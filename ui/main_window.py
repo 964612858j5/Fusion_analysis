@@ -5,12 +5,14 @@ block01/ui/main_window.py — MainWindow.
 import os
 import gc
 import json
+import time
 import traceback
 import multiprocessing as mp
 from queue import Empty
 
 import numpy as np
 import pyqtgraph as pg
+import zarr
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -25,7 +27,7 @@ from ..config import (
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
 from ..core.fusion_engine import FusionEngine
-from ..workers.cellpose_worker import run_cellpose_process
+from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
 from .step0.search_ctrl import SearchCtrlPanel
@@ -54,8 +56,13 @@ class MainWindow(QMainWindow):
         self._patch_channel_cache: dict = {}
         self._patch_loaders: dict = {}
         self._patch_load_ready: set = set()
+        self._roi_patch_items: list = []
         self._fused_zarr_path    = None
         self._rois               = []
+        self._active_roi         = None
+        self._corrected_zarr_path = ""
+        self._corrected_zarr_mode = ""
+        self._corrected_decisions = {}
         self._params_source      = None  # 'phase2'|'loaded'|'manual' — tracks how params were set
         self.proc                = None
         self._proc_queue         = None
@@ -193,12 +200,34 @@ class MainWindow(QMainWindow):
 
         main_split = QSplitter(Qt.Horizontal)
 
+        # Left: read-only ROI/patch overview for Step1. ROI and patches come
+        # from Step0; drawing/editing remains owned by Step0.
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(4)
+        ll.addWidget(self._make_label("① ROI / Patch Overview", bold=True))
+        self.roi_gv = pg.GraphicsLayoutWidget()
+        self.roi_gv.setBackground("#111")
+        self.roi_vb = self.roi_gv.addViewBox()
+        self.roi_vb.setAspectLocked(True)
+        self.roi_vb.invertY(True)
+        self.roi_img = pg.ImageItem()
+        self.roi_vb.addItem(self.roi_img)
+        ll.addWidget(self.roi_gv, stretch=1)
+        self.roi_status = QLabel("No ROI loaded")
+        self.roi_status.setAlignment(Qt.AlignCenter)
+        self.roi_status.setWordWrap(True)
+        self.roi_status.setStyleSheet("color:#888;font-size:10px;")
+        ll.addWidget(self.roi_status)
+        main_split.addWidget(left)
+
         mid = QSplitter(Qt.Vertical)
         pw = QWidget()
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.addWidget(self._make_label(
-            "Fusion Preview  Red=cyto  Blue=nucleus  (real-time update)",
+            "② Fusion Preview  Red=cyto  Blue=nucleus  (real-time update)",
             bold=True,
         ))
 
@@ -217,6 +246,15 @@ class MainWindow(QMainWindow):
         self.prev_status.setStyleSheet("color:#777;font-size:10px;")
         self.prev_status.setWordWrap(True)
         status_row.addWidget(self.prev_status, stretch=1)
+
+        btn_load_step0 = QPushButton("Load Step0 ROI Result")
+        btn_load_step0.setStyleSheet(
+            "QPushButton{color:#6bcb77;font-size:10px;"
+            "border:1px solid #6bcb77;border-radius:3px;padding:2px 8px;}"
+            "QPushButton:hover{background:#13251a;}"
+        )
+        btn_load_step0.clicked.connect(self._load_step0_roi_result)
+        status_row.addWidget(btn_load_step0)
 
         btn_update = QPushButton("⟳ Update")
         btn_update.setFixedWidth(72)
@@ -268,8 +306,9 @@ class MainWindow(QMainWindow):
         right.setStretchFactor(1, 1)
         main_split.addWidget(right)
 
-        main_split.setStretchFactor(0, 3)
-        main_split.setStretchFactor(1, 4)
+        main_split.setStretchFactor(0, 2)
+        main_split.setStretchFactor(1, 3)
+        main_split.setStretchFactor(2, 4)
         root.addWidget(main_split, stretch=1)
 
         bot = QHBoxLayout()
@@ -338,6 +377,8 @@ class MainWindow(QMainWindow):
         self._set_step_active(0)
 
     def _go_to_step0(self):
+        if self._current_step == 1:
+            self._stop_all_loaders()
         self._stack.setCurrentIndex(0)
         self._set_step_active(0)
 
@@ -357,6 +398,8 @@ class MainWindow(QMainWindow):
         if self.loader is not None:
             self.loader.set_correction_config(correction_config)
             self.loader.set_corrected_zarr_store(corrected_zarr_path, corrected_decisions)
+        self._corrected_zarr_path = corrected_zarr_path or ""
+        self._corrected_decisions = dict(corrected_decisions)
 
         self._stop_all_loaders()
         self._patch_channel_cache.clear()
@@ -376,8 +419,7 @@ class MainWindow(QMainWindow):
                 self.step0_output.get("panel_nucleus"),
             )
 
-        self._on_rois_changed(self._rois)
-        self._on_patches(self._all_patches)
+        self._load_step0_roi_result(auto=True)
         self.step1_done = False
         self._step2._out_edit.setText(OUTPUT_DIR)
         self._step4._ome_edit.setText(OME_TIFF_FILE)
@@ -385,7 +427,132 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
 
+    def _load_step0_roi_result(self, _checked=False, auto=False):
+        print("[Step1] loading Step0 ROI result")
+        if self.loader is None:
+            if not auto:
+                QMessageBox.warning(self, "Step1", "Load Step0 first.")
+            return
+
+        out_dir = self.step0_output.get("output_dir") or OUTPUT_DIR
+        corr_path = (
+            self.step0_output.get("corrected_zarr_path")
+            or self._corrected_zarr_path
+            or os.path.join(out_dir, "corrected_channels.zarr")
+        )
+        cfg_path = os.path.join(out_dir, "correction_config.json")
+        roi_path = os.path.join(out_dir, "roi_config.json")
+        patch_path = os.path.join(out_dir, "patch_config.json")
+
+        correction_config = self.step0_output.get("correction_config")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    correction_config = json.load(f)
+            except Exception as e:
+                print(f"[Step1] failed to load correction_config.json: {e}")
+
+        rois = list(self.step0_output.get("rois") or self._rois or [])
+        if os.path.exists(roi_path):
+            try:
+                with open(roi_path, "r", encoding="utf-8") as f:
+                    rois = json.load(f)
+            except Exception as e:
+                print(f"[Step1] failed to load roi_config.json: {e}")
+
+        corrected_mode = ""
+        if corr_path and os.path.exists(corr_path):
+            try:
+                root = zarr.open(corr_path, mode="r")
+                corrected_mode = str(root.attrs.get("mode", "")).strip().lower()
+                if corrected_mode == "roi_only" and not rois:
+                    rois = []
+                    for group_name in root.group_keys():
+                        group = root[group_name]
+                        rois.append({
+                            "name": group.attrs.get("roi_name", group_name),
+                            "bbox_fullres": list(group.attrs.get("bbox_fullres", [])),
+                            "polygon_fullres": group.attrs.get("polygon_fullres"),
+                            "patch_indices": [],
+                        })
+            except Exception as e:
+                print(f"[Step1] failed to inspect corrected zarr: {e}")
+        self._corrected_zarr_path = corr_path if corr_path and os.path.exists(corr_path) else ""
+        self._corrected_zarr_mode = corrected_mode
+        print(f"[Step1] corrected_zarr_mode={corrected_mode or 'none'}")
+
+        decisions = {}
+        if correction_config:
+            decisions = {
+                str(ch): str(method).strip().lower()
+                for ch, method in (correction_config.get("channel_decisions") or {}).items()
+                if str(method).strip().lower() in {"tophat", "cucim"}
+            }
+        decisions.update(self.step0_output.get("corrected_decisions") or {})
+        self._corrected_decisions = decisions
+        self.loader.set_correction_config(correction_config)
+        self.loader.set_corrected_zarr_store(self._corrected_zarr_path, decisions)
+
+        self._rois = list(rois or [])
+        self._active_roi = self._rois[0] if self._rois else None
+        if corrected_mode == "roi_only" and not self._active_roi:
+            msg = "No ROI found for ROI-only corrected zarr."
+            print(f"[Step1] {msg}")
+            if not auto:
+                QMessageBox.warning(self, "Step1", msg)
+            return
+
+        patches = list(self.step0_output.get("patches") or self._all_patches or [])
+        if os.path.exists(patch_path):
+            try:
+                with open(patch_path, "r", encoding="utf-8") as f:
+                    patch_cfg = json.load(f)
+                patches = [
+                    tuple(item.get("coords", item))
+                    for item in patch_cfg
+                    if isinstance(item, (dict, list, tuple))
+                ]
+            except Exception as e:
+                print(f"[Step1] failed to load patch_config.json: {e}")
+        if self._active_roi:
+            patches = self._filter_patches_to_roi(patches, self._active_roi)
+            print(f"[Step1] active_roi={self._active_roi.get('name', 'ROI_1')}")
+            print(f"[Step1] roi_bbox={self._active_roi.get('bbox_fullres')}")
+            print(f"[Step1] n_patches={len(patches)}")
+            if self._corrected_zarr_path:
+                print(
+                    "[Step1] loading channels from "
+                    f"corrected_channels.zarr/{self._active_roi.get('name', 'ROI_1')}"
+                )
+        elif not auto:
+            print("[Step1] No ROI found. Load full WSI mode.")
+
+        if self.loader is not None:
+            self.config.all_channels = self.loader.channel_names()
+            self.config.nuc_combo.clear()
+            self.config.nuc_combo.addItems(self.loader.channel_names())
+            self.config.nuc_combo.setCurrentIndex(-1)
+            self.config.load_panel(
+                self.step0_output.get("panel_groups") or {},
+                self.step0_output.get("panel_nucleus"),
+            )
+            self._zero_marker_weights()
+
+        self._stop_all_loaders()
+        self._patch_channel_cache.clear()
+        self._patch_load_ready.clear()
+        self._preview_patch_idx = -1
+        self._on_rois_changed(self._rois)
+        self._on_patches(patches)
+        self._show_active_roi_preview()
+        if not auto:
+            self.prev_status.setText("Step0 ROI result loaded.")
+
     def _go_to_step2(self):
+        if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
+            self._step3._stop_loaders()
+        if self._current_step == 1:
+            self._stop_all_loaders()
         if self.is_sequential_flow and self.step1_output:
             zarr_path = self.step1_output.get("zarr_path")
             if zarr_path:
@@ -414,6 +581,8 @@ class MainWindow(QMainWindow):
         self._set_step_active(1)
 
     def _go_to_step3(self, output_dir=None):
+        if self._current_step == 1:
+            self._stop_all_loaders()
         if output_dir:
             self.step2_done = True
             self.step2_output = {
@@ -427,6 +596,10 @@ class MainWindow(QMainWindow):
         self._set_step_active(3)
 
     def _go_to_step4(self, output_dir=None):
+        if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
+            self._step3._stop_loaders()
+        if self._current_step == 1:
+            self._stop_all_loaders()
         if self._current_step == 3:
             self.step3_done = True
         if self.is_sequential_flow and self.step3_output:
@@ -522,6 +695,85 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet(style)
         return lbl
 
+    def _zero_marker_weights(self):
+        for panel in self.config._panels.values():
+            for row in panel._rows.values():
+                row.spin.setValue(0.0)
+        self.config.config_changed.emit()
+
+    @staticmethod
+    def _patch_inside_roi_bbox(patch, roi):
+        bbox = roi.get("bbox_fullres") if roi else None
+        if not bbox or len(bbox) != 4:
+            return True
+        y0, y1, x0, x1 = [int(v) for v in patch]
+        ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
+        return ry0 <= y0 and y1 <= ry1 and rx0 <= x0 and x1 <= rx1
+
+    def _filter_patches_to_roi(self, patches, roi):
+        kept = [tuple(int(v) for v in p) for p in patches if self._patch_inside_roi_bbox(p, roi)]
+        dropped = len(patches) - len(kept)
+        if dropped:
+            print(f"[Step1] dropped {dropped} patch(es) outside active ROI bbox")
+        return kept
+
+    def _clear_roi_patch_items(self):
+        for item in getattr(self, "_roi_patch_items", []):
+            try:
+                self.roi_vb.removeItem(item)
+            except Exception:
+                pass
+        self._roi_patch_items = []
+
+    def _show_active_roi_preview(self):
+        self._clear_roi_patch_items()
+        roi = self._active_roi
+        if self.loader is None or not roi:
+            self.roi_status.setText("No ROI loaded")
+            return
+        bbox = roi.get("bbox_fullres")
+        if not bbox or len(bbox) != 4:
+            self.roi_status.setText("No ROI bbox")
+            return
+        nuc_ch, _ = self.config.get_nucleus()
+        if not nuc_ch or nuc_ch not in self.loader.ch_map:
+            self.roi_status.setText("No nucleus channel selected")
+            return
+        ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
+        roi_h, roi_w = ry1 - ry0, rx1 - rx0
+        if roi_h <= 0 or roi_w <= 0:
+            return
+        ds = max(PREVIEW_DOWNSAMPLE, int(max(roi_h, roi_w) / 1800) + 1)
+        try:
+            arr = self.loader.read_region(nuc_ch, ry0, ry1, rx0, rx1, downsample=ds)
+            grey = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+            rgb = np.stack([grey, grey, grey], axis=-1)
+            self.roi_img.setImage(rgb, autoLevels=False)
+            self.roi_vb.autoRange()
+
+            for idx, patch in enumerate(self._all_patches):
+                if not self._patch_inside_roi_bbox(patch, roi):
+                    continue
+                y0, y1, x0, x1 = [int(v) for v in patch]
+                lx0 = (x0 - rx0) / ds
+                lx1 = (x1 - rx0) / ds
+                ly0 = (y0 - ry0) / ds
+                ly1 = (y1 - ry0) / ds
+                color = PATCH_COLORS[idx % len(PATCH_COLORS)]
+                xs = [lx0, lx1, lx1, lx0, lx0]
+                ys = [ly0, ly0, ly1, ly1, ly0]
+                item = pg.PlotDataItem(xs, ys, pen=pg.mkPen(color, width=2))
+                self.roi_vb.addItem(item)
+                self._roi_patch_items.append(item)
+
+            self.roi_status.setText(
+                f"ROI preview: {roi.get('name', 'ROI_1')}  "
+                f"{roi_h}×{roi_w}px  patches={len(self._all_patches)}"
+            )
+        except Exception as e:
+            self.roi_status.setText(f"⚠ ROI preview failed: {e}")
+            print(f"[Step1] ROI preview failed: {e}")
+
     # ── Patch selector button management ────────────────────────────
 
     def _rebuild_patch_buttons(self, patches):
@@ -602,7 +854,8 @@ class MainWindow(QMainWindow):
             self._patch_channel_cache.clear()
             self._patch_load_ready.clear()
             self._preview_patch_idx = -1
-            self.prev_status.setText("Please define a patch in Step 0 first")
+            self.prev_img.clear()
+            self.prev_status.setText("No patch selected")
             return
 
         # Drop cache for patches whose ROI coordinates changed
@@ -610,9 +863,7 @@ class MainWindow(QMainWindow):
             if idx < len(old_rois) and roi != old_rois[idx]:
                 self._patch_channel_cache.pop(idx, None)
                 self._patch_load_ready.discard(idx)
-                if idx in self._patch_loaders:
-                    self._patch_loaders[idx].stop()
-                    self._patch_loaders.pop(idx, None)
+                self._stop_loader_for(idx)
 
         # Auto-select newest patch
         new_idx = len(patches) - 1
@@ -629,7 +880,8 @@ class MainWindow(QMainWindow):
                 f"preloading remaining patches in background…"
             )
         else:
-            self.prev_status.setText("Preloading all patches in background…")
+            self.prev_img.clear()
+            self.prev_status.setText("Loading patch...")
 
         # Debounce: start background preload 400 ms after last patch change
         self._preload_debounce.start(400)
@@ -645,25 +897,21 @@ class MainWindow(QMainWindow):
         if idx in self._patch_load_ready:
             self._render_current_patch(reset_view=True)
         elif idx in self._patch_loaders:
-            self.prev_status.setText(f"P{idx+1} still loading… please wait")
+            self.prev_img.clear()
+            self.prev_status.setText("Loading patch...")
         else:
             # Not yet started — kick off a single loader for this patch immediately
+            self.prev_img.clear()
+            self.prev_status.setText("Loading patch...")
             self._start_loader_for(idx)
 
     # ── Background preloading ────────────────────────────────────────
 
     def _needed_channels(self):
-        """Return the list of channel names required by the current config."""
-        needed_cfg = set()
-        for cw in self.config.get_groups().values():
-            needed_cfg.update(cw.keys())
-        nuc_ch, _ = self.config.get_nucleus()
-        needed_cfg.add(nuc_ch)
-        needed  = [ch for ch in needed_cfg if ch in self.loader.ch_map]
-        missing = needed_cfg - set(needed)
-        if missing:
-            print(f"[Preview] Channels not found in OME-TIFF (skipped): {sorted(missing)}")
-        return needed
+        """Return all loadable channel names for Step1 patch caches."""
+        if self.loader is None:
+            return []
+        return list(self.loader.channel_names())
 
     def _preload_all_patches(self):
         """Launch a background loader for every patch not yet in cache.
@@ -694,24 +942,22 @@ class MainWindow(QMainWindow):
         if not needed:
             return
 
-        # Stop any existing loader for this patch
-        old = self._patch_loaders.pop(idx, None)
-        if old is not None:
-            old.stop()
-            try:
-                old.done.disconnect()
-                old.progress.disconnect()
-                old.error.disconnect()
-            except Exception:
-                pass
+        # Stop any existing loader for this patch before replacing it.
+        if not self._stop_loader_for(idx):
+            self.prev_status.setText(f"P{idx+1} is still stopping… please wait")
+            return
 
         y0, y1, x0, x1 = self._all_patches[idx]
+        if self._active_roi and not self._patch_inside_roi_bbox((y0, y1, x0, x1), self._active_roi):
+            self.prev_status.setText(f"⚠ P{idx+1} is outside active ROI")
+            return
         t = PreviewLoaderThread(idx, self.loader, needed,
                                 y0, y1, x0, x1,
                                 downsample=PREVIEW_DOWNSAMPLE)
         t.done.connect(self._on_patch_loaded)
         t.progress.connect(self._on_patch_progress)
         t.error.connect(self._on_patch_error)
+        t.finished.connect(lambda idx=idx, thread=t: self._on_patch_loader_finished(idx, thread))
         self._patch_loaders[idx] = t
         self._set_patch_btn_state(idx, 'loading')
         t.start()
@@ -725,14 +971,19 @@ class MainWindow(QMainWindow):
     def _on_patch_loaded(self, patch_idx, cache):
         self._patch_channel_cache[patch_idx] = cache
         self._patch_load_ready.add(patch_idx)
-        self._patch_loaders.pop(patch_idx, None)
         self._set_patch_btn_state(patch_idx, 'ready')
 
         nuc_ch, _ = self.config.get_nucleus()
         y0, y1, x0, x1 = self._all_patches[patch_idx]
         h = (y1 - y0) // PREVIEW_DOWNSAMPLE
         w = (x1 - x0) // PREVIEW_DOWNSAMPLE
-        print(f"[Preview] P{patch_idx+1} ready — {len(cache)} ch, {h}×{w} px")
+        local_txt = ""
+        if self._active_roi and self._active_roi.get("bbox_fullres"):
+            ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
+            local_txt = (
+                f" local=[{y0-ry0},{y1-ry0},{x0-rx0},{x1-rx0}]"
+            )
+        print(f"[Preview] P{patch_idx+1} ready — {len(cache)} ch, {h}×{w} px{local_txt}")
 
         # If this is the currently viewed patch, render it immediately
         if patch_idx == self._preview_patch_idx:
@@ -754,22 +1005,53 @@ class MainWindow(QMainWindow):
             )
 
     def _on_patch_error(self, patch_idx, msg):
-        self._patch_loaders.pop(patch_idx, None)
         self._set_patch_btn_state(patch_idx, 'error')
         if patch_idx == self._preview_patch_idx:
             self.prev_status.setText(f"⚠ P{patch_idx+1} load error: {msg}")
         print(f"[Preview] P{patch_idx+1} error: {msg}")
 
+    def _on_patch_loader_finished(self, patch_idx, thread):
+        if self._patch_loaders.get(patch_idx) is thread:
+            self._patch_loaders.pop(patch_idx, None)
+
+    def _stop_loader_for(self, idx, timeout_ms=3000):
+        thread = self._patch_loaders.get(idx)
+        if thread is None:
+            return True
+        if thread.isRunning():
+            thread.stop()
+            thread.wait(timeout_ms)
+        if not thread.isRunning() and self._patch_loaders.get(idx) is thread:
+            self._patch_loaders.pop(idx, None)
+            return True
+        return not thread.isRunning()
+
     def _stop_all_loaders(self):
-        for t in self._patch_loaders.values():
-            t.stop()
+        self._preload_debounce.stop()
+        survivors = {}
+        for idx, t in list(self._patch_loaders.items()):
+            if t.isRunning():
+                t.stop()
+                t.wait(3000)
             try:
                 t.done.disconnect()
                 t.progress.disconnect()
                 t.error.disconnect()
             except Exception:
                 pass
-        self._patch_loaders.clear()
+            if t.isRunning():
+                survivors[idx] = t
+                print(f"[Preview] loader P{idx+1} still running after stop request; keeping reference")
+        self._patch_loaders = survivors
+
+    def closeEvent(self, event):
+        self._stop_all_loaders()
+        if self._patch_loaders:
+            event.ignore()
+            self.prev_status.setText("Waiting for preview loaders to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
+        super().closeEvent(event)
 
     # ── Force-update (clears all caches, re-loads everything) ───────
 
@@ -796,9 +1078,15 @@ class MainWindow(QMainWindow):
         """
         idx = self._preview_patch_idx
         if idx not in self._patch_load_ready:
+            if idx < 0 or idx >= len(self._all_patches):
+                self.prev_img.clear()
+                self.prev_status.setText("No patch selected")
+            else:
+                self.prev_status.setText("Loading patch...")
             return
         cache = self._patch_channel_cache.get(idx)
         if not cache:
+            self.prev_status.setText("Loading patch...")
             return
         groups = self.config.get_groups()
         group_weights = self.config.get_group_weights()
@@ -921,6 +1209,8 @@ class MainWindow(QMainWindow):
             "group_weights": self.config.get_group_weights(),
             "nuc_ch": nuc_ch,
             "nuc_w": nuc_w,
+            "corrected_zarr_path": self._corrected_zarr_path,
+            "corrected_decisions": self._corrected_decisions,
         }
         self.proc = mp.Process(
             target=run_cellpose_process,
@@ -1135,6 +1425,12 @@ class MainWindow(QMainWindow):
             return
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        if self._corrected_zarr_mode == "roi_only" and not self._rois:
+            QMessageBox.warning(
+                self, "ROI required",
+                "Step0 corrected output is ROI-only, but no ROI is loaded."
+            )
+            return
 
         # ── Write fusion_config.json ──────────────────────────────────
         fcfg = self.config.get_full_config()
@@ -1179,9 +1475,14 @@ class MainWindow(QMainWindow):
         except ImportError:
             sys_ram_gb = 128   # conservative default
 
+        tile_h, tile_w = self.loader.shape
+        if self._active_roi and self._active_roi.get("bbox_fullres"):
+            ry0, ry1, rx0, rx1 = [int(v) for v in self._active_roi["bbox_fullres"]]
+            tile_h, tile_w = ry1 - ry0, rx1 - rx0
+
         dlg = TileSelectDialog(
-            self.loader.shape[0],
-            self.loader.shape[1],
+            tile_h,
+            tile_w,
             n_channels,
             sys_ram_gb=sys_ram_gb,
             parent=self,
@@ -1218,4 +1519,3 @@ class MainWindow(QMainWindow):
 # ══════════════════════════════════════════════════════════════════════
 #  Segment + Merge Worker  (block03 + block04 combined)
 # ══════════════════════════════════════════════════════════════════════
-

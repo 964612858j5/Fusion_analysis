@@ -105,7 +105,7 @@ class GroupPanel(QGroupBox):
             self, f"Add Channel → {self.group_name}", "Select:", avail, 0, False
         )
         if ok and ch:
-            self._add_row(ch, 1.0)
+            self._add_row(ch, 0.0)
             self.config_changed.emit()
 
     def channel_weights(self):

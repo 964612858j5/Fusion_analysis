@@ -140,6 +140,10 @@ def run_cellpose_process(args, result_queue, stop_flag):
             args.get("name_map") or {},
             correction_config=args.get("correction_config"),
         )
+        loader.set_corrected_zarr_store(
+            args.get("corrected_zarr_path"),
+            args.get("corrected_decisions") or {},
+        )
         fusion = FusionEngine()
         tasks = args["tasks"]
         groups = args["groups"]

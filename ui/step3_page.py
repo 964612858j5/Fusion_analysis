@@ -4,6 +4,9 @@ block01/ui/step3_page.py — _RoiRect, _ThumbLoader, _RegionLoader, Step3Page.
 
 import os
 import random
+import glob
+import json
+import traceback
 
 import numpy as np
 import tifffile
@@ -132,9 +135,15 @@ class _ThumbLoader(QThread):
         super().__init__()
         self.dapi_path = dapi_path
         self.ds        = ds
+        self._stop     = False
+
+    def stop(self):
+        self._stop = True
 
     def run(self):
         try:
+            if self._stop:
+                return
             tif   = tifffile.TiffFile(self.dapi_path)
             store = tif.aszarr()
             try:
@@ -150,6 +159,8 @@ class _ThumbLoader(QThread):
             finally:
                 store.close()
                 tif.close()
+            if self._stop:
+                return
             arr  = arr.astype(np.float32)
             nz   = arr[arr > 0]
             if nz.size > 100:
@@ -158,9 +169,11 @@ class _ThumbLoader(QThread):
                     arr = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
                 else:
                     arr = np.zeros_like(arr)
-            self.done.emit(arr)
+            if not self._stop:
+                self.done.emit(arr)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._stop:
+                self.error.emit(traceback.format_exc())
 
 
 class _RegionLoader(QThread):
@@ -181,6 +194,10 @@ class _RegionLoader(QThread):
         self.mask_path = mask_path
         self.y0, self.y1, self.x0, self.x1 = y0, y1, x0, x1
         self.sub = sub
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
 
     @staticmethod
     def _read_region(path, y0, y1, x0, x1, sub):
@@ -218,9 +235,15 @@ class _RegionLoader(QThread):
     def run(self):
         try:
             y0, y1, x0, x1, sub = self.y0, self.y1, self.x0, self.x1, self.sub
+            if self._stop:
+                return
 
             dapi_raw = self._read_region(self.dapi_path, y0, y1, x0, x1, sub)
+            if self._stop:
+                return
             mask_raw = self._read_region(self.mask_path, y0, y1, x0, x1, sub)
+            if self._stop:
+                return
 
             grey_u8  = self._norm_u8(dapi_raw)
             dapi_rgb = np.stack([grey_u8, grey_u8, grey_u8], axis=-1)
@@ -233,9 +256,11 @@ class _RegionLoader(QThread):
             rgb_overlay = cellpose_mask_overlay(grey_u8, mask_u32)
 
             h, w = grey_u8.shape
-            self.done.emit(rgb_overlay, dapi_rgb, n_cells, h, w)
+            if not self._stop:
+                self.done.emit(rgb_overlay, dapi_rgb, n_cells, h, w)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._stop:
+                self.error.emit(traceback.format_exc())
 
 
 class Step3Page(QWidget):
@@ -257,6 +282,12 @@ class Step3Page(QWidget):
         self._dapi_path       = None
         self._mask_path       = None
         self._fused_zarr_path = None   # for cyto+nucleus background
+        self._mode            = "full_wsi"
+        self._active_roi_name = None
+        self._active_tiles_dir = None
+        self._active_bbox     = None
+        self._tile_grid       = None
+        self._tile_shape      = None
         self._full_h      = 0
         self._full_w      = 0
         self._thumb_arr   = None   # float32 normalised thumbnail
@@ -293,49 +324,148 @@ class Step3Page(QWidget):
 
     def set_output_dir(self, output_dir):
         """Called from MainWindow when Step 2 finishes."""
-        import glob as _glob
+        print("[Step3] entering QC viewer")
+        print(f"[Step3] output_dir={output_dir}")
+        try:
+            self._stop_loaders()
+            roi_inputs = self._find_roi_inputs(output_dir)
+            if roi_inputs is not None:
+                self._mode = "roi"
+                self._active_roi_name = roi_inputs["roi_name"]
+                self._active_tiles_dir = roi_inputs["tiles_dir"]
+                self._active_bbox = roi_inputs.get("bbox")
+                self._tile_grid = roi_inputs.get("tile_grid")
+                self._dapi_path = roi_inputs["global_dapi"]
+                self._mask_path = roi_inputs["global_mask"]
+                print("[Step3] QC mode=roi")
+                print(f"[Step3] active_roi={self._active_roi_name}")
+                print(f"[Step3] roi_shape={roi_inputs.get('roi_shape')}")
+                if self._tile_grid:
+                    print(f"[Step3] tile_grid={self._tile_grid[0]}x{self._tile_grid[1]}")
+                print("[Step3] showing ROI preview")
+                print("[Step3] waiting for user patch")
+                print(f"[Step3] tiles_dir={self._active_tiles_dir}")
+                self._load_thumbnail()
+                return
 
-        # Try exact names first (full-WSI mode)
-        dapi = os.path.join(output_dir, 'global_dapi.ome.tiff')
-        mask = os.path.join(output_dir, 'global_mask.ome.tiff')
+            self._mode = "full_wsi"
+            self._active_roi_name = None
+            self._active_tiles_dir = None
+            self._active_bbox = None
+            self._tile_grid = None
+            print("[Step3] mode=full_wsi")
 
-        # Fallback: ROI mode produces global_dapi_<ROI>.ome.tiff
-        if not os.path.exists(dapi):
-            candidates = sorted(_glob.glob(
-                os.path.join(output_dir, 'global_dapi_*.ome.tiff')
-            ))
-            if candidates:
-                dapi = candidates[0]   # take first ROI
-
-        if not os.path.exists(mask):
-            candidates = sorted(_glob.glob(
-                os.path.join(output_dir, 'global_mask_*.ome.tiff')
-            ))
-            if candidates:
-                mask = candidates[0]
-
-        if os.path.exists(dapi) and os.path.exists(mask):
-            self._dapi_path = dapi
-            self._mask_path = mask
-            self._load_thumbnail()
-        else:
-            self._status(
-                f'\u26a0  global_dapi.ome.tiff / global_mask.ome.tiff not found.\n'
-                f'Searched in: {output_dir}\n'
-                f'Also tried: global_dapi_*.ome.tiff'
+            dapi = os.path.join(output_dir, 'global_dapi.ome.tiff')
+            mask = os.path.join(output_dir, 'global_mask.ome.tiff')
+            if os.path.exists(dapi) and os.path.exists(mask):
+                self._dapi_path = dapi
+                self._mask_path = mask
+                self._load_thumbnail()
+            else:
+                self._show_input_error(
+                    f'Step3 input not found.\nPlease check Step2 outputs.\n\n'
+                    f'Searched in: {output_dir}\n'
+                    f'Expected full-WSI files:\n'
+                    f'  global_dapi.ome.tiff\n'
+                    f'  global_mask.ome.tiff'
+                )
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"[Step3] set_output_dir failed:\n{tb}")
+            self._show_input_error(
+                "Step3 input not found.\nPlease check Step2 outputs."
             )
+
+    def _find_roi_inputs(self, output_dir):
+        meta_paths = sorted(glob.glob(os.path.join(output_dir, "segmentation_meta_*.json")))
+        if not meta_paths:
+            roi_cfg = os.path.join(output_dir, "roi_config.json")
+            if not os.path.exists(roi_cfg):
+                return None
+            tile_dirs = sorted(glob.glob(os.path.join(output_dir, "tiles_*")))
+            if not tile_dirs:
+                return None
+            roi_name = os.path.basename(tile_dirs[0]).replace("tiles_", "", 1)
+            meta = {"roi_name": roi_name, "tile_dir": tile_dirs[0], "bbox": None}
+        else:
+            with open(meta_paths[0], "r", encoding="utf-8") as f:
+                meta = json.load(f)
+
+        roi_name = str(meta.get("roi_name") or "ROI_1")
+        tile_dir = meta.get("tile_dir") or os.path.join(output_dir, f"tiles_{roi_name}")
+        if not os.path.isabs(tile_dir):
+            tile_dir = os.path.join(output_dir, tile_dir)
+        global_dapi = meta.get("global_dapi") or os.path.join(output_dir, f"global_dapi_{roi_name}.ome.tiff")
+        global_mask = meta.get("ome_tiff") or os.path.join(output_dir, f"global_mask_{roi_name}.ome.tiff")
+        if not os.path.isabs(global_dapi):
+            global_dapi = os.path.join(output_dir, global_dapi)
+        if not os.path.isabs(global_mask):
+            global_mask = os.path.join(output_dir, global_mask)
+        if not os.path.exists(global_dapi) or not os.path.exists(global_mask):
+            self._show_input_error(
+                "Step3 input not found.\n\n"
+                f"Missing ROI-level DAPI/mask:\n{global_dapi}\n{global_mask}"
+            )
+            return None
+        dapi_tiles = sorted(glob.glob(os.path.join(tile_dir, "tile_r*_c*_dapi.ome.tiff")))
+        mask_tiles = sorted(glob.glob(os.path.join(tile_dir, "tile_r*_c*_raw_mask.ome.tiff")))
+        if not dapi_tiles or not mask_tiles:
+            self._show_input_error(
+                "Step3 input not found.\nPlease check Step2 outputs.\n\n"
+                f"Missing ROI tile files in:\n{tile_dir}"
+            )
+            return None
+        tile_stats = meta.get("tile_stats") or []
+        if tile_stats:
+            n_rows = max(int(t.get("row", 0)) for t in tile_stats) + 1
+            n_cols = max(int(t.get("col", 0)) for t in tile_stats) + 1
+        else:
+            coords = []
+            for p in dapi_tiles:
+                base = os.path.basename(p)
+                try:
+                    rc = base.split("_dapi", 1)[0]
+                    r = int(rc.split("tile_r", 1)[1].split("_c", 1)[0])
+                    c = int(rc.split("_c", 1)[1])
+                    coords.append((r, c))
+                except Exception:
+                    pass
+            n_rows = max((r for r, _ in coords), default=0) + 1
+            n_cols = max((c for _, c in coords), default=0) + 1
+        roi_shape = None
+        try:
+            with tifffile.TiffFile(global_dapi) as tif:
+                p = tif.pages[0]
+                roi_shape = [int(p.imagelength), int(p.imagewidth)]
+        except Exception:
+            pass
+        return {
+            "roi_name": roi_name,
+            "tiles_dir": tile_dir,
+            "bbox": meta.get("bbox"),
+            "global_dapi": global_dapi,
+            "global_mask": global_mask,
+            "tile_grid": [n_rows, n_cols],
+            "roi_shape": roi_shape,
+        }
 
     def load_from_paths(self, dapi_path, mask_path):
         """Manual load via Browse buttons."""
-        if not os.path.exists(dapi_path):
-            self._status(f'\u26a0  DAPI file not found:\n{dapi_path}')
-            return
-        if not os.path.exists(mask_path):
-            self._status(f'\u26a0  Mask file not found:\n{mask_path}')
-            return
-        self._dapi_path = dapi_path
-        self._mask_path = mask_path
-        self._load_thumbnail()
+        try:
+            if not os.path.exists(dapi_path):
+                self._show_input_error(f'Step3 input not found.\nPlease check Step2 outputs.\n\nDAPI file not found:\n{dapi_path}')
+                return
+            if not os.path.exists(mask_path):
+                self._show_input_error(f'Step3 input not found.\nPlease check Step2 outputs.\n\nMask file not found:\n{mask_path}')
+                return
+            self._mode = "full_wsi"
+            self._dapi_path = dapi_path
+            self._mask_path = mask_path
+            self._load_thumbnail()
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"[Step3] load_from_paths failed:\n{tb}")
+            self._show_input_error("Step3 input not found.\nPlease check Step2 outputs.")
 
     # ── UI construction ───────────────────────────────────────────────
 
@@ -603,7 +733,9 @@ class Step3Page(QWidget):
                 else:
                     self._full_h, self._full_w = z0.shape[0], z0.shape[1]
         except Exception as e:
-            self._thumb_status.setText(f'⚠  Cannot read DAPI: {e}')
+            tb = traceback.format_exc()
+            print(f"[Step3] Cannot read DAPI:\n{tb}")
+            self._show_input_error("Step3 input not found.\nPlease check Step2 outputs.")
             return
 
         # Update edit boxes
@@ -612,13 +744,16 @@ class Step3Page(QWidget):
 
         # Start background loader
         if self._thumb_loader and self._thumb_loader.isRunning():
-            self._thumb_loader.terminate()
+            self._thumb_loader.stop()
+            self._thumb_loader.wait(3000)
+            if self._thumb_loader.isRunning():
+                self._thumb_status.setText("Previous thumbnail loader is still stopping…")
+                return
 
         self._thumb_loader = _ThumbLoader(self._dapi_path, self._OV_DS)
         self._thumb_loader.done.connect(self._on_thumb_loaded)
-        self._thumb_loader.error.connect(
-            lambda e: self._thumb_status.setText(f'⚠  Thumbnail error: {e}')
-        )
+        self._thumb_loader.error.connect(self._on_thumb_error)
+        self._thumb_loader.finished.connect(lambda thread=self._thumb_loader: self._on_thumb_finished(thread))
         self._thumb_loader.start()
 
     def _on_thumb_loaded(self, arr):
@@ -634,6 +769,21 @@ class Step3Page(QWidget):
             f'Full image: {self._full_h:,}×{self._full_w:,} px\n'
             f'Drag on thumbnail to select a QC region'
         )
+        if self._mode == "roi":
+            self._thumb_status.setText(
+                f'ROI mode: {self._active_roi_name}  '
+                f'ROI preview {self._full_h:,}×{self._full_w:,} px '
+                f'(1/{self._OV_DS})\n'
+                f'Draw a QC patch inside the ROI preview'
+            )
+
+    def _on_thumb_error(self, msg):
+        print(f"[Step3] Thumbnail error:\n{msg}")
+        self._show_input_error("Step3 input not found.\nPlease check Step2 outputs.")
+
+    def _on_thumb_finished(self, thread):
+        if self._thumb_loader is thread:
+            self._thumb_loader = None
 
     # ── ROI rectangle management ──────────────────────────────────────
 
@@ -681,18 +831,35 @@ class Step3Page(QWidget):
         self._cell_count_lbl.setText('')
 
         if self._region_loader and self._region_loader.isRunning():
-            self._region_loader.terminate()
-            self._region_loader.wait(200)
+            self._region_loader.stop()
+            self._region_loader.wait(3000)
+            if self._region_loader.isRunning():
+                self._roi_status.setText("Previous region loader is still stopping…")
+                return
+        dapi_path = self._dapi_path
+        mask_path = self._mask_path
+        read_y0, read_y1, read_x0, read_x1 = y0, y1, x0, x1
+        if self._mode == "roi":
+            tile_info = self._locate_patch_tile(y0, y1, x0, x1)
+            if tile_info is None:
+                self._roi_status.setText("Patch crosses tile boundary. Draw smaller patch.")
+                return
+            row, col, tile_y0, tile_y1, tile_x0, tile_x1, dapi_path, mask_path = tile_info
+            read_y0, read_y1 = y0 - tile_y0, y1 - tile_y0
+            read_x0, read_x1 = x0 - tile_x0, x1 - tile_x0
+            print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
+            print(f"[Step3] patch tile row/col={row},{col}")
+            print(f"[Step3] loading dapi tile={dapi_path}")
+            print(f"[Step3] loading mask tile={mask_path}")
 
         self._region_loader = _RegionLoader(
-            self._dapi_path, self._mask_path,
-            y0, y1, x0, x1, sub=sub,
+            dapi_path, mask_path,
+            read_y0, read_y1, read_x0, read_x1, sub=sub,
             fused_zarr_path=self._fused_zarr_path,
         )
         self._region_loader.done.connect(self._on_region_loaded)
-        self._region_loader.error.connect(
-            lambda e: self._roi_status.setText(f'⚠  {e}')
-        )
+        self._region_loader.error.connect(self._on_region_error)
+        self._region_loader.finished.connect(lambda thread=self._region_loader: self._on_region_finished(thread))
         self._region_loader.start()
 
     def _on_region_loaded(self, rgb_overlay, dapi_rgb, n_cells, h, w):
@@ -703,7 +870,45 @@ class Step3Page(QWidget):
         sub = self._sub_spin.value()
         self._cell_count_lbl.setText(f'Cells in ROI: {n_cells:,}')
         self._roi_status.setText(f'{h:,}×{w:,} px  (sub ×{sub})')
+        if self._mode == "roi":
+            print(f"[Step3] patch cells={n_cells}")
         self._render_roi(reset_view=True)
+
+    def _locate_patch_tile(self, y0, y1, x0, x1):
+        if not self._active_tiles_dir or not self._tile_grid:
+            return None
+        n_rows, n_cols = [int(v) for v in self._tile_grid]
+        if n_rows <= 0 or n_cols <= 0:
+            return None
+        tile_h = -(-self._full_h // n_rows)
+        tile_w = -(-self._full_w // n_cols)
+        row0 = min(n_rows - 1, max(0, y0 // tile_h))
+        row1 = min(n_rows - 1, max(0, (y1 - 1) // tile_h))
+        col0 = min(n_cols - 1, max(0, x0 // tile_w))
+        col1 = min(n_cols - 1, max(0, (x1 - 1) // tile_w))
+        if row0 != row1 or col0 != col1:
+            return None
+        tile_y0 = row0 * tile_h
+        tile_y1 = min(tile_y0 + tile_h, self._full_h)
+        tile_x0 = col0 * tile_w
+        tile_x1 = min(tile_x0 + tile_w, self._full_w)
+        dapi_path = os.path.join(self._active_tiles_dir, f"tile_r{row0}_c{col0}_dapi.ome.tiff")
+        mask_path = os.path.join(self._active_tiles_dir, f"tile_r{row0}_c{col0}_raw_mask.ome.tiff")
+        if not os.path.exists(dapi_path) or not os.path.exists(mask_path):
+            self._roi_status.setText("Step3 input not found.")
+            print(f"[Step3] missing tile files:\n{dapi_path}\n{mask_path}")
+            return None
+        return row0, col0, tile_y0, tile_y1, tile_x0, tile_x1, dapi_path, mask_path
+
+    def _on_region_error(self, msg):
+        print(f"[Step3] Region load error:\n{msg}")
+        self._roi_status.setText(
+            "Step3 input not found.\nPlease check Step2 outputs."
+        )
+
+    def _on_region_finished(self, thread):
+        if self._region_loader is thread:
+            self._region_loader = None
 
     @staticmethod
     def _overlay_mask_on_dapi(dapi_rgb, mask):
@@ -780,6 +985,34 @@ class Step3Page(QWidget):
 
     def _status(self, msg):
         self._thumb_status.setText(msg)
+
+    def _show_input_error(self, msg):
+        self._thumb_status.setText(msg)
+        self._roi_status.setText(msg)
+        self._roi_info.setText(msg)
+
+    def _stop_loaders(self):
+        self._load_debounce.stop()
+        for attr in ("_thumb_loader", "_region_loader"):
+            thread = getattr(self, attr, None)
+            if thread is None:
+                continue
+            if thread.isRunning():
+                if hasattr(thread, "stop"):
+                    thread.stop()
+                thread.wait(3000)
+            if not thread.isRunning():
+                setattr(self, attr, None)
+
+    def closeEvent(self, event):
+        self._stop_loaders()
+        if ((self._thumb_loader and self._thumb_loader.isRunning()) or
+                (self._region_loader and self._region_loader.isRunning())):
+            event.ignore()
+            self._status("Waiting for Step3 loaders to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
+        super().closeEvent(event)
 
     # ── Event filter: thumbnail rubber-band + ROI-view pan/zoom ───────
 
@@ -971,4 +1204,3 @@ class Step3Page(QWidget):
 # ══════════════════════════════════════════════════════════════════════
 #  Step 4 — Cell Feature Extraction Worker
 # ══════════════════════════════════════════════════════════════════════
-

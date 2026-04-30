@@ -2,6 +2,8 @@
 block01/ui/step0/result_grid.py — ResultGridPanel, ImageZoomDialog, ResultViewWindow.
 """
 
+import json
+
 import numpy as np
 
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -593,4 +595,3 @@ class ResultViewWindow(QMainWindow):
 # ══════════════════════════════════════════════════════════════════════
 #  Search Control Panel
 # ══════════════════════════════════════════════════════════════════════
-

@@ -275,22 +275,13 @@ class FullFusionWorker(QThread):
     # ── helpers ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _read_one_channel(filepath, ch_map, ch_name, y0, y1, x0, x1):
-        """Read a single channel tile region via zarr (used by thread pool)."""
-        page_idx = ch_map[ch_name]
-        with tifffile.TiffFile(filepath) as tif:
-            store = tif.aszarr()
-            z     = zarr.open(store, mode="r")
-            if isinstance(z, zarr.hierarchy.Group):
-                z0 = z[0] if "0" in z else next(iter(z.values()))
-            else:
-                z0 = z
-            if z0.ndim == 3:
-                region = np.array(z0[page_idx, y0:y1, x0:x1])
-            elif z0.ndim == 4:
-                region = np.array(z0[0, page_idx, y0:y1, x0:x1])
-            else:
-                region = np.array(z0[y0:y1, x0:x1])
+    def _read_one_channel(loader, ch_name, y0, y1, x0, x1):
+        """Read one channel tile through the loader so corrected ROI zarr is honored."""
+        region = loader.read_region(
+            ch_name, y0, y1, x0, x1,
+            downsample=1,
+            normalize=False,
+        )
         return ch_name, region.copy()
 
     @staticmethod
@@ -485,7 +476,7 @@ class FullFusionWorker(QThread):
                         futures = {
                             pool.submit(
                                 self._read_one_channel,
-                                ome_path, ch_map, ch, ty0, ty1, tx0, tx1
+                                self.loader, ch, ty0, ty1, tx0, tx1
                             ): ch
                             for ch in all_channels
                         }
@@ -1828,4 +1819,3 @@ class OverviewPanel(QWidget):
 # ══════════════════════════════════════════════════════════════════════
 #  Result Grid Panel
 # ══════════════════════════════════════════════════════════════════════
-

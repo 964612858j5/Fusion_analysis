@@ -738,18 +738,46 @@ class WsiCorrectionWorker(QThread):
     canceled = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, loader, output_dir, correction_config, parent=None):
+    def __init__(self, loader, output_dir, correction_config, rois=None, parent=None):
         super().__init__(parent)
         self.loader = loader
         self.output_dir = output_dir
         self.correction_config = _normalize_correction_config(correction_config) or {}
+        self.rois = list(rois or [])
         self._cancel_requested = False
 
     def stop_after_current_channel(self):
         self._cancel_requested = True
 
+    @staticmethod
+    def _safe_group_name(name, idx):
+        name = str(name or f"ROI_{idx}").strip() or f"ROI_{idx}"
+        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
+        return safe or f"ROI_{idx}"
+
+    @staticmethod
+    def _poly_mask(polygon_fullres, bbox_y0, bbox_x0, h, w):
+        import cv2 as _cv2
+        mask = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array(
+            [[int(x - bbox_x0), int(y - bbox_y0)] for x, y in polygon_fullres],
+            dtype=np.int32,
+        )
+        _cv2.fillPoly(mask, [pts], color=1)
+        return mask.astype(bool)
+
     def run(self):
         try:
+            rois = [
+                roi for roi in self.rois
+                if roi.get("bbox_fullres") and len(roi.get("bbox_fullres")) == 4
+            ]
+            print("[WsiCorrectionWorker] mode=roi_only")
+            print(f"[WsiCorrectionWorker] n_rois={len(rois)}")
+            if not rois:
+                self.error.emit("No ROI found. Draw ROI first.")
+                return
+
             decisions = dict((self.correction_config.get("channel_decisions") or {}))
             params = dict((self.correction_config.get("method_params") or {}))
             channels = [
@@ -777,59 +805,115 @@ class WsiCorrectionWorker(QThread):
 
             os.makedirs(self.output_dir, exist_ok=True)
             root = zarr.open_group(zarr_path, mode="w")
+            root.attrs["mode"] = "roi_only"
+            root.attrs["roi_names"] = [str(r.get("name") or f"ROI_{i}") for i, r in enumerate(rois, start=1)]
+            root.attrs["correction_config"] = self.correction_config
             corrected_decisions = {}
             full_h, full_w = self.loader.shape
-            channel_total = len(channels)
-            tile_counts = [
-                len(list(_tile_slices(full_h, full_w, 4096, max(1, 2 * param))))
-                for _, _, param in channels
-            ]
+            roi_infos = []
+            used_group_names = set()
+            for idx, roi in enumerate(rois, start=1):
+                y0, y1, x0, x1 = [int(v) for v in roi["bbox_fullres"]]
+                y0 = max(0, min(full_h, y0)); y1 = max(0, min(full_h, y1))
+                x0 = max(0, min(full_w, x0)); x1 = max(0, min(full_w, x1))
+                if y1 <= y0 or x1 <= x0:
+                    continue
+                base_group_name = self._safe_group_name(roi.get("name"), idx)
+                group_name = base_group_name
+                suffix = 2
+                while group_name in used_group_names:
+                    group_name = f"{base_group_name}_{suffix}"
+                    suffix += 1
+                used_group_names.add(group_name)
+                roi_h, roi_w = y1 - y0, x1 - x0
+                print(f"[WsiCorrectionWorker] {group_name} bbox={[y0, y1, x0, x1]} shape={(roi_h, roi_w)}")
+                roi_infos.append({
+                    "idx": idx,
+                    "group_name": group_name,
+                    "roi_name": str(roi.get("name") or group_name),
+                    "bbox": [y0, y1, x0, x1],
+                    "shape": (roi_h, roi_w),
+                    "polygon_fullres": roi.get("polygon_fullres"),
+                })
+
+            if not roi_infos:
+                self.error.emit("No ROI found. Draw ROI first.")
+                return
+            root.attrs["roi_names"] = [info["roi_name"] for info in roi_infos]
+
+            channel_total = len(channels) * len(roi_infos)
+            tile_counts = []
+            for info in roi_infos:
+                roi_h, roi_w = info["shape"]
+                for _, _, param in channels:
+                    tile_counts.append(len(list(_tile_slices(roi_h, roi_w, 4096, max(1, 2 * param)))))
             total_units = sum(tile_counts)
             started = time.time()
             completed_units = 0
+            progress_idx = 0
 
-            for channel_idx, (ch_name, method, param) in enumerate(channels, start=1):
-                overlap = max(1, 2 * param)
-                tiles = list(_tile_slices(full_h, full_w, 4096, overlap))
-                ds = root.create_dataset(
-                    ch_name,
-                    shape=(full_h, full_w),
-                    chunks=(1024, 1024),
-                    dtype=np.float32,
-                    overwrite=True,
-                )
+            for info in roi_infos:
+                group = root.create_group(info["group_name"], overwrite=True)
+                group.attrs["roi_name"] = info["roi_name"]
+                group.attrs["bbox_fullres"] = info["bbox"]
+                if info["polygon_fullres"] is not None:
+                    group.attrs["polygon_fullres"] = info["polygon_fullres"]
+                roi_y0, roi_y1, roi_x0, roi_x1 = info["bbox"]
+                roi_h, roi_w = info["shape"]
+                poly_mask = None
+                if info["polygon_fullres"]:
+                    poly_mask = self._poly_mask(info["polygon_fullres"], roi_y0, roi_x0, roi_h, roi_w)
 
-                for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
-                    y0, y1, x0, x1 = core
-                    py0, py1, px0, px1 = padded
-                    cy0, cy1, cx0, cx1 = crop
-                    raw = self.loader._read_roi_zarr(
-                        self.loader.ch_map[ch_name], py0, py1, px0, px1
-                    ).astype(np.float32, copy=False)
-                    if method == "tophat":
-                        corr = _apply_tophat_cpu(raw, param)
-                    else:
-                        corr = _apply_cucim_or_cpu(raw, param, prefer_gpu=CUCIM_AVAILABLE)
-                    ds[y0:y1, x0:x1] = corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=False)
-                    elapsed = max(0.001, time.time() - started)
-                    done_units = completed_units + tile_idx
-                    remain = int((total_units - done_units) * (elapsed / done_units))
-                    self.progress.emit(
-                        channel_idx,
-                        channel_total,
-                        tile_idx,
-                        len(tiles),
+                for ch_name, method, param in channels:
+                    progress_idx += 1
+                    print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
+                    overlap = max(1, 2 * param)
+                    tiles = list(_tile_slices(roi_h, roi_w, 4096, overlap))
+                    ds = group.create_dataset(
                         ch_name,
-                        method,
-                        remain,
+                        shape=(roi_h, roi_w),
+                        chunks=(min(1024, roi_h), min(1024, roi_w)),
+                        dtype=np.float32,
+                        overwrite=True,
                     )
 
-                corrected_decisions[ch_name] = method
-                completed_units += len(tiles)
-                if self._cancel_requested:
-                    shutil.rmtree(zarr_path, ignore_errors=True)
-                    self.canceled.emit(zarr_path)
-                    return
+                    for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
+                        y0, y1, x0, x1 = core
+                        py0, py1, px0, px1 = padded
+                        cy0, cy1, cx0, cx1 = crop
+                        raw = self.loader._read_roi_zarr(
+                            self.loader.ch_map[ch_name],
+                            roi_y0 + py0, roi_y0 + py1,
+                            roi_x0 + px0, roi_x0 + px1,
+                        ).astype(np.float32, copy=False)
+                        if method == "tophat":
+                            corr = _apply_tophat_cpu(raw, param)
+                        else:
+                            corr = _apply_cucim_or_cpu(raw, param, prefer_gpu=CUCIM_AVAILABLE)
+                        out = corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=False)
+                        if poly_mask is not None:
+                            out = out.copy()
+                            out[~poly_mask[y0:y1, x0:x1]] = 0
+                        ds[y0:y1, x0:x1] = out
+                        elapsed = max(0.001, time.time() - started)
+                        done_units = completed_units + tile_idx
+                        remain = int((total_units - done_units) * (elapsed / done_units))
+                        self.progress.emit(
+                            progress_idx,
+                            channel_total,
+                            tile_idx,
+                            len(tiles),
+                            f"{info['group_name']}/{ch_name}",
+                            method,
+                            remain,
+                        )
+
+                    corrected_decisions[ch_name] = method
+                    completed_units += len(tiles)
+                    if self._cancel_requested:
+                        shutil.rmtree(zarr_path, ignore_errors=True)
+                        self.canceled.emit(zarr_path)
+                        return
 
             self.finished.emit(zarr_path, corrected_decisions)
         except Exception:
@@ -909,5 +993,3 @@ class _WsiCorrectionProgressDialog(QDialog):
             super().closeEvent(event)
         else:
             event.ignore()
-
-

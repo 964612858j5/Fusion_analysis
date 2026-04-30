@@ -87,12 +87,22 @@ class OMETIFFLoader:
         if channel_name in self._corrected_decisions and self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
             if self._corrected_store is None:
                 self._corrected_store = zarr.open(self._corrected_zarr_path, mode="r")
-            region = np.asarray(self._corrected_store[channel_name][y0:y1, x0:x1], dtype=np.float32)
-            if downsample > 1:
-                region = region[::downsample, ::downsample]
-            if normalize:
-                return self._norm(region)
-            return region.astype(np.float32, copy=False)
+            corrected_mode = str(self._corrected_store.attrs.get("mode", "")).strip().lower()
+            if corrected_mode == "roi_only":
+                region = self._read_corrected_roi_only(channel_name, y0, y1, x0, x1)
+                if region is not None:
+                    if downsample > 1:
+                        region = region[::downsample, ::downsample]
+                    if normalize:
+                        return self._norm(region)
+                    return region.astype(np.float32, copy=False)
+            elif channel_name in self._corrected_store:
+                region = np.asarray(self._corrected_store[channel_name][y0:y1, x0:x1], dtype=np.float32)
+                if downsample > 1:
+                    region = region[::downsample, ::downsample]
+                if normalize:
+                    return self._norm(region)
+                return region.astype(np.float32, copy=False)
 
         page_idx = self.ch_map[channel_name]
         region = self._read_roi_zarr(page_idx, y0, y1, x0, x1)
@@ -104,6 +114,26 @@ class OMETIFFLoader:
         if normalize:
             return self._norm(region)
         return region.astype(np.float32, copy=False)
+
+    def _read_corrected_roi_only(self, channel_name, y0, y1, x0, x1):
+        """
+        Read a global-coordinate request from ROI-only corrected zarr when the
+        request is fully contained in one stored ROI. Otherwise return None so
+        callers never treat ROI-local arrays as full-WSI datasets.
+        """
+        store = self._corrected_store
+        for group_name in store.group_keys():
+            group = store[group_name]
+            bbox = group.attrs.get("bbox_fullres")
+            if not bbox or len(bbox) != 4 or channel_name not in group:
+                continue
+            ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
+            if ry0 <= y0 and y1 <= ry1 and rx0 <= x0 and x1 <= rx1:
+                return np.asarray(
+                    group[channel_name][y0 - ry0:y1 - ry0, x0 - rx0:x1 - rx0],
+                    dtype=np.float32,
+                )
+        return None
 
     def _apply_configured_correction(self, channel_name, region, correction_config):
         if not correction_config:

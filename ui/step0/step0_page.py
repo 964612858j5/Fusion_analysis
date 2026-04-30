@@ -46,7 +46,8 @@ from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
 from .search_ctrl import (
     SearchCtrlPanel, BatchProcessWorker,
-    WsiCorrectionWorker, _WsiCorrectionProgressDialog,
+    WsiCorrectionWorker, BackgroundPreviewWorker,
+    _WsiCorrectionProgressDialog,
 )
 
 class Step0Page(QWidget):
@@ -2335,6 +2336,12 @@ class Step0Page(QWidget):
         }
         zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")
 
+        rois = list(self.overview.get_rois() if self.overview else self.rois)
+        if not rois:
+            QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
+            return
+        self.rois = rois
+
         if not corrected:
             if os.path.exists(zarr_path):
                 shutil.rmtree(zarr_path, ignore_errors=True)
@@ -2345,7 +2352,9 @@ class Step0Page(QWidget):
         self._btn_continue.setEnabled(False)
         self._btn_load.setEnabled(False)
         self._wsi_dialog = _WsiCorrectionProgressDialog(self)
-        self._wsi_worker = WsiCorrectionWorker(self.loader, self.output_dir, config, self)
+        self._wsi_worker = WsiCorrectionWorker(
+            self.loader, self.output_dir, config, rois=rois, parent=self
+        )
         self._wsi_worker.progress.connect(self._on_wsi_progress)
         self._wsi_worker.finished.connect(lambda path, decisions: self._on_wsi_finished(config, path, decisions))
         self._wsi_worker.canceled.connect(self._on_wsi_canceled)
@@ -2394,11 +2403,15 @@ class Step0Page(QWidget):
         # 自动静默保存 ROI 到 output_dir
         try:
             roi_path = os.path.join(self.output_dir, "roi_config.json")
+            patch_path = os.path.join(self.output_dir, "patch_config.json")
             os.makedirs(self.output_dir, exist_ok=True)
             data = [{k: v for k, v in r.items() if k != "patch_indices"}
                     for r in (self.overview._rois if self.overview else [])]
             with open(roi_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            patch_data = list(self.overview._patches if self.overview else [])
+            with open(patch_path, 'w', encoding='utf-8') as f:
+                json.dump(patch_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[Step0] Auto-save ROI failed: {e}")
         payload = {
@@ -2415,5 +2428,3 @@ class Step0Page(QWidget):
             "corrected_decisions": dict(decisions),
         }
         self.step0_complete.emit(payload)
-
-

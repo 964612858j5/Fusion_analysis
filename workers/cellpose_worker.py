@@ -209,10 +209,16 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 result_queue.put({"type": "error", "msg": str(e)})
                 mask = np.zeros(fused.shape[:2], dtype=np.uint32)
 
-            dapi_u8 = (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8)
-            rgb_raw = np.stack([dapi_u8] * 3, axis=-1)
-            rgb_ov = cellpose_mask_overlay(dapi_u8, mask)
+            fusion_rgb = np.stack([
+                (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
+                np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
+                (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
+            ], axis=-1)
+            dapi_u8 = fusion_rgb[:, :, 2]
+            rgb_raw = fusion_rgb
+            rgb_ov = rgb_raw
             n_cells = int(mask.max())
+            mask_payload = mask.copy()
 
             del fused, fused_f32, mask, dapi_u8
             gc.collect()
@@ -225,6 +231,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "params": params,
                 "rgb_overlay": rgb_ov,
                 "rgb_raw": rgb_raw,
+                "masks": mask_payload,
             })
             result_queue.put({
                 "type": "progress",
@@ -249,9 +256,9 @@ def run_cellpose_process(args, result_queue, stop_flag):
 # ══════════════════════════════════════════════════════════════════════
 
 class CellposeWorker(QThread):
-    # rgb_overlay = DAPI grey + cellpose-style mask overlay (no borders)
-    # rgb_raw     = DAPI grey only (no mask)
-    result_ready   = pyqtSignal(int, dict, object, object)  # patch_idx, params, rgb_overlay, rgb_raw
+    # rgb_overlay is kept for legacy signal/API compatibility.
+    # Viewers render masks from rgb_raw + masks through utils.mask_renderer.
+    result_ready   = pyqtSignal(int, dict, object, object, object)  # patch_idx, params, rgb_overlay, rgb_raw, masks
     progress       = pyqtSignal(int, int, str)               # done, total, msg
     finished_all   = pyqtSignal()
     error_occurred = pyqtSignal(str)
@@ -344,20 +351,25 @@ class CellposeWorker(QThread):
                     self.error_occurred.emit(str(e))
                     mask = np.zeros(fused.shape[:2], dtype=np.uint32)
 
-                dapi_u8  = (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8)
+                fusion_rgb = np.stack([
+                    (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
+                    np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
+                    (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
+                ], axis=-1)
+                dapi_u8  = fusion_rgb[:, :, 2]
                 print(f"[Cellpose] dapi_u8: min={dapi_u8.min()} max={dapi_u8.max()} "
                       f"mean={dapi_u8.mean():.1f}")
-                rgb_raw  = np.stack([dapi_u8]*3, axis=-1)
-                rgb_ov   = cellpose_mask_overlay(dapi_u8, mask)
+                rgb_raw  = fusion_rgb
+                rgb_ov   = rgb_raw
                 n_cells  = int(mask.max())
-                print(f"[Cellpose] rgb_ov shape={rgb_ov.shape} "
-                      f"same_as_raw={np.array_equal(rgb_ov, rgb_raw)}")
+                mask_payload = mask.copy()
+                print(f"[Cellpose] rgb_raw shape={rgb_raw.shape}")
 
                 del fused, fused_f32, mask, dapi_u8
                 gc.collect()
                 torch.cuda.empty_cache()
 
-                self.result_ready.emit(patch_idx, params, rgb_ov, rgb_raw)
+                self.result_ready.emit(patch_idx, params, rgb_ov, rgb_raw, mask_payload)
                 self.progress.emit(done + 1, total,
                                    f"✓ Patch {patch_idx+1}  cells={n_cells}")
 

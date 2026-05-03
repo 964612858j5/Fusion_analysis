@@ -11,11 +11,12 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QMainWindow, QDialog,
-    QProgressBar,
+    QProgressBar, QSlider, QCheckBox,
 )
 import pyqtgraph as pg
 
 from ...config import PATCH_COLORS
+from ...utils.mask_renderer import render_mask_overlay
 
 class ResultGridPanel(QWidget):
     param_selected = pyqtSignal(dict)
@@ -29,10 +30,12 @@ class ResultGridPanel(QWidget):
         self._cell_widgets = {}   # (row, col) → QLabel widget
         self._col_btns     = []
         self._selected_col = -1
-        self._full_results = {}   # (row, col) → rgb_overlay ndarray (with mask)
-        self._raw_results  = {}   # (row, col) → rgb_raw ndarray (without mask)
+        self._fusion_results = {} # (row, col) → fusion RGB ndarray
+        self._mask_results  = {}  # (row, col) → label mask ndarray
         self._phase_desc   = ""
-        self._show_mask    = True
+        self._alpha        = 35
+        self._show_outline = True
+        self._show_fusion  = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -47,20 +50,27 @@ class ResultGridPanel(QWidget):
         )
         hdr.addWidget(self.phase_lbl, stretch=1)
 
-        self.btn_toggle_mask = QPushButton("Hide Mask")
-        self.btn_toggle_mask.setEnabled(False)
-        self.btn_toggle_mask.setCheckable(True)
-        self.btn_toggle_mask.setStyleSheet(
-            "QPushButton{background:#353;color:#8e8;"
-            "border:1px solid #8e8;border-radius:3px;"
-            "font-size:11px;padding:3px 8px;}"
-            "QPushButton:checked{background:#533;color:#e88;"
-            "border:1px solid #e88;}"
-            "QPushButton:hover{background:#464;}"
-            "QPushButton:disabled{background:#222;color:#444;}"
-        )
-        self.btn_toggle_mask.clicked.connect(self._toggle_mask)
-        hdr.addWidget(self.btn_toggle_mask)
+        hdr.addWidget(QLabel("Alpha:"))
+        self.alpha_slider = QSlider(Qt.Horizontal)
+        self.alpha_slider.setRange(0, 100)
+        self.alpha_slider.setValue(self._alpha)
+        self.alpha_slider.setFixedWidth(90)
+        self.alpha_slider.valueChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.alpha_slider)
+        self.alpha_lbl = QLabel(f"{self._alpha}%")
+        self.alpha_lbl.setFixedWidth(34)
+        self.alpha_lbl.setStyleSheet("color:#aaa;font-size:10px;")
+        hdr.addWidget(self.alpha_lbl)
+
+        self.chk_outline = QCheckBox("Outline")
+        self.chk_outline.setChecked(True)
+        self.chk_outline.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_outline)
+
+        self.chk_fusion = QCheckBox("Fusion")
+        self.chk_fusion.setChecked(True)
+        self.chk_fusion.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_fusion)
 
         self.btn_fullscreen = QPushButton("⛶ Fullscreen View")
         self.btn_fullscreen.setEnabled(False)
@@ -100,16 +110,19 @@ class ResultGridPanel(QWidget):
                 item.widget().deleteLater()
         self._cell_widgets.clear()
         self._col_btns.clear()
-        self._full_results.clear()
-        self._raw_results.clear()
+        self._fusion_results.clear()
+        self._mask_results.clear()
         self._selected_col = -1
         self._params      = param_list
         self._n_patches   = n_patches
         self._phase_desc  = phase_desc
-        self._show_mask   = True
-        self.btn_toggle_mask.setEnabled(False)
-        self.btn_toggle_mask.setChecked(False)
-        self.btn_toggle_mask.setText("Hide Mask")
+        self._alpha = 35
+        self._show_outline = True
+        self._show_fusion = True
+        self.alpha_slider.setValue(self._alpha)
+        self.alpha_lbl.setText(f"{self._alpha}%")
+        self.chk_outline.setChecked(True)
+        self.chk_fusion.setChecked(True)
         self.btn_fullscreen.setEnabled(False)
         self.phase_lbl.setText(phase_desc)
 
@@ -170,7 +183,7 @@ class ResultGridPanel(QWidget):
                              QtGui.QImage.Format_RGB888).copy()
         return QtGui.QPixmap.fromImage(qimg)
 
-    def add_result(self, patch_idx, params, rgb_overlay, rgb_raw):
+    def add_result(self, patch_idx, params, rgb_overlay, rgb_raw, masks=None):
         pkey = self._pkey(params)
         col  = next(
             (i for i, p in enumerate(self._params) if self._pkey(p) == pkey),
@@ -194,9 +207,12 @@ class ResultGridPanel(QWidget):
 
         W = self.IMG_W
 
-        # ── QLabel + QPixmap: much faster rendering than pyqtgraph widget ──
-        pm_mask = self._to_pixmap(rgb_overlay, W)
-        pm_raw  = self._to_pixmap(rgb_raw,     W)
+        fusion_rgb = np.asarray(rgb_raw, dtype=np.uint8)
+        if masks is None:
+            masks = np.zeros(fusion_rgb.shape[:2], dtype=np.uint32)
+        masks = np.asarray(masks, dtype=np.uint32)
+        rendered = self._render_result_image(fusion_rgb, masks)
+        pm = self._to_pixmap(rendered, W)
 
         lbl = QLabel()
         lbl.setFixedSize(W + 4, W + 4)
@@ -204,19 +220,22 @@ class ResultGridPanel(QWidget):
         lbl.setStyleSheet("background:#000;border:1px solid #333;")
         lbl.setCursor(Qt.PointingHandCursor)
         lbl.setToolTip("Click to zoom (scroll to zoom in/out)")
-        lbl.setProperty("pm_mask", pm_mask)
-        lbl.setProperty("pm_raw",  pm_raw)
-        lbl.setPixmap(pm_mask if self._show_mask else pm_raw)
+        lbl.setProperty("result_key", key)
+        lbl.setPixmap(pm)
 
         # Click → open single image zoom window
-        _ov  = rgb_overlay
-        _raw = rgb_raw
-        _sm  = self._show_mask
+        _fusion = fusion_rgb
+        _masks = masks
 
-        def _on_click(ev, ov=_ov, raw=_raw, grid=self):
+        def _on_click(ev, fusion=_fusion, mask=_masks, grid=self):
             if ev.button() == Qt.LeftButton:
-                dlg = ImageZoomDialog(ov, raw, show_mask=grid._show_mask,
-                                      parent=grid)
+                dlg = ImageZoomDialog(
+                    fusion, mask,
+                    alpha=grid._alpha / 100.0,
+                    show_outline=grid._show_outline,
+                    show_fusion=grid._show_fusion,
+                    parent=grid,
+                )
                 dlg.show()
 
         lbl.mousePressEvent = _on_click
@@ -224,13 +243,11 @@ class ResultGridPanel(QWidget):
         self.grid_lay.addWidget(lbl, patch_idx + 1, col + 1)
         self._cell_widgets[key] = lbl
 
-        # Save full results for fullscreen view + mask toggle
-        self._full_results[(patch_idx, col)] = rgb_overlay
-        self._raw_results[(patch_idx, col)]  = rgb_raw
+        self._fusion_results[(patch_idx, col)] = fusion_rgb
+        self._mask_results[(patch_idx, col)] = masks
 
         n_total = self._n_patches * max(len(self._params), 1)
-        if len(self._full_results) >= 1:
-            self.btn_toggle_mask.setEnabled(True)
+        if len(self._fusion_results) >= 1:
             self.btn_fullscreen.setEnabled(True)
 
     def _select(self, col):
@@ -276,28 +293,43 @@ class ResultGridPanel(QWidget):
     def _pkey(p):
         return json.dumps(p, sort_keys=True)
 
-    def _toggle_mask(self):
-        """Toggle mask boundary display in thumbnails."""
-        self._show_mask = not self.btn_toggle_mask.isChecked()
-        self.btn_toggle_mask.setText(
-            "Show Mask" if not self._show_mask else "Hide Mask"
+    def _render_result_image(self, fusion_rgb, masks):
+        return render_mask_overlay(
+            fusion_rgb,
+            masks,
+            alpha=self._alpha / 100.0,
+            show_outline=self._show_outline,
+            show_fusion=self._show_fusion,
         )
-        # Update all displayed thumbnails
+
+    def _on_render_controls_changed(self, *_):
+        self._alpha = int(self.alpha_slider.value())
+        self._show_outline = bool(self.chk_outline.isChecked())
+        self._show_fusion = bool(self.chk_fusion.isChecked())
+        self.alpha_lbl.setText(f"{self._alpha}%")
+        self._refresh_thumbnails()
+
+    def _refresh_thumbnails(self):
         for key, lbl in self._cell_widgets.items():
             if not isinstance(lbl, QLabel):
                 continue
-            pm = (lbl.property("pm_mask") if self._show_mask
-                  else lbl.property("pm_raw"))
-            if pm is not None:
-                lbl.setPixmap(pm)
+            fusion = self._fusion_results.get(key)
+            masks = self._mask_results.get(key)
+            if fusion is None or masks is None:
+                continue
+            lbl.setPixmap(self._to_pixmap(self._render_result_image(fusion, masks), self.IMG_W))
 
     def _open_fullscreen(self):
-        if not self._full_results:
+        if not self._fusion_results:
             return
         win = ResultViewWindow(
             self._n_patches, self._params,
-            self._full_results, self._raw_results,
-            self._phase_desc, parent=self,
+            self._fusion_results, self._mask_results,
+            self._phase_desc,
+            alpha=self._alpha / 100.0,
+            show_outline=self._show_outline,
+            show_fusion=self._show_fusion,
+            parent=self,
         )
         win.show()
 
@@ -307,17 +339,20 @@ class ResultGridPanel(QWidget):
 # ══════════════════════════════════════════════════════════════════════
 
 class ImageZoomDialog(QtWidgets.QDialog):
-    """Interactive zoom window for a single image (scroll to zoom / mid-right drag to pan / mask toggle)."""
+    """Interactive zoom window for a single image (scroll to zoom / mid-right drag to pan)."""
 
-    def __init__(self, rgb_overlay, rgb_raw, show_mask=True, parent=None):
+    def __init__(self, fusion_rgb, masks, alpha=0.35,
+                 show_outline=True, show_fusion=True, parent=None):
         super().__init__(parent,
                          QtCore.Qt.Window |
                          QtCore.Qt.WindowMinMaxButtonsHint |
                          QtCore.Qt.WindowCloseButtonHint)
         self.setWindowTitle("Image Zoom View  (Scroll=Zoom  Mid/Right-drag=Pan)")
-        self._rgb_ov   = rgb_overlay
-        self._rgb_raw  = rgb_raw
-        self._show_mask = show_mask
+        self._fusion_rgb = np.asarray(fusion_rgb, dtype=np.uint8)
+        self._masks = np.asarray(masks, dtype=np.uint32)
+        self._alpha = int(round(float(alpha) * 100))
+        self._show_outline = bool(show_outline)
+        self._show_fusion = bool(show_fusion)
         self._pan_last  = None
         self._build_ui()
         self.resize(900, 700)
@@ -329,19 +364,27 @@ class ImageZoomDialog(QtWidgets.QDialog):
 
         # Toolbar
         bar = QHBoxLayout()
-        self.btn_mask = QPushButton(
-            "Hide Mask" if self._show_mask else "Show Mask"
-        )
-        self.btn_mask.setCheckable(True)
-        self.btn_mask.setChecked(not self._show_mask)
-        self.btn_mask.setStyleSheet(
-            "QPushButton{background:#353;color:#8e8;"
-            "border:1px solid #8e8;border-radius:3px;padding:4px 10px;}"
-            "QPushButton:checked{background:#533;color:#e88;"
-            "border:1px solid #e88;}"
-        )
-        self.btn_mask.clicked.connect(self._toggle_mask)
-        bar.addWidget(self.btn_mask)
+        bar.addWidget(QLabel("Alpha:"))
+        self.alpha_slider = QSlider(Qt.Horizontal)
+        self.alpha_slider.setRange(0, 100)
+        self.alpha_slider.setValue(self._alpha)
+        self.alpha_slider.setFixedWidth(120)
+        self.alpha_slider.valueChanged.connect(self._on_controls_changed)
+        bar.addWidget(self.alpha_slider)
+        self.alpha_lbl = QLabel(f"{self._alpha}%")
+        self.alpha_lbl.setFixedWidth(36)
+        self.alpha_lbl.setStyleSheet("color:#aaa;font-size:10px;")
+        bar.addWidget(self.alpha_lbl)
+
+        self.chk_outline = QCheckBox("Outline")
+        self.chk_outline.setChecked(self._show_outline)
+        self.chk_outline.stateChanged.connect(self._on_controls_changed)
+        bar.addWidget(self.chk_outline)
+
+        self.chk_fusion = QCheckBox("Fusion")
+        self.chk_fusion.setChecked(self._show_fusion)
+        self.chk_fusion.stateChanged.connect(self._on_controls_changed)
+        bar.addWidget(self.chk_fusion)
         bar.addStretch()
 
         hint = QLabel("Scroll=Zoom  Drag=Pan  Double-click=Reset")
@@ -377,14 +420,22 @@ class ImageZoomDialog(QtWidgets.QDialog):
         self.gv.viewport().installEventFilter(self)
 
     def _set_image(self, reset_view=False):
-        data = self._rgb_ov if self._show_mask else self._rgb_raw
+        data = render_mask_overlay(
+            self._fusion_rgb,
+            self._masks,
+            alpha=self._alpha / 100.0,
+            show_outline=self._show_outline,
+            show_fusion=self._show_fusion,
+        )
         self.ii.setImage(data, autoLevels=False)
         if reset_view:
             self.vb.autoRange()
 
-    def _toggle_mask(self):
-        self._show_mask = not self.btn_mask.isChecked()
-        self.btn_mask.setText("Hide Mask" if self._show_mask else "Show Mask")
+    def _on_controls_changed(self, *_):
+        self._alpha = int(self.alpha_slider.value())
+        self._show_outline = bool(self.chk_outline.isChecked())
+        self._show_fusion = bool(self.chk_fusion.isChecked())
+        self.alpha_lbl.setText(f"{self._alpha}%")
         self._set_image(reset_view=False)   # preserve zoom & pan
 
     def mouseDoubleClickEvent(self, ev):
@@ -456,16 +507,20 @@ class ResultViewWindow(QMainWindow):
     CELL_SIZE = 460   # cell display edge length (px)
 
     def __init__(self, n_patches, param_list,
-                 full_results, raw_results, phase_desc, parent=None):
+                 fusion_results, mask_results, phase_desc,
+                 alpha=0.35, show_outline=True, show_fusion=True,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Fullscreen Result View — {phase_desc}")
-        self._n_patches  = n_patches
-        self._params     = param_list
-        self._results    = full_results   # {(row,col): ndarray} with mask
-        self._raw        = raw_results    # {(row,col): ndarray} without mask
-        self._phase_desc = phase_desc
-        self._show_mask  = True
-        self._cell_labels = {}            # (row,col) → QLabel
+        self._n_patches     = n_patches
+        self._params        = param_list
+        self._fusion_results = fusion_results  # {(row,col): fusion RGB ndarray}
+        self._mask_results   = mask_results    # {(row,col): label mask ndarray}
+        self._phase_desc    = phase_desc
+        self._alpha         = int(round(float(alpha) * 100))
+        self._show_outline  = bool(show_outline)
+        self._show_fusion   = bool(show_fusion)
+        self._cell_labels   = {}            # (row,col) → QLabel
         self._build_ui()
         self.showMaximized()
 
@@ -482,16 +537,27 @@ class ResultViewWindow(QMainWindow):
         ttl.setStyleSheet("font-size:14px;font-weight:bold;color:#eee;padding:2px;")
         hdr.addWidget(ttl, stretch=1)
 
-        self.btn_mask = QPushButton("Hide Mask")
-        self.btn_mask.setCheckable(True)
-        self.btn_mask.setStyleSheet(
-            "QPushButton{background:#353;color:#8e8;"
-            "border:1px solid #8e8;border-radius:3px;padding:3px 10px;}"
-            "QPushButton:checked{background:#533;color:#e88;"
-            "border:1px solid #e88;}"
-        )
-        self.btn_mask.clicked.connect(self._toggle_mask)
-        hdr.addWidget(self.btn_mask)
+        hdr.addWidget(QLabel("Alpha:"))
+        self.alpha_slider = QSlider(Qt.Horizontal)
+        self.alpha_slider.setRange(0, 100)
+        self.alpha_slider.setValue(self._alpha)
+        self.alpha_slider.setFixedWidth(120)
+        self.alpha_slider.valueChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.alpha_slider)
+        self.alpha_lbl = QLabel(f"{self._alpha}%")
+        self.alpha_lbl.setFixedWidth(36)
+        self.alpha_lbl.setStyleSheet("color:#aaa;font-size:10px;")
+        hdr.addWidget(self.alpha_lbl)
+
+        self.chk_outline = QCheckBox("Outline")
+        self.chk_outline.setChecked(self._show_outline)
+        self.chk_outline.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_outline)
+
+        self.chk_fusion = QCheckBox("Fusion")
+        self.chk_fusion.setChecked(self._show_fusion)
+        self.chk_fusion.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_fusion)
 
         hint = QLabel("Click image to zoom")
         hint.setStyleSheet("color:#555;font-size:10px;")
@@ -543,8 +609,9 @@ class ResultViewWindow(QMainWindow):
             self._grid_lay.addWidget(pl, row + 1, 0)
 
             for col in range(len(self._params)):
-                rgb_ov = self._results.get((row, col))
-                rgb_rw = self._raw.get((row, col))
+                key = (row, col)
+                fusion = self._fusion_results.get(key)
+                masks = self._mask_results.get(key)
 
                 lbl = QLabel()
                 lbl.setFixedSize(W + 8, W + 8)
@@ -553,21 +620,22 @@ class ResultViewWindow(QMainWindow):
                     "background:#111;border:1px solid #2a2a2a;"
                 )
 
-                if rgb_ov is not None:
-                    pm_ov = ResultGridPanel._to_pixmap(rgb_ov, W)
-                    pm_rw = ResultGridPanel._to_pixmap(rgb_rw, W) if rgb_rw is not None else pm_ov
-                    lbl.setProperty("pm_mask", pm_ov)
-                    lbl.setProperty("pm_raw",  pm_rw)
-                    lbl.setPixmap(pm_ov)
+                if fusion is not None and masks is not None:
+                    lbl.setProperty("result_key", key)
+                    lbl.setPixmap(ResultGridPanel._to_pixmap(
+                        self._render_cell_image(fusion, masks), W
+                    ))
                     lbl.setCursor(Qt.PointingHandCursor)
                     lbl.setToolTip("Click to zoom (scroll to zoom, drag to pan)")
 
-                    _ov, _rw, _win = rgb_ov, rgb_rw, self
-                    def _click(ev, ov=_ov, rw=_rw, win=_win):
+                    _fusion, _masks, _win = fusion, masks, self
+                    def _click(ev, fusion_rgb=_fusion, mask=_masks, win=_win):
                         if ev.button() == Qt.LeftButton:
                             dlg = ImageZoomDialog(
-                                ov, rw,
-                                show_mask=win._show_mask,
+                                fusion_rgb, mask,
+                                alpha=win._alpha / 100.0,
+                                show_outline=win._show_outline,
+                                show_fusion=win._show_fusion,
                                 parent=win,
                             )
                             dlg.show()
@@ -582,14 +650,32 @@ class ResultViewWindow(QMainWindow):
                 self._grid_lay.addWidget(lbl, row + 1, col + 1)
                 self._cell_labels[(row, col)] = lbl
 
-    def _toggle_mask(self):
-        self._show_mask = not self.btn_mask.isChecked()
-        self.btn_mask.setText("Show Mask" if not self._show_mask else "Hide Mask")
-        for lbl in self._cell_labels.values():
-            pm = (lbl.property("pm_mask") if self._show_mask
-                  else lbl.property("pm_raw"))
-            if pm is not None:
-                lbl.setPixmap(pm)
+    def _render_cell_image(self, fusion_rgb, masks):
+        return render_mask_overlay(
+            fusion_rgb,
+            masks,
+            alpha=self._alpha / 100.0,
+            show_outline=self._show_outline,
+            show_fusion=self._show_fusion,
+        )
+
+    def _on_render_controls_changed(self, *_):
+        self._alpha = int(self.alpha_slider.value())
+        self._show_outline = bool(self.chk_outline.isChecked())
+        self._show_fusion = bool(self.chk_fusion.isChecked())
+        self.alpha_lbl.setText(f"{self._alpha}%")
+        self._refresh_cells()
+
+    def _refresh_cells(self):
+        W = self.CELL_SIZE
+        for key, lbl in self._cell_labels.items():
+            fusion = self._fusion_results.get(key)
+            masks = self._mask_results.get(key)
+            if fusion is None or masks is None:
+                continue
+            lbl.setPixmap(ResultGridPanel._to_pixmap(
+                self._render_cell_image(fusion, masks), W
+            ))
 
 
 # ══════════════════════════════════════════════════════════════════════

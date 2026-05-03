@@ -55,6 +55,10 @@ class SegmentMergeWorker(QThread):
         self._logger          = None
         self._mem_timer       = None
 
+    @staticmethod
+    def _abs(path):
+        return os.path.abspath(path) if path else path
+
     def stop(self):
         self._stop = True
 
@@ -381,7 +385,14 @@ class SegmentMergeWorker(QThread):
 
             n_kept = len(keep_labels)
             global_id_offset += n_kept
-            tile_stats.append({'row': row, 'col': col, 'n_cells': n_kept})
+            tile_stats.append({
+                'row': row,
+                'col': col,
+                'n_cells': n_kept,
+                'bbox_local': [oy0, oy1, ox0, ox1],
+                'dapi_path': self._abs(dapi_tile_path),
+                'mask_path': self._abs(raw_mask_tile_path),
+            })
 
             self.tile_done.emit(i, n_tiles, n_kept)
             log.info(f"  ✓ [{out_prefix}] Tile [{i+1}/{n_tiles}] kept={n_kept}")
@@ -460,13 +471,20 @@ class SegmentMergeWorker(QThread):
         gc.collect()
 
         meta = {
+            'mode':            'roi',
             'roi_name':        out_prefix,
-            'zarr_path':       out_zarr_path,
-            'ome_tiff':        ome_path,
-            'global_dapi':     global_dapi_path,
-            'tile_dir':        tile_dir,
-            'mmap_path':       mmap_path,
+            'zarr_path':       self._abs(out_zarr_path),
+            'fused_zarr_path':  self._abs(zarr_path),
+            'input_zarr':       self._abs(zarr_path),
+            'source_zarr':      self._abs(zarr_path),
+            'ome_tiff':        self._abs(ome_path),
+            'global_dapi':     self._abs(global_dapi_path),
+            'tile_dir':        self._abs(tile_dir),
+            'tiles_dir':        self._abs(tile_dir),
+            'mmap_path':       self._abs(mmap_path),
             'total_cells':     total_cells,
+            'image_shape':      [full_h, full_w],
+            'tile_grid':        [self.n_rows, self.n_cols],
             'tile_stats':      tile_stats,
             'cp_params':       self.cp_params,
             'bbox':            list(bbox) if bbox else None,
@@ -538,6 +556,7 @@ class SegmentMergeWorker(QThread):
             if self.rois:
                 log.info(f"ROI mode: {len(self.rois)} ROI(s)")
                 total_cells_all = 0
+                roi_meta_all = []
                 for roi_i, roi in enumerate(self.rois):
                     if self._stop:
                         break
@@ -548,6 +567,7 @@ class SegmentMergeWorker(QThread):
                     if not os.path.exists(roi_zarr):
                         log.warning(f"ROI zarr not found: {roi_zarr} — skipping")
                         continue
+                    roi_zarr_abs = self._abs(roi_zarr)
                     log.info(
                         f"=== ROI [{roi_i+1}/{len(self.rois)}]: {roi_name} ==="
                     )
@@ -556,7 +576,7 @@ class SegmentMergeWorker(QThread):
                         f"Segmenting ROI [{roi_i+1}/{len(self.rois)}]: {roi_name}…"
                     )
                     n_cells = self._segment_one_zarr(
-                        zarr_path    = roi_zarr,
+                        zarr_path    = roi_zarr_abs,
                         out_prefix   = roi_name,
                         model        = model,
                         use_gpu      = use_gpu,
@@ -565,6 +585,16 @@ class SegmentMergeWorker(QThread):
                         bbox         = roi.get("bbox_fullres"),
                     )
                     total_cells_all += n_cells
+                    roi_meta_all.append({
+                        "roi_name": roi_name,
+                        "bbox_fullres": roi.get("bbox_fullres"),
+                        "fused_zarr_path": roi_zarr_abs,
+                        "input_zarr": roi_zarr_abs,
+                        "source_zarr": roi_zarr_abs,
+                        "tiles_dir": self._abs(os.path.join(self.output_dir, f"tiles_{roi_name}")),
+                        "tile_grid": [self.n_rows, self.n_cols],
+                        "total_cells": n_cells,
+                    })
                     self.progress.emit(
                         roi_i + 1, len(self.rois),
                         f"✓ ROI {roi_name}: {n_cells:,} cells  "
@@ -581,6 +611,15 @@ class SegmentMergeWorker(QThread):
                 log.info(
                     f"=== All ROIs done  total_cells={total_cells_all:,} ==="
                 )
+                summary_meta = {
+                    "mode": "roi",
+                    "output_dir": self._abs(self.output_dir),
+                    "rois": roi_meta_all,
+                    "total_cells": total_cells_all,
+                    "created_at": datetime.now().isoformat(),
+                }
+                with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
+                    json.dump(summary_meta, f, indent=2)
                 self._stop_mem_logger()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return
@@ -756,7 +795,14 @@ class SegmentMergeWorker(QThread):
 
                 n_kept = len(keep_labels)
                 global_id_offset += n_kept
-                tile_stats.append({'row': row, 'col': col, 'n_cells': n_kept})
+                tile_stats.append({
+                    'row': row,
+                    'col': col,
+                    'n_cells': n_kept,
+                    'bbox_local': [oy0, oy1, ox0, ox1],
+                    'dapi_path': self._abs(dapi_tile_path),
+                    'mask_path': self._abs(raw_mask_tile_path),
+                })
 
                 self.tile_done.emit(i, n_tiles, n_kept)
                 _done_msg = (
@@ -849,11 +895,16 @@ class SegmentMergeWorker(QThread):
             log.debug(f"[MEM final drop_caches] {self._mem_snapshot()}")
 
             meta = {
-                'zarr_path':      out_zarr_path,
-                'ome_tiff':       ome_path,
-                'global_dapi':    global_dapi_path,
-                'tile_dir':       tile_dir,
-                'mmap_path':      mmap_path,
+                'mode':           'full_wsi',
+                'zarr_path':      self._abs(out_zarr_path),
+                'fused_zarr_path': self._abs(self.zarr_path),
+                'input_zarr':      self._abs(self.zarr_path),
+                'source_zarr':     self._abs(self.zarr_path),
+                'ome_tiff':       self._abs(ome_path),
+                'global_dapi':    self._abs(global_dapi_path),
+                'tile_dir':       self._abs(tile_dir),
+                'tiles_dir':       self._abs(tile_dir),
+                'mmap_path':      self._abs(mmap_path),
                 'total_cells':    total_cells,
                 'image_shape':    [full_h, full_w],
                 'tile_grid':      [self.n_rows, self.n_cols],

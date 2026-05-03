@@ -588,6 +588,11 @@ class MainWindow(QMainWindow):
             self.step2_output = {
                 "output_dir": output_dir,
             }
+            self._step3.set_channel_context(
+                loader=self.loader,
+                corrected_zarr_path=self._corrected_zarr_path,
+                rois=self._rois,
+            )
             if self.is_sequential_flow:
                 self._step3.set_output_dir(output_dir)
                 self.step3_output = dict(self.step2_output)
@@ -1271,6 +1276,7 @@ class MainWindow(QMainWindow):
                     item["params"],
                     item["rgb_overlay"],
                     item["rgb_raw"],
+                    item.get("masks"),
                 )
             elif kind == "progress":
                 self.search.update_progress(

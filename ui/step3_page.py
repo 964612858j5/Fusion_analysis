@@ -16,12 +16,14 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer, QRectF, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QSplitter, QSlider, QMessageBox, QFileDialog,
+    QGroupBox, QSplitter, QSlider, QCheckBox, QScrollArea,
+    QMessageBox, QFileDialog,
 )
 import pyqtgraph as pg
 
-from ..config import OUTPUT_DIR
-from ..workers.cellpose_worker import cellpose_mask_overlay
+from ..config import OUTPUT_DIR, OME_TIFF_FILE
+from ..core.io_loader import OMETIFFLoader
+from ..utils.mask_renderer import render_mask_overlay
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 3 Page  — Segmentation QC Viewer
@@ -178,22 +180,25 @@ class _ThumbLoader(QThread):
 
 class _RegionLoader(QThread):
     """
-    Load a rectangular ROI from global_dapi + global_mask, compute the
-    cellpose-style overlay in the background thread.
+    Load a rectangular ROI from global_dapi + global_mask.
 
     Signals:
-        done(rgb_overlay, dapi_grey_rgb, n_cells, h, w)
+        done(dapi_rgb, fusion_rgb_or_none, mask_labels, n_cells, h, w, fusion_source)
     """
-    done  = pyqtSignal(object, object, int, int, int)
+    done  = pyqtSignal(object, object, object, int, int, int, str)
     error = pyqtSignal(str)
 
     def __init__(self, dapi_path, mask_path, y0, y1, x0, x1,
-                 sub=1, fused_zarr_path=None):
+                 sub=1, fused_zarr_path=None, fusion_roi=None,
+                 tile_infos=None):
         super().__init__()
         self.dapi_path = dapi_path
         self.mask_path = mask_path
         self.y0, self.y1, self.x0, self.x1 = y0, y1, x0, x1
         self.sub = sub
+        self.fused_zarr_path = fused_zarr_path
+        self.fusion_roi = fusion_roi
+        self.tile_infos = tile_infos or []
         self._stop = False
 
     def stop(self):
@@ -232,32 +237,139 @@ class _RegionLoader(QThread):
             a = np.zeros_like(a)
         return (a * 255).astype(np.uint8)
 
+    @staticmethod
+    def _read_fusion_rgb(zarr_path, roi, sub):
+        if not zarr_path or not os.path.exists(zarr_path) or roi is None:
+            return None
+        y0, y1, x0, x1 = roi
+        z = zarr.open(zarr_path, mode='r')
+        patch = np.asarray(z[y0:y1:sub, x0:x1:sub, :])
+        if patch.ndim != 3 or patch.shape[2] not in (2, 3):
+            return None
+        if patch.shape[2] == 2:
+            cyto = _RegionLoader._norm_u8(patch[:, :, 0])
+            nuc = _RegionLoader._norm_u8(patch[:, :, 1])
+            return np.stack([cyto, np.zeros_like(cyto, dtype=np.uint8), nuc], axis=-1)
+        chans = [_RegionLoader._norm_u8(patch[:, :, i]) for i in range(3)]
+        return np.stack(chans, axis=-1)
+
+    @staticmethod
+    def _relabel_mask(mask):
+        binary = np.asarray(mask) > 0
+        if not np.any(binary):
+            return np.zeros(binary.shape, dtype=np.uint32)
+        try:
+            from skimage.measure import label
+            return label(binary, connectivity=1).astype(np.uint32)
+        except Exception:
+            pass
+        try:
+            from scipy import ndimage
+            labels, _ = ndimage.label(binary)
+            return labels.astype(np.uint32)
+        except Exception:
+            return binary.astype(np.uint32)
+
+    @staticmethod
+    def _read_stitched_tiles(patch_roi, tile_infos, sub):
+        py0, py1, px0, px1 = patch_roi
+        ph, pw = py1 - py0, px1 - px0
+        if ph <= 0 or pw <= 0:
+            raise ValueError("Patch outside ROI.")
+        dapi_canvas = np.zeros((ph, pw), dtype=np.uint16)
+        mask_canvas = np.zeros((ph, pw), dtype=np.uint32)
+        used = []
+
+        for tile in tile_infos:
+            ty0, ty1, tx0, tx1 = [int(v) for v in tile["bbox_local"]]
+            iy0 = max(py0, ty0)
+            iy1 = min(py1, ty1)
+            ix0 = max(px0, tx0)
+            ix1 = min(px1, tx1)
+            if iy1 <= iy0 or ix1 <= ix0:
+                continue
+
+            dapi_path = tile.get("dapi_path")
+            mask_path = tile.get("mask_path")
+            if not dapi_path or not mask_path or not os.path.exists(dapi_path) or not os.path.exists(mask_path):
+                raise FileNotFoundError("Missing tile input.")
+
+            tile_y0 = iy0 - ty0
+            tile_y1 = iy1 - ty0
+            tile_x0 = ix0 - tx0
+            tile_x1 = ix1 - tx0
+            patch_y0 = iy0 - py0
+            patch_y1 = iy1 - py0
+            patch_x0 = ix0 - px0
+            patch_x1 = ix1 - px0
+
+            dapi_crop = _RegionLoader._read_region(
+                dapi_path, tile_y0, tile_y1, tile_x0, tile_x1, 1
+            )
+            mask_crop = _RegionLoader._read_region(
+                mask_path, tile_y0, tile_y1, tile_x0, tile_x1, 1
+            )
+            dapi_canvas[patch_y0:patch_y1, patch_x0:patch_x1] = dapi_crop.astype(np.uint16)
+            mask_canvas[patch_y0:patch_y1, patch_x0:patch_x1] = mask_crop.astype(np.uint32)
+            used.append(tile)
+
+        if not used:
+            raise ValueError("Patch outside ROI.")
+
+        if sub > 1:
+            dapi_canvas = dapi_canvas[::sub, ::sub]
+            mask_canvas = mask_canvas[::sub, ::sub]
+        mask_canvas = _RegionLoader._relabel_mask(mask_canvas)
+        return dapi_canvas, mask_canvas, used
+
     def run(self):
         try:
             y0, y1, x0, x1, sub = self.y0, self.y1, self.x0, self.x1, self.sub
             if self._stop:
                 return
 
-            dapi_raw = self._read_region(self.dapi_path, y0, y1, x0, x1, sub)
-            if self._stop:
-                return
-            mask_raw = self._read_region(self.mask_path, y0, y1, x0, x1, sub)
+            if self.tile_infos:
+                dapi_raw, mask_u32, used_tiles = self._read_stitched_tiles(
+                    (y0, y1, x0, x1), self.tile_infos, sub
+                )
+                print(f"[Step3] patch intersects n_tiles={len(used_tiles)}")
+                for tile in used_tiles:
+                    print(
+                        f"[Step3] using tile r={tile.get('row')} c={tile.get('col')} "
+                        f"bbox={tile.get('bbox_local')}"
+                    )
+            else:
+                dapi_raw = self._read_region(self.dapi_path, y0, y1, x0, x1, sub)
+                if self._stop:
+                    return
+                mask_raw = self._read_region(self.mask_path, y0, y1, x0, x1, sub)
+                mask_u32 = mask_raw.astype(np.uint32)
             if self._stop:
                 return
 
             grey_u8  = self._norm_u8(dapi_raw)
             dapi_rgb = np.stack([grey_u8, grey_u8, grey_u8], axis=-1)
+            fusion_rgb = None
+            fusion_source = "unavailable"
+            try:
+                fusion_rgb = self._read_fusion_rgb(
+                    self.fused_zarr_path, self.fusion_roi, sub
+                )
+                if fusion_rgb is not None:
+                    fusion_source = self.fused_zarr_path
+            except Exception:
+                fusion_rgb = None
+                fusion_source = "unavailable"
 
-            mask_u32 = mask_raw.astype(np.uint32)
             n_cells  = int(mask_u32.max())
 
-            # cellpose_mask_overlay enforces a minimum brightness of 0.15
-            # on mask pixels — cytoplasm with weak DAPI signal stays visible
-            rgb_overlay = cellpose_mask_overlay(grey_u8, mask_u32)
-
             h, w = grey_u8.shape
+            print(f"[Step3] stitched dapi shape={dapi_rgb.shape}")
+            print(f"[Step3] stitched mask shape={mask_u32.shape}")
+            print(f"[Step3] relabeled cells={n_cells}")
+            print(f"[Step3] fusion crop source={fusion_source}")
             if not self._stop:
-                self.done.emit(rgb_overlay, dapi_rgb, n_cells, h, w)
+                self.done.emit(dapi_rgb, fusion_rgb, mask_u32, n_cells, h, w, fusion_source)
         except Exception as e:
             if not self._stop:
                 self.error.emit(traceback.format_exc())
@@ -282,12 +394,24 @@ class Step3Page(QWidget):
         self._dapi_path       = None
         self._mask_path       = None
         self._fused_zarr_path = None   # for cyto+nucleus background
+        self._fusion_zarr_path = None
+        self._output_dir      = None
+        self._loader          = None
+        self._raw_ome_path    = None
+        self._raw_loader      = None
+        self._corrected_zarr_path = None
+        self._corrected_zarr = None
+        self._corrected_channel_names = []
+        self._raw_channel_names = []
+        self._channel_sources = {}
+        self._rois           = []
         self._mode            = "full_wsi"
         self._active_roi_name = None
         self._active_tiles_dir = None
         self._active_bbox     = None
         self._tile_grid       = None
         self._tile_shape      = None
+        self._tile_infos      = []
         self._full_h      = 0
         self._full_w      = 0
         self._thumb_arr   = None   # float32 normalised thumbnail
@@ -305,10 +429,20 @@ class Step3Page(QWidget):
         self._pan_last    = None
 
         # Current displayed arrays
-        self._dapi_rgb    = None   # uint8 (H,W,3)  grey RGB
-        self._mask_rgb    = None   # uint8 (H,W,3)  cellpose overlay (precomputed, fully opaque)
-        self._show_mask   = True
-        self._mask_alpha  = 0.6    # default opacity: 60%
+        self._patch_dapi_rgb = None
+        self._patch_fusion_rgb = None
+        self._patch_fusion_source = None
+        self._patch_fusion_available = False
+        self._mask_labels = None   # uint32 (H,W), 0=background, >0=cells
+        self._mask_alpha  = 0.35
+        self._show_outline = True
+        self._show_fusion  = True
+        self._background_mode = "DAPI"
+        self._available_channels = []
+        self._channel_settings = {}
+        self._channel_rows = {}
+        self._patch_channel_cache = {}
+        self._last_patch_bbox = None
 
         self._thumb_loader  = None
         self._region_loader = None
@@ -319,15 +453,56 @@ class Step3Page(QWidget):
         self._load_debounce.timeout.connect(self._load_region)
 
         self._build_ui()
+        self._restore_saved_input_sources()
 
     # ── public API ────────────────────────────────────────────────────
 
+    def set_channel_context(self, loader=None, corrected_zarr_path=None, rois=None):
+        self._loader = loader
+        self._corrected_zarr_path = corrected_zarr_path if corrected_zarr_path and os.path.exists(corrected_zarr_path) else None
+        if loader is not None and getattr(loader, "filepath", None):
+            self._raw_ome_path = loader.filepath
+            self._raw_loader = loader
+        self._corrected_zarr = None
+        self._rois = list(rois or [])
+        self._refresh_channel_sources()
+
+    def _restore_saved_input_sources(self):
+        cfg = self._load_input_files_config(self._output_dir or OUTPUT_DIR)
+        if not cfg:
+            self._corrected_zarr_path = self._resolve_channel_source_path(None)
+            self._raw_ome_path = self._resolve_raw_ome_path(None)
+        else:
+            self._dapi_path = cfg.get("dapi") or self._dapi_path
+            self._mask_path = cfg.get("mask") or self._mask_path
+            self._fusion_zarr_path = cfg.get("fusion_source") or self._fusion_zarr_path
+            self._fused_zarr_path = self._fusion_zarr_path
+            self._corrected_zarr_path = self._resolve_channel_source_path(cfg.get("channel_source"))
+            self._raw_ome_path = self._resolve_raw_ome_path(cfg.get("raw_ome"))
+            self._dapi_edit.setText(self._dapi_path or "")
+            self._mask_edit.setText(self._mask_path or "")
+            self._fusion_edit.setText(self._fusion_zarr_path or "")
+            self._channel_source_edit.setText(self._corrected_zarr_path or "")
+            self._raw_ome_edit.setText(self._raw_ome_path or "")
+        self._refresh_channel_sources()
+
     def set_output_dir(self, output_dir):
         """Called from MainWindow when Step 2 finishes."""
+        self._output_dir = output_dir
         print("[Step3] entering QC viewer")
+        print("[Step3] loading previous result")
         print(f"[Step3] output_dir={output_dir}")
         try:
             self._stop_loaders()
+            self._clear_region_cache()
+            input_cfg = self._load_input_files_config(output_dir)
+            self._show_fusion = True
+            if hasattr(self, "_chk_fusion"):
+                self._chk_fusion.blockSignals(True)
+                self._chk_fusion.setEnabled(True)
+                self._chk_fusion.setChecked(True)
+                self._chk_fusion.blockSignals(False)
+            print("[Step3] searching fusion source...")
             roi_inputs = self._find_roi_inputs(output_dir)
             if roi_inputs is not None:
                 self._mode = "roi"
@@ -335,8 +510,22 @@ class Step3Page(QWidget):
                 self._active_tiles_dir = roi_inputs["tiles_dir"]
                 self._active_bbox = roi_inputs.get("bbox")
                 self._tile_grid = roi_inputs.get("tile_grid")
-                self._dapi_path = roi_inputs["global_dapi"]
-                self._mask_path = roi_inputs["global_mask"]
+                self._tile_infos = roi_inputs.get("tiles") or []
+                self._fused_zarr_path = roi_inputs.get("fused_zarr")
+                self._fusion_zarr_path = self._fused_zarr_path
+                self._dapi_path = input_cfg.get("dapi") or roi_inputs["global_dapi"]
+                self._mask_path = input_cfg.get("mask") or roi_inputs["global_mask"]
+                if input_cfg.get("fusion_source"):
+                    self._fusion_zarr_path = input_cfg.get("fusion_source")
+                    self._fused_zarr_path = self._fusion_zarr_path
+                self._corrected_zarr_path = self._resolve_channel_source_path(input_cfg.get("channel_source"))
+                self._raw_ome_path = self._resolve_raw_ome_path(input_cfg.get("raw_ome"))
+                self._dapi_edit.setText(self._dapi_path or "")
+                self._mask_edit.setText(self._mask_path or "")
+                self._fusion_edit.setText(self._fusion_zarr_path or "")
+                self._channel_source_edit.setText(self._corrected_zarr_path or "")
+                self._raw_ome_edit.setText(self._raw_ome_path or "")
+                self._refresh_channel_sources()
                 print("[Step3] QC mode=roi")
                 print(f"[Step3] active_roi={self._active_roi_name}")
                 print(f"[Step3] roi_shape={roi_inputs.get('roi_shape')}")
@@ -345,6 +534,9 @@ class Step3Page(QWidget):
                 print("[Step3] showing ROI preview")
                 print("[Step3] waiting for user patch")
                 print(f"[Step3] tiles_dir={self._active_tiles_dir}")
+                print(f"[Step3] selected fusion_zarr={self._fused_zarr_path}")
+                print(f"[Step3] exists={bool(self._fused_zarr_path and os.path.exists(self._fused_zarr_path))}")
+                print(f"[Step3] show_fusion default={self._show_fusion}")
                 self._load_thumbnail()
                 return
 
@@ -353,13 +545,40 @@ class Step3Page(QWidget):
             self._active_tiles_dir = None
             self._active_bbox = None
             self._tile_grid = None
+            self._tile_infos = []
+            summary_path = os.path.join(output_dir, "segmentation_meta.json")
+            summary_meta = None
+            print(f"[Step3] segmentation_meta exists={os.path.exists(summary_path)}")
+            if os.path.exists(summary_path):
+                try:
+                    with open(summary_path, "r", encoding="utf-8") as f:
+                        summary_meta = json.load(f)
+                except Exception:
+                    print(f"[Step3] failed to read segmentation_meta.json:\n{traceback.format_exc()}")
+            self._fused_zarr_path = self._find_fusion_zarr(output_dir, None, summary_meta, summary_meta)
+            self._fusion_zarr_path = self._fused_zarr_path
+            print(f"[Step3] metadata fused_zarr_path={summary_meta.get('fused_zarr_path') if isinstance(summary_meta, dict) else None}")
             print("[Step3] mode=full_wsi")
+            print(f"[Step3] selected fusion_zarr={self._fused_zarr_path}")
+            print(f"[Step3] exists={bool(self._fused_zarr_path and os.path.exists(self._fused_zarr_path))}")
+            print(f"[Step3] show_fusion default={self._show_fusion}")
 
             dapi = os.path.join(output_dir, 'global_dapi.ome.tiff')
             mask = os.path.join(output_dir, 'global_mask.ome.tiff')
             if os.path.exists(dapi) and os.path.exists(mask):
-                self._dapi_path = dapi
-                self._mask_path = mask
+                self._dapi_path = input_cfg.get("dapi") or dapi
+                self._mask_path = input_cfg.get("mask") or mask
+                if input_cfg.get("fusion_source"):
+                    self._fusion_zarr_path = input_cfg.get("fusion_source")
+                    self._fused_zarr_path = self._fusion_zarr_path
+                self._corrected_zarr_path = self._resolve_channel_source_path(input_cfg.get("channel_source"))
+                self._raw_ome_path = self._resolve_raw_ome_path(input_cfg.get("raw_ome"))
+                self._dapi_edit.setText(self._dapi_path or "")
+                self._mask_edit.setText(self._mask_path or "")
+                self._fusion_edit.setText(self._fusion_zarr_path or "")
+                self._channel_source_edit.setText(self._corrected_zarr_path or "")
+                self._raw_ome_edit.setText(self._raw_ome_path or "")
+                self._refresh_channel_sources()
                 self._load_thumbnail()
             else:
                 self._show_input_error(
@@ -377,8 +596,33 @@ class Step3Page(QWidget):
             )
 
     def _find_roi_inputs(self, output_dir):
-        meta_paths = sorted(glob.glob(os.path.join(output_dir, "segmentation_meta_*.json")))
-        if not meta_paths:
+        summary_path = os.path.join(output_dir, "segmentation_meta.json")
+        print(f"[Step3] segmentation_meta exists={os.path.exists(summary_path)}")
+        summary_meta = None
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    summary_meta = json.load(f)
+            except Exception:
+                print(f"[Step3] failed to read segmentation_meta.json:\n{traceback.format_exc()}")
+
+        summary_roi = None
+        if isinstance(summary_meta, dict):
+            rois_meta = summary_meta.get("rois") or []
+            if rois_meta:
+                summary_roi = rois_meta[0]
+                roi_name_hint = str(summary_roi.get("roi_name") or "ROI_1")
+                for item in rois_meta:
+                    if str(item.get("roi_name") or "") == roi_name_hint:
+                        summary_roi = item
+                        break
+                meta_paths = sorted(glob.glob(os.path.join(output_dir, f"segmentation_meta_{roi_name_hint}.json")))
+            else:
+                meta_paths = []
+        else:
+            meta_paths = sorted(glob.glob(os.path.join(output_dir, "segmentation_meta_*.json")))
+
+        if not meta_paths and summary_roi is None:
             roi_cfg = os.path.join(output_dir, "roi_config.json")
             if not os.path.exists(roi_cfg):
                 return None
@@ -387,9 +631,25 @@ class Step3Page(QWidget):
                 return None
             roi_name = os.path.basename(tile_dirs[0]).replace("tiles_", "", 1)
             meta = {"roi_name": roi_name, "tile_dir": tile_dirs[0], "bbox": None}
+        elif summary_roi is not None and not meta_paths:
+            meta = dict(summary_roi)
+            roi_name = str(meta.get("roi_name") or "ROI_1")
+            meta.setdefault("tile_dir", meta.get("tiles_dir") or os.path.join(output_dir, f"tiles_{roi_name}"))
+            meta.setdefault("bbox", meta.get("bbox_fullres"))
         else:
             with open(meta_paths[0], "r", encoding="utf-8") as f:
                 meta = json.load(f)
+            if summary_roi is not None:
+                merged = dict(summary_roi)
+                merged.update(meta)
+                for key in ("fused_zarr_path", "input_zarr", "source_zarr"):
+                    if summary_roi.get(key):
+                        merged[key] = summary_roi.get(key)
+                if summary_roi.get("tiles_dir"):
+                    merged["tile_dir"] = summary_roi.get("tiles_dir")
+                if summary_roi.get("bbox_fullres"):
+                    merged["bbox"] = summary_roi.get("bbox_fullres")
+                meta = merged
 
         roi_name = str(meta.get("roi_name") or "ROI_1")
         tile_dir = meta.get("tile_dir") or os.path.join(output_dir, f"tiles_{roi_name}")
@@ -407,6 +667,15 @@ class Step3Page(QWidget):
                 f"Missing ROI-level DAPI/mask:\n{global_dapi}\n{global_mask}"
             )
             return None
+        fused_zarr = self._find_fusion_zarr(output_dir, roi_name, meta, summary_meta)
+        print(f"[Step3] metadata fused_zarr_path={meta.get('fused_zarr_path') or meta.get('input_zarr') or meta.get('source_zarr')}")
+        print(f"[Step3] fused_zarr exists={bool(fused_zarr and os.path.exists(fused_zarr))}")
+        if fused_zarr:
+            try:
+                z = zarr.open(fused_zarr, mode="r")
+                print(f"[Step3] fused_zarr shape={getattr(z, 'shape', None)}")
+            except Exception:
+                print(f"[Step3] fused_zarr shape=<unreadable>")
         dapi_tiles = sorted(glob.glob(os.path.join(tile_dir, "tile_r*_c*_dapi.ome.tiff")))
         mask_tiles = sorted(glob.glob(os.path.join(tile_dir, "tile_r*_c*_raw_mask.ome.tiff")))
         if not dapi_tiles or not mask_tiles:
@@ -439,19 +708,471 @@ class Step3Page(QWidget):
                 roi_shape = [int(p.imagelength), int(p.imagewidth)]
         except Exception:
             pass
+        tile_infos = self._build_tile_infos(
+            tile_dir,
+            roi_shape,
+            [n_rows, n_cols],
+            tile_stats,
+        )
         return {
             "roi_name": roi_name,
             "tiles_dir": tile_dir,
             "bbox": meta.get("bbox"),
             "global_dapi": global_dapi,
             "global_mask": global_mask,
+            "fused_zarr": fused_zarr,
             "tile_grid": [n_rows, n_cols],
             "roi_shape": roi_shape,
+            "tiles": tile_infos,
         }
+
+    def _build_tile_infos(self, tile_dir, roi_shape, tile_grid, tile_stats):
+        n_rows, n_cols = [int(v) for v in tile_grid]
+        if n_rows <= 0 or n_cols <= 0:
+            return []
+        if roi_shape:
+            full_h, full_w = [int(v) for v in roi_shape]
+        else:
+            full_h, full_w = int(self._full_h), int(self._full_w)
+        stats_by_rc = {
+            (int(t.get("row", 0)), int(t.get("col", 0))): t
+            for t in (tile_stats or [])
+        }
+        tile_h = -(-full_h // n_rows)
+        tile_w = -(-full_w // n_cols)
+        infos = []
+        for row in range(n_rows):
+            for col in range(n_cols):
+                stat = stats_by_rc.get((row, col), {})
+                bbox = stat.get("bbox_local")
+                if not bbox:
+                    ty0 = row * tile_h
+                    ty1 = min(ty0 + tile_h, full_h)
+                    tx0 = col * tile_w
+                    tx1 = min(tx0 + tile_w, full_w)
+                    bbox = [ty0, ty1, tx0, tx1]
+                dapi_path = stat.get("dapi_path") or os.path.join(
+                    tile_dir, f"tile_r{row}_c{col}_dapi.ome.tiff"
+                )
+                mask_path = stat.get("mask_path") or os.path.join(
+                    tile_dir, f"tile_r{row}_c{col}_raw_mask.ome.tiff"
+                )
+                if not os.path.isabs(dapi_path):
+                    dapi_path = os.path.join(tile_dir, dapi_path)
+                if not os.path.isabs(mask_path):
+                    mask_path = os.path.join(tile_dir, mask_path)
+                infos.append({
+                    "row": row,
+                    "col": col,
+                    "bbox_local": [int(v) for v in bbox],
+                    "dapi_path": dapi_path,
+                    "mask_path": mask_path,
+                })
+        return infos
+
+    def _input_files_meta_path(self, output_dir=None):
+        base = output_dir or self._output_dir or OUTPUT_DIR
+        return os.path.join(base, "step3_input_files.json")
+
+    def _save_input_files_config(self):
+        path = self._input_files_meta_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "dapi": self._dapi_path or self._dapi_edit.text().strip(),
+                        "mask": self._mask_path or self._mask_edit.text().strip(),
+                        "fusion_source": self._fusion_zarr_path or self._fusion_edit.text().strip(),
+                        "channel_source": self._corrected_zarr_path or self._channel_source_edit.text().strip(),
+                        "raw_ome": self._raw_ome_path or self._raw_ome_edit.text().strip(),
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception:
+            print(f"[Step3] failed to save input file config:\n{traceback.format_exc()}")
+
+    def _load_input_files_config(self, output_dir):
+        path = self._input_files_meta_path(output_dir)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            print(f"[Step3] loaded input file config={path}")
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            print(f"[Step3] failed to load input file config:\n{traceback.format_exc()}")
+            return {}
+
+    def _load_manual_fusion_source(self, output_dir, roi_name=None):
+        input_cfg = self._load_input_files_config(output_dir)
+        manual_from_inputs = input_cfg.get("fusion_source")
+        if manual_from_inputs:
+            print(f"[Step3] loaded manual fusion source={manual_from_inputs}")
+            return manual_from_inputs
+        return None
+
+    def _resolve_channel_source_path(self, manual_path=None):
+        candidates = []
+        if manual_path:
+            candidates.append(manual_path)
+        if self._corrected_zarr_path:
+            candidates.append(self._corrected_zarr_path)
+        base_dir = self._output_dir or OUTPUT_DIR
+        if base_dir:
+            candidates.extend([
+                os.path.join(base_dir, "corrected_channels.zarr"),
+                os.path.join(os.path.dirname(base_dir), "corrected_channels.zarr"),
+            ])
+        for cand in candidates:
+            if cand and os.path.exists(cand):
+                return os.path.abspath(cand)
+        return None
+
+    def _resolve_raw_ome_path(self, manual_path=None):
+        candidates = []
+        if manual_path:
+            candidates.append(manual_path)
+        if self._raw_ome_path:
+            candidates.append(self._raw_ome_path)
+        if self._loader is not None and getattr(self._loader, "filepath", None):
+            candidates.append(self._loader.filepath)
+        base_dir = self._output_dir or OUTPUT_DIR
+        if base_dir:
+            for name in ("fusion_config.json", "correction_config.json", "roi_config.json", "step0_output.json"):
+                meta_path = os.path.join(base_dir, name)
+                if not os.path.exists(meta_path):
+                    continue
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    for key in ("ome_tiff", "ome_tiff_path", "raw_ome"):
+                        if isinstance(meta, dict) and meta.get(key):
+                            candidates.append(meta.get(key))
+                except Exception:
+                    pass
+            candidates.extend(glob.glob(os.path.join(base_dir, "*.ome.tif")))
+            candidates.extend(glob.glob(os.path.join(base_dir, "*.ome.tiff")))
+            parent = os.path.dirname(base_dir)
+            candidates.extend(glob.glob(os.path.join(parent, "*.ome.tif")))
+            candidates.extend(glob.glob(os.path.join(parent, "*.ome.tiff")))
+        candidates.append(OME_TIFF_FILE)
+        for cand in candidates:
+            if not cand:
+                continue
+            base = os.path.basename(str(cand)).lower()
+            if base.startswith(("global_", "tile_")):
+                continue
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+        return None
+
+    def _validate_fusion_zarr(self, path):
+        if not path or not os.path.exists(path):
+            raise ValueError("Selected fusion zarr path does not exist.")
+        z = zarr.open(path, mode="r")
+        shape = getattr(z, "shape", None)
+        if not shape or len(shape) != 3 or int(shape[2]) not in (2, 3):
+            raise ValueError(
+                "Fusion zarr must have shape H x W x 2 or H x W x 3."
+            )
+        return z, tuple(int(v) for v in shape)
+
+    def _channel_config_path(self):
+        return os.path.join(self._output_dir or OUTPUT_DIR, "step3_channel_overlay_config.json")
+
+    def _default_channel_color(self, ch):
+        u = str(ch).upper()
+        if "DAPI" in u or "NUC" in u:
+            return "#0000ff"
+        if "CK19" in u or "EPCAM" in u or "PANCK" in u or "KRT" in u:
+            return "#ff0000"
+        if "CD3" in u or "CD45" in u or "CD68" in u or "CD4" in u or "CD8" in u:
+            return "#00ff00"
+        if "CD31" in u or "PECAM" in u:
+            return "#00ffff"
+        return "#ffffff"
+
+    def _default_channel_visible(self, ch):
+        return False
+
+    def _default_channel_settings(self, ch):
+        return {
+            "visible": self._default_channel_visible(ch),
+            "color": self._default_channel_color(ch),
+            "opacity": 1.0,
+            "contrast": [1.0, 99.5],
+        }
+
+    def _load_channel_config(self):
+        path = self._channel_config_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            self._background_mode = cfg.get("background_mode", self._background_mode)
+            saved = cfg.get("channels") or {}
+            for ch, st in saved.items():
+                cur = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
+                for key in ("color", "opacity", "contrast"):
+                    if key in st:
+                        cur[key] = st[key]
+                cur["visible"] = False
+        except Exception:
+            print(f"[Step3] failed to load channel overlay config:\n{traceback.format_exc()}")
+
+    def _save_channel_config(self):
+        try:
+            with open(self._channel_config_path(), "w", encoding="utf-8") as f:
+                json.dump({
+                    "background_mode": self._background_mode,
+                    "channels": self._channel_settings,
+                }, f, indent=2)
+        except Exception:
+            print(f"[Step3] failed to save channel overlay config:\n{traceback.format_exc()}")
+
+    def _refresh_channel_sources(self):
+        corrected_channels = []
+        raw_channels = []
+        self._channel_sources = {}
+        self._corrected_zarr_path = self._resolve_channel_source_path(
+            self._channel_source_edit.text().strip() if hasattr(self, "_channel_source_edit") else None
+        )
+        self._raw_ome_path = self._resolve_raw_ome_path(
+            self._raw_ome_edit.text().strip() if hasattr(self, "_raw_ome_edit") else None
+        )
+
+        if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
+            try:
+                root = zarr.open(self._corrected_zarr_path, mode="r")
+                self._corrected_zarr = root
+                roi_name = self._active_roi_name or "ROI_1"
+                if roi_name in root and self._array_names(root[roi_name]):
+                    group = root[roi_name]
+                    corrected_channels.extend(self._array_names(group))
+                else:
+                    corrected_channels.extend(self._array_names(root))
+            except Exception:
+                print(f"[Step3] failed to inspect corrected zarr:\n{traceback.format_exc()}")
+
+        raw_loader = self._loader
+        if self._raw_ome_path and (
+            raw_loader is None or getattr(raw_loader, "filepath", None) != self._raw_ome_path
+        ):
+            try:
+                raw_loader = OMETIFFLoader(self._raw_ome_path)
+                self._raw_loader = raw_loader
+            except Exception:
+                print(f"[Step3] failed to load Raw OME channels:\n{traceback.format_exc()}")
+                raw_loader = None
+        elif raw_loader is not None:
+            self._raw_loader = raw_loader
+
+        if raw_loader is not None:
+            try:
+                raw_channels.extend(raw_loader.channel_names())
+            except Exception:
+                print(f"[Step3] failed to inspect raw OME channels:\n{traceback.format_exc()}")
+
+        self._corrected_channel_names = sorted(set(map(str, corrected_channels)))
+        self._raw_channel_names = sorted(set(map(str, raw_channels)))
+        merged = sorted(set(self._corrected_channel_names) | set(self._raw_channel_names))
+        self._available_channels = merged
+        for ch in merged:
+            self._channel_sources[ch] = "corrected" if ch in self._corrected_channel_names else "raw"
+        for ch in self._available_channels:
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
+        self._load_channel_config()
+        if self._available_channels and self._background_mode not in {"DAPI", "Fusion", "Channels"}:
+            self._background_mode = "Channels"
+        if self._available_channels and self._background_mode == "DAPI":
+            self._background_mode = "Channels"
+        if hasattr(self, "_bg_mode_combo"):
+            self._bg_mode_combo.blockSignals(True)
+            self._bg_mode_combo.setCurrentText(self._background_mode if self._background_mode in {"DAPI", "Fusion", "Channels"} else "DAPI")
+            self._bg_mode_combo.blockSignals(False)
+        if hasattr(self, "_channel_source_edit"):
+            self._channel_source_edit.setText(self._corrected_zarr_path or "")
+        if hasattr(self, "_raw_ome_edit"):
+            self._raw_ome_edit.setText(self._raw_ome_path or "")
+        self._rebuild_channel_panel()
+        print("[Step3] channel overlay panel initialized")
+        print(f"[Step3] active_roi={self._active_roi_name or 'ROI_1'}")
+        print(f"[Step3] fusion_source={self._fusion_zarr_path}")
+        print(f"[Step3] channel_source={self._corrected_zarr_path}")
+        print(f"[Step3] raw_ome={self._raw_ome_path}")
+        print(f"[Step3] corrected_channels={self._corrected_channel_names}")
+        print(f"[Step3] raw_channels count={len(self._raw_channel_names)}")
+        print(f"[Step3] merged_channels count={len(self._available_channels)}")
+
+    def _array_names(self, group):
+        try:
+            if hasattr(group, "array_keys"):
+                return [str(k) for k in group.array_keys()]
+            return [str(k) for k in group.keys() if hasattr(group[k], "shape")]
+        except Exception:
+            return []
+
+    def _rebuild_channel_panel(self):
+        if not hasattr(self, "_channel_lay"):
+            return
+        while self._channel_lay.count():
+            item = self._channel_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+        self._channel_rows.clear()
+        if not self._available_channels:
+            msg = QLabel("No channels found.\nSet Channel Source / Raw OME.")
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color:#aaa;font-size:10px;")
+            self._channel_lay.addWidget(msg)
+            self._channel_lay.addStretch()
+            return
+        for ch in self._available_channels:
+            st = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
+            row = QHBoxLayout()
+            cb = QCheckBox()
+            cb.setChecked(bool(st.get("visible", False)))
+            cb.stateChanged.connect(lambda _v, name=ch: self._on_channel_visibility_changed(name))
+            row.addWidget(cb)
+            name_lbl = QLabel(ch)
+            name_lbl.setMinimumWidth(80)
+            row.addWidget(name_lbl)
+            src_lbl = QLabel(self._channel_sources.get(ch, "raw"))
+            src_lbl.setFixedWidth(58)
+            src_lbl.setStyleSheet("color:#888;font-size:9px;")
+            row.addWidget(src_lbl)
+            color_btn = QPushButton()
+            color_btn.setFixedSize(24, 18)
+            color_btn.setStyleSheet(f"background:{st.get('color', '#ffffff')};border:1px solid #777;")
+            color_btn.clicked.connect(lambda _=False, name=ch: self._choose_channel_color(name))
+            row.addWidget(color_btn)
+            op = QSlider(Qt.Horizontal)
+            op.setRange(0, 100)
+            op.setValue(int(float(st.get("opacity", 1.0)) * 100))
+            op.setFixedWidth(90)
+            op.valueChanged.connect(lambda _v, name=ch: self._on_channel_opacity_changed(name))
+            row.addWidget(op)
+            auto_btn = QPushButton("Auto")
+            auto_btn.setFixedWidth(44)
+            auto_btn.clicked.connect(lambda _=False, name=ch: self._auto_channel_contrast(name))
+            row.addWidget(auto_btn)
+            self._channel_lay.addLayout(row)
+            self._channel_rows[ch] = {"checkbox": cb, "color_btn": color_btn, "opacity": op}
+        self._channel_lay.addStretch()
+
+    def _make_channel_overlay_panel(self):
+        ch_box = QGroupBox('Channel Overlay')
+        ch_box.setStyleSheet(
+            'QGroupBox{border:1px solid #56b6c2;border-radius:5px;'
+            'margin-top:4px;font-weight:bold;color:#56b6c2;font-size:11px;}'
+        )
+        ch_lay = QVBoxLayout(ch_box)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('Background:'))
+        self._bg_mode_combo = QtWidgets.QComboBox()
+        self._bg_mode_combo.addItems(['DAPI', 'Fusion', 'Channels'])
+        self._bg_mode_combo.setCurrentText(self._background_mode)
+        self._bg_mode_combo.currentTextChanged.connect(self._on_background_mode_changed)
+        mode_row.addWidget(self._bg_mode_combo)
+        btn_clear = QPushButton('Clear All')
+        btn_clear.clicked.connect(self._reset_channel_visibility)
+        mode_row.addWidget(btn_clear)
+        btn_reset_colors = QPushButton('Reset Colors')
+        btn_reset_colors.clicked.connect(self._reset_channel_colors)
+        mode_row.addWidget(btn_reset_colors)
+        mode_row.addStretch()
+        ch_lay.addLayout(mode_row)
+
+        self._channel_scroll = QScrollArea()
+        self._channel_scroll.setWidgetResizable(True)
+        self._channel_scroll.setMinimumHeight(220)
+        self._channel_scroll.setMaximumHeight(420)
+        self._channel_w = QWidget()
+        self._channel_lay = QVBoxLayout(self._channel_w)
+        self._channel_lay.setContentsMargins(2, 2, 2, 2)
+        self._channel_lay.setSpacing(2)
+        self._channel_scroll.setWidget(self._channel_w)
+        ch_lay.addWidget(self._channel_scroll)
+        self._rebuild_channel_panel()
+        return ch_box
+
+    def _find_fusion_zarr(self, output_dir, roi_name=None, seg_meta=None, summary_meta=None):
+        candidates = []
+
+        def _add(path):
+            if not path:
+                return
+            p = str(path)
+            if not os.path.isabs(p):
+                p = os.path.join(output_dir, p)
+            if p not in candidates:
+                candidates.append(p)
+
+        manual_path = self._load_manual_fusion_source(output_dir, roi_name)
+        if manual_path:
+            _add(manual_path)
+
+        if seg_meta:
+            for key in ("fused_zarr_path", "fused_zarr", "input_zarr", "source_zarr", "fusion_zarr"):
+                _add(seg_meta.get(key))
+
+        if summary_meta:
+            if roi_name:
+                for item in summary_meta.get("rois") or []:
+                    if str(item.get("roi_name") or "") == str(roi_name):
+                        for key in ("fused_zarr_path", "input_zarr", "source_zarr"):
+                            _add(item.get(key))
+            for key in ("fused_zarr_path", "input_zarr", "source_zarr"):
+                _add(summary_meta.get(key))
+
+        fusion_meta_path = os.path.join(output_dir, "fusion_meta.json")
+        if os.path.exists(fusion_meta_path):
+            try:
+                with open(fusion_meta_path, "r", encoding="utf-8") as f:
+                    fusion_meta = json.load(f)
+                regions = fusion_meta.get("regions") or []
+                matched = None
+                for reg in regions:
+                    name = str(reg.get("roi_name") or reg.get("name") or "")
+                    if roi_name and name == str(roi_name):
+                        matched = reg
+                        break
+                if matched is None and not roi_name and regions:
+                    matched = regions[0]
+                if matched is not None:
+                    _add(matched.get("zarr_path"))
+                for reg in regions:
+                    _add(reg.get("zarr_path"))
+            except Exception:
+                print(f"[Step3] failed to read fusion_meta.json:\n{traceback.format_exc()}")
+
+        _add(os.path.join(output_dir, "fused.zarr"))
+        if roi_name:
+            _add(os.path.join(output_dir, f"fused_{roi_name}.zarr"))
+            _add(os.path.join(output_dir, roi_name, "fused.zarr"))
+        _add(os.path.join(output_dir, "fusion.zarr"))
+
+        for cand in candidates:
+            exists = os.path.exists(cand)
+            print(f"[Step3] fusion candidate={cand} exists={exists}")
+            if exists:
+                return cand
+        print("[Step3] selected fusion_zarr=None")
+        return None
 
     def load_from_paths(self, dapi_path, mask_path):
         """Manual load via Browse buttons."""
         try:
+            self._clear_region_cache()
             if not os.path.exists(dapi_path):
                 self._show_input_error(f'Step3 input not found.\nPlease check Step2 outputs.\n\nDAPI file not found:\n{dapi_path}')
                 return
@@ -459,8 +1180,29 @@ class Step3Page(QWidget):
                 self._show_input_error(f'Step3 input not found.\nPlease check Step2 outputs.\n\nMask file not found:\n{mask_path}')
                 return
             self._mode = "full_wsi"
+            fusion_path = self._fusion_edit.text().strip()
+            if fusion_path:
+                try:
+                    _z, shape = self._validate_fusion_zarr(fusion_path)
+                    self._fusion_zarr_path = os.path.abspath(fusion_path)
+                    self._fused_zarr_path = self._fusion_zarr_path
+                    print(f"[Step3] manual fusion zarr shape={shape}")
+                except Exception as e:
+                    QMessageBox.warning(self, 'Invalid fusion source', str(e))
+                    return
+            else:
+                self._fused_zarr_path = None
+                self._fusion_zarr_path = None
+            self._corrected_zarr_path = self._resolve_channel_source_path(
+                self._channel_source_edit.text().strip()
+            )
+            self._raw_ome_path = self._resolve_raw_ome_path(
+                self._raw_ome_edit.text().strip()
+            )
             self._dapi_path = dapi_path
             self._mask_path = mask_path
+            self._refresh_channel_sources()
+            self._save_input_files_config()
             self._load_thumbnail()
         except Exception:
             tb = traceback.format_exc()
@@ -512,12 +1254,21 @@ class Step3Page(QWidget):
             return r, ed, btn
 
         r1, self._dapi_edit, btn_dapi = _file_row('DAPI:', '_dapi_edit')
-        r2, self._mask_edit, btn_mask = _file_row('Mask:', '_mask_edit')
+        r2, self._mask_edit, btn_mask = _file_row('MASK:', '_mask_edit')
+        r3, self._fusion_edit, btn_fusion = _file_row('Fusion Source:', '_fusion_edit')
+        r4, self._channel_source_edit, btn_channel_source = _file_row('Channel Source:', '_channel_source_edit')
+        r5, self._raw_ome_edit, btn_raw_ome = _file_row('Raw OME:', '_raw_ome_edit')
         fl.addLayout(r1)
         fl.addLayout(r2)
+        fl.addLayout(r3)
+        fl.addLayout(r4)
+        fl.addLayout(r5)
 
         btn_dapi.clicked.connect(lambda: self._browse('dapi'))
         btn_mask.clicked.connect(lambda: self._browse('mask'))
+        btn_fusion.clicked.connect(lambda: self._browse('fusion'))
+        btn_channel_source.clicked.connect(lambda: self._browse('channel_source'))
+        btn_raw_ome.clicked.connect(lambda: self._browse('raw_ome'))
 
         btn_load = QPushButton('▶  Load Files & Thumbnail')
         btn_load.setStyleSheet(
@@ -528,8 +1279,26 @@ class Step3Page(QWidget):
         fl.addWidget(btn_load)
         left_lay.addWidget(file_box)
 
+        # The lower-left area is split into the ROI preview and a compact
+        # control column, matching the QC workflow: preview, then controls
+        # immediately to its right, before the enlarged patch result.
+        left_body = QWidget()
+        left_body_lay = QHBoxLayout(left_body)
+        left_body_lay.setContentsMargins(0, 0, 0, 0)
+        left_body_lay.setSpacing(6)
+
+        preview_w = QWidget()
+        preview_lay = QVBoxLayout(preview_w)
+        preview_lay.setContentsMargins(0, 0, 0, 0)
+        preview_lay.setSpacing(4)
+
+        controls_w = QWidget()
+        controls_lay = QVBoxLayout(controls_w)
+        controls_lay.setContentsMargins(0, 0, 0, 0)
+        controls_lay.setSpacing(6)
+
         # Thumbnail canvas
-        left_lay.addWidget(QLabel(
+        preview_lay.addWidget(QLabel(
             '  Thumbnail  '
             '(drag empty area=draw ROI  |  drag rect=move  |  right-click rect=delete  |  dbl-click=reset view)'
         ))
@@ -546,13 +1315,13 @@ class Step3Page(QWidget):
         self._ov_vb.addItem(self._ov_img)
         # Draw ROI via mouse events on the viewport
         self._ov_gv.viewport().installEventFilter(self)
-        left_lay.addWidget(self._ov_gv, stretch=1)
+        preview_lay.addWidget(self._ov_gv, stretch=1)
 
         self._thumb_status = QLabel('No files loaded')
         self._thumb_status.setStyleSheet('color:#888;font-size:10px;')
         self._thumb_status.setAlignment(Qt.AlignCenter)
         self._thumb_status.setWordWrap(True)
-        left_lay.addWidget(self._thumb_status)
+        preview_lay.addWidget(self._thumb_status)
 
         # Sampling controls
         samp_box = QGroupBox('ROI / Sampling')
@@ -604,7 +1373,13 @@ class Step3Page(QWidget):
         sz_row.addStretch()
         sl.addLayout(sz_row)
 
-        left_lay.addWidget(samp_box)
+        controls_lay.addWidget(self._make_channel_overlay_panel())
+        controls_lay.addWidget(samp_box)
+        controls_lay.addStretch()
+
+        left_body_lay.addWidget(preview_w, stretch=7)
+        left_body_lay.addWidget(controls_w, stretch=3)
+        left_lay.addWidget(left_body, stretch=1)
         split.addWidget(left_w)
 
         # ── RIGHT: ROI zoom viewer ────────────────────────────────────
@@ -621,21 +1396,10 @@ class Step3Page(QWidget):
         self._roi_info.setWordWrap(True)
         toolbar.addWidget(self._roi_info, stretch=1)
 
-        self._btn_mask_toggle = QPushButton('Hide Mask')
-        self._btn_mask_toggle.setCheckable(True)
-        self._btn_mask_toggle.setStyleSheet(
-            'QPushButton{background:#353;color:#8e8;border:1px solid #8e8;'
-            'border-radius:3px;font-size:11px;padding:3px 8px;}'
-            'QPushButton:checked{background:#533;color:#e88;border:1px solid #e88;}'
-        )
-        self._btn_mask_toggle.clicked.connect(self._toggle_mask)
-        toolbar.addWidget(self._btn_mask_toggle)
-
-        # Mask opacity slider
-        toolbar.addWidget(QLabel('Opacity:'))
+        toolbar.addWidget(QLabel('Alpha:'))
         self._alpha_slider = QSlider(Qt.Horizontal)
         self._alpha_slider.setRange(0, 100)
-        self._alpha_slider.setValue(60)
+        self._alpha_slider.setValue(int(round(self._mask_alpha * 100)))
         self._alpha_slider.setFixedWidth(110)
         self._alpha_slider.setToolTip('Mask opacity (0% = transparent, 100% = opaque)')
         self._alpha_slider.setStyleSheet(
@@ -644,7 +1408,7 @@ class Step3Page(QWidget):
             'background:#8e8;border-radius:6px;}'
             'QSlider::sub-page:horizontal{background:#4a7;border-radius:2px;}'
         )
-        self._alpha_lbl = QLabel('60%')
+        self._alpha_lbl = QLabel(f'{int(round(self._mask_alpha * 100))}%')
         self._alpha_lbl.setFixedWidth(34)
         self._alpha_lbl.setStyleSheet('color:#8e8;font-size:10px;')
 
@@ -656,6 +1420,25 @@ class Step3Page(QWidget):
         self._alpha_slider.valueChanged.connect(_on_alpha)
         toolbar.addWidget(self._alpha_slider)
         toolbar.addWidget(self._alpha_lbl)
+
+        self._chk_outline = QCheckBox('Show Outline')
+        self._chk_outline.setChecked(self._show_outline)
+        self._chk_outline.stateChanged.connect(self._on_render_controls_changed)
+        toolbar.addWidget(self._chk_outline)
+
+        self._chk_fusion = QCheckBox('Show Fusion')
+        self._chk_fusion.setChecked(self._show_fusion)
+        self._chk_fusion.stateChanged.connect(self._on_render_controls_changed)
+        toolbar.addWidget(self._chk_fusion)
+
+        btn_reset = QPushButton('Reset View')
+        btn_reset.setStyleSheet(
+            'QPushButton{background:#333;color:#bbb;border:1px solid #555;'
+            'border-radius:3px;font-size:11px;padding:3px 8px;}'
+            'QPushButton:hover{background:#444;color:#fff;}'
+        )
+        btn_reset.clicked.connect(self._reset_roi_view)
+        toolbar.addWidget(btn_reset)
 
         hint_lbl = QLabel('Scroll=Zoom  Drag=Pan  Dbl-click=Reset')
         hint_lbl.setStyleSheet('color:#444;font-size:10px;')
@@ -694,8 +1477,8 @@ class Step3Page(QWidget):
         right_lay.addLayout(bot_bar)
 
         split.addWidget(right_w)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 4)
         root.addWidget(split, stretch=1)
 
         # ── Bottom nav ────────────────────────────────────────────────
@@ -827,6 +1610,9 @@ class Step3Page(QWidget):
         y0, y1, x0, x1 = self._roi
         sub = self._sub_spin.value()
 
+        self._clear_region_cache(clear_image=False)
+        self._patch_channel_cache.clear()
+        self._last_patch_bbox = (y0, y1, x0, x1)
         self._roi_status.setText('Loading…')
         self._cell_count_lbl.setText('')
 
@@ -839,39 +1625,81 @@ class Step3Page(QWidget):
         dapi_path = self._dapi_path
         mask_path = self._mask_path
         read_y0, read_y1, read_x0, read_x1 = y0, y1, x0, x1
+        fusion_roi = (y0, y1, x0, x1)
+        tile_infos = None
         if self._mode == "roi":
-            tile_info = self._locate_patch_tile(y0, y1, x0, x1)
-            if tile_info is None:
-                self._roi_status.setText("Patch crosses tile boundary. Draw smaller patch.")
+            tile_infos = self._intersect_patch_tiles(y0, y1, x0, x1)
+            if not tile_infos:
+                self._roi_status.setText("Patch outside ROI.")
                 return
-            row, col, tile_y0, tile_y1, tile_x0, tile_x1, dapi_path, mask_path = tile_info
-            read_y0, read_y1 = y0 - tile_y0, y1 - tile_y0
-            read_x0, read_x1 = x0 - tile_x0, x1 - tile_x0
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
-            print(f"[Step3] patch tile row/col={row},{col}")
-            print(f"[Step3] loading dapi tile={dapi_path}")
-            print(f"[Step3] loading mask tile={mask_path}")
+            print(f"[Step3] patch intersects n_tiles={len(tile_infos)}")
+        else:
+            print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
+        print(f"[Step3] reading fusion crop from={self._fused_zarr_path}")
+        print(f"[Step3] patch bbox={[y0, y1, x0, x1]}")
+        print(f"[Step3] background_mode={self._background_mode}")
 
         self._region_loader = _RegionLoader(
             dapi_path, mask_path,
             read_y0, read_y1, read_x0, read_x1, sub=sub,
             fused_zarr_path=self._fused_zarr_path,
+            fusion_roi=fusion_roi,
+            tile_infos=tile_infos,
         )
         self._region_loader.done.connect(self._on_region_loaded)
         self._region_loader.error.connect(self._on_region_error)
         self._region_loader.finished.connect(lambda thread=self._region_loader: self._on_region_finished(thread))
         self._region_loader.start()
 
-    def _on_region_loaded(self, rgb_overlay, dapi_rgb, n_cells, h, w):
-        # Both arrays are already computed in the background thread.
-        # Main thread only stores them and calls setImage — no heavy work here.
-        self._mask_rgb  = rgb_overlay   # precomputed cellpose overlay
-        self._dapi_rgb  = dapi_rgb      # plain grey RGB (for "hide mask" mode)
+    def _on_region_loaded(self, dapi_rgb, fusion_rgb, mask_labels, n_cells, h, w, fusion_source):
+        self._patch_dapi_rgb = np.asarray(dapi_rgb, dtype=np.uint8)
+        self._patch_fusion_rgb = (
+            None if fusion_rgb is None else np.asarray(fusion_rgb, dtype=np.uint8)
+        )
+        self._patch_fusion_source = str(fusion_source or "unavailable")
+        self._patch_fusion_available = self._patch_fusion_rgb is not None
+        self._mask_labels = np.asarray(mask_labels, dtype=np.uint32)
+        self._chk_fusion.blockSignals(True)
+        self._chk_fusion.setEnabled(True)
+        self._chk_fusion.setToolTip("")
+        self._chk_fusion.setChecked(self._show_fusion)
+        self._chk_fusion.blockSignals(False)
         sub = self._sub_spin.value()
-        self._cell_count_lbl.setText(f'Cells in ROI: {n_cells:,}')
+        if n_cells > 0:
+            self._cell_count_lbl.setText(f'Cells in ROI: {n_cells:,}')
+        else:
+            self._cell_count_lbl.setText('No cells detected.')
         self._roi_status.setText(f'{h:,}×{w:,} px  (sub ×{sub})')
-        if self._mode == "roi":
-            print(f"[Step3] patch cells={n_cells}")
+        print("[Step3] patch loaded")
+        print(f"[Step3] patch cells={n_cells}")
+        print("[Step3] dapi available=True")
+        print(f"[Step3] fusion available={self._patch_fusion_available}")
+        print(f"[Step3] rendering background={self._current_background_kind()}")
+        print(f"[Step3] cells={n_cells}")
+        print(f"[Step3] alpha={self._mask_alpha:.2f}")
+        print(f"[Step3] outline={self._show_outline}")
+        print(f"[Step3] fusion={self._show_fusion}")
+        print(f"[Step3] fusion_rgb source={self._patch_fusion_source}")
+        if not self._patch_fusion_available:
+            print("[Step3] fusion source unavailable, using DAPI fallback")
+            if self._show_fusion:
+                self._roi_status.setText(
+                    f'{h:,}×{w:,} px  (sub ×{sub})  |  Fusion Source not set; showing DAPI.'
+                )
+        if self._patch_fusion_rgb is not None:
+            print(f"[Step3] fusion crop shape={self._patch_fusion_rgb.shape}")
+            print(f"[Step3] fusion_rgb shape={self._patch_fusion_rgb.shape}")
+            print(
+                f"[Step3] fusion_rgb min/max="
+                f"{int(self._patch_fusion_rgb.min())}/{int(self._patch_fusion_rgb.max())}"
+            )
+        print(f"[Step3] dapi_rgb shape={self._patch_dapi_rgb.shape}")
+        print(f"[Step3] dapi_rgb min/max={int(self._patch_dapi_rgb.min())}/{int(self._patch_dapi_rgb.max())}")
+        print(f"[Step3] mask shape={self._mask_labels.shape}")
+        print(f"[Step3] show_fusion={self._show_fusion}")
+        print(f"[Step3] mask cells={n_cells}")
+        self._load_visible_patch_channels()
         self._render_roi(reset_view=True)
 
     def _locate_patch_tile(self, y0, y1, x0, x1):
@@ -900,6 +1728,34 @@ class Step3Page(QWidget):
             return None
         return row0, col0, tile_y0, tile_y1, tile_x0, tile_x1, dapi_path, mask_path
 
+    def _intersect_patch_tiles(self, y0, y1, x0, x1):
+        tiles = self._tile_infos or self._build_tile_infos(
+            self._active_tiles_dir,
+            [self._full_h, self._full_w],
+            self._tile_grid or [0, 0],
+            [],
+        )
+        hits = []
+        for tile in tiles:
+            ty0, ty1, tx0, tx1 = [int(v) for v in tile["bbox_local"]]
+            iy0 = max(y0, ty0)
+            iy1 = min(y1, ty1)
+            ix0 = max(x0, tx0)
+            ix1 = min(x1, tx1)
+            if iy1 <= iy0 or ix1 <= ix0:
+                continue
+            if not os.path.exists(tile.get("dapi_path", "")) or not os.path.exists(tile.get("mask_path", "")):
+                self._roi_status.setText("Missing tile input.")
+                QMessageBox.warning(self, "Missing tile input", "Missing tile input.")
+                print(
+                    "[Step3] Missing tile input.\n"
+                    f"dapi={tile.get('dapi_path')}\n"
+                    f"mask={tile.get('mask_path')}"
+                )
+                return []
+            hits.append(tile)
+        return hits
+
     def _on_region_error(self, msg):
         print(f"[Step3] Region load error:\n{msg}")
         self._roi_status.setText(
@@ -910,40 +1766,249 @@ class Step3Page(QWidget):
         if self._region_loader is thread:
             self._region_loader = None
 
+    def _clear_region_cache(self, clear_image=True):
+        self._patch_dapi_rgb = None
+        self._patch_fusion_rgb = None
+        self._patch_fusion_source = None
+        self._patch_fusion_available = False
+        self._mask_labels = None
+        self._patch_channel_cache.clear()
+        if clear_image and hasattr(self, "_roi_img"):
+            self._roi_img.clear()
+
     @staticmethod
     def _overlay_mask_on_dapi(dapi_rgb, mask):
-        """Kept for API compatibility — actual overlay is precomputed in _RegionLoader."""
-        return cellpose_mask_overlay(dapi_rgb[:, :, 0], mask)
+        """Compatibility wrapper: Step3 rendering is centralized in mask_renderer."""
+        return render_mask_overlay(dapi_rgb, mask)
 
     def _render_roi(self, reset_view=False):
-        if self._dapi_rgb is None:
+        if self._patch_dapi_rgb is None:
             return
-        if self._show_mask and self._mask_rgb is not None:
-            a = self._mask_alpha
-            if a >= 0.999:
-                display = self._mask_rgb
-            elif a <= 0.001:
-                display = self._dapi_rgb
-            else:
-                # Fast vectorised alpha blend: overlay * a + dapi * (1-a)
-                display = (
-                    self._mask_rgb.astype(np.float32) * a
-                    + self._dapi_rgb.astype(np.float32) * (1.0 - a)
-                ).astype(np.uint8)
+        background = self._current_background_rgb()
+        if self._mask_labels is None:
+            display = background
         else:
-            display = self._dapi_rgb
+            display = render_mask_overlay(
+                background,
+                self._mask_labels,
+                alpha=self._mask_alpha,
+                show_outline=self._show_outline,
+                show_fusion=True,
+            )
         first = (self._roi_img.image is None)
         self._roi_img.setImage(display, autoLevels=False)
         if first or reset_view:
             self._roi_vb.autoRange()
 
-    def _toggle_mask(self):
-        self._show_mask = not self._btn_mask_toggle.isChecked()
-        self._btn_mask_toggle.setText(
-            'Show Mask' if not self._show_mask else 'Hide Mask'
-        )
-        # Instant toggle — just swap the already-computed array, no calculation
+    def _reset_roi_view(self):
+        if hasattr(self, "_roi_vb") and self._roi_vb is not None:
+            self._roi_vb.autoRange()
+
+    def _on_render_controls_changed(self, *_):
+        self._show_outline = bool(self._chk_outline.isChecked())
+        self._show_fusion = bool(self._chk_fusion.isChecked())
+        print(f"[Step3] show_fusion={self._show_fusion}")
         self._render_roi(reset_view=False)
+
+    def _on_background_mode_changed(self, mode):
+        self._background_mode = str(mode)
+        self._save_channel_config()
+        self._load_visible_patch_channels()
+        print(f"[Step3] background_mode={self._background_mode}")
+        if self._background_mode == "Channels":
+            selected = [
+                ch for ch in self._available_channels
+                if self._channel_settings.get(ch, {}).get("visible", False)
+            ]
+            print(f"[Step3] selected_channels={selected}")
+        print("[Step3] rerender only")
+        self._render_roi(reset_view=False)
+
+    def _on_channel_visibility_changed(self, ch):
+        row = self._channel_rows.get(ch)
+        if not row:
+            return
+        val = bool(row["checkbox"].isChecked())
+        self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["visible"] = val
+        self._save_channel_config()
+        print(f"[Step3] channel visibility changed: {ch}={val}")
+        print(f"[Step3] channel toggled: {ch}={val}")
+        if val and ch not in self._patch_channel_cache:
+            self._load_patch_channel(ch)
+        print("[Step3] rerender only")
+        self._render_roi(reset_view=False)
+
+    def _on_channel_opacity_changed(self, ch):
+        row = self._channel_rows.get(ch)
+        if not row:
+            return
+        self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["opacity"] = row["opacity"].value() / 100.0
+        self._save_channel_config()
+        print("[Step3] rerender only")
+        self._render_roi(reset_view=False)
+
+    def _choose_channel_color(self, ch):
+        cur = QtGui.QColor(self._channel_settings.get(ch, {}).get("color", "#ffffff"))
+        color = QtWidgets.QColorDialog.getColor(cur, self, f"Channel color: {ch}")
+        if not color.isValid():
+            return
+        hex_color = color.name()
+        self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["color"] = hex_color
+        row = self._channel_rows.get(ch)
+        if row:
+            row["color_btn"].setStyleSheet(f"background:{hex_color};border:1px solid #777;")
+        self._save_channel_config()
+        print(f"[Step3] channel color changed: {ch}={hex_color}")
+        print("[Step3] rerender only")
+        self._render_roi(reset_view=False)
+
+    def _auto_channel_contrast(self, ch):
+        arr = self._patch_channel_cache.get(ch)
+        if arr is not None:
+            nz = arr[np.isfinite(arr)]
+            if nz.size:
+                self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["contrast"] = [
+                    float(np.percentile(nz, 1.0)),
+                    float(np.percentile(nz, 99.5)),
+                ]
+        else:
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["contrast"] = [1.0, 99.5]
+        self._save_channel_config()
+        self._render_roi(reset_view=False)
+
+    def _reset_channel_visibility(self):
+        for ch in self._available_channels:
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["visible"] = False
+        self._rebuild_channel_panel()
+        self._save_channel_config()
+        self._load_visible_patch_channels()
+        self._render_roi(reset_view=False)
+
+    def _reset_channel_colors(self):
+        for ch in self._available_channels:
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["color"] = self._default_channel_color(ch)
+        self._rebuild_channel_panel()
+        self._save_channel_config()
+        self._render_roi(reset_view=False)
+
+    def _current_background_rgb(self):
+        if self._background_mode == "Channels" and self._available_channels:
+            rgb = self._render_channel_overlay()
+            if rgb is not None:
+                return rgb
+        if self._background_mode == "Fusion" and self._show_fusion and self._patch_fusion_rgb is not None:
+            return self._patch_fusion_rgb
+        return self._patch_dapi_rgb
+
+    def _current_background_kind(self):
+        if self._background_mode == "Channels" and self._available_channels:
+            return "channels"
+        if self._background_mode == "Fusion" and self._show_fusion and self._patch_fusion_rgb is not None:
+            return "fusion"
+        return "dapi"
+
+    def _hex_to_rgb(self, color):
+        q = QtGui.QColor(str(color))
+        if not q.isValid():
+            q = QtGui.QColor("#ffffff")
+        return np.array([q.red(), q.green(), q.blue()], dtype=np.float32) / 255.0
+
+    def _normalize_channel_for_display(self, ch, arr):
+        st = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
+        contrast = st.get("contrast", [1.0, 99.5])
+        a = np.asarray(arr, dtype=np.float32)
+        if len(contrast) == 2 and max(contrast) <= 100.0:
+            nz = a[np.isfinite(a)]
+            if nz.size:
+                lo, hi = np.percentile(nz, [float(contrast[0]), float(contrast[1])])
+            else:
+                lo, hi = 0.0, 1.0
+        else:
+            lo, hi = float(contrast[0]), float(contrast[1])
+        if hi <= lo:
+            hi = lo + 1.0
+        return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+    def _render_channel_overlay(self):
+        if self._patch_dapi_rgb is None:
+            return None
+        h, w = self._patch_dapi_rgb.shape[:2]
+        canvas = np.zeros((h, w, 3), dtype=np.float32)
+        visible = []
+        for ch in self._available_channels:
+            st = self._channel_settings.get(ch, {})
+            if not st.get("visible", False):
+                continue
+            arr = self._patch_channel_cache.get(ch)
+            if arr is None:
+                continue
+            if arr.shape[:2] != (h, w):
+                continue
+            norm = self._normalize_channel_for_display(ch, arr)
+            color = self._hex_to_rgb(st.get("color", "#ffffff"))
+            opacity = float(np.clip(st.get("opacity", 1.0), 0.0, 1.0))
+            canvas += norm[:, :, None] * color[None, None, :] * opacity
+            visible.append(ch)
+        rgb = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
+        print(f"[Step3] rendered channels: {visible}")
+        print(f"[Step3] rendered multichannel overlay shape={rgb.shape}")
+        return rgb
+
+    def _load_visible_patch_channels(self):
+        if self._last_patch_bbox is None or self._background_mode != "Channels":
+            return
+        visible = [
+            ch for ch in self._available_channels
+            if self._channel_settings.get(ch, {}).get("visible", False)
+        ]
+        print(f"[Step3] available_channels={self._available_channels}")
+        print(f"[Step3] visible_channels={visible}")
+        for ch in visible:
+            if ch not in self._patch_channel_cache:
+                self._load_patch_channel(ch)
+
+    def _load_patch_channel(self, ch):
+        if self._last_patch_bbox is None:
+            return
+        y0, y1, x0, x1 = self._last_patch_bbox
+        sub = self._sub_spin.value() if hasattr(self, "_sub_spin") else 1
+        print(f"[Step3] loading channel={ch}")
+        print(f"[Step3] loading channel crop: {ch}")
+        arr = None
+        source = None
+        if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
+            try:
+                if self._corrected_zarr is None:
+                    self._corrected_zarr = zarr.open(self._corrected_zarr_path, mode="r")
+                root = self._corrected_zarr
+                roi_name = self._active_roi_name or "ROI_1"
+                if roi_name in root and ch in root[roi_name]:
+                    arr = np.asarray(root[roi_name][ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
+                    source = "corrected"
+                elif ch in root:
+                    arr = np.asarray(root[ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
+                    source = "corrected"
+            except Exception as e:
+                print(f"[Step3] corrected channel load failed {ch}: {e}")
+
+        raw_loader = self._raw_loader or self._loader
+        if arr is None and raw_loader is not None:
+            try:
+                if self._mode == "roi" and self._active_bbox and len(self._active_bbox) == 4:
+                    gy0 = int(self._active_bbox[0]) + y0
+                    gy1 = int(self._active_bbox[0]) + y1
+                    gx0 = int(self._active_bbox[2]) + x0
+                    gx1 = int(self._active_bbox[2]) + x1
+                else:
+                    gy0, gy1, gx0, gx1 = y0, y1, x0, x1
+                arr = raw_loader.read_region(ch, gy0, gy1, gx0, gx1, downsample=sub, normalize=True)
+                source = "raw"
+            except Exception as e:
+                print(f"[Step3] channel missing/skipped {ch}: {e}")
+                return
+        if arr is not None:
+            print(f"[Step3] channel={ch} source={source or self._channel_sources.get(ch, 'unknown')}")
+            self._patch_channel_cache[ch] = np.asarray(arr, dtype=np.float32)
 
     # ── Random ROI ───────────────────────────────────────────────────
 
@@ -967,6 +2032,87 @@ class Step3Page(QWidget):
     # ── Browse helpers ────────────────────────────────────────────────
 
     def _browse(self, which):
+        if which == 'fusion':
+            path = QFileDialog.getExistingDirectory(
+                self,
+                'Select Fusion Source zarr folder',
+                self._output_dir or OUTPUT_DIR,
+            )
+            if not path:
+                return
+            try:
+                _z, shape = self._validate_fusion_zarr(path)
+            except Exception as e:
+                QMessageBox.warning(self, 'Invalid fusion source', str(e))
+                return
+            selected = os.path.abspath(path)
+            self._fusion_edit.setText(selected)
+            self._fusion_zarr_path = selected
+            self._fused_zarr_path = selected
+            print(f"[Step3] manual fusion source selected: {selected}")
+            print(f"[Step3] manual fusion zarr shape={shape}")
+            self._save_input_files_config()
+            self._show_fusion = True
+            self._chk_fusion.blockSignals(True)
+            self._chk_fusion.setChecked(True)
+            self._chk_fusion.setEnabled(True)
+            self._chk_fusion.blockSignals(False)
+            if self._roi is not None:
+                self._load_region()
+            else:
+                self._roi_status.setText(f'Fusion source loaded: {selected}')
+            return
+
+        if which == 'channel_source':
+            path = QFileDialog.getExistingDirectory(
+                self,
+                'Select corrected_channels.zarr folder',
+                self._output_dir or OUTPUT_DIR,
+            )
+            if not path:
+                return
+            try:
+                root = zarr.open(path, mode="r")
+                roi_name = self._active_roi_name or "ROI_1"
+                if str(root.attrs.get("mode", "")).lower() == "roi_only" and roi_name not in root:
+                    raise ValueError(f"ROI group not found in corrected zarr: {roi_name}")
+            except Exception as e:
+                QMessageBox.warning(self, 'Invalid Channel Source', str(e))
+                return
+            selected = os.path.abspath(path)
+            self._channel_source_edit.setText(selected)
+            self._corrected_zarr_path = selected
+            self._corrected_zarr = None
+            self._save_input_files_config()
+            self._refresh_channel_sources()
+            self._load_visible_patch_channels()
+            self._render_roi(reset_view=False)
+            return
+
+        if which == 'raw_ome':
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                'Select Raw OME-TIFF',
+                self._output_dir or OUTPUT_DIR,
+                'OME-TIFF (*.tif *.tiff)'
+            )
+            if not path:
+                return
+            try:
+                loader = OMETIFFLoader(path)
+            except Exception as e:
+                QMessageBox.warning(self, 'Invalid Raw OME', str(e))
+                return
+            selected = os.path.abspath(path)
+            self._raw_ome_edit.setText(selected)
+            self._raw_ome_path = selected
+            self._raw_loader = loader
+            self._save_input_files_config()
+            self._refresh_channel_sources()
+            self._load_visible_patch_channels()
+            self._render_roi(reset_view=False)
+            return
+
         path, _ = QFileDialog.getOpenFileName(
             self, f'Select {"DAPI" if which == "dapi" else "Mask"} OME-TIFF',
             OUTPUT_DIR, 'OME-TIFF (*.tiff *.tif)'
@@ -974,8 +2120,11 @@ class Step3Page(QWidget):
         if path:
             if which == 'dapi':
                 self._dapi_edit.setText(path)
+                self._dapi_path = path
             else:
                 self._mask_edit.setText(path)
+                self._mask_path = path
+            self._save_input_files_config()
 
     def _manual_load(self):
         self.load_from_paths(
@@ -1036,9 +2185,7 @@ class Step3Page(QWidget):
                             self._roi_rect.contains_ds(px, py)):
                         self._roi_rect_clear()
                         self._roi      = None
-                        self._dapi_rgb = None
-                        self._mask     = None
-                        self._roi_img.clear()
+                        self._clear_region_cache(clear_image=True)
                         self._roi_info.setText(
                             'Draw a rectangle on the thumbnail to inspect a region'
                         )

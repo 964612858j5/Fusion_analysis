@@ -326,6 +326,7 @@ class MainWindow(QMainWindow):
         self.search = SearchCtrlPanel()
         self.search.run_p1.connect(self._run_p1)
         self.search.run_p2.connect(self._run_p2)
+        self.search.run_preview.connect(self._run_direct_patch_preview)
         self.search.stop.connect(self._stop)
         self.search.params_ready.connect(self._on_params_ready)
         self.search.method_changed.connect(self._on_step1_segmentation_mode_changed)
@@ -1721,6 +1722,40 @@ class MainWindow(QMainWindow):
         )
         self._launch_worker(tasks)
 
+    def _run_direct_patch_preview(self, params):
+        method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
+        if method == CELLPOSE_WHOLECELL_FUSION:
+            QMessageBox.information(
+                self, "Segmentation mode",
+                "Use Phase 1 / Phase 2 for Cellpose whole-cell preview."
+            )
+            return
+        patches = list(self._all_patches)
+        if not patches:
+            QMessageBox.warning(self, "Info", "Please add at least one Patch first")
+            return
+        patch_idx = self._preview_patch_idx
+        if patch_idx < 0 or patch_idx >= len(patches):
+            patch_idx = 0
+            self._preview_patch_idx = 0
+        params = normalize_segmentation_config(params or {})
+        self._p2_params = params
+        self._params_source = "direct_patch_preview"
+        self._check_save_unlock()
+
+        nuc_ch, _ = self.config.get_nucleus()
+        print(f"[Step1] patch preview mode={method}")
+        print(f"[Step1] patch=P{patch_idx + 1}")
+        print(f"[Step1] input=DAPI channel={nuc_ch}")
+        print(f"[Step1] params={params.get('params') or params}")
+
+        self.result_grid.setup_grid(
+            len(patches),
+            [dict(params)],
+            f"Patch Preview — {method}  (P{patch_idx + 1})"
+        )
+        self._launch_worker([(patch_idx, patches[patch_idx], dict(params))])
+
     # ── Worker ──────────────────────────────────────────────────────
 
     def _launch_worker(self, tasks):
@@ -1796,6 +1831,12 @@ class MainWindow(QMainWindow):
 
             kind = item.get("type")
             if kind == "result":
+                masks = item.get("masks")
+                if masks is not None:
+                    params = item.get("params") or {}
+                    method = params.get("method")
+                    if method and method != CELLPOSE_WHOLECELL_FUSION:
+                        print(f"[Step1] cells={int(np.asarray(masks).max())}")
                 self.result_grid.add_result(
                     item["patch_idx"],
                     item["params"],
@@ -1856,14 +1897,17 @@ class MainWindow(QMainWindow):
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")
         print(f"[Step1] segmentation mode selected={method}")
+        print(f"[Step1] segmentation mode={method}")
         print(f"[Step1] workflow={workflow}")
         print(f"[Step1] phase1_required={is_whole}")
         print("[Step1] channel_weight_panel_visible=True")
         print("[Step1] fusion_preview_enabled=True")
+        print("[Step1] layout resize avoided=True")
+        print("[Step1] channel_panel_visible=True")
 
         self.config.setVisible(True)
         self.config.setEnabled(True)
-        self.result_grid.setVisible(is_whole)
+        self.result_grid.setVisible(True)
         if is_whole:
             self.btn_save.setText("💾  Save Config  &  Generate fused.zarr")
             if self._p2_params is not None and self._p2_params.get("method") != CELLPOSE_WHOLECELL_FUSION:

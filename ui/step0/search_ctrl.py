@@ -65,6 +65,7 @@ class SearchCtrlPanel(QWidget):
 
     run_p1       = pyqtSignal(list)   # [diameter_or_None] — single-element list
     run_p2       = pyqtSignal(dict)   # {diameter, flow, prob}
+    run_preview  = pyqtSignal(dict)   # direct patch preview for non-whole-cell methods
     stop         = pyqtSignal()
     params_ready = pyqtSignal(dict)
     method_changed = pyqtSignal(str)
@@ -294,6 +295,16 @@ class SearchCtrlPanel(QWidget):
         )
         self.btn_use_manual.clicked.connect(self._use_manual_params)
         ml.addWidget(self.btn_use_manual)
+
+        self.btn_patch_preview = QPushButton("▶ Run Patch Preview")
+        self.btn_patch_preview.setStyleSheet(
+            "QPushButton{background:#246;color:white;"
+            "border-radius:4px;padding:5px;font-weight:bold;}"
+            "QPushButton:hover{background:#357;}"
+            "QPushButton:disabled{background:#333;color:#555;}"
+        )
+        self.btn_patch_preview.clicked.connect(self._emit_patch_preview)
+        ml.addWidget(self.btn_patch_preview)
         lay.addWidget(man_box)
         self._on_method_changed()
 
@@ -362,6 +373,16 @@ class SearchCtrlPanel(QWidget):
         }
         payload.update(self.get_selected_method_config())
         self.run_p2.emit(payload)
+
+    def _emit_patch_preview(self):
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        if method == CELLPOSE_WHOLECELL_FUSION:
+            QMessageBox.information(
+                self, "Segmentation mode",
+                "Use Phase 1 / Phase 2 for Cellpose whole-cell preview."
+            )
+            return
+        self.run_preview.emit(self.get_current_params())
 
     def _load_params_file(self):
         """Browse for cellpose_params.json and load it."""
@@ -438,6 +459,7 @@ class SearchCtrlPanel(QWidget):
         is_whole = self._method_combo.currentData() == CELLPOSE_WHOLECELL_FUSION
         self.btn_p1.setEnabled(not running and is_whole)
         self.btn_p2.setEnabled(not running and self._p2_diam_set and is_whole)
+        self.btn_patch_preview.setEnabled(not running and not is_whole)
         self.btn_stop.setEnabled(running)
 
     def update_progress(self, done, total, msg):
@@ -478,8 +500,19 @@ class SearchCtrlPanel(QWidget):
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method == STARDIST_NUCLEI_EXPANSION
-        self._p1_box.setVisible(is_whole)
-        self._p2_box.setVisible(is_whole)
+        self._p1_box.setVisible(True)
+        self._p2_box.setVisible(True)
+        self._p1_box.setEnabled(is_whole)
+        self._p2_box.setEnabled(is_whole)
+        self._p1_box.setTitle(
+            "Phase 1 — Auto-diameter preview  (cpsam)"
+            if is_whole else "Phase 1 — Whole-cell only (not required)"
+        )
+        self._p2_box.setTitle(
+            "Phase 2 — Fine search: flow × cellprob"
+            if is_whole else "Phase 2 — Whole-cell only (not required)"
+        )
+        self.btn_p1.setEnabled(is_whole)
         self.btn_p2.setEnabled(is_whole and self._p2_diam_set)
         for row in self._cellpose_param_rows:
             for i in range(row.count()):
@@ -501,6 +534,8 @@ class SearchCtrlPanel(QWidget):
             f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
         )
         self._dapi_only_note.setVisible(not is_whole)
+        self.btn_patch_preview.setEnabled(not is_whole)
+        self.btn_patch_preview.setVisible(True)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
@@ -510,6 +545,8 @@ class SearchCtrlPanel(QWidget):
         print(f"[Step1] segmentation mode selected={method}")
         print(f"[Step1] workflow={workflow}")
         print(f"[Step1] phase1_required={is_whole}")
+        print(f"[Step1] mode switched={method}")
+        print("[Step1] layout stable=True")
         self.method_changed.emit(method)
 
 

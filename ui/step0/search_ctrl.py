@@ -115,6 +115,12 @@ class SearchCtrlPanel(QWidget):
         self._method_hint.setStyleSheet("color:#999;font-size:10px;")
         self._method_hint.setWordWrap(True)
         method_lay.addWidget(self._method_hint)
+        self._dapi_only_note = QLabel(
+            "Segmentation uses DAPI only. Fusion panel remains available for preview/QC."
+        )
+        self._dapi_only_note.setStyleSheet("color:#8fb8ff;font-size:10px;")
+        self._dapi_only_note.setWordWrap(True)
+        method_lay.addWidget(self._dapi_only_note)
         lay.addWidget(method_box)
 
         # ── Phase 1 ───────────────────────────────────────────────────
@@ -494,6 +500,7 @@ class SearchCtrlPanel(QWidget):
         self._method_hint.setText(
             f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
         )
+        self._dapi_only_note.setVisible(not is_whole)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",

@@ -1858,8 +1858,11 @@ class MainWindow(QMainWindow):
         print(f"[Step1] segmentation mode selected={method}")
         print(f"[Step1] workflow={workflow}")
         print(f"[Step1] phase1_required={is_whole}")
+        print("[Step1] channel_weight_panel_visible=True")
+        print("[Step1] fusion_preview_enabled=True")
 
-        self.config.setVisible(is_whole)
+        self.config.setVisible(True)
+        self.config.setEnabled(True)
         self.result_grid.setVisible(is_whole)
         if is_whole:
             self.btn_save.setText("💾  Save Config  &  Generate fused.zarr")

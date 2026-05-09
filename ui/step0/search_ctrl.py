@@ -344,8 +344,8 @@ class SearchCtrlPanel(QWidget):
             return []
 
     def _emit_p1(self):
-        if self._method_combo.currentData() != CELLPOSE_WHOLECELL_FUSION:
-            QMessageBox.information(self, "Segmentation mode", "Phase 1 is only used for Cellpose whole-cell (Fusion + DAPI).")
+        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+            QMessageBox.information(self, "Segmentation mode", "Phase 1 is only used for Cellpose modes.")
             return
         override = self._p1_override.value()
         # None = auto (diameter=0 in spinbox), positive = manual override
@@ -353,8 +353,8 @@ class SearchCtrlPanel(QWidget):
         self.run_p1.emit([diam])
 
     def _emit_p2(self):
-        if self._method_combo.currentData() != CELLPOSE_WHOLECELL_FUSION:
-            QMessageBox.information(self, "Segmentation mode", "Phase 2 is only used for Cellpose whole-cell (Fusion + DAPI).")
+        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+            QMessageBox.information(self, "Segmentation mode", "Phase 2 is only used for Cellpose modes.")
             return
         if not self._p2_diam_set:
             QMessageBox.warning(
@@ -376,10 +376,10 @@ class SearchCtrlPanel(QWidget):
 
     def _emit_patch_preview(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        if method == CELLPOSE_WHOLECELL_FUSION:
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
             QMessageBox.information(
                 self, "Segmentation mode",
-                "Use Phase 1 / Phase 2 for Cellpose whole-cell preview."
+                "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
             return
         self.run_preview.emit(self.get_current_params())
@@ -453,13 +453,13 @@ class SearchCtrlPanel(QWidget):
         self._p2_diam_set = True
         label = "auto (cpsam)" if d is None else str(d)
         self.p2_diam_lbl.setText(f"diameter = {label}  (from Phase 1)")
-        self.btn_p2.setEnabled(True)
+        self.btn_p2.setEnabled(self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI))
 
     def set_running(self, running):
-        is_whole = self._method_combo.currentData() == CELLPOSE_WHOLECELL_FUSION
-        self.btn_p1.setEnabled(not running and is_whole)
-        self.btn_p2.setEnabled(not running and self._p2_diam_set and is_whole)
-        self.btn_patch_preview.setEnabled(not running and not is_whole)
+        is_cellpose = self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        self.btn_p1.setEnabled(not running and is_cellpose)
+        self.btn_p2.setEnabled(not running and self._p2_diam_set and is_cellpose)
+        self.btn_patch_preview.setEnabled(not running and not is_cellpose)
         self.btn_stop.setEnabled(running)
 
     def update_progress(self, done, total, msg):
@@ -489,6 +489,7 @@ class SearchCtrlPanel(QWidget):
             params["model_name"] = self._sd_model.text().strip() or "2D_versatile_fluo"
             params["prob_thresh"] = None if self._sd_prob.value() < 0 else self._sd_prob.value()
             params["nms_thresh"] = None if self._sd_nms.value() < 0 else self._sd_nms.value()
+            params["device_preference"] = "gpu_first"
         if method == STARDIST_NUCLEI_EXPANSION:
             params["expand_distance"] = self._sd_expand_manual.value()
         return {"method": method, "params": params}
@@ -496,24 +497,23 @@ class SearchCtrlPanel(QWidget):
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         cfg = get_segmentation_method_config(method)
-        is_whole = method == CELLPOSE_WHOLECELL_FUSION
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method == STARDIST_NUCLEI_EXPANSION
-        self._p1_box.setVisible(True)
-        self._p2_box.setVisible(True)
-        self._p1_box.setEnabled(is_whole)
-        self._p2_box.setEnabled(is_whole)
+        self._p1_box.setVisible(is_cellpose)
+        self._p2_box.setVisible(is_cellpose)
+        self._p1_box.setEnabled(is_cellpose)
+        self._p2_box.setEnabled(is_cellpose)
         self._p1_box.setTitle(
             "Phase 1 — Auto-diameter preview  (cpsam)"
-            if is_whole else "Phase 1 — Whole-cell only (not required)"
+            if is_cellpose else "Phase 1 — StarDist direct params (not required)"
         )
         self._p2_box.setTitle(
             "Phase 2 — Fine search: flow × cellprob"
-            if is_whole else "Phase 2 — Whole-cell only (not required)"
+            if is_cellpose else "Phase 2 — StarDist direct params (not required)"
         )
-        self.btn_p1.setEnabled(is_whole)
-        self.btn_p2.setEnabled(is_whole and self._p2_diam_set)
+        self.btn_p1.setEnabled(is_cellpose)
+        self.btn_p2.setEnabled(is_cellpose and self._p2_diam_set)
         for row in self._cellpose_param_rows:
             for i in range(row.count()):
                 w = row.itemAt(i).widget()
@@ -533,8 +533,8 @@ class SearchCtrlPanel(QWidget):
         self._method_hint.setText(
             f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
         )
-        self._dapi_only_note.setVisible(not is_whole)
-        self.btn_patch_preview.setEnabled(not is_whole)
+        self._dapi_only_note.setVisible(method != CELLPOSE_WHOLECELL_FUSION)
+        self.btn_patch_preview.setEnabled(is_stardist)
         self.btn_patch_preview.setVisible(True)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
@@ -544,7 +544,7 @@ class SearchCtrlPanel(QWidget):
         }.get(method, "unknown")
         print(f"[Step1] segmentation mode selected={method}")
         print(f"[Step1] workflow={workflow}")
-        print(f"[Step1] phase1_required={is_whole}")
+        print(f"[Step1] phase1_required={is_cellpose}")
         print(f"[Step1] mode switched={method}")
         print("[Step1] layout stable=True")
         self.method_changed.emit(method)

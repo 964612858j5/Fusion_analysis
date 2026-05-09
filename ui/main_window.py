@@ -1724,10 +1724,10 @@ class MainWindow(QMainWindow):
 
     def _run_direct_patch_preview(self, params):
         method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method == CELLPOSE_WHOLECELL_FUSION:
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
             QMessageBox.information(
                 self, "Segmentation mode",
-                "Use Phase 1 / Phase 2 for Cellpose whole-cell preview."
+                "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
             return
         patches = list(self._all_patches)
@@ -1890,6 +1890,8 @@ class MainWindow(QMainWindow):
     def _on_step1_segmentation_mode_changed(self, method):
         method = method or CELLPOSE_WHOLECELL_FUSION
         is_whole = method == CELLPOSE_WHOLECELL_FUSION
+        phase_required = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
@@ -1899,7 +1901,7 @@ class MainWindow(QMainWindow):
         print(f"[Step1] segmentation mode selected={method}")
         print(f"[Step1] segmentation mode={method}")
         print(f"[Step1] workflow={workflow}")
-        print(f"[Step1] phase1_required={is_whole}")
+        print(f"[Step1] phase1_required={phase_required}")
         print("[Step1] channel_weight_panel_visible=True")
         print("[Step1] fusion_preview_enabled=True")
         print("[Step1] layout resize avoided=True")
@@ -1910,13 +1912,16 @@ class MainWindow(QMainWindow):
         self.result_grid.setVisible(True)
         if is_whole:
             self.btn_save.setText("💾  Save Config  &  Generate fused.zarr")
-            if self._p2_params is not None and self._p2_params.get("method") != CELLPOSE_WHOLECELL_FUSION:
+        else:
+            self.btn_save.setText("💾  Save segmentation config  &  Generate DAPI input zarr")
+
+        if phase_required:
+            if self._p2_params is not None and self._p2_params.get("method") != method:
                 self._p2_params = None
                 self._params_source = None
                 self.btn_save.setEnabled(False)
                 self._fusion_bar_widget.setVisible(False)
-        else:
-            self.btn_save.setText("💾  Save segmentation config  &  Generate DAPI input zarr")
+        elif is_stardist:
             self._p2_params = self.search.get_current_params()
             self._params_source = "direct_method"
             self._check_save_unlock()
@@ -2037,7 +2042,7 @@ class MainWindow(QMainWindow):
 
     def _save(self):
         current_method = self.search._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        if self._p2_params is None and current_method != CELLPOSE_WHOLECELL_FUSION:
+        if self._p2_params is None and current_method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
             self._p2_params = self.search.get_current_params()
             self._params_source = "direct_method"
         if self._p2_params is None:

@@ -2,6 +2,7 @@
 block01/workers/cellpose_worker.py — Cellpose-related threads and overlay utilities.
 """
 
+import os
 import gc
 import traceback
 import numpy as np
@@ -137,6 +138,63 @@ def cellpose_mask_overlay(img_grey_u8, masks):
     return (RGB * 255).astype(np.uint8)
 
 
+def load_stardist_model(model_name, prefer_gpu=True, result_queue=None):
+    """Load StarDist with TensorFlow/Keras backend, trying GPU then CPU."""
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+    if result_queue is not None:
+        result_queue.put({
+            "type": "progress",
+            "done": 0,
+            "total": 1,
+            "msg": "[Worker] KERAS_BACKEND=tensorflow",
+        })
+
+    def _emit(msg):
+        print(msg)
+        if result_queue is not None:
+            result_queue.put({
+                "type": "progress",
+                "done": 0,
+                "total": 1,
+                "msg": msg,
+            })
+
+    if prefer_gpu:
+        try:
+            _emit("[Worker] trying StarDist GPU")
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices("GPU")
+            if not gpus:
+                raise RuntimeError("TensorFlow sees no GPU")
+            for gpu in gpus:
+                try:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                except Exception:
+                    pass
+            from csbdeep.utils import normalize as stardist_normalize
+            from stardist.models import StarDist2D
+            model = StarDist2D.from_pretrained(model_name)
+            _emit("[Worker] StarDist device=gpu")
+            return model, stardist_normalize, "gpu"
+        except Exception as e:
+            _emit(f"[Worker] GPU failed, fallback CPU: {e}")
+
+    try:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        import tensorflow as tf
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
+        from csbdeep.utils import normalize as stardist_normalize
+        from stardist.models import StarDist2D
+        model = StarDist2D.from_pretrained(model_name)
+        _emit("[Worker] StarDist device=cpu")
+        return model, stardist_normalize, "cpu"
+    except Exception:
+        raise
+
+
 def run_cellpose_process(args, result_queue, stop_flag):
     try:
         from cellpose import models
@@ -179,6 +237,8 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
         cellpose_model = None
         stardist_model = None
+        stardist_normalize = None
+        stardist_device = None
         total = len(tasks)
 
         for done, (patch_idx, roi, params) in enumerate(tasks):
@@ -187,6 +247,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
             params = normalize_segmentation_config(params)
             method = params.get("method", CELLPOSE_WHOLECELL_FUSION)
+            print(f"[Worker] method={method}")
             y0, y1, x0, x1 = roi
             result_queue.put({
                 "type": "progress",
@@ -239,10 +300,10 @@ def run_cellpose_process(args, result_queue, stop_flag):
                     )
                 elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
                     if stardist_model is None:
-                        from csbdeep.utils import normalize as stardist_normalize
-                        from stardist.models import StarDist2D
-                        stardist_model = StarDist2D.from_pretrained(
-                            params.get("model_name", "2D_versatile_fluo")
+                        stardist_model, stardist_normalize, stardist_device = load_stardist_model(
+                            params.get("model_name", "2D_versatile_fluo"),
+                            prefer_gpu=params.get("device_preference", "gpu_first") != "cpu",
+                            result_queue=result_queue,
                         )
                     img = stardist_normalize(seg_img, 1, 99.8, axis=(0, 1))
                     kwargs = {}
@@ -256,6 +317,8 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         dist = float(params.get("expand_distance", 8) or 0)
                         if dist > 0:
                             masks_out = expand_labels(masks_out, distance=dist)
+                    if stardist_device:
+                        params["device_used"] = stardist_device
                 else:
                     raise ValueError(f"Unknown segmentation method: {method}")
                 mask = masks_out.astype(np.uint32)

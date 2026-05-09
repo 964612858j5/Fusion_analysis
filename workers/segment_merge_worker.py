@@ -29,6 +29,7 @@ from ..utils.segmentation_registry import (
     register_legacy_result,
     upsert_result,
 )
+from .cellpose_worker import load_stardist_model
 
 
 class SegmentMergeWorker(QThread):
@@ -301,9 +302,18 @@ class SegmentMergeWorker(QThread):
             from cellpose import models as cp_models
             return {"cellpose": cp_models.CellposeModel(device=device)}
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            from stardist.models import StarDist2D
             model_name = self.seg_config.get("model_name", "2D_versatile_fluo")
-            return {"stardist": StarDist2D.from_pretrained(model_name)}
+            model, stardist_normalize, stardist_device = load_stardist_model(
+                model_name,
+                prefer_gpu=self.seg_config.get("device_preference", "gpu_first") != "cpu",
+            )
+            if self._logger:
+                self._logger.info(f"[Worker] StarDist device={stardist_device}")
+            return {
+                "stardist": model,
+                "stardist_normalize": stardist_normalize,
+                "stardist_device": stardist_device,
+            }
         raise ValueError(f"Unknown segmentation method: {method}")
 
     def _segment_tile(self, tile_data, backend):
@@ -335,8 +345,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            from csbdeep.utils import normalize as stardist_normalize
-            img = stardist_normalize(dapi, 1, 99.8, axis=(0, 1))
+            img = backend["stardist_normalize"](dapi, 1, 99.8, axis=(0, 1))
             kwargs = {}
             if self.seg_config.get("prob_thresh") is not None:
                 kwargs["prob_thresh"] = self.seg_config.get("prob_thresh")

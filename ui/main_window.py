@@ -494,6 +494,9 @@ class MainWindow(QMainWindow):
                 self.step0_output["ome_tiff_path"] = raw_ome
             except Exception:
                 print(f"[Step1] failed to load raw OME from manifest:\n{traceback.format_exc()}")
+        print(f"[Step1] loader initialized={self.loader is not None}")
+        if self.loader is not None:
+            print(f"[Step1] loader channels count={len(self.loader.channel_names())}")
 
         corr_path = (
             manifest.get("corrected_zarr_path")
@@ -596,15 +599,35 @@ class MainWindow(QMainWindow):
             print("[Step1] No ROI found. Load full WSI mode.")
 
         if self.loader is not None:
-            self.config.all_channels = self.loader.channel_names()
-            self.config.nuc_combo.clear()
-            self.config.nuc_combo.addItems(self.loader.channel_names())
-            self.config.nuc_combo.setCurrentIndex(-1)
-            self.config.load_panel(
-                self.step0_output.get("panel_groups") or {},
-                self.step0_output.get("panel_nucleus"),
+            channels = self.loader.channel_names()
+            nucleus_channel = self._choose_step1_nucleus_channel(
+                channels,
+                manifest=manifest,
+                correction_config=correction_config,
             )
+            panel_groups = self.step0_output.get("panel_groups") or {}
+            source = "step0_panel"
+            if not panel_groups:
+                panel_groups = {
+                    "markers": {
+                        ch: 0.0
+                        for ch in channels
+                        if ch != nucleus_channel
+                    }
+                }
+                source = "default_all_channels"
+            self.config.all_channels = channels
+            self.config.nuc_combo.clear()
+            self.config.nuc_combo.addItems(channels)
+            self.config.load_panel(panel_groups, nucleus_channel)
+            idx = self.config.nuc_combo.findText(nucleus_channel)
+            if idx >= 0:
+                self.config.nuc_combo.setCurrentIndex(idx)
+            self.config.nuc_row.spin.setValue(0.0)
             self._zero_marker_weights()
+            print(f"[Step1] nucleus_channel={nucleus_channel}")
+            print(f"[Step1] panel_groups source={source}")
+            print(f"[Step1] config panel initialized={bool(self.config._panels)}")
 
         self._stop_all_loaders()
         self._patch_channel_cache.clear()
@@ -613,9 +636,32 @@ class MainWindow(QMainWindow):
         self._on_rois_changed(self._rois)
         self._on_patches(patches)
         self._show_active_roi_preview()
+        print("[Step1] preloading patches...")
         if not auto:
             self.prev_status.setText("Step0 ROI result loaded.")
         self._schedule_step1_session_save()
+
+    @staticmethod
+    def _choose_step1_nucleus_channel(channels, manifest=None, correction_config=None):
+        channels = list(channels or [])
+        manifest = manifest or {}
+        correction_config = correction_config or {}
+        for candidate in (
+            manifest.get("nucleus_channel"),
+            correction_config.get("nucleus_channel"),
+        ):
+            if candidate and candidate in channels:
+                return candidate
+        for candidate in channels:
+            if candidate == "DAPI":
+                return candidate
+        for candidate in channels:
+            if "dapi" in candidate.lower():
+                return candidate
+        for candidate in channels:
+            if "nuc" in candidate.lower():
+                return candidate
+        return channels[0] if channels else ""
 
     def _bootstrap_step1_context_from_disk(self, auto=False):
         """Create the minimum Step1 context from Step0 files on disk.
@@ -1201,6 +1247,7 @@ class MainWindow(QMainWindow):
             rgb = np.stack([grey, grey, grey], axis=-1)
             self.roi_img.setImage(rgb, autoLevels=False)
             self.roi_vb.autoRange()
+            print(f"[Step1] roi preview loaded shape={rgb.shape}")
 
             for idx, patch in enumerate(self._all_patches):
                 if not self._patch_inside_roi_bbox(patch, roi):
@@ -1567,6 +1614,10 @@ class MainWindow(QMainWindow):
         if nuc_ch and nuc_ch in cache and nuc_w > 0:
             nuc = self.fusion._normalize_intensity(cache[nuc_ch]) * float(np.clip(nuc_w, 0.0, 1.0))
             np.clip(nuc, 0.0, 1.0, out=nuc)
+
+        if float(cyto.max()) <= 0.0 and float(nuc.max()) <= 0.0 and nuc_ch and nuc_ch in cache:
+            nuc = self.fusion._normalize_intensity(cache[nuc_ch])
+            self.prev_status.setText("All marker weights are 0. Showing nucleus channel fallback.")
 
         if cyto is None and nuc is None:
             return

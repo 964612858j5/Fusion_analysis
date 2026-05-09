@@ -2544,6 +2544,7 @@ class Step0Page(QWidget):
             "mode": "roi_only",
             "output_dir": os.path.abspath(self.output_dir),
             "raw_ome_path": os.path.abspath(self.ome_path),
+            "nucleus_channel": self.nucleus_channel,
             "corrected_zarr_path": os.path.abspath(corrected_path),
             "correction_config_path": os.path.abspath(corr_path),
             "roi_config_path": os.path.abspath(roi_path),

@@ -40,7 +40,9 @@ from ...core.bg_correction import (
 )
 from ...core.io_loader import OMETIFFLoader
 from ...utils.segmentation_config import (
+    CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     available_segmentation_methods,
     get_segmentation_method_config,
@@ -65,6 +67,7 @@ class SearchCtrlPanel(QWidget):
     run_p2       = pyqtSignal(dict)   # {diameter, flow, prob}
     stop         = pyqtSignal()
     params_ready = pyqtSignal(dict)
+    method_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -97,7 +100,8 @@ class SearchCtrlPanel(QWidget):
         method_lay.addLayout(method_row)
 
         exp_row = QHBoxLayout()
-        exp_row.addWidget(QLabel("expansion_distance:"))
+        self._expand_dist_label = QLabel("expansion_distance:")
+        exp_row.addWidget(self._expand_dist_label)
         self._expand_dist = QDoubleSpinBox()
         self._expand_dist.setRange(0, 200)
         self._expand_dist.setDecimals(1)
@@ -112,10 +116,10 @@ class SearchCtrlPanel(QWidget):
         self._method_hint.setWordWrap(True)
         method_lay.addWidget(self._method_hint)
         lay.addWidget(method_box)
-        self._on_method_changed()
 
         # ── Phase 1 ───────────────────────────────────────────────────
         p1 = QGroupBox("Phase 1 — Auto-diameter preview  (cpsam)")
+        self._p1_box = p1
         p1.setStyleSheet(
             "QGroupBox{border:1px solid #666;border-radius:4px;"
             "font-weight:bold;color:#ccc;font-size:11px;}"
@@ -161,6 +165,7 @@ class SearchCtrlPanel(QWidget):
 
         # ── Phase 2 ───────────────────────────────────────────────────
         p2 = QGroupBox("Phase 2 — Fine search: flow × cellprob")
+        self._p2_box = p2
         p2.setStyleSheet(
             "QGroupBox{border:1px solid #666;border-radius:4px;"
             "font-weight:bold;color:#ccc;font-size:11px;}"
@@ -229,7 +234,8 @@ class SearchCtrlPanel(QWidget):
         lay.addWidget(load_box)
 
         # ── Manual entry ───────────────────────────────────────────────
-        man_box = QGroupBox("Manual entry (skip grid search)")
+        man_box = QGroupBox("Manual / direct method parameters")
+        self._manual_box = man_box
         man_box.setStyleSheet(
             "QGroupBox{border:1px solid #888;border-radius:4px;"
             "font-weight:bold;color:#aaa;font-size:11px;}"
@@ -251,8 +257,27 @@ class SearchCtrlPanel(QWidget):
         r1, self._man_diam  = _spin_row("diameter (px):",  0, 500, 5,   1, 30)
         r2, self._man_flow  = _spin_row("flow_threshold:", 0,   3, 0.05, 2, 0.4)
         r3, self._man_prob  = _spin_row("cellprob_threshold:", -6, 6, 0.1, 2, 0.0)
+        self._cellpose_param_rows = [r1, r2, r3]
         self._man_diam.setSpecialValueText("auto")
         for r in (r1, r2, r3):
+            ml.addLayout(r)
+
+        sd_model_row = QHBoxLayout()
+        sd_model_lbl = QLabel("model_name:")
+        sd_model_lbl.setFixedWidth(130)
+        sd_model_row.addWidget(sd_model_lbl)
+        self._sd_model = QtWidgets.QLineEdit("2D_versatile_fluo")
+        self._sd_model.setStyleSheet("font-size:11px;")
+        sd_model_row.addWidget(self._sd_model)
+        ml.addLayout(sd_model_row)
+
+        r4, self._sd_prob = _spin_row("prob_thresh:", -1, 1, 0.05, 2, -1)
+        r5, self._sd_nms = _spin_row("nms_thresh:", -1, 1, 0.05, 2, -1)
+        r6, self._sd_expand_manual = _spin_row("expand_distance:", 0, 200, 1, 1, 8)
+        self._sd_prob.setSpecialValueText("auto")
+        self._sd_nms.setSpecialValueText("auto")
+        self._stardist_param_rows = [sd_model_row, r4, r5, r6]
+        for r in (r4, r5, r6):
             ml.addLayout(r)
 
         self.btn_use_manual = QPushButton("✓ Use These Params")
@@ -264,6 +289,7 @@ class SearchCtrlPanel(QWidget):
         self.btn_use_manual.clicked.connect(self._use_manual_params)
         ml.addWidget(self.btn_use_manual)
         lay.addWidget(man_box)
+        self._on_method_changed()
 
         # ── Progress ──────────────────────────────────────────────────
         self.pbar = QProgressBar()
@@ -301,12 +327,18 @@ class SearchCtrlPanel(QWidget):
             return []
 
     def _emit_p1(self):
+        if self._method_combo.currentData() != CELLPOSE_WHOLECELL_FUSION:
+            QMessageBox.information(self, "Segmentation mode", "Phase 1 is only used for Cellpose whole-cell (Fusion + DAPI).")
+            return
         override = self._p1_override.value()
         # None = auto (diameter=0 in spinbox), positive = manual override
         diam = None if override <= 0 else override
         self.run_p1.emit([diam])
 
     def _emit_p2(self):
+        if self._method_combo.currentData() != CELLPOSE_WHOLECELL_FUSION:
+            QMessageBox.information(self, "Segmentation mode", "Phase 2 is only used for Cellpose whole-cell (Fusion + DAPI).")
+            return
         if not self._p2_diam_set:
             QMessageBox.warning(
                 self, "Info",
@@ -397,8 +429,9 @@ class SearchCtrlPanel(QWidget):
         self.btn_p2.setEnabled(True)
 
     def set_running(self, running):
-        self.btn_p1.setEnabled(not running)
-        self.btn_p2.setEnabled(not running and self._p2_diam_set)
+        is_whole = self._method_combo.currentData() == CELLPOSE_WHOLECELL_FUSION
+        self.btn_p1.setEnabled(not running and is_whole)
+        self.btn_p2.setEnabled(not running and self._p2_diam_set and is_whole)
         self.btn_stop.setEnabled(running)
 
     def update_progress(self, done, total, msg):
@@ -408,6 +441,7 @@ class SearchCtrlPanel(QWidget):
 
     def get_current_params(self):
         """Return spinbox values regardless of source."""
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
@@ -417,23 +451,59 @@ class SearchCtrlPanel(QWidget):
             "cellprob_threshold": cp,
         }
         params.update(self.get_selected_method_config())
-        return params
+        return normalize_segmentation_config(params)
 
     def get_selected_method_config(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         cfg = get_segmentation_method_config(method)
         params = dict(cfg.get("params") or {})
+        if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
+            params["model_name"] = self._sd_model.text().strip() or "2D_versatile_fluo"
+            params["prob_thresh"] = None if self._sd_prob.value() < 0 else self._sd_prob.value()
+            params["nms_thresh"] = None if self._sd_nms.value() < 0 else self._sd_nms.value()
         if method == STARDIST_NUCLEI_EXPANSION:
-            params["expand_distance"] = self._expand_dist.value()
+            params["expand_distance"] = self._sd_expand_manual.value()
         return {"method": method, "params": params}
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         cfg = get_segmentation_method_config(method)
+        is_whole = method == CELLPOSE_WHOLECELL_FUSION
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+        is_expansion = method == STARDIST_NUCLEI_EXPANSION
+        self._p1_box.setVisible(is_whole)
+        self._p2_box.setVisible(is_whole)
+        self.btn_p2.setEnabled(is_whole and self._p2_diam_set)
+        for row in self._cellpose_param_rows:
+            for i in range(row.count()):
+                w = row.itemAt(i).widget()
+                if w:
+                    w.setVisible(is_cellpose)
+        for row in self._stardist_param_rows:
+            visible = is_stardist
+            if row is self._stardist_param_rows[-1]:
+                visible = is_expansion
+            for i in range(row.count()):
+                w = row.itemAt(i).widget()
+                if w:
+                    w.setVisible(visible)
         self._expand_dist.setEnabled(method == STARDIST_NUCLEI_EXPANSION)
+        self._expand_dist.setVisible(False)
+        self._expand_dist_label.setVisible(False)
         self._method_hint.setText(
             f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
         )
+        workflow = {
+            CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
+            CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
+            STARDIST_NUCLEI_DAPI: "stardist",
+            STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
+        }.get(method, "unknown")
+        print(f"[Step1] segmentation mode selected={method}")
+        print(f"[Step1] workflow={workflow}")
+        print(f"[Step1] phase1_required={is_whole}")
+        self.method_changed.emit(method)
 
 
 # ══════════════════════════════════════════════════════════════════════

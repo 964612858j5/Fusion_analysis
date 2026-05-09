@@ -222,6 +222,8 @@ class SegmentMergeWorker(QThread):
         logger.info(f"result output_dir: {self.output_dir}")
         logger.info(f"Grid: {self.n_rows}×{self.n_cols}  overlap={self.overlap_px}px")
         logger.info(f"Segmentation config: {self.seg_config}")
+        logger.info(f"[Step2] segmentation method={self.seg_config.get('method')}")
+        logger.info(f"[Step2] input_type={self.seg_config.get('input_type')}")
         return logger, log_path
 
     @staticmethod

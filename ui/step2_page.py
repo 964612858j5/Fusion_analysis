@@ -709,6 +709,9 @@ class Step2Page(QWidget):
             recovery_npy_dir = recovery_dir,
             rois             = self._rois if self._rois else None,
         )
+        seg_cfg = self.get_seg_config()
+        print(f"[Step2] segmentation method={seg_cfg.get('method')}")
+        print(f"[Step2] input_type={seg_cfg.get('input_type')}")
         self._worker.progress.connect(self._on_progress)
         self._worker.tile_done.connect(self._on_tile_done)
         self._worker.finished.connect(self._on_finished)

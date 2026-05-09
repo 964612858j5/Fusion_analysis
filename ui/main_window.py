@@ -30,7 +30,10 @@ from ..config import (
 from ..core.fusion_engine import FusionEngine
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
+    CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_DAPI,
+    STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
 )
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
@@ -325,6 +328,7 @@ class MainWindow(QMainWindow):
         self.search.run_p2.connect(self._run_p2)
         self.search.stop.connect(self._stop)
         self.search.params_ready.connect(self._on_params_ready)
+        self.search.method_changed.connect(self._on_step1_segmentation_mode_changed)
         right.addWidget(self.search)
 
         self.result_grid = ResultGridPanel()
@@ -1052,6 +1056,17 @@ class MainWindow(QMainWindow):
             )
             self._step2._fusion_config_path = self.step1_output.get("fusion_config_path")
             cfg_path = self.step1_output.get("fusion_config_path")
+            seg_cfg_path = os.path.join(self.step1_output.get("output_dir", OUTPUT_DIR), "segmentation_config.json")
+            if os.path.exists(seg_cfg_path):
+                try:
+                    with open(seg_cfg_path, "r", encoding="utf-8") as f:
+                        seg_cfg = normalize_segmentation_config(json.load(f))
+                    if hasattr(self._step2, "_apply_seg_config_to_ui"):
+                        self._step2._apply_seg_config_to_ui(seg_cfg)
+                    print(f"[Step2] segmentation method={seg_cfg.get('method')}")
+                    print(f"[Step2] input_type={seg_cfg.get('input_type')}")
+                except Exception:
+                    print(f"[Step2] failed to load segmentation_config.json:\n{traceback.format_exc()}")
             if cfg_path:
                 self._step2._zarr_info.setText(
                     (self._step2._zarr_info.text() or "") +
@@ -1831,6 +1846,35 @@ class MainWindow(QMainWindow):
         self._check_save_unlock()
         self._schedule_step1_session_save()
 
+    def _on_step1_segmentation_mode_changed(self, method):
+        method = method or CELLPOSE_WHOLECELL_FUSION
+        is_whole = method == CELLPOSE_WHOLECELL_FUSION
+        workflow = {
+            CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
+            CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
+            STARDIST_NUCLEI_DAPI: "stardist",
+            STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
+        }.get(method, "unknown")
+        print(f"[Step1] segmentation mode selected={method}")
+        print(f"[Step1] workflow={workflow}")
+        print(f"[Step1] phase1_required={is_whole}")
+
+        self.config.setVisible(is_whole)
+        self.result_grid.setVisible(is_whole)
+        if is_whole:
+            self.btn_save.setText("💾  Save Config  &  Generate fused.zarr")
+            if self._p2_params is not None and self._p2_params.get("method") != CELLPOSE_WHOLECELL_FUSION:
+                self._p2_params = None
+                self._params_source = None
+                self.btn_save.setEnabled(False)
+                self._fusion_bar_widget.setVisible(False)
+        else:
+            self.btn_save.setText("💾  Save segmentation config  &  Generate DAPI input zarr")
+            self._p2_params = self.search.get_current_params()
+            self._params_source = "direct_method"
+            self._check_save_unlock()
+        self._schedule_step1_session_save()
+
     def _on_param_sel(self, params):
         if params.get("_phase") == 1:
             # Auto-unlock Phase 2 with the diameter used in Phase 1
@@ -1858,11 +1902,19 @@ class MainWindow(QMainWindow):
             d  = self._p2_params.get("diameter", "auto")
             fl = self._p2_params.get("flow_threshold", 0.4)
             cp = self._p2_params.get("cellprob_threshold", 0.0)
-            self._fusion_lbl.setText(
-                f"Params ready ({src_lbl})  "
-                f"diam={d}  flow={fl}  prob={cp}  "
-                f"→ click Save to generate fused.zarr"
-            )
+            method = self._p2_params.get("method", CELLPOSE_WHOLECELL_FUSION)
+            if method == CELLPOSE_WHOLECELL_FUSION:
+                msg = (
+                    f"Params ready ({src_lbl})  "
+                    f"diam={d}  flow={fl}  prob={cp}  "
+                    f"→ click Save to generate fused.zarr"
+                )
+            else:
+                msg = (
+                    f"Params ready ({src_lbl})  method={method}  "
+                    f"→ click Save to generate DAPI input zarr"
+                )
+            self._fusion_lbl.setText(msg)
             self._fusion_bar_widget.setVisible(True)
 
     # ── Lock / unlock UI during fusion ──────────────────────────────
@@ -1892,7 +1944,12 @@ class MainWindow(QMainWindow):
 
     def _on_fusion_done(self, zarr_path):
         self._fusion_pbar.setValue(100)
-        self._fusion_lbl.setText(f"✓  Fusion complete → {zarr_path}")
+        method = CELLPOSE_WHOLECELL_FUSION
+        if self._p2_params:
+            method = self._p2_params.get("method", CELLPOSE_WHOLECELL_FUSION)
+        is_wholecell = method == CELLPOSE_WHOLECELL_FUSION
+        result_name = "Fusion" if is_wholecell else "DAPI input zarr"
+        self._fusion_lbl.setText(f"✓  {result_name} complete → {zarr_path}")
         self._fused_zarr_path = zarr_path
         self.step1_output = {
             "fusion_config_path": os.path.join(OUTPUT_DIR, "fusion_config.json"),
@@ -1916,8 +1973,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         QMessageBox.information(
-            self, "Fusion complete",
-            f"{'ROI' if self._rois else 'Full WSI'} fusion done  "
+            self, f"{result_name} complete",
+            f"{'ROI' if self._rois else 'Full WSI'} {result_name.lower()} done  "
             f"({n_zarrs} zarr(s))\n\n"
             f"First zarr → {zarr_path}\n\n"
             f"Click  [Next → Step 2]  to proceed to segmentation."
@@ -1932,6 +1989,10 @@ class MainWindow(QMainWindow):
     # ── Save ────────────────────────────────────────────────────────
 
     def _save(self):
+        current_method = self.search._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        if self._p2_params is None and current_method != CELLPOSE_WHOLECELL_FUSION:
+            self._p2_params = self.search.get_current_params()
+            self._params_source = "direct_method"
         if self._p2_params is None:
             # Give user a hint about all three ways to get params
             QMessageBox.warning(
@@ -1994,11 +2055,19 @@ class MainWindow(QMainWindow):
         print(f"[Save] {fp1}")
         print(f"[Save] {fp2}")
         print(f"[Save] {fp_seg}")
+        print(f"[Step1] saved segmentation_config={fp_seg}")
 
         # ── Tile selection dialog ─────────────────────────────────────
         # Count active channels for RAM estimate
-        active_ch = set([fcfg["nucleus"]["channel"]])
-        for gdata in fcfg["groups"].values():
+        is_wholecell = selected_method == CELLPOSE_WHOLECELL_FUSION
+        worker_fcfg = dict(fcfg)
+        if not is_wholecell:
+            nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nuc_combo.currentText()
+            worker_fcfg = dict(fcfg)
+            worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
+            worker_fcfg["groups"] = {}
+        active_ch = set([worker_fcfg["nucleus"]["channel"]])
+        for gdata in worker_fcfg["groups"].values():
             active_ch.update(gdata["channels"].keys())
         n_channels = len([ch for ch in active_ch if ch in self.loader.ch_map])
 
@@ -2030,7 +2099,7 @@ class MainWindow(QMainWindow):
         # ── Start FullFusionWorker ────────────────────────────────────
         self._fusion_worker = FullFusionWorker(
             loader     = self.loader,
-            fusion_cfg = fcfg,
+            fusion_cfg = worker_fcfg,
             n_rows     = n_rows,
             n_cols     = n_cols,
             rois       = self._rois if self._rois else None,
@@ -2042,8 +2111,9 @@ class MainWindow(QMainWindow):
         self._lock_ui()
         self._fusion_bar_widget.setVisible(True)
         self._fusion_pbar.setValue(0)
+        job_name = "fusion" if is_wholecell else "DAPI input zarr"
         self._fusion_lbl.setText(
-            f"Starting fusion  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
+            f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
         )
         self._fusion_worker.start()
 

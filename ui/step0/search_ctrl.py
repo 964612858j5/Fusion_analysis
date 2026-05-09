@@ -882,6 +882,9 @@ class WsiCorrectionWorker(QThread):
             os.makedirs(self.output_dir, exist_ok=True)
             root = zarr.open_group(zarr_path, mode="w")
             root.attrs["mode"] = "roi_only"
+            root.attrs["source_ome"] = os.path.abspath(getattr(self.loader, "filepath", "") or "")
+            root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+            root.attrs["created_by"] = "Step0"
             root.attrs["roi_names"] = [str(r.get("name") or f"ROI_{i}") for i, r in enumerate(rois, start=1)]
             root.attrs["correction_config"] = self.correction_config
             corrected_decisions = {}
@@ -932,6 +935,7 @@ class WsiCorrectionWorker(QThread):
                 group = root.create_group(info["group_name"], overwrite=True)
                 group.attrs["roi_name"] = info["roi_name"]
                 group.attrs["bbox_fullres"] = info["bbox"]
+                group.attrs["shape"] = [int(roi_h), int(roi_w)]
                 if info["polygon_fullres"] is not None:
                     group.attrs["polygon_fullres"] = info["polygon_fullres"]
                 roi_y0, roi_y1, roi_x0, roi_x1 = info["bbox"]

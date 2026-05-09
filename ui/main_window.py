@@ -457,6 +457,7 @@ class MainWindow(QMainWindow):
         self._set_step_active(1)
 
     def _load_step0_roi_result(self, _checked=False, auto=False):
+        global OME_TIFF_FILE, OUTPUT_DIR
         print("[Step1] loading Step0 ROI result")
         if self.loader is None:
             if not self._bootstrap_step1_context_from_disk(auto=auto):
@@ -470,14 +471,41 @@ class MainWindow(QMainWindow):
                 return
 
         out_dir = self.step0_output.get("output_dir") or OUTPUT_DIR
+        manifest_path = os.path.join(out_dir, "step0_roi_result.json")
+        manifest = {}
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                out_dir = manifest.get("output_dir") or out_dir
+            except Exception as e:
+                print(f"[Step1] failed to load step0_roi_result.json: {e}")
+        print(f"[Step1] manifest found={bool(manifest)}")
+
+        raw_ome = manifest.get("raw_ome_path")
+        if raw_ome and os.path.exists(raw_ome) and (
+            self.loader is None or getattr(self.loader, "filepath", "") != raw_ome
+        ):
+            try:
+                OME_TIFF_FILE = raw_ome
+                OUTPUT_DIR = out_dir
+                self.loader = OMETIFFLoader(raw_ome)
+                self.step0_output["loader"] = self.loader
+                self.step0_output["ome_tiff_path"] = raw_ome
+            except Exception:
+                print(f"[Step1] failed to load raw OME from manifest:\n{traceback.format_exc()}")
+
         corr_path = (
-            self.step0_output.get("corrected_zarr_path")
+            manifest.get("corrected_zarr_path")
+            or self.step0_output.get("corrected_zarr_path")
             or self._corrected_zarr_path
             or os.path.join(out_dir, "corrected_channels.zarr")
         )
-        cfg_path = os.path.join(out_dir, "correction_config.json")
-        roi_path = os.path.join(out_dir, "roi_config.json")
-        patch_path = os.path.join(out_dir, "patch_config.json")
+        cfg_path = manifest.get("correction_config_path") or os.path.join(out_dir, "correction_config.json")
+        roi_path = manifest.get("roi_config_path") or os.path.join(out_dir, "roi_config.json")
+        patch_path = manifest.get("patch_config_path") or os.path.join(out_dir, "patch_config.json")
+        print(f"[Step1] raw_ome={getattr(self.loader, 'filepath', raw_ome or '')}")
+        print(f"[Step1] corrected_zarr={corr_path}")
 
         correction_config = self.step0_output.get("correction_config")
         if os.path.exists(cfg_path):
@@ -542,13 +570,18 @@ class MainWindow(QMainWindow):
             try:
                 with open(patch_path, "r", encoding="utf-8") as f:
                     patch_cfg = json.load(f)
-                patches = [
-                    tuple(item.get("coords", item))
-                    for item in patch_cfg
-                    if isinstance(item, (dict, list, tuple))
-                ]
+                patches = []
+                for item in patch_cfg:
+                    if isinstance(item, dict):
+                        coords = item.get("coords") or item.get("bbox_fullres")
+                    else:
+                        coords = item
+                    if coords and len(coords) == 4:
+                        patches.append(tuple(int(v) for v in coords))
             except Exception as e:
                 print(f"[Step1] failed to load patch_config.json: {e}")
+        print(f"[Step1] rois={len(rois or [])}")
+        print(f"[Step1] patches={len(patches or [])}")
         if self._active_roi:
             patches = self._filter_patches_to_roi(patches, self._active_roi)
             print(f"[Step1] active_roi={self._active_roi.get('name', 'ROI_1')}")
@@ -618,8 +651,19 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return False
 
+        manifest = {}
+        manifest_path = os.path.join(out_dir, "step0_roi_result.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                out_dir = manifest.get("output_dir") or out_dir
+            except Exception as e:
+                print(f"[Step1] failed to load step0_roi_result.json during bootstrap: {e}")
+
         ome_candidates = []
         for p in (
+            manifest.get("raw_ome_path"),
             self._ome_path_edit.text().strip() if hasattr(self, "_ome_path_edit") else "",
             OME_TIFF_FILE,
         ):
@@ -657,7 +701,7 @@ class MainWindow(QMainWindow):
             "output_dir": out_dir,
             "ome_tiff_path": ome_path,
             "loader": self.loader,
-            "corrected_zarr_path": os.path.join(out_dir, "corrected_channels.zarr"),
+            "corrected_zarr_path": manifest.get("corrected_zarr_path") or os.path.join(out_dir, "corrected_channels.zarr"),
         }
         self.step0_done = True
         self._step2._out_edit.setText(out_dir)

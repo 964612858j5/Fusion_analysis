@@ -11,6 +11,7 @@ import multiprocessing as mp
 from queue import Empty
 
 import numpy as np
+import zarr
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer, QRectF, QThread, pyqtSignal
@@ -2343,10 +2344,9 @@ class Step0Page(QWidget):
         self.rois = rois
 
         if not corrected:
-            if os.path.exists(zarr_path):
-                shutil.rmtree(zarr_path, ignore_errors=True)
+            self._ensure_empty_corrected_zarr(zarr_path, rois)
             self.loader.set_corrected_zarr_store(None, {})
-            self._emit_complete(config, "", {})
+            self._emit_complete(config, zarr_path, {})
             return
 
         self._btn_continue.setEnabled(False)
@@ -2397,34 +2397,193 @@ class Step0Page(QWidget):
         QMessageBox.critical(self, "Background Correction Error", msg)
         print(f"[Step0 WSI Error]\n{msg}")
 
+    @staticmethod
+    def _clean_correction_config(config):
+        cfg = dict(config or {})
+        params = dict(cfg.get("method_params") or {})
+        decisions = {}
+        for ch, method in (cfg.get("channel_decisions") or {}).items():
+            m = str(method).strip().lower()
+            if m == "both":
+                m = "original"
+            if m not in {"tophat", "cucim", "original"}:
+                m = "original"
+            decisions[str(ch)] = m
+        return {
+            "method_params": {
+                "tophat_radius": int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)),
+                "cucim_sigma": int(params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT)),
+            },
+            "channel_decisions": decisions,
+        }
+
+    @staticmethod
+    def _roi_shape_from_bbox(bbox):
+        if not bbox or len(bbox) != 4:
+            return [0, 0]
+        y0, y1, x0, x1 = [int(v) for v in bbox]
+        return [max(0, y1 - y0), max(0, x1 - x0)]
+
+    def _standard_rois(self):
+        src = list(self.overview._rois if self.overview else self.rois)
+        rois = []
+        for idx, roi in enumerate(src, start=1):
+            bbox = list(roi.get("bbox_fullres") or [])
+            item = {
+                "name": str(roi.get("name") or f"ROI_{idx}"),
+                "bbox_fullres": [int(v) for v in bbox] if len(bbox) == 4 else [],
+                "polygon_fullres": roi.get("polygon_fullres") or [],
+                "shape": self._roi_shape_from_bbox(bbox),
+            }
+            if "color" in roi:
+                item["color"] = roi.get("color")
+            if "polygon_display" in roi:
+                item["polygon_display"] = roi.get("polygon_display")
+            rois.append(item)
+        return rois
+
+    @staticmethod
+    def _patch_roi_name(patch, rois):
+        y0, y1, x0, x1 = [int(v) for v in patch]
+        cy = (y0 + y1) / 2.0
+        cx = (x0 + x1) / 2.0
+        for roi in rois:
+            bbox = roi.get("bbox_fullres") or []
+            if len(bbox) != 4:
+                continue
+            ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
+            if ry0 <= cy <= ry1 and rx0 <= cx <= rx1:
+                return roi.get("name", "ROI_1"), [ry0, ry1, rx0, rx1]
+        if rois:
+            bbox = rois[0].get("bbox_fullres") or [0, 0, 0, 0]
+            return rois[0].get("name", "ROI_1"), [int(v) for v in bbox]
+        return "", [0, 0, 0, 0]
+
+    def _standard_patches(self, rois):
+        patches = []
+        raw_patches = list(self.overview._patches if self.overview else [])
+        if not raw_patches:
+            raw_patches = [{"coords": p} for p in self.patches]
+        for idx, patch_obj in enumerate(raw_patches, start=1):
+            coords = patch_obj.get("coords") if isinstance(patch_obj, dict) else patch_obj
+            if not coords or len(coords) != 4:
+                continue
+            y0, y1, x0, x1 = [int(v) for v in coords]
+            roi_name, roi_bbox = self._patch_roi_name((y0, y1, x0, x1), rois)
+            ry0, _, rx0, _ = roi_bbox
+            patches.append({
+                "name": f"P{idx}",
+                "roi_name": roi_name,
+                "bbox_fullres": [y0, y1, x0, x1],
+                "bbox_local": [y0 - ry0, y1 - ry0, x0 - rx0, x1 - rx0],
+                "coords": [y0, y1, x0, x1],
+            })
+        return patches
+
+    def _ensure_empty_corrected_zarr(self, zarr_path, rois):
+        if os.path.exists(zarr_path):
+            shutil.rmtree(zarr_path, ignore_errors=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        root = zarr.open_group(zarr_path, mode="w")
+        root.attrs["mode"] = "roi_only"
+        root.attrs["source_ome"] = os.path.abspath(self.ome_path)
+        root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+        root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
+        root.attrs["created_by"] = "Step0"
+        for idx, roi in enumerate(rois, start=1):
+            name = str(roi.get("name") or f"ROI_{idx}")
+            group = root.create_group(name, overwrite=True)
+            group.attrs["roi_name"] = name
+            group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
+            group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
+            group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
+
+    def _write_step0_handoff(self, config, zarr_path):
+        os.makedirs(self.output_dir, exist_ok=True)
+        config = self._clean_correction_config(config)
+        rois = self._standard_rois()
+        patches = self._standard_patches(rois)
+        corr_path = os.path.join(self.output_dir, "correction_config.json")
+        roi_path = os.path.join(self.output_dir, "roi_config.json")
+        patch_path = os.path.join(self.output_dir, "patch_config.json")
+        corrected_path = zarr_path or os.path.join(self.output_dir, "corrected_channels.zarr")
+        manifest_path = os.path.join(self.output_dir, "step0_roi_result.json")
+
+        print("[Step0] writing Step0 ROI handoff")
+        with open(corr_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        with open(roi_path, "w", encoding="utf-8") as f:
+            json.dump(rois, f, indent=2, ensure_ascii=False)
+        with open(patch_path, "w", encoding="utf-8") as f:
+            json.dump(patches, f, indent=2, ensure_ascii=False)
+
+        if not os.path.exists(corrected_path):
+            self._ensure_empty_corrected_zarr(corrected_path, rois)
+
+        if os.path.exists(corrected_path):
+            try:
+                root = zarr.open_group(corrected_path, mode="a")
+                root.attrs["mode"] = "roi_only"
+                root.attrs["source_ome"] = os.path.abspath(self.ome_path)
+                root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+                root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
+                root.attrs["created_by"] = "Step0"
+                for roi in rois:
+                    name = str(roi.get("name") or "")
+                    if name and name in root:
+                        group = root[name]
+                        group.attrs["roi_name"] = name
+                        group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
+                        group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
+                        group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
+            except Exception as e:
+                print(f"[Step0] failed to update corrected zarr attrs: {e}")
+
+        manifest = {
+            "version": "v5_step0_roi_handoff_1",
+            "mode": "roi_only",
+            "output_dir": os.path.abspath(self.output_dir),
+            "raw_ome_path": os.path.abspath(self.ome_path),
+            "corrected_zarr_path": os.path.abspath(corrected_path),
+            "correction_config_path": os.path.abspath(corr_path),
+            "roi_config_path": os.path.abspath(roi_path),
+            "patch_config_path": os.path.abspath(patch_path),
+            "active_roi": rois[0]["name"] if rois else "",
+            "n_rois": len(rois),
+            "n_patches": len(patches),
+        }
+        manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        print(f"[Step0] correction_config={corr_path}")
+        print(f"[Step0] roi_config={roi_path}")
+        print(f"[Step0] patch_config={patch_path}")
+        print(f"[Step0] corrected_zarr={corrected_path}")
+        print(f"[Step0] step0_roi_result={manifest_path}")
+        return config, rois, patches, manifest
+
     def _emit_complete(self, config, zarr_path, decisions):
         self._btn_continue.setEnabled(True)
         self._btn_load.setEnabled(True)
-        # 自动静默保存 ROI 到 output_dir
         try:
-            roi_path = os.path.join(self.output_dir, "roi_config.json")
-            patch_path = os.path.join(self.output_dir, "patch_config.json")
-            os.makedirs(self.output_dir, exist_ok=True)
-            data = [{k: v for k, v in r.items() if k != "patch_indices"}
-                    for r in (self.overview._rois if self.overview else [])]
-            with open(roi_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            patch_data = list(self.overview._patches if self.overview else [])
-            with open(patch_path, 'w', encoding='utf-8') as f:
-                json.dump(patch_data, f, indent=2, ensure_ascii=False)
+            config, rois, patches, manifest = self._write_step0_handoff(config, zarr_path)
         except Exception as e:
+            rois = list(self.rois)
+            patches = [{"coords": p} for p in self.patches]
+            manifest = {}
             print(f"[Step0] Auto-save ROI failed: {e}")
         payload = {
             "loader": self.loader,
             "patches": list(self.patches),
-            "rois": list(self.rois),
+            "rois": list(rois),
             "correction_config": config,
-            "corrected_zarr_path": zarr_path,
+            "corrected_zarr_path": manifest.get("corrected_zarr_path", zarr_path),
             "output_dir": self.output_dir,
             "ome_tiff_path": self.ome_path,
             "panel_csv_path": self.panel_csv_path,
             "panel_groups": dict(self.panel_groups),
             "panel_nucleus": self.nucleus_channel,
             "corrected_decisions": dict(decisions),
+            "step0_manifest_path": manifest.get("step0_roi_result_path", os.path.join(self.output_dir, "step0_roi_result.json")),
         }
         self.step0_complete.emit(payload)

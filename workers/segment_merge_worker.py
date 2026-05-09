@@ -5,6 +5,7 @@ block01/workers/segment_merge_worker.py — Tile-based segmentation + merge work
 import os
 import gc
 import json
+import shutil
 import traceback
 import logging
 import threading
@@ -16,10 +17,23 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from ..utils.segmentation_config import (
+    CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_DAPI,
+    STARDIST_NUCLEI_EXPANSION,
+    normalize_segmentation_config,
+)
+from ..utils.segmentation_registry import (
+    create_result_dir,
+    register_legacy_result,
+    upsert_result,
+)
+
 
 class SegmentMergeWorker(QThread):
     """
-    Runs Cellpose tile-by-tile on fused.zarr, then streams results into
+    Runs segmentation tile-by-tile on fused.zarr, then streams results into
     a global numpy memmap (no intermediate .npy files in normal mode).
 
     Tile ownership:
@@ -29,10 +43,7 @@ class SegmentMergeWorker(QThread):
       cell is counted exactly once and no cell is truncated.
 
     Output:
-      <output_dir>/global_mask.dat       — numpy memmap uint32
-      <output_dir>/global_mask.ome.tiff  — OME-TIFF (for QuPath)
-      <output_dir>/global_mask.zarr      — zarr (for downstream)
-      <output_dir>/segmentation_meta.json
+      <project_output_dir>/segmentation_results/<timestamp>_<method>/...
     """
 
     tile_done  = pyqtSignal(int, int, int)   # tile_idx, n_tiles, n_cells_this_tile
@@ -40,24 +51,121 @@ class SegmentMergeWorker(QThread):
     finished   = pyqtSignal(str, int)        # output_dir, total_cells
     error      = pyqtSignal(str)
 
-    def __init__(self, zarr_path, cp_params, n_rows, n_cols,
-                 overlap_px, output_dir, recovery_npy_dir=None, rois=None):
+    def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
+                 overlap_px=200, output_dir=None, recovery_npy_dir=None,
+                 rois=None, cp_params=None):
         super().__init__()
         self.zarr_path        = zarr_path
-        self.cp_params        = cp_params
+        self.seg_config       = normalize_segmentation_config(seg_config if seg_config is not None else cp_params)
+        self.method           = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         self.n_rows           = n_rows
         self.n_cols           = n_cols
         self.overlap_px       = overlap_px
-        self.output_dir       = output_dir
+        self.project_output_dir = os.path.abspath(output_dir or os.getcwd())
+        self.result_id, self.output_dir, self.created_at = create_result_dir(
+            self.project_output_dir, self.method
+        )
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
         self._stop            = False
         self._logger          = None
         self._mem_timer       = None
+        self._last_region_meta = None
 
     @staticmethod
     def _abs(path):
         return os.path.abspath(path) if path else path
+
+    def _project_path(self, *parts):
+        return os.path.join(self.project_output_dir, *parts)
+
+    def _write_segmentation_config(self):
+        path = os.path.join(self.output_dir, "segmentation_config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.seg_config, f, indent=2)
+        return path
+
+    def _multichannel_source_path(self):
+        candidates = [
+            self._project_path("corrected_channels.zarr"),
+            os.path.join(os.path.dirname(self.project_output_dir), "corrected_channels.zarr"),
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                return self._abs(path)
+        return ""
+
+    def _register_completed_result(self, summary_meta):
+        config_path = os.path.join(self.output_dir, "segmentation_config.json")
+        meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
+        method = self.seg_config.get("method", self.method)
+        display_name = self.seg_config.get("display_name", method)
+
+        mask_path = summary_meta.get("ome_tiff") or summary_meta.get("mask_path") or ""
+        dapi_path = summary_meta.get("global_dapi") or summary_meta.get("dapi_path") or ""
+        fusion_path = (
+            summary_meta.get("fused_zarr_path")
+            or summary_meta.get("input_zarr")
+            or summary_meta.get("source_zarr")
+            or self.zarr_path
+        )
+        rois = summary_meta.get("rois") or []
+        if rois:
+            first = rois[0]
+            mask_path = first.get("ome_tiff") or first.get("mask_path") or mask_path
+            dapi_path = first.get("global_dapi") or first.get("dapi_path") or dapi_path
+            fusion_path = first.get("fused_zarr_path") or first.get("input_zarr") or fusion_path
+
+        entry = {
+            "result_id": self.result_id,
+            "method": method,
+            "display_name": display_name,
+            "created_at": self.created_at,
+            "status": "completed",
+            "mask_path": self._abs(mask_path) if mask_path else "",
+            "dapi_path": self._abs(dapi_path) if dapi_path else "",
+            "fusion_path": self._abs(fusion_path) if fusion_path else "",
+            "multichannel_source_path": self._multichannel_source_path(),
+            "config_path": self._abs(config_path),
+            "meta_path": self._abs(meta_path),
+            "output_dir": self._abs(self.output_dir),
+            "notes": "",
+        }
+        upsert_result(self.project_output_dir, entry)
+        return entry
+
+    def _make_alias(self, source_path, alias_name):
+        if not source_path or not os.path.exists(source_path):
+            return ""
+        dst = os.path.join(self.output_dir, alias_name)
+        if os.path.lexists(dst):
+            return self._abs(dst)
+        try:
+            rel = os.path.relpath(source_path, os.path.dirname(dst))
+            os.symlink(rel, dst, target_is_directory=os.path.isdir(source_path))
+        except Exception:
+            if os.path.isdir(source_path):
+                shutil.copytree(source_path, dst)
+            else:
+                shutil.copy2(source_path, dst)
+        return self._abs(dst)
+
+    def _write_roi_canonical_aliases(self, roi_meta_all):
+        """Expose first ROI result under standard names for legacy readers."""
+        if not roi_meta_all:
+            return
+        first = roi_meta_all[0]
+        mask_alias = self._make_alias(first.get("ome_tiff") or first.get("mask_path"), "global_mask.ome.tiff")
+        dapi_alias = self._make_alias(first.get("global_dapi") or first.get("dapi_path"), "global_dapi.ome.tiff")
+        zarr_alias = self._make_alias(first.get("zarr_path"), "global_mask.zarr")
+        if mask_alias:
+            first["mask_path"] = mask_alias
+            first["ome_tiff"] = mask_alias
+        if dapi_alias:
+            first["dapi_path"] = dapi_alias
+            first["global_dapi"] = dapi_alias
+        if zarr_alias:
+            first["zarr_path"] = zarr_alias
 
     def stop(self):
         self._stop = True
@@ -109,8 +217,11 @@ class SegmentMergeWorker(QThread):
 
         logger.info(f"Log file: {log_path}")
         logger.info(f"zarr: {self.zarr_path}")
+        logger.info(f"project output_dir: {self.project_output_dir}")
+        logger.info(f"result_id: {self.result_id}")
+        logger.info(f"result output_dir: {self.output_dir}")
         logger.info(f"Grid: {self.n_rows}×{self.n_cols}  overlap={self.overlap_px}px")
-        logger.info(f"Cellpose params: {self.cp_params}")
+        logger.info(f"Segmentation config: {self.seg_config}")
         return logger, log_path
 
     @staticmethod
@@ -170,6 +281,76 @@ class SegmentMergeWorker(QThread):
         return np.array(z[y0:y1, x0:x1, 1])
 
     @staticmethod
+    def _normalize01(arr):
+        arr = np.asarray(arr, dtype=np.float32)
+        nz = arr[arr > 0]
+        if nz.size > 100:
+            lo, hi = np.percentile(nz, [1.0, 99.8])
+            if hi > lo:
+                return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+        vmax = float(arr.max()) if arr.size else 0.0
+        if vmax > 0:
+            return np.clip(arr / vmax, 0.0, 1.0)
+        return np.zeros_like(arr, dtype=np.float32)
+
+    def _init_segmentation_backend(self, use_gpu, device):
+        method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+            from cellpose import models as cp_models
+            return {"cellpose": cp_models.CellposeModel(device=device)}
+        if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
+            from stardist.models import StarDist2D
+            model_name = self.seg_config.get("model_name", "2D_versatile_fluo")
+            return {"stardist": StarDist2D.from_pretrained(model_name)}
+        raise ValueError(f"Unknown segmentation method: {method}")
+
+    def _segment_tile(self, tile_data, backend):
+        """Return a uint32 label mask for one read tile."""
+        method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
+        tile_f32 = tile_data.astype(np.float32) / 65535.0
+
+        if method == CELLPOSE_WHOLECELL_FUSION:
+            masks, _, _ = backend["cellpose"].eval(
+                tile_f32,
+                diameter=self.seg_config.get("diameter"),
+                flow_threshold=self.seg_config.get("flow_threshold", 0.4),
+                cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
+                min_size=self.seg_config.get("min_size", 15),
+                do_3D=False,
+            )
+            return masks.astype(np.uint32)
+
+        dapi = np.ascontiguousarray(tile_f32[:, :, 1])
+        if method == CELLPOSE_NUCLEI_DAPI:
+            masks, _, _ = backend["cellpose"].eval(
+                dapi,
+                diameter=self.seg_config.get("diameter"),
+                flow_threshold=self.seg_config.get("flow_threshold", 0.4),
+                cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
+                min_size=self.seg_config.get("min_size", 15),
+                do_3D=False,
+            )
+            return masks.astype(np.uint32)
+
+        if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
+            from csbdeep.utils import normalize as stardist_normalize
+            img = stardist_normalize(dapi, 1, 99.8, axis=(0, 1))
+            kwargs = {}
+            if self.seg_config.get("prob_thresh") is not None:
+                kwargs["prob_thresh"] = self.seg_config.get("prob_thresh")
+            if self.seg_config.get("nms_thresh") is not None:
+                kwargs["nms_thresh"] = self.seg_config.get("nms_thresh")
+            masks, _ = backend["stardist"].predict_instances(img, **kwargs)
+            if method == STARDIST_NUCLEI_EXPANSION:
+                from skimage.segmentation import expand_labels
+                dist = float(self.seg_config.get("expand_distance", 8) or 0)
+                if dist > 0:
+                    masks = expand_labels(masks, distance=dist)
+            return masks.astype(np.uint32)
+
+        raise ValueError(f"Unknown segmentation method: {method}")
+
+    @staticmethod
     def _write_tile_ometiff(path, arr, description=""):
         """Write a 2-D array as a tiled OME-TIFF (single IFD, LZW, 512×512 tiles)."""
         with tifffile.TiffWriter(path, bigtiff=True) as tif:
@@ -188,9 +369,9 @@ class SegmentMergeWorker(QThread):
         """
         Segment one zarr file (one ROI or full WSI).
 
-        Per-tile outputs (inside <output_dir>/tiles_<out_prefix>/):
+        Per-tile outputs (inside <output_dir>/tile_masks/<out_prefix>/):
           tile_r{r}_c{c}_dapi.ome.tiff      — DAPI uint16 (own region, no overlap)
-          tile_r{r}_c{c}_raw_mask.ome.tiff  — raw Cellpose mask float32 (own region, no overlap)
+          tile_r{r}_c{c}_raw_mask.ome.tiff  — raw segmentation mask float32 (own region, no overlap)
 
         Global outputs:
           global_mask_<out_prefix>.dat       — memmap uint32
@@ -234,7 +415,7 @@ class SegmentMergeWorker(QThread):
                          shape=(full_h, full_w))
         mmap[:] = 0
 
-        tile_dir = os.path.join(self.output_dir, f'tiles_{out_prefix}')
+        tile_dir = os.path.join(self.output_dir, 'tile_masks', out_prefix)
         os.makedirs(tile_dir, exist_ok=True)
 
         dapi_mmap_path = os.path.join(
@@ -285,19 +466,9 @@ class SegmentMergeWorker(QThread):
                 local_mask = np.load(npy_path)
             else:
                 try:
-                    tile_f32 = tile_data.astype(np.float32) / 65535.0
-                    masks, _, _ = model.eval(
-                        tile_f32,
-                        diameter           = self.cp_params.get('diameter'),
-                        flow_threshold     = self.cp_params.get('flow_threshold', 0.4),
-                        cellprob_threshold = self.cp_params.get('cellprob_threshold', 0.0),
-                        min_size           = self.cp_params.get('min_size', 15),
-                        do_3D              = False,
-                    )
-                    del tile_f32
-                    local_mask = masks.astype(np.uint32)
+                    local_mask = self._segment_tile(tile_data, model)
                 except Exception as e:
-                    log.error(f"  Tile [{row},{col}] failed: {e}")
+                    log.error(f"  Tile [{row},{col}] failed: {traceback.format_exc()}")
                     local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
                 if use_gpu:
                     torch.cuda.empty_cache()
@@ -340,7 +511,7 @@ class SegmentMergeWorker(QThread):
                 self._write_tile_ometiff(
                     raw_mask_tile_path,
                     raw_own_mask.astype(np.float32),
-                    description=f'raw Cellpose mask  row={row} col={col}  '
+                    description=f'raw segmentation mask  row={row} col={col}  '
                                 f'n_cells={int(raw_own_mask.max())}',
                 )
                 log.info(f"    raw mask tile → {raw_mask_tile_path}")
@@ -478,7 +649,9 @@ class SegmentMergeWorker(QThread):
             'input_zarr':       self._abs(zarr_path),
             'source_zarr':      self._abs(zarr_path),
             'ome_tiff':        self._abs(ome_path),
+            'mask_path':        self._abs(ome_path),
             'global_dapi':     self._abs(global_dapi_path),
+            'dapi_path':        self._abs(global_dapi_path),
             'tile_dir':        self._abs(tile_dir),
             'tiles_dir':        self._abs(tile_dir),
             'mmap_path':       self._abs(mmap_path),
@@ -486,7 +659,8 @@ class SegmentMergeWorker(QThread):
             'image_shape':      [full_h, full_w],
             'tile_grid':        [self.n_rows, self.n_cols],
             'tile_stats':      tile_stats,
-            'cp_params':       self.cp_params,
+            'seg_config':      self.seg_config,
+            'cp_params':       self.seg_config,
             'bbox':            list(bbox) if bbox else None,
             'created_at':      datetime.now().isoformat(),
         }
@@ -496,6 +670,7 @@ class SegmentMergeWorker(QThread):
         ) as f:
             json.dump(meta, f, indent=2)
 
+        self._last_region_meta = meta
         log.info(f"  [{out_prefix}] outputs written")
         return total_cells
 
@@ -526,11 +701,13 @@ class SegmentMergeWorker(QThread):
     def run(self):
         try:
             import torch
-            from cellpose import models as cp_models
 
             self._logger, log_path = self._setup_logger()
             log = self._logger
             log.info("=== Segmentation started ===")
+            register_legacy_result(self.project_output_dir)
+            config_path = self._write_segmentation_config()
+            log.info(f"segmentation_config.json → {config_path}")
 
             try:
                 import psutil
@@ -547,7 +724,7 @@ class SegmentMergeWorker(QThread):
             if self.recovery_npy_dir is None:
                 use_gpu = torch.cuda.is_available()
                 device  = torch.device('cuda' if use_gpu else 'cpu')
-                model   = cp_models.CellposeModel(device=device)
+                model   = self._init_segmentation_backend(use_gpu, device)
             else:
                 model   = None
                 use_gpu = False
@@ -562,7 +739,7 @@ class SegmentMergeWorker(QThread):
                         break
                     roi_name = roi["name"]
                     roi_zarr = os.path.join(
-                        self.output_dir, f"fused_{roi_name}.zarr"
+                        self.project_output_dir, f"fused_{roi_name}.zarr"
                     )
                     if not os.path.exists(roi_zarr):
                         log.warning(f"ROI zarr not found: {roi_zarr} — skipping")
@@ -584,6 +761,7 @@ class SegmentMergeWorker(QThread):
                         poly_fullres = roi.get("polygon_fullres"),
                         bbox         = roi.get("bbox_fullres"),
                     )
+                    region_meta = self._last_region_meta or {}
                     total_cells_all += n_cells
                     roi_meta_all.append({
                         "roi_name": roi_name,
@@ -591,9 +769,15 @@ class SegmentMergeWorker(QThread):
                         "fused_zarr_path": roi_zarr_abs,
                         "input_zarr": roi_zarr_abs,
                         "source_zarr": roi_zarr_abs,
-                        "tiles_dir": self._abs(os.path.join(self.output_dir, f"tiles_{roi_name}")),
+                        "mask_path": region_meta.get("mask_path") or region_meta.get("ome_tiff"),
+                        "ome_tiff": region_meta.get("ome_tiff"),
+                        "dapi_path": region_meta.get("dapi_path") or region_meta.get("global_dapi"),
+                        "global_dapi": region_meta.get("global_dapi"),
+                        "zarr_path": region_meta.get("zarr_path"),
+                        "tiles_dir": region_meta.get("tiles_dir") or self._abs(os.path.join(self.output_dir, "tile_masks", roi_name)),
                         "tile_grid": [self.n_rows, self.n_cols],
                         "total_cells": n_cells,
+                        "seg_config": self.seg_config,
                     })
                     self.progress.emit(
                         roi_i + 1, len(self.rois),
@@ -611,15 +795,23 @@ class SegmentMergeWorker(QThread):
                 log.info(
                     f"=== All ROIs done  total_cells={total_cells_all:,} ==="
                 )
+                self._write_roi_canonical_aliases(roi_meta_all)
                 summary_meta = {
                     "mode": "roi",
                     "output_dir": self._abs(self.output_dir),
+                    "project_output_dir": self._abs(self.project_output_dir),
+                    "result_id": self.result_id,
+                    "method": self.method,
+                    "display_name": self.seg_config.get("display_name", self.method),
                     "rois": roi_meta_all,
                     "total_cells": total_cells_all,
+                    "seg_config": self.seg_config,
+                    "config_path": self._abs(config_path),
                     "created_at": datetime.now().isoformat(),
                 }
                 with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
                     json.dump(summary_meta, f, indent=2)
+                self._register_completed_result(summary_meta)
                 self._stop_mem_logger()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return
@@ -653,7 +845,7 @@ class SegmentMergeWorker(QThread):
 
             os.makedirs(self.output_dir, exist_ok=True)
 
-            tile_dir = os.path.join(self.output_dir, 'tiles_full')
+            tile_dir = os.path.join(self.output_dir, 'tile_masks')
             os.makedirs(tile_dir, exist_ok=True)
 
             mmap_path = os.path.join(self.output_dir, 'global_mask.dat')
@@ -705,18 +897,9 @@ class SegmentMergeWorker(QThread):
                 else:
                     tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
                     try:
-                        tile_f32 = tile_data.astype(np.float32) / 65535.0
-                        masks, _, _ = model.eval(
-                            tile_f32,
-                            diameter           = self.cp_params.get('diameter'),
-                            flow_threshold     = self.cp_params.get('flow_threshold', 0.4),
-                            cellprob_threshold = self.cp_params.get('cellprob_threshold', 0.0),
-                            min_size           = self.cp_params.get('min_size', 15),
-                            do_3D              = False,
-                        )
-                        local_mask = masks.astype(np.uint32)
-                        del tile_f32
+                        local_mask = self._segment_tile(tile_data, model)
                     except Exception as e:
+                        log.error(f'Tile [{row},{col}] inference failed:\n{traceback.format_exc()}')
                         self.error.emit(f'Tile [{row},{col}] inference failed: {e}')
                         local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
                     del tile_data
@@ -896,12 +1079,19 @@ class SegmentMergeWorker(QThread):
 
             meta = {
                 'mode':           'full_wsi',
+                'result_id':      self.result_id,
+                'method':         self.method,
+                'display_name':   self.seg_config.get("display_name", self.method),
+                'output_dir':     self._abs(self.output_dir),
+                'project_output_dir': self._abs(self.project_output_dir),
                 'zarr_path':      self._abs(out_zarr_path),
                 'fused_zarr_path': self._abs(self.zarr_path),
                 'input_zarr':      self._abs(self.zarr_path),
                 'source_zarr':     self._abs(self.zarr_path),
                 'ome_tiff':       self._abs(ome_path),
+                'mask_path':      self._abs(ome_path),
                 'global_dapi':    self._abs(global_dapi_path),
+                'dapi_path':      self._abs(global_dapi_path),
                 'tile_dir':       self._abs(tile_dir),
                 'tiles_dir':       self._abs(tile_dir),
                 'mmap_path':      self._abs(mmap_path),
@@ -910,12 +1100,15 @@ class SegmentMergeWorker(QThread):
                 'tile_grid':      [self.n_rows, self.n_cols],
                 'overlap_px':     self.overlap_px,
                 'tile_stats':     tile_stats,
-                'cp_params':      self.cp_params,
+                'seg_config':     self.seg_config,
+                'cp_params':      self.seg_config,
+                'config_path':    self._abs(config_path),
                 'created_at':     datetime.now().isoformat(),
             }
             with open(os.path.join(self.output_dir,
                                    'segmentation_meta.json'), 'w') as f:
                 json.dump(meta, f, indent=2)
+            self._register_completed_result(meta)
 
             log.info(
                 f"=== Segmentation complete ===  "

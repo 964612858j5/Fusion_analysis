@@ -4,6 +4,7 @@ block01/ui/main_window.py — MainWindow.
 
 import os
 import gc
+import glob
 import json
 import time
 import traceback
@@ -27,6 +28,11 @@ from ..config import (
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
 from ..core.fusion_engine import FusionEngine
+from ..core.io_loader import OMETIFFLoader
+from ..utils.segmentation_config import (
+    CELLPOSE_WHOLECELL_FUSION,
+    normalize_segmentation_config,
+)
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
@@ -91,6 +97,11 @@ class MainWindow(QMainWindow):
         self._proc_poll_timer = QTimer()
         self._proc_poll_timer.setInterval(100)
         self._proc_poll_timer.timeout.connect(self._poll_cellpose_process)
+
+        self._step1_restore_active = False
+        self._step1_session_timer = QTimer()
+        self._step1_session_timer.setSingleShot(True)
+        self._step1_session_timer.timeout.connect(self._save_step1_session)
 
         self._build_ui()
 
@@ -255,6 +266,24 @@ class MainWindow(QMainWindow):
         )
         btn_load_step0.clicked.connect(self._load_step0_roi_result)
         status_row.addWidget(btn_load_step0)
+
+        btn_load_session = QPushButton("Load Previous Step1 Session")
+        btn_load_session.setStyleSheet(
+            "QPushButton{color:#8cf;font-size:10px;"
+            "border:1px solid #8cf;border-radius:3px;padding:2px 8px;}"
+            "QPushButton:hover{background:#122333;}"
+        )
+        btn_load_session.clicked.connect(self._load_previous_step1_session)
+        status_row.addWidget(btn_load_session)
+
+        btn_save_session = QPushButton("Save Session")
+        btn_save_session.setStyleSheet(
+            "QPushButton{color:#aaa;font-size:10px;"
+            "border:1px solid #555;border-radius:3px;padding:2px 8px;}"
+            "QPushButton:hover{background:#222;}"
+        )
+        btn_save_session.clicked.connect(self._save_step1_session)
+        status_row.addWidget(btn_save_session)
 
         btn_update = QPushButton("⟳ Update")
         btn_update.setFixedWidth(72)
@@ -430,9 +459,15 @@ class MainWindow(QMainWindow):
     def _load_step0_roi_result(self, _checked=False, auto=False):
         print("[Step1] loading Step0 ROI result")
         if self.loader is None:
-            if not auto:
-                QMessageBox.warning(self, "Step1", "Load Step0 first.")
-            return
+            if not self._bootstrap_step1_context_from_disk(auto=auto):
+                if not auto:
+                    QMessageBox.warning(
+                        self,
+                        "Step1",
+                        "Load Step0 first, or select a Step0 output directory "
+                        "that contains correction_config.json / roi_config.json / corrected_channels.zarr.",
+                    )
+                return
 
         out_dir = self.step0_output.get("output_dir") or OUTPUT_DIR
         corr_path = (
@@ -547,6 +582,371 @@ class MainWindow(QMainWindow):
         self._show_active_roi_preview()
         if not auto:
             self.prev_status.setText("Step0 ROI result loaded.")
+        self._schedule_step1_session_save()
+
+    def _bootstrap_step1_context_from_disk(self, auto=False):
+        """Create the minimum Step1 context from Step0 files on disk.
+
+        This supports GUI restart → Step1 → Load Step0 ROI Result without an
+        in-memory Step0 payload.  It does not invent patches; patch_config.json
+        must exist if the user wants previous patches restored.
+        """
+        global OME_TIFF_FILE, OUTPUT_DIR
+
+        out_candidates = []
+        for p in (
+            self._out_path_edit.text().strip() if hasattr(self, "_out_path_edit") else "",
+            OUTPUT_DIR,
+            os.path.join(os.getcwd(), "outcome"),
+            "/sda1/Fusion/analysis_pipline/outcome",
+        ):
+            if p and p not in out_candidates:
+                out_candidates.append(p)
+
+        out_dir = ""
+        if auto:
+            for p in out_candidates:
+                if os.path.exists(os.path.join(p, "corrected_channels.zarr")) or os.path.exists(os.path.join(p, "roi_config.json")):
+                    out_dir = p
+                    break
+        else:
+            out_dir = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                "Select Step0 output directory",
+                OUTPUT_DIR if os.path.isdir(OUTPUT_DIR) else os.getcwd(),
+            )
+        if not out_dir:
+            return False
+
+        ome_candidates = []
+        for p in (
+            self._ome_path_edit.text().strip() if hasattr(self, "_ome_path_edit") else "",
+            OME_TIFF_FILE,
+        ):
+            if p and p not in ome_candidates:
+                ome_candidates.append(p)
+        parent = os.path.dirname(out_dir)
+        if parent and os.path.isdir(parent):
+            ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tif")))
+            ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tiff")))
+
+        ome_path = next((p for p in ome_candidates if p and os.path.exists(p)), "")
+        if not ome_path and not auto:
+            ome_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Select raw OME-TIFF for Step1",
+                parent if parent and os.path.isdir(parent) else os.getcwd(),
+                "OME-TIFF (*.ome.tif *.ome.tiff *.tif *.tiff)",
+            )
+        if not ome_path or not os.path.exists(ome_path):
+            if not auto:
+                QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing.")
+            return False
+
+        try:
+            self.loader = OMETIFFLoader(ome_path)
+        except Exception:
+            print(f"[Step1] failed to create OME loader:\n{traceback.format_exc()}")
+            if not auto:
+                QMessageBox.warning(self, "Step1", "Failed to load raw OME-TIFF. See terminal.")
+            return False
+
+        OUTPUT_DIR = out_dir
+        OME_TIFF_FILE = ome_path
+        self.step0_output = {
+            "output_dir": out_dir,
+            "ome_tiff_path": ome_path,
+            "loader": self.loader,
+            "corrected_zarr_path": os.path.join(out_dir, "corrected_channels.zarr"),
+        }
+        self.step0_done = True
+        self._step2._out_edit.setText(out_dir)
+        self._step4._ome_edit.setText(ome_path)
+        self._step4._out_edit.setText(out_dir)
+        print(f"[Step1] bootstrapped from disk output_dir={out_dir}")
+        print(f"[Step1] raw_ome={ome_path}")
+        if not os.path.exists(os.path.join(out_dir, "patch_config.json")):
+            print("[Step1] patch_config.json not found; previous patches cannot be restored from Step0 output.")
+        return True
+
+    def _step1_session_path(self, output_dir=None):
+        base = output_dir or (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
+        return os.path.join(base, "step1_session.json")
+
+    def _find_step1_session(self):
+        candidates = []
+        for base in {
+            OUTPUT_DIR,
+            (self.step0_output or {}).get("output_dir"),
+            self._out_path_edit.text().strip() if hasattr(self, "_out_path_edit") else "",
+        }:
+            if base:
+                candidates.append(os.path.join(base, "step1_session.json"))
+        parent = os.path.dirname(OUTPUT_DIR)
+        if parent and os.path.isdir(parent):
+            candidates.extend(glob.glob(os.path.join(parent, "*", "step1_session.json")))
+        existing = [p for p in candidates if p and os.path.exists(p)]
+        if not existing:
+            return ""
+        return max(existing, key=lambda p: os.path.getmtime(p))
+
+    def _step1_session_payload(self):
+        if self.loader is None:
+            return None
+        out_dir = (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
+        active_roi = self._active_roi or (self._rois[0] if self._rois else None)
+        roi_bbox = active_roi.get("bbox_fullres") if active_roi else None
+        ry0, _, rx0, _ = [0, 0, 0, 0]
+        if roi_bbox and len(roi_bbox) == 4:
+            ry0, _, rx0, _ = [int(v) for v in roi_bbox]
+        patches = []
+        for i, patch in enumerate(self._all_patches):
+            y0, y1, x0, x1 = [int(v) for v in patch]
+            item = {
+                "name": f"P{i+1}",
+                "bbox_fullres": [y0, y1, x0, x1],
+            }
+            if roi_bbox and len(roi_bbox) == 4:
+                item["bbox_local"] = [y0 - ry0, y1 - ry0, x0 - rx0, x1 - rx0]
+            patches.append(item)
+
+        fusion_cfg = self.config.get_full_config()
+        channel_weights = {}
+        channel_visibility = {}
+        for gdata in fusion_cfg.get("groups", {}).values():
+            for ch, weight in (gdata.get("channels") or {}).items():
+                channel_weights[ch] = float(weight)
+                channel_visibility[ch] = float(weight) > 0
+        nuc = fusion_cfg.get("nucleus") or {}
+        if nuc.get("channel"):
+            channel_weights[nuc["channel"]] = float(nuc.get("weight", 0.0))
+            channel_visibility[nuc["channel"]] = float(nuc.get("weight", 0.0)) > 0
+
+        return {
+            "version": 1,
+            "mode": "roi" if active_roi else "full_wsi",
+            "active_roi": active_roi.get("name", "ROI_1") if active_roi else "",
+            "roi_bbox": roi_bbox,
+            "rois": self._rois,
+            "patches": patches,
+            "selected_patch": f"P{self._preview_patch_idx+1}" if 0 <= self._preview_patch_idx < len(self._all_patches) else "",
+            "corrected_zarr_path": self._corrected_zarr_path or os.path.join(out_dir, "corrected_channels.zarr"),
+            "corrected_zarr_mode": self._corrected_zarr_mode,
+            "fusion_zarr_path": self._fused_zarr_path or (self.step1_output or {}).get("zarr_path", ""),
+            "raw_ome_path": getattr(self.loader, "filepath", OME_TIFF_FILE),
+            "output_dir": out_dir,
+            "fusion_config": fusion_cfg,
+            "channel_weights": channel_weights,
+            "channel_visibility": channel_visibility,
+            "channel_colors": {},
+            "p2_params": self._p2_params,
+            "p1_diam": self._p1_diam,
+            "params_source": self._params_source,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _schedule_step1_session_save(self):
+        if self._step1_restore_active:
+            return
+        if self.loader is None:
+            return
+        self._step1_session_timer.start(500)
+
+    def _save_step1_session(self):
+        if self._step1_restore_active:
+            return
+        payload = self._step1_session_payload()
+        if not payload:
+            return
+        out_dir = payload.get("output_dir") or OUTPUT_DIR
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            path = self._step1_session_path(out_dir)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            print("[Step1] session autosaved")
+        except Exception:
+            print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
+
+    def _apply_step1_fusion_config(self, cfg):
+        cfg = dict(cfg or {})
+        nucleus_cfg = cfg.get("nucleus") or {}
+        groups_cfg = cfg.get("groups") or {}
+        for name in list(self.config._panels.keys()):
+            self.config._del_group(name)
+
+        nuc_ch = str(nucleus_cfg.get("channel") or "")
+        self.config.nuc_combo.clear()
+        self.config.nuc_combo.addItems(self.loader.channel_names() if self.loader else [])
+        idx = self.config.nuc_combo.findText(nuc_ch)
+        self.config.nuc_combo.setCurrentIndex(idx if idx >= 0 else -1)
+        self.config.nuc_row.spin.setValue(float(nucleus_cfg.get("weight", 0.0) or 0.0))
+
+        for gname, gdata in groups_cfg.items():
+            channels = {
+                str(ch): float(w)
+                for ch, w in (gdata.get("channels") or {}).items()
+                if not self.loader or ch in self.loader.channel_names()
+            }
+            self.config._add_group(str(gname), channels)
+            panel = self.config._panels.get(str(gname))
+            if panel:
+                panel.gw_row.spin.setValue(float(gdata.get("group_weight", 1.0)))
+        self.config.config_changed.emit()
+
+    def _fusion_config_from_flat_weights(self, sess):
+        weights = dict(sess.get("channel_weights") or {})
+        if not weights:
+            return {}
+        channels = self.loader.channel_names() if self.loader else []
+        nuc_ch = "DAPI" if "DAPI" in weights else (channels[0] if channels else "")
+        nuc_weight = float(weights.get(nuc_ch, 0.0)) if nuc_ch else 0.0
+        marker_weights = {
+            ch: float(w)
+            for ch, w in weights.items()
+            if ch != nuc_ch and (not channels or ch in channels)
+        }
+        return {
+            "nucleus": {"channel": nuc_ch, "weight": nuc_weight},
+            "groups": {
+                "restored": {
+                    "group_weight": 1.0,
+                    "channels": marker_weights,
+                }
+            },
+        }
+
+    def _load_previous_step1_session(self, _checked=False, auto=False, path=None):
+        global OME_TIFF_FILE, OUTPUT_DIR
+        print("[Step1] searching previous session")
+        session_path = path or self._find_step1_session()
+        if not session_path and not auto:
+            session_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Load Previous Step1 Session",
+                OUTPUT_DIR,
+                "Step1 Session (step1_session.json);;JSON (*.json)",
+            )
+        print(f"[Step1] session found={bool(session_path and os.path.exists(session_path))}")
+        if not session_path or not os.path.exists(session_path):
+            if not auto:
+                QMessageBox.information(self, "Step1", "No previous Step1 session found.")
+            return False
+
+        self._step1_restore_active = True
+        try:
+            print(f"[Step1] loading session={session_path}")
+            with open(session_path, "r", encoding="utf-8") as f:
+                sess = json.load(f)
+
+            out_dir = sess.get("output_dir") or os.path.dirname(session_path)
+            raw_ome = sess.get("raw_ome_path") or OME_TIFF_FILE
+            if not raw_ome or not os.path.exists(raw_ome):
+                QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing. Please load Step0 or edit the session.")
+                return False
+            OUTPUT_DIR = out_dir
+            OME_TIFF_FILE = raw_ome
+            self.step0_output = {
+                "output_dir": out_dir,
+                "ome_tiff_path": raw_ome,
+            }
+            self.loader = OMETIFFLoader(raw_ome)
+
+            corr_path = sess.get("corrected_zarr_path") or os.path.join(out_dir, "corrected_channels.zarr")
+            if corr_path and not os.path.exists(corr_path):
+                QMessageBox.warning(self, "Step1", "Corrected channel source missing.")
+                corr_path = ""
+            correction_config = None
+            cfg_path = os.path.join(out_dir, "correction_config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    correction_config = json.load(f)
+            decisions = {}
+            if correction_config:
+                decisions = {
+                    str(ch): str(method).strip().lower()
+                    for ch, method in (correction_config.get("channel_decisions") or {}).items()
+                    if str(method).strip().lower() in {"tophat", "cucim"}
+                }
+            self.loader.set_correction_config(correction_config)
+            self.loader.set_corrected_zarr_store(corr_path, decisions)
+            self._corrected_zarr_path = corr_path
+            self._corrected_decisions = decisions
+            self._corrected_zarr_mode = str(sess.get("corrected_zarr_mode") or "")
+
+            self.config.all_channels = self.loader.channel_names()
+            fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
+            self._apply_step1_fusion_config(fusion_cfg)
+
+            rois = list(sess.get("rois") or [])
+            if not rois and sess.get("roi_bbox"):
+                rois = [{
+                    "name": sess.get("active_roi") or "ROI_1",
+                    "bbox_fullres": sess.get("roi_bbox"),
+                    "polygon_fullres": sess.get("polygon_fullres"),
+                    "patch_indices": [],
+                }]
+            self._rois = rois
+            active_name = sess.get("active_roi") or (rois[0].get("name") if rois else "")
+            self._active_roi = next((r for r in rois if r.get("name") == active_name), rois[0] if rois else None)
+            print(f"[Step1] active_roi={active_name or 'none'}")
+
+            patches = []
+            ry0, _, rx0, _ = [0, 0, 0, 0]
+            if self._active_roi and self._active_roi.get("bbox_fullres"):
+                ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
+            for p in sess.get("patches") or []:
+                if p.get("bbox_fullres"):
+                    patches.append(tuple(int(v) for v in p["bbox_fullres"]))
+                elif p.get("bbox_local"):
+                    y0, y1, x0, x1 = [int(v) for v in p["bbox_local"]]
+                    patches.append((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1))
+            self._p2_params = sess.get("p2_params")
+            self._p1_diam = sess.get("p1_diam")
+            self._params_source = sess.get("params_source")
+            self._fused_zarr_path = sess.get("fusion_zarr_path") or None
+            self.step1_output = {
+                "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
+                "correction_config_path": os.path.join(out_dir, "correction_config.json"),
+                "zarr_path": self._fused_zarr_path,
+                "roi_info": self._rois,
+                "output_dir": out_dir,
+                "ome_tiff_path": raw_ome,
+            }
+
+            self._stop_all_loaders()
+            self._patch_channel_cache.clear()
+            self._patch_load_ready.clear()
+            self._preview_patch_idx = -1
+            self._on_rois_changed(self._rois)
+            self._on_patches(patches)
+            selected_name = sess.get("selected_patch")
+            if selected_name and selected_name.startswith("P"):
+                try:
+                    sel_idx = int(selected_name[1:]) - 1
+                    if 0 <= sel_idx < len(self._all_patches):
+                        self._select_preview_patch(sel_idx)
+                except Exception:
+                    pass
+            self._show_active_roi_preview()
+            self.step0_done = True
+            self.step1_done = bool(self._fused_zarr_path)
+            self._step2._out_edit.setText(out_dir)
+            self._step4._ome_edit.setText(raw_ome)
+            self._step4._out_edit.setText(out_dir)
+            self._update_next_button()
+            self.prev_status.setText("Loaded previous Step1 session.")
+            print(f"[Step1] restored patches={len(patches)}")
+            print(f"[Step1] restored channel weights count={len(sess.get('channel_weights') or {})}")
+            return True
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"[Step1] failed to load session:\n{tb}")
+            if not auto:
+                QMessageBox.warning(self, "Step1", f"Failed to load Step1 session:\n{tb}")
+            return False
+        finally:
+            self._step1_restore_active = False
 
     def _go_to_step2(self):
         if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
@@ -575,8 +975,10 @@ class MainWindow(QMainWindow):
 
     def _go_to_step1(self):
         if not self.step0_done and self.loader is None:
-            self._go_to_step0()
-            return
+            if not self._load_previous_step1_session(auto=True):
+                self.prev_status.setText(
+                    "No previous Step1 session found. Use Load Previous Step1 Session or run Step0 first."
+                )
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
 
@@ -861,6 +1263,7 @@ class MainWindow(QMainWindow):
             self._preview_patch_idx = -1
             self.prev_img.clear()
             self.prev_status.setText("No patch selected")
+            self._schedule_step1_session_save()
             return
 
         # Drop cache for patches whose ROI coordinates changed
@@ -890,6 +1293,7 @@ class MainWindow(QMainWindow):
 
         # Debounce: start background preload 400 ms after last patch change
         self._preload_debounce.start(400)
+        self._schedule_step1_session_save()
 
     def _select_preview_patch(self, idx):
         """User clicked a patch button — render from cache if ready, else show status."""
@@ -898,6 +1302,7 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self._patch_sel_btns):
             btn.setChecked(i == idx)
         self._preview_patch_idx = idx
+        self._schedule_step1_session_save()
 
         if idx in self._patch_load_ready:
             self._render_current_patch(reset_view=True)
@@ -1134,6 +1539,7 @@ class MainWindow(QMainWindow):
         """Weight/group changed: re-render from cache (no disk IO) after 300 ms debounce."""
         if self._preview_patch_idx in self._patch_load_ready:
             self._prev_timer.start(300)
+        self._schedule_step1_session_save()
 
     # ── Phase 1 ─────────────────────────────────────────────────────
 
@@ -1150,20 +1556,23 @@ class MainWindow(QMainWindow):
             return
 
         diam = diameters[0]   # None or float
+        method_cfg = self.search.get_selected_method_config()
         param_list = [
             {"diameter": diam,
              "flow_threshold": 0.4,
              "cellprob_threshold": 0.0,
-             "_phase": 1}
+             "_phase": 1,
+             **method_cfg}
         ]
         tasks = [
             (pi, roi, dict(param_list[0]))
             for pi, roi in enumerate(patches)
         ]
         diam_str = "auto" if diam is None else f"{diam} px"
+        method = param_list[0].get("method", CELLPOSE_WHOLECELL_FUSION)
         self.result_grid.setup_grid(
             len(patches), param_list,
-            f"Phase 1 — auto-diameter preview  (diameter={diam_str},"
+            f"Phase 1 — {method}  (diameter={diam_str},"
             f"  {len(patches)} patch(es))"
         )
         self._launch_worker(tasks)
@@ -1177,11 +1586,16 @@ class MainWindow(QMainWindow):
             return
 
         diam  = cfg["diameter"]
+        method_cfg = {
+            "method": cfg.get("method", CELLPOSE_WHOLECELL_FUSION),
+            "params": dict(cfg.get("params") or {}),
+        }
         param_list = [
             {"diameter": diam,
              "flow_threshold": f,
              "cellprob_threshold": p,
-             "_phase": 2}
+             "_phase": 2,
+             **method_cfg}
             for f in cfg["flow"]
             for p in cfg["prob"]
         ]
@@ -1190,9 +1604,10 @@ class MainWindow(QMainWindow):
             for pi, roi in enumerate(patches)
             for p in param_list
         ]
+        method = method_cfg["method"]
         self.result_grid.setup_grid(
             len(patches), param_list,
-            f"Phase 2 — flow × cellprob  diameter={diam}  ({len(tasks)} inferences)"
+            f"Phase 2 — {method}  flow × cellprob  diameter={diam}  ({len(tasks)} inferences)"
         )
         self._launch_worker(tasks)
 
@@ -1319,6 +1734,7 @@ class MainWindow(QMainWindow):
         self._p2_params    = params
         self._params_source = params.get("_source", "manual")
         self._check_save_unlock()
+        self._schedule_step1_session_save()
 
     def _on_param_sel(self, params):
         if params.get("_phase") == 1:
@@ -1332,6 +1748,7 @@ class MainWindow(QMainWindow):
             self._p2_params    = params
             self._params_source = "phase2"
             self._check_save_unlock()
+        self._schedule_step1_session_save()
 
     def _check_save_unlock(self):
         """Unlock the Save button whenever valid params are available."""
@@ -1392,6 +1809,7 @@ class MainWindow(QMainWindow):
         }
         self.step1_done = True
         self._update_next_button()
+        self._save_step1_session()
         self._unlock_ui()
         # Count per-ROI zarrs from meta
         meta_path = os.path.join(OUTPUT_DIR, "fusion_meta.json")
@@ -1452,7 +1870,17 @@ class MainWindow(QMainWindow):
             json.dump(fcfg, f, indent=2, ensure_ascii=False)
 
         # ── Write cellpose_params.json ────────────────────────────────
-        cpcfg = {
+        method_cfg = self.search.get_selected_method_config()
+        selected_method = (
+            self._p2_params.get("method")
+            or method_cfg.get("method")
+            or CELLPOSE_WHOLECELL_FUSION
+        )
+        params_block = dict(method_cfg.get("params") or {})
+        params_block.update(dict(self._p2_params.get("params") or {}))
+        cpcfg = normalize_segmentation_config({
+            "method":             selected_method,
+            "params":             params_block,
             "model_type":         "cpsam",
             "diameter":           self._p2_params.get("diameter"),
             "flow_threshold":     self._p2_params.get("flow_threshold", 0.4),
@@ -1461,12 +1889,16 @@ class MainWindow(QMainWindow):
             "phase1_diameter":    self._p1_diam,
             "params_source":      self._params_source or "unknown",
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
+        })
         fp2 = os.path.join(OUTPUT_DIR, "cellpose_params.json")
         with open(fp2, "w", encoding="utf-8") as f:
             json.dump(cpcfg, f, indent=2, ensure_ascii=False)
+        fp_seg = os.path.join(OUTPUT_DIR, "segmentation_config.json")
+        with open(fp_seg, "w", encoding="utf-8") as f:
+            json.dump(cpcfg, f, indent=2, ensure_ascii=False)
         print(f"[Save] {fp1}")
         print(f"[Save] {fp2}")
+        print(f"[Save] {fp_seg}")
 
         # ── Tile selection dialog ─────────────────────────────────────
         # Count active channels for RAM estimate

@@ -13,11 +13,20 @@ from PyQt5.QtCore import Qt, QRectF, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSplitter, QProgressBar, QMessageBox, QFileDialog,
-    QDoubleSpinBox, QScrollArea,
+    QDoubleSpinBox, QScrollArea, QComboBox,
 )
 import pyqtgraph as pg
 
 from ..config import OUTPUT_DIR
+from ..utils.segmentation_config import (
+    CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_DAPI,
+    STARDIST_NUCLEI_EXPANSION,
+    available_segmentation_methods,
+    get_segmentation_method_config,
+    normalize_segmentation_config,
+)
 from ..workers.segment_merge_worker import SegmentMergeWorker
 
 # ══════════════════════════════════════════════════════════════════════
@@ -25,7 +34,7 @@ from ..workers.segment_merge_worker import SegmentMergeWorker
 # ══════════════════════════════════════════════════════════════════════
 
 class Step2Page(QWidget):
-    """Full Step 2 UI: zarr input, tile grid, Cellpose params, progress."""
+    """Full Step 2 UI: zarr input, tile grid, segmentation params, progress."""
 
     go_back           = pyqtSignal()
     segmentation_done = pyqtSignal(str)   # emits output_dir when done
@@ -39,7 +48,7 @@ class Step2Page(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._zarr_path      = None
-        self._cp_params      = {}
+        self._seg_config     = {}
         self._worker         = None
         self._tile_rects     = {}
         self._tile_status    = {}
@@ -62,7 +71,7 @@ class Step2Page(QWidget):
         root.setSpacing(6)
 
         # Title
-        title = QLabel('Step 2 — Cellpose Segmentation & Merge')
+        title = QLabel('Step 2 — Segmentation & Merge')
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(
             'font-size:16px;font-weight:bold;color:#eee;'
@@ -199,8 +208,8 @@ class Step2Page(QWidget):
         self._cols_spin.valueChanged.connect(self._update_tile_info)
         rl.addWidget(tile_box)
 
-        # Cellpose params
-        cp_box = QGroupBox('Cellpose Parameters')
+        # Segmentation params
+        cp_box = QGroupBox('Segmentation Parameters')
         cp_box.setStyleSheet(self._box_style('#c678dd'))
         cpl = QVBoxLayout(cp_box)
 
@@ -210,7 +219,18 @@ class Step2Page(QWidget):
             l.setFixedWidth(160)
             r.addWidget(l)
             r.addWidget(widget)
-            return r
+            return r, l, widget
+
+        self._method_combo = QComboBox()
+        for method in available_segmentation_methods():
+            cfg = get_segmentation_method_config(method)
+            self._method_combo.addItem(cfg["display_name"], method)
+        self._method_combo.setCurrentIndex(
+            max(0, self._method_combo.findData(CELLPOSE_WHOLECELL_FUSION))
+        )
+        self._method_combo.currentIndexChanged.connect(self._on_method_changed)
+        r, self._method_label, _ = _param_row('Method:', self._method_combo)
+        cpl.addLayout(r)
 
         # Cellpose 4.0.1+: model_type is ignored — only cpsam is used
         self._cp_model_lbl = QLabel('cpsam  (Cellpose 4.0.1+: only model, model_type ignored)')
@@ -218,32 +238,70 @@ class Step2Page(QWidget):
             'color:#fa8;font-size:11px;padding:2px 4px;'
             'background:#221;border-radius:3px;'
         )
-        cpl.addLayout(_param_row('Model:', self._cp_model_lbl))
+        r, self._cp_model_label, _ = _param_row('Model:', self._cp_model_lbl)
+        cpl.addLayout(r)
 
         self._cp_diam = QDoubleSpinBox()
         self._cp_diam.setRange(0, 300)
         self._cp_diam.setValue(30)
         self._cp_diam.setSpecialValueText('auto')
-        cpl.addLayout(_param_row('diameter (0=auto):', self._cp_diam))
+        r, self._cp_diam_label, _ = _param_row('diameter (0=auto):', self._cp_diam)
+        cpl.addLayout(r)
 
         self._cp_flow = QDoubleSpinBox()
         self._cp_flow.setRange(0.0, 3.0)
         self._cp_flow.setSingleStep(0.05)
         self._cp_flow.setValue(0.4)
-        cpl.addLayout(_param_row('flow_threshold:', self._cp_flow))
+        r, self._cp_flow_label, _ = _param_row('flow_threshold:', self._cp_flow)
+        cpl.addLayout(r)
 
         self._cp_prob = QDoubleSpinBox()
         self._cp_prob.setRange(-6.0, 6.0)
         self._cp_prob.setSingleStep(0.1)
         self._cp_prob.setValue(0.0)
-        cpl.addLayout(_param_row('cellprob_threshold:', self._cp_prob))
+        r, self._cp_prob_label, _ = _param_row('cellprob_threshold:', self._cp_prob)
+        cpl.addLayout(r)
 
         self._cp_minsize = QtWidgets.QSpinBox()
         self._cp_minsize.setRange(1, 10000)
         self._cp_minsize.setValue(15)
-        cpl.addLayout(_param_row('min_size (px²):', self._cp_minsize))
+        r, self._cp_minsize_label, _ = _param_row('min_size (px²):', self._cp_minsize)
+        cpl.addLayout(r)
 
-        btn_load_cp = QPushButton('↓ Load from cellpose_params.json')
+        self._sd_model = QtWidgets.QLineEdit('2D_versatile_fluo')
+        self._sd_model.setStyleSheet('font-size:11px;')
+        r, self._sd_model_label, _ = _param_row('StarDist model:', self._sd_model)
+        cpl.addLayout(r)
+
+        self._sd_prob = QDoubleSpinBox()
+        self._sd_prob.setRange(-1.0, 1.0)
+        self._sd_prob.setSingleStep(0.05)
+        self._sd_prob.setValue(-1.0)
+        self._sd_prob.setSpecialValueText('auto')
+        r, self._sd_prob_label, _ = _param_row('prob_thresh:', self._sd_prob)
+        cpl.addLayout(r)
+
+        self._sd_nms = QDoubleSpinBox()
+        self._sd_nms.setRange(-1.0, 1.0)
+        self._sd_nms.setSingleStep(0.05)
+        self._sd_nms.setValue(-1.0)
+        self._sd_nms.setSpecialValueText('auto')
+        r, self._sd_nms_label, _ = _param_row('nms_thresh:', self._sd_nms)
+        cpl.addLayout(r)
+
+        self._sd_expand = QDoubleSpinBox()
+        self._sd_expand.setRange(0, 200)
+        self._sd_expand.setSingleStep(1)
+        self._sd_expand.setValue(8)
+        r, self._sd_expand_label, _ = _param_row('expansion_distance:', self._sd_expand)
+        cpl.addLayout(r)
+
+        self._method_hint = QLabel('')
+        self._method_hint.setStyleSheet('color:#999;font-size:10px;')
+        self._method_hint.setWordWrap(True)
+        cpl.addWidget(self._method_hint)
+
+        btn_load_cp = QPushButton('↓ Load segmentation_config.json / cellpose_params.json')
         btn_load_cp.setStyleSheet(
             'QPushButton{color:#8cf;font-size:10px;border:1px solid #8cf;'
             'border-radius:3px;padding:3px;}'
@@ -251,6 +309,7 @@ class Step2Page(QWidget):
         btn_load_cp.clicked.connect(self._load_cp_params)
         cpl.addWidget(btn_load_cp)
         rl.addWidget(cp_box)
+        self._on_method_changed()
 
         # Output settings
         out_box = QGroupBox('Output')
@@ -269,8 +328,9 @@ class Step2Page(QWidget):
         outl.addLayout(outr)
 
         out_info = QLabel(
+            'Each run writes: segmentation_results/<timestamp>_<method>/\n'
             'Global: global_mask.zarr | global_mask.ome.tiff | global_dapi.ome.tiff\n'
-            'Per-tile: tiles_*/tile_r*_c*_dapi.ome.tiff | tile_r*_c*_raw_mask.ome.tiff'
+            'Per-tile: tile_masks/tile_r*_c*_dapi.ome.tiff | tile_r*_c*_raw_mask.ome.tiff'
         )
         out_info.setStyleSheet('color:#888;font-size:10px;')
         outl.addWidget(out_info)
@@ -376,6 +436,7 @@ class Step2Page(QWidget):
         if path and os.path.exists(path):
             self._zarr_edit.setText(path)
             self._load_zarr_info()
+            self._load_default_seg_config(silent=True)
 
     def set_rois(self, rois):
         """Receive ROI list from Step 1 for per-ROI segmentation."""
@@ -415,6 +476,7 @@ class Step2Page(QWidget):
             )
             self._update_tile_info()
             self._load_overview_from_zarr(z)
+            self._load_default_seg_config(silent=True)
         except Exception as e:
             self._zarr_info.setText(f'⚠ Failed to open zarr: {e}')
 
@@ -518,39 +580,100 @@ class Step2Page(QWidget):
         }
         rect.setPen(pg.mkPen(colours.get(state, '#808080'), width=2))
 
-    # ── Cellpose params loading ───────────────────────────────────────
+    # ── Segmentation params loading ───────────────────────────────────
 
     def _load_cp_params(self):
-        cp_path = os.path.join(OUTPUT_DIR, 'cellpose_params.json')
+        self._load_default_seg_config(silent=False)
+
+    def _load_default_seg_config(self, silent=True):
+        cp_path = os.path.join(OUTPUT_DIR, 'segmentation_config.json')
         if not os.path.exists(cp_path):
+            cp_path = os.path.join(OUTPUT_DIR, 'cellpose_params.json')
+        if not os.path.exists(cp_path):
+            if silent:
+                return
             cp_path, _ = QFileDialog.getOpenFileName(
-                self, 'Select cellpose_params.json', OUTPUT_DIR, 'JSON (*.json)'
+                self, 'Select segmentation_config.json', OUTPUT_DIR, 'JSON (*.json)'
             )
         if not cp_path or not os.path.exists(cp_path):
             return
         try:
             with open(cp_path) as f:
-                p = json.load(f)
+                p = normalize_segmentation_config(json.load(f))
+            self._apply_seg_config_to_ui(p)
+            self._seg_config = p
+            if not silent:
+                QMessageBox.information(self, 'Loaded',
+                                        f'Segmentation config loaded from:\n{cp_path}')
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, 'Error', str(e))
+            else:
+                print(f'[Step2] failed to auto-load segmentation config: {e}')
+
+    def _apply_seg_config_to_ui(self, p):
+        method = p.get('method', CELLPOSE_WHOLECELL_FUSION)
+        idx = self._method_combo.findData(method)
+        if idx >= 0:
+            self._method_combo.setCurrentIndex(idx)
             # model_type ignored in Cellpose 4.0.1+; skip UI update
             self._cp_diam.setValue(p.get('diameter') or 0)
             self._cp_flow.setValue(p.get('flow_threshold', 0.4))
             self._cp_prob.setValue(p.get('cellprob_threshold', 0.0))
             self._cp_minsize.setValue(p.get('min_size', 15))
-            self._cp_params = p
-            QMessageBox.information(self, 'Loaded',
-                                    f'Parameters loaded from:\n{cp_path}')
-        except Exception as e:
-            QMessageBox.warning(self, 'Error', str(e))
+        self._sd_model.setText(str(p.get('model_name') or '2D_versatile_fluo'))
+        self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
+        self._sd_nms.setValue(-1.0 if p.get('nms_thresh') is None else float(p.get('nms_thresh')))
+        self._sd_expand.setValue(float(p.get('expand_distance', 8) or 0))
+        self._on_method_changed()
 
     def get_cp_params(self):
+        return self.get_seg_config()
+
+    def get_seg_config(self):
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         diam = self._cp_diam.value()
-        return {
+        data = {
+            'method':             method,
+            'params': {
+                'model_name':         self._sd_model.text().strip() or '2D_versatile_fluo',
+                'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
+                'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
+                'expand_distance':    self._sd_expand.value(),
+            },
             'model_type':         'cpsam',  # Cellpose 4.0.1+: always cpsam
             'diameter':           None if diam == 0 else diam,
             'flow_threshold':     self._cp_flow.value(),
             'cellprob_threshold': self._cp_prob.value(),
             'min_size':           self._cp_minsize.value(),
         }
+        return normalize_segmentation_config(data)
+
+    def _on_method_changed(self):
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+        is_expansion = method == STARDIST_NUCLEI_EXPANSION
+        for w in (
+            self._cp_model_label, self._cp_model_lbl,
+            self._cp_diam_label, self._cp_diam,
+            self._cp_flow_label, self._cp_flow,
+            self._cp_prob_label, self._cp_prob,
+            self._cp_minsize_label, self._cp_minsize,
+        ):
+            w.setVisible(is_cellpose)
+        for w in (
+            self._sd_model_label, self._sd_model,
+            self._sd_prob_label, self._sd_prob,
+            self._sd_nms_label, self._sd_nms,
+        ):
+            w.setVisible(is_stardist)
+        self._sd_expand_label.setVisible(is_expansion)
+        self._sd_expand.setVisible(is_expansion)
+        cfg = get_segmentation_method_config(method)
+        self._method_hint.setText(
+            f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
+        )
 
     # ── run / stop ────────────────────────────────────────────────────
 
@@ -578,7 +701,7 @@ class Step2Page(QWidget):
 
         self._worker = SegmentMergeWorker(
             zarr_path        = self._zarr_path,
-            cp_params        = self.get_cp_params(),
+            seg_config       = self.get_seg_config(),
             n_rows           = nr,
             n_cols           = nc,
             overlap_px       = self._overlap_spin.value(),
@@ -650,9 +773,10 @@ class Step2Page(QWidget):
             f'  global_mask.zarr\n'
             f'  global_mask.ome.tiff   (merged mask, float32)\n'
             f'  global_dapi.ome.tiff   (DAPI, uint16)\n'
+            f'  segmentation_config.json\n'
             f'  segmentation_meta.json\n\n'
             f'Per-tile outputs:\n'
-            f'  tiles_full/  (or tiles_<ROI>/)\n'
+            f'  tile_masks/\n'
             f'    tile_r*_c*_dapi.ome.tiff\n'
             f'    tile_r*_c*_raw_mask.ome.tiff'
         )
@@ -679,4 +803,3 @@ class Step2Page(QWidget):
 # ══════════════════════════════════════════════════════════════════════
 #  Step 3 Page  — Segmentation QC Viewer
 # ══════════════════════════════════════════════════════════════════════
-

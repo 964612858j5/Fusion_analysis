@@ -10,6 +10,13 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..core.io_loader import OMETIFFLoader
 from ..core.fusion_engine import FusionEngine
+from ..utils.segmentation_config import (
+    CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_DAPI,
+    STARDIST_NUCLEI_EXPANSION,
+    normalize_segmentation_config,
+)
 
 
 class OverviewLoaderThread(QThread):
@@ -170,57 +177,97 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "msg": "[Cellpose] CUDA not available, using CPU (slower)",
             })
 
-        model = models.CellposeModel(device=device)
+        cellpose_model = None
+        stardist_model = None
         total = len(tasks)
 
         for done, (patch_idx, roi, params) in enumerate(tasks):
             if stop_flag.is_set():
                 break
 
+            params = normalize_segmentation_config(params)
+            method = params.get("method", CELLPOSE_WHOLECELL_FUSION)
             y0, y1, x0, x1 = roi
             result_queue.put({
                 "type": "progress",
                 "done": done,
                 "total": total,
-                "msg": (f"Patch {patch_idx+1}  "
+                "msg": (f"Patch {patch_idx+1}  {method}  "
                         f"diam={params.get('diameter')}  "
                         f"flow={params.get('flow_threshold')}  "
                         f"prob={params.get('cellprob_threshold')}"),
             })
 
-            fused = fusion.fuse_fullres(
-                loader, y0, y1, x0, x1,
-                groups, group_weights, nuc_ch, nuc_w,
-            )
-            fused_f32 = np.array(fused.astype(np.float32) / 65535.0)
+            fused = None
+            fused_f32 = None
+            dapi_f32 = None
+
+            if method == CELLPOSE_WHOLECELL_FUSION:
+                fused = fusion.fuse_fullres(
+                    loader, y0, y1, x0, x1,
+                    groups, group_weights, nuc_ch, nuc_w,
+                )
+                fused_f32 = np.array(fused.astype(np.float32) / 65535.0)
+                seg_img = np.ascontiguousarray(fused_f32[:, :, 1])
+                rgb_raw = np.stack([
+                    (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
+                    np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
+                    (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
+                ], axis=-1)
+            else:
+                dapi_raw = loader.read_region(nuc_ch, y0, y1, x0, x1, downsample=1)
+                dapi_f32 = fusion._normalize_intensity(dapi_raw).astype(np.float32)
+                seg_img = np.ascontiguousarray(dapi_f32)
+                dapi_u8 = (np.clip(dapi_f32, 0, 1) * 255).astype(np.uint8)
+                rgb_raw = np.stack([
+                    np.zeros_like(dapi_u8),
+                    np.zeros_like(dapi_u8),
+                    dapi_u8,
+                ], axis=-1)
 
             try:
-                nuc_2d = np.ascontiguousarray(fused_f32[:, :, 1])
-                masks_out, _, _ = model.eval(
-                    nuc_2d,
-                    diameter=params.get("diameter"),
-                    flow_threshold=params.get("flow_threshold", 0.4),
-                    cellprob_threshold=params.get("cellprob_threshold", 0.0),
-                    min_size=15,
-                    do_3D=False,
-                )
+                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+                    if cellpose_model is None:
+                        cellpose_model = models.CellposeModel(device=device)
+                    masks_out, _, _ = cellpose_model.eval(
+                        seg_img,
+                        diameter=params.get("diameter"),
+                        flow_threshold=params.get("flow_threshold", 0.4),
+                        cellprob_threshold=params.get("cellprob_threshold", 0.0),
+                        min_size=int(params.get("min_size", 15) or 15),
+                        do_3D=False,
+                    )
+                elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
+                    if stardist_model is None:
+                        from csbdeep.utils import normalize as stardist_normalize
+                        from stardist.models import StarDist2D
+                        stardist_model = StarDist2D.from_pretrained(
+                            params.get("model_name", "2D_versatile_fluo")
+                        )
+                    img = stardist_normalize(seg_img, 1, 99.8, axis=(0, 1))
+                    kwargs = {}
+                    if params.get("prob_thresh") is not None:
+                        kwargs["prob_thresh"] = params.get("prob_thresh")
+                    if params.get("nms_thresh") is not None:
+                        kwargs["nms_thresh"] = params.get("nms_thresh")
+                    masks_out, _ = stardist_model.predict_instances(img, **kwargs)
+                    if method == STARDIST_NUCLEI_EXPANSION:
+                        from skimage.segmentation import expand_labels
+                        dist = float(params.get("expand_distance", 8) or 0)
+                        if dist > 0:
+                            masks_out = expand_labels(masks_out, distance=dist)
+                else:
+                    raise ValueError(f"Unknown segmentation method: {method}")
                 mask = masks_out.astype(np.uint32)
             except Exception as e:
-                result_queue.put({"type": "error", "msg": str(e)})
-                mask = np.zeros(fused.shape[:2], dtype=np.uint32)
+                result_queue.put({"type": "error", "msg": traceback.format_exc()})
+                mask = np.zeros(seg_img.shape, dtype=np.uint32)
 
-            fusion_rgb = np.stack([
-                (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
-                np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
-                (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
-            ], axis=-1)
-            dapi_u8 = fusion_rgb[:, :, 2]
-            rgb_raw = fusion_rgb
             rgb_ov = rgb_raw
             n_cells = int(mask.max())
             mask_payload = mask.copy()
 
-            del fused, fused_f32, mask, dapi_u8
+            del fused, fused_f32, dapi_f32, mask
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -240,7 +287,8 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "msg": f"✓ Patch {patch_idx+1}  cells={n_cells}",
             })
 
-        del model
+        del cellpose_model
+        del stardist_model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

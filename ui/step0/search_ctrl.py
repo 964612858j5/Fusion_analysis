@@ -39,6 +39,13 @@ from ...core.bg_correction import (
     _tile_slices,
 )
 from ...core.io_loader import OMETIFFLoader
+from ...utils.segmentation_config import (
+    CELLPOSE_WHOLECELL_FUSION,
+    STARDIST_NUCLEI_EXPANSION,
+    available_segmentation_methods,
+    get_segmentation_method_config,
+    normalize_segmentation_config,
+)
 
 class SearchCtrlPanel(QWidget):
     """
@@ -69,6 +76,43 @@ class SearchCtrlPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(5)
+
+        method_box = QGroupBox("Segmentation Method")
+        method_box.setStyleSheet(
+            "QGroupBox{border:1px solid #666;border-radius:4px;"
+            "font-weight:bold;color:#ccc;font-size:11px;}"
+        )
+        method_lay = QVBoxLayout(method_box)
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method:"))
+        self._method_combo = QComboBox()
+        for method in available_segmentation_methods():
+            cfg = get_segmentation_method_config(method)
+            self._method_combo.addItem(cfg["display_name"], method)
+        self._method_combo.setCurrentIndex(
+            max(0, self._method_combo.findData(CELLPOSE_WHOLECELL_FUSION))
+        )
+        self._method_combo.currentIndexChanged.connect(self._on_method_changed)
+        method_row.addWidget(self._method_combo, stretch=1)
+        method_lay.addLayout(method_row)
+
+        exp_row = QHBoxLayout()
+        exp_row.addWidget(QLabel("expansion_distance:"))
+        self._expand_dist = QDoubleSpinBox()
+        self._expand_dist.setRange(0, 200)
+        self._expand_dist.setDecimals(1)
+        self._expand_dist.setSingleStep(1)
+        self._expand_dist.setValue(8)
+        self._expand_dist.setFixedWidth(80)
+        exp_row.addWidget(self._expand_dist)
+        exp_row.addStretch()
+        method_lay.addLayout(exp_row)
+        self._method_hint = QLabel("")
+        self._method_hint.setStyleSheet("color:#999;font-size:10px;")
+        self._method_hint.setWordWrap(True)
+        method_lay.addWidget(self._method_hint)
+        lay.addWidget(method_box)
+        self._on_method_changed()
 
         # ── Phase 1 ───────────────────────────────────────────────────
         p1 = QGroupBox("Phase 1 — Auto-diameter preview  (cpsam)")
@@ -274,10 +318,12 @@ class SearchCtrlPanel(QWidget):
         if not flows or not probs:
             QMessageBox.warning(self, "Error", "Invalid flow/cellprob format")
             return
-        self.run_p2.emit({
+        payload = {
             "diameter": self._p2_diam,   # None = auto, float = override
             "flow": flows, "prob": probs,
-        })
+        }
+        payload.update(self.get_selected_method_config())
+        self.run_p2.emit(payload)
 
     def _load_params_file(self):
         """Browse for cellpose_params.json and load it."""
@@ -290,7 +336,7 @@ class SearchCtrlPanel(QWidget):
             return
         try:
             with open(path) as f:
-                p = json.load(f)
+                p = normalize_segmentation_config(json.load(f))
             d = p.get("diameter") or 0
             fl = p.get("flow_threshold", 0.4)
             cp = p.get("cellprob_threshold", 0.0)
@@ -302,12 +348,22 @@ class SearchCtrlPanel(QWidget):
                 f"diam={d}  flow={fl}  prob={cp}"
             )
             self._loaded_lbl.setStyleSheet("color:#4c4;font-size:10px;")
-            params = {
+            data = {
+                "params":             dict(p.get("params") or {}),
                 "diameter":           d if d > 0 else None,
                 "flow_threshold":     fl,
                 "cellprob_threshold": cp,
                 "_source":            "loaded",
             }
+            if p.get("method"):
+                data["method"] = p.get("method")
+                idx = self._method_combo.findData(p.get("method"))
+                if idx >= 0:
+                    self._method_combo.setCurrentIndex(idx)
+            if p.get("expand_distance") is not None:
+                self._expand_dist.setValue(float(p.get("expand_distance")))
+                data["params"]["expand_distance"] = float(p.get("expand_distance"))
+            params = normalize_segmentation_config(data)
             self.params_ready.emit(params)
         except Exception as e:
             QMessageBox.warning(self, "Error", "Failed to load params:\n" + str(e))
@@ -317,14 +373,16 @@ class SearchCtrlPanel(QWidget):
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
-        params = {
+        data = {
             "diameter":           d if d > 0 else None,
             "flow_threshold":     fl,
             "cellprob_threshold": cp,
             "_source":            "manual",
         }
+        data.update(self.get_selected_method_config())
+        params = normalize_segmentation_config(data)
         self._loaded_lbl.setText(
-            f"✓ Manual  diam={d}  flow={fl}  prob={cp}"
+            f"✓ Manual  method={params.get('method')}  diam={d}  flow={fl}  prob={cp}"
         )
         self._loaded_lbl.setStyleSheet("color:#fa8;font-size:10px;")
         self.params_ready.emit(params)
@@ -353,11 +411,29 @@ class SearchCtrlPanel(QWidget):
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
-        return {
+        params = {
             "diameter":           d if d > 0 else None,
             "flow_threshold":     fl,
             "cellprob_threshold": cp,
         }
+        params.update(self.get_selected_method_config())
+        return params
+
+    def get_selected_method_config(self):
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        cfg = get_segmentation_method_config(method)
+        params = dict(cfg.get("params") or {})
+        if method == STARDIST_NUCLEI_EXPANSION:
+            params["expand_distance"] = self._expand_dist.value()
+        return {"method": method, "params": params}
+
+    def _on_method_changed(self):
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        cfg = get_segmentation_method_config(method)
+        self._expand_dist.setEnabled(method == STARDIST_NUCLEI_EXPANSION)
+        self._method_hint.setText(
+            f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════

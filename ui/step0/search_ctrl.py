@@ -41,6 +41,7 @@ from ...core.bg_correction import (
 from ...core.io_loader import OMETIFFLoader
 from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -344,7 +345,7 @@ class SearchCtrlPanel(QWidget):
             return []
 
     def _emit_p1(self):
-        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(self, "Segmentation mode", "Phase 1 is only used for Cellpose modes.")
             return
         override = self._p1_override.value()
@@ -353,7 +354,7 @@ class SearchCtrlPanel(QWidget):
         self.run_p1.emit([diam])
 
     def _emit_p2(self):
-        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(self, "Segmentation mode", "Phase 2 is only used for Cellpose modes.")
             return
         if not self._p2_diam_set:
@@ -376,7 +377,7 @@ class SearchCtrlPanel(QWidget):
 
     def _emit_patch_preview(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(
                 self, "Segmentation mode",
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
@@ -420,7 +421,7 @@ class SearchCtrlPanel(QWidget):
                 if idx >= 0:
                     self._method_combo.setCurrentIndex(idx)
             if p.get("expand_distance") is not None:
-                self._expand_dist.setValue(float(p.get("expand_distance")))
+                self._sd_expand_manual.setValue(float(p.get("expand_distance")))
                 data["params"]["expand_distance"] = float(p.get("expand_distance"))
             params = normalize_segmentation_config(data)
             self.params_ready.emit(params)
@@ -453,10 +454,10 @@ class SearchCtrlPanel(QWidget):
         self._p2_diam_set = True
         label = "auto (cpsam)" if d is None else str(d)
         self.p2_diam_lbl.setText(f"diameter = {label}  (from Phase 1)")
-        self.btn_p2.setEnabled(self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI))
+        self.btn_p2.setEnabled(self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION))
 
     def set_running(self, running):
-        is_cellpose = self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        is_cellpose = self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         self.btn_p1.setEnabled(not running and is_cellpose)
         self.btn_p2.setEnabled(not running and self._p2_diam_set and is_cellpose)
         self.btn_patch_preview.setEnabled(not running and not is_cellpose)
@@ -490,16 +491,16 @@ class SearchCtrlPanel(QWidget):
             params["prob_thresh"] = None if self._sd_prob.value() < 0 else self._sd_prob.value()
             params["nms_thresh"] = None if self._sd_nms.value() < 0 else self._sd_nms.value()
             params["device_preference"] = "gpu_first"
-        if method == STARDIST_NUCLEI_EXPANSION:
+        if method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION):
             params["expand_distance"] = self._sd_expand_manual.value()
         return {"method": method, "params": params}
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         cfg = get_segmentation_method_config(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
-        is_expansion = method == STARDIST_NUCLEI_EXPANSION
+        is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         self._p1_box.setVisible(is_cellpose)
         self._p2_box.setVisible(is_cellpose)
         self._p1_box.setEnabled(is_cellpose)
@@ -527,7 +528,7 @@ class SearchCtrlPanel(QWidget):
                 w = row.itemAt(i).widget()
                 if w:
                     w.setVisible(visible)
-        self._expand_dist.setEnabled(method == STARDIST_NUCLEI_EXPANSION)
+        self._expand_dist.setEnabled(is_expansion)
         self._expand_dist.setVisible(False)
         self._expand_dist_label.setVisible(False)
         self._method_hint.setText(
@@ -539,6 +540,7 @@ class SearchCtrlPanel(QWidget):
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
+            CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")

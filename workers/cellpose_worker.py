@@ -17,6 +17,7 @@ from ..core.io_loader import OMETIFFLoader
 from ..core.fusion_engine import FusionEngine
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -431,7 +432,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 ], axis=-1)
 
             try:
-                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
                     masks_out, _, _ = cellpose_model.eval(
@@ -442,6 +443,14 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         min_size=int(params.get("min_size", 15) or 15),
                         do_3D=False,
                     )
+                    if method == CELLPOSE_NUCLEI_EXPANSION:
+                        from skimage.segmentation import expand_labels
+                        dist = float(params.get("expand_distance", 8) or 0)
+                        print("[Worker] input=dapi_only")
+                        print(f"[Worker] expand_distance={dist}")
+                        if dist > 0:
+                            masks_out = expand_labels(masks_out, distance=dist)
+                        print(f"[Worker] expanded cells={int(np.asarray(masks_out).max())}")
                 elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
                     result_queue.put({
                         "type": "progress",

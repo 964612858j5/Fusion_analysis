@@ -31,6 +31,7 @@ from ..core.fusion_engine import FusionEngine
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -1724,7 +1725,7 @@ class MainWindow(QMainWindow):
 
     def _run_direct_patch_preview(self, params):
         method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(
                 self, "Segmentation mode",
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
@@ -1891,11 +1892,12 @@ class MainWindow(QMainWindow):
     def _on_step1_segmentation_mode_changed(self, method):
         method = method or CELLPOSE_WHOLECELL_FUSION
         is_whole = method == CELLPOSE_WHOLECELL_FUSION
-        phase_required = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI)
+        phase_required = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
+            CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")

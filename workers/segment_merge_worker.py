@@ -19,6 +19,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
+    CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -298,7 +299,7 @@ class SegmentMergeWorker(QThread):
 
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI):
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             from cellpose import models as cp_models
             return {"cellpose": cp_models.CellposeModel(device=device)}
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
@@ -333,7 +334,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
-        if method == CELLPOSE_NUCLEI_DAPI:
+        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             masks, _, _ = backend["cellpose"].eval(
                 dapi,
                 diameter=self.seg_config.get("diameter"),
@@ -342,6 +343,14 @@ class SegmentMergeWorker(QThread):
                 min_size=self.seg_config.get("min_size", 15),
                 do_3D=False,
             )
+            if method == CELLPOSE_NUCLEI_EXPANSION:
+                from skimage.segmentation import expand_labels
+                dist = float(self.seg_config.get("expand_distance", 8) or 0)
+                if self._logger:
+                    self._logger.info(f"[Step2] applying expand_labels distance={dist}")
+                print(f"[Step2] applying expand_labels distance={dist}")
+                if dist > 0:
+                    masks = expand_labels(masks, distance=dist)
             return masks.astype(np.uint32)
 
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):

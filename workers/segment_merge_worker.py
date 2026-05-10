@@ -55,7 +55,7 @@ class SegmentMergeWorker(QThread):
 
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
                  overlap_px=200, output_dir=None, recovery_npy_dir=None,
-                 rois=None, cp_params=None):
+                 rois=None, cp_params=None, param_file=None):
         super().__init__()
         self.zarr_path        = zarr_path
         self.seg_config       = normalize_segmentation_config(seg_config if seg_config is not None else cp_params)
@@ -69,6 +69,7 @@ class SegmentMergeWorker(QThread):
         )
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
+        self.param_file       = self._abs(param_file) if param_file else ""
         self._stop            = False
         self._logger          = None
         self._mem_timer       = None
@@ -85,6 +86,52 @@ class SegmentMergeWorker(QThread):
         path = os.path.join(self.output_dir, "segmentation_config.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.seg_config, f, indent=2)
+        return path
+
+    def _write_run_metadata(self, summary_meta):
+        meta = {
+            "run_id": self.result_id,
+            "method": self.seg_config.get("method", self.method),
+            "param_file": self.param_file,
+            "created_at": self.created_at,
+            "input_zarr": self._abs(self.zarr_path),
+            "output_dir": self._abs(self.output_dir),
+            "roi_mode": bool(self.rois),
+            "n_rois": len(self.rois or []),
+        }
+        meta.update({k: v for k, v in (summary_meta or {}).items() if k not in meta})
+        path = os.path.join(self.output_dir, "run_metadata.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        return path
+
+    def _update_results_index(self, entry):
+        path = os.path.join(self.project_output_dir, "segmentation_results", "segmentation_results_index.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {"version": 1, "runs": [], "latest_by_method": {}}
+        runs = data.setdefault("runs", [])
+        rid = entry.get("result_id")
+        runs[:] = [r for r in runs if r.get("run_id") != rid and r.get("result_id") != rid]
+        runs.append({
+            "run_id": rid,
+            "result_id": rid,
+            "method": entry.get("method"),
+            "display_name": entry.get("display_name"),
+            "created_at": entry.get("created_at"),
+            "status": entry.get("status"),
+            "output_dir": entry.get("output_dir"),
+            "config_path": entry.get("config_path"),
+            "meta_path": entry.get("meta_path"),
+            "param_file": self.param_file,
+        })
+        data.setdefault("latest_by_method", {})[entry.get("method")] = rid
+        data["updated_at"] = datetime.now().isoformat()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
         return path
 
     def _multichannel_source_path(self):
@@ -133,7 +180,11 @@ class SegmentMergeWorker(QThread):
             "output_dir": self._abs(self.output_dir),
             "notes": "",
         }
+        run_meta_path = self._write_run_metadata(summary_meta)
+        entry["run_metadata_path"] = self._abs(run_meta_path)
+        entry["param_file"] = self.param_file
         upsert_result(self.project_output_dir, entry)
+        self._update_results_index(entry)
         return entry
 
     def _make_alias(self, source_path, alias_name):

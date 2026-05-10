@@ -37,6 +37,10 @@ from ..utils.segmentation_config import (
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
 )
+from ..utils.segmentation_params import (
+    load_active_segmentation_params,
+    save_segmentation_params,
+)
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
@@ -1050,25 +1054,38 @@ class MainWindow(QMainWindow):
         if self._current_step == 1:
             self._stop_all_loaders()
         if self.is_sequential_flow and self.step1_output:
-            zarr_path = self.step1_output.get("zarr_path")
-            if zarr_path:
-                self._step2.set_zarr_path(zarr_path)
             self._step2._out_edit.setText(
                 self.step1_output.get("output_dir", OUTPUT_DIR)
             )
+            zarr_path = self.step1_output.get("zarr_path")
+            if zarr_path:
+                self._step2.set_zarr_path(zarr_path)
             self._step2._fusion_config_path = self.step1_output.get("fusion_config_path")
             cfg_path = self.step1_output.get("fusion_config_path")
-            seg_cfg_path = os.path.join(self.step1_output.get("output_dir", OUTPUT_DIR), "segmentation_config.json")
-            if os.path.exists(seg_cfg_path):
-                try:
-                    with open(seg_cfg_path, "r", encoding="utf-8") as f:
+            out_dir = self.step1_output.get("output_dir", OUTPUT_DIR)
+            seg_cfg = None
+            seg_cfg_path = ""
+            try:
+                seg_cfg, seg_cfg_path = load_active_segmentation_params(out_dir)
+            except Exception:
+                print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
+            if seg_cfg is None:
+                legacy_path = os.path.join(out_dir, "segmentation_config.json")
+                if os.path.exists(legacy_path):
+                    seg_cfg_path = legacy_path
+                    with open(legacy_path, "r", encoding="utf-8") as f:
                         seg_cfg = normalize_segmentation_config(json.load(f))
+            if seg_cfg is not None:
+                try:
                     if hasattr(self._step2, "_apply_seg_config_to_ui"):
                         self._step2._apply_seg_config_to_ui(seg_cfg)
-                    print(f"[Step2] segmentation method={seg_cfg.get('method')}")
-                    print(f"[Step2] input_type={seg_cfg.get('input_type')}")
+                    if hasattr(self._step2, "set_segmentation_params_path"):
+                        self._step2.set_segmentation_params_path(seg_cfg_path)
+                    print("[Step2] loaded active segmentation params")
+                    print(f"[Step2] method={seg_cfg.get('method')}")
+                    print(f"[Step2] param_file={seg_cfg_path}")
                 except Exception:
-                    print(f"[Step2] failed to load segmentation_config.json:\n{traceback.format_exc()}")
+                    print(f"[Step2] failed to apply segmentation params:\n{traceback.format_exc()}")
             if cfg_path:
                 self._step2._zarr_info.setText(
                     (self._step2._zarr_info.text() or "") +
@@ -2010,6 +2027,7 @@ class MainWindow(QMainWindow):
             "fusion_config_path": os.path.join(OUTPUT_DIR, "fusion_config.json"),
             "correction_config_path": os.path.join(OUTPUT_DIR, "correction_config.json"),
             "zarr_path": zarr_path,
+            "segmentation_param_path": getattr(self, "_pending_segmentation_param_path", ""),
             "roi_info": self._rois if self._rois else [],
             "output_dir": OUTPUT_DIR,
             "ome_tiff_path": OME_TIFF_FILE,
@@ -2107,10 +2125,13 @@ class MainWindow(QMainWindow):
         fp_seg = os.path.join(OUTPUT_DIR, "segmentation_config.json")
         with open(fp_seg, "w", encoding="utf-8") as f:
             json.dump(cpcfg, f, indent=2, ensure_ascii=False)
+        fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
         print(f"[Save] {fp1}")
         print(f"[Save] {fp2}")
         print(f"[Save] {fp_seg}")
+        print(f"[Save] {fp_method}")
         print(f"[Step1] saved segmentation_config={fp_seg}")
+        print(f"[Step1] saved active segmentation params={fp_method}")
 
         # ── Tile selection dialog ─────────────────────────────────────
         # Count active channels for RAM estimate
@@ -2171,6 +2192,7 @@ class MainWindow(QMainWindow):
             f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
         )
         self._fusion_worker.start()
+        self._pending_segmentation_param_path = fp_method
 
 
 

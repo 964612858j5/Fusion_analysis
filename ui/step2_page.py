@@ -28,6 +28,7 @@ from ..utils.segmentation_config import (
     get_segmentation_method_config,
     normalize_segmentation_config,
 )
+from ..utils.segmentation_params import load_active_segmentation_params
 from ..workers.segment_merge_worker import SegmentMergeWorker
 
 # ══════════════════════════════════════════════════════════════════════
@@ -61,6 +62,7 @@ class Step2Page(QWidget):
         self._ov_thread      = None
         self._rois           = []
         self._last_output_dir = None   # set when segmentation finishes
+        self._seg_param_file = ""
 
         self._build_ui()
 
@@ -157,13 +159,24 @@ class Step2Page(QWidget):
         zr.addWidget(btn_browse)
         inl.addLayout(zr)
 
+        pr = QHBoxLayout()
+        pr.addWidget(QLabel('Segmentation Params:'))
+        self._seg_params_edit = QtWidgets.QLineEdit()
+        self._seg_params_edit.setPlaceholderText('Optional JSON; auto-loaded from Step1 when available')
+        self._seg_params_edit.setStyleSheet('font-size:11px;')
+        pr.addWidget(self._seg_params_edit, stretch=1)
+        btn_params = QPushButton('Browse')
+        btn_params.setFixedWidth(64)
+        btn_params.clicked.connect(self._browse_seg_params)
+        pr.addWidget(btn_params)
+        inl.addLayout(pr)
+
         btn_load = QPushButton('Load zarr info & overview')
         btn_load.setStyleSheet(
             'QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}'
             'QPushButton:hover{background:#377;}'
         )
         btn_load.clicked.connect(self._load_zarr_info)
-        inl.addLayout(zr)
         inl.addWidget(btn_load)
 
         self._zarr_info = QLabel('—')
@@ -309,6 +322,7 @@ class Step2Page(QWidget):
         )
         btn_load_cp.clicked.connect(self._load_cp_params)
         cpl.addWidget(btn_load_cp)
+        btn_load_cp.setVisible(False)
         rl.addWidget(cp_box)
         self._on_method_changed()
 
@@ -437,7 +451,6 @@ class Step2Page(QWidget):
         if path and os.path.exists(path):
             self._zarr_edit.setText(path)
             self._load_zarr_info()
-            self._load_default_seg_config(silent=True)
 
     def set_rois(self, rois):
         """Receive ROI list from Step 1 for per-ROI segmentation."""
@@ -453,6 +466,41 @@ class Step2Page(QWidget):
         path = QFileDialog.getExistingDirectory(self, 'Select fused.zarr directory')
         if path:
             self._zarr_edit.setText(path)
+
+    def _browse_seg_params(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Select segmentation params JSON', OUTPUT_DIR, 'JSON (*.json)'
+        )
+        if path:
+            self.set_segmentation_params_path(path, load=True)
+
+    def set_segmentation_params_path(self, path, load=False):
+        self._seg_param_file = os.path.abspath(path) if path else ""
+        self._seg_params_edit.setText(self._seg_param_file)
+        if load and self._seg_param_file:
+            self._load_seg_params_file(self._seg_param_file, silent=False)
+
+    def _load_seg_params_file(self, path, silent=True):
+        if not path or not os.path.exists(path):
+            if not silent:
+                QMessageBox.warning(self, 'Error', 'Segmentation params file not found.')
+            return False
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                cfg = normalize_segmentation_config(json.load(f))
+            self._apply_seg_config_to_ui(cfg)
+            self._seg_config = cfg
+            self.set_segmentation_params_path(path, load=False)
+            print("[Step2] loaded active segmentation params")
+            print(f"[Step2] method={cfg.get('method')}")
+            print(f"[Step2] param_file={path}")
+            return True
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, 'Error', str(e))
+            else:
+                print(f'[Step2] failed to load segmentation params: {e}')
+            return False
 
     def _browse_out(self):
         path = QFileDialog.getExistingDirectory(self, 'Select output directory')
@@ -587,30 +635,21 @@ class Step2Page(QWidget):
         self._load_default_seg_config(silent=False)
 
     def _load_default_seg_config(self, silent=True):
-        cp_path = os.path.join(OUTPUT_DIR, 'segmentation_config.json')
-        if not os.path.exists(cp_path):
-            cp_path = os.path.join(OUTPUT_DIR, 'cellpose_params.json')
-        if not os.path.exists(cp_path):
-            if silent:
-                return
-            cp_path, _ = QFileDialog.getOpenFileName(
-                self, 'Select segmentation_config.json', OUTPUT_DIR, 'JSON (*.json)'
-            )
-        if not cp_path or not os.path.exists(cp_path):
-            return
+        output_dir = self._out_edit.text().strip() or OUTPUT_DIR
         try:
-            with open(cp_path) as f:
-                p = normalize_segmentation_config(json.load(f))
-            self._apply_seg_config_to_ui(p)
-            self._seg_config = p
-            if not silent:
-                QMessageBox.information(self, 'Loaded',
-                                        f'Segmentation config loaded from:\n{cp_path}')
+            cfg, path = load_active_segmentation_params(output_dir)
+            if cfg is not None and path:
+                self._apply_seg_config_to_ui(cfg)
+                self._seg_config = cfg
+                self.set_segmentation_params_path(path, load=False)
+                print("[Step2] loaded active segmentation params")
+                print(f"[Step2] method={cfg.get('method')}")
+                print(f"[Step2] param_file={path}")
+                return
         except Exception as e:
-            if not silent:
-                QMessageBox.warning(self, 'Error', str(e))
-            else:
-                print(f'[Step2] failed to auto-load segmentation config: {e}')
+            print(f'[Step2] failed to auto-load active segmentation params: {e}')
+        if not silent:
+            self._browse_seg_params()
 
     def _apply_seg_config_to_ui(self, p):
         method = p.get('method', CELLPOSE_WHOLECELL_FUSION)
@@ -692,6 +731,9 @@ class Step2Page(QWidget):
         nc  = self._cols_spin.value()
         self._n_rows = nr
         self._n_cols = nc
+        param_path = self._seg_params_edit.text().strip()
+        if param_path and os.path.exists(param_path):
+            self._load_seg_params_file(param_path, silent=True)
 
         # Reset tile colours
         for key in self._tile_status:
@@ -709,6 +751,7 @@ class Step2Page(QWidget):
             output_dir       = self._out_edit.text().strip() or OUTPUT_DIR,
             recovery_npy_dir = recovery_dir,
             rois             = self._rois if self._rois else None,
+            param_file        = self._seg_param_file,
         )
         seg_cfg = self.get_seg_config()
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")

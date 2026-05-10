@@ -1071,12 +1071,6 @@ class MainWindow(QMainWindow):
                     print("[Step2] loaded segmentation params index")
             except Exception:
                 print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
-            if seg_cfg is None:
-                legacy_path = os.path.join(out_dir, "segmentation_config.json")
-                if os.path.exists(legacy_path):
-                    seg_cfg_path = legacy_path
-                    with open(legacy_path, "r", encoding="utf-8") as f:
-                        seg_cfg = normalize_segmentation_config(json.load(f))
             if seg_cfg is not None:
                 try:
                     if hasattr(self._step2, "_apply_seg_config_to_ui"):
@@ -2075,7 +2069,7 @@ class MainWindow(QMainWindow):
                 self, "No parameters available",
                 "Please do one of the following before saving:\n\n"
                 "1. Run Phase 1 → Phase 2 and select params from the result grid\n"
-                "2. Click 📂 Browse to load an existing cellpose_params.json\n"
+                "2. Click 📂 Browse to load an existing segmentation params JSON\n"
                 "3. Fill in the manual spinboxes and click ✓ Use These Params"
             )
             return
@@ -2101,7 +2095,7 @@ class MainWindow(QMainWindow):
         with open(fp1, "w", encoding="utf-8") as f:
             json.dump(fcfg, f, indent=2, ensure_ascii=False)
 
-        # ── Write cellpose_params.json ────────────────────────────────
+        # ── Write timestamped segmentation params ─────────────────────
         method_cfg = self.search.get_selected_method_config()
         selected_method = (
             self._p2_params.get("method")
@@ -2123,21 +2117,8 @@ class MainWindow(QMainWindow):
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
         })
         fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
-        rel_param = os.path.relpath(fp_method, OUTPUT_DIR)
-        alias_cfg = dict(cpcfg)
-        alias_cfg["param_file"] = rel_param
-        alias_cfg["is_latest_alias"] = True
-        fp2 = os.path.join(OUTPUT_DIR, "cellpose_params.json")
-        with open(fp2, "w", encoding="utf-8") as f:
-            json.dump(alias_cfg, f, indent=2, ensure_ascii=False)
-        fp_seg = os.path.join(OUTPUT_DIR, "segmentation_config.json")
-        with open(fp_seg, "w", encoding="utf-8") as f:
-            json.dump(alias_cfg, f, indent=2, ensure_ascii=False)
         print(f"[Save] {fp1}")
-        print(f"[Save] {fp2}")
-        print(f"[Save] {fp_seg}")
         print(f"[Save] {fp_method}")
-        print(f"[Step1] saved segmentation_config={fp_seg}")
         print(f"[Step1] saved active segmentation params={fp_method}")
 
         # ── Tile selection dialog ─────────────────────────────────────

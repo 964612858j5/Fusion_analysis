@@ -315,7 +315,7 @@ class Step2Page(QWidget):
         self._method_hint.setWordWrap(True)
         cpl.addWidget(self._method_hint)
 
-        btn_load_cp = QPushButton('↓ Load segmentation_config.json / cellpose_params.json')
+        btn_load_cp = QPushButton('↓ Load segmentation params JSON')
         btn_load_cp.setStyleSheet(
             'QPushButton{color:#8cf;font-size:10px;border:1px solid #8cf;'
             'border-radius:3px;padding:3px;}'
@@ -822,7 +822,7 @@ class Step2Page(QWidget):
             f'  global_mask.zarr\n'
             f'  global_mask.ome.tiff   (merged mask, float32)\n'
             f'  global_dapi.ome.tiff   (DAPI, uint16)\n'
-            f'  segmentation_config.json\n'
+            f'  run_segmentation_params.json\n'
             f'  segmentation_meta.json\n\n'
             f'Per-tile outputs:\n'
             f'  tile_masks/\n'

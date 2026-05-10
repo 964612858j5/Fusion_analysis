@@ -82,8 +82,8 @@ class SegmentMergeWorker(QThread):
     def _project_path(self, *parts):
         return os.path.join(self.project_output_dir, *parts)
 
-    def _write_segmentation_config(self):
-        path = os.path.join(self.output_dir, "segmentation_config.json")
+    def _write_run_segmentation_config(self):
+        path = os.path.join(self.output_dir, "run_segmentation_params.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.seg_config, f, indent=2)
         return path
@@ -145,7 +145,7 @@ class SegmentMergeWorker(QThread):
         return ""
 
     def _register_completed_result(self, summary_meta):
-        config_path = os.path.join(self.output_dir, "segmentation_config.json")
+        config_path = os.path.join(self.output_dir, "run_segmentation_params.json")
         meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
         method = self.seg_config.get("method", self.method)
         display_name = self.seg_config.get("display_name", method)
@@ -777,8 +777,8 @@ class SegmentMergeWorker(QThread):
             log = self._logger
             log.info("=== Segmentation started ===")
             register_legacy_result(self.project_output_dir)
-            config_path = self._write_segmentation_config()
-            log.info(f"segmentation_config.json → {config_path}")
+            config_path = self._write_run_segmentation_config()
+            log.info(f"run_segmentation_params.json -> {config_path}")
 
             try:
                 import psutil

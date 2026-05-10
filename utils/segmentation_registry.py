@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 
 from .segmentation_config import CELLPOSE_WHOLECELL_FUSION, normalize_segmentation_config
+from .segmentation_params import active_params_path
 
 
 REGISTRY_DIRNAME = "segmentation_results"
@@ -106,9 +107,7 @@ def register_legacy_result(project_output_dir):
         if item.get("mask_path") == mask_abs:
             return item
 
-    config_path = os.path.join(project_output_dir, "segmentation_config.json")
-    if not os.path.exists(config_path):
-        config_path = os.path.join(project_output_dir, "cellpose_params.json")
+    config_path = active_params_path(project_output_dir)
     meta_path = os.path.join(project_output_dir, "segmentation_meta.json")
     fusion_path = os.path.join(project_output_dir, "fused.zarr")
     multichannel = os.path.join(project_output_dir, "corrected_channels.zarr")

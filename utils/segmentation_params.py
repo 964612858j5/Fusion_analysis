@@ -37,8 +37,14 @@ def save_segmentation_params(output_dir, config):
     created_at = datetime.now().isoformat()
     cfg["created_at"] = cfg.get("created_at") or created_at
     cfg["source"] = cfg.get("source") or "Step1"
-    filename = f"{method}_{_timestamp()}.json"
+    stem = f"{method}_{_timestamp()}"
+    filename = f"{stem}.json"
     path = os.path.join(out_dir, filename)
+    suffix = 1
+    while os.path.exists(path):
+        filename = f"{stem}_{suffix:02d}.json"
+        path = os.path.join(out_dir, filename)
+        suffix += 1
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 

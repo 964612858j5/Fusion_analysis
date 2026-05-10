@@ -642,9 +642,11 @@ class Step2Page(QWidget):
                 self._apply_seg_config_to_ui(cfg)
                 self._seg_config = cfg
                 self.set_segmentation_params_path(path, load=False)
+                print("[Step2] loaded segmentation params index")
                 print("[Step2] loaded active segmentation params")
-                print(f"[Step2] method={cfg.get('method')}")
-                print(f"[Step2] param_file={path}")
+                print(f"[Step2] active_method={cfg.get('method')}")
+                print(f"[Step2] active_param_file={path}")
+                print(f"[Step2] loaded method config={cfg.get('method')}")
                 return
         except Exception as e:
             print(f'[Step2] failed to auto-load active segmentation params: {e}')

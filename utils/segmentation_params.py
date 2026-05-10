@@ -34,20 +34,28 @@ def save_segmentation_params(output_dir, config):
     out_dir = params_dir(output_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    created_at = datetime.now().isoformat()
+    cfg["created_at"] = cfg.get("created_at") or created_at
+    cfg["source"] = cfg.get("source") or "Step1"
     filename = f"{method}_{_timestamp()}.json"
     path = os.path.join(out_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
     index = load_params_index(output_dir)
-    updated = datetime.now().isoformat()
+    updated = created_at
     index["active_method"] = method
     index["active_param_file"] = filename
     index["updated_at"] = updated
-    index.setdefault("methods", {})[method] = {
+    method_info = index.setdefault("methods", {}).setdefault(method, {})
+    history = list(method_info.get("history") or [])
+    if filename not in history:
+        history.append(filename)
+    method_info.update({
         "latest": filename,
+        "history": history,
         "updated_at": updated,
-    }
+    })
     with open(params_index_path(output_dir), "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
     return _abs(path), index

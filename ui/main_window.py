@@ -1067,6 +1067,8 @@ class MainWindow(QMainWindow):
             seg_cfg_path = ""
             try:
                 seg_cfg, seg_cfg_path = load_active_segmentation_params(out_dir)
+                if seg_cfg is not None and seg_cfg_path:
+                    print("[Step2] loaded segmentation params index")
             except Exception:
                 print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
             if seg_cfg is None:
@@ -1082,8 +1084,9 @@ class MainWindow(QMainWindow):
                     if hasattr(self._step2, "set_segmentation_params_path"):
                         self._step2.set_segmentation_params_path(seg_cfg_path)
                     print("[Step2] loaded active segmentation params")
-                    print(f"[Step2] method={seg_cfg.get('method')}")
-                    print(f"[Step2] param_file={seg_cfg_path}")
+                    print(f"[Step2] active_method={seg_cfg.get('method')}")
+                    print(f"[Step2] active_param_file={seg_cfg_path}")
+                    print(f"[Step2] loaded method config={seg_cfg.get('method')}")
                 except Exception:
                     print(f"[Step2] failed to apply segmentation params:\n{traceback.format_exc()}")
             if cfg_path:
@@ -2119,13 +2122,17 @@ class MainWindow(QMainWindow):
             "params_source":      self._params_source or "unknown",
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
         })
+        fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
+        rel_param = os.path.relpath(fp_method, OUTPUT_DIR)
+        alias_cfg = dict(cpcfg)
+        alias_cfg["param_file"] = rel_param
+        alias_cfg["is_latest_alias"] = True
         fp2 = os.path.join(OUTPUT_DIR, "cellpose_params.json")
         with open(fp2, "w", encoding="utf-8") as f:
-            json.dump(cpcfg, f, indent=2, ensure_ascii=False)
+            json.dump(alias_cfg, f, indent=2, ensure_ascii=False)
         fp_seg = os.path.join(OUTPUT_DIR, "segmentation_config.json")
         with open(fp_seg, "w", encoding="utf-8") as f:
-            json.dump(cpcfg, f, indent=2, ensure_ascii=False)
-        fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
+            json.dump(alias_cfg, f, indent=2, ensure_ascii=False)
         print(f"[Save] {fp1}")
         print(f"[Save] {fp2}")
         print(f"[Save] {fp_seg}")

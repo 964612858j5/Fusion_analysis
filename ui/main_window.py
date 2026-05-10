@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
 
         self._p1_diam            = None
         self._p2_params          = None
+        self._seg_preview_history = {}
+        self._active_segmentation_method = ""
+        self._active_preview_patch = ""
         self._preview_patch_idx  = -1
         self._all_patches        = []
         self._patch_channel_cache: dict = {}
@@ -840,10 +843,53 @@ class MainWindow(QMainWindow):
             "channel_visibility": channel_visibility,
             "channel_colors": {},
             "p2_params": self._p2_params,
+            "segmentation_preview_history": self._seg_preview_history,
+            "active_segmentation_method": self._active_segmentation_method,
+            "active_preview_patch": self._active_preview_patch,
             "p1_diam": self._p1_diam,
             "params_source": self._params_source,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    @staticmethod
+    def _json_safe_step1_value(value):
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False))
+        except Exception:
+            if isinstance(value, dict):
+                return {str(k): MainWindow._json_safe_step1_value(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [MainWindow._json_safe_step1_value(v) for v in value]
+            try:
+                return value.item()
+            except Exception:
+                return str(value)
+
+    def _record_segmentation_preview_result(self, patch_idx, params, masks):
+        params = normalize_segmentation_config(params or {})
+        method = params.get("method") or CELLPOSE_WHOLECELL_FUSION
+        patch_name = f"P{int(patch_idx) + 1}"
+        cells = int(np.asarray(masks).max()) if masks is not None else 0
+        device = str(params.get("device_used") or params.get("device") or "unknown")
+        record = {
+            "params": self._json_safe_step1_value(params),
+            "cells": cells,
+            "device": device,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        patch_hist = self._seg_preview_history.setdefault(patch_name, {})
+        method_hist = patch_hist.setdefault(method, {})
+        history = method_hist.setdefault("history", [])
+        history.append(record)
+        method_hist["latest"] = record
+
+        is_active_params = params.get("_phase") != 1
+        if is_active_params:
+            self._p2_params = params
+            self._active_segmentation_method = method
+            self._active_preview_patch = patch_name
+        return is_active_params
 
     def _schedule_step1_session_save(self):
         if self._step1_restore_active:
@@ -1002,6 +1048,13 @@ class MainWindow(QMainWindow):
                     y0, y1, x0, x1 = [int(v) for v in p["bbox_local"]]
                     patches.append((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1))
             self._p2_params = sess.get("p2_params")
+            self._seg_preview_history = dict(sess.get("segmentation_preview_history") or {})
+            self._active_segmentation_method = str(
+                sess.get("active_segmentation_method")
+                or (self._p2_params or {}).get("method")
+                or ""
+            )
+            self._active_preview_patch = str(sess.get("active_preview_patch") or "")
             self._p1_diam = sess.get("p1_diam")
             self._params_source = sess.get("params_source")
             self._fused_zarr_path = sess.get("fusion_zarr_path") or None
@@ -1848,6 +1901,15 @@ class MainWindow(QMainWindow):
             if kind == "result":
                 print(f"[Step1] received result patch_idx={item.get('patch_idx')}")
                 masks = item.get("masks")
+                active_updated = self._record_segmentation_preview_result(
+                    item.get("patch_idx", 0),
+                    item.get("params") or {},
+                    masks,
+                )
+                if active_updated:
+                    self._params_source = "patch_preview"
+                    self._check_save_unlock()
+                self._schedule_step1_session_save()
                 if masks is not None:
                     params = item.get("params") or {}
                     method = params.get("method")

@@ -433,6 +433,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
             try:
                 if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+                    params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
                     masks_out, _, _ = cellpose_model.eval(

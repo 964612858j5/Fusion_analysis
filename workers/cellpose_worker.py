@@ -4,6 +4,10 @@ block01/workers/cellpose_worker.py — Cellpose-related threads and overlay util
 
 import os
 import gc
+import sys
+import json
+import tempfile
+import subprocess
 import traceback
 import numpy as np
 
@@ -195,6 +199,142 @@ def load_stardist_model(model_name, prefer_gpu=True, result_queue=None):
         raise
 
 
+def run_stardist_predict_in_subprocess(image, params, device="gpu", timeout_s=None):
+    """Run StarDist prediction in a clean Python process.
+
+    TensorFlow cannot reliably switch from initialized GPU state to CPU in the
+    same process after cuDNN graph failures.  This helper isolates every
+    StarDist attempt in a fresh interpreter, so CPU fallback starts with
+    CUDA hidden before TensorFlow/Keras/StarDist are imported.
+    """
+    device = "cpu" if str(device).lower() == "cpu" else "gpu"
+    params = normalize_segmentation_config(params)
+    prefix = "[StarDist-CPU]" if device == "cpu" else "[StarDist-GPU]"
+    with tempfile.TemporaryDirectory(prefix=f"stardist_{device}_") as td:
+        image_path = os.path.join(td, "image.npy")
+        params_path = os.path.join(td, "params.json")
+        mask_path = os.path.join(td, "mask.npy")
+        result_path = os.path.join(td, "result.json")
+        np.save(image_path, np.asarray(image, dtype=np.float32))
+        with open(params_path, "w", encoding="utf-8") as f:
+            json.dump(params, f)
+
+        code = r'''
+import os
+import sys
+import json
+import traceback
+import numpy as np
+
+image_path, params_path, mask_path, result_path, device = sys.argv[1:6]
+prefix = "[StarDist-CPU]" if device == "cpu" else "[StarDist-GPU]"
+os.environ["KERAS_BACKEND"] = "tensorflow"
+if device == "cpu":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+def log(msg):
+    print(msg, flush=True)
+
+try:
+    log(f"{prefix} KERAS_BACKEND={os.environ.get('KERAS_BACKEND')}")
+    log(f"{prefix} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<visible>')}")
+    import tensorflow as tf
+    if device == "gpu":
+        gpus = tf.config.list_physical_devices("GPU")
+        if not gpus:
+            raise RuntimeError("TensorFlow sees no GPU")
+        for gpu in gpus:
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            except Exception:
+                pass
+    else:
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
+
+    from csbdeep.utils import normalize
+    from stardist.models import StarDist2D
+
+    with open(params_path, "r", encoding="utf-8") as f:
+        params = json.load(f)
+    image = np.load(image_path)
+    model_name = params.get("model_name", "2D_versatile_fluo")
+    model = StarDist2D.from_pretrained(model_name)
+    log(f"{prefix} model loaded")
+    img = normalize(image, 1, 99.8, axis=(0, 1))
+    kwargs = {}
+    if params.get("prob_thresh") is not None:
+        kwargs["prob_thresh"] = params.get("prob_thresh")
+    if params.get("nms_thresh") is not None:
+        kwargs["nms_thresh"] = params.get("nms_thresh")
+    log(f"{prefix} predict_instances started")
+    masks, _ = model.predict_instances(img, **kwargs)
+    masks = masks.astype(np.uint32, copy=False)
+    np.save(mask_path, masks)
+    cells = int(masks.max()) if masks.size else 0
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump({"success": True, "device": device, "cells": cells}, f)
+    log(f"{prefix} success cells={cells}")
+except Exception:
+    err = traceback.format_exc()
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump({"success": False, "device": device, "error": err}, f)
+    log(f"{prefix} failed: {err}")
+    sys.exit(2)
+'''
+        env = os.environ.copy()
+        env["KERAS_BACKEND"] = "tensorflow"
+        if device == "cpu":
+            env["CUDA_VISIBLE_DEVICES"] = "-1"
+        cmd = [sys.executable, "-c", code, image_path, params_path, mask_path, result_path, device]
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+        )
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="")
+
+        result = {"success": False, "device": device, "error": ""}
+        if os.path.exists(result_path):
+            try:
+                with open(result_path, "r", encoding="utf-8") as f:
+                    result = json.load(f)
+            except Exception:
+                result = {"success": False, "device": device, "error": traceback.format_exc()}
+        elif proc.returncode != 0:
+            result["error"] = proc.stderr or proc.stdout or f"StarDist subprocess exited {proc.returncode}"
+
+        if result.get("success") and os.path.exists(mask_path):
+            result["mask"] = np.load(mask_path).astype(np.uint32, copy=False)
+        return result
+
+
+def run_stardist_predict_gpu_first(image, params):
+    print(f"[Worker] method={params.get('method')}")
+    print("[Worker] trying StarDist GPU subprocess")
+    result = run_stardist_predict_in_subprocess(image, params, device="gpu")
+    if result.get("success"):
+        print("[Worker] StarDist device=gpu")
+        return result
+
+    err = str(result.get("error") or "")
+    short = err.strip().splitlines()[-1] if err.strip() else "unknown error"
+    print(f"[Worker] StarDist GPU failed, retrying CPU: {short}")
+    print("[Worker] retrying StarDist CPU subprocess")
+    result_cpu = run_stardist_predict_in_subprocess(image, params, device="cpu")
+    if result_cpu.get("success"):
+        print("[Worker] StarDist device=cpu")
+    return result_cpu
+
+
 def run_cellpose_process(args, result_queue, stop_flag):
     try:
         from cellpose import models
@@ -236,9 +376,6 @@ def run_cellpose_process(args, result_queue, stop_flag):
             })
 
         cellpose_model = None
-        stardist_model = None
-        stardist_normalize = None
-        stardist_device = None
         total = len(tasks)
 
         for done, (patch_idx, roi, params) in enumerate(tasks):
@@ -299,26 +436,25 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         do_3D=False,
                     )
                 elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-                    if stardist_model is None:
-                        stardist_model, stardist_normalize, stardist_device = load_stardist_model(
-                            params.get("model_name", "2D_versatile_fluo"),
-                            prefer_gpu=params.get("device_preference", "gpu_first") != "cpu",
-                            result_queue=result_queue,
-                        )
-                    img = stardist_normalize(seg_img, 1, 99.8, axis=(0, 1))
-                    kwargs = {}
-                    if params.get("prob_thresh") is not None:
-                        kwargs["prob_thresh"] = params.get("prob_thresh")
-                    if params.get("nms_thresh") is not None:
-                        kwargs["nms_thresh"] = params.get("nms_thresh")
-                    masks_out, _ = stardist_model.predict_instances(img, **kwargs)
+                    result_queue.put({
+                        "type": "progress",
+                        "done": done,
+                        "total": total,
+                        "msg": "[Worker] trying StarDist GPU subprocess",
+                    })
+                    if params.get("device_preference", "gpu_first") == "cpu":
+                        sd_result = run_stardist_predict_in_subprocess(seg_img, params, device="cpu")
+                    else:
+                        sd_result = run_stardist_predict_gpu_first(seg_img, params)
+                    if not sd_result.get("success"):
+                        raise RuntimeError(sd_result.get("error") or "StarDist prediction failed")
+                    masks_out = sd_result["mask"]
                     if method == STARDIST_NUCLEI_EXPANSION:
                         from skimage.segmentation import expand_labels
                         dist = float(params.get("expand_distance", 8) or 0)
                         if dist > 0:
                             masks_out = expand_labels(masks_out, distance=dist)
-                    if stardist_device:
-                        params["device_used"] = stardist_device
+                    params["device_used"] = sd_result.get("device")
                 else:
                     raise ValueError(f"Unknown segmentation method: {method}")
                 mask = masks_out.astype(np.uint32)
@@ -351,7 +487,6 @@ def run_cellpose_process(args, result_queue, stop_flag):
             })
 
         del cellpose_model
-        del stardist_model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

@@ -28,7 +28,10 @@ from ..utils.segmentation_config import (
     get_segmentation_method_config,
     normalize_segmentation_config,
 )
-from ..utils.segmentation_params import load_active_segmentation_params
+from ..utils.segmentation_params import (
+    PARAM_INDEX,
+    params_index_path,
+)
 from ..workers.segment_merge_worker import SegmentMergeWorker
 
 # ══════════════════════════════════════════════════════════════════════
@@ -63,6 +66,9 @@ class Step2Page(QWidget):
         self._rois           = []
         self._last_output_dir = None   # set when segmentation finishes
         self._seg_param_file = ""
+        self._seg_params_index = {}
+        self._seg_params_dir = ""
+        self._loading_index_selection = False
 
         self._build_ui()
 
@@ -160,9 +166,9 @@ class Step2Page(QWidget):
         inl.addLayout(zr)
 
         pr = QHBoxLayout()
-        pr.addWidget(QLabel('Segmentation Params:'))
+        pr.addWidget(QLabel('Segmentation Index:'))
         self._seg_params_edit = QtWidgets.QLineEdit()
-        self._seg_params_edit.setPlaceholderText('Optional JSON; auto-loaded from Step1 when available')
+        self._seg_params_edit.setPlaceholderText('segmentation_params/ or segmentation_params_index.json')
         self._seg_params_edit.setStyleSheet('font-size:11px;')
         pr.addWidget(self._seg_params_edit, stretch=1)
         btn_params = QPushButton('Browse')
@@ -245,6 +251,13 @@ class Step2Page(QWidget):
         self._method_combo.currentIndexChanged.connect(self._on_method_changed)
         r, self._method_label, _ = _param_row('Method:', self._method_combo)
         cpl.addLayout(r)
+
+        self._history_combo = QComboBox()
+        self._history_combo.currentIndexChanged.connect(self._on_history_changed)
+        r, self._history_label, _ = _param_row('History:', self._history_combo)
+        cpl.addLayout(r)
+        self._history_combo.setVisible(False)
+        self._history_label.setVisible(False)
 
         # Cellpose 4.0.1+: model_type is ignored — only cpsam is used
         self._cp_model_lbl = QLabel('cpsam  (Cellpose 4.0.1+: only model, model_type ignored)')
@@ -468,17 +481,135 @@ class Step2Page(QWidget):
             self._zarr_edit.setText(path)
 
     def _browse_seg_params(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Select segmentation params JSON', OUTPUT_DIR, 'JSON (*.json)'
-        )
-        if path:
-            self.set_segmentation_params_path(path, load=True)
+        dlg = QFileDialog(self, 'Select segmentation_params directory or index JSON', OUTPUT_DIR)
+        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        dlg.setFileMode(QFileDialog.AnyFile)
+        dlg.setNameFilter('Segmentation params index (segmentation_params_index.json);;JSON (*.json);;All files (*)')
+        if dlg.exec_():
+            selected = dlg.selectedFiles()
+            if selected:
+                self.set_segmentation_params_path(selected[0], load=True)
 
     def set_segmentation_params_path(self, path, load=False):
-        self._seg_param_file = os.path.abspath(path) if path else ""
-        self._seg_params_edit.setText(self._seg_param_file)
-        if load and self._seg_param_file:
+        display_path = os.path.abspath(path) if path else ""
+        self._seg_params_edit.setText(display_path)
+        if not load:
+            self._seg_param_file = display_path
+            return
+        if display_path and self._load_seg_params_index(display_path, silent=True):
+            return
+        self._seg_param_file = display_path
+        if self._seg_param_file:
             self._load_seg_params_file(self._seg_param_file, silent=False)
+
+    def _resolve_seg_params_index_path(self, path):
+        path = os.path.abspath(path or "")
+        if not path:
+            return ""
+        if os.path.isfile(path):
+            return path if os.path.basename(path) == PARAM_INDEX else ""
+        if os.path.isdir(path):
+            direct = os.path.join(path, PARAM_INDEX)
+            if os.path.exists(direct):
+                return direct
+            nested = params_index_path(path)
+            if os.path.exists(nested):
+                return nested
+        return ""
+
+    def _param_path_from_index(self, rel_or_abs):
+        rel_or_abs = rel_or_abs or ""
+        if not rel_or_abs:
+            return ""
+        return os.path.abspath(rel_or_abs) if os.path.isabs(rel_or_abs) else os.path.abspath(os.path.join(self._seg_params_dir, rel_or_abs))
+
+    def _method_display_name(self, method):
+        try:
+            return get_segmentation_method_config(method).get("display_name") or method
+        except Exception:
+            return method
+
+    def _load_seg_params_index(self, path, silent=True):
+        index_path = self._resolve_seg_params_index_path(path)
+        if not index_path:
+            if not silent:
+                QMessageBox.warning(self, 'Error', 'Select segmentation_params/ or segmentation_params_index.json.')
+            return False
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                index = json.load(f)
+            if not isinstance(index, dict):
+                raise ValueError('segmentation_params_index.json is not a JSON object.')
+            methods = index.get("methods") or {}
+            if not methods:
+                raise ValueError('segmentation_params_index.json has no methods.')
+            self._seg_params_index = index
+            self._seg_params_dir = os.path.dirname(index_path)
+            active_method = index.get("active_method") or next(iter(methods))
+            if active_method not in methods:
+                active_method = next(iter(methods))
+            active_file = index.get("active_param_file") if active_method == index.get("active_method") else ""
+            active_file = active_file or (methods.get(active_method) or {}).get("latest") or ""
+
+            self._loading_index_selection = True
+            try:
+                self._method_combo.clear()
+                for method in methods.keys():
+                    self._method_combo.addItem(self._method_display_name(method), method)
+                idx = self._method_combo.findData(active_method)
+                self._method_combo.setCurrentIndex(idx if idx >= 0 else 0)
+                self._populate_history_for_method(active_method, active_file)
+            finally:
+                self._loading_index_selection = False
+
+            ok = self._load_index_method(active_method, active_file, silent=silent)
+            if ok:
+                print("[Step2] loaded segmentation params index")
+                print(f"[Step2] index={index_path}")
+            return ok
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, 'Error', str(e))
+            else:
+                print(f'[Step2] failed to load segmentation params index: {e}')
+            return False
+
+    def _populate_history_for_method(self, method, selected_file=""):
+        info = (self._seg_params_index.get("methods") or {}).get(method) or {}
+        history = list(info.get("history") or [])
+        latest = info.get("latest") or ""
+        if latest and latest not in history:
+            history.append(latest)
+        selected_file = selected_file or latest
+        self._history_combo.blockSignals(True)
+        try:
+            self._history_combo.clear()
+            for filename in history:
+                label = f"latest: {filename}" if filename == latest else filename
+                self._history_combo.addItem(label, filename)
+            idx = self._history_combo.findData(selected_file)
+            self._history_combo.setCurrentIndex(idx if idx >= 0 else max(0, self._history_combo.findData(latest)))
+            has_history = self._history_combo.count() > 0
+            self._history_combo.setVisible(has_history)
+            self._history_label.setVisible(has_history)
+        finally:
+            self._history_combo.blockSignals(False)
+
+    def _load_index_method(self, method, filename="", silent=True):
+        info = (self._seg_params_index.get("methods") or {}).get(method) or {}
+        filename = filename or info.get("latest") or ""
+        path = self._param_path_from_index(filename)
+        if not path or not os.path.exists(path):
+            if not silent:
+                QMessageBox.warning(self, 'Error', f'Segmentation params file not found:\n{path}')
+            return False
+        self._populate_history_for_method(method, filename)
+        old = self._loading_index_selection
+        self._loading_index_selection = True
+        try:
+            return self._load_seg_params_file(path, silent=silent)
+        finally:
+            self._loading_index_selection = old
 
     def _load_seg_params_file(self, path, silent=True):
         if not path or not os.path.exists(path):
@@ -501,6 +632,14 @@ class Step2Page(QWidget):
             else:
                 print(f'[Step2] failed to load segmentation params: {e}')
             return False
+
+    def _on_history_changed(self):
+        if self._loading_index_selection:
+            return
+        method = self._method_combo.currentData()
+        filename = self._history_combo.currentData()
+        if method and filename and self._seg_params_index:
+            self._load_index_method(method, filename, silent=True)
 
     def _browse_out(self):
         path = QFileDialog.getExistingDirectory(self, 'Select output directory')
@@ -637,16 +776,7 @@ class Step2Page(QWidget):
     def _load_default_seg_config(self, silent=True):
         output_dir = self._out_edit.text().strip() or OUTPUT_DIR
         try:
-            cfg, path = load_active_segmentation_params(output_dir)
-            if cfg is not None and path:
-                self._apply_seg_config_to_ui(cfg)
-                self._seg_config = cfg
-                self.set_segmentation_params_path(path, load=False)
-                print("[Step2] loaded segmentation params index")
-                print("[Step2] loaded active segmentation params")
-                print(f"[Step2] active_method={cfg.get('method')}")
-                print(f"[Step2] active_param_file={path}")
-                print(f"[Step2] loaded method config={cfg.get('method')}")
+            if self._load_seg_params_index(output_dir, silent=True):
                 return
         except Exception as e:
             print(f'[Step2] failed to auto-load active segmentation params: {e}')
@@ -693,6 +823,8 @@ class Step2Page(QWidget):
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        if self._seg_params_index and not self._loading_index_selection:
+            self._load_index_method(method, silent=True)
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)

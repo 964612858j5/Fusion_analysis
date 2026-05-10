@@ -377,6 +377,13 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
         cellpose_model = None
         total = len(tasks)
+        if any(
+            normalize_segmentation_config(t[2]).get("method") in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+            for t in tasks
+        ):
+            print(f"[Worker] StarDist tasks={total}")
+            for patch_idx, _, _ in tasks:
+                print(f"[Worker] task patch_idx={patch_idx} patch=P{patch_idx + 1}")
 
         for done, (patch_idx, roi, params) in enumerate(tasks):
             if stop_flag.is_set():
@@ -440,14 +447,19 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         "type": "progress",
                         "done": done,
                         "total": total,
-                        "msg": "[Worker] trying StarDist GPU subprocess",
+                        "msg": f"[Worker] StarDist patch=P{patch_idx + 1} try GPU",
                     })
+                    print(f"[Worker] StarDist patch=P{patch_idx + 1} try GPU")
                     if params.get("device_preference", "gpu_first") == "cpu":
                         sd_result = run_stardist_predict_in_subprocess(seg_img, params, device="cpu")
                     else:
                         sd_result = run_stardist_predict_gpu_first(seg_img, params)
                     if not sd_result.get("success"):
                         raise RuntimeError(sd_result.get("error") or "StarDist prediction failed")
+                    if sd_result.get("device") == "cpu":
+                        print(f"[Worker] StarDist patch=P{patch_idx + 1} CPU success cells={int(np.asarray(sd_result['mask']).max())}")
+                    else:
+                        print(f"[Worker] StarDist patch=P{patch_idx + 1} GPU success cells={int(np.asarray(sd_result['mask']).max())}")
                     masks_out = sd_result["mask"]
                     if method == STARDIST_NUCLEI_EXPANSION:
                         from skimage.segmentation import expand_labels
@@ -479,6 +491,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "rgb_raw": rgb_raw,
                 "masks": mask_payload,
             })
+            print(f"[Worker] emitting result patch_idx={patch_idx}")
             result_queue.put({
                 "type": "progress",
                 "done": done + 1,

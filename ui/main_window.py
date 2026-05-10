@@ -1734,10 +1734,6 @@ class MainWindow(QMainWindow):
         if not patches:
             QMessageBox.warning(self, "Info", "Please add at least one Patch first")
             return
-        patch_idx = self._preview_patch_idx
-        if patch_idx < 0 or patch_idx >= len(patches):
-            patch_idx = 0
-            self._preview_patch_idx = 0
         params = normalize_segmentation_config(params or {})
         self._p2_params = params
         self._params_source = "direct_patch_preview"
@@ -1745,16 +1741,20 @@ class MainWindow(QMainWindow):
 
         nuc_ch, _ = self.config.get_nucleus()
         print(f"[Step1] patch preview mode={method}")
-        print(f"[Step1] patch=P{patch_idx + 1}")
+        print(f"[Step1] preview patches={len(patches)}")
         print(f"[Step1] input=DAPI channel={nuc_ch}")
         print(f"[Step1] params={params.get('params') or params}")
 
+        tasks = [
+            (pi, roi, dict(params))
+            for pi, roi in enumerate(patches)
+        ]
         self.result_grid.setup_grid(
             len(patches),
             [dict(params)],
-            f"Patch Preview — {method}  (P{patch_idx + 1})"
+            f"Patch Preview — {method}  ({len(patches)} patch(es))"
         )
-        self._launch_worker([(patch_idx, patches[patch_idx], dict(params))])
+        self._launch_worker(tasks)
 
     # ── Worker ──────────────────────────────────────────────────────
 
@@ -1831,6 +1831,7 @@ class MainWindow(QMainWindow):
 
             kind = item.get("type")
             if kind == "result":
+                print(f"[Step1] received result patch_idx={item.get('patch_idx')}")
                 masks = item.get("masks")
                 if masks is not None:
                     params = item.get("params") or {}

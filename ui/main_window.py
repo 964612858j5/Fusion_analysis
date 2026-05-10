@@ -38,7 +38,6 @@ from ..utils.segmentation_config import (
     normalize_segmentation_config,
 )
 from ..utils.segmentation_params import (
-    load_active_segmentation_params,
     save_segmentation_params,
 )
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
@@ -1116,26 +1115,11 @@ class MainWindow(QMainWindow):
             self._step2._fusion_config_path = self.step1_output.get("fusion_config_path")
             cfg_path = self.step1_output.get("fusion_config_path")
             out_dir = self.step1_output.get("output_dir", OUTPUT_DIR)
-            seg_cfg = None
-            seg_cfg_path = ""
             try:
-                seg_cfg, seg_cfg_path = load_active_segmentation_params(out_dir)
-                if seg_cfg is not None and seg_cfg_path:
-                    print("[Step2] loaded segmentation params index")
+                if hasattr(self._step2, "load_step1_active_params"):
+                    self._step2.load_step1_active_params(out_dir)
             except Exception:
                 print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
-            if seg_cfg is not None:
-                try:
-                    if hasattr(self._step2, "_apply_seg_config_to_ui"):
-                        self._step2._apply_seg_config_to_ui(seg_cfg)
-                    if hasattr(self._step2, "set_segmentation_params_path"):
-                        self._step2.set_segmentation_params_path(seg_cfg_path)
-                    print("[Step2] loaded active segmentation params")
-                    print(f"[Step2] active_method={seg_cfg.get('method')}")
-                    print(f"[Step2] active_param_file={seg_cfg_path}")
-                    print(f"[Step2] loaded method config={seg_cfg.get('method')}")
-                except Exception:
-                    print(f"[Step2] failed to apply segmentation params:\n{traceback.format_exc()}")
             if cfg_path:
                 self._step2._zarr_info.setText(
                     (self._step2._zarr_info.text() or "") +

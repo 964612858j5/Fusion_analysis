@@ -55,7 +55,8 @@ class SegmentMergeWorker(QThread):
 
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
                  overlap_px=200, output_dir=None, recovery_npy_dir=None,
-                 rois=None, cp_params=None, param_file=None):
+                 rois=None, cp_params=None, param_file=None,
+                 parameter_source="manual"):
         super().__init__()
         self.zarr_path        = zarr_path
         self.seg_config       = normalize_segmentation_config(seg_config if seg_config is not None else cp_params)
@@ -70,6 +71,7 @@ class SegmentMergeWorker(QThread):
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
         self.param_file       = self._abs(param_file) if param_file else ""
+        self.parameter_source = "index" if self.param_file and parameter_source == "index" else "manual"
         self._stop            = False
         self._logger          = None
         self._mem_timer       = None
@@ -92,7 +94,8 @@ class SegmentMergeWorker(QThread):
         meta = {
             "run_id": self.result_id,
             "method": self.seg_config.get("method", self.method),
-            "param_file": self.param_file,
+            "parameter_source": self.parameter_source,
+            "param_file": self.param_file or None,
             "created_at": self.created_at,
             "input_zarr": self._abs(self.zarr_path),
             "output_dir": self._abs(self.output_dir),

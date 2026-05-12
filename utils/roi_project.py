@@ -200,6 +200,38 @@ def mark_roi_step(project_dir, roi_id, step_name, status="done"):
     return idx
 
 
+def update_roi_segmentation_run(roi_dir_path, run_entry):
+    """Append/update one Step2 segmentation run in the ROI-level index."""
+    if not roi_dir_path or not run_entry:
+        return None
+    manifest = load_json(roi_manifest_path(roi_dir_path), {}) or {}
+    roi_id = manifest.get("roi_id") or os.path.basename(roi_dir_path)
+    idx_path = roi_index_path(roi_dir_path)
+    idx = load_json(idx_path, None) or _default_roi_index(roi_id)
+    run_id = run_entry.get("run_id")
+    if not run_id:
+        return idx
+    idx.setdefault("segmentation_runs", {})
+    idx["segmentation_runs"][run_id] = {
+        "run_id": run_id,
+        "method": run_entry.get("method", ""),
+        "created_at": run_entry.get("created_at", ""),
+        "path": run_entry.get("path", ""),
+        "status": run_entry.get("status", "done"),
+        "meta_path": run_entry.get("meta_path", ""),
+    }
+    idx["active_segmentation_run"] = run_id
+    method = run_entry.get("method")
+    if method:
+        idx.setdefault("latest_by_method", {})[method] = run_id
+    idx["active_step"] = "step2"
+    idx.setdefault("steps", {}).setdefault("step2", {"path": "step2/"})
+    idx["steps"]["step2"]["status"] = "done"
+    idx["steps"]["step2"]["path"] = "step2/"
+    save_json(idx_path, idx)
+    return idx
+
+
 def resolve_roi_context(path, default_project_dir=None):
     """Resolve project dir, ROI dir, step0 dir, or step0 manifest to context."""
     path = _abs(path or default_project_dir or "")
@@ -256,4 +288,3 @@ def resolve_roi_context(path, default_project_dir=None):
         },
         "legacy": True,
     }
-

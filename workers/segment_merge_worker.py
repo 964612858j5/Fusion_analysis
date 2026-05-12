@@ -30,6 +30,11 @@ from ..utils.segmentation_registry import (
     register_legacy_result,
     upsert_result,
 )
+from ..utils.roi_project import (
+    load_json,
+    roi_manifest_path,
+    update_roi_segmentation_run,
+)
 from .cellpose_worker import load_stardist_model
 
 
@@ -65,9 +70,11 @@ class SegmentMergeWorker(QThread):
         self.n_cols           = n_cols
         self.overlap_px       = overlap_px
         self.project_output_dir = os.path.abspath(output_dir or os.getcwd())
-        self.result_id, self.output_dir, self.created_at = create_result_dir(
-            self.project_output_dir, self.method
-        )
+        self.roi_dir = self._infer_roi_dir(self.project_output_dir)
+        self.roi_manifest = load_json(roi_manifest_path(self.roi_dir), {}) if self.roi_dir else {}
+        self.roi_id = str(self.roi_manifest.get("roi_id") or self._roi_id_from_rois(rois) or "")
+        self.roi_display_name = str(self.roi_manifest.get("display_name") or self._roi_display_from_rois(rois) or "ROI_1")
+        self.result_id, self.output_dir, self.created_at = self._create_output_dir()
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
         self.param_file       = self._abs(param_file) if param_file else ""
@@ -76,6 +83,48 @@ class SegmentMergeWorker(QThread):
         self._logger          = None
         self._mem_timer       = None
         self._last_region_meta = None
+
+    @staticmethod
+    def _infer_roi_dir(output_dir):
+        cur = os.path.abspath(output_dir or "")
+        while cur and cur != os.path.dirname(cur):
+            if os.path.exists(os.path.join(cur, "roi_manifest.json")):
+                return cur
+            cur = os.path.dirname(cur)
+        return ""
+
+    @staticmethod
+    def _roi_id_from_rois(rois):
+        for roi in rois or []:
+            if roi.get("roi_id"):
+                return roi.get("roi_id")
+        return ""
+
+    @staticmethod
+    def _roi_display_from_rois(rois):
+        for roi in rois or []:
+            if roi.get("display_name") or roi.get("name"):
+                return roi.get("display_name") or roi.get("name")
+        return ""
+
+    def _create_output_dir(self):
+        now = datetime.now()
+        created_at = now.isoformat()
+        safe_method = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(self.method)).strip("._")
+        if self.roi_dir or os.path.basename(self.project_output_dir) == "step2":
+            base = f"seg_{now.strftime('%Y%m%d_%H%M%S')}_{safe_method}"
+            parent = os.path.join(self.project_output_dir, "segmentation_runs")
+            os.makedirs(parent, exist_ok=True)
+            run_id = base
+            out_dir = os.path.join(parent, run_id)
+            suffix = 1
+            while os.path.exists(out_dir):
+                run_id = f"{base}_{suffix:02d}"
+                out_dir = os.path.join(parent, run_id)
+                suffix += 1
+            os.makedirs(out_dir, exist_ok=True)
+            return run_id, out_dir, created_at
+        return create_result_dir(self.project_output_dir, self.method)
 
     @staticmethod
     def _abs(path):
@@ -139,6 +188,7 @@ class SegmentMergeWorker(QThread):
 
     def _multichannel_source_path(self):
         candidates = [
+            os.path.join(self.roi_dir, "step0", "corrected_channels.zarr") if self.roi_dir else "",
             self._project_path("corrected_channels.zarr"),
             os.path.join(os.path.dirname(self.project_output_dir), "corrected_channels.zarr"),
         ]
@@ -146,6 +196,21 @@ class SegmentMergeWorker(QThread):
             if path and os.path.exists(path):
                 return self._abs(path)
         return ""
+
+    def _fusion_source_path(self, roi_name=None):
+        candidates = [
+            self.zarr_path,
+            os.path.join(self.roi_dir, "step1", "fused.zarr") if self.roi_dir else "",
+            os.path.join(self.roi_dir, "step1", f"fused_{roi_name}.zarr") if self.roi_dir and roi_name else "",
+            self._project_path(f"fused_{roi_name}.zarr") if roi_name else "",
+            self._project_path("fused.zarr"),
+            os.path.join(os.path.dirname(self.project_output_dir), f"fused_{roi_name}.zarr") if roi_name else "",
+            os.path.join(os.path.dirname(self.project_output_dir), "fused.zarr"),
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                return self._abs(path)
+        return self._abs(self.zarr_path)
 
     def _register_completed_result(self, summary_meta):
         config_path = os.path.join(self.output_dir, "run_segmentation_params.json")
@@ -717,6 +782,10 @@ class SegmentMergeWorker(QThread):
 
         meta = {
             'mode':            'roi',
+            'run_id':          self.result_id,
+            'roi_id':          self.roi_id,
+            'roi_display_name': out_prefix,
+            'method':          self.method,
             'roi_name':        out_prefix,
             'zarr_path':       self._abs(out_zarr_path),
             'fused_zarr_path':  self._abs(zarr_path),
@@ -738,6 +807,24 @@ class SegmentMergeWorker(QThread):
             'bbox':            list(bbox) if bbox else None,
             'created_at':      datetime.now().isoformat(),
         }
+        if self.roi_id:
+            mask_roi_id = os.path.join(self.output_dir, f"global_mask_{self.roi_id}.ome.tiff")
+            dapi_roi_id = os.path.join(self.output_dir, f"global_dapi_{self.roi_id}.ome.tiff")
+            try:
+                self._make_alias(ome_path, os.path.basename(mask_roi_id))
+                self._make_alias(global_dapi_path, os.path.basename(dapi_roi_id))
+            except Exception as e:
+                log.warning(f"Could not create roi_id OME aliases: {e}")
+            meta["paths"] = {
+                "dapi_ome": self._abs(dapi_roi_id if os.path.exists(dapi_roi_id) or os.path.islink(dapi_roi_id) else global_dapi_path),
+                "mask_ome": self._abs(mask_roi_id if os.path.exists(mask_roi_id) or os.path.islink(mask_roi_id) else ome_path),
+                "mask_zarr": self._abs(out_zarr_path),
+                "fusion_zarr": self._abs(zarr_path),
+                "corrected_channels_zarr": self._multichannel_source_path(),
+                "raw_ome": self._abs(self.roi_manifest.get("source_ome") or ""),
+            }
+            meta["roi_bbox_fullres"] = list(bbox) if bbox else self.roi_manifest.get("bbox_fullres")
+            meta["roi_shape"] = meta.get("image_shape")
         with open(
             os.path.join(self.output_dir,
                          f'segmentation_meta_{out_prefix}.json'), 'w'
@@ -812,9 +899,7 @@ class SegmentMergeWorker(QThread):
                     if self._stop:
                         break
                     roi_name = roi["name"]
-                    roi_zarr = os.path.join(
-                        self.project_output_dir, f"fused_{roi_name}.zarr"
-                    )
+                    roi_zarr = self._fusion_source_path(roi_name)
                     if not os.path.exists(roi_zarr):
                         log.warning(f"ROI zarr not found: {roi_zarr} — skipping")
                         continue
@@ -870,22 +955,54 @@ class SegmentMergeWorker(QThread):
                     f"=== All ROIs done  total_cells={total_cells_all:,} ==="
                 )
                 self._write_roi_canonical_aliases(roi_meta_all)
+                first_roi_meta = roi_meta_all[0] if roi_meta_all else {}
+                first_paths = dict(first_roi_meta.get("paths") or {})
                 summary_meta = {
                     "mode": "roi",
+                    "run_id": self.result_id,
+                    "roi_id": self.roi_id,
+                    "roi_display_name": self.roi_display_name,
+                    "method": self.method,
+                    "created_at": self.created_at,
+                    "roi_bbox_fullres": self.roi_manifest.get("bbox_fullres") or first_roi_meta.get("bbox_fullres"),
+                    "roi_shape": self.roi_manifest.get("shape") or first_roi_meta.get("image_shape"),
+                    "paths": {
+                        "dapi_ome": first_paths.get("dapi_ome") or first_roi_meta.get("global_dapi") or "",
+                        "mask_ome": first_paths.get("mask_ome") or first_roi_meta.get("ome_tiff") or "",
+                        "mask_zarr": first_paths.get("mask_zarr") or first_roi_meta.get("zarr_path") or "",
+                        "fusion_zarr": first_paths.get("fusion_zarr") or first_roi_meta.get("fused_zarr_path") or self._fusion_source_path(self.roi_display_name),
+                        "corrected_channels_zarr": first_paths.get("corrected_channels_zarr") or self._multichannel_source_path(),
+                        "raw_ome": first_paths.get("raw_ome") or self._abs(self.roi_manifest.get("source_ome") or ""),
+                    },
                     "output_dir": self._abs(self.output_dir),
                     "project_output_dir": self._abs(self.project_output_dir),
                     "result_id": self.result_id,
-                    "method": self.method,
                     "display_name": self.seg_config.get("display_name", self.method),
                     "rois": roi_meta_all,
                     "total_cells": total_cells_all,
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
-                    "created_at": datetime.now().isoformat(),
                 }
                 with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
                     json.dump(summary_meta, f, indent=2)
                 self._register_completed_result(summary_meta)
+                if self.roi_dir and self.roi_id:
+                    rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
+                    update_roi_segmentation_run(self.roi_dir, {
+                        "run_id": self.result_id,
+                        "method": self.method,
+                        "created_at": self.created_at,
+                        "path": rel_run_path,
+                        "status": "done",
+                        "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
+                    })
+                    print(f"[Step2] run_id={self.result_id}")
+                    print(f"[Step2] roi_id={self.roi_id}")
+                    print(f"[Step2] method={self.method}")
+                    print(f"[Step2] output_run_dir={self.output_dir}")
+                    print(f"[Step2] dapi_ome={summary_meta['paths']['dapi_ome']}")
+                    print(f"[Step2] mask_ome={summary_meta['paths']['mask_ome']}")
+                    print("[Step2] updated roi_index latest_by_method")
                 self._stop_mem_logger()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return

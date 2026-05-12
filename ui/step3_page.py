@@ -25,6 +25,12 @@ import pyqtgraph as pg
 from ..config import OUTPUT_DIR, OME_TIFF_FILE
 from ..core.io_loader import OMETIFFLoader
 from ..utils.mask_renderer import render_mask_overlay
+from ..utils.roi_project import (
+    project_roi_index_path,
+    roi_manifest_path,
+    roi_index_path,
+    load_json,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 3 Page  — Segmentation QC Viewer
@@ -405,6 +411,10 @@ class Step3Page(QWidget):
         self._corrected_channel_names = []
         self._raw_channel_names = []
         self._channel_sources = {}
+        self._project_dir = None
+        self._roi_entries = []
+        self._segmentation_runs = {}
+        self._selected_run_meta = {}
         self._rois           = []
         self._mode            = "full_wsi"
         self._active_roi_name = None
@@ -507,6 +517,20 @@ class Step3Page(QWidget):
                     print("[Step3] validating source roi_id / bbox")
                 except Exception:
                     print(f"[Step3] failed to read ROI manifest:\n{traceback.format_exc()}")
+                meta_path = os.path.join(output_dir, "segmentation_meta.json")
+                meta = load_json(meta_path, {}) or {}
+                if meta.get("roi_id"):
+                    project_dir = os.path.dirname(os.path.dirname(roi_dir))
+                    if hasattr(self, "_project_edit"):
+                        self._project_edit.setText(project_dir)
+                    self._project_dir = project_dir
+                    self.load_project(project_dir)
+                    rid = meta.get("run_id") or os.path.basename(output_dir)
+                    if hasattr(self, "_run_combo"):
+                        i = self._run_combo.findData(rid)
+                        if i >= 0:
+                            self._run_combo.setCurrentIndex(i)
+                    return
             input_cfg = self._load_input_files_config(output_dir)
             self._show_fusion = True
             if hasattr(self, "_chk_fusion"):
@@ -827,6 +851,182 @@ class Step3Page(QWidget):
             print(f"[Step3] loaded manual fusion source={manual_from_inputs}")
             return manual_from_inputs
         return None
+
+    def _browse_project(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select project directory",
+            self._project_dir or OUTPUT_DIR,
+        )
+        if path:
+            self.load_project(path)
+
+    def load_project(self, project_dir):
+        self._project_dir = os.path.abspath(project_dir)
+        if hasattr(self, "_project_edit"):
+            self._project_edit.setText(self._project_dir)
+        idx = load_json(project_roi_index_path(self._project_dir), {}) or {}
+        entries = list(idx.get("rois") or [])
+        self._roi_entries = entries
+        print(f"[Step3] project loaded={self._project_dir}")
+        if hasattr(self, "_roi_combo"):
+            self._roi_combo.blockSignals(True)
+            self._roi_combo.clear()
+            for item in entries:
+                label = f"{item.get('display_name') or item.get('roi_id')}  ({item.get('roi_id')})"
+                self._roi_combo.addItem(label, item.get("roi_id"))
+            active = idx.get("active_roi_id")
+            if active:
+                i = self._roi_combo.findData(active)
+                if i >= 0:
+                    self._roi_combo.setCurrentIndex(i)
+            self._roi_combo.blockSignals(False)
+        if entries:
+            self._on_project_roi_changed()
+        else:
+            self._resolved_paths_lbl.setText("No ROI found in project.")
+
+    def _current_selected_roi_id(self):
+        if not hasattr(self, "_roi_combo"):
+            return ""
+        return self._roi_combo.currentData() or ""
+
+    def _on_project_roi_changed(self, *_args):
+        roi_id = self._current_selected_roi_id()
+        if not roi_id or not self._project_dir:
+            return
+        self._active_roi_name = None
+        rdir = os.path.join(self._project_dir, "rois", roi_id)
+        manifest = load_json(roi_manifest_path(rdir), {}) or {}
+        self._active_roi_name = manifest.get("display_name") or "ROI_1"
+        self._active_bbox = manifest.get("bbox_fullres")
+        self._segmentation_runs = {}
+        roi_idx = load_json(roi_index_path(rdir), {}) or {}
+        runs = dict(roi_idx.get("segmentation_runs") or {})
+        self._segmentation_runs = runs
+        print(f"[Step3] selected roi_id={roi_id}")
+        print(f"[Step3] loaded roi_index={roi_index_path(rdir)}")
+        print(f"[Step3] available segmentation runs={list(runs)}")
+        self._populate_run_combo()
+
+    def _run_display_label(self, run):
+        method = str(run.get("method") or "")
+        created = str(run.get("created_at") or "")
+        return f"{method} — {created[:16].replace('T', ' ')}"
+
+    def _populate_run_combo(self):
+        if not hasattr(self, "_run_combo"):
+            return
+        roi_id = self._current_selected_roi_id()
+        if not roi_id or not self._project_dir:
+            return
+        rdir = os.path.join(self._project_dir, "rois", roi_id)
+        roi_idx = load_json(roi_index_path(rdir), {}) or {}
+        runs = dict(roi_idx.get("segmentation_runs") or {})
+        if self._latest_only_chk.isChecked():
+            wanted = set((roi_idx.get("latest_by_method") or {}).values())
+            runs = {rid: run for rid, run in runs.items() if rid in wanted}
+        items = sorted(runs.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
+        active = roi_idx.get("active_segmentation_run")
+        self._run_combo.blockSignals(True)
+        self._run_combo.clear()
+        for rid, run in items:
+            self._run_combo.addItem(self._run_display_label(run), rid)
+        if active:
+            i = self._run_combo.findData(active)
+            if i >= 0:
+                self._run_combo.setCurrentIndex(i)
+        self._run_combo.blockSignals(False)
+        if items:
+            self._on_segmentation_run_changed()
+
+    def _on_segmentation_run_changed(self, *_args):
+        roi_id = self._current_selected_roi_id()
+        run_id = self._run_combo.currentData() if hasattr(self, "_run_combo") else ""
+        if not roi_id or not run_id or not self._project_dir:
+            return
+        rdir = os.path.join(self._project_dir, "rois", roi_id)
+        run = (load_json(roi_index_path(rdir), {}) or {}).get("segmentation_runs", {}).get(run_id, {})
+        run_path = run.get("path") or os.path.join("step2", "segmentation_runs", run_id)
+        run_dir = run_path if os.path.isabs(run_path) else os.path.join(rdir, run_path)
+        meta_path = os.path.join(run_dir, "segmentation_meta.json")
+        meta = load_json(meta_path, {}) or {}
+        if not self._apply_segmentation_meta(rdir, roi_id, run_id, meta, meta_path):
+            return
+        self._stop_loaders()
+        self._clear_region_cache()
+        self._patch_channel_cache.clear()
+        self._load_thumbnail()
+
+    def _apply_segmentation_meta(self, roi_dir, roi_id, run_id, meta, meta_path):
+        manifest = load_json(roi_manifest_path(roi_dir), {}) or {}
+        paths = dict(meta.get("paths") or {})
+        if meta.get("roi_id") and str(meta.get("roi_id")) != str(roi_id):
+            QMessageBox.warning(self, "Step3", "Segmentation result ROI id mismatch.")
+            print("[Step3] validation passed=False")
+            return False
+        bbox_meta = meta.get("roi_bbox_fullres")
+        bbox_manifest = manifest.get("bbox_fullres")
+        if bbox_meta and bbox_manifest and [int(v) for v in bbox_meta] != [int(v) for v in bbox_manifest]:
+            QMessageBox.warning(self, "Step3", "Segmentation result ROI bbox mismatch.")
+            print("[Step3] validation passed=False")
+            return False
+        self._mode = "roi"
+        self._output_dir = os.path.dirname(meta_path)
+        self._selected_run_meta = meta
+        self._active_roi_name = meta.get("roi_display_name") or manifest.get("display_name") or "ROI_1"
+        self._active_bbox = bbox_manifest or bbox_meta
+        self._dapi_path = paths.get("dapi_ome") or meta.get("global_dapi") or meta.get("dapi_path")
+        self._mask_path = paths.get("mask_ome") or meta.get("ome_tiff") or meta.get("mask_path")
+        self._fusion_zarr_path = paths.get("fusion_zarr") or meta.get("fused_zarr_path") or meta.get("input_zarr")
+        self._fused_zarr_path = self._fusion_zarr_path
+        self._corrected_zarr_path = paths.get("corrected_channels_zarr") or os.path.join(roi_dir, "step0", "corrected_channels.zarr")
+        self._raw_ome_path = paths.get("raw_ome") or manifest.get("source_ome")
+        self._tile_grid = meta.get("tile_grid")
+        self._active_tiles_dir = meta.get("tiles_dir") or meta.get("tile_dir") or os.path.join(self._output_dir, "tile_masks", self._active_roi_name)
+        tile_stats = meta.get("tile_stats") or ((meta.get("rois") or [{}])[0].get("tile_stats") if meta.get("rois") else [])
+        roi_shape = meta.get("roi_shape") or meta.get("image_shape")
+        if not roi_shape and self._dapi_path and os.path.exists(self._dapi_path):
+            try:
+                with tifffile.TiffFile(self._dapi_path) as tif:
+                    p = tif.pages[0]
+                    roi_shape = [int(p.imagelength), int(p.imagewidth)]
+            except Exception:
+                pass
+        if not self._tile_grid and tile_stats:
+            self._tile_grid = [
+                max(int(t.get("row", 0)) for t in tile_stats) + 1,
+                max(int(t.get("col", 0)) for t in tile_stats) + 1,
+            ]
+        if self._active_tiles_dir and self._tile_grid:
+            self._tile_infos = self._build_tile_infos(self._active_tiles_dir, roi_shape, self._tile_grid, tile_stats)
+        else:
+            self._tile_infos = []
+        for edit, value in (
+            (getattr(self, "_dapi_edit", None), self._dapi_path),
+            (getattr(self, "_mask_edit", None), self._mask_path),
+            (getattr(self, "_fusion_edit", None), self._fusion_zarr_path),
+            (getattr(self, "_channel_source_edit", None), self._corrected_zarr_path),
+            (getattr(self, "_raw_ome_edit", None), self._raw_ome_path),
+        ):
+            if edit is not None:
+                edit.setText(value or "")
+        self._refresh_channel_sources()
+        resolved = (
+            f"run={run_id}\n"
+            f"DAPI={self._dapi_path}\nMASK={self._mask_path}\n"
+            f"Fusion={self._fusion_zarr_path}\nCorrected={self._corrected_zarr_path}\nRaw={self._raw_ome_path}"
+        )
+        self._resolved_paths_lbl.setText(resolved)
+        print(f"[Step3] selected run_id={run_id}")
+        print(f"[Step3] method={meta.get('method')}")
+        print(f"[Step3] resolved dapi={self._dapi_path}")
+        print(f"[Step3] resolved mask={self._mask_path}")
+        print(f"[Step3] resolved fusion={self._fusion_zarr_path}")
+        print(f"[Step3] resolved corrected={self._corrected_zarr_path}")
+        print(f"[Step3] resolved raw_ome={self._raw_ome_path}")
+        print("[Step3] validation passed=True")
+        return True
 
     def _resolve_channel_source_path(self, manual_path=None):
         candidates = []
@@ -1406,12 +1606,54 @@ class Step3Page(QWidget):
         left_lay.setContentsMargins(0, 0, 4, 0)
         left_lay.setSpacing(6)
 
-        # File input box
-        file_box = QGroupBox('Input Files')
+        # Project / ROI / segmentation run input box
+        project_box = QGroupBox('Input')
+        project_box.setStyleSheet(
+            'QGroupBox{border:1px solid #61afef;border-radius:5px;'
+            'margin-top:4px;font-weight:bold;color:#61afef;font-size:11px;}'
+        )
+        pl = QVBoxLayout(project_box)
+        proj_row = QHBoxLayout()
+        proj_row.addWidget(QLabel('Project directory:'))
+        self._project_edit = QtWidgets.QLineEdit()
+        self._project_edit.setPlaceholderText('Select project directory…')
+        self._project_edit.setStyleSheet('font-size:10px;')
+        proj_row.addWidget(self._project_edit, stretch=1)
+        btn_project = QPushButton('Browse')
+        btn_project.setFixedWidth(56)
+        btn_project.clicked.connect(self._browse_project)
+        proj_row.addWidget(btn_project)
+        pl.addLayout(proj_row)
+
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel('ROI:'))
+        self._roi_combo = QtWidgets.QComboBox()
+        self._roi_combo.currentIndexChanged.connect(self._on_project_roi_changed)
+        sel_row.addWidget(self._roi_combo, stretch=1)
+        sel_row.addWidget(QLabel('Result:'))
+        self._run_combo = QtWidgets.QComboBox()
+        self._run_combo.currentIndexChanged.connect(self._on_segmentation_run_changed)
+        sel_row.addWidget(self._run_combo, stretch=2)
+        pl.addLayout(sel_row)
+
+        self._latest_only_chk = QCheckBox('Latest only')
+        self._latest_only_chk.setChecked(False)
+        self._latest_only_chk.toggled.connect(lambda _v: self._populate_run_combo())
+        pl.addWidget(self._latest_only_chk)
+        self._resolved_paths_lbl = QLabel('No project loaded')
+        self._resolved_paths_lbl.setWordWrap(True)
+        self._resolved_paths_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        pl.addWidget(self._resolved_paths_lbl)
+        left_lay.addWidget(project_box)
+
+        # Advanced file input box
+        file_box = QGroupBox('Advanced Overrides (optional)')
         file_box.setStyleSheet(
             'QGroupBox{border:1px solid #61afef;border-radius:5px;'
             'margin-top:4px;font-weight:bold;color:#61afef;font-size:11px;}'
         )
+        file_box.setCheckable(True)
+        file_box.setChecked(False)
         fl = QVBoxLayout(file_box)
 
         def _file_row(label, attr_edit):

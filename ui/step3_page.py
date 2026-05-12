@@ -931,20 +931,59 @@ class Step3Page(QWidget):
             print(f"[Step3] active ROI inferred from input files: {inferred} (was {self._active_roi_name})")
             self._active_roi_name = inferred
 
+        bbox = self._lookup_active_roi_bbox()
+        if bbox and self._active_bbox != bbox:
+            print(f"[Step3] active_bbox resolved for {self._active_roi_name}: {bbox}")
+            self._active_bbox = bbox
+
+    def _zarr_group_names(self, root):
+        try:
+            if hasattr(root, "group_keys"):
+                return [str(k) for k in root.group_keys()]
+            return [str(k) for k in root.keys() if not hasattr(root[k], "shape")]
+        except Exception:
+            return []
+
+    def _lookup_active_roi_bbox(self):
         if not self._active_roi_name or not self._corrected_zarr_path or not os.path.exists(self._corrected_zarr_path):
-            return
+            bbox = self._lookup_active_roi_bbox_from_roi_config()
+            return bbox
         try:
             root = zarr.open(self._corrected_zarr_path, mode="r")
             if self._active_roi_name in root:
                 attrs = root[self._active_roi_name].attrs
                 bbox = attrs.get("bbox_fullres") or attrs.get("bbox")
                 if bbox and len(bbox) == 4:
-                    bbox = [int(v) for v in bbox]
-                    if self._active_bbox != bbox:
-                        print(f"[Step3] active_bbox from corrected zarr {self._active_roi_name}: {bbox}")
-                        self._active_bbox = bbox
+                    return [int(v) for v in bbox]
         except Exception:
             print(f"[Step3] failed to sync active ROI from corrected zarr:\n{traceback.format_exc()}")
+        return self._lookup_active_roi_bbox_from_roi_config()
+
+    def _lookup_active_roi_bbox_from_roi_config(self):
+        if not self._active_roi_name:
+            return None
+        base = self._output_dir or OUTPUT_DIR
+        candidates = [
+            os.path.join(base, "roi_config.json"),
+            os.path.join(os.path.dirname(base), "roi_config.json") if base else None,
+        ]
+        for path in candidates:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                rois = cfg.get("rois") if isinstance(cfg, dict) else cfg
+                for roi in rois or []:
+                    if str(roi.get("name") or roi.get("roi_name") or "") != self._active_roi_name:
+                        continue
+                    bbox = roi.get("bbox_fullres") or roi.get("bbox")
+                    if bbox and len(bbox) == 4:
+                        print(f"[Step3] active_bbox from roi_config={path}")
+                        return [int(v) for v in bbox]
+            except Exception:
+                print(f"[Step3] failed to read ROI bbox from {path}:\n{traceback.format_exc()}")
+        return None
 
     def _is_canonical_dapi_channel(self, ch):
         name = str(ch or "").strip().lower()
@@ -1023,9 +1062,12 @@ class Step3Page(QWidget):
         corrected_channels = []
         raw_channels = []
         self._channel_sources = {}
+        old_corrected_path = self._corrected_zarr_path
         self._corrected_zarr_path = self._resolve_channel_source_path(
             self._channel_source_edit.text().strip() if hasattr(self, "_channel_source_edit") else None
         )
+        if old_corrected_path != self._corrected_zarr_path:
+            self._corrected_zarr = None
         self._raw_ome_path = self._resolve_raw_ome_path(
             self._raw_ome_edit.text().strip() if hasattr(self, "_raw_ome_edit") else None
         )
@@ -1047,7 +1089,7 @@ class Step3Page(QWidget):
             except Exception:
                 print(f"[Step3] failed to inspect corrected zarr:\n{traceback.format_exc()}")
 
-        raw_loader = self._loader
+        raw_loader = self._raw_loader
         if self._raw_ome_path and (
             raw_loader is None or getattr(raw_loader, "filepath", None) != self._raw_ome_path
         ):
@@ -1057,8 +1099,8 @@ class Step3Page(QWidget):
             except Exception:
                 print(f"[Step3] failed to load Raw OME channels:\n{traceback.format_exc()}")
                 raw_loader = None
-        elif raw_loader is not None:
-            self._raw_loader = raw_loader
+        elif raw_loader is None:
+            raw_loader = self._loader
 
         if raw_loader is not None:
             try:
@@ -2067,6 +2109,9 @@ class Step3Page(QWidget):
         print(f"[Step3] loading channel={ch}")
         print(f"[Step3] loading channel crop: {ch}")
         self._sync_active_roi_from_input_paths()
+        print(f"[Step3] active_roi={self._active_roi_name}")
+        print(f"[Step3] active_bbox global={self._active_bbox}")
+        print(f"[Step3] patch_local={[y0, y1, x0, x1]}")
         arr = None
         source = None
 
@@ -2085,9 +2130,14 @@ class Step3Page(QWidget):
                 root = self._corrected_zarr
                 roi_name = self._active_roi_name or "ROI_1"
                 root_mode = str(root.attrs.get("mode", "")).lower()
+                groups = self._zarr_group_names(root)
+                print(f"[Step3] corrected groups={groups}")
+                print(f"[Step3] selected corrected group={roi_name}")
                 if roi_name in root and ch in root[roi_name]:
                     arr = np.asarray(root[roi_name][ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
                     source = "corrected_zarr roi_local"
+                    print(f"[Step3] channel={ch} source=corrected_zarr")
+                    print(f"[Step3] corrected_roi={roi_name}")
                 elif root_mode != "roi_only" and ch in root:
                     arr = np.asarray(root[ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
                     source = "corrected_zarr full_wsi"
@@ -2096,7 +2146,7 @@ class Step3Page(QWidget):
             except Exception as e:
                 print(f"[Step3] corrected channel load failed {ch}: {e}")
 
-        raw_loader = self._raw_loader or self._loader
+        raw_loader = self._raw_loader
         if arr is None and self._raw_ome_path and (
             raw_loader is None or getattr(raw_loader, "filepath", None) != self._raw_ome_path
         ):
@@ -2106,6 +2156,8 @@ class Step3Page(QWidget):
             except Exception as e:
                 print(f"[Step3] failed to initialize Raw OME loader for {ch}: {e}")
                 raw_loader = None
+        if arr is None and raw_loader is None:
+            raw_loader = self._loader
         if arr is None and raw_loader is not None:
             try:
                 if self._mode == "roi" and self._active_bbox and len(self._active_bbox) == 4:
@@ -2113,8 +2165,13 @@ class Step3Page(QWidget):
                     gy1 = int(self._active_bbox[0]) + y1
                     gx0 = int(self._active_bbox[2]) + x0
                     gx1 = int(self._active_bbox[2]) + x1
+                elif self._mode == "roi":
+                    print(f"[Step3] raw OME channel skipped; missing active ROI bbox for {ch}")
+                    return
                 else:
                     gy0, gy1, gx0, gx1 = y0, y1, x0, x1
+                print(f"[Step3] channel={ch} source=raw_ome")
+                print(f"[Step3] raw_global_bbox={[gy0, gy1, gx0, gx1]}")
                 arr = raw_loader.read_region(ch, gy0, gy1, gx0, gx1, downsample=sub, normalize=True)
                 source = f"raw_ome global_bbox={[gy0, gy1, gx0, gx1]}"
             except Exception as e:

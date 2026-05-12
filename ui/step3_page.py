@@ -6,6 +6,7 @@ import os
 import random
 import glob
 import json
+import re
 import traceback
 
 import numpy as np
@@ -465,6 +466,7 @@ class Step3Page(QWidget):
             self._raw_loader = loader
         self._corrected_zarr = None
         self._rois = list(rois or [])
+        self._sync_active_roi_from_input_paths()
         self._refresh_channel_sources()
 
     def _restore_saved_input_sources(self):
@@ -484,6 +486,7 @@ class Step3Page(QWidget):
             self._fusion_edit.setText(self._fusion_zarr_path or "")
             self._channel_source_edit.setText(self._corrected_zarr_path or "")
             self._raw_ome_edit.setText(self._raw_ome_path or "")
+        self._sync_active_roi_from_input_paths()
         self._refresh_channel_sources()
 
     def set_output_dir(self, output_dir):
@@ -520,6 +523,7 @@ class Step3Page(QWidget):
                     self._fused_zarr_path = self._fusion_zarr_path
                 self._corrected_zarr_path = self._resolve_channel_source_path(input_cfg.get("channel_source"))
                 self._raw_ome_path = self._resolve_raw_ome_path(input_cfg.get("raw_ome"))
+                self._sync_active_roi_from_input_paths()
                 self._dapi_edit.setText(self._dapi_path or "")
                 self._mask_edit.setText(self._mask_path or "")
                 self._fusion_edit.setText(self._fusion_zarr_path or "")
@@ -573,6 +577,7 @@ class Step3Page(QWidget):
                     self._fused_zarr_path = self._fusion_zarr_path
                 self._corrected_zarr_path = self._resolve_channel_source_path(input_cfg.get("channel_source"))
                 self._raw_ome_path = self._resolve_raw_ome_path(input_cfg.get("raw_ome"))
+                self._sync_active_roi_from_input_paths()
                 self._dapi_edit.setText(self._dapi_path or "")
                 self._mask_edit.setText(self._mask_path or "")
                 self._fusion_edit.setText(self._fusion_zarr_path or "")
@@ -906,6 +911,86 @@ class Step3Page(QWidget):
             "contrast": [1.0, 99.5],
         }
 
+    @staticmethod
+    def _roi_name_from_path(path):
+        if not path:
+            return None
+        m = re.search(r"ROI[_-]?(\d+)", str(path), flags=re.IGNORECASE)
+        if not m:
+            return None
+        return f"ROI_{int(m.group(1))}"
+
+    def _sync_active_roi_from_input_paths(self):
+        """Keep ROI-specific input files, corrected zarr groups, and bbox aligned."""
+        inferred = None
+        for path in (self._dapi_path, self._mask_path, self._fusion_zarr_path, self._fused_zarr_path):
+            inferred = self._roi_name_from_path(path)
+            if inferred:
+                break
+        if inferred and inferred != self._active_roi_name:
+            print(f"[Step3] active ROI inferred from input files: {inferred} (was {self._active_roi_name})")
+            self._active_roi_name = inferred
+
+        if not self._active_roi_name or not self._corrected_zarr_path or not os.path.exists(self._corrected_zarr_path):
+            return
+        try:
+            root = zarr.open(self._corrected_zarr_path, mode="r")
+            if self._active_roi_name in root:
+                attrs = root[self._active_roi_name].attrs
+                bbox = attrs.get("bbox_fullres") or attrs.get("bbox")
+                if bbox and len(bbox) == 4:
+                    bbox = [int(v) for v in bbox]
+                    if self._active_bbox != bbox:
+                        print(f"[Step3] active_bbox from corrected zarr {self._active_roi_name}: {bbox}")
+                        self._active_bbox = bbox
+        except Exception:
+            print(f"[Step3] failed to sync active ROI from corrected zarr:\n{traceback.format_exc()}")
+
+    def _is_canonical_dapi_channel(self, ch):
+        name = str(ch or "").strip().lower()
+        return name == "dapi" or "dapi" in name or "nuc" in name
+
+    def _patch_dapi_channel_array(self):
+        if self._patch_dapi_rgb is None:
+            return None
+        dapi = np.asarray(self._patch_dapi_rgb)
+        if dapi.ndim == 3:
+            dapi = dapi[:, :, 0]
+        dapi = dapi.astype(np.float32, copy=False)
+        if dapi.size and float(np.nanmax(dapi)) > 1.0:
+            dapi = dapi / 255.0
+        return dapi
+
+    def _target_patch_shape(self):
+        if self._mask_labels is not None:
+            return tuple(int(v) for v in self._mask_labels.shape[:2])
+        if self._patch_dapi_rgb is not None:
+            return tuple(int(v) for v in self._patch_dapi_rgb.shape[:2])
+        return None
+
+    def _match_channel_shape(self, ch, arr, source):
+        arr = np.asarray(arr, dtype=np.float32)
+        target = self._target_patch_shape()
+        mask_shape = None if self._mask_labels is None else tuple(int(v) for v in self._mask_labels.shape[:2])
+        match = target is None or tuple(arr.shape[:2]) == target
+        print(f"[Step3] channel crop shape={tuple(arr.shape[:2])}")
+        print(f"[Step3] mask shape={mask_shape}")
+        print(f"[Step3] shape match={match}")
+        if target is None or match:
+            return arr
+
+        th, tw = target
+        out = np.zeros((th, tw), dtype=np.float32)
+        mh = min(th, int(arr.shape[0]))
+        mw = min(tw, int(arr.shape[1]))
+        if mh > 0 and mw > 0:
+            out[:mh, :mw] = arr[:mh, :mw]
+        print(
+            f"[Step3] warning: channel shape adjusted for {ch} from "
+            f"{tuple(arr.shape[:2])} to {target} source={source}"
+        )
+        return out
+
     def _load_channel_config(self):
         path = self._channel_config_path()
         if not os.path.exists(path):
@@ -944,17 +1029,21 @@ class Step3Page(QWidget):
         self._raw_ome_path = self._resolve_raw_ome_path(
             self._raw_ome_edit.text().strip() if hasattr(self, "_raw_ome_edit") else None
         )
+        self._sync_active_roi_from_input_paths()
 
         if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
             try:
                 root = zarr.open(self._corrected_zarr_path, mode="r")
                 self._corrected_zarr = root
                 roi_name = self._active_roi_name or "ROI_1"
+                root_mode = str(root.attrs.get("mode", "")).lower()
                 if roi_name in root and self._array_names(root[roi_name]):
                     group = root[roi_name]
                     corrected_channels.extend(self._array_names(group))
-                else:
+                elif root_mode != "roi_only":
                     corrected_channels.extend(self._array_names(root))
+                else:
+                    print(f"[Step3] corrected zarr ROI group not found for active_roi={roi_name}")
             except Exception:
                 print(f"[Step3] failed to inspect corrected zarr:\n{traceback.format_exc()}")
 
@@ -1633,6 +1722,8 @@ class Step3Page(QWidget):
                 self._roi_status.setText("Patch outside ROI.")
                 return
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
+            print(f"[Step3] active_roi={self._active_roi_name}")
+            print(f"[Step3] active_bbox global={self._active_bbox}")
             print(f"[Step3] patch intersects n_tiles={len(tile_infos)}")
         else:
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
@@ -1696,6 +1787,7 @@ class Step3Page(QWidget):
             )
         print(f"[Step3] dapi_rgb shape={self._patch_dapi_rgb.shape}")
         print(f"[Step3] dapi_rgb min/max={int(self._patch_dapi_rgb.min())}/{int(self._patch_dapi_rgb.max())}")
+        print(f"[Step3] dapi shape={self._patch_dapi_rgb.shape[:2]}")
         print(f"[Step3] mask shape={self._mask_labels.shape}")
         print(f"[Step3] show_fusion={self._show_fusion}")
         print(f"[Step3] mask cells={n_cells}")
@@ -1974,24 +2066,46 @@ class Step3Page(QWidget):
         sub = self._sub_spin.value() if hasattr(self, "_sub_spin") else 1
         print(f"[Step3] loading channel={ch}")
         print(f"[Step3] loading channel crop: {ch}")
+        self._sync_active_roi_from_input_paths()
         arr = None
         source = None
+
+        if self._is_canonical_dapi_channel(ch):
+            arr = self._patch_dapi_channel_array()
+            if arr is not None:
+                source = "canonical_step3_dapi"
+                print(f"[Step3] channel={ch} source={source}")
+                self._patch_channel_cache[ch] = self._match_channel_shape(ch, arr, source)
+                return
+
         if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
             try:
                 if self._corrected_zarr is None:
                     self._corrected_zarr = zarr.open(self._corrected_zarr_path, mode="r")
                 root = self._corrected_zarr
                 roi_name = self._active_roi_name or "ROI_1"
+                root_mode = str(root.attrs.get("mode", "")).lower()
                 if roi_name in root and ch in root[roi_name]:
                     arr = np.asarray(root[roi_name][ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
-                    source = "corrected"
-                elif ch in root:
+                    source = "corrected_zarr roi_local"
+                elif root_mode != "roi_only" and ch in root:
                     arr = np.asarray(root[ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
-                    source = "corrected"
+                    source = "corrected_zarr full_wsi"
+                elif root_mode == "roi_only":
+                    print(f"[Step3] channel={ch} not found in corrected zarr active_roi={roi_name}")
             except Exception as e:
                 print(f"[Step3] corrected channel load failed {ch}: {e}")
 
         raw_loader = self._raw_loader or self._loader
+        if arr is None and self._raw_ome_path and (
+            raw_loader is None or getattr(raw_loader, "filepath", None) != self._raw_ome_path
+        ):
+            try:
+                raw_loader = OMETIFFLoader(self._raw_ome_path)
+                self._raw_loader = raw_loader
+            except Exception as e:
+                print(f"[Step3] failed to initialize Raw OME loader for {ch}: {e}")
+                raw_loader = None
         if arr is None and raw_loader is not None:
             try:
                 if self._mode == "roi" and self._active_bbox and len(self._active_bbox) == 4:
@@ -2002,13 +2116,15 @@ class Step3Page(QWidget):
                 else:
                     gy0, gy1, gx0, gx1 = y0, y1, x0, x1
                 arr = raw_loader.read_region(ch, gy0, gy1, gx0, gx1, downsample=sub, normalize=True)
-                source = "raw"
+                source = f"raw_ome global_bbox={[gy0, gy1, gx0, gx1]}"
             except Exception as e:
                 print(f"[Step3] channel missing/skipped {ch}: {e}")
                 return
         if arr is not None:
             print(f"[Step3] channel={ch} source={source or self._channel_sources.get(ch, 'unknown')}")
-            self._patch_channel_cache[ch] = np.asarray(arr, dtype=np.float32)
+            self._patch_channel_cache[ch] = self._match_channel_shape(
+                ch, arr, source or self._channel_sources.get(ch, "unknown")
+            )
 
     # ── Random ROI ───────────────────────────────────────────────────
 
@@ -2049,6 +2165,7 @@ class Step3Page(QWidget):
             self._fusion_edit.setText(selected)
             self._fusion_zarr_path = selected
             self._fused_zarr_path = selected
+            self._sync_active_roi_from_input_paths()
             print(f"[Step3] manual fusion source selected: {selected}")
             print(f"[Step3] manual fusion zarr shape={shape}")
             self._save_input_files_config()
@@ -2083,6 +2200,7 @@ class Step3Page(QWidget):
             self._channel_source_edit.setText(selected)
             self._corrected_zarr_path = selected
             self._corrected_zarr = None
+            self._sync_active_roi_from_input_paths()
             self._save_input_files_config()
             self._refresh_channel_sources()
             self._load_visible_patch_channels()
@@ -2107,6 +2225,7 @@ class Step3Page(QWidget):
             self._raw_ome_edit.setText(selected)
             self._raw_ome_path = selected
             self._raw_loader = loader
+            self._sync_active_roi_from_input_paths()
             self._save_input_files_config()
             self._refresh_channel_sources()
             self._load_visible_patch_channels()
@@ -2124,6 +2243,7 @@ class Step3Page(QWidget):
             else:
                 self._mask_edit.setText(path)
                 self._mask_path = path
+            self._sync_active_roi_from_input_paths()
             self._save_input_files_config()
 
     def _manual_load(self):

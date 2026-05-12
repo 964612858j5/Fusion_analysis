@@ -498,6 +498,15 @@ class Step3Page(QWidget):
         try:
             self._stop_loaders()
             self._clear_region_cache()
+            roi_dir = self._infer_roi_dir_from_output(output_dir)
+            if roi_dir:
+                try:
+                    with open(os.path.join(roi_dir, "roi_manifest.json"), "r", encoding="utf-8") as f:
+                        roi_manifest = json.load(f)
+                    print(f"[Step3] roi_id={roi_manifest.get('roi_id')}")
+                    print("[Step3] validating source roi_id / bbox")
+                except Exception:
+                    print(f"[Step3] failed to read ROI manifest:\n{traceback.format_exc()}")
             input_cfg = self._load_input_files_config(output_dir)
             self._show_fusion = True
             if hasattr(self, "_chk_fusion"):
@@ -831,9 +840,23 @@ class Step3Page(QWidget):
                 os.path.join(base_dir, "corrected_channels.zarr"),
                 os.path.join(os.path.dirname(base_dir), "corrected_channels.zarr"),
             ])
+            roi_dir = self._infer_roi_dir_from_output(base_dir)
+            if roi_dir:
+                candidates.extend([
+                    os.path.join(roi_dir, "step0", "corrected_channels.zarr"),
+                    os.path.join(roi_dir, "step1", "corrected_channels.zarr"),
+                ])
         for cand in candidates:
             if cand and os.path.exists(cand):
                 return os.path.abspath(cand)
+        return None
+
+    def _infer_roi_dir_from_output(self, output_dir=None):
+        cur = os.path.abspath(output_dir or self._output_dir or OUTPUT_DIR)
+        while cur and cur != os.path.dirname(cur):
+            if os.path.exists(os.path.join(cur, "roi_manifest.json")):
+                return cur
+            cur = os.path.dirname(cur)
         return None
 
     def _resolve_raw_ome_path(self, manual_path=None):
@@ -863,6 +886,19 @@ class Step3Page(QWidget):
             parent = os.path.dirname(base_dir)
             candidates.extend(glob.glob(os.path.join(parent, "*.ome.tif")))
             candidates.extend(glob.glob(os.path.join(parent, "*.ome.tiff")))
+            roi_dir = self._infer_roi_dir_from_output(base_dir)
+            if roi_dir:
+                for meta_name in ("roi_manifest.json", os.path.join("step0", "step0_roi_result.json")):
+                    meta_path = os.path.join(roi_dir, meta_name)
+                    if os.path.exists(meta_path):
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                meta = json.load(f)
+                            for key in ("source_ome", "raw_ome_path"):
+                                if isinstance(meta, dict) and meta.get(key):
+                                    candidates.append(meta.get(key))
+                        except Exception:
+                            pass
         candidates.append(OME_TIFF_FILE)
         for cand in candidates:
             if not cand:
@@ -1290,6 +1326,12 @@ class Step3Page(QWidget):
         if roi_name:
             _add(os.path.join(output_dir, f"fused_{roi_name}.zarr"))
             _add(os.path.join(output_dir, roi_name, "fused.zarr"))
+        roi_dir = self._infer_roi_dir_from_output(output_dir)
+        if roi_dir:
+            _add(os.path.join(roi_dir, "step1", "fused.zarr"))
+            if roi_name:
+                _add(os.path.join(roi_dir, "step1", f"fused_{roi_name}.zarr"))
+            _add(os.path.join(roi_dir, "step1", "fusion.zarr"))
         _add(os.path.join(output_dir, "fusion.zarr"))
 
         for cand in candidates:

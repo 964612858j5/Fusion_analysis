@@ -40,6 +40,10 @@ from ..utils.segmentation_config import (
 from ..utils.segmentation_params import (
     save_segmentation_params,
 )
+from ..utils.roi_project import (
+    resolve_roi_context,
+    mark_roi_step,
+)
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
@@ -431,7 +435,7 @@ class MainWindow(QMainWindow):
         self._all_patches = list(self.step0_output.get("patches") or [])
         self._rois = list(self.step0_output.get("rois") or [])
         OME_TIFF_FILE = self.step0_output.get("ome_tiff_path", OME_TIFF_FILE)
-        OUTPUT_DIR = self.step0_output.get("output_dir", OUTPUT_DIR)
+        OUTPUT_DIR = self.step0_output.get("step1_dir") or self.step0_output.get("output_dir", OUTPUT_DIR)
 
         correction_config = self.step0_output.get("correction_config")
         corrected_zarr_path = self.step0_output.get("corrected_zarr_path")
@@ -462,9 +466,9 @@ class MainWindow(QMainWindow):
 
         self._load_step0_roi_result(auto=True)
         self.step1_done = False
-        self._step2._out_edit.setText(OUTPUT_DIR)
+        self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         self._step4._ome_edit.setText(OME_TIFF_FILE)
-        self._step4._out_edit.setText(OUTPUT_DIR)
+        self._step4._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
 
@@ -482,17 +486,28 @@ class MainWindow(QMainWindow):
                     )
                 return
 
-        out_dir = self.step0_output.get("output_dir") or OUTPUT_DIR
-        manifest_path = os.path.join(out_dir, "step0_roi_result.json")
+        out_dir = self.step0_output.get("step0_dir") or self.step0_output.get("output_dir") or OUTPUT_DIR
+        ctx = resolve_roi_context(out_dir, OUTPUT_DIR)
+        step0_dir = (ctx or {}).get("step_dirs", {}).get("step0", out_dir)
+        step1_dir = (ctx or {}).get("step_dirs", {}).get("step1", out_dir)
+        step2_dir = (ctx or {}).get("step_dirs", {}).get("step2", out_dir)
+        manifest_path = (ctx or {}).get("step0_manifest_path") or os.path.join(step0_dir, "step0_roi_result.json")
         manifest = {}
         if os.path.exists(manifest_path):
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
-                out_dir = manifest.get("output_dir") or out_dir
+                step0_dir = manifest.get("step0_dir") or manifest.get("output_dir") or step0_dir
+                if manifest.get("roi_dir"):
+                    step1_dir = os.path.join(manifest["roi_dir"], "step1")
+                    step2_dir = os.path.join(manifest["roi_dir"], "step2")
+                out_dir = step0_dir
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json: {e}")
         print(f"[Step1] manifest found={bool(manifest)}")
+        print("[Step1] loading ROI context")
+        print(f"[Step1] roi_id={manifest.get('roi_id') or (ctx or {}).get('roi_id', '')}")
+        print(f"[Step1] step0_result={manifest_path}")
 
         raw_ome = manifest.get("raw_ome_path")
         if raw_ome and os.path.exists(raw_ome) and (
@@ -500,7 +515,7 @@ class MainWindow(QMainWindow):
         ):
             try:
                 OME_TIFF_FILE = raw_ome
-                OUTPUT_DIR = out_dir
+                OUTPUT_DIR = step1_dir or out_dir
                 self.loader = OMETIFFLoader(raw_ome)
                 self.step0_output["loader"] = self.loader
                 self.step0_output["ome_tiff_path"] = raw_ome
@@ -648,6 +663,25 @@ class MainWindow(QMainWindow):
         self._on_rois_changed(self._rois)
         self._on_patches(patches)
         self._show_active_roi_preview()
+        roi_id = manifest.get("roi_id") or (ctx or {}).get("roi_id", "")
+        roi_dir = manifest.get("roi_dir") or (ctx or {}).get("roi_dir", "")
+        project_dir = manifest.get("project_output_dir") or (ctx or {}).get("project_dir", "")
+        if step1_dir:
+            os.makedirs(step1_dir, exist_ok=True)
+            OUTPUT_DIR = step1_dir
+        self.step0_output.update({
+            "output_dir": step1_dir or out_dir,
+            "project_output_dir": project_dir,
+            "roi_id": roi_id,
+            "roi_dir": roi_dir,
+            "step0_dir": step0_dir,
+            "step1_dir": step1_dir,
+            "step2_dir": step2_dir,
+            "step0_manifest_path": manifest_path,
+            "corrected_zarr_path": corr_path,
+            "rois": self._rois,
+            "patches": list(patches or []),
+        })
         print("[Step1] preloading patches...")
         if not auto:
             self.prev_status.setText("Step0 ROI result loaded.")
@@ -697,6 +731,15 @@ class MainWindow(QMainWindow):
         out_dir = ""
         if auto:
             for p in out_candidates:
+                ctx = resolve_roi_context(p, p)
+                step0_dir = (ctx or {}).get("step_dirs", {}).get("step0", p)
+                if (
+                    os.path.exists(os.path.join(step0_dir, "step0_roi_result.json"))
+                    or os.path.exists(os.path.join(step0_dir, "corrected_channels.zarr"))
+                    or os.path.exists(os.path.join(step0_dir, "roi_config.json"))
+                ):
+                    out_dir = step0_dir
+                    break
                 if os.path.exists(os.path.join(p, "corrected_channels.zarr")) or os.path.exists(os.path.join(p, "roi_config.json")):
                     out_dir = p
                     break
@@ -709,13 +752,21 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return False
 
+        ctx = resolve_roi_context(out_dir, OUTPUT_DIR)
+        step0_dir = (ctx or {}).get("step_dirs", {}).get("step0", out_dir)
+        step1_dir = (ctx or {}).get("step_dirs", {}).get("step1", out_dir)
+        step2_dir = (ctx or {}).get("step_dirs", {}).get("step2", out_dir)
         manifest = {}
-        manifest_path = os.path.join(out_dir, "step0_roi_result.json")
+        manifest_path = (ctx or {}).get("step0_manifest_path") or os.path.join(step0_dir, "step0_roi_result.json")
         if os.path.exists(manifest_path):
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
-                out_dir = manifest.get("output_dir") or out_dir
+                step0_dir = manifest.get("step0_dir") or manifest.get("output_dir") or step0_dir
+                if manifest.get("roi_dir"):
+                    step1_dir = os.path.join(manifest["roi_dir"], "step1")
+                    step2_dir = os.path.join(manifest["roi_dir"], "step2")
+                out_dir = step0_dir
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json during bootstrap: {e}")
 
@@ -753,21 +804,27 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Step1", "Failed to load raw OME-TIFF. See terminal.")
             return False
 
-        OUTPUT_DIR = out_dir
+        OUTPUT_DIR = step1_dir or out_dir
         OME_TIFF_FILE = ome_path
         self.step0_output = {
-            "output_dir": out_dir,
+            "output_dir": step1_dir or out_dir,
+            "project_output_dir": manifest.get("project_output_dir") or (ctx or {}).get("project_dir", ""),
+            "roi_id": manifest.get("roi_id") or (ctx or {}).get("roi_id", ""),
+            "roi_dir": manifest.get("roi_dir") or (ctx or {}).get("roi_dir", ""),
+            "step0_dir": step0_dir,
+            "step1_dir": step1_dir,
+            "step2_dir": step2_dir,
             "ome_tiff_path": ome_path,
             "loader": self.loader,
-            "corrected_zarr_path": manifest.get("corrected_zarr_path") or os.path.join(out_dir, "corrected_channels.zarr"),
+            "corrected_zarr_path": manifest.get("corrected_zarr_path") or os.path.join(step0_dir, "corrected_channels.zarr"),
         }
         self.step0_done = True
-        self._step2._out_edit.setText(out_dir)
+        self._step2._out_edit.setText(step2_dir or out_dir)
         self._step4._ome_edit.setText(ome_path)
-        self._step4._out_edit.setText(out_dir)
-        print(f"[Step1] bootstrapped from disk output_dir={out_dir}")
+        self._step4._out_edit.setText(step2_dir or out_dir)
+        print(f"[Step1] bootstrapped from disk output_dir={step0_dir}")
         print(f"[Step1] raw_ome={ome_path}")
-        if not os.path.exists(os.path.join(out_dir, "patch_config.json")):
+        if not os.path.exists(os.path.join(step0_dir, "patch_config.json")):
             print("[Step1] patch_config.json not found; previous patches cannot be restored from Step0 output.")
         return True
 
@@ -827,6 +884,10 @@ class MainWindow(QMainWindow):
         return {
             "version": 1,
             "mode": "roi" if active_roi else "full_wsi",
+            "roi_id": (self.step0_output or {}).get("roi_id", ""),
+            "roi_dir": (self.step0_output or {}).get("roi_dir", ""),
+            "step0_dir": (self.step0_output or {}).get("step0_dir", ""),
+            "step1_dir": (self.step0_output or {}).get("step1_dir", out_dir),
             "active_roi": active_roi.get("name", "ROI_1") if active_roi else "",
             "roi_bbox": roi_bbox,
             "rois": self._rois,
@@ -994,6 +1055,10 @@ class MainWindow(QMainWindow):
             self.step0_output = {
                 "output_dir": out_dir,
                 "ome_tiff_path": raw_ome,
+                "roi_id": sess.get("roi_id", ""),
+                "roi_dir": sess.get("roi_dir", ""),
+                "step0_dir": sess.get("step0_dir", ""),
+                "step1_dir": sess.get("step1_dir", out_dir),
             }
             self.loader = OMETIFFLoader(raw_ome)
 
@@ -1106,8 +1171,11 @@ class MainWindow(QMainWindow):
         if self._current_step == 1:
             self._stop_all_loaders()
         if self.is_sequential_flow and self.step1_output:
+            step2_dir = self.step1_output.get("step2_dir") or (self.step0_output or {}).get("step2_dir")
+            if step2_dir:
+                os.makedirs(step2_dir, exist_ok=True)
             self._step2._out_edit.setText(
-                self.step1_output.get("output_dir", OUTPUT_DIR)
+                step2_dir or self.step1_output.get("output_dir", OUTPUT_DIR)
             )
             zarr_path = self.step1_output.get("zarr_path")
             if zarr_path:
@@ -1128,6 +1196,12 @@ class MainWindow(QMainWindow):
             rois = self.step0_output.get("rois") or self.step1_output.get("roi_info")
             if rois:
                 self._step2.set_rois(rois)
+            if hasattr(self._step2, "set_roi_context"):
+                self._step2.set_roi_context(
+                    roi_id=self.step1_output.get("roi_id") or (self.step0_output or {}).get("roi_id", ""),
+                    roi_dir=self.step1_output.get("roi_dir") or (self.step0_output or {}).get("roi_dir", ""),
+                    step2_dir=step2_dir or "",
+                )
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
 
@@ -2073,8 +2147,16 @@ class MainWindow(QMainWindow):
             "segmentation_param_path": getattr(self, "_pending_segmentation_param_path", ""),
             "roi_info": self._rois if self._rois else [],
             "output_dir": OUTPUT_DIR,
+            "step2_dir": (self.step0_output or {}).get("step2_dir", ""),
+            "roi_id": (self.step0_output or {}).get("roi_id", ""),
+            "roi_dir": (self.step0_output or {}).get("roi_dir", ""),
             "ome_tiff_path": OME_TIFF_FILE,
         }
+        if self.step1_output.get("roi_id") and self.step0_output.get("project_output_dir"):
+            try:
+                mark_roi_step(self.step0_output["project_output_dir"], self.step1_output["roi_id"], "step1", "done")
+            except Exception:
+                print(f"[Step1] failed to update ROI step1 status:\n{traceback.format_exc()}")
         self.step1_done = True
         self._update_next_button()
         self._save_step1_session()

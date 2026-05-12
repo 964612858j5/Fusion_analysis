@@ -32,6 +32,7 @@ from ..utils.segmentation_params import (
     PARAM_INDEX,
     params_index_path,
 )
+from ..utils.roi_project import mark_roi_step
 from ..workers.segment_merge_worker import SegmentMergeWorker
 
 # ══════════════════════════════════════════════════════════════════════
@@ -71,8 +72,21 @@ class Step2Page(QWidget):
         self._loading_index_selection = False
         self._parameter_source = "manual"
         self._applied_param_file = ""
+        self._roi_id = ""
+        self._roi_dir = ""
+        self._step2_dir = ""
 
         self._build_ui()
+
+    def set_roi_context(self, roi_id="", roi_dir="", step2_dir=""):
+        self._roi_id = roi_id or ""
+        self._roi_dir = roi_dir or ""
+        self._step2_dir = step2_dir or ""
+        if self._step2_dir:
+            os.makedirs(self._step2_dir, exist_ok=True)
+            self._out_edit.setText(self._step2_dir)
+        print(f"[Step2] roi_id={self._roi_id}")
+        print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
 
     # ── UI construction ───────────────────────────────────────────────
 
@@ -985,7 +999,7 @@ class Step2Page(QWidget):
             n_rows           = nr,
             n_cols           = nc,
             overlap_px       = self._overlap_spin.value(),
-            output_dir       = self._out_edit.text().strip() or OUTPUT_DIR,
+            output_dir       = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR,
             recovery_npy_dir = recovery_dir,
             rois             = self._rois if self._rois else None,
             param_file        = param_file,
@@ -994,6 +1008,9 @@ class Step2Page(QWidget):
         seg_cfg = self.get_seg_config()
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
+        if self._roi_id:
+            print(f"[Step2] roi_id={self._roi_id}")
+            print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
         self._worker.progress.connect(self._on_progress)
         self._worker.tile_done.connect(self._on_tile_done)
         self._worker.finished.connect(self._on_finished)
@@ -1048,6 +1065,12 @@ class Step2Page(QWidget):
         self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._last_output_dir = output_dir
+        if self._roi_id and self._roi_dir:
+            try:
+                project_dir = os.path.dirname(os.path.dirname(self._roi_dir))
+                mark_roi_step(project_dir, self._roi_id, "step2", "done")
+            except Exception as e:
+                print(f"[Step2] failed to update ROI step2 status: {e}")
 
         msg = QMessageBox(self)
         msg.setWindowTitle('Segmentation Complete')

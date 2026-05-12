@@ -50,6 +50,11 @@ from .search_ctrl import (
     WsiCorrectionWorker, BackgroundPreviewWorker,
     _WsiCorrectionProgressDialog,
 )
+from ...utils.roi_project import (
+    create_roi_context,
+    mark_roi_step,
+    roi_shape_from_bbox,
+)
 
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
@@ -78,6 +83,8 @@ class Step0Page(QWidget):
         self._channel_decisions = {}
         self._loaded_config = None
         self._roi_selected_idx = -1
+        self._roi_context = None
+        self._project_output_dir = OUTPUT_DIR
         self._patch_selected_idx = -1
         self._roi_selected_indices = []
         self._patch_selected_indices = []
@@ -2323,9 +2330,21 @@ class Step0Page(QWidget):
             QMessageBox.warning(self, "Validation", "Please define at least 1 patch before continuing.")
             return
 
-        os.makedirs(self.output_dir, exist_ok=True)
+        rois = list(self.overview.get_rois() if self.overview else self.rois)
+        if not rois:
+            QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
+            return
+        self.rois = rois
+        self._project_output_dir = self.output_dir
+        self._roi_context = create_roi_context(self._project_output_dir, rois[0], self.ome_path)
+        step0_dir = self._roi_context["step_dirs"]["step0"]
+        os.makedirs(step0_dir, exist_ok=True)
+        print("[Step0] writing ROI-specific outputs")
+        print(f"[Step0] roi_id={self._roi_context['roi_id']}")
+        print(f"[Step0] step0_dir={step0_dir}")
+
         config = self._build_config()
-        config_path = os.path.join(self.output_dir, "correction_config.json")
+        config_path = os.path.join(step0_dir, "correction_config.json")
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         self.loader.set_correction_config(config)
@@ -2335,13 +2354,7 @@ class Step0Page(QWidget):
             for ch, method in (config.get("channel_decisions") or {}).items()
             if method in {"tophat", "cucim"}
         }
-        zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")
-
-        rois = list(self.overview.get_rois() if self.overview else self.rois)
-        if not rois:
-            QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
-            return
-        self.rois = rois
+        zarr_path = os.path.join(step0_dir, "corrected_channels.zarr")
 
         if not corrected:
             self._ensure_empty_corrected_zarr(zarr_path, rois)
@@ -2353,7 +2366,7 @@ class Step0Page(QWidget):
         self._btn_load.setEnabled(False)
         self._wsi_dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_worker = WsiCorrectionWorker(
-            self.loader, self.output_dir, config, rois=rois, parent=self
+            self.loader, step0_dir, config, rois=rois, parent=self
         )
         self._wsi_worker.progress.connect(self._on_wsi_progress)
         self._wsi_worker.finished.connect(lambda path, decisions: self._on_wsi_finished(config, path, decisions))
@@ -2431,10 +2444,14 @@ class Step0Page(QWidget):
             bbox = list(roi.get("bbox_fullres") or [])
             item = {
                 "name": str(roi.get("name") or f"ROI_{idx}"),
+                "display_name": str(roi.get("name") or f"ROI_{idx}"),
                 "bbox_fullres": [int(v) for v in bbox] if len(bbox) == 4 else [],
                 "polygon_fullres": roi.get("polygon_fullres") or [],
                 "shape": self._roi_shape_from_bbox(bbox),
             }
+            if idx == 1 and self._roi_context:
+                item["roi_id"] = self._roi_context.get("roi_id", "")
+                item["roi_dir"] = self._roi_context.get("roi_dir", "")
             if "color" in roi:
                 item["color"] = roi.get("color")
             if "polygon_display" in roi:
@@ -2483,11 +2500,15 @@ class Step0Page(QWidget):
     def _ensure_empty_corrected_zarr(self, zarr_path, rois):
         if os.path.exists(zarr_path):
             shutil.rmtree(zarr_path, ignore_errors=True)
-        os.makedirs(self.output_dir, exist_ok=True)
+        out_dir = os.path.dirname(zarr_path) or self.output_dir
+        os.makedirs(out_dir, exist_ok=True)
         root = zarr.open_group(zarr_path, mode="w")
         root.attrs["mode"] = "roi_only"
         root.attrs["source_ome"] = os.path.abspath(self.ome_path)
-        root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+        root.attrs["output_dir"] = os.path.abspath(out_dir)
+        if self._roi_context:
+            root.attrs["roi_id"] = self._roi_context.get("roi_id", "")
+            root.attrs["roi_dir"] = os.path.abspath(self._roi_context.get("roi_dir", ""))
         root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
         root.attrs["created_by"] = "Step0"
         for idx, roi in enumerate(rois, start=1):
@@ -2499,17 +2520,25 @@ class Step0Page(QWidget):
             group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
 
     def _write_step0_handoff(self, config, zarr_path):
-        os.makedirs(self.output_dir, exist_ok=True)
+        step0_dir = os.path.dirname(zarr_path) if zarr_path else (
+            self._roi_context["step_dirs"]["step0"] if self._roi_context else self.output_dir
+        )
+        os.makedirs(step0_dir, exist_ok=True)
         config = self._clean_correction_config(config)
         rois = self._standard_rois()
         patches = self._standard_patches(rois)
-        corr_path = os.path.join(self.output_dir, "correction_config.json")
-        roi_path = os.path.join(self.output_dir, "roi_config.json")
-        patch_path = os.path.join(self.output_dir, "patch_config.json")
-        corrected_path = zarr_path or os.path.join(self.output_dir, "corrected_channels.zarr")
-        manifest_path = os.path.join(self.output_dir, "step0_roi_result.json")
+        corr_path = os.path.join(step0_dir, "correction_config.json")
+        roi_path = os.path.join(step0_dir, "roi_config.json")
+        patch_path = os.path.join(step0_dir, "patch_config.json")
+        corrected_path = zarr_path or os.path.join(step0_dir, "corrected_channels.zarr")
+        manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
+        roi_id = self._roi_context.get("roi_id", "") if self._roi_context else ""
+        roi_dir = self._roi_context.get("roi_dir", "") if self._roi_context else ""
+        project_dir = self._roi_context.get("project_dir", self.output_dir) if self._roi_context else self.output_dir
 
-        print("[Step0] writing Step0 ROI handoff")
+        print("[Step0] writing ROI-specific outputs")
+        print(f"[Step0] roi_id={roi_id}")
+        print(f"[Step0] step0_dir={step0_dir}")
         with open(corr_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         with open(roi_path, "w", encoding="utf-8") as f:
@@ -2525,7 +2554,10 @@ class Step0Page(QWidget):
                 root = zarr.open_group(corrected_path, mode="a")
                 root.attrs["mode"] = "roi_only"
                 root.attrs["source_ome"] = os.path.abspath(self.ome_path)
-                root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+                root.attrs["output_dir"] = os.path.abspath(step0_dir)
+                root.attrs["project_output_dir"] = os.path.abspath(project_dir)
+                root.attrs["roi_id"] = roi_id
+                root.attrs["roi_dir"] = os.path.abspath(roi_dir) if roi_dir else ""
                 root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
                 root.attrs["created_by"] = "Step0"
                 for roi in rois:
@@ -2540,9 +2572,14 @@ class Step0Page(QWidget):
                 print(f"[Step0] failed to update corrected zarr attrs: {e}")
 
         manifest = {
-            "version": "v5_step0_roi_handoff_1",
+            "version": "v5_roi_handoff_1",
+            "roi_id": roi_id,
+            "display_name": rois[0]["name"] if rois else "",
             "mode": "roi_only",
-            "output_dir": os.path.abspath(self.output_dir),
+            "project_output_dir": os.path.abspath(project_dir),
+            "roi_dir": os.path.abspath(roi_dir) if roi_dir else "",
+            "step0_dir": os.path.abspath(step0_dir),
+            "output_dir": os.path.abspath(step0_dir),
             "raw_ome_path": os.path.abspath(self.ome_path),
             "nucleus_channel": self.nucleus_channel,
             "corrected_zarr_path": os.path.abspath(corrected_path),
@@ -2550,6 +2587,8 @@ class Step0Page(QWidget):
             "roi_config_path": os.path.abspath(roi_path),
             "patch_config_path": os.path.abspath(patch_path),
             "active_roi": rois[0]["name"] if rois else "",
+            "bbox_fullres": rois[0].get("bbox_fullres", []) if rois else [],
+            "shape": rois[0].get("shape", []) if rois else [],
             "n_rois": len(rois),
             "n_patches": len(patches),
         }
@@ -2561,6 +2600,11 @@ class Step0Page(QWidget):
         print(f"[Step0] patch_config={patch_path}")
         print(f"[Step0] corrected_zarr={corrected_path}")
         print(f"[Step0] step0_roi_result={manifest_path}")
+        if roi_id and project_dir:
+            try:
+                mark_roi_step(project_dir, roi_id, "step0", "done")
+            except Exception as e:
+                print(f"[Step0] failed to update ROI index: {e}")
         return config, rois, patches, manifest
 
     def _emit_complete(self, config, zarr_path, decisions):
@@ -2579,7 +2623,15 @@ class Step0Page(QWidget):
             "rois": list(rois),
             "correction_config": config,
             "corrected_zarr_path": manifest.get("corrected_zarr_path", zarr_path),
-            "output_dir": self.output_dir,
+            "output_dir": manifest.get("step0_dir", self.output_dir),
+            "project_output_dir": manifest.get("project_output_dir", self.output_dir),
+            "roi_id": manifest.get("roi_id", ""),
+            "roi_dir": manifest.get("roi_dir", ""),
+            "step0_dir": manifest.get("step0_dir", ""),
+            "step1_dir": (
+                self._roi_context["step_dirs"]["step1"]
+                if self._roi_context else ""
+            ),
             "ome_tiff_path": self.ome_path,
             "panel_csv_path": self.panel_csv_path,
             "panel_groups": dict(self.panel_groups),

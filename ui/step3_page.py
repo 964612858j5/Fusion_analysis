@@ -1649,59 +1649,70 @@ class Step3Page(QWidget):
                 "source": source,
             }
 
-        if self._background_mode == "DAPI":
-            _add_row("__layer_dapi__", "DAPI", "canonical")
-            self._channel_lay.addStretch()
-            self._log_overlay_rows()
-            return
+        self._apply_background_defaults()
+        dapi_lbl = QLabel("DAPI Overlay")
+        dapi_lbl.setStyleSheet("color:#56b6c2;font-weight:bold;font-size:10px;padding-top:4px;")
+        self._channel_lay.addWidget(dapi_lbl)
+        _add_row("__layer_dapi__", "DAPI", "canonical")
 
-        if self._background_mode == "Fusion":
-            _add_row("__layer_fusion__", "Fusion", "fused ch0")
-            _add_row("__layer_dapi__", "DAPI", "fused ch1/DAPI")
+        fusion_lbl = QLabel("Fusion Overlay")
+        fusion_lbl.setStyleSheet("color:#56b6c2;font-weight:bold;font-size:10px;padding-top:4px;")
+        self._channel_lay.addWidget(fusion_lbl)
+        _add_row("__layer_fusion__", "Fusion", "fused ch0")
+        if hasattr(self, "_chk_fusion"):
             self._show_fusion = bool(
-                self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__")).get("visible", True)
+                self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__")).get("visible", False)
             )
-            if hasattr(self, "_chk_fusion"):
-                self._chk_fusion.blockSignals(True)
-                self._chk_fusion.setChecked(self._show_fusion)
-                self._chk_fusion.blockSignals(False)
-            self._channel_lay.addStretch()
-            self._log_overlay_rows()
-            return
+            self._chk_fusion.setEnabled(bool(self._patch_fusion_available or self._fusion_zarr_path))
+            self._chk_fusion.setToolTip("" if self._chk_fusion.isEnabled() else "Fusion source not available.")
+            self._chk_fusion.blockSignals(True)
+            self._chk_fusion.setChecked(self._show_fusion)
+            self._chk_fusion.blockSignals(False)
 
-        if not self._available_channels:
+        marker_lbl = QLabel("Marker Channels")
+        marker_lbl.setStyleSheet("color:#aaa;font-weight:bold;font-size:10px;padding-top:6px;")
+        self._channel_lay.addWidget(marker_lbl)
+        marker_channels = self._marker_channels()
+        if not marker_channels:
             msg = QLabel("No channels found.\nSet Channel Source / Raw OME.")
             msg.setWordWrap(True)
             msg.setStyleSheet("color:#aaa;font-size:10px;")
             self._channel_lay.addWidget(msg)
             self._channel_lay.addStretch()
+            self._log_overlay_rows(marker_channels)
             return
-        if self._background_mode == "Channels":
-            self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__"))["visible"] = bool(self._show_fusion)
-            self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))["visible"] = True
-            lbl = QLabel("Fusion Overlay")
-            lbl.setStyleSheet("color:#56b6c2;font-weight:bold;font-size:10px;padding-top:4px;")
-            self._channel_lay.addWidget(lbl)
-            _add_row("__layer_fusion__", "Fusion", "fused ch0")
-            _add_row("__layer_dapi__", "DAPI", "fused ch1/DAPI")
-            if hasattr(self, "_chk_fusion"):
-                self._chk_fusion.setEnabled(bool(self._patch_fusion_available or self._fusion_zarr_path))
-                self._chk_fusion.setToolTip("" if self._chk_fusion.isEnabled() else "Fusion source not available.")
-                self._chk_fusion.blockSignals(True)
-                self._chk_fusion.setChecked(bool(self._show_fusion))
-                self._chk_fusion.blockSignals(False)
-            sep = QLabel("Marker Channels")
-            sep.setStyleSheet("color:#aaa;font-weight:bold;font-size:10px;padding-top:6px;")
-            self._channel_lay.addWidget(sep)
-        for ch in self._available_channels:
+        for ch in marker_channels:
             _add_row(ch, ch, self._channel_sources.get(ch, "raw"))
         self._channel_lay.addStretch()
-        self._log_overlay_rows()
+        self._log_overlay_rows(marker_channels)
 
-    def _log_overlay_rows(self):
+    def _apply_background_defaults(self):
+        dapi = self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))
+        fusion = self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__"))
+        mode = str(self._background_mode)
+        if getattr(self, "_overlay_defaults_mode", None) == mode:
+            self._show_fusion = bool(fusion.get("visible", False))
+            return
+        if self._background_mode == "DAPI":
+            dapi["visible"] = True
+            fusion["visible"] = False
+        elif self._background_mode == "Fusion":
+            dapi["visible"] = True
+            fusion["visible"] = True
+        self._overlay_defaults_mode = mode
+        self._show_fusion = bool(fusion.get("visible", False))
+
+    def _marker_channels(self):
+        return [ch for ch in self._available_channels if not self._is_canonical_dapi_channel(ch)]
+
+    def _log_overlay_rows(self, marker_channels=None):
         rows = [v.get("label", k) for k, v in self._channel_rows.items()]
         print(f"[Step3] background_mode={self._background_mode}")
         print(f"[Step3] overlay rows={rows}")
+        print("[Step3] overlay sections:")
+        print("  DAPI shared=True")
+        print("  Fusion shared=True")
+        print(f"  marker_channels_count={len(marker_channels if marker_channels is not None else self._marker_channels())}")
         for key, label in (("__layer_dapi__", "DAPI"), ("__layer_fusion__", "Fusion")):
             if key in self._channel_rows:
                 st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
@@ -2561,7 +2572,7 @@ class Step3Page(QWidget):
         print(f"[Step3] background_mode={self._background_mode}")
         if self._background_mode == "Channels":
             selected = [
-                ch for ch in self._available_channels
+                ch for ch in self._marker_channels()
                 if self._channel_settings.get(ch, {}).get("visible", False)
             ]
             print(f"[Step3] selected_channels={selected}")
@@ -2631,9 +2642,6 @@ class Step3Page(QWidget):
 
     def _layer_array_for_key(self, key):
         if key == "__layer_dapi__":
-            if self._background_mode == "Fusion" and self._patch_fusion_rgb is not None:
-                _fusion, dapi, _source = self._fusion_layer_arrays()
-                return dapi
             return self._dapi_layer_array()
         if key == "__layer_fusion__":
             fusion, _dapi, _source = self._fusion_layer_arrays()
@@ -2656,25 +2664,8 @@ class Step3Page(QWidget):
         self._render_roi(reset_view=False)
 
     def _current_background_rgb(self):
-        if self._background_mode == "DAPI":
-            rgb = self._render_dapi_overlay()
-            if rgb is not None:
-                return rgb
-        if self._background_mode == "Fusion":
-            rgb = self._render_fusion_overlay()
-            if rgb is not None:
-                return rgb
-            if self._patch_dapi_rgb is not None:
-                self._roi_status.setText("Fusion source not available. Falling back to DAPI.")
-                print("[Step3] Fusion source not available. Falling back to DAPI.")
-                dapi_rgb = self._render_dapi_overlay()
-                return dapi_rgb if dapi_rgb is not None else self._patch_dapi_rgb
-        if self._background_mode == "Channels" and self._available_channels:
-            rgb = self._render_channel_overlay()
-            if rgb is not None:
-                return rgb
-        dapi_rgb = self._render_dapi_overlay()
-        return dapi_rgb if dapi_rgb is not None else self._patch_dapi_rgb
+        rgb = self._render_layer_stack()
+        return rgb if rgb is not None else self._patch_dapi_rgb
 
     def _current_background_kind(self):
         if self._background_mode == "DAPI":
@@ -2775,45 +2766,24 @@ class Step3Page(QWidget):
             print("[Step3] Fusion channel 0 is empty.")
         return fusion, dapi, dapi_source
 
-    def _render_dapi_overlay(self):
-        return self._compose_layer_rgb([
-            ("__layer_dapi__", "DAPI", "canonical_dapi", self._dapi_layer_array()),
-        ])
-
-    def _render_fusion_overlay(self):
-        if self._patch_fusion_rgb is None:
-            return None
+    def _base_layer_specs(self):
+        specs = [("__layer_dapi__", "DAPI", "canonical_dapi", self._dapi_layer_array())]
         fusion, dapi, dapi_source = self._fusion_layer_arrays()
-        return self._compose_layer_rgb([
-            ("__layer_fusion__", "Fusion", "fused_zarr_ch0", fusion),
-            ("__layer_dapi__", "DAPI", dapi_source, dapi),
-        ])
+        if fusion is None and self._channel_settings.get("__layer_fusion__", {}).get("visible", False):
+            print("[Step3] Fusion source not available.")
+            if hasattr(self, "_roi_status"):
+                self._roi_status.setText("Fusion source not available. Falling back to DAPI.")
+        specs.append(("__layer_fusion__", "Fusion", "fused_zarr_ch0", fusion))
+        return specs
 
-    def _render_channel_overlay(self):
+    def _render_layer_stack(self):
         if self._patch_dapi_rgb is None:
             return None
         target = self._target_patch_shape() or self._patch_dapi_rgb.shape[:2]
         canvas = np.zeros((target[0], target[1], 3), dtype=np.float32)
-        rendered_layers = []
-        if self._show_fusion and self._patch_fusion_rgb is not None:
-            self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__"))["visible"] = True
-            self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))["visible"] = True
-            fusion, dapi, dapi_source = self._fusion_layer_arrays()
-            for key, label, source, arr in (
-                ("__layer_fusion__", "Fusion", "fused_zarr_ch0", fusion),
-                ("__layer_dapi__", "DAPI", dapi_source, dapi),
-            ):
-                layer = self._colorize_layer(key, arr, label, source)
-                if layer is None:
-                    continue
-                if layer.shape[:2] != target:
-                    layer = self._match_rgb_shape(layer, target, label)
-                canvas += layer
-                rendered_layers.append(label)
-        elif self._show_fusion:
-            print("[Step3] Fusion source not available.")
+        rendered_layers = self._add_layer_specs_to_canvas(canvas, self._base_layer_specs(), target)
         visible = []
-        for ch in self._available_channels:
+        for ch in self._marker_channels():
             st = self._channel_settings.get(ch, {})
             if not st.get("visible", False):
                 continue
@@ -2828,7 +2798,7 @@ class Step3Page(QWidget):
             canvas += norm[:, :, None] * color[None, None, :] * opacity
             visible.append(ch)
         rgb = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
-        print("[Step3] background_mode=Channels")
+        print(f"[Step3] background_mode={self._background_mode}")
         print(f"[Step3] selected marker channels={visible}")
         print(f"[Step3] show_fusion={self._show_fusion}")
         print(f"[Step3] fusion source={self._patch_fusion_source}")
@@ -2837,11 +2807,23 @@ class Step3Page(QWidget):
         print(f"[Step3] rendered multichannel overlay shape={rgb.shape}")
         return rgb
 
+    def _add_layer_specs_to_canvas(self, canvas, layer_specs, target):
+        rendered = []
+        for key, label, source, arr in layer_specs:
+            layer = self._colorize_layer(key, arr, label, source)
+            if layer is None:
+                continue
+            if layer.shape[:2] != target:
+                layer = self._match_rgb_shape(layer, target, label)
+            canvas += layer
+            rendered.append(label)
+        return rendered
+
     def _load_visible_patch_channels(self):
         if self._last_patch_bbox is None or self._background_mode != "Channels":
             return
         visible = [
-            ch for ch in self._available_channels
+            ch for ch in self._marker_channels()
             if self._channel_settings.get(ch, {}).get("visible", False)
         ]
         print(f"[Step3] available_channels={self._available_channels}")

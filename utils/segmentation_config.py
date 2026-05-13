@@ -11,6 +11,7 @@ from copy import deepcopy
 CELLPOSE_WHOLECELL_FUSION = "cellpose_wholecell_fusion"
 CELLPOSE_NUCLEI_DAPI = "cellpose_nuclei_dapi"
 CELLPOSE_NUCLEI_EXPANSION = "cellpose_nuclei_expansion"
+CELLPOSE_NUCLEI_HQ = "cellpose_nuclei_hq"
 STARDIST_NUCLEI_DAPI = "stardist_nuclei_dapi"
 STARDIST_NUCLEI_EXPANSION = "stardist_nuclei_expansion"
 
@@ -55,6 +56,27 @@ SEGMENTATION_METHODS = {
             "expand_distance": 8,
         },
         "output_type": "expanded_pseudo_cell_mask",
+    },
+    CELLPOSE_NUCLEI_HQ: {
+        "method": CELLPOSE_NUCLEI_HQ,
+        "display_name": "Cellpose nuclei + HQ",
+        "input_type": "dapi_plus_hq_structural_channels",
+        "process": "cellpose_nuclei_then_hq_seeded_watershed_consensus",
+        "params": {
+            "model_type": "cpsam",
+            "diameter": None,
+            "flow_threshold": 0.4,
+            "cellprob_threshold": 0.0,
+            "min_size": 15,
+            "hq_channels": [],
+            "max_cell_radius": 12,
+            "normalization_percentile_low": 1.0,
+            "normalization_percentile_high": 99.5,
+            "consensus_mode": "adaptive_best_channel",
+            "channel_weights": {},
+            "min_signal_threshold": 0.08,
+        },
+        "output_type": "whole_cell_mask",
     },
     STARDIST_NUCLEI_DAPI: {
         "method": STARDIST_NUCLEI_DAPI,
@@ -122,6 +144,13 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "expand_distance",
         "phase1_diameter",
         "params_source",
+        "hq_channels",
+        "max_cell_radius",
+        "normalization_percentile_low",
+        "normalization_percentile_high",
+        "consensus_mode",
+        "channel_weights",
+        "min_signal_threshold",
     ):
         if key in raw:
             params[key] = raw[key]

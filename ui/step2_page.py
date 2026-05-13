@@ -21,6 +21,7 @@ from ..config import OUTPUT_DIR
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_HQ,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -33,6 +34,12 @@ from ..utils.segmentation_params import (
     params_index_path,
 )
 from ..utils.roi_project import mark_roi_step
+from ..workers.hq_marker_segmentation import (
+    CONSENSUS_MODES,
+    parse_channel_weights,
+    parse_hq_channels,
+    validate_hq_channels,
+)
 from ..workers.segment_merge_worker import SegmentMergeWorker
 
 # ══════════════════════════════════════════════════════════════════════
@@ -363,6 +370,52 @@ class Step2Page(QWidget):
         self._sd_expand.setSingleStep(1)
         self._sd_expand.setValue(8)
         r, self._sd_expand_label, _ = _param_row('expansion_distance:', self._sd_expand)
+        cpl.addLayout(r)
+
+        self._hq_channels = QtWidgets.QLineEdit()
+        self._hq_channels.setPlaceholderText('PanCK;CD45;CD68')
+        self._hq_channels.setStyleSheet('font-size:11px;')
+        r, self._hq_channels_label, _ = _param_row('hq_channels:', self._hq_channels)
+        cpl.addLayout(r)
+
+        self._hq_radius = QDoubleSpinBox()
+        self._hq_radius.setRange(1, 200)
+        self._hq_radius.setSingleStep(1)
+        self._hq_radius.setValue(12)
+        r, self._hq_radius_label, _ = _param_row('max_cell_radius:', self._hq_radius)
+        cpl.addLayout(r)
+
+        self._hq_norm_low = QDoubleSpinBox()
+        self._hq_norm_low.setRange(0.0, 50.0)
+        self._hq_norm_low.setSingleStep(0.5)
+        self._hq_norm_low.setValue(1.0)
+        r, self._hq_norm_low_label, _ = _param_row('norm percentile low:', self._hq_norm_low)
+        cpl.addLayout(r)
+
+        self._hq_norm_high = QDoubleSpinBox()
+        self._hq_norm_high.setRange(50.0, 100.0)
+        self._hq_norm_high.setSingleStep(0.5)
+        self._hq_norm_high.setValue(99.5)
+        r, self._hq_norm_high_label, _ = _param_row('norm percentile high:', self._hq_norm_high)
+        cpl.addLayout(r)
+
+        self._hq_consensus = QComboBox()
+        for mode in CONSENSUS_MODES:
+            self._hq_consensus.addItem(mode, mode)
+        r, self._hq_consensus_label, _ = _param_row('consensus mode:', self._hq_consensus)
+        cpl.addLayout(r)
+
+        self._hq_weights = QtWidgets.QLineEdit()
+        self._hq_weights.setPlaceholderText('optional: PanCK=1;CD45=0.8;CD68=1')
+        self._hq_weights.setStyleSheet('font-size:11px;')
+        r, self._hq_weights_label, _ = _param_row('channel weights:', self._hq_weights)
+        cpl.addLayout(r)
+
+        self._hq_min_signal = QDoubleSpinBox()
+        self._hq_min_signal.setRange(0.0, 1.0)
+        self._hq_min_signal.setSingleStep(0.01)
+        self._hq_min_signal.setValue(0.08)
+        r, self._hq_min_signal_label, _ = _param_row('min signal threshold:', self._hq_min_signal)
         cpl.addLayout(r)
 
         self._method_hint = QLabel('')
@@ -900,6 +953,15 @@ class Step2Page(QWidget):
         self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if p.get('nms_thresh') is None else float(p.get('nms_thresh')))
         self._sd_expand.setValue(float(p.get('expand_distance', 8) or 0))
+        self._hq_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
+        self._hq_radius.setValue(float(p.get("max_cell_radius", 12) or 12))
+        self._hq_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
+        self._hq_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
+        idx = self._hq_consensus.findData(p.get("consensus_mode", "adaptive_best_channel"))
+        self._hq_consensus.setCurrentIndex(max(0, idx))
+        weights = p.get("channel_weights") or {}
+        self._hq_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
+        self._hq_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
         self._on_method_changed()
 
     def _apply_method_defaults_to_ui(self, method):
@@ -912,6 +974,14 @@ class Step2Page(QWidget):
         self._sd_prob.setValue(-1.0 if cfg.get('prob_thresh') is None else float(cfg.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if cfg.get('nms_thresh') is None else float(cfg.get('nms_thresh')))
         self._sd_expand.setValue(float(cfg.get('expand_distance', 8) or 0))
+        self._hq_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
+        self._hq_radius.setValue(float(cfg.get("max_cell_radius", 12) or 12))
+        self._hq_norm_low.setValue(float(cfg.get("normalization_percentile_low", 1.0)))
+        self._hq_norm_high.setValue(float(cfg.get("normalization_percentile_high", 99.5)))
+        idx = self._hq_consensus.findData(cfg.get("consensus_mode", "adaptive_best_channel"))
+        self._hq_consensus.setCurrentIndex(max(0, idx))
+        self._hq_weights.setText("")
+        self._hq_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
 
     def get_cp_params(self):
         return self.get_seg_config()
@@ -919,6 +989,7 @@ class Step2Page(QWidget):
     def get_seg_config(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         diam = self._cp_diam.value()
+        hq_channels = parse_hq_channels(self._hq_channels.text())
         data = {
             'method':             method,
             'params': {
@@ -926,6 +997,13 @@ class Step2Page(QWidget):
                 'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
                 'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
                 'expand_distance':    self._sd_expand.value(),
+                'hq_channels':        hq_channels,
+                'max_cell_radius':    self._hq_radius.value(),
+                'normalization_percentile_low': self._hq_norm_low.value(),
+                'normalization_percentile_high': self._hq_norm_high.value(),
+                'consensus_mode':     self._hq_consensus.currentData() or 'adaptive_best_channel',
+                'channel_weights':    parse_channel_weights(self._hq_weights.text(), hq_channels),
+                'min_signal_threshold': self._hq_min_signal.value(),
             },
             'model_type':         'cpsam',  # Cellpose 4.0.1+: always cpsam
             'diameter':           None if diam == 0 else diam,
@@ -942,9 +1020,10 @@ class Step2Page(QWidget):
             and (self._param_source_combo.currentData() or "manual") == "manual"
         ):
             self._apply_method_defaults_to_ui(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
+        is_hq = method == CELLPOSE_NUCLEI_HQ
         for w in (
             self._cp_model_label, self._cp_model_lbl,
             self._cp_diam_label, self._cp_diam,
@@ -961,10 +1040,54 @@ class Step2Page(QWidget):
             w.setVisible(is_stardist)
         self._sd_expand_label.setVisible(is_expansion)
         self._sd_expand.setVisible(is_expansion)
+        for w in (
+            self._hq_channels_label, self._hq_channels,
+            self._hq_radius_label, self._hq_radius,
+            self._hq_norm_low_label, self._hq_norm_low,
+            self._hq_norm_high_label, self._hq_norm_high,
+            self._hq_consensus_label, self._hq_consensus,
+            self._hq_weights_label, self._hq_weights,
+            self._hq_min_signal_label, self._hq_min_signal,
+        ):
+            w.setVisible(is_hq)
         cfg = get_segmentation_method_config(method)
         self._method_hint.setText(
             f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
         )
+
+    def _available_hq_channels(self):
+        candidates = []
+        if self._roi_dir:
+            candidates.append(os.path.join(self._roi_dir, "step0", "corrected_channels.zarr"))
+        out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
+        candidates.extend([
+            os.path.join(out_dir, "corrected_channels.zarr"),
+            os.path.join(os.path.dirname(out_dir), "corrected_channels.zarr"),
+        ])
+        for path in candidates:
+            if not path or not os.path.exists(path):
+                continue
+            root = zarr.open(path, mode="r")
+            mode = str(root.attrs.get("mode", "")).strip().lower()
+            if mode == "roi_only":
+                groups = list(getattr(root, "group_keys", lambda: [])())
+                if not groups and hasattr(root, "groups"):
+                    groups = [name for name, _group in root.groups()]
+                target = None
+                for group_name in groups:
+                    group = root[group_name]
+                    if str(group.attrs.get("roi_id") or "") == self._roi_id:
+                        target = group
+                        break
+                    if str(group.attrs.get("roi_name") or group_name) in {self._roi_id, self._roi_id or group_name}:
+                        target = group
+                        break
+                if target is None and groups:
+                    target = root[groups[0]]
+                if target is not None:
+                    return list(target.array_keys())
+            return list(root.array_keys())
+        return []
 
     # ── run / stop ────────────────────────────────────────────────────
 
@@ -973,6 +1096,22 @@ class Step2Page(QWidget):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
             return
+        seg_config = self.get_seg_config()
+        if seg_config.get("method") == CELLPOSE_NUCLEI_HQ:
+            channels = seg_config.get("hq_channels") or []
+            try:
+                available = self._available_hq_channels()
+                validate_hq_channels(channels, available)
+            except Exception as e:
+                QMessageBox.warning(self, 'Missing channels', str(e))
+                return
+            if len(channels) > 3:
+                QMessageBox.information(
+                    self,
+                    'HQ channel recommendation',
+                    'Cellpose nuclei + HQ recommends 2-5 high-quality structural channels; '
+                    'using more than 3 channels can be slower and may dilute consensus.'
+                )
 
         recovery_dir = None
         if self._rec_box.isChecked():
@@ -996,7 +1135,7 @@ class Step2Page(QWidget):
 
         self._worker = SegmentMergeWorker(
             zarr_path        = self._zarr_path,
-            seg_config       = self.get_seg_config(),
+            seg_config       = seg_config,
             n_rows           = nr,
             n_cols           = nc,
             overlap_px       = self._overlap_spin.value(),
@@ -1006,7 +1145,7 @@ class Step2Page(QWidget):
             param_file        = param_file,
             parameter_source  = "index" if param_file else "manual",
         )
-        seg_cfg = self.get_seg_config()
+        seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
         if self._roi_id:

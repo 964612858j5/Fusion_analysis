@@ -20,6 +20,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_HQ,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -36,6 +37,12 @@ from ..utils.roi_project import (
     update_roi_segmentation_run,
 )
 from .cellpose_worker import load_stardist_model
+from .hq_marker_segmentation import (
+    parse_hq_channels,
+    segment_nuclei_hq,
+    validate_hq_channels,
+    write_hq_qc_table,
+)
 
 
 class SegmentMergeWorker(QThread):
@@ -403,6 +410,74 @@ class SegmentMergeWorker(QThread):
         """
         return np.array(z[y0:y1, x0:x1, 1])
 
+    def _open_hq_channel_group(self, roi_name=None):
+        path = self._multichannel_source_path()
+        if not path or not os.path.exists(path):
+            raise FileNotFoundError(
+                "Cellpose nuclei + HQ requires corrected_channels.zarr, but it was not found."
+            )
+        root = zarr.open(path, mode="r")
+        mode = str(root.attrs.get("mode", "")).strip().lower()
+        if mode == "roi_only":
+            groups = list(getattr(root, "group_keys", lambda: [])())
+            if not groups and hasattr(root, "groups"):
+                groups = [name for name, _group in root.groups()]
+            for group_name in groups:
+                group = root[group_name]
+                if str(group.attrs.get("roi_id") or "") == self.roi_id:
+                    return group
+                if roi_name and str(group.attrs.get("roi_name") or group_name) == str(roi_name):
+                    return group
+            if groups:
+                return root[groups[0]]
+        return root
+
+    @staticmethod
+    def _channel_array_names(group):
+        if hasattr(group, "array_keys"):
+            return list(group.array_keys())
+        return [k for k in group.keys() if hasattr(group[k], "shape")]
+
+    def _validate_hq_config(self, roi_name=None):
+        channels = parse_hq_channels(self.seg_config.get("hq_channels") or [])
+        group = self._open_hq_channel_group(roi_name)
+        available = self._channel_array_names(group)
+        channels = validate_hq_channels(channels, available)
+        self.seg_config["hq_channels"] = channels
+        return channels, group
+
+    def _hq_meta_fields(self, nuclei_mask_path="", final_cell_mask_path="", qc_table_path=""):
+        return {
+            "method": "cellpose_nuclei_hq",
+            "display_name": "Cellpose nuclei + HQ",
+            "cellpose_nuclei_parameters": {
+                "model_type": self.seg_config.get("model_type", "cpsam"),
+                "diameter": self.seg_config.get("diameter"),
+                "flow_threshold": self.seg_config.get("flow_threshold", 0.4),
+                "cellprob_threshold": self.seg_config.get("cellprob_threshold", 0.0),
+                "min_size": self.seg_config.get("min_size", 15),
+            },
+            "hq_channels": parse_hq_channels(self.seg_config.get("hq_channels") or []),
+            "max_cell_radius": self.seg_config.get("max_cell_radius", 12),
+            "normalization_percentiles": [
+                self.seg_config.get("normalization_percentile_low", 1.0),
+                self.seg_config.get("normalization_percentile_high", 99.5),
+            ],
+            "consensus_mode": self.seg_config.get("consensus_mode", "adaptive_best_channel"),
+            "channel_weights": self.seg_config.get("channel_weights") or {},
+            "min_signal_threshold": self.seg_config.get("min_signal_threshold", 0.08),
+            "nuclei_mask_path": self._abs(nuclei_mask_path),
+            "final_cell_mask_path": self._abs(final_cell_mask_path),
+            "qc_table_path": self._abs(qc_table_path),
+        }
+
+    def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
+        marker_channels = []
+        for ch in channels:
+            arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+            marker_channels.append(arr)
+        return marker_channels
+
     @staticmethod
     def _normalize01(arr):
         arr = np.asarray(arr, dtype=np.float32)
@@ -418,7 +493,7 @@ class SegmentMergeWorker(QThread):
 
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ):
             from cellpose import models as cp_models
             return {"cellpose": cp_models.CellposeModel(device=device)}
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
@@ -436,7 +511,7 @@ class SegmentMergeWorker(QThread):
             }
         raise ValueError(f"Unknown segmentation method: {method}")
 
-    def _segment_tile(self, tile_data, backend):
+    def _segment_tile(self, tile_data, backend, hq_marker_channels=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         tile_f32 = tile_data.astype(np.float32) / 65535.0
@@ -453,7 +528,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
-        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ):
             masks, _, _ = backend["cellpose"].eval(
                 dapi,
                 diameter=self.seg_config.get("diameter"),
@@ -470,6 +545,23 @@ class SegmentMergeWorker(QThread):
                 print(f"[Step2] applying expand_labels distance={dist}")
                 if dist > 0:
                     masks = expand_labels(masks, distance=dist)
+            if method == CELLPOSE_NUCLEI_HQ:
+                final_mask, nuclei_mask, qc_rows = segment_nuclei_hq(
+                    masks.astype(np.uint32, copy=False),
+                    hq_marker_channels or [],
+                    self.seg_config.get("hq_channels") or [],
+                    max_cell_radius=self.seg_config.get("max_cell_radius", 12),
+                    normalization_low=self.seg_config.get("normalization_percentile_low", 1.0),
+                    normalization_high=self.seg_config.get("normalization_percentile_high", 99.5),
+                    consensus_mode=self.seg_config.get("consensus_mode", "adaptive_best_channel"),
+                    channel_weights=self.seg_config.get("channel_weights") or {},
+                    min_signal_threshold=self.seg_config.get("min_signal_threshold", 0.08),
+                )
+                return {
+                    "mask": final_mask.astype(np.uint32, copy=False),
+                    "nuclei": nuclei_mask.astype(np.uint32, copy=False),
+                    "qc_rows": qc_rows,
+                }
             return masks.astype(np.uint32)
 
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
@@ -564,6 +656,20 @@ class SegmentMergeWorker(QThread):
                               shape=(full_h, full_w))
         dapi_mmap[:] = 0
 
+        is_hq = self.method == CELLPOSE_NUCLEI_HQ
+        hq_channels, hq_group = ([], None)
+        nuclei_mmap = None
+        nuclei_mmap_path = ""
+        hq_qc_rows = []
+        if is_hq:
+            hq_channels, hq_group = self._validate_hq_config(out_prefix)
+            nuclei_mmap_path = os.path.join(
+                self.output_dir, f'global_nuclei_mask_{out_prefix}.dat'
+            )
+            nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
+                                    shape=(full_h, full_w))
+            nuclei_mmap[:] = 0
+
         global_id_offset = 0
         tile_stats = []
 
@@ -594,6 +700,8 @@ class SegmentMergeWorker(QThread):
             dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
 
             if self.recovery_npy_dir is not None:
+                local_nuclei = None
+                local_qc_rows = []
                 npy_path = os.path.join(
                     self.recovery_npy_dir,
                     f'tile_{out_prefix}_{row}_{col}.npy'
@@ -605,10 +713,25 @@ class SegmentMergeWorker(QThread):
                 local_mask = np.load(npy_path)
             else:
                 try:
-                    local_mask = self._segment_tile(tile_data, model)
+                    hq_marker_channels = None
+                    if is_hq:
+                        hq_marker_channels = self._read_hq_marker_channels(
+                            hq_group, hq_channels, ry0, ry1, rx0, rx1
+                        )
+                    local_result = self._segment_tile(tile_data, model, hq_marker_channels)
+                    local_nuclei = None
+                    local_qc_rows = []
+                    if isinstance(local_result, dict):
+                        local_mask = local_result["mask"]
+                        local_nuclei = local_result.get("nuclei")
+                        local_qc_rows = local_result.get("qc_rows") or []
+                    else:
+                        local_mask = local_result
                 except Exception as e:
                     log.error(f"  Tile [{row},{col}] failed: {traceback.format_exc()}")
                     local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
+                    local_nuclei = None
+                    local_qc_rows = []
                 if use_gpu:
                     torch.cuda.empty_cache()
 
@@ -687,11 +810,25 @@ class SegmentMergeWorker(QThread):
                 lut[lab] = new_id + global_id_offset
 
             remapped = lut[local_mask]
+            remapped_nuclei = lut[local_nuclei] if is_hq and local_nuclei is not None else None
+            if is_hq and local_qc_rows:
+                kept_set = set(keep_labels)
+                for row_qc in local_qc_rows:
+                    old_id = int(row_qc.get("cell_id", 0) or 0)
+                    if old_id not in kept_set:
+                        continue
+                    new_row = dict(row_qc)
+                    new_row["cell_id"] = int(lut[old_id])
+                    hq_qc_rows.append(new_row)
             del local_mask, lut, cy, cx
 
             dst = mmap[ry0:ry1, rx0:rx1]
             np.copyto(dst, remapped, where=(remapped > 0))
             del remapped
+            if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
+                np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
+                del remapped_nuclei
 
             n_kept = len(keep_labels)
             global_id_offset += n_kept
@@ -712,10 +849,14 @@ class SegmentMergeWorker(QThread):
         # ── Flush memmaps ─────────────────────────────────────────────
         mmap.flush()
         dapi_mmap.flush()
+        if nuclei_mmap is not None:
+            nuclei_mmap.flush()
         total_cells = int(global_id_offset)
         log.info(f"  [{out_prefix}] total_cells={total_cells:,}")
 
         del mmap, dapi_mmap
+        if nuclei_mmap is not None:
+            del nuclei_mmap
         gc.collect()
         self._drop_caches()
 
@@ -728,6 +869,10 @@ class SegmentMergeWorker(QThread):
                                  shape=(full_h, full_w))
         dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                  shape=(full_h, full_w))
+        nuclei_mmap_ro = None
+        if is_hq and nuclei_mmap_path:
+            nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
+                                       shape=(full_h, full_w))
 
         out_zarr_path = os.path.join(
             self.output_dir, f'global_mask_{out_prefix}.zarr'
@@ -777,6 +922,33 @@ class SegmentMergeWorker(QThread):
             )
         self._drop_caches()
 
+        nuclei_ome_path = ""
+        nuclei_zarr_path = ""
+        qc_table_path = ""
+        if is_hq and nuclei_mmap_ro is not None:
+            nuclei_zarr_path = os.path.join(
+                self.output_dir, f'global_nuclei_mask_{out_prefix}.zarr'
+            )
+            nz = zarr.open(nuclei_zarr_path, mode='w',
+                           shape=(full_h, full_w), dtype='uint32',
+                           chunks=(1024, 1024))
+            for y in range(0, full_h, CHUNK):
+                nz[y:y+CHUNK, :] = nuclei_mmap_ro[y:y+CHUNK, :]
+            nuclei_ome_path = os.path.join(
+                self.output_dir, f'global_nuclei_mask_{out_prefix}.ome.tiff'
+            )
+            with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
+                tif.write(
+                    nuclei_mmap_ro.astype(np.float32),
+                    tile=(512, 512),
+                    compression='lzw',
+                    photometric='minisblack',
+                    metadata=None,
+                )
+            qc_table_path = os.path.join(self.output_dir, f'hq_qc_table_{out_prefix}.csv')
+            write_hq_qc_table(qc_table_path, hq_qc_rows)
+            del nuclei_mmap_ro
+
         del mmap_ro, dapi_mmap_ro
         gc.collect()
 
@@ -807,6 +979,8 @@ class SegmentMergeWorker(QThread):
             'bbox':            list(bbox) if bbox else None,
             'created_at':      datetime.now().isoformat(),
         }
+        if is_hq:
+            meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
         if self.roi_id:
             mask_roi_id = os.path.join(self.output_dir, f"global_mask_{self.roi_id}.ome.tiff")
             dapi_roi_id = os.path.join(self.output_dir, f"global_dapi_{self.roi_id}.ome.tiff")
@@ -988,6 +1162,12 @@ class SegmentMergeWorker(QThread):
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
                 }
+                if self.method == CELLPOSE_NUCLEI_HQ:
+                    summary_meta.update(self._hq_meta_fields(
+                        first_roi_meta.get("nuclei_mask_path", ""),
+                        first_roi_meta.get("final_cell_mask_path") or first_roi_meta.get("ome_tiff", ""),
+                        first_roi_meta.get("qc_table_path", ""),
+                    ))
                 with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
                     json.dump(summary_meta, f, indent=2)
                 self._register_completed_result(summary_meta)
@@ -1055,6 +1235,18 @@ class SegmentMergeWorker(QThread):
                                   shape=(full_h, full_w))
             dapi_mmap[:] = 0
 
+            is_hq = self.method == CELLPOSE_NUCLEI_HQ
+            hq_channels, hq_group = ([], None)
+            nuclei_mmap = None
+            nuclei_mmap_path = ""
+            hq_qc_rows = []
+            if is_hq:
+                hq_channels, hq_group = self._validate_hq_config()
+                nuclei_mmap_path = os.path.join(self.output_dir, 'global_nuclei_mask.dat')
+                nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
+                                        shape=(full_h, full_w))
+                nuclei_mmap[:] = 0
+
             global_id_offset = 0
             tile_stats = []
 
@@ -1081,6 +1273,8 @@ class SegmentMergeWorker(QThread):
                 dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
 
                 if self.recovery_npy_dir is not None:
+                    local_nuclei = None
+                    local_qc_rows = []
                     npy_path = os.path.join(
                         self.recovery_npy_dir, f'tile_{row}_{col}.npy'
                     )
@@ -1094,11 +1288,26 @@ class SegmentMergeWorker(QThread):
                 else:
                     tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
                     try:
-                        local_mask = self._segment_tile(tile_data, model)
+                        hq_marker_channels = None
+                        if is_hq:
+                            hq_marker_channels = self._read_hq_marker_channels(
+                                hq_group, hq_channels, ry0, ry1, rx0, rx1
+                            )
+                        local_result = self._segment_tile(tile_data, model, hq_marker_channels)
+                        local_nuclei = None
+                        local_qc_rows = []
+                        if isinstance(local_result, dict):
+                            local_mask = local_result["mask"]
+                            local_nuclei = local_result.get("nuclei")
+                            local_qc_rows = local_result.get("qc_rows") or []
+                        else:
+                            local_mask = local_result
                     except Exception as e:
                         log.error(f'Tile [{row},{col}] inference failed:\n{traceback.format_exc()}')
                         self.error.emit(f'Tile [{row},{col}] inference failed: {e}')
                         local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
+                        local_nuclei = None
+                        local_qc_rows = []
                     del tile_data
                     if use_gpu:
                         torch.cuda.empty_cache()
@@ -1167,11 +1376,25 @@ class SegmentMergeWorker(QThread):
                     lut[lab] = new_id + global_id_offset
 
                 remapped = lut[local_mask]
+                remapped_nuclei = lut[local_nuclei] if is_hq and local_nuclei is not None else None
+                if is_hq and local_qc_rows:
+                    kept_set = set(keep_labels)
+                    for row_qc in local_qc_rows:
+                        old_id = int(row_qc.get("cell_id", 0) or 0)
+                        if old_id not in kept_set:
+                            continue
+                        new_row = dict(row_qc)
+                        new_row["cell_id"] = int(lut[old_id])
+                        hq_qc_rows.append(new_row)
                 del local_mask, lut, cy, cx
 
                 dst = mmap[ry0:ry1, rx0:rx1]
                 np.copyto(dst, remapped, where=(remapped > 0))
                 del remapped
+                if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                    ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
+                    np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
+                    del remapped_nuclei
 
                 n_kept = len(keep_labels)
                 global_id_offset += n_kept
@@ -1208,6 +1431,8 @@ class SegmentMergeWorker(QThread):
 
             mmap.flush()
             dapi_mmap.flush()
+            if nuclei_mmap is not None:
+                nuclei_mmap.flush()
             total_cells = int(global_id_offset)
             _out_msg = f"Inference done. Total cells: {total_cells:,}. Writing outputs…"
             self.progress.emit(n_tiles, n_tiles, _out_msg)
@@ -1215,6 +1440,8 @@ class SegmentMergeWorker(QThread):
             self._stop_mem_logger()
 
             del mmap, dapi_mmap
+            if nuclei_mmap is not None:
+                del nuclei_mmap
             gc.collect()
             self._drop_caches()
 
@@ -1222,6 +1449,10 @@ class SegmentMergeWorker(QThread):
                                      shape=(full_h, full_w))
             dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                      shape=(full_h, full_w))
+            nuclei_mmap_ro = None
+            if is_hq and nuclei_mmap_path:
+                nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
+                                           shape=(full_h, full_w))
 
             CHUNK_ROWS = 4096
             n_chunks   = -(-full_h // CHUNK_ROWS)
@@ -1269,6 +1500,32 @@ class SegmentMergeWorker(QThread):
             self.progress.emit(n_tiles, n_tiles, '✓ global DAPI OME-TIFF written')
             log.info(f"DAPI OME-TIFF → {global_dapi_path}  {self._mem_snapshot()}")
 
+            nuclei_ome_path = ""
+            nuclei_zarr_path = ""
+            qc_table_path = ""
+            if is_hq and nuclei_mmap_ro is not None:
+                nuclei_zarr_path = os.path.join(self.output_dir, 'global_nuclei_mask.zarr')
+                nz = zarr.open(
+                    nuclei_zarr_path, mode='w',
+                    shape=(full_h, full_w), dtype='uint32',
+                    chunks=(1024, 1024),
+                )
+                for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
+                    y1 = min(y + CHUNK_ROWS, full_h)
+                    nz[y:y1, :] = nuclei_mmap_ro[y:y1, :]
+                nuclei_ome_path = os.path.join(self.output_dir, 'global_nuclei_mask.ome.tiff')
+                with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
+                    tif.write(
+                        nuclei_mmap_ro.astype(np.float32),
+                        tile=(512, 512),
+                        compression='lzw',
+                        photometric='minisblack',
+                        metadata=None,
+                    )
+                qc_table_path = os.path.join(self.output_dir, 'hq_qc_table.csv')
+                write_hq_qc_table(qc_table_path, hq_qc_rows)
+                del nuclei_mmap_ro
+
             del mmap_ro, dapi_mmap_ro
             gc.collect()
             self._drop_caches()
@@ -1302,6 +1559,8 @@ class SegmentMergeWorker(QThread):
                 'config_path':    self._abs(config_path),
                 'created_at':     datetime.now().isoformat(),
             }
+            if is_hq:
+                meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
             fusion_path = self._fusion_source_path()
             meta["fused_zarr_path"] = fusion_path
             meta["input_zarr"] = fusion_path

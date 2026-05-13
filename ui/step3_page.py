@@ -3,7 +3,6 @@ block01/ui/step3_page.py — _RoiRect, _ThumbLoader, _RegionLoader, Step3Page.
 """
 
 import os
-import random
 import glob
 import json
 import re
@@ -469,10 +468,11 @@ class Step3Page(QWidget):
         self._mask_alpha  = 0.35
         self._show_outline = True
         self._show_fusion  = True
-        self._background_mode = "DAPI"
+        self._background_mode = "Layers"
         self._available_channels = []
         self._channel_settings = {}
         self._channel_rows = {}
+        self._channel_search_text = ""
         self._patch_channel_cache = {}
         self._last_patch_bbox = None
 
@@ -1490,7 +1490,6 @@ class Step3Page(QWidget):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            self._background_mode = cfg.get("background_mode", self._background_mode)
             saved = cfg.get("channels") or {}
             for ch, st in saved.items():
                 cur = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
@@ -1504,7 +1503,7 @@ class Step3Page(QWidget):
         try:
             with open(self._channel_config_path(), "w", encoding="utf-8") as f:
                 json.dump({
-                    "background_mode": self._background_mode,
+                    "background_mode": "Layers",
                     "channels": self._channel_settings,
                 }, f, indent=2)
         except Exception:
@@ -1569,12 +1568,6 @@ class Step3Page(QWidget):
         for ch in self._available_channels:
             self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
         self._load_channel_config()
-        if self._background_mode not in {"DAPI", "Fusion", "Channels"}:
-            self._background_mode = "DAPI"
-        if hasattr(self, "_bg_mode_combo"):
-            self._bg_mode_combo.blockSignals(True)
-            self._bg_mode_combo.setCurrentText(self._background_mode if self._background_mode in {"DAPI", "Fusion", "Channels"} else "DAPI")
-            self._bg_mode_combo.blockSignals(False)
         if hasattr(self, "_channel_source_edit"):
             self._channel_source_edit.setText(self._corrected_zarr_path or "")
         if hasattr(self, "_raw_ome_edit"):
@@ -1649,7 +1642,7 @@ class Step3Page(QWidget):
                 "source": source,
             }
 
-        self._apply_background_defaults()
+        self._sync_unified_layer_state()
         dapi_lbl = QLabel("DAPI Overlay")
         dapi_lbl.setStyleSheet("color:#56b6c2;font-weight:bold;font-size:10px;padding-top:4px;")
         self._channel_lay.addWidget(dapi_lbl)
@@ -1673,6 +1666,7 @@ class Step3Page(QWidget):
         marker_lbl.setStyleSheet("color:#aaa;font-weight:bold;font-size:10px;padding-top:6px;")
         self._channel_lay.addWidget(marker_lbl)
         marker_channels = self._marker_channels()
+        filtered_channels = self._filtered_marker_channels(marker_channels)
         if not marker_channels:
             msg = QLabel("No channels found.\nSet Channel Source / Raw OME.")
             msg.setWordWrap(True)
@@ -1681,38 +1675,50 @@ class Step3Page(QWidget):
             self._channel_lay.addStretch()
             self._log_overlay_rows(marker_channels)
             return
-        for ch in marker_channels:
+        if not filtered_channels:
+            msg = QLabel("No matching channels.")
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color:#aaa;font-size:10px;")
+            self._channel_lay.addWidget(msg)
+            self._channel_lay.addStretch()
+            self._log_overlay_rows(marker_channels, visible_count=0)
+            return
+        for ch in filtered_channels:
             _add_row(ch, ch, self._channel_sources.get(ch, "raw"))
         self._channel_lay.addStretch()
-        self._log_overlay_rows(marker_channels)
+        self._log_overlay_rows(marker_channels, visible_count=len(filtered_channels))
 
-    def _apply_background_defaults(self):
-        dapi = self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))
+    def _sync_unified_layer_state(self):
+        self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))
         fusion = self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__"))
-        mode = str(self._background_mode)
-        if getattr(self, "_overlay_defaults_mode", None) == mode:
-            self._show_fusion = bool(fusion.get("visible", False))
-            return
-        if self._background_mode == "DAPI":
-            dapi["visible"] = True
-            fusion["visible"] = False
-        elif self._background_mode == "Fusion":
-            dapi["visible"] = True
-            fusion["visible"] = True
-        self._overlay_defaults_mode = mode
         self._show_fusion = bool(fusion.get("visible", False))
 
     def _marker_channels(self):
         return [ch for ch in self._available_channels if not self._is_canonical_dapi_channel(ch)]
 
-    def _log_overlay_rows(self, marker_channels=None):
+    def _filtered_marker_channels(self, marker_channels=None):
+        channels = list(marker_channels if marker_channels is not None else self._marker_channels())
+        text = str(getattr(self, "_channel_search_text", "") or "").strip().lower()
+        if text:
+            channels = [ch for ch in channels if text in str(ch).lower()]
+        return channels
+
+    def _on_channel_search_changed(self, text):
+        self._channel_search_text = str(text or "")
+        visible_count = len(self._filtered_marker_channels())
+        print(f"[Step3] channel search='{self._channel_search_text}'")
+        print(f"[Step3] marker rows visible={visible_count}")
+        self._rebuild_channel_panel()
+
+    def _log_overlay_rows(self, marker_channels=None, visible_count=None):
         rows = [v.get("label", k) for k, v in self._channel_rows.items()]
-        print(f"[Step3] background_mode={self._background_mode}")
         print(f"[Step3] overlay rows={rows}")
         print("[Step3] overlay sections:")
         print("  DAPI shared=True")
         print("  Fusion shared=True")
         print(f"  marker_channels_count={len(marker_channels if marker_channels is not None else self._marker_channels())}")
+        if visible_count is not None:
+            print(f"[Step3] marker rows visible={visible_count}")
         for key, label in (("__layer_dapi__", "DAPI"), ("__layer_fusion__", "Fusion")):
             if key in self._channel_rows:
                 st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
@@ -1728,26 +1734,27 @@ class Step3Page(QWidget):
             'margin-top:4px;font-weight:bold;color:#56b6c2;font-size:11px;}'
         )
         ch_lay = QVBoxLayout(ch_box)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel('Background:'))
-        self._bg_mode_combo = QtWidgets.QComboBox()
-        self._bg_mode_combo.addItems(['DAPI', 'Fusion', 'Channels'])
-        self._bg_mode_combo.setCurrentText(self._background_mode)
-        self._bg_mode_combo.currentTextChanged.connect(self._on_background_mode_changed)
-        mode_row.addWidget(self._bg_mode_combo)
-        btn_clear = QPushButton('Clear All')
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel('Search channels:'))
+        self._channel_search_edit = QtWidgets.QLineEdit()
+        self._channel_search_edit.setPlaceholderText('Search channels...')
+        self._channel_search_edit.textChanged.connect(self._on_channel_search_changed)
+        search_row.addWidget(self._channel_search_edit, stretch=1)
+        ch_lay.addLayout(search_row)
+
+        tool_row = QHBoxLayout()
+        btn_clear = QPushButton('Clear all markers')
         btn_clear.clicked.connect(self._reset_channel_visibility)
-        mode_row.addWidget(btn_clear)
+        tool_row.addWidget(btn_clear)
         btn_reset_colors = QPushButton('Reset Colors')
         btn_reset_colors.clicked.connect(self._reset_channel_colors)
-        mode_row.addWidget(btn_reset_colors)
-        mode_row.addStretch()
-        ch_lay.addLayout(mode_row)
+        tool_row.addWidget(btn_reset_colors)
+        tool_row.addStretch()
+        ch_lay.addLayout(tool_row)
 
         self._channel_scroll = QScrollArea()
         self._channel_scroll.setWidgetResizable(True)
-        self._channel_scroll.setMinimumHeight(220)
-        self._channel_scroll.setMaximumHeight(420)
+        self._channel_scroll.setMinimumHeight(360)
         self._channel_w = QWidget()
         self._channel_lay = QVBoxLayout(self._channel_w)
         self._channel_lay.setContentsMargins(2, 2, 2, 2)
@@ -1943,6 +1950,7 @@ class Step3Page(QWidget):
         dev_btn = QPushButton('Developer options')
         dev_btn.setCheckable(True)
         dev_btn.setChecked(False)
+        dev_btn.setVisible(False)
         left_lay.addWidget(dev_btn)
 
         # Advanced file input box
@@ -2039,58 +2047,13 @@ class Step3Page(QWidget):
         self._thumb_status.setWordWrap(True)
         preview_lay.addWidget(self._thumb_status)
 
-        # Sampling controls
-        samp_box = QGroupBox('ROI / Sampling')
-        samp_box.setStyleSheet(
-            'QGroupBox{border:1px solid #e5c07b;border-radius:5px;'
-            'margin-top:4px;font-weight:bold;color:#e5c07b;font-size:11px;}'
-        )
-        sl = QVBoxLayout(samp_box)
-
-        # Sub-sampling
-        sub_row = QHBoxLayout()
-        sub_row.addWidget(QLabel('Sub-sample (1=full res):'))
+        # Internal patch load controls. The old ROI/Sampling panel is no
+        # longer shown, but the existing loader still reads this value.
         self._sub_spin = QtWidgets.QSpinBox()
         self._sub_spin.setRange(1, 16)
         self._sub_spin.setValue(2)
-        self._sub_spin.setToolTip(
-            '1 = full resolution (slow for large ROIs)\n'
-            '2 = half resolution (recommended)\n'
-            '4 = quarter resolution (fast)'
-        )
-        sub_row.addWidget(self._sub_spin)
-        sub_row.addStretch()
-        sl.addLayout(sub_row)
 
-        # Random sample button
-        btn_rnd = QPushButton('🎲  Random ROI')
-        btn_rnd.setStyleSheet(
-            'QPushButton{background:#333;color:#e5c07b;border:1px solid #e5c07b;'
-            'border-radius:3px;padding:4px;font-size:11px;}'
-            'QPushButton:hover{background:#443;}'
-        )
-        btn_rnd.clicked.connect(self._random_roi)
-        sl.addWidget(btn_rnd)
-
-        # ROI size spinboxes
-        sz_row = QHBoxLayout()
-        sz_row.addWidget(QLabel('ROI size (px):'))
-        self._roi_h_spin = QtWidgets.QSpinBox()
-        self._roi_h_spin.setRange(256, 20000)
-        self._roi_h_spin.setValue(2048)
-        self._roi_h_spin.setSingleStep(256)
-        sz_row.addWidget(self._roi_h_spin)
-        sz_row.addWidget(QLabel('×'))
-        self._roi_w_spin = QtWidgets.QSpinBox()
-        self._roi_w_spin.setRange(256, 20000)
-        self._roi_w_spin.setValue(2048)
-        self._roi_w_spin.setSingleStep(256)
-        sz_row.addWidget(self._roi_w_spin)
-        sz_row.addStretch()
-        sl.addLayout(sz_row)
-
-        controls_lay.addWidget(self._make_channel_overlay_panel())
-        controls_lay.addWidget(samp_box)
+        controls_lay.addWidget(self._make_channel_overlay_panel(), stretch=1)
         controls_lay.addStretch()
 
         left_body_lay.addWidget(preview_w, stretch=7)
@@ -2145,7 +2108,7 @@ class Step3Page(QWidget):
         self._chk_fusion = QCheckBox('Show Fusion')
         self._chk_fusion.setChecked(self._show_fusion)
         self._chk_fusion.stateChanged.connect(self._on_render_controls_changed)
-        toolbar.addWidget(self._chk_fusion)
+        self._chk_fusion.setVisible(False)
 
         btn_reset = QPushButton('Reset View')
         btn_reset.setStyleSheet(
@@ -2375,7 +2338,7 @@ class Step3Page(QWidget):
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
         print(f"[Step3] reading fusion crop from={self._fused_zarr_path}")
         print(f"[Step3] patch bbox={[y0, y1, x0, x1]}")
-        print(f"[Step3] background_mode={self._background_mode}")
+        print("[Step3] overlay_mode=Layers")
 
         self._region_loader = _RegionLoader(
             dapi_path, mask_path,
@@ -2556,28 +2519,10 @@ class Step3Page(QWidget):
                 cb.blockSignals(False)
         dapi_st = self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))
         print(f"[Step3] show_fusion={self._show_fusion}")
-        if self._background_mode == "Channels":
-            print(f"[Step3] Channels mode fusion overlay={self._show_fusion}")
         print(f"[Step3] fusion visible={self._show_fusion}")
         print(f"[Step3] dapi visible={bool(dapi_st.get('visible', True))}")
         print(f"[Step3] DAPI color unchanged={dapi_st.get('color', '#3366ff')}")
         self._save_channel_config()
-        self._render_roi(reset_view=False)
-
-    def _on_background_mode_changed(self, mode):
-        self._background_mode = str(mode)
-        self._save_channel_config()
-        self._rebuild_channel_panel()
-        self._load_visible_patch_channels()
-        print(f"[Step3] background_mode={self._background_mode}")
-        if self._background_mode == "Channels":
-            selected = [
-                ch for ch in self._marker_channels()
-                if self._channel_settings.get(ch, {}).get("visible", False)
-            ]
-            print(f"[Step3] selected_channels={selected}")
-            print(f"[Step3] Channels mode fusion overlay={self._show_fusion}")
-        print("[Step3] rerender only")
         self._render_roi(reset_view=False)
 
     def _on_channel_visibility_changed(self, ch):
@@ -2595,7 +2540,7 @@ class Step3Page(QWidget):
         self._save_channel_config()
         print(f"[Step3] channel visibility changed: {ch}={val}")
         print(f"[Step3] channel toggled: {ch}={val}")
-        if val and ch not in self._patch_channel_cache:
+        if val and ch not in ("__layer_dapi__", "__layer_fusion__") and ch not in self._patch_channel_cache:
             self._load_patch_channel(ch)
         print("[Step3] rerender only")
         self._render_roi(reset_view=False)
@@ -2657,6 +2602,9 @@ class Step3Page(QWidget):
         self._render_roi(reset_view=False)
 
     def _reset_channel_colors(self):
+        for ch in ("__layer_dapi__", "__layer_fusion__"):
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["color"] = self._default_channel_color(ch)
+            self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["opacity"] = 1.0
         for ch in self._available_channels:
             self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["color"] = self._default_channel_color(ch)
         self._rebuild_channel_panel()
@@ -2668,13 +2616,7 @@ class Step3Page(QWidget):
         return rgb if rgb is not None else self._patch_dapi_rgb
 
     def _current_background_kind(self):
-        if self._background_mode == "DAPI":
-            return "dapi"
-        if self._background_mode == "Fusion":
-            return "fusion" if self._patch_fusion_available else "dapi"
-        if self._background_mode == "Channels" and self._available_channels:
-            return "channels"
-        return "dapi"
+        return "layers"
 
     def _hex_to_rgb(self, color):
         q = QtGui.QColor(str(color))
@@ -2798,9 +2740,12 @@ class Step3Page(QWidget):
             canvas += norm[:, :, None] * color[None, None, :] * opacity
             visible.append(ch)
         rgb = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
-        print(f"[Step3] background_mode={self._background_mode}")
-        print(f"[Step3] selected marker channels={visible}")
-        print(f"[Step3] show_fusion={self._show_fusion}")
+        dapi_visible = bool(self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__")).get("visible", True))
+        fusion_visible = bool(self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__")).get("visible", False))
+        print("[Step3] rendering unified overlay")
+        print(f"[Step3] DAPI visible={dapi_visible}")
+        print(f"[Step3] Fusion visible={fusion_visible}")
+        print(f"[Step3] marker visible={visible}")
         print(f"[Step3] fusion source={self._patch_fusion_source}")
         print(f"[Step3] render layers={rendered_layers + visible}")
         print(f"[Step3] rendered channels: {visible}")
@@ -2820,7 +2765,7 @@ class Step3Page(QWidget):
         return rendered
 
     def _load_visible_patch_channels(self):
-        if self._last_patch_bbox is None or self._background_mode != "Channels":
+        if self._last_patch_bbox is None:
             return
         visible = [
             ch for ch in self._marker_channels()
@@ -2913,25 +2858,6 @@ class Step3Page(QWidget):
             self._patch_channel_cache[ch] = self._match_channel_shape(
                 ch, arr, source or self._channel_sources.get(ch, "unknown")
             )
-
-    # ── Random ROI ───────────────────────────────────────────────────
-
-    def _random_roi(self):
-        if self._full_h == 0:
-            return
-        rh = min(self._roi_h_spin.value(), self._full_h)
-        rw = min(self._roi_w_spin.value(), self._full_w)
-        import random
-        y0 = random.randint(0, max(0, self._full_h - rh))
-        x0 = random.randint(0, max(0, self._full_w - rw))
-        y1 = min(y0 + rh, self._full_h)
-        x1 = min(x0 + rw, self._full_w)
-        # Place rect on thumbnail
-        x_ds = x0 / self._OV_DS
-        y_ds = y0 / self._OV_DS
-        w_ds = (x1 - x0) / self._OV_DS
-        h_ds = (y1 - y0) / self._OV_DS
-        self._roi_rect_set(x_ds, y_ds, w_ds, h_ds)
 
     # ── Browse helpers ────────────────────────────────────────────────
 

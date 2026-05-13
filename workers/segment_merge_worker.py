@@ -924,6 +924,8 @@ class SegmentMergeWorker(QThread):
                     total_cells_all += n_cells
                     roi_meta_all.append({
                         "roi_name": roi_name,
+                        "roi_id": self.roi_id,
+                        "roi_display_name": roi_name,
                         "bbox_fullres": roi.get("bbox_fullres"),
                         "fused_zarr_path": roi_zarr_abs,
                         "input_zarr": roi_zarr_abs,
@@ -937,6 +939,9 @@ class SegmentMergeWorker(QThread):
                         "tile_grid": [self.n_rows, self.n_cols],
                         "total_cells": n_cells,
                         "seg_config": self.seg_config,
+                        "paths": region_meta.get("paths") or {},
+                        "roi_bbox_fullres": region_meta.get("roi_bbox_fullres"),
+                        "roi_shape": region_meta.get("roi_shape"),
                     })
                     self.progress.emit(
                         roi_i + 1, len(self.rois),

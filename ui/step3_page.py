@@ -867,6 +867,21 @@ class Step3Page(QWidget):
             self._project_edit.setText(self._project_dir)
         idx = load_json(project_roi_index_path(self._project_dir), {}) or {}
         entries = list(idx.get("rois") or [])
+        if not entries:
+            rois_dir = os.path.join(self._project_dir, "rois")
+            if os.path.isdir(rois_dir):
+                for roi_id in sorted(os.listdir(rois_dir)):
+                    rdir = os.path.join(rois_dir, roi_id)
+                    manifest = load_json(roi_manifest_path(rdir), {}) or {}
+                    if not manifest:
+                        continue
+                    entries.append({
+                        "roi_id": manifest.get("roi_id") or roi_id,
+                        "display_name": manifest.get("display_name") or roi_id,
+                        "created_at": manifest.get("created_at", ""),
+                        "status": manifest.get("status", "active"),
+                        "manifest": os.path.relpath(roi_manifest_path(rdir), self._project_dir),
+                    })
         self._roi_entries = entries
         print(f"[Step3] project loaded={self._project_dir}")
         if hasattr(self, "_roi_combo"):
@@ -882,6 +897,7 @@ class Step3Page(QWidget):
                     self._roi_combo.setCurrentIndex(i)
             self._roi_combo.blockSignals(False)
         if entries:
+            self._resolved_paths_lbl.setText(f"Loaded {len(entries)} ROI(s).")
             self._on_project_roi_changed()
         else:
             self._resolved_paths_lbl.setText("No ROI found in project.")
@@ -903,16 +919,66 @@ class Step3Page(QWidget):
         self._segmentation_runs = {}
         roi_idx = load_json(roi_index_path(rdir), {}) or {}
         runs = dict(roi_idx.get("segmentation_runs") or {})
+        runs.update(self._scan_roi_segmentation_runs(rdir))
         self._segmentation_runs = runs
         print(f"[Step3] selected roi_id={roi_id}")
         print(f"[Step3] loaded roi_index={roi_index_path(rdir)}")
         print(f"[Step3] available segmentation runs={list(runs)}")
         self._populate_run_combo()
 
+    def _scan_roi_segmentation_runs(self, roi_dir):
+        found = {}
+        search_dirs = [
+            os.path.join(roi_dir, "step2", "segmentation_runs"),
+            os.path.join(roi_dir, "step2", "segmentation_results"),
+        ]
+        print("[Step3] searching results in:")
+        for d in search_dirs:
+            print(f"  {d}")
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                run_dir = os.path.join(d, name)
+                if not os.path.isdir(run_dir):
+                    continue
+                seg_meta_path = os.path.join(run_dir, "segmentation_meta.json")
+                run_meta_path = os.path.join(run_dir, "run_metadata.json")
+                if not (os.path.exists(seg_meta_path) or os.path.exists(run_meta_path)):
+                    continue
+                meta = load_json(seg_meta_path, {}) or load_json(run_meta_path, {}) or {}
+                config = load_json(os.path.join(run_dir, "run_segmentation_params.json"), {}) or {}
+                run_id = str(meta.get("run_id") or meta.get("result_id") or name)
+                method = str(meta.get("method") or config.get("method") or self._method_from_run_id(name))
+                created = str(meta.get("created_at") or self._created_from_run_id(name))
+                found[run_id] = {
+                    "run_id": run_id,
+                    "method": method,
+                    "created_at": created,
+                    "path": os.path.relpath(run_dir, roi_dir),
+                    "status": "done",
+                    "meta_path": os.path.relpath(seg_meta_path if os.path.exists(seg_meta_path) else run_meta_path, roi_dir),
+                }
+                print(f"[Step3] run metadata={seg_meta_path if os.path.exists(seg_meta_path) else run_meta_path}")
+        print(f"[Step3] found run dirs={list(found)}")
+        return found
+
     def _run_display_label(self, run):
         method = str(run.get("method") or "")
         created = str(run.get("created_at") or "")
+        if not created:
+            created = self._created_from_run_id(run.get("run_id"))
         return f"{method} — {created[:16].replace('T', ' ')}"
+
+    @staticmethod
+    def _method_from_run_id(run_id):
+        text = str(run_id or "")
+        m = re.match(r"(?:seg_)?\d{8}_\d{6}_(.+)", text)
+        return m.group(1) if m else text
+
+    @staticmethod
+    def _created_from_run_id(run_id):
+        m = re.search(r"(\d{8}_\d{6})", str(run_id or ""))
+        return m.group(1) if m else ""
 
     def _populate_run_combo(self):
         if not hasattr(self, "_run_combo"):
@@ -923,6 +989,7 @@ class Step3Page(QWidget):
         rdir = os.path.join(self._project_dir, "rois", roi_id)
         roi_idx = load_json(roi_index_path(rdir), {}) or {}
         runs = dict(roi_idx.get("segmentation_runs") or {})
+        runs.update(self._scan_roi_segmentation_runs(rdir))
         if self._latest_only_chk.isChecked():
             wanted = set((roi_idx.get("latest_by_method") or {}).values())
             runs = {rid: run for rid, run in runs.items() if rid in wanted}
@@ -937,8 +1004,11 @@ class Step3Page(QWidget):
             if i >= 0:
                 self._run_combo.setCurrentIndex(i)
         self._run_combo.blockSignals(False)
+        print(f"[Step3] result dropdown count={len(items)}")
         if items:
             self._on_segmentation_run_changed()
+        elif hasattr(self, "_resolved_paths_lbl"):
+            self._resolved_paths_lbl.setText("No segmentation results found for selected ROI.")
 
     def _on_segmentation_run_changed(self, *_args):
         roi_id = self._current_selected_roi_id()
@@ -946,11 +1016,14 @@ class Step3Page(QWidget):
         if not roi_id or not run_id or not self._project_dir:
             return
         rdir = os.path.join(self._project_dir, "rois", roi_id)
-        run = (load_json(roi_index_path(rdir), {}) or {}).get("segmentation_runs", {}).get(run_id, {})
+        run = self._segmentation_runs.get(run_id) or (load_json(roi_index_path(rdir), {}) or {}).get("segmentation_runs", {}).get(run_id, {})
         run_path = run.get("path") or os.path.join("step2", "segmentation_runs", run_id)
         run_dir = run_path if os.path.isabs(run_path) else os.path.join(rdir, run_path)
         meta_path = os.path.join(run_dir, "segmentation_meta.json")
         meta = load_json(meta_path, {}) or {}
+        if not meta:
+            meta_path = os.path.join(run_dir, "run_metadata.json")
+            meta = load_json(meta_path, {}) or {}
         if not self._apply_segmentation_meta(rdir, roi_id, run_id, meta, meta_path):
             return
         self._stop_loaders()
@@ -976,12 +1049,40 @@ class Step3Page(QWidget):
         self._selected_run_meta = meta
         self._active_roi_name = meta.get("roi_display_name") or manifest.get("display_name") or "ROI_1"
         self._active_bbox = bbox_manifest or bbox_meta
-        self._dapi_path = paths.get("dapi_ome") or meta.get("global_dapi") or meta.get("dapi_path")
-        self._mask_path = paths.get("mask_ome") or meta.get("ome_tiff") or meta.get("mask_path")
-        self._fusion_zarr_path = paths.get("fusion_zarr") or meta.get("fused_zarr_path") or meta.get("input_zarr")
+        run_dir = os.path.dirname(meta_path)
+        self._dapi_path = (
+            paths.get("dapi_ome")
+            or meta.get("global_dapi")
+            or meta.get("dapi_path")
+            or self._first_existing_run_file(run_dir, [
+                f"global_dapi_{roi_id}.ome.tiff",
+                f"global_dapi_{self._active_roi_name}.ome.tiff",
+                "global_dapi.ome.tiff",
+            ])
+        )
+        self._mask_path = (
+            paths.get("mask_ome")
+            or meta.get("global_mask")
+            or meta.get("mask_path")
+            or meta.get("ome_tiff")
+            or self._first_existing_run_file(run_dir, [
+                f"global_mask_{roi_id}.ome.tiff",
+                f"global_mask_{self._active_roi_name}.ome.tiff",
+                "global_mask.ome.tiff",
+            ])
+        )
+        self._fusion_zarr_path = paths.get("fusion_zarr") or meta.get("fused_zarr_path") or meta.get("input_zarr") or meta.get("source_zarr")
         self._fused_zarr_path = self._fusion_zarr_path
         self._corrected_zarr_path = paths.get("corrected_channels_zarr") or os.path.join(roi_dir, "step0", "corrected_channels.zarr")
         self._raw_ome_path = paths.get("raw_ome") or manifest.get("source_ome")
+        if not (self._dapi_path and os.path.exists(self._dapi_path) and self._mask_path and os.path.exists(self._mask_path)):
+            msg = "Selected segmentation run has no DAPI/MASK outputs.\nPlease rerun Step2 or check run output."
+            self._resolved_paths_lbl.setText(msg)
+            QMessageBox.warning(self, "Step3", msg)
+            print("[Step3] validation passed=False")
+            print(f"[Step3] missing dapi={self._dapi_path}")
+            print(f"[Step3] missing mask={self._mask_path}")
+            return False
         self._tile_grid = meta.get("tile_grid")
         self._active_tiles_dir = meta.get("tiles_dir") or meta.get("tile_dir") or os.path.join(self._output_dir, "tile_masks", self._active_roi_name)
         tile_stats = meta.get("tile_stats") or ((meta.get("rois") or [{}])[0].get("tile_stats") if meta.get("rois") else [])
@@ -1027,6 +1128,14 @@ class Step3Page(QWidget):
         print(f"[Step3] resolved raw_ome={self._raw_ome_path}")
         print("[Step3] validation passed=True")
         return True
+
+    @staticmethod
+    def _first_existing_run_file(run_dir, names):
+        for name in names:
+            path = os.path.join(run_dir, name)
+            if os.path.exists(path) or os.path.islink(path):
+                return path
+        return ""
 
     def _resolve_channel_source_path(self, manual_path=None):
         candidates = []

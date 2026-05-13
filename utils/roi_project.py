@@ -42,6 +42,10 @@ def generate_roi_id():
     return f"roi_{_now_compact()}_{uuid.uuid4().hex[:4]}"
 
 
+def generate_full_wsi_id():
+    return f"full_wsi_{_now_compact()}_{uuid.uuid4().hex[:4]}"
+
+
 def roi_shape_from_bbox(bbox):
     if not bbox or len(bbox) != 4:
         return [0, 0]
@@ -122,6 +126,7 @@ def update_project_roi_index(project_dir, roi_manifest):
     entry = {
         "roi_id": roi_id,
         "display_name": roi_manifest.get("display_name", ""),
+        "type": roi_manifest.get("type", roi_manifest.get("analysis_region_type", "roi")),
         "created_at": roi_manifest.get("created_at", ""),
         "status": roi_manifest.get("status", "active"),
         "manifest": _rel(os.path.join(roi_dir(project_dir, roi_id), ROI_MANIFEST), project_dir),
@@ -167,6 +172,39 @@ def create_roi_context(project_dir, roi, source_ome=None, display_name=None):
     update_project_roi_index(project_dir, manifest)
     print(f"[ROI] created roi_id={roi_id}")
     print(f"[ROI] display_name={display_name}")
+    print(f"[ROI] roi_dir={rdir}")
+    print(f"[ROI] bbox={bbox}")
+    return build_roi_context(project_dir, roi_id)
+
+
+def create_full_wsi_context(project_dir, image_shape, source_ome=None):
+    """Create a fresh immutable ROI-like context for full-slide processing."""
+    project_dir = _abs(project_dir)
+    ensure_project_manifest(project_dir, source_ome)
+    h, w = [int(v) for v in image_shape[:2]]
+    roi_id = generate_full_wsi_id()
+    bbox = [0, h, 0, w]
+    manifest = {
+        "roi_id": roi_id,
+        "display_name": "Full WSI",
+        "type": "full_wsi",
+        "analysis_region_type": "full_wsi",
+        "created_at": _now_iso(),
+        "source_ome": _abs(source_ome),
+        "bbox_fullres": bbox,
+        "polygon_fullres": None,
+        "shape": [h, w],
+        "status": "active",
+    }
+    rdir = roi_dir(project_dir, roi_id)
+    os.makedirs(rdir, exist_ok=True)
+    for step in ("step0", "step1", "step2", "step3", "future"):
+        os.makedirs(os.path.join(rdir, step), exist_ok=True)
+    save_json(roi_manifest_path(rdir), manifest)
+    save_json(roi_index_path(rdir), _default_roi_index(roi_id))
+    update_project_roi_index(project_dir, manifest)
+    print(f"[ROI] created roi_id={roi_id}")
+    print("[ROI] display_name=Full WSI")
     print(f"[ROI] roi_dir={rdir}")
     print(f"[ROI] bbox={bbox}")
     return build_roi_context(project_dir, roi_id)

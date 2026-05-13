@@ -52,6 +52,7 @@ from .search_ctrl import (
 )
 from ...utils.roi_project import (
     create_roi_context,
+    create_full_wsi_context,
     mark_roi_step,
     roi_shape_from_bbox,
 )
@@ -85,6 +86,7 @@ class Step0Page(QWidget):
         self._roi_selected_idx = -1
         self._roi_context = None
         self._project_output_dir = OUTPUT_DIR
+        self._analysis_region_mode = "roi"
         self._patch_selected_idx = -1
         self._roi_selected_indices = []
         self._patch_selected_indices = []
@@ -217,6 +219,27 @@ class Step0Page(QWidget):
         )
         bl.addWidget(b_title)
 
+        region_row = QHBoxLayout()
+        region_row.addWidget(QLabel("Analysis region:"))
+        self._analysis_region_combo = QComboBox()
+        self._analysis_region_combo.addItems(["ROI selection", "Full WSI"])
+        self._analysis_region_combo.currentIndexChanged.connect(self._on_analysis_region_changed)
+        region_row.addWidget(self._analysis_region_combo, stretch=1)
+        self._btn_use_full_wsi = QPushButton("Use full image")
+        self._btn_use_full_wsi.setToolTip("Switch to Full WSI mode. ROI drawing is not required.")
+        self._btn_use_full_wsi.clicked.connect(lambda: self._analysis_region_combo.setCurrentIndex(1))
+        region_row.addWidget(self._btn_use_full_wsi)
+        bl.addLayout(region_row)
+
+        self._analysis_region_msg = QLabel("")
+        self._analysis_region_msg.setWordWrap(True)
+        self._analysis_region_msg.setStyleSheet(
+            "color:#ffb86c;font-size:10px;background:#241f12;"
+            "border:1px solid #5c4a18;border-radius:3px;padding:3px;"
+        )
+        self._analysis_region_msg.setVisible(False)
+        bl.addWidget(self._analysis_region_msg)
+
         # ROI/Patch 统一工具栏：模式切换 + 一键删除 + 重命名
         _ts = (
             "QPushButton{{color:{c};border:1px solid {c};border-radius:3px;"
@@ -268,6 +291,7 @@ class Step0Page(QWidget):
             "shape": (0, 0), "ch_map": {}, "channel_names": lambda s: []
         })()
         self.overview = OverviewPanel(_dummy_loader, self.nucleus_channel, lazy=True)
+        self.overview.full_wsi_mode = False
         self.overview.patches_changed.connect(self._on_patches_changed)
         self.overview.rois_changed.connect(self._on_rois_changed)
         self._wrap_overview_patch_limit()
@@ -985,6 +1009,7 @@ class Step0Page(QWidget):
 
         self.overview.loader = self.loader
         self.overview.nuc_ch = self.nucleus_channel
+        self.overview.full_wsi_mode = self._is_full_wsi_mode()
         self.overview.full_h = self.loader.shape[0]
         self.overview.full_w = self.loader.shape[1]
         for arts in self.overview._roi_artists:
@@ -1022,6 +1047,52 @@ class Step0Page(QWidget):
             return original(fy0, fy1, fx0, fx1, rmin, rmax, cmin, cmax, roi_idx)
 
         self.overview._add_patch = wrapped
+
+    def _is_full_wsi_mode(self):
+        return str(getattr(self, "_analysis_region_mode", "roi")) == "full_wsi"
+
+    def _on_analysis_region_changed(self, idx):
+        self._analysis_region_mode = "full_wsi" if int(idx) == 1 else "roi"
+        full = self._is_full_wsi_mode()
+        for btn in (
+            getattr(self, "_btn_mode_roi", None),
+            getattr(self, "_btn_del_roi", None),
+            getattr(self, "_btn_rename_roi", None),
+        ):
+            if btn is not None:
+                btn.setEnabled(not full)
+        if full:
+            self._set_draw_mode("patch")
+            if self.overview:
+                self.overview.full_wsi_mode = True
+            self._analysis_region_msg.setText(
+                "Full WSI mode: the entire image will be processed. "
+                "Draw preview patches anywhere in the image for Step1 tuning."
+            )
+            self._analysis_region_msg.setVisible(True)
+            if self.overview:
+                self.overview.status.setText(
+                    "Full WSI mode: drag patch rectangles anywhere. ROI drawing is disabled."
+                )
+        else:
+            if self.overview:
+                self.overview.full_wsi_mode = False
+            self._analysis_region_msg.setVisible(False)
+            if self.overview:
+                self.overview.status.setText("ROI mode: draw ROI vertices or patch rectangles inside a ROI.")
+
+    def _full_wsi_roi(self):
+        h, w = (self.loader.shape if self.loader is not None else (0, 0))
+        return {
+            "name": "Full WSI",
+            "display_name": "Full WSI",
+            "type": "full_wsi",
+            "analysis_region_type": "full_wsi",
+            "bbox_fullres": [0, int(h), 0, int(w)],
+            "polygon_fullres": None,
+            "shape": [int(h), int(w)],
+            "patch_indices": list(range(len(self.overview._patches if self.overview else []))),
+        }
 
     def _reindex_roi_patch_links(self):
         for roi in self.overview._rois:
@@ -2327,16 +2398,31 @@ class Step0Page(QWidget):
             QMessageBox.warning(self, "Validation", "Please load an OME-TIFF first.")
             return
         if not self.patches:
-            QMessageBox.warning(self, "Validation", "Please define at least 1 patch before continuing.")
+            QMessageBox.warning(self, "Validation", "Please define at least 1 preview patch before continuing.")
             return
 
-        rois = list(self.overview.get_rois() if self.overview else self.rois)
+        if self._is_full_wsi_mode():
+            rois = [self._full_wsi_roi()]
+            self.rois = rois
+            self._project_output_dir = self.output_dir
+            self._roi_context = create_full_wsi_context(
+                self._project_output_dir,
+                self.loader.shape,
+                self.ome_path,
+            )
+            print("[Step0] analysis_region_type=full_wsi")
+        else:
+            rois = list(self.overview.get_rois() if self.overview else self.rois)
+            if not rois:
+                QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first, or choose Full WSI mode.")
+                return
+            self.rois = rois
+            self._project_output_dir = self.output_dir
+            self._roi_context = create_roi_context(self._project_output_dir, rois[0], self.ome_path)
+            print("[Step0] analysis_region_type=roi")
         if not rois:
             QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
             return
-        self.rois = rois
-        self._project_output_dir = self.output_dir
-        self._roi_context = create_roi_context(self._project_output_dir, rois[0], self.ome_path)
         step0_dir = self._roi_context["step_dirs"]["step0"]
         os.makedirs(step0_dir, exist_ok=True)
         print("[Step0] writing ROI-specific outputs")
@@ -2438,7 +2524,7 @@ class Step0Page(QWidget):
         return [max(0, y1 - y0), max(0, x1 - x0)]
 
     def _standard_rois(self):
-        src = list(self.overview._rois if self.overview else self.rois)
+        src = [self._full_wsi_roi()] if self._is_full_wsi_mode() else list(self.overview._rois if self.overview else self.rois)
         rois = []
         for idx, roi in enumerate(src, start=1):
             bbox = list(roi.get("bbox_fullres") or [])
@@ -2446,9 +2532,13 @@ class Step0Page(QWidget):
                 "name": str(roi.get("name") or f"ROI_{idx}"),
                 "display_name": str(roi.get("name") or f"ROI_{idx}"),
                 "bbox_fullres": [int(v) for v in bbox] if len(bbox) == 4 else [],
-                "polygon_fullres": roi.get("polygon_fullres") or [],
+                "polygon_fullres": None if roi.get("type") == "full_wsi" else (roi.get("polygon_fullres") or []),
                 "shape": self._roi_shape_from_bbox(bbox),
             }
+            if roi.get("type"):
+                item["type"] = roi.get("type")
+            if roi.get("analysis_region_type"):
+                item["analysis_region_type"] = roi.get("analysis_region_type")
             if idx == 1 and self._roi_context:
                 item["roi_id"] = self._roi_context.get("roi_id", "")
                 item["roi_dir"] = self._roi_context.get("roi_dir", "")
@@ -2504,6 +2594,7 @@ class Step0Page(QWidget):
         os.makedirs(out_dir, exist_ok=True)
         root = zarr.open_group(zarr_path, mode="w")
         root.attrs["mode"] = "roi_only"
+        root.attrs["analysis_region_type"] = "full_wsi" if self._is_full_wsi_mode() else "roi"
         root.attrs["source_ome"] = os.path.abspath(self.ome_path)
         root.attrs["output_dir"] = os.path.abspath(out_dir)
         if self._roi_context:
@@ -2515,6 +2606,7 @@ class Step0Page(QWidget):
             name = str(roi.get("name") or f"ROI_{idx}")
             group = root.create_group(name, overwrite=True)
             group.attrs["roi_name"] = name
+            group.attrs["analysis_region_type"] = "full_wsi" if self._is_full_wsi_mode() else "roi"
             group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
             group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
             group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
@@ -2535,6 +2627,7 @@ class Step0Page(QWidget):
         roi_id = self._roi_context.get("roi_id", "") if self._roi_context else ""
         roi_dir = self._roi_context.get("roi_dir", "") if self._roi_context else ""
         project_dir = self._roi_context.get("project_dir", self.output_dir) if self._roi_context else self.output_dir
+        analysis_region_type = "full_wsi" if self._is_full_wsi_mode() else "roi"
 
         print("[Step0] writing ROI-specific outputs")
         print(f"[Step0] roi_id={roi_id}")
@@ -2553,6 +2646,7 @@ class Step0Page(QWidget):
             try:
                 root = zarr.open_group(corrected_path, mode="a")
                 root.attrs["mode"] = "roi_only"
+                root.attrs["analysis_region_type"] = analysis_region_type
                 root.attrs["source_ome"] = os.path.abspath(self.ome_path)
                 root.attrs["output_dir"] = os.path.abspath(step0_dir)
                 root.attrs["project_output_dir"] = os.path.abspath(project_dir)
@@ -2562,9 +2656,16 @@ class Step0Page(QWidget):
                 root.attrs["created_by"] = "Step0"
                 for roi in rois:
                     name = str(roi.get("name") or "")
-                    if name and name in root:
-                        group = root[name]
+                    group = root[name] if name and name in root else None
+                    if group is None:
+                        for group_name in root.group_keys():
+                            candidate = root[group_name]
+                            if str(candidate.attrs.get("roi_name") or group_name) == name:
+                                group = candidate
+                                break
+                    if group is not None:
                         group.attrs["roi_name"] = name
+                        group.attrs["analysis_region_type"] = analysis_region_type
                         group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
                         group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
                         group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
@@ -2572,13 +2673,16 @@ class Step0Page(QWidget):
                 print(f"[Step0] failed to update corrected zarr attrs: {e}")
 
         manifest = {
-            "version": "v5_roi_handoff_1",
+            "version": "v6_roi_handoff_1",
             "roi_id": roi_id,
             "display_name": rois[0]["name"] if rois else "",
-            "mode": "roi_only",
+            "analysis_region_type": analysis_region_type,
+            "mode": "full_wsi" if analysis_region_type == "full_wsi" else "roi_only",
             "project_output_dir": os.path.abspath(project_dir),
             "roi_dir": os.path.abspath(roi_dir) if roi_dir else "",
             "step0_dir": os.path.abspath(step0_dir),
+            "step1_dir": os.path.abspath(self._roi_context["step_dirs"]["step1"]) if self._roi_context else "",
+            "step2_dir": os.path.abspath(self._roi_context["step_dirs"]["step2"]) if self._roi_context else "",
             "output_dir": os.path.abspath(step0_dir),
             "raw_ome_path": os.path.abspath(self.ome_path),
             "nucleus_channel": self.nucleus_channel,
@@ -2627,6 +2731,7 @@ class Step0Page(QWidget):
             "project_output_dir": manifest.get("project_output_dir", self.output_dir),
             "roi_id": manifest.get("roi_id", ""),
             "roi_dir": manifest.get("roi_dir", ""),
+            "analysis_region_type": manifest.get("analysis_region_type", "roi"),
             "step0_dir": manifest.get("step0_dir", ""),
             "step1_dir": (
                 self._roi_context["step_dirs"]["step1"]

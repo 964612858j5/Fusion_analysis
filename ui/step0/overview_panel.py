@@ -1760,7 +1760,7 @@ class OverviewPanel(QWidget):
                     cc = (cmin + cmax) // 2
 
                     # ROI constraint check
-                    if self._rois:
+                    if self._rois and not getattr(self, "full_wsi_mode", False):
                         roi_idx = self._find_roi_for_patch(cr, cc)
                         if roi_idx is None:
                             self.status.setText(

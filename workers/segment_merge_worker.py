@@ -199,9 +199,9 @@ class SegmentMergeWorker(QThread):
 
     def _fusion_source_path(self, roi_name=None):
         candidates = [
-            self.zarr_path,
             os.path.join(self.roi_dir, "step1", "fused.zarr") if self.roi_dir else "",
             os.path.join(self.roi_dir, "step1", f"fused_{roi_name}.zarr") if self.roi_dir and roi_name else "",
+            self.zarr_path,
             self._project_path(f"fused_{roi_name}.zarr") if roi_name else "",
             self._project_path("fused.zarr"),
             os.path.join(os.path.dirname(self.project_output_dir), f"fused_{roi_name}.zarr") if roi_name else "",
@@ -1007,6 +1007,7 @@ class SegmentMergeWorker(QThread):
                     print(f"[Step2] output_run_dir={self.output_dir}")
                     print(f"[Step2] dapi_ome={summary_meta['paths']['dapi_ome']}")
                     print(f"[Step2] mask_ome={summary_meta['paths']['mask_ome']}")
+                    print(f"[Step2] fusion_zarr={summary_meta['paths'].get('fusion_zarr')}")
                     print("[Step2] updated roi_index latest_by_method")
                 self._stop_mem_logger()
                 self.finished.emit(self.output_dir, total_cells_all)
@@ -1300,6 +1301,18 @@ class SegmentMergeWorker(QThread):
                 'cp_params':      self.seg_config,
                 'config_path':    self._abs(config_path),
                 'created_at':     datetime.now().isoformat(),
+            }
+            fusion_path = self._fusion_source_path()
+            meta["fused_zarr_path"] = fusion_path
+            meta["input_zarr"] = fusion_path
+            meta["source_zarr"] = fusion_path
+            meta["paths"] = {
+                "dapi_ome": self._abs(global_dapi_path),
+                "mask_ome": self._abs(ome_path),
+                "mask_zarr": self._abs(out_zarr_path),
+                "fusion_zarr": fusion_path,
+                "corrected_channels_zarr": self._multichannel_source_path(),
+                "raw_ome": "",
             }
             with open(os.path.join(self.output_dir,
                                    'segmentation_meta.json'), 'w') as f:

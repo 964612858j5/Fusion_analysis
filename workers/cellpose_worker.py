@@ -336,6 +336,46 @@ def run_stardist_predict_gpu_first(image, params):
     return result_cpu
 
 
+def _fusion_uint16_to_rgb(fused):
+    fused_f32 = np.asarray(fused, dtype=np.float32) / 65535.0
+    return np.stack([
+        (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
+        np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
+        (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
+    ], axis=-1)
+
+
+def _dapi_f32_to_rgb(dapi_f32):
+    dapi_u8 = (np.clip(dapi_f32, 0, 1) * 255).astype(np.uint8)
+    return np.stack([
+        np.zeros_like(dapi_u8),
+        np.zeros_like(dapi_u8),
+        dapi_u8,
+    ], axis=-1)
+
+
+def _preview_rgb_from_fusion_or_dapi(fusion, loader, roi, groups, group_weights, nuc_ch, nuc_w, dapi_f32, method):
+    y0, y1, x0, x1 = roi
+    dapi_rgb = _dapi_f32_to_rgb(dapi_f32)
+    try:
+        fused_preview = fusion.fuse_fullres(
+            loader, y0, y1, x0, x1,
+            groups, group_weights, nuc_ch, nuc_w,
+        )
+        rgb = _fusion_uint16_to_rgb(fused_preview)
+        if int(rgb.max()) > 0:
+            print(f"[Worker] method={method}")
+            print("[Worker] segmentation_input=dapi_only")
+            print("[Worker] preview_background=fusion")
+            print(f"[Worker] fusion_rgb min/max={int(rgb.min())}/{int(rgb.max())}")
+            print("[Worker] rgb_raw source=fusion")
+            return rgb, "fusion"
+        print("[Worker] fallback_preview_background=dapi (fusion all zero)")
+    except Exception:
+        print(f"[Worker] fallback_preview_background=dapi\n{traceback.format_exc()}")
+    return dapi_rgb, "dapi"
+
+
 def run_cellpose_process(args, result_queue, stop_flag):
     try:
         from cellpose import models
@@ -424,12 +464,10 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 dapi_raw = loader.read_region(nuc_ch, y0, y1, x0, x1, downsample=1)
                 dapi_f32 = fusion._normalize_intensity(dapi_raw).astype(np.float32)
                 seg_img = np.ascontiguousarray(dapi_f32)
-                dapi_u8 = (np.clip(dapi_f32, 0, 1) * 255).astype(np.uint8)
-                rgb_raw = np.stack([
-                    np.zeros_like(dapi_u8),
-                    np.zeros_like(dapi_u8),
-                    dapi_u8,
-                ], axis=-1)
+                rgb_raw, preview_background = _preview_rgb_from_fusion_or_dapi(
+                    fusion, loader, (y0, y1, x0, x1),
+                    groups, group_weights, nuc_ch, nuc_w, dapi_f32, method,
+                )
 
             try:
                 if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
@@ -493,6 +531,8 @@ def run_cellpose_process(args, result_queue, stop_flag):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+            preview_bg = preview_background if method != CELLPOSE_WHOLECELL_FUSION else "fusion"
+            params["preview_background"] = preview_bg
             result_queue.put({
                 "type": "result",
                 "patch_idx": patch_idx,
@@ -500,6 +540,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "rgb_overlay": rgb_ov,
                 "rgb_raw": rgb_raw,
                 "masks": mask_payload,
+                "preview_background": preview_bg,
             })
             print(f"[Worker] emitting result patch_idx={patch_idx}")
             result_queue.put({

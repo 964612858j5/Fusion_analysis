@@ -249,10 +249,14 @@ class _RegionLoader(QThread):
         if not zarr_path or not os.path.exists(zarr_path) or roi is None:
             return None
         y0, y1, x0, x1 = roi
+        print(f"[Step3] reading fusion crop local_bbox={[y0, y1, x0, x1]}")
         z = zarr.open(zarr_path, mode='r')
         patch = np.asarray(z[y0:y1:sub, x0:x1:sub, :])
         if patch.ndim != 3 or patch.shape[2] not in (2, 3):
             return None
+        print(f"[Step3] fusion crop shape={patch.shape}")
+        if patch.size:
+            print(f"[Step3] fusion min/max={float(np.nanmin(patch))}/{float(np.nanmax(patch))}")
         if patch.shape[2] == 2:
             cyto = _RegionLoader._norm_u8(patch[:, :, 0])
             nuc = _RegionLoader._norm_u8(patch[:, :, 1])
@@ -1115,7 +1119,18 @@ class Step3Page(QWidget):
                 "global_mask.ome.tiff",
             ])
         )
-        self._fusion_zarr_path = paths.get("fusion_zarr") or meta.get("fused_zarr_path") or meta.get("input_zarr") or meta.get("source_zarr")
+        self._fusion_zarr_path = (
+            paths.get("fusion_zarr")
+            or meta.get("fused_zarr_path")
+            or meta.get("input_zarr")
+            or meta.get("source_zarr")
+        )
+        if self._fusion_zarr_path and not os.path.isabs(str(self._fusion_zarr_path)):
+            self._fusion_zarr_path = os.path.join(os.path.dirname(meta_path), str(self._fusion_zarr_path))
+        if not (self._fusion_zarr_path and os.path.exists(self._fusion_zarr_path)):
+            self._fusion_zarr_path = self._find_fusion_zarr(
+                os.path.dirname(meta_path), self._active_roi_name, meta, meta
+            )
         self._fused_zarr_path = self._fusion_zarr_path
         self._corrected_zarr_path = paths.get("corrected_channels_zarr") or os.path.join(roi_dir, "step0", "corrected_channels.zarr")
         self._raw_ome_path = paths.get("raw_ome") or manifest.get("source_ome")
@@ -1193,6 +1208,8 @@ class Step3Page(QWidget):
         print(f"[Step3] patch_source={self._patch_source}")
         print(f"[Step3] tile_infos ignored={self._roi_global_ome_available}")
         print(f"[Step3] method={meta.get('method')}")
+        print(f"[Step3] resolved fusion_zarr={self._fusion_zarr_path}")
+        print(f"[Step3] fusion exists={bool(self._fusion_zarr_path and os.path.exists(self._fusion_zarr_path))}")
         print(f"[Step3] resolved dapi={self._dapi_path}")
         print(f"[Step3] resolved mask={self._mask_path}")
         print(f"[Step3] resolved fusion={self._fusion_zarr_path}")

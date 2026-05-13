@@ -346,6 +346,7 @@ class _RegionLoader(QThread):
                         f"bbox={tile.get('bbox_local')}"
                     )
             else:
+                print("[Step3] using direct ROI OME crop")
                 dapi_raw = self._read_region(self.dapi_path, y0, y1, x0, x1, sub)
                 if self._stop:
                     return
@@ -371,6 +372,8 @@ class _RegionLoader(QThread):
             n_cells  = int(mask_u32.max())
 
             h, w = grey_u8.shape
+            print(f"[Step3] dapi crop shape={dapi_rgb.shape}")
+            print(f"[Step3] mask crop shape={mask_u32.shape}")
             print(f"[Step3] stitched dapi shape={dapi_rgb.shape}")
             print(f"[Step3] stitched mask shape={mask_u32.shape}")
             print(f"[Step3] relabeled cells={n_cells}")
@@ -424,6 +427,8 @@ class Step3Page(QWidget):
         self._tile_grid       = None
         self._tile_shape      = None
         self._tile_infos      = []
+        self._patch_source    = "unknown"
+        self._roi_global_ome_available = False
         self._full_h      = 0
         self._full_w      = 0
         self._thumb_arr   = None   # float32 normalised thumbnail
@@ -1122,10 +1127,30 @@ class Step3Page(QWidget):
             print(f"[Step3] missing dapi={self._dapi_path}")
             print(f"[Step3] missing mask={self._mask_path}")
             return False
+        dapi_shape = None
+        mask_shape = None
+        try:
+            with tifffile.TiffFile(self._dapi_path) as tif:
+                p = tif.pages[0]
+                dapi_shape = (int(p.imagelength), int(p.imagewidth))
+        except Exception:
+            print(f"[Step3] failed to probe dapi shape:\n{traceback.format_exc()}")
+        try:
+            with tifffile.TiffFile(self._mask_path) as tif:
+                p = tif.pages[0]
+                mask_shape = (int(p.imagelength), int(p.imagewidth))
+        except Exception:
+            print(f"[Step3] failed to probe mask shape:\n{traceback.format_exc()}")
+        self._roi_global_ome_available = bool(dapi_shape and mask_shape)
+        self._patch_source = "roi_global_ome" if self._roi_global_ome_available else "tile_fallback"
+        if dapi_shape:
+            self._full_h, self._full_w = dapi_shape
         self._tile_grid = meta.get("tile_grid")
         self._active_tiles_dir = meta.get("tiles_dir") or meta.get("tile_dir") or os.path.join(self._output_dir, "tile_masks", self._active_roi_name)
         tile_stats = meta.get("tile_stats") or ((meta.get("rois") or [{}])[0].get("tile_stats") if meta.get("rois") else [])
         roi_shape = meta.get("roi_shape") or meta.get("image_shape")
+        if not roi_shape and dapi_shape:
+            roi_shape = list(dapi_shape)
         if not roi_shape and self._dapi_path and os.path.exists(self._dapi_path):
             try:
                 with tifffile.TiffFile(self._dapi_path) as tif:
@@ -1133,12 +1158,16 @@ class Step3Page(QWidget):
                     roi_shape = [int(p.imagelength), int(p.imagewidth)]
             except Exception:
                 pass
-        if not self._tile_grid and tile_stats:
+        if self._roi_global_ome_available:
+            self._tile_infos = []
+        elif not self._tile_grid and tile_stats:
             self._tile_grid = [
                 max(int(t.get("row", 0)) for t in tile_stats) + 1,
                 max(int(t.get("col", 0)) for t in tile_stats) + 1,
             ]
-        if self._active_tiles_dir and self._tile_grid:
+        if self._roi_global_ome_available:
+            pass
+        elif self._active_tiles_dir and self._tile_grid:
             self._tile_infos = self._build_tile_infos(self._active_tiles_dir, roi_shape, self._tile_grid, tile_stats)
         else:
             self._tile_infos = []
@@ -1157,6 +1186,12 @@ class Step3Page(QWidget):
             f"Input status: Loaded {self._active_roi_name} | {method_label} | ready"
         )
         print(f"[Step3] selected run_id={run_id}")
+        print(f"[Step3] dapi_ome={self._dapi_path}")
+        print(f"[Step3] mask_ome={self._mask_path}")
+        print(f"[Step3] dapi_shape={dapi_shape}")
+        print(f"[Step3] mask_shape={mask_shape}")
+        print(f"[Step3] patch_source={self._patch_source}")
+        print(f"[Step3] tile_infos ignored={self._roi_global_ome_available}")
         print(f"[Step3] method={meta.get('method')}")
         print(f"[Step3] resolved dapi={self._dapi_path}")
         print(f"[Step3] resolved mask={self._mask_path}")
@@ -2188,6 +2223,19 @@ class Step3Page(QWidget):
             return
         y0, y1, x0, x1 = self._roi
         sub = self._sub_spin.value()
+        full_h, full_w = int(self._full_h or 0), int(self._full_w or 0)
+        if full_h > 0 and full_w > 0:
+            y0 = max(0, min(int(y0), full_h))
+            y1 = max(0, min(int(y1), full_h))
+            x0 = max(0, min(int(x0), full_w))
+            x1 = max(0, min(int(x1), full_w))
+        if y1 <= y0 or x1 <= x0:
+            self._roi_status.setText("Patch outside image bounds.")
+            print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
+            print(f"[Step3] full_h={self._full_h}")
+            print(f"[Step3] full_w={self._full_w}")
+            print("[Step3] Patch outside image bounds.")
+            return
 
         self._clear_region_cache(clear_image=False)
         self._patch_channel_cache.clear()
@@ -2207,14 +2255,20 @@ class Step3Page(QWidget):
         fusion_roi = (y0, y1, x0, x1)
         tile_infos = None
         if self._mode == "roi":
-            tile_infos = self._intersect_patch_tiles(y0, y1, x0, x1)
-            if not tile_infos:
-                self._roi_status.setText("Patch outside ROI.")
-                return
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
+            print(f"[Step3] full_h={self._full_h}")
+            print(f"[Step3] full_w={self._full_w}")
             print(f"[Step3] active_roi={self._active_roi_name}")
             print(f"[Step3] active_bbox global={self._active_bbox}")
-            print(f"[Step3] patch intersects n_tiles={len(tile_infos)}")
+            if self._roi_global_ome_available:
+                tile_infos = []
+                print("[Step3] using direct ROI OME crop")
+            else:
+                tile_infos = self._intersect_patch_tiles(y0, y1, x0, x1)
+                if not tile_infos:
+                    self._roi_status.setText("Patch outside ROI.")
+                    return
+                print(f"[Step3] patch intersects n_tiles={len(tile_infos)}")
         else:
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
         print(f"[Step3] reading fusion crop from={self._fused_zarr_path}")

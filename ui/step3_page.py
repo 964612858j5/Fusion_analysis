@@ -415,6 +415,7 @@ class Step3Page(QWidget):
         self._roi_entries = []
         self._segmentation_runs = {}
         self._selected_run_meta = {}
+        self._selected_meta_path = ""
         self._rois           = []
         self._mode            = "full_wsi"
         self._active_roi_name = None
@@ -861,6 +862,41 @@ class Step3Page(QWidget):
         if path:
             self.load_project(path)
 
+    def _refresh_project_selection(self):
+        path = self._project_edit.text().strip() if hasattr(self, "_project_edit") else ""
+        if path:
+            self.load_project(path)
+        elif self._project_dir:
+            self.load_project(self._project_dir)
+        else:
+            QMessageBox.information(self, "Step3", "Select a project directory first.")
+
+    def _view_resolved_paths(self):
+        text = "\n\n".join([
+            f"Run ID:\n{self._run_combo.currentData() if hasattr(self, '_run_combo') else ''}",
+            f"DAPI:\n{self._dapi_path or ''}",
+            f"MASK:\n{self._mask_path or ''}",
+            f"Fusion:\n{self._fusion_zarr_path or ''}",
+            f"Corrected channels:\n{self._corrected_zarr_path or ''}",
+            f"Raw OME:\n{self._raw_ome_path or ''}",
+            f"segmentation_meta:\n{self._selected_meta_path or ''}",
+        ])
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Resolved Step3 Paths")
+        dlg.resize(900, 520)
+        lay = QVBoxLayout(dlg)
+        edit = QtWidgets.QTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(text)
+        lay.addWidget(edit)
+        btn = QPushButton("Close")
+        btn.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(btn)
+        lay.addLayout(row)
+        dlg.exec_()
+
     def load_project(self, project_dir):
         self._project_dir = os.path.abspath(project_dir)
         if hasattr(self, "_project_edit"):
@@ -924,6 +960,8 @@ class Step3Page(QWidget):
         print(f"[Step3] selected roi_id={roi_id}")
         print(f"[Step3] loaded roi_index={roi_index_path(rdir)}")
         print(f"[Step3] available segmentation runs={list(runs)}")
+        if hasattr(self, "_resolved_paths_lbl"):
+            self._resolved_paths_lbl.setText(f"Loaded ROI {self._active_roi_name}.")
         self._populate_run_combo()
 
     def _scan_roi_segmentation_runs(self, roi_dir):
@@ -1047,6 +1085,7 @@ class Step3Page(QWidget):
         self._mode = "roi"
         self._output_dir = os.path.dirname(meta_path)
         self._selected_run_meta = meta
+        self._selected_meta_path = meta_path
         self._active_roi_name = meta.get("roi_display_name") or manifest.get("display_name") or "ROI_1"
         self._active_bbox = bbox_manifest or bbox_meta
         run_dir = os.path.dirname(meta_path)
@@ -1113,12 +1152,10 @@ class Step3Page(QWidget):
             if edit is not None:
                 edit.setText(value or "")
         self._refresh_channel_sources()
-        resolved = (
-            f"run={run_id}\n"
-            f"DAPI={self._dapi_path}\nMASK={self._mask_path}\n"
-            f"Fusion={self._fusion_zarr_path}\nCorrected={self._corrected_zarr_path}\nRaw={self._raw_ome_path}"
+        method_label = str(meta.get("display_name") or meta.get("method") or "segmentation result")
+        self._resolved_paths_lbl.setText(
+            f"Input status: Loaded {self._active_roi_name} | {method_label} | ready"
         )
-        self._resolved_paths_lbl.setText(resolved)
         print(f"[Step3] selected run_id={run_id}")
         print(f"[Step3] method={meta.get('method')}")
         print(f"[Step3] resolved dapi={self._dapi_path}")
@@ -1260,7 +1297,9 @@ class Step3Page(QWidget):
     def _roi_name_from_path(path):
         if not path:
             return None
-        m = re.search(r"ROI[_-]?(\d+)", str(path), flags=re.IGNORECASE)
+        # Match display names like ROI_2 without accidentally parsing immutable
+        # ROI ids such as roi_20260512_153012_a8f3 as ROI_20260512.
+        m = re.search(r"(?<![A-Za-z0-9])ROI[_-]?(\d{1,4})(?![A-Za-z0-9])", str(path), flags=re.IGNORECASE)
         if not m:
             return None
         return f"ROI_{int(m.group(1))}"
@@ -1749,11 +1788,25 @@ class Step3Page(QWidget):
         self._latest_only_chk.setChecked(False)
         self._latest_only_chk.toggled.connect(lambda _v: self._populate_run_combo())
         pl.addWidget(self._latest_only_chk)
+        action_row = QHBoxLayout()
+        btn_refresh_project = QPushButton('Load / Refresh')
+        btn_refresh_project.clicked.connect(self._refresh_project_selection)
+        action_row.addWidget(btn_refresh_project)
+        btn_view_paths = QPushButton('View resolved paths')
+        btn_view_paths.clicked.connect(self._view_resolved_paths)
+        action_row.addWidget(btn_view_paths)
+        action_row.addStretch()
+        pl.addLayout(action_row)
         self._resolved_paths_lbl = QLabel('No project loaded')
         self._resolved_paths_lbl.setWordWrap(True)
         self._resolved_paths_lbl.setStyleSheet('color:#aaa;font-size:10px;')
         pl.addWidget(self._resolved_paths_lbl)
         left_lay.addWidget(project_box)
+
+        dev_btn = QPushButton('Developer options')
+        dev_btn.setCheckable(True)
+        dev_btn.setChecked(False)
+        left_lay.addWidget(dev_btn)
 
         # Advanced file input box
         file_box = QGroupBox('Advanced Overrides (optional)')
@@ -1763,6 +1816,8 @@ class Step3Page(QWidget):
         )
         file_box.setCheckable(True)
         file_box.setChecked(False)
+        file_box.setVisible(False)
+        dev_btn.toggled.connect(file_box.setVisible)
         fl = QVBoxLayout(file_box)
 
         def _file_row(label, attr_edit):

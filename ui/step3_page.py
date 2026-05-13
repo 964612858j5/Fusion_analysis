@@ -258,9 +258,20 @@ class _RegionLoader(QThread):
         if patch.size:
             print(f"[Step3] fusion min/max={float(np.nanmin(patch))}/{float(np.nanmax(patch))}")
         if patch.shape[2] == 2:
+            ch0_min, ch0_max = float(np.nanmin(patch[:, :, 0])), float(np.nanmax(patch[:, :, 0]))
+            ch1_min, ch1_max = float(np.nanmin(patch[:, :, 1])), float(np.nanmax(patch[:, :, 1]))
+            print(f"[Step3] fusion ch0 min/max={ch0_min}/{ch0_max}")
+            print(f"[Step3] fusion ch1 min/max={ch1_min}/{ch1_max}")
+            if ch0_max <= 0:
+                print("[Step3] fusion cyto channel is empty")
             cyto = _RegionLoader._norm_u8(patch[:, :, 0])
             nuc = _RegionLoader._norm_u8(patch[:, :, 1])
             return np.stack([cyto, np.zeros_like(cyto, dtype=np.uint8), nuc], axis=-1)
+        for i in range(3):
+            print(
+                f"[Step3] fusion ch{i} min/max="
+                f"{float(np.nanmin(patch[:, :, i]))}/{float(np.nanmax(patch[:, :, i]))}"
+            )
         chans = [_RegionLoader._norm_u8(patch[:, :, i]) for i in range(3)]
         return np.stack(chans, axis=-1)
 
@@ -1324,8 +1335,12 @@ class Step3Page(QWidget):
 
     def _default_channel_color(self, ch):
         u = str(ch).upper()
-        if "DAPI" in u or "NUC" in u:
-            return "#0000ff"
+        if "FUSION" in u:
+            return "#ff3333"
+        if "DAPI" in u:
+            return "#3366ff"
+        if "NUC" in u:
+            return "#3366ff"
         if "CK19" in u or "EPCAM" in u or "PANCK" in u or "KRT" in u:
             return "#ff0000"
         if "CD3" in u or "CD45" in u or "CD68" in u or "CD4" in u or "CD8" in u:
@@ -1335,6 +1350,8 @@ class Step3Page(QWidget):
         return "#ffffff"
 
     def _default_channel_visible(self, ch):
+        if str(ch) in ("__layer_dapi__", "__layer_fusion__"):
+            return True
         return False
 
     def _default_channel_settings(self, ch):
@@ -1477,10 +1494,9 @@ class Step3Page(QWidget):
             saved = cfg.get("channels") or {}
             for ch, st in saved.items():
                 cur = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
-                for key in ("color", "opacity", "contrast"):
+                for key in ("color", "opacity", "contrast", "visible"):
                     if key in st:
                         cur[key] = st[key]
-                cur["visible"] = False
         except Exception:
             print(f"[Step3] failed to load channel overlay config:\n{traceback.format_exc()}")
 
@@ -1553,10 +1569,8 @@ class Step3Page(QWidget):
         for ch in self._available_channels:
             self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
         self._load_channel_config()
-        if self._available_channels and self._background_mode not in {"DAPI", "Fusion", "Channels"}:
-            self._background_mode = "Channels"
-        if self._available_channels and self._background_mode == "DAPI":
-            self._background_mode = "Channels"
+        if self._background_mode not in {"DAPI", "Fusion", "Channels"}:
+            self._background_mode = "DAPI"
         if hasattr(self, "_bg_mode_combo"):
             self._bg_mode_combo.blockSignals(True)
             self._bg_mode_combo.setCurrentText(self._background_mode if self._background_mode in {"DAPI", "Fusion", "Channels"} else "DAPI")
@@ -1596,6 +1610,65 @@ class Step3Page(QWidget):
                     if sub.widget():
                         sub.widget().deleteLater()
         self._channel_rows.clear()
+
+        def _add_row(key, label, source):
+            st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
+            row = QHBoxLayout()
+            cb = QCheckBox()
+            cb.setChecked(bool(st.get("visible", False)))
+            cb.stateChanged.connect(lambda _v, name=key: self._on_channel_visibility_changed(name))
+            row.addWidget(cb)
+            name_lbl = QLabel(label)
+            name_lbl.setMinimumWidth(80)
+            row.addWidget(name_lbl)
+            src_lbl = QLabel(source)
+            src_lbl.setFixedWidth(90)
+            src_lbl.setStyleSheet("color:#888;font-size:9px;")
+            row.addWidget(src_lbl)
+            color_btn = QPushButton()
+            color_btn.setFixedSize(24, 18)
+            color_btn.setStyleSheet(f"background:{st.get('color', '#ffffff')};border:1px solid #777;")
+            color_btn.clicked.connect(lambda _=False, name=key: self._choose_channel_color(name))
+            row.addWidget(color_btn)
+            op = QSlider(Qt.Horizontal)
+            op.setRange(0, 200)
+            op.setValue(int(float(st.get("opacity", 1.0)) * 100))
+            op.setFixedWidth(90)
+            op.valueChanged.connect(lambda _v, name=key: self._on_channel_opacity_changed(name))
+            row.addWidget(op)
+            auto_btn = QPushButton("Auto")
+            auto_btn.setFixedWidth(44)
+            auto_btn.clicked.connect(lambda _=False, name=key: self._auto_channel_contrast(name))
+            row.addWidget(auto_btn)
+            self._channel_lay.addLayout(row)
+            self._channel_rows[key] = {
+                "checkbox": cb,
+                "color_btn": color_btn,
+                "opacity": op,
+                "label": label,
+                "source": source,
+            }
+
+        if self._background_mode == "DAPI":
+            _add_row("__layer_dapi__", "DAPI", "canonical")
+            self._channel_lay.addStretch()
+            self._log_overlay_rows()
+            return
+
+        if self._background_mode == "Fusion":
+            _add_row("__layer_fusion__", "Fusion", "fused ch0")
+            _add_row("__layer_dapi__", "DAPI", "fused ch1/DAPI")
+            self._show_fusion = bool(
+                self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__")).get("visible", True)
+            )
+            if hasattr(self, "_chk_fusion"):
+                self._chk_fusion.blockSignals(True)
+                self._chk_fusion.setChecked(self._show_fusion)
+                self._chk_fusion.blockSignals(False)
+            self._channel_lay.addStretch()
+            self._log_overlay_rows()
+            return
+
         if not self._available_channels:
             msg = QLabel("No channels found.\nSet Channel Source / Raw OME.")
             msg.setWordWrap(True)
@@ -1604,37 +1677,21 @@ class Step3Page(QWidget):
             self._channel_lay.addStretch()
             return
         for ch in self._available_channels:
-            st = self._channel_settings.setdefault(ch, self._default_channel_settings(ch))
-            row = QHBoxLayout()
-            cb = QCheckBox()
-            cb.setChecked(bool(st.get("visible", False)))
-            cb.stateChanged.connect(lambda _v, name=ch: self._on_channel_visibility_changed(name))
-            row.addWidget(cb)
-            name_lbl = QLabel(ch)
-            name_lbl.setMinimumWidth(80)
-            row.addWidget(name_lbl)
-            src_lbl = QLabel(self._channel_sources.get(ch, "raw"))
-            src_lbl.setFixedWidth(58)
-            src_lbl.setStyleSheet("color:#888;font-size:9px;")
-            row.addWidget(src_lbl)
-            color_btn = QPushButton()
-            color_btn.setFixedSize(24, 18)
-            color_btn.setStyleSheet(f"background:{st.get('color', '#ffffff')};border:1px solid #777;")
-            color_btn.clicked.connect(lambda _=False, name=ch: self._choose_channel_color(name))
-            row.addWidget(color_btn)
-            op = QSlider(Qt.Horizontal)
-            op.setRange(0, 100)
-            op.setValue(int(float(st.get("opacity", 1.0)) * 100))
-            op.setFixedWidth(90)
-            op.valueChanged.connect(lambda _v, name=ch: self._on_channel_opacity_changed(name))
-            row.addWidget(op)
-            auto_btn = QPushButton("Auto")
-            auto_btn.setFixedWidth(44)
-            auto_btn.clicked.connect(lambda _=False, name=ch: self._auto_channel_contrast(name))
-            row.addWidget(auto_btn)
-            self._channel_lay.addLayout(row)
-            self._channel_rows[ch] = {"checkbox": cb, "color_btn": color_btn, "opacity": op}
+            _add_row(ch, ch, self._channel_sources.get(ch, "raw"))
         self._channel_lay.addStretch()
+        self._log_overlay_rows()
+
+    def _log_overlay_rows(self):
+        rows = [v.get("label", k) for k, v in self._channel_rows.items()]
+        print(f"[Step3] background_mode={self._background_mode}")
+        print(f"[Step3] overlay rows={rows}")
+        for key, label in (("__layer_dapi__", "DAPI"), ("__layer_fusion__", "Fusion")):
+            if key in self._channel_rows:
+                st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
+                print(
+                    f"[Step3] {label} color={st.get('color')} "
+                    f"intensity={float(st.get('opacity', 1.0))}"
+                )
 
     def _make_channel_overlay_panel(self):
         ch_box = QGroupBox('Channel Overlay')
@@ -2460,12 +2517,27 @@ class Step3Page(QWidget):
     def _on_render_controls_changed(self, *_):
         self._show_outline = bool(self._chk_outline.isChecked())
         self._show_fusion = bool(self._chk_fusion.isChecked())
+        fusion_st = self._channel_settings.setdefault("__layer_fusion__", self._default_channel_settings("__layer_fusion__"))
+        fusion_st["visible"] = self._show_fusion
+        row = self._channel_rows.get("__layer_fusion__")
+        if row:
+            cb = row.get("checkbox")
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setChecked(self._show_fusion)
+                cb.blockSignals(False)
+        dapi_st = self._channel_settings.setdefault("__layer_dapi__", self._default_channel_settings("__layer_dapi__"))
         print(f"[Step3] show_fusion={self._show_fusion}")
+        print(f"[Step3] fusion visible={self._show_fusion}")
+        print(f"[Step3] dapi visible={bool(dapi_st.get('visible', True))}")
+        print(f"[Step3] DAPI color unchanged={dapi_st.get('color', '#3366ff')}")
+        self._save_channel_config()
         self._render_roi(reset_view=False)
 
     def _on_background_mode_changed(self, mode):
         self._background_mode = str(mode)
         self._save_channel_config()
+        self._rebuild_channel_panel()
         self._load_visible_patch_channels()
         print(f"[Step3] background_mode={self._background_mode}")
         if self._background_mode == "Channels":
@@ -2483,6 +2555,12 @@ class Step3Page(QWidget):
             return
         val = bool(row["checkbox"].isChecked())
         self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["visible"] = val
+        if ch == "__layer_fusion__":
+            self._show_fusion = val
+            if hasattr(self, "_chk_fusion"):
+                self._chk_fusion.blockSignals(True)
+                self._chk_fusion.setChecked(val)
+                self._chk_fusion.blockSignals(False)
         self._save_channel_config()
         print(f"[Step3] channel visibility changed: {ch}={val}")
         print(f"[Step3] channel toggled: {ch}={val}")
@@ -2517,6 +2595,8 @@ class Step3Page(QWidget):
 
     def _auto_channel_contrast(self, ch):
         arr = self._patch_channel_cache.get(ch)
+        if arr is None and ch in ("__layer_dapi__", "__layer_fusion__"):
+            arr = self._layer_array_for_key(ch)
         if arr is not None:
             nz = arr[np.isfinite(arr)]
             if nz.size:
@@ -2528,6 +2608,17 @@ class Step3Page(QWidget):
             self._channel_settings.setdefault(ch, self._default_channel_settings(ch))["contrast"] = [1.0, 99.5]
         self._save_channel_config()
         self._render_roi(reset_view=False)
+
+    def _layer_array_for_key(self, key):
+        if key == "__layer_dapi__":
+            if self._background_mode == "Fusion" and self._patch_fusion_rgb is not None:
+                _fusion, dapi, _source = self._fusion_layer_arrays()
+                return dapi
+            return self._dapi_layer_array()
+        if key == "__layer_fusion__":
+            fusion, _dapi, _source = self._fusion_layer_arrays()
+            return fusion
+        return None
 
     def _reset_channel_visibility(self):
         for ch in self._available_channels:
@@ -2545,19 +2636,33 @@ class Step3Page(QWidget):
         self._render_roi(reset_view=False)
 
     def _current_background_rgb(self):
+        if self._background_mode == "DAPI":
+            rgb = self._render_dapi_overlay()
+            if rgb is not None:
+                return rgb
+        if self._background_mode == "Fusion":
+            rgb = self._render_fusion_overlay()
+            if rgb is not None:
+                return rgb
+            if self._patch_dapi_rgb is not None:
+                self._roi_status.setText("Fusion source not available. Falling back to DAPI.")
+                print("[Step3] Fusion source not available. Falling back to DAPI.")
+                dapi_rgb = self._render_dapi_overlay()
+                return dapi_rgb if dapi_rgb is not None else self._patch_dapi_rgb
         if self._background_mode == "Channels" and self._available_channels:
             rgb = self._render_channel_overlay()
             if rgb is not None:
                 return rgb
-        if self._background_mode == "Fusion" and self._show_fusion and self._patch_fusion_rgb is not None:
-            return self._patch_fusion_rgb
-        return self._patch_dapi_rgb
+        dapi_rgb = self._render_dapi_overlay()
+        return dapi_rgb if dapi_rgb is not None else self._patch_dapi_rgb
 
     def _current_background_kind(self):
+        if self._background_mode == "DAPI":
+            return "dapi"
+        if self._background_mode == "Fusion":
+            return "fusion" if self._patch_fusion_available else "dapi"
         if self._background_mode == "Channels" and self._available_channels:
             return "channels"
-        if self._background_mode == "Fusion" and self._show_fusion and self._patch_fusion_rgb is not None:
-            return "fusion"
         return "dapi"
 
     def _hex_to_rgb(self, color):
@@ -2579,8 +2684,90 @@ class Step3Page(QWidget):
         else:
             lo, hi = float(contrast[0]), float(contrast[1])
         if hi <= lo:
+            mx = float(np.nanmax(a)) if a.size else 0.0
+            if mx > 0:
+                return np.ones_like(a, dtype=np.float32)
             hi = lo + 1.0
         return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+    def _colorize_layer(self, key, arr, label, source):
+        if arr is None:
+            return None
+        st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
+        if not st.get("visible", False):
+            return None
+        norm = self._normalize_channel_for_display(key, arr)
+        color = self._hex_to_rgb(st.get("color", "#ffffff"))
+        intensity = float(np.clip(st.get("opacity", 1.0), 0.0, 2.0))
+        print(
+            f"[Step3] {label} source={source} min/max="
+            f"{float(np.nanmin(arr)) if np.size(arr) else 0.0}/"
+            f"{float(np.nanmax(arr)) if np.size(arr) else 0.0}"
+        )
+        return norm[:, :, None] * color[None, None, :] * intensity
+
+    def _compose_layer_rgb(self, layer_specs):
+        target = self._target_patch_shape()
+        if target is None:
+            return None
+        canvas = np.zeros((target[0], target[1], 3), dtype=np.float32)
+        rendered = []
+        for key, label, source, arr in layer_specs:
+            layer = self._colorize_layer(key, arr, label, source)
+            if layer is None:
+                continue
+            if layer.shape[:2] != target:
+                layer = self._match_rgb_shape(layer, target, label)
+            canvas += layer
+            rendered.append(label)
+        rgb = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
+        print(f"[Step3] render layers={rendered}")
+        print(f"[Step3] output rgb min/max={int(rgb.min())}/{int(rgb.max())}")
+        return rgb
+
+    @staticmethod
+    def _match_rgb_shape(arr, target, label):
+        th, tw = target
+        out = np.zeros((th, tw, 3), dtype=np.float32)
+        mh = min(th, int(arr.shape[0]))
+        mw = min(tw, int(arr.shape[1]))
+        if mh > 0 and mw > 0:
+            out[:mh, :mw, :] = arr[:mh, :mw, :]
+        print(f"[Step3] warning: layer shape adjusted for {label} to {target}")
+        return out
+
+    def _dapi_layer_array(self):
+        arr = self._patch_dapi_channel_array()
+        return None if arr is None else arr * 255.0
+
+    def _fusion_layer_arrays(self):
+        if self._patch_fusion_rgb is None:
+            return None, self._dapi_layer_array(), "canonical_dapi"
+        fusion_rgb = np.asarray(self._patch_fusion_rgb, dtype=np.float32)
+        fusion = fusion_rgb[:, :, 0]
+        if fusion_rgb.shape[2] > 2 and np.nanmax(fusion_rgb[:, :, 2]) > 0:
+            dapi = fusion_rgb[:, :, 2]
+            dapi_source = "fused_zarr_ch1"
+        else:
+            dapi = self._dapi_layer_array()
+            dapi_source = "canonical_dapi"
+        if np.size(fusion) and float(np.nanmax(fusion)) <= 0:
+            print("[Step3] Fusion channel 0 is empty.")
+        return fusion, dapi, dapi_source
+
+    def _render_dapi_overlay(self):
+        return self._compose_layer_rgb([
+            ("__layer_dapi__", "DAPI", "canonical_dapi", self._dapi_layer_array()),
+        ])
+
+    def _render_fusion_overlay(self):
+        if self._patch_fusion_rgb is None:
+            return None
+        fusion, dapi, dapi_source = self._fusion_layer_arrays()
+        return self._compose_layer_rgb([
+            ("__layer_fusion__", "Fusion", "fused_zarr_ch0", fusion),
+            ("__layer_dapi__", "DAPI", dapi_source, dapi),
+        ])
 
     def _render_channel_overlay(self):
         if self._patch_dapi_rgb is None:

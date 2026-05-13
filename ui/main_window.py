@@ -406,7 +406,8 @@ class MainWindow(QMainWindow):
 
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
-        self._step2.segmentation_done.connect(self._go_to_step3)
+        self._step2.segmentation_done.connect(self._on_step2_complete)
+        self._step2.open_qc_requested.connect(self._go_to_step3)
         self._stack.addWidget(self._step2)
 
         self._step3 = Step3Page()
@@ -1218,10 +1219,7 @@ class MainWindow(QMainWindow):
         if self._current_step == 1:
             self._stop_all_loaders()
         if output_dir:
-            self.step2_done = True
-            self.step2_output = {
-                "output_dir": output_dir,
-            }
+            self._on_step2_complete(output_dir)
             self._step3.set_channel_context(
                 loader=self.loader,
                 corrected_zarr_path=self._corrected_zarr_path,
@@ -1233,6 +1231,22 @@ class MainWindow(QMainWindow):
             self._step3.set_output_dir(output_dir)
         self._stack.setCurrentIndex(3)
         self._set_step_active(3)
+
+    def _on_step2_complete(self, output_dir):
+        self.step2_done = True
+        self.step2_output = {
+            "output_dir": output_dir,
+        }
+        if hasattr(self, "_step3"):
+            self._step3.set_channel_context(
+                loader=self.loader,
+                corrected_zarr_path=self._corrected_zarr_path,
+                rois=self._rois,
+            )
+        self._update_next_button()
+        print(f"[MainWindow] Step2 complete output_dir={output_dir}")
+        print(f"[MainWindow] step2_done={self.step2_done}")
+        print(f"[MainWindow] next_enabled={self._btn_next.isEnabled()}")
 
     def _go_to_step4(self, output_dir=None):
         if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
@@ -2256,8 +2270,10 @@ class MainWindow(QMainWindow):
         if not is_wholecell:
             nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nuc_combo.currentText()
             worker_fcfg = dict(fcfg)
+            # DAPI-only methods use channel 1 as segmentation input, but the
+            # saved zarr remains a full fusion preview/QC source: ch0 marker
+            # fusion, ch1 DAPI/nucleus.
             worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
-            worker_fcfg["groups"] = {}
         active_ch = set([worker_fcfg["nucleus"]["channel"]])
         for gdata in worker_fcfg["groups"].values():
             active_ch.update(gdata["channels"].keys())

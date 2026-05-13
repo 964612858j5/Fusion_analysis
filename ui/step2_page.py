@@ -44,6 +44,7 @@ class Step2Page(QWidget):
 
     go_back           = pyqtSignal()
     segmentation_done = pyqtSignal(str)   # emits output_dir when done
+    open_qc_requested = pyqtSignal(str)   # user explicitly chose Step3/QC
 
     # Tile status colours
     _COL_IDLE    = (80,  80,  80)
@@ -1065,6 +1066,7 @@ class Step2Page(QWidget):
         self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._last_output_dir = output_dir
+        self.segmentation_done.emit(output_dir)
         if self._roi_id and self._roi_dir:
             try:
                 project_dir = os.path.dirname(os.path.dirname(self._roi_dir))
@@ -1095,9 +1097,9 @@ class Step2Page(QWidget):
         msg.addButton('OK', QMessageBox.RejectRole)
         msg.exec_()
         if msg.clickedButton() is btn_qc:
-            self.segmentation_done.emit(output_dir)
+            self.open_qc_requested.emit(output_dir)
         elif msg.clickedButton() is btn_feat:
-            self.segmentation_done.emit(output_dir)   # step3 auto-loads too
+            self.open_qc_requested.emit(output_dir)   # step3 auto-loads too
 
     def _on_error(self, msg):
         self._prog_lbl.setText('✗ Error — see terminal')

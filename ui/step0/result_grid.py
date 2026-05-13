@@ -36,6 +36,7 @@ class ResultGridPanel(QWidget):
         self._alpha        = 35
         self._show_outline = True
         self._show_fusion  = True
+        self._show_dapi    = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -71,6 +72,11 @@ class ResultGridPanel(QWidget):
         self.chk_fusion.setChecked(True)
         self.chk_fusion.stateChanged.connect(self._on_render_controls_changed)
         hdr.addWidget(self.chk_fusion)
+
+        self.chk_dapi = QCheckBox("DAPI")
+        self.chk_dapi.setChecked(True)
+        self.chk_dapi.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_dapi)
 
         self.btn_fullscreen = QPushButton("⛶ Fullscreen View")
         self.btn_fullscreen.setEnabled(False)
@@ -119,10 +125,12 @@ class ResultGridPanel(QWidget):
         self._alpha = 35
         self._show_outline = True
         self._show_fusion = True
+        self._show_dapi = True
         self.alpha_slider.setValue(self._alpha)
         self.alpha_lbl.setText(f"{self._alpha}%")
         self.chk_outline.setChecked(True)
         self.chk_fusion.setChecked(True)
+        self.chk_dapi.setChecked(True)
         self.btn_fullscreen.setEnabled(False)
         self.phase_lbl.setText(phase_desc)
 
@@ -234,6 +242,7 @@ class ResultGridPanel(QWidget):
                     alpha=grid._alpha / 100.0,
                     show_outline=grid._show_outline,
                     show_fusion=grid._show_fusion,
+                    show_dapi=grid._show_dapi,
                     parent=grid,
                 )
                 dlg.show()
@@ -294,18 +303,41 @@ class ResultGridPanel(QWidget):
         return json.dumps(p, sort_keys=True)
 
     def _render_result_image(self, fusion_rgb, masks):
+        background = self._compose_background(fusion_rgb)
         return render_mask_overlay(
-            fusion_rgb,
+            background,
             masks,
             alpha=self._alpha / 100.0,
             show_outline=self._show_outline,
-            show_fusion=self._show_fusion,
+            show_fusion=True,
         )
+
+    def _compose_background(self, rgb):
+        arr = np.asarray(rgb, dtype=np.uint8)
+        bg = np.zeros_like(arr, dtype=np.uint8)
+        if self._show_fusion:
+            # Step1 fusion RGB convention: R/G are marker/cyto display layers,
+            # B is the nucleus/DAPI reference layer.
+            bg[:, :, 0] = arr[:, :, 0]
+            if arr.shape[2] > 1:
+                bg[:, :, 1] = arr[:, :, 1]
+        if self._show_dapi and arr.shape[2] > 2:
+            bg[:, :, 2] = arr[:, :, 2]
+        print(f"[Step1] show_dapi={self._show_dapi}")
+        print(f"[Step1] show_fusion={self._show_fusion}")
+        layers = []
+        if self._show_fusion:
+            layers.append("fusion")
+        if self._show_dapi:
+            layers.append("dapi")
+        print(f"[Step1] preview background layers={layers or ['blank']}")
+        return bg
 
     def _on_render_controls_changed(self, *_):
         self._alpha = int(self.alpha_slider.value())
         self._show_outline = bool(self.chk_outline.isChecked())
         self._show_fusion = bool(self.chk_fusion.isChecked())
+        self._show_dapi = bool(self.chk_dapi.isChecked())
         self.alpha_lbl.setText(f"{self._alpha}%")
         self._refresh_thumbnails()
 
@@ -329,6 +361,7 @@ class ResultGridPanel(QWidget):
             alpha=self._alpha / 100.0,
             show_outline=self._show_outline,
             show_fusion=self._show_fusion,
+            show_dapi=self._show_dapi,
             parent=self,
         )
         win.show()
@@ -342,7 +375,7 @@ class ImageZoomDialog(QtWidgets.QDialog):
     """Interactive zoom window for a single image (scroll to zoom / mid-right drag to pan)."""
 
     def __init__(self, fusion_rgb, masks, alpha=0.35,
-                 show_outline=True, show_fusion=True, parent=None):
+                 show_outline=True, show_fusion=True, show_dapi=True, parent=None):
         super().__init__(parent,
                          QtCore.Qt.Window |
                          QtCore.Qt.WindowMinMaxButtonsHint |
@@ -353,6 +386,7 @@ class ImageZoomDialog(QtWidgets.QDialog):
         self._alpha = int(round(float(alpha) * 100))
         self._show_outline = bool(show_outline)
         self._show_fusion = bool(show_fusion)
+        self._show_dapi = bool(show_dapi)
         self._pan_last  = None
         self._build_ui()
         self.resize(900, 700)
@@ -385,6 +419,11 @@ class ImageZoomDialog(QtWidgets.QDialog):
         self.chk_fusion.setChecked(self._show_fusion)
         self.chk_fusion.stateChanged.connect(self._on_controls_changed)
         bar.addWidget(self.chk_fusion)
+
+        self.chk_dapi = QCheckBox("DAPI")
+        self.chk_dapi.setChecked(self._show_dapi)
+        self.chk_dapi.stateChanged.connect(self._on_controls_changed)
+        bar.addWidget(self.chk_dapi)
         bar.addStretch()
 
         hint = QLabel("Scroll=Zoom  Drag=Pan  Double-click=Reset")
@@ -420,21 +459,33 @@ class ImageZoomDialog(QtWidgets.QDialog):
         self.gv.viewport().installEventFilter(self)
 
     def _set_image(self, reset_view=False):
+        background = self._compose_background()
         data = render_mask_overlay(
-            self._fusion_rgb,
+            background,
             self._masks,
             alpha=self._alpha / 100.0,
             show_outline=self._show_outline,
-            show_fusion=self._show_fusion,
+            show_fusion=True,
         )
         self.ii.setImage(data, autoLevels=False)
         if reset_view:
             self.vb.autoRange()
 
+    def _compose_background(self):
+        bg = np.zeros_like(self._fusion_rgb, dtype=np.uint8)
+        if self._show_fusion:
+            bg[:, :, 0] = self._fusion_rgb[:, :, 0]
+            if self._fusion_rgb.shape[2] > 1:
+                bg[:, :, 1] = self._fusion_rgb[:, :, 1]
+        if self._show_dapi and self._fusion_rgb.shape[2] > 2:
+            bg[:, :, 2] = self._fusion_rgb[:, :, 2]
+        return bg
+
     def _on_controls_changed(self, *_):
         self._alpha = int(self.alpha_slider.value())
         self._show_outline = bool(self.chk_outline.isChecked())
         self._show_fusion = bool(self.chk_fusion.isChecked())
+        self._show_dapi = bool(self.chk_dapi.isChecked())
         self.alpha_lbl.setText(f"{self._alpha}%")
         self._set_image(reset_view=False)   # preserve zoom & pan
 
@@ -508,7 +559,7 @@ class ResultViewWindow(QMainWindow):
 
     def __init__(self, n_patches, param_list,
                  fusion_results, mask_results, phase_desc,
-                 alpha=0.35, show_outline=True, show_fusion=True,
+                 alpha=0.35, show_outline=True, show_fusion=True, show_dapi=True,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Fullscreen Result View — {phase_desc}")
@@ -520,6 +571,7 @@ class ResultViewWindow(QMainWindow):
         self._alpha         = int(round(float(alpha) * 100))
         self._show_outline  = bool(show_outline)
         self._show_fusion   = bool(show_fusion)
+        self._show_dapi     = bool(show_dapi)
         self._cell_labels   = {}            # (row,col) → QLabel
         self._build_ui()
         self.showMaximized()
@@ -558,6 +610,11 @@ class ResultViewWindow(QMainWindow):
         self.chk_fusion.setChecked(self._show_fusion)
         self.chk_fusion.stateChanged.connect(self._on_render_controls_changed)
         hdr.addWidget(self.chk_fusion)
+
+        self.chk_dapi = QCheckBox("DAPI")
+        self.chk_dapi.setChecked(self._show_dapi)
+        self.chk_dapi.stateChanged.connect(self._on_render_controls_changed)
+        hdr.addWidget(self.chk_dapi)
 
         hint = QLabel("Click image to zoom")
         hint.setStyleSheet("color:#555;font-size:10px;")
@@ -636,6 +693,7 @@ class ResultViewWindow(QMainWindow):
                                 alpha=win._alpha / 100.0,
                                 show_outline=win._show_outline,
                                 show_fusion=win._show_fusion,
+                                show_dapi=win._show_dapi,
                                 parent=win,
                             )
                             dlg.show()
@@ -651,18 +709,31 @@ class ResultViewWindow(QMainWindow):
                 self._cell_labels[(row, col)] = lbl
 
     def _render_cell_image(self, fusion_rgb, masks):
+        background = self._compose_background(fusion_rgb)
         return render_mask_overlay(
-            fusion_rgb,
+            background,
             masks,
             alpha=self._alpha / 100.0,
             show_outline=self._show_outline,
-            show_fusion=self._show_fusion,
+            show_fusion=True,
         )
+
+    def _compose_background(self, rgb):
+        arr = np.asarray(rgb, dtype=np.uint8)
+        bg = np.zeros_like(arr, dtype=np.uint8)
+        if self._show_fusion:
+            bg[:, :, 0] = arr[:, :, 0]
+            if arr.shape[2] > 1:
+                bg[:, :, 1] = arr[:, :, 1]
+        if self._show_dapi and arr.shape[2] > 2:
+            bg[:, :, 2] = arr[:, :, 2]
+        return bg
 
     def _on_render_controls_changed(self, *_):
         self._alpha = int(self.alpha_slider.value())
         self._show_outline = bool(self.chk_outline.isChecked())
         self._show_fusion = bool(self.chk_fusion.isChecked())
+        self._show_dapi = bool(self.chk_dapi.isChecked())
         self.alpha_lbl.setText(f"{self._alpha}%")
         self._refresh_cells()
 

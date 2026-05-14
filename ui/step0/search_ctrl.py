@@ -42,12 +42,18 @@ from ...core.io_loader import OMETIFFLoader
 from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_HQ,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     available_segmentation_methods,
     get_segmentation_method_config,
     normalize_segmentation_config,
+)
+from ...workers.hq_marker_segmentation import (
+    CONSENSUS_MODES,
+    parse_channel_weights,
+    parse_hq_channels,
 )
 
 class SearchCtrlPanel(QWidget):
@@ -288,6 +294,56 @@ class SearchCtrlPanel(QWidget):
         for r in (r4, r5, r6):
             ml.addLayout(r)
 
+        hq_channels_row = QHBoxLayout()
+        self._hq_channels_label = QLabel("hq_channels:")
+        self._hq_channels_label.setFixedWidth(130)
+        hq_channels_row.addWidget(self._hq_channels_label)
+        self._hq_channels = QtWidgets.QLineEdit()
+        self._hq_channels.setPlaceholderText("PanCK;CD45;CD68")
+        self._hq_channels.setStyleSheet("font-size:11px;")
+        self._hq_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
+        hq_channels_row.addWidget(self._hq_channels)
+
+        hq_radius_row, self._hq_radius = _spin_row("max_cell_radius:", 1, 200, 1, 1, 12)
+        hq_low_row, self._hq_norm_low = _spin_row("norm pct low:", 0, 50, 0.5, 1, 1)
+        hq_high_row, self._hq_norm_high = _spin_row("norm pct high:", 50, 100, 0.5, 1, 99.5)
+
+        hq_consensus_row = QHBoxLayout()
+        self._hq_consensus_label = QLabel("consensus_mode:")
+        self._hq_consensus_label.setFixedWidth(130)
+        hq_consensus_row.addWidget(self._hq_consensus_label)
+        self._hq_consensus = QComboBox()
+        for mode in CONSENSUS_MODES:
+            self._hq_consensus.addItem(mode, mode)
+        hq_consensus_row.addWidget(self._hq_consensus)
+
+        hq_weights_row = QHBoxLayout()
+        self._hq_weights_label = QLabel("channel_weights:")
+        self._hq_weights_label.setFixedWidth(130)
+        hq_weights_row.addWidget(self._hq_weights_label)
+        self._hq_weights = QtWidgets.QLineEdit()
+        self._hq_weights.setPlaceholderText("optional: PanCK=1;CD45=0.8;CD68=1")
+        self._hq_weights.setStyleSheet("font-size:11px;")
+        hq_weights_row.addWidget(self._hq_weights)
+
+        hq_signal_row, self._hq_min_signal = _spin_row("min signal:", 0, 1, 0.01, 2, 0.08)
+        self._hq_param_rows = [
+            hq_channels_row,
+            hq_radius_row,
+            hq_low_row,
+            hq_high_row,
+            hq_consensus_row,
+            hq_weights_row,
+            hq_signal_row,
+        ]
+        for r in self._hq_param_rows:
+            ml.addLayout(r)
+
+        self._patch_preview_hint = QLabel("")
+        self._patch_preview_hint.setStyleSheet("color:#ffb86c;font-size:10px;")
+        self._patch_preview_hint.setWordWrap(True)
+        ml.addWidget(self._patch_preview_hint)
+
         self.btn_use_manual = QPushButton("✓ Use These Params")
         self.btn_use_manual.setStyleSheet(
             "QPushButton{background:#444;color:#ccc;"
@@ -345,7 +401,7 @@ class SearchCtrlPanel(QWidget):
             return []
 
     def _emit_p1(self):
-        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+        if self._selected_method() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(self, "Segmentation mode", "Phase 1 is only used for Cellpose modes.")
             return
         override = self._p1_override.value()
@@ -354,7 +410,7 @@ class SearchCtrlPanel(QWidget):
         self.run_p1.emit([diam])
 
     def _emit_p2(self):
-        if self._method_combo.currentData() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+        if self._selected_method() not in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(self, "Segmentation mode", "Phase 2 is only used for Cellpose modes.")
             return
         if not self._p2_diam_set:
@@ -376,12 +432,20 @@ class SearchCtrlPanel(QWidget):
         self.run_p2.emit(payload)
 
     def _emit_patch_preview(self):
-        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        method = self._selected_method()
         if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(
                 self, "Segmentation mode",
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
+            return
+        if method == CELLPOSE_NUCLEI_HQ and not parse_hq_channels(self._hq_channels.text()):
+            QMessageBox.warning(
+                self,
+                "HQ channels required",
+                "Please enter HQ channels, e.g. PanCK;CD45;CD68",
+            )
+            self._refresh_patch_preview_state()
             return
         self.run_preview.emit(self.get_current_params())
 
@@ -454,13 +518,14 @@ class SearchCtrlPanel(QWidget):
         self._p2_diam_set = True
         label = "auto (cpsam)" if d is None else str(d)
         self.p2_diam_lbl.setText(f"diameter = {label}  (from Phase 1)")
-        self.btn_p2.setEnabled(self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION))
+        self.btn_p2.setEnabled(self._selected_method() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION))
 
     def set_running(self, running):
-        is_cellpose = self._method_combo.currentData() in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
+        method = self._selected_method()
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         self.btn_p1.setEnabled(not running and is_cellpose)
         self.btn_p2.setEnabled(not running and self._p2_diam_set and is_cellpose)
-        self.btn_patch_preview.setEnabled(not running and not is_cellpose)
+        self._refresh_patch_preview_state(running=running)
         self.btn_stop.setEnabled(running)
 
     def update_progress(self, done, total, msg):
@@ -470,7 +535,7 @@ class SearchCtrlPanel(QWidget):
 
     def get_current_params(self):
         """Return spinbox values regardless of source."""
-        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        method = self._selected_method()
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
@@ -483,7 +548,7 @@ class SearchCtrlPanel(QWidget):
         return normalize_segmentation_config(params)
 
     def get_selected_method_config(self):
-        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        method = self._selected_method()
         cfg = get_segmentation_method_config(method)
         params = dict(cfg.get("params") or {})
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
@@ -493,14 +558,41 @@ class SearchCtrlPanel(QWidget):
             params["device_preference"] = "gpu_first"
         if method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION):
             params["expand_distance"] = self._sd_expand_manual.value()
+        if method == CELLPOSE_NUCLEI_HQ:
+            hq_channels = parse_hq_channels(self._hq_channels.text())
+            params["hq_channels"] = hq_channels
+            params["max_cell_radius"] = self._hq_radius.value()
+            params["normalization_percentile_low"] = self._hq_norm_low.value()
+            params["normalization_percentile_high"] = self._hq_norm_high.value()
+            params["consensus_mode"] = self._hq_consensus.currentData() or "adaptive_best_channel"
+            params["channel_weights"] = parse_channel_weights(self._hq_weights.text(), hq_channels)
+            params["min_signal_threshold"] = self._hq_min_signal.value()
         return {"method": method, "params": params}
 
-    def _on_method_changed(self):
+    def _selected_method(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        if self._method_combo.currentText() == "Cellpose nuclei + HQ":
+            method = CELLPOSE_NUCLEI_HQ
+        return method
+
+    def _refresh_patch_preview_state(self, running=False):
+        method = self._selected_method()
+        is_hq = method == CELLPOSE_NUCLEI_HQ
+        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+        enabled = (is_stardist or (is_hq and bool(parse_hq_channels(self._hq_channels.text())))) and not running
+        self.btn_patch_preview.setEnabled(enabled)
+        if is_hq and not parse_hq_channels(self._hq_channels.text()):
+            self._patch_preview_hint.setText("Please enter HQ channels, e.g. PanCK;CD45;CD68")
+        else:
+            self._patch_preview_hint.setText("")
+
+    def _on_method_changed(self):
+        method = self._selected_method()
         cfg = get_segmentation_method_config(method)
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
+        is_hq = method == CELLPOSE_NUCLEI_HQ or self._method_combo.currentText() == "Cellpose nuclei + HQ"
         self._p1_box.setVisible(is_cellpose)
         self._p2_box.setVisible(is_cellpose)
         self._p1_box.setEnabled(is_cellpose)
@@ -528,6 +620,11 @@ class SearchCtrlPanel(QWidget):
                 w = row.itemAt(i).widget()
                 if w:
                     w.setVisible(visible)
+        for row in self._hq_param_rows:
+            for i in range(row.count()):
+                w = row.itemAt(i).widget()
+                if w:
+                    w.setVisible(is_hq)
         self._expand_dist.setEnabled(is_expansion)
         self._expand_dist.setVisible(False)
         self._expand_dist_label.setVisible(False)
@@ -535,15 +632,20 @@ class SearchCtrlPanel(QWidget):
             f"{method}  |  input={cfg.get('input_type')}  output={cfg.get('output_type')}"
         )
         self._dapi_only_note.setVisible(method != CELLPOSE_WHOLECELL_FUSION)
-        self.btn_patch_preview.setEnabled(is_stardist)
+        self._refresh_patch_preview_state()
         self.btn_patch_preview.setVisible(True)
         workflow = {
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
+            CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")
+        print("[Step2] method changed:", method)
+        print("[Step2] is_hq:", is_hq)
+        print("[Step2] hq widgets visible:", self._hq_channels.isVisible())
+        print("[Step2] preview enabled:", self.btn_patch_preview.isEnabled())
         print(f"[Step1] segmentation mode selected={method}")
         print(f"[Step1] workflow={workflow}")
         print(f"[Step1] phase1_required={is_cellpose}")

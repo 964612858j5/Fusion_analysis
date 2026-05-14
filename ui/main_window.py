@@ -32,11 +32,13 @@ from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_HQ,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
 )
+from ..workers.hq_marker_segmentation import parse_hq_channels, validate_hq_channels
 from ..utils.segmentation_params import (
     save_segmentation_params,
 )
@@ -1870,6 +1872,21 @@ class MainWindow(QMainWindow):
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
             return
+        if method == CELLPOSE_NUCLEI_HQ:
+            params = normalize_segmentation_config(params or {})
+            hq_channels = parse_hq_channels(params.get("hq_channels") or [])
+            if not hq_channels:
+                QMessageBox.warning(
+                    self,
+                    "HQ channels required",
+                    "Please enter HQ channels, e.g. PanCK;CD45;CD68",
+                )
+                return
+            try:
+                validate_hq_channels(hq_channels, self.loader.channel_names() if self.loader else [])
+            except Exception as e:
+                QMessageBox.warning(self, "Missing channels", str(e))
+                return
         patches = list(self._all_patches)
         if not patches:
             QMessageBox.warning(self, "Info", "Please add at least one Patch first")
@@ -2046,6 +2063,7 @@ class MainWindow(QMainWindow):
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
+            CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")

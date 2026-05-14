@@ -18,10 +18,16 @@ from ..core.fusion_engine import FusionEngine
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_HQ,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
+)
+from .hq_marker_segmentation import (
+    parse_hq_channels,
+    segment_nuclei_hq,
+    validate_hq_channels,
 )
 
 
@@ -470,7 +476,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 )
 
             try:
-                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
+                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
@@ -490,6 +496,29 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         if dist > 0:
                             masks_out = expand_labels(masks_out, distance=dist)
                         print(f"[Worker] expanded cells={int(np.asarray(masks_out).max())}")
+                    if method == CELLPOSE_NUCLEI_HQ:
+                        hq_channels = parse_hq_channels(params.get("hq_channels") or [])
+                        validate_hq_channels(hq_channels, loader.channel_names())
+                        marker_channels = [
+                            loader.read_region(ch, y0, y1, x0, x1, downsample=1)
+                            for ch in hq_channels
+                        ]
+                        masks_out, nuclei_labels, qc_rows = segment_nuclei_hq(
+                            masks_out.astype(np.uint32, copy=False),
+                            marker_channels,
+                            hq_channels,
+                            max_cell_radius=params.get("max_cell_radius", 12),
+                            normalization_low=params.get("normalization_percentile_low", 1.0),
+                            normalization_high=params.get("normalization_percentile_high", 99.5),
+                            consensus_mode=params.get("consensus_mode", "adaptive_best_channel"),
+                            channel_weights=params.get("channel_weights") or {},
+                            min_signal_threshold=params.get("min_signal_threshold", 0.08),
+                        )
+                        params["hq_preview_qc_rows"] = len(qc_rows)
+                        params["nuclei_cells"] = int(np.asarray(nuclei_labels).max())
+                        print("[Worker] input=dapi_plus_hq_channels")
+                        print(f"[Worker] hq_channels={hq_channels}")
+                        print(f"[Worker] hq final cells={int(np.asarray(masks_out).max())}")
                 elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
                     result_queue.put({
                         "type": "progress",

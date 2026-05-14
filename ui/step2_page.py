@@ -988,6 +988,8 @@ class Step2Page(QWidget):
 
     def get_seg_config(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        if self._method_combo.currentText() == "Cellpose nuclei + HQ":
+            method = CELLPOSE_NUCLEI_HQ
         diam = self._cp_diam.value()
         hq_channels = parse_hq_channels(self._hq_channels.text())
         data = {
@@ -1015,6 +1017,9 @@ class Step2Page(QWidget):
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        display_name = self._method_combo.currentText()
+        if display_name == "Cellpose nuclei + HQ":
+            method = CELLPOSE_NUCLEI_HQ
         if (
             not self._loading_index_selection
             and (self._param_source_combo.currentData() or "manual") == "manual"
@@ -1023,7 +1028,7 @@ class Step2Page(QWidget):
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
-        is_hq = method == CELLPOSE_NUCLEI_HQ
+        is_hq = method == CELLPOSE_NUCLEI_HQ or display_name == "Cellpose nuclei + HQ"
         for w in (
             self._cp_model_label, self._cp_model_lbl,
             self._cp_diam_label, self._cp_diam,
@@ -1054,6 +1059,11 @@ class Step2Page(QWidget):
         self._method_hint.setText(
             f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
         )
+        preview_btn = getattr(self, "_btn_patch_preview", None)
+        print("[Step2] method changed:", method)
+        print("[Step2] is_hq:", is_hq)
+        print("[Step2] hq widgets visible:", self._hq_channels.isVisible())
+        print("[Step2] preview enabled:", preview_btn.isEnabled() if preview_btn is not None else None)
 
     def _available_hq_channels(self):
         candidates = []

@@ -992,27 +992,30 @@ class Step2Page(QWidget):
             method = CELLPOSE_NUCLEI_HQ
         diam = self._cp_diam.value()
         hq_channels = parse_hq_channels(self._hq_channels.text())
-        data = {
+        data = dict(self._seg_config or {})
+        params = dict(data.get("params") or {})
+        params.update({
+            'model_name':         self._sd_model.text().strip() or '2D_versatile_fluo',
+            'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
+            'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
+            'expand_distance':    self._sd_expand.value(),
+            'hq_channels':        hq_channels,
+            'max_cell_radius':    self._hq_radius.value(),
+            'normalization_percentile_low': self._hq_norm_low.value(),
+            'normalization_percentile_high': self._hq_norm_high.value(),
+            'consensus_mode':     self._hq_consensus.currentData() or 'adaptive_best_channel',
+            'channel_weights':    parse_channel_weights(self._hq_weights.text(), hq_channels),
+            'min_signal_threshold': self._hq_min_signal.value(),
+        })
+        data.update({
             'method':             method,
-            'params': {
-                'model_name':         self._sd_model.text().strip() or '2D_versatile_fluo',
-                'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
-                'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
-                'expand_distance':    self._sd_expand.value(),
-                'hq_channels':        hq_channels,
-                'max_cell_radius':    self._hq_radius.value(),
-                'normalization_percentile_low': self._hq_norm_low.value(),
-                'normalization_percentile_high': self._hq_norm_high.value(),
-                'consensus_mode':     self._hq_consensus.currentData() or 'adaptive_best_channel',
-                'channel_weights':    parse_channel_weights(self._hq_weights.text(), hq_channels),
-                'min_signal_threshold': self._hq_min_signal.value(),
-            },
+            'params':             params,
             'model_type':         'cpsam',  # Cellpose 4.0.1+: always cpsam
             'diameter':           None if diam == 0 else diam,
             'flow_threshold':     self._cp_flow.value(),
             'cellprob_threshold': self._cp_prob.value(),
             'min_size':           self._cp_minsize.value(),
-        }
+        })
         return normalize_segmentation_config(data)
 
     def _on_method_changed(self):
@@ -1067,6 +1070,10 @@ class Step2Page(QWidget):
 
     def _available_hq_channels(self):
         candidates = []
+        cfg = self._seg_config or {}
+        for key in ("hq_source_zarr", "multichannel_source_path", "corrected_channels_zarr"):
+            if cfg.get(key):
+                candidates.append(cfg.get(key))
         if self._roi_dir:
             candidates.append(os.path.join(self._roi_dir, "step0", "corrected_channels.zarr"))
         out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
@@ -1074,9 +1081,14 @@ class Step2Page(QWidget):
             os.path.join(out_dir, "corrected_channels.zarr"),
             os.path.join(os.path.dirname(out_dir), "corrected_channels.zarr"),
         ])
+        seen = set()
         for path in candidates:
             if not path or not os.path.exists(path):
                 continue
+            path = os.path.abspath(path)
+            if path in seen:
+                continue
+            seen.add(path)
             root = zarr.open(path, mode="r")
             mode = str(root.attrs.get("mode", "")).strip().lower()
             if mode == "roi_only":
@@ -1086,16 +1098,38 @@ class Step2Page(QWidget):
                 target = None
                 for group_name in groups:
                     group = root[group_name]
-                    if str(group.attrs.get("roi_id") or "") == self._roi_id:
+                    requested_roi_id = str(cfg.get("roi_id") or self._roi_id or "")
+                    requested_names = {
+                        str(v) for v in (
+                            cfg.get("roi_name"),
+                            cfg.get("roi_display_name"),
+                            self._roi_id,
+                        )
+                        if str(v or "").strip()
+                    }
+                    if requested_roi_id and str(group.attrs.get("roi_id") or "") == requested_roi_id:
                         target = group
                         break
-                    if str(group.attrs.get("roi_name") or group_name) in {self._roi_id, self._roi_id or group_name}:
+                    group_names = {
+                        str(group_name),
+                        str(group.attrs.get("roi_name") or ""),
+                        str(group.attrs.get("display_name") or ""),
+                        str(group.attrs.get("roi_display_name") or ""),
+                    }
+                    if requested_names and requested_names & {name for name in group_names if name}:
                         target = group
                         break
-                if target is None and groups:
-                    target = root[groups[0]]
                 if target is not None:
                     return list(target.array_keys())
+                print(
+                    "[Step2] HQ channel source ROI group not matched\n"
+                    f"  path={path}\n"
+                    f"  requested_roi_id={cfg.get('roi_id') or self._roi_id or ''}\n"
+                    f"  requested_names={sorted(requested_names) if 'requested_names' in locals() else []}\n"
+                    f"  available_groups={groups}",
+                    flush=True,
+                )
+                continue
             return list(root.array_keys())
         return []
 
@@ -1158,6 +1192,18 @@ class Step2Page(QWidget):
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
+        if seg_cfg.get("method") == CELLPOSE_NUCLEI_HQ:
+            print(f"[Step2][HQ] loaded param_file path={param_file or '(manual)'}")
+            print(f"[Step2][HQ] seg_config hq_channels={seg_cfg.get('hq_channels')}")
+            print(
+                "[Step2][HQ] selected hq_source_zarr="
+                f"{seg_cfg.get('hq_source_zarr') or seg_cfg.get('multichannel_source_path') or '(auto)'}"
+            )
+            print(
+                "[Step2][HQ] requested roi="
+                f"id={seg_cfg.get('roi_id') or self._roi_id or ''} "
+                f"name={seg_cfg.get('roi_name') or seg_cfg.get('roi_display_name') or ''}"
+            )
         if self._roi_id:
             print(f"[Step2] roi_id={self._roi_id}")
             print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")

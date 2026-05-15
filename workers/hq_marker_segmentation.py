@@ -6,6 +6,7 @@ from the merge worker and tests can exercise the consensus logic directly.
 """
 
 import csv
+import difflib
 import json
 import os
 from collections import defaultdict
@@ -23,7 +24,7 @@ def parse_hq_channels(text):
     return [part.strip() for part in str(text or "").split(";") if part.strip()]
 
 
-def validate_hq_channels(input_channels, available_channels):
+def validate_hq_channels(input_channels, available_channels, context=None):
     """Validate HQ channels and return a normalized channel list.
 
     Raises
@@ -31,18 +32,30 @@ def validate_hq_channels(input_channels, available_channels):
     ValueError
         If no channels are selected or any requested channel is unavailable.
     """
-    channels = list(input_channels or [])
+    channels = [str(ch).strip() for ch in (input_channels or []) if str(ch).strip()]
     if not channels:
         raise ValueError("Cellpose nuclei + HQ requires at least one hq_channels entry.")
-    available = set(available_channels or [])
+    available_channels = [str(ch).strip() for ch in (available_channels or []) if str(ch).strip()]
+    available = set(available_channels)
     missing = [ch for ch in channels if ch not in available]
     if missing:
-        raise ValueError(
-            "Missing HQ channel(s): "
-            + "; ".join(missing)
-            + "\nAvailable channels: "
-            + "; ".join(sorted(available))
-        )
+        lines = [
+            "Missing HQ channel(s): " + "; ".join(missing),
+            "Available channels: " + "; ".join(sorted(available)),
+        ]
+        lower_available = {ch.lower(): ch for ch in available_channels}
+        for ch in missing:
+            if ch.lower() in lower_available:
+                lines.append(
+                    f"Case-sensitive exact match required: requested {ch!r}, "
+                    f"available {lower_available[ch.lower()]!r}."
+                )
+            close = difflib.get_close_matches(ch, available_channels, n=3, cutoff=0.72)
+            if close:
+                lines.append(f"Did you mean for {ch!r}: {'; '.join(close)}?")
+        if context:
+            lines.append(str(context).rstrip())
+        raise ValueError("\n".join(lines))
     return channels
 
 

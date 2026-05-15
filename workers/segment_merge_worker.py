@@ -140,6 +140,16 @@ class SegmentMergeWorker(QThread):
     def _project_path(self, *parts):
         return os.path.join(self.project_output_dir, *parts)
 
+    def _load_param_file_config(self):
+        if not self.param_file or not os.path.exists(self.param_file):
+            return {}
+        try:
+            with open(self.param_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def _write_run_segmentation_config(self):
         path = os.path.join(self.output_dir, "run_segmentation_params.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -194,13 +204,29 @@ class SegmentMergeWorker(QThread):
         return path
 
     def _multichannel_source_path(self):
+        param_cfg = self._load_param_file_config()
+        explicit = [
+            self.seg_config.get("hq_source_zarr"),
+            self.seg_config.get("multichannel_source_path"),
+            param_cfg.get("hq_source_zarr"),
+            param_cfg.get("multichannel_source_path"),
+            param_cfg.get("corrected_channels_zarr"),
+        ]
+        for path in explicit:
+            if path:
+                return self._abs(path)
         candidates = [
             os.path.join(self.roi_dir, "step0", "corrected_channels.zarr") if self.roi_dir else "",
+            self.roi_manifest.get("corrected_zarr_path") or "",
             self._project_path("corrected_channels.zarr"),
             os.path.join(os.path.dirname(self.project_output_dir), "corrected_channels.zarr"),
         ]
+        seen = set()
         for path in candidates:
             if path and os.path.exists(path):
+                if path in seen:
+                    continue
+                seen.add(path)
                 return self._abs(path)
         return ""
 
@@ -410,26 +436,71 @@ class SegmentMergeWorker(QThread):
         """
         return np.array(z[y0:y1, x0:x1, 1])
 
+    @staticmethod
+    def _group_keys(root):
+        groups = list(getattr(root, "group_keys", lambda: [])())
+        if not groups and hasattr(root, "groups"):
+            groups = [name for name, _group in root.groups()]
+        return groups
+
+    def _available_groups_debug(self, root):
+        debug = []
+        for group_name in self._group_keys(root):
+            group = root[group_name]
+            debug.append(
+                {
+                    "group": group_name,
+                    "attrs": dict(group.attrs),
+                    "channels": self._channel_array_names(group),
+                }
+            )
+        return debug
+
+    def _requested_roi_names(self, roi_name=None):
+        names = [
+            roi_name,
+            self.seg_config.get("roi_name"),
+            self.seg_config.get("roi_display_name"),
+            self.roi_display_name,
+        ]
+        return {str(name) for name in names if str(name or "").strip()}
+
     def _open_hq_channel_group(self, roi_name=None):
         path = self._multichannel_source_path()
         if not path or not os.path.exists(path):
             raise FileNotFoundError(
-                "Cellpose nuclei + HQ requires corrected_channels.zarr, but it was not found."
+                "Cellpose nuclei + HQ requires corrected_channels.zarr, but it was not found.\n"
+                f"Requested HQ source: {path or '(none)'}\n"
+                f"loaded param_file path: {self.param_file or '(none)'}"
             )
         root = zarr.open(path, mode="r")
         mode = str(root.attrs.get("mode", "")).strip().lower()
         if mode == "roi_only":
-            groups = list(getattr(root, "group_keys", lambda: [])())
-            if not groups and hasattr(root, "groups"):
-                groups = [name for name, _group in root.groups()]
+            groups = self._group_keys(root)
+            requested_roi_id = str(self.seg_config.get("roi_id") or self.roi_id or "")
+            requested_names = self._requested_roi_names(roi_name)
             for group_name in groups:
                 group = root[group_name]
-                if str(group.attrs.get("roi_id") or "") == self.roi_id:
+                if requested_roi_id and str(group.attrs.get("roi_id") or "") == requested_roi_id:
                     return group
-                if roi_name and str(group.attrs.get("roi_name") or group_name) == str(roi_name):
+            for group_name in groups:
+                group = root[group_name]
+                group_names = {
+                    str(group_name),
+                    str(group.attrs.get("roi_name") or ""),
+                    str(group.attrs.get("display_name") or ""),
+                    str(group.attrs.get("roi_display_name") or ""),
+                }
+                if requested_names and requested_names & {name for name in group_names if name}:
                     return group
-            if groups:
-                return root[groups[0]]
+            raise ValueError(
+                "Could not match ROI group in corrected_channels.zarr for HQ segmentation.\n"
+                f"Found corrected_channels.zarr at: {path}\n"
+                f"Requested ROI id: {requested_roi_id or '(none)'}\n"
+                f"Requested ROI name(s): {sorted(requested_names) if requested_names else '(none)'}\n"
+                f"Available groups: {groups}\n"
+                f"Available channels per group: {json.dumps(self._available_groups_debug(root), indent=2, default=str)}"
+            )
         return root
 
     @staticmethod
@@ -442,8 +513,36 @@ class SegmentMergeWorker(QThread):
         channels = parse_hq_channels(self.seg_config.get("hq_channels") or [])
         group = self._open_hq_channel_group(roi_name)
         available = self._channel_array_names(group)
-        channels = validate_hq_channels(channels, available)
+        source_path = self._multichannel_source_path()
+        root_attrs = {}
+        if source_path and os.path.exists(source_path):
+            try:
+                root_attrs = dict(zarr.open(source_path, mode="r").attrs)
+            except Exception:
+                root_attrs = {}
+        group_name = getattr(group, "name", "") or ""
+        context = (
+            "HQ source debug:\n"
+            f"  loaded param_file path: {self.param_file or '(none)'}\n"
+            f"  selected hq_source_zarr: {source_path or '(none)'}\n"
+            f"  zarr attrs mode: {root_attrs}\n"
+            f"  requested roi_id: {self.seg_config.get('roi_id') or self.roi_id or '(none)'}\n"
+            f"  requested roi_name: {self.seg_config.get('roi_name') or self.seg_config.get('roi_display_name') or roi_name or self.roi_display_name or '(none)'}\n"
+            f"  selected ROI group name: {group_name or '(root)'}\n"
+            f"  selected ROI group attrs: {dict(getattr(group, 'attrs', {}))}\n"
+            f"  available channel array_keys: {available}"
+        )
+        channels = validate_hq_channels(channels, available, context=context)
         self.seg_config["hq_channels"] = channels
+        if self._logger:
+            root = zarr.open(source_path, mode="r") if source_path else None
+            self._logger.debug("[HQ] loaded param_file path: %s", self.param_file or "")
+            self._logger.debug("[HQ] seg_config hq_channels: %s", channels)
+            self._logger.debug("[HQ] selected hq_source_zarr: %s", source_path)
+            self._logger.debug("[HQ] zarr attrs mode: %s", dict(root.attrs) if root is not None else {})
+            self._logger.debug("[HQ] selected ROI group name: %s", group_name or "(root)")
+            self._logger.debug("[HQ] selected ROI group attrs: %s", dict(getattr(group, "attrs", {})))
+            self._logger.debug("[HQ] available channel array_keys: %s", available)
         return channels, group
 
     def _hq_meta_fields(self, nuclei_mask_path="", final_cell_mask_path="", qc_table_path=""):

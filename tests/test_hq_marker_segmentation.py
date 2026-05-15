@@ -2,6 +2,7 @@ import json
 import unittest
 
 import numpy as np
+import zarr
 
 from block01.workers.hq_marker_segmentation import (
     parse_hq_channels,
@@ -91,6 +92,73 @@ class TestHqMarkerSegmentation(unittest.TestCase):
         self.assertTrue(loaded["final_cell_mask_path"].endswith("global_mask.ome.tiff"))
         self.assertTrue(loaded["nuclei_mask_path"].endswith("global_nuclei_mask.ome.tiff"))
         self.assertTrue(loaded["qc_table_path"].endswith("hq_qc_table.csv"))
+
+
+    def test_hq_roi_only_source_uses_saved_roi_not_first_group(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            zarr_path = Path(td) / "corrected_channels.zarr"
+            root = zarr.open_group(str(zarr_path), mode="w")
+            root.attrs["mode"] = "roi_only"
+            wrong = root.create_group("ROI_wrong")
+            wrong.attrs["roi_name"] = "ROI_wrong"
+            wrong.create_dataset("CD45RA", shape=(8, 8), dtype="f4", fill_value=0)
+            right = root.create_group("ROI_right")
+            right.attrs["roi_name"] = "ROI_right"
+            right.create_dataset("TOX", shape=(8, 8), dtype="f4", fill_value=1)
+            right.create_dataset("CD68", shape=(8, 8), dtype="f4", fill_value=1)
+
+            worker = SegmentMergeWorker.__new__(SegmentMergeWorker)
+            worker.seg_config = {
+                "hq_channels": ["TOX", "CD68"],
+                "hq_source_zarr": str(zarr_path),
+                "roi_name": "ROI_right",
+            }
+            worker.param_file = ""
+            worker.project_output_dir = td
+            worker.roi_dir = ""
+            worker.roi_manifest = {}
+            worker.roi_id = ""
+            worker.roi_display_name = "ROI_right"
+            worker._logger = None
+
+            channels, group = worker._validate_hq_config("ROI_right")
+            selected_channels = set(worker._channel_array_names(group))
+
+        self.assertEqual(channels, ["TOX", "CD68"])
+        self.assertEqual(selected_channels, {"TOX", "CD68"})
+
+
+    def test_hq_roi_only_source_does_not_silently_fallback_to_first_group(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            zarr_path = Path(td) / "corrected_channels.zarr"
+            root = zarr.open_group(str(zarr_path), mode="w")
+            root.attrs["mode"] = "roi_only"
+            first = root.create_group("ROI_first")
+            first.attrs["roi_name"] = "ROI_first"
+            first.create_dataset("TOX", shape=(8, 8), dtype="f4", fill_value=1)
+
+            worker = SegmentMergeWorker.__new__(SegmentMergeWorker)
+            worker.seg_config = {
+                "hq_channels": ["TOX"],
+                "hq_source_zarr": str(zarr_path),
+                "roi_name": "ROI_missing",
+            }
+            worker.param_file = ""
+            worker.project_output_dir = td
+            worker.roi_dir = ""
+            worker.roi_manifest = {}
+            worker.roi_id = ""
+            worker.roi_display_name = "ROI_missing"
+            worker._logger = None
+
+            with self.assertRaisesRegex(ValueError, "Could not match ROI group"):
+                worker._validate_hq_config("ROI_missing")
 
 
 if __name__ == "__main__":

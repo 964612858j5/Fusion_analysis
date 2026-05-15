@@ -2276,6 +2276,51 @@ class MainWindow(QMainWindow):
             "params_source":      self._params_source or "unknown",
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
         })
+        if selected_method == CELLPOSE_NUCLEI_HQ:
+            hq_source = (
+                self._corrected_zarr_path
+                or (self.step0_output or {}).get("corrected_zarr_path")
+                or ""
+            )
+            roi_id = (self.step0_output or {}).get("roi_id", "")
+            roi_name = (
+                (self._active_roi or {}).get("name")
+                or (self._active_roi or {}).get("display_name")
+                or (self.step0_output or {}).get("display_name")
+                or ""
+            )
+            available_at_save = []
+            if hq_source and os.path.exists(hq_source):
+                try:
+                    root = zarr.open(hq_source, mode="r")
+                    group = root
+                    if str(root.attrs.get("mode", "")).strip().lower() == "roi_only":
+                        for group_name in list(getattr(root, "group_keys", lambda: [])()):
+                            candidate = root[group_name]
+                            if roi_id and str(candidate.attrs.get("roi_id") or "") == str(roi_id):
+                                group = candidate
+                                break
+                            if roi_name and str(candidate.attrs.get("roi_name") or group_name) == str(roi_name):
+                                group = candidate
+                                break
+                    available_at_save = list(group.array_keys()) if hasattr(group, "array_keys") else list(group.keys())
+                except Exception:
+                    print(f"[Step1] failed to inspect HQ source zarr:\n{traceback.format_exc()}")
+            hq_meta = {
+                "hq_source_zarr": os.path.abspath(hq_source) if hq_source else "",
+                "multichannel_source_path": os.path.abspath(hq_source) if hq_source else "",
+                "roi_id": roi_id,
+                "roi_name": roi_name,
+                "roi_display_name": roi_name,
+                "hq_available_channels_at_save": available_at_save,
+                "hq_channels": parse_hq_channels(cpcfg.get("hq_channels") or []),
+            }
+            cpcfg.update(hq_meta)
+            cpcfg.setdefault("params", {}).update(hq_meta)
+            print(f"[Step1] HQ source zarr={hq_meta['hq_source_zarr']}")
+            print(f"[Step1] HQ roi_id={roi_id} roi_name={roi_name}")
+            print(f"[Step1] HQ selected channels={hq_meta['hq_channels']}")
+            print(f"[Step1] HQ available at save={available_at_save}")
         fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
         print(f"[Save] {fp1}")
         print(f"[Save] {fp_method}")

@@ -466,10 +466,14 @@ def run_cellpose_process(args, result_queue, stop_flag):
             preview_background = "fusion" if method == CELLPOSE_WHOLECELL_FUSION else "dapi"
 
             if method == CELLPOSE_WHOLECELL_FUSION:
+                print(f"[Step1-preview] patch_bbox={[int(y0), int(y1), int(x0), int(x1)]}")
+                print(f"[Step1-preview] read_region y0,y1,x0,x1={[int(y0), int(y1), int(x0), int(x1)]}")
                 fused = fusion.fuse_fullres(
                     loader, y0, y1, x0, x1,
                     groups, group_weights, nuc_ch, nuc_w,
                 )
+                print(f"[Step1-preview] loaded_shape={fused.shape}")
+                print("[Step1-preview] full_image_load=False")
                 fused_f32 = np.array(fused.astype(np.float32) / 65535.0)
                 seg_img = np.ascontiguousarray(fused_f32[:, :, 1])
                 rgb_raw = np.stack([
@@ -478,7 +482,11 @@ def run_cellpose_process(args, result_queue, stop_flag):
                     (np.clip(fused_f32[:, :, 1], 0, 1) * 255).astype(np.uint8),
                 ], axis=-1)
             else:
+                print(f"[Step1-preview] patch_bbox={[int(y0), int(y1), int(x0), int(x1)]}")
+                print(f"[Step1-preview] read_region y0,y1,x0,x1={[int(y0), int(y1), int(x0), int(x1)]}")
                 dapi_raw = loader.read_region(nuc_ch, y0, y1, x0, x1, downsample=1)
+                print(f"[Step1-preview] loaded_shape={dapi_raw.shape}")
+                print("[Step1-preview] full_image_load=False")
                 dapi_f32 = fusion._normalize_intensity(dapi_raw).astype(np.float32)
                 seg_img = np.ascontiguousarray(dapi_f32)
                 rgb_raw, preview_background = _preview_rgb_from_fusion_or_dapi(

@@ -1772,6 +1772,22 @@ class OverviewPanel(QWidget):
         self._rebuild_patch_artists()
         self._update_info()
 
+    def set_background_crop(self, arr, y0, y1, x0, x1, downsample):
+        """Show a pre-read crop without changing Step0's global scene coords."""
+        if not hasattr(self, "_step1_bg_item"):
+            self._step1_bg_item = pg.ImageItem()
+            self.vb.addItem(self._step1_bg_item)
+            self._step1_bg_item.setZValue(-10)
+        self._step1_bg_item.setImage(arr, autoLevels=False)
+        ds = max(1, int(downsample or self.ds))
+        self._step1_bg_item.setRect(QRectF(x0 / ds, y0 / ds, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)))
+        self.ov_h = max(1, int(np.ceil(self.full_h / float(self.ds))))
+        self.ov_w = max(1, int(np.ceil(self.full_w / float(self.ds))))
+        self.vb.setRange(
+            QRectF(x0 / ds, y0 / ds, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)),
+            padding=0.02,
+        )
+
     def add_center_patch(self, roi=None, size_px=512):
         """Add a centered patch through the same Step0 add/rebuild path."""
         if roi and roi.get("bbox_fullres"):

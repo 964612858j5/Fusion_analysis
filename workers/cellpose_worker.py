@@ -26,6 +26,7 @@ from ..utils.segmentation_config import (
 )
 from .hq_marker_segmentation import (
     parse_hq_channels,
+    resolve_hq_channels,
     segment_nuclei_hq,
     validate_hq_channels,
 )
@@ -497,16 +498,52 @@ def run_cellpose_process(args, result_queue, stop_flag):
                             masks_out = expand_labels(masks_out, distance=dist)
                         print(f"[Worker] expanded cells={int(np.asarray(masks_out).max())}")
                     if method == CELLPOSE_NUCLEI_HQ:
-                        hq_channels = parse_hq_channels(params.get("hq_channels") or [])
-                        validate_hq_channels(hq_channels, loader.channel_names())
-                        marker_channels = [
-                            loader.read_region(ch, y0, y1, x0, x1, downsample=1)
-                            for ch in hq_channels
-                        ]
+                        mode = str(params.get("hq_input_mode") or "selected_channels_from_source")
+                        if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
+                            mode = "selected_channels_from_source"
+                        requested = parse_hq_channels(params.get("hq_channels") or [])
+                        available = loader.channel_names()
+                        weights = dict(params.get("step1_fusion_weights") or params.get("channel_weights") or {})
+                        query_channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in weights.items() if float(w or 0) > 0]
+                        resolved, missing, warnings = resolve_hq_channels(query_channels, available)
+                        print(f"[Step2-HQ] hq_input_mode: {mode}")
+                        print(f"[Step2-HQ] requested hq_channels: {requested}")
+                        print(f"[Step2-HQ] full source path: {getattr(loader, 'filepath', '')}")
+                        print(f"[Step2-HQ] available channels from full source: {available}")
+                        print(f"[Step2-HQ] available channels from fusion weights: {sorted(weights.keys())}")
+                        print(f"[Step2-HQ] resolved channels: {resolved}")
+                        print(f"[Step2-HQ] missing channels: {missing}")
+                        for msg in warnings:
+                            print(f"[Step2-HQ] warning: {msg}")
+                        context = (
+                            "HQ source debug:\n"
+                            f"  requested channels: {query_channels}\n"
+                            f"  resolved channel source path: {getattr(loader, 'filepath', '')}\n"
+                            f"  available channels from full source: {available}\n"
+                            f"  available channels from Step1 fusion weights: {sorted(weights.keys())}"
+                        )
+                        hq_channels = validate_hq_channels(query_channels, available, context=context)
+                        if mode == "step1_weighted_fusion":
+                            fused_marker = None
+                            for ch in hq_channels:
+                                arr = loader.read_region(ch, y0, y1, x0, x1, downsample=1)
+                                arr = fusion._normalize_intensity(arr) * float(weights.get(ch, 1.0))
+                                fused_marker = arr if fused_marker is None else np.maximum(fused_marker, arr)
+                            marker_channels = [fused_marker if fused_marker is not None else np.zeros_like(seg_img)]
+                            hq_channel_names = ["step1_weighted_fusion"]
+                            params["channel_weights"] = {ch: float(weights.get(ch, 1.0)) for ch in hq_channels}
+                        else:
+                            marker_channels = [
+                                loader.read_region(ch, y0, y1, x0, x1, downsample=1)
+                                for ch in hq_channels
+                            ]
+                            hq_channel_names = hq_channels
+                            if mode == "hybrid":
+                                params["channel_weights"] = {ch: float(weights.get(ch, 1.0)) for ch in hq_channels}
                         masks_out, nuclei_labels, qc_rows = segment_nuclei_hq(
                             masks_out.astype(np.uint32, copy=False),
                             marker_channels,
-                            hq_channels,
+                            hq_channel_names,
                             max_cell_radius=params.get("max_cell_radius", 12),
                             normalization_low=params.get("normalization_percentile_low", 1.0),
                             normalization_high=params.get("normalization_percentile_high", 99.5),

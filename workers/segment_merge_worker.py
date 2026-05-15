@@ -17,6 +17,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -39,6 +40,7 @@ from ..utils.roi_project import (
 from .cellpose_worker import load_stardist_model
 from .hq_marker_segmentation import (
     parse_hq_channels,
+    resolve_hq_channels,
     segment_nuclei_hq,
     validate_hq_channels,
     write_hq_qc_table,
@@ -90,6 +92,8 @@ class SegmentMergeWorker(QThread):
         self._logger          = None
         self._mem_timer       = None
         self._last_region_meta = None
+        self._current_region_bbox = None
+        self._hq_resolved_source_path = ""
 
     @staticmethod
     def _infer_roi_dir(output_dir):
@@ -227,6 +231,20 @@ class SegmentMergeWorker(QThread):
                 if path in seen:
                     continue
                 seen.add(path)
+                return self._abs(path)
+        return ""
+
+    def _raw_channel_source_path(self):
+        param_cfg = self._load_param_file_config()
+        for path in (
+            self.seg_config.get("raw_channel_source_path"),
+            self.seg_config.get("raw_ome_path"),
+            param_cfg.get("raw_channel_source_path"),
+            param_cfg.get("raw_ome_path"),
+            self.roi_manifest.get("source_ome"),
+            self.roi_manifest.get("raw_ome_path"),
+        ):
+            if path and os.path.exists(path):
                 return self._abs(path)
         return ""
 
@@ -468,11 +486,17 @@ class SegmentMergeWorker(QThread):
     def _open_hq_channel_group(self, roi_name=None):
         path = self._multichannel_source_path()
         if not path or not os.path.exists(path):
+            raw_path = self._raw_channel_source_path()
+            if raw_path:
+                self._hq_resolved_source_path = raw_path
+                return {"kind": "raw_ome", "path": raw_path, "loader": OMETIFFLoader(raw_path)}
             raise FileNotFoundError(
-                "Cellpose nuclei + HQ requires corrected_channels.zarr, but it was not found.\n"
+                "Cellpose nuclei + HQ requires corrected_channels.zarr or raw OME channel source, but neither was found.\n"
                 f"Requested HQ source: {path or '(none)'}\n"
+                f"Resolved raw source: {raw_path or '(none)'}\n"
                 f"loaded param_file path: {self.param_file or '(none)'}"
             )
+        self._hq_resolved_source_path = self._abs(path)
         root = zarr.open(path, mode="r")
         mode = str(root.attrs.get("mode", "")).strip().lower()
         if mode == "roi_only":
@@ -505,43 +529,71 @@ class SegmentMergeWorker(QThread):
 
     @staticmethod
     def _channel_array_names(group):
+        if isinstance(group, dict) and group.get("kind") == "raw_ome":
+            return group["loader"].channel_names()
         if hasattr(group, "array_keys"):
             return list(group.array_keys())
         return [k for k in group.keys() if hasattr(group[k], "shape")]
 
     def _validate_hq_config(self, roi_name=None):
-        channels = parse_hq_channels(self.seg_config.get("hq_channels") or [])
+        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source").strip()
+        if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
+            mode = "selected_channels_from_source"
+        requested = parse_hq_channels(self.seg_config.get("hq_channels") or [])
+        fusion_weights = dict(self.seg_config.get("step1_fusion_weights") or self.seg_config.get("channel_weights") or {})
+        channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in fusion_weights.items() if float(w or 0) > 0]
         group = self._open_hq_channel_group(roi_name)
         available = self._channel_array_names(group)
-        source_path = self._multichannel_source_path()
+        source_path = self._hq_resolved_source_path or self._multichannel_source_path() or self._raw_channel_source_path()
         root_attrs = {}
-        if source_path and os.path.exists(source_path):
+        if source_path and os.path.exists(source_path) and str(source_path).endswith(".zarr"):
             try:
                 root_attrs = dict(zarr.open(source_path, mode="r").attrs)
             except Exception:
                 root_attrs = {}
-        group_name = getattr(group, "name", "") or ""
+        group_name = "raw_ome" if isinstance(group, dict) else (getattr(group, "name", "") or "")
+        group_attrs = {} if isinstance(group, dict) else dict(getattr(group, 'attrs', {}))
         context = (
             "HQ source debug:\n"
             f"  loaded param_file path: {self.param_file or '(none)'}\n"
             f"  selected hq_source_zarr: {source_path or '(none)'}\n"
+            f"  requested channels: {channels}\n"
             f"  zarr attrs mode: {root_attrs}\n"
             f"  requested roi_id: {self.seg_config.get('roi_id') or self.roi_id or '(none)'}\n"
             f"  requested roi_name: {self.seg_config.get('roi_name') or self.seg_config.get('roi_display_name') or roi_name or self.roi_display_name or '(none)'}\n"
             f"  selected ROI group name: {group_name or '(root)'}\n"
-            f"  selected ROI group attrs: {dict(getattr(group, 'attrs', {}))}\n"
-            f"  available channel array_keys: {available}"
+            f"  selected ROI group attrs: {group_attrs}\n"
+            f"  available channels from full source: {available}\n"
+            f"  available channels from Step1 fusion weights: {sorted(fusion_weights.keys())}"
         )
+        resolved, missing, warnings = resolve_hq_channels(channels, available)
+        print(f"[Step2-HQ] hq_input_mode: {mode}")
+        print(f"[Step2-HQ] requested hq_channels: {requested}")
+        print(f"[Step2-HQ] full source path: {source_path or '(none)'}")
+        print(f"[Step2-HQ] available channels from full source: {available}")
+        print(f"[Step2-HQ] available channels from fusion weights: {sorted(fusion_weights.keys())}")
+        print(f"[Step2-HQ] resolved channels: {resolved}")
+        print(f"[Step2-HQ] missing channels: {missing}")
+        if warnings:
+            for msg in warnings:
+                print(f"[Step2-HQ] warning: {msg}")
         channels = validate_hq_channels(channels, available, context=context)
+        if mode == "hybrid":
+            weights = {ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
+            self.seg_config["channel_weights"] = weights
+        elif mode == "step1_weighted_fusion":
+            weights = {ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
+            self.seg_config["channel_weights"] = weights
         self.seg_config["hq_channels"] = channels
+        self.seg_config["hq_input_mode"] = mode
         if self._logger:
-            root = zarr.open(source_path, mode="r") if source_path else None
+            root = zarr.open(source_path, mode="r") if source_path and str(source_path).endswith(".zarr") else None
             self._logger.debug("[HQ] loaded param_file path: %s", self.param_file or "")
             self._logger.debug("[HQ] seg_config hq_channels: %s", channels)
             self._logger.debug("[HQ] selected hq_source_zarr: %s", source_path)
             self._logger.debug("[HQ] zarr attrs mode: %s", dict(root.attrs) if root is not None else {})
             self._logger.debug("[HQ] selected ROI group name: %s", group_name or "(root)")
-            self._logger.debug("[HQ] selected ROI group attrs: %s", dict(getattr(group, "attrs", {})))
+            self._logger.debug("[HQ] selected ROI group attrs: %s", group_attrs)
             self._logger.debug("[HQ] available channel array_keys: %s", available)
         return channels, group
 
@@ -556,6 +608,7 @@ class SegmentMergeWorker(QThread):
                 "cellprob_threshold": self.seg_config.get("cellprob_threshold", 0.0),
                 "min_size": self.seg_config.get("min_size", 15),
             },
+            "hq_input_mode": self.seg_config.get("hq_input_mode", "selected_channels_from_source"),
             "hq_channels": parse_hq_channels(self.seg_config.get("hq_channels") or []),
             "max_cell_radius": self.seg_config.get("max_cell_radius", 12),
             "normalization_percentiles": [
@@ -571,7 +624,36 @@ class SegmentMergeWorker(QThread):
         }
 
     def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
+        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source")
         marker_channels = []
+        if isinstance(group, dict) and group.get("kind") == "raw_ome":
+            loader = group["loader"]
+            by0, _by1, bx0, _bx1 = [0, 0, 0, 0]
+            if self._current_region_bbox and len(self._current_region_bbox) == 4:
+                by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
+            fy0, fy1 = by0 + int(y0), by0 + int(y1)
+            fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
+            if mode == "step1_weighted_fusion":
+                fused = None
+                weights = dict(self.seg_config.get("channel_weights") or {})
+                for ch in channels:
+                    arr = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
+                    arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
+                    fused = arr if fused is None else np.maximum(fused, arr)
+                marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
+                return marker_channels
+            for ch in channels:
+                marker_channels.append(loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False))
+            return marker_channels
+        if mode == "step1_weighted_fusion":
+            fused = None
+            weights = dict(self.seg_config.get("channel_weights") or {})
+            for ch in channels:
+                arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+                arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
+                fused = arr if fused is None else np.maximum(fused, arr)
+            marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
+            return marker_channels
         for ch in channels:
             arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
             marker_channels.append(arr)
@@ -645,10 +727,13 @@ class SegmentMergeWorker(QThread):
                 if dist > 0:
                     masks = expand_labels(masks, distance=dist)
             if method == CELLPOSE_NUCLEI_HQ:
+                hq_names = self.seg_config.get("hq_channels") or []
+                if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
+                    hq_names = ["step1_weighted_fusion"]
                 final_mask, nuclei_mask, qc_rows = segment_nuclei_hq(
                     masks.astype(np.uint32, copy=False),
                     hq_marker_channels or [],
-                    self.seg_config.get("hq_channels") or [],
+                    hq_names,
                     max_cell_radius=self.seg_config.get("max_cell_radius", 12),
                     normalization_low=self.seg_config.get("normalization_percentile_low", 1.0),
                     normalization_high=self.seg_config.get("normalization_percentile_high", 99.5),
@@ -712,6 +797,7 @@ class SegmentMergeWorker(QThread):
         Returns total cell count.
         """
         import torch
+        self._current_region_bbox = list(bbox) if bbox else None
         z      = zarr.open(zarr_path, mode='r')
         full_h = z.shape[0]
         full_w = z.shape[1]

@@ -1052,6 +1052,7 @@ class OverviewPanel(QWidget):
         # ── Data model ────────────────────────────────────────────────
         self._rois    = []
         self._patches = []
+        self._selected_patch_idx = -1
 
         # ── Drawing state ─────────────────────────────────────────────
         self._mode            = 'patch'
@@ -1559,6 +1560,67 @@ class OverviewPanel(QWidget):
         self._update_info()
         self.patches_changed.emit(self._patch_coords())
 
+    def _remove_patch(self, patch_idx):
+        if patch_idx < 0 or patch_idx >= len(self._patches):
+            return
+        removed = self._patches.pop(patch_idx)
+        if removed["roi_idx"] is not None:
+            ri = removed["roi_idx"]
+            if 0 <= ri < len(self._rois):
+                self._rois[ri]["patch_indices"] = [
+                    i for i in self._rois[ri].get("patch_indices", [])
+                    if i != patch_idx
+                ]
+        for roi in self._rois:
+            roi["patch_indices"] = [
+                (i - 1 if i > patch_idx else i)
+                for i in roi.get("patch_indices", [])
+                if i != patch_idx
+            ]
+        self._selected_patch_idx = min(patch_idx, len(self._patches) - 1)
+        self._rebuild_patch_artists()
+        self._update_info()
+        self.patches_changed.emit(self._patch_coords())
+
+    def _select_patch_artist(self, patch_idx):
+        self._selected_patch_idx = patch_idx
+        self._rebuild_patch_artists()
+
+    def _on_patch_roi_changed(self, patch_idx, rect):
+        if patch_idx < 0 or patch_idx >= len(self._patches):
+            return
+        pos = rect.pos()
+        size = rect.size()
+        c0 = max(0.0, float(pos.x()))
+        r0 = max(0.0, float(pos.y()))
+        c1 = min(float(getattr(self, "ov_w", 1)), c0 + max(1.0, float(size.x())))
+        r1 = min(float(getattr(self, "ov_h", 1)), r0 + max(1.0, float(size.y())))
+        fy0 = int(max(0, round(r0 * self.ds)))
+        fy1 = int(min(self.full_h, round(r1 * self.ds)))
+        fx0 = int(max(0, round(c0 * self.ds)))
+        fx1 = int(min(self.full_w, round(c1 * self.ds)))
+        if fy1 <= fy0 or fx1 <= fx0:
+            return
+        roi_idx = None
+        if self._rois and not getattr(self, "full_wsi_mode", False):
+            roi_idx = self._find_roi_for_patch((r0 + r1) / 2.0, (c0 + c1) / 2.0)
+            if roi_idx is None:
+                self.status.setText("⚠ Patch centre is outside all ROIs")
+                self._rebuild_patch_artists()
+                return
+        self._patches[patch_idx] = {
+            "roi_idx": roi_idx,
+            "coords": (fy0, fy1, fx0, fx1),
+        }
+        for roi in self._rois:
+            roi["patch_indices"] = []
+        for i, patch in enumerate(self._patches):
+            ri = patch.get("roi_idx")
+            if ri is not None and 0 <= ri < len(self._rois):
+                self._rois[ri].setdefault("patch_indices", []).append(i)
+        self._update_info()
+        self.patches_changed.emit(self._patch_coords())
+
     def _rebuild_patch_artists(self):
         """Remove all patch visuals and redraw from scratch (after any delete/renumber)."""
         for rect, lbl in self._patch_artists:
@@ -1573,11 +1635,18 @@ class OverviewPanel(QWidget):
             cmin = fx0 // self.ds
             cmax = fx1 // self.ds
             color = PATCH_COLORS[i % len(PATCH_COLORS)]
+            width = 3 if i == self._selected_patch_idx else 2
             rect  = pg.RectROI(
                 [cmin, rmin], [cmax - cmin, rmax - rmin],
-                pen=pg.mkPen(color, width=2),
-                movable=False, resizable=False,
+                pen=pg.mkPen(color, width=width),
+                movable=True, resizable=True,
             )
+            rect.addScaleHandle([1, 1], [0, 0])
+            rect.addScaleHandle([0, 0], [1, 1])
+            rect.sigRegionChangeFinished.connect(
+                lambda roi, idx=i: self._on_patch_roi_changed(idx, roi)
+            )
+            rect.sigClicked.connect(lambda _roi, _ev, idx=i: self._select_patch_artist(idx))
             lbl = pg.TextItem(f"P{i+1}", color=color, anchor=(0, 1))
             lbl.setPos(cmin, rmin)
             self.vb.addItem(rect)
@@ -1590,6 +1659,7 @@ class OverviewPanel(QWidget):
             self.vb.removeItem(lbl)
         self._patch_artists.clear()
         self._patches.clear()
+        self._selected_patch_idx = -1
         for roi in self._rois:
             roi["patch_indices"] = []
         self._update_info()
@@ -1654,6 +1724,15 @@ class OverviewPanel(QWidget):
                 self._delete_last_roi(); return True
             elif key in (Qt.Key_Return, Qt.Key_Enter):
                 self._finish_roi(); return True
+
+        if t == QtCore.QEvent.KeyPress and self._mode == 'patch':
+            key = event.key()
+            if key in (Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_D):
+                idx = self._selected_patch_idx
+                if idx < 0:
+                    idx = len(self._patches) - 1
+                self._remove_patch(idx)
+                return True
 
         # ── Scroll zoom ───────────────────────────────────────────────
         if t == QtCore.QEvent.Wheel:

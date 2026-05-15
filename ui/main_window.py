@@ -57,6 +57,8 @@ from .step2_page import Step2Page
 from .step3_page import Step3Page
 from .step4_page import Step4Page
 
+STEP1_PATCH_PREVIEW_MAX_PX = 1024
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -82,6 +84,7 @@ class MainWindow(QMainWindow):
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
+        self._selected_step1_patch_idx = -1
         self._corrected_zarr_path = ""
         self._corrected_zarr_mode = ""
         self._corrected_decisions = {}
@@ -242,6 +245,17 @@ class MainWindow(QMainWindow):
         self.roi_img = pg.ImageItem()
         self.roi_vb.addItem(self.roi_img)
         ll.addWidget(self.roi_gv, stretch=1)
+        patch_edit_row = QHBoxLayout()
+        btn_add_step1_patch = QPushButton("Add Patch")
+        btn_del_step1_patch = QPushButton("Delete Patch")
+        btn_add_step1_patch.setStyleSheet("font-size:10px;padding:2px 8px;")
+        btn_del_step1_patch.setStyleSheet("font-size:10px;padding:2px 8px;")
+        btn_add_step1_patch.clicked.connect(self._add_step1_patch)
+        btn_del_step1_patch.clicked.connect(self._delete_step1_patch)
+        patch_edit_row.addWidget(btn_add_step1_patch)
+        patch_edit_row.addWidget(btn_del_step1_patch)
+        patch_edit_row.addStretch()
+        ll.addLayout(patch_edit_row)
         self.roi_status = QLabel("No ROI loaded")
         self.roi_status.setAlignment(Qt.AlignCenter)
         self.roi_status.setWordWrap(True)
@@ -378,7 +392,12 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled{background:#333;color:#555;}"
         )
         self.btn_save.clicked.connect(self._save)
+        self._force_dapi_zarr = QCheckBox("force_regenerate_dapi_zarr")
+        self._force_dapi_zarr.setChecked(False)
+        self._force_dapi_zarr.setStyleSheet("color:#aaa;font-size:10px;")
+        self._force_dapi_zarr.setToolTip("Regenerate DAPI input zarr even when dapi_input_meta.json matches.")
         bot.addWidget(self.btn_save)
+        bot.addWidget(self._force_dapi_zarr)
         root.addLayout(bot)
 
         self._fusion_bar_widget = QWidget()
@@ -1416,9 +1435,20 @@ class MainWindow(QMainWindow):
                 ly0 = (y0 - ry0) / ds
                 ly1 = (y1 - ry0) / ds
                 color = PATCH_COLORS[idx % len(PATCH_COLORS)]
-                xs = [lx0, lx1, lx1, lx0, lx0]
-                ys = [ly0, ly0, ly1, ly1, ly0]
-                item = pg.PlotDataItem(xs, ys, pen=pg.mkPen(color, width=2))
+                width = 3 if idx == self._selected_step1_patch_idx else 2
+                item = pg.RectROI(
+                    [lx0, ly0],
+                    [max(1, lx1 - lx0), max(1, ly1 - ly0)],
+                    pen=pg.mkPen(color, width=width),
+                    movable=True,
+                    resizable=True,
+                )
+                item.addScaleHandle([1, 1], [0, 0])
+                item.addScaleHandle([0, 0], [1, 1])
+                item.sigRegionChangeFinished.connect(
+                    lambda roi_item, pidx=idx, scale=ds, origin=(ry0, rx0): self._on_step1_patch_roi_changed(pidx, roi_item, scale, origin)
+                )
+                item.sigClicked.connect(lambda _roi, _ev, pidx=idx: self._select_step1_patch_artist(pidx))
                 self.roi_vb.addItem(item)
                 self._roi_patch_items.append(item)
 
@@ -1429,6 +1459,64 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.roi_status.setText(f"⚠ ROI preview failed: {e}")
             print(f"[Step1] ROI preview failed: {e}")
+
+    def _select_step1_patch_artist(self, patch_idx):
+        self._selected_step1_patch_idx = patch_idx
+        self._select_preview_patch(patch_idx)
+        self._show_active_roi_preview()
+
+    def _on_step1_patch_roi_changed(self, patch_idx, roi_item, ds, roi_origin):
+        if patch_idx < 0 or patch_idx >= len(self._all_patches):
+            return
+        ry0, rx0 = roi_origin
+        pos = roi_item.pos()
+        size = roi_item.size()
+        y0 = int(ry0 + max(0, round(float(pos.y()) * ds)))
+        x0 = int(rx0 + max(0, round(float(pos.x()) * ds)))
+        y1 = int(ry0 + max(1, round((float(pos.y()) + float(size.y())) * ds)))
+        x1 = int(rx0 + max(1, round((float(pos.x()) + float(size.x())) * ds)))
+        if self._active_roi and self._active_roi.get("bbox_fullres"):
+            by0, by1, bx0, bx1 = [int(v) for v in self._active_roi["bbox_fullres"]]
+            y0, y1 = max(by0, y0), min(by1, y1)
+            x0, x1 = max(bx0, x0), min(bx1, x1)
+        if y1 <= y0 or x1 <= x0:
+            self._show_active_roi_preview()
+            return
+        patches = list(self._all_patches)
+        patches[patch_idx] = (y0, y1, x0, x1)
+        self._selected_step1_patch_idx = patch_idx
+        self._on_patches(patches)
+        self._show_active_roi_preview()
+
+    def _add_step1_patch(self):
+        roi = self._active_roi
+        if not roi or not roi.get("bbox_fullres"):
+            self.roi_status.setText("Load an ROI before adding a patch.")
+            return
+        y0, y1, x0, x1 = [int(v) for v in roi["bbox_fullres"]]
+        size = min(512, max(64, y1 - y0), max(64, x1 - x0))
+        cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+        patch = (
+            max(y0, cy - size // 2),
+            min(y1, cy + size // 2),
+            max(x0, cx - size // 2),
+            min(x1, cx + size // 2),
+        )
+        patches = list(self._all_patches) + [patch]
+        self._selected_step1_patch_idx = len(patches) - 1
+        self._on_patches(patches)
+        self._show_active_roi_preview()
+
+    def _delete_step1_patch(self):
+        if not self._all_patches:
+            return
+        idx = self._selected_step1_patch_idx
+        if idx < 0 or idx >= len(self._all_patches):
+            idx = self._preview_patch_idx if self._preview_patch_idx >= 0 else len(self._all_patches) - 1
+        patches = [p for i, p in enumerate(self._all_patches) if i != idx]
+        self._selected_step1_patch_idx = min(idx, len(patches) - 1)
+        self._on_patches(patches)
+        self._show_active_roi_preview()
 
     # ── Patch selector button management ────────────────────────────
 
@@ -1554,7 +1642,16 @@ class MainWindow(QMainWindow):
         self._schedule_step1_session_save()
 
         if idx in self._patch_load_ready:
-            self._render_current_patch(reset_view=True)
+            cache = self._patch_channel_cache.get(idx) or {}
+            missing = [ch for ch in self._needed_channels() if ch not in cache]
+            if missing:
+                self._patch_channel_cache.pop(idx, None)
+                self._patch_load_ready.discard(idx)
+                self.prev_img.clear()
+                self.prev_status.setText("Loading patch...")
+                self._start_loader_for(idx)
+            else:
+                self._render_current_patch(reset_view=True)
         elif idx in self._patch_loaders:
             self.prev_img.clear()
             self.prev_status.setText("Loading patch...")
@@ -1567,10 +1664,34 @@ class MainWindow(QMainWindow):
     # ── Background preloading ────────────────────────────────────────
 
     def _needed_channels(self):
-        """Return all loadable channel names for Step1 patch caches."""
+        """Return only channels needed for the current Step1 weighted preview."""
         if self.loader is None:
             return []
-        return list(self.loader.channel_names())
+        available = set(self.loader.channel_names())
+        needed = []
+        groups = self.config.get_groups()
+        for ch_weights in groups.values():
+            for ch, w in ch_weights.items():
+                if ch in available and float(w or 0) > 0:
+                    needed.append(ch)
+        nuc_ch, nuc_w = self.config.get_nucleus()
+        if nuc_ch in available and (float(nuc_w or 0) > 0 or not needed):
+            needed.append(nuc_ch)
+        seen = set()
+        return [ch for ch in needed if not (ch in seen or seen.add(ch))]
+
+    @staticmethod
+    def _limited_patch_bbox(roi, max_px=STEP1_PATCH_PREVIEW_MAX_PX):
+        y0, y1, x0, x1 = [int(v) for v in roi]
+        h = max(1, y1 - y0)
+        w = max(1, x1 - x0)
+        if h <= max_px and w <= max_px:
+            return y0, y1, x0, x1
+        cy = (y0 + y1) // 2
+        cx = (x0 + x1) // 2
+        hh = min(h, max_px) // 2
+        ww = min(w, max_px) // 2
+        return cy - hh, cy - hh + min(h, max_px), cx - ww, cx - ww + min(w, max_px)
 
     def _preload_all_patches(self):
         """Launch a background loader for every patch not yet in cache.
@@ -1586,7 +1707,8 @@ class MainWindow(QMainWindow):
             return
 
         for idx, roi in enumerate(self._all_patches):
-            if idx in self._patch_load_ready:
+            cache = self._patch_channel_cache.get(idx) or {}
+            if idx in self._patch_load_ready and all(ch in cache for ch in needed):
                 continue   # already cached
             if idx in self._patch_loaders and self._patch_loaders[idx].isRunning():
                 continue   # already loading
@@ -1606,13 +1728,17 @@ class MainWindow(QMainWindow):
             self.prev_status.setText(f"P{idx+1} is still stopping… please wait")
             return
 
-        y0, y1, x0, x1 = self._all_patches[idx]
+        patch_bbox = self._all_patches[idx]
+        y0, y1, x0, x1 = self._limited_patch_bbox(patch_bbox)
         if self._active_roi and not self._patch_inside_roi_bbox((y0, y1, x0, x1), self._active_roi):
             self.prev_status.setText(f"⚠ P{idx+1} is outside active ROI")
             return
+        print("[Step1] patch preview source: fullres")
+        print(f"[Step1] patch bbox: original={list(map(int, patch_bbox))} loaded={[y0, y1, x0, x1]}")
+        print(f"[Step1] channels loaded for patch: {needed}")
         t = PreviewLoaderThread(idx, self.loader, needed,
                                 y0, y1, x0, x1,
-                                downsample=PREVIEW_DOWNSAMPLE)
+                                downsample=1)
         t.done.connect(self._on_patch_loaded)
         t.progress.connect(self._on_patch_progress)
         t.error.connect(self._on_patch_error)
@@ -1634,8 +1760,8 @@ class MainWindow(QMainWindow):
 
         nuc_ch, _ = self.config.get_nucleus()
         y0, y1, x0, x1 = self._all_patches[patch_idx]
-        h = (y1 - y0) // PREVIEW_DOWNSAMPLE
-        w = (x1 - x0) // PREVIEW_DOWNSAMPLE
+        h = next(iter(cache.values())).shape[0] if cache else 0
+        w = next(iter(cache.values())).shape[1] if cache else 0
         local_txt = ""
         if self._active_roi and self._active_roi.get("bbox_fullres"):
             ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
@@ -1650,7 +1776,7 @@ class MainWindow(QMainWindow):
             cyto_n = len([c for c in cache if c != nuc_ch])
             self.prev_status.setText(
                 f"P{patch_idx+1} ready  nucleus({nuc_ch}){nuc_ok}  "
-                f"cyto: {cyto_n} ch  {h}×{w} px (1/{PREVIEW_DOWNSAMPLE})"
+                f"cyto: {cyto_n} ch  {h}×{w} px (full-res crop)"
             )
             self._render_current_patch(reset_view=True)
 
@@ -1791,7 +1917,14 @@ class MainWindow(QMainWindow):
     def _on_cfg_changed(self):
         """Weight/group changed: re-render from cache (no disk IO) after 300 ms debounce."""
         if self._preview_patch_idx in self._patch_load_ready:
-            self._prev_timer.start(300)
+            cache = self._patch_channel_cache.get(self._preview_patch_idx) or {}
+            missing = [ch for ch in self._needed_channels() if ch not in cache]
+            if missing:
+                self._patch_channel_cache.pop(self._preview_patch_idx, None)
+                self._patch_load_ready.discard(self._preview_patch_idx)
+                self._start_loader_for(self._preview_patch_idx)
+            else:
+                self._prev_timer.start(300)
         self._schedule_step1_session_save()
 
     # ── Phase 1 ─────────────────────────────────────────────────────
@@ -2191,6 +2324,12 @@ class MainWindow(QMainWindow):
                 print(f"[Step1] failed to update ROI step1 status:\n{traceback.format_exc()}")
         self.step1_done = True
         self._update_next_button()
+        if (
+            not is_wholecell
+            and getattr(self, "_pending_dapi_input_meta", None)
+            and not getattr(self, "_reused_dapi_input_meta", False)
+        ):
+            self._write_dapi_input_meta(self._pending_dapi_input_meta)
         self._save_step1_session()
         self._unlock_ui()
         # Count per-ROI zarrs from meta
@@ -2215,6 +2354,135 @@ class MainWindow(QMainWindow):
         self._unlock_ui()
         QMessageBox.critical(self, "Fusion Error", msg)
         print(f"[Fusion Error]\n{msg}")
+
+    def _dapi_input_meta_path(self):
+        return os.path.join(OUTPUT_DIR, "dapi_input_meta.json")
+
+    def _expected_dapi_input_meta(self, worker_fcfg, selected_method):
+        active_roi = self._active_roi or (self._rois[0] if self._rois else None)
+        regions = []
+        if self._rois:
+            for roi in self._rois:
+                bbox = [int(v) for v in roi.get("bbox_fullres", [])]
+                if len(bbox) == 4:
+                    regions.append({
+                        "roi_name": roi.get("name") or roi.get("display_name") or "",
+                        "roi_id": (self.step0_output or {}).get("roi_id", ""),
+                        "roi_bbox": bbox,
+                        "shape": [bbox[1] - bbox[0], bbox[3] - bbox[2], 2],
+                    })
+        else:
+            h, w = self.loader.shape
+            regions.append({
+                "roi_name": "full",
+                "roi_id": "",
+                "roi_bbox": [0, h, 0, w],
+                "shape": [h, w, 2],
+            })
+        source_path = (
+            self._corrected_zarr_path
+            or (self.step0_output or {}).get("corrected_zarr_path")
+            or getattr(self.loader, "filepath", "")
+        )
+        meta = {
+            "version": 1,
+            "purpose": "step1_dapi_input_zarr",
+            "method": selected_method,
+            "source_path": os.path.abspath(source_path) if source_path else "",
+            "raw_ome_path": os.path.abspath(getattr(self.loader, "filepath", OME_TIFF_FILE)),
+            "roi_id": (self.step0_output or {}).get("roi_id", ""),
+            "roi_bbox": active_roi.get("bbox_fullres") if active_roi else None,
+            "regions": regions,
+            "dapi_channel": worker_fcfg.get("nucleus", {}).get("channel"),
+            "shape": regions[0]["shape"] if len(regions) == 1 else [r["shape"] for r in regions],
+            "dtype": "uint16",
+            "resolution": worker_fcfg.get("resolution") or None,
+            "normalization_source": "corrected" if self._corrected_zarr_path else "raw",
+            "background_correction_source": os.path.abspath(self._corrected_zarr_path) if self._corrected_zarr_path else "",
+            "pixel_size": (self.step0_output or {}).get("pixel_size"),
+            "code_version": "block01_step1_v8_dapi_meta",
+        }
+        return meta
+
+    @staticmethod
+    def _dapi_meta_compare_view(meta):
+        keys = (
+            "source_path", "raw_ome_path", "roi_id", "roi_bbox", "regions",
+            "dapi_channel", "shape", "dtype", "resolution",
+            "normalization_source", "background_correction_source", "pixel_size",
+            "code_version",
+        )
+        return {k: meta.get(k) for k in keys}
+
+    def _existing_dapi_zarr_path(self):
+        meta_path = os.path.join(OUTPUT_DIR, "fusion_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                regions = meta.get("regions") or []
+                if regions:
+                    path = regions[0].get("zarr_path")
+                    if path and os.path.exists(path):
+                        return path
+            except Exception:
+                pass
+        if self._rois:
+            name = self._rois[0].get("name", "ROI_1")
+            path = os.path.join(OUTPUT_DIR, f"fused_{name}.zarr")
+        else:
+            path = os.path.join(OUTPUT_DIR, "fused.zarr")
+        return path if os.path.exists(path) else ""
+
+    def _try_reuse_dapi_input_zarr(self, expected_meta):
+        meta_path = self._dapi_input_meta_path()
+        existing_zarr = self._existing_dapi_zarr_path()
+        if bool(getattr(self, "_force_dapi_zarr", None) and self._force_dapi_zarr.isChecked()):
+            reason = "force_regenerate_dapi_zarr checked"
+        elif not existing_zarr:
+            reason = "no existing DAPI input zarr"
+        elif not os.path.exists(meta_path):
+            reason = "dapi_input_meta.json missing"
+        else:
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    old_meta = json.load(f)
+                if self._dapi_meta_compare_view(old_meta) == self._dapi_meta_compare_view(expected_meta):
+                    print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
+                    print("[Step1] DAPI input zarr reuse/regenerate reason: metadata match")
+                    print("Reusing existing DAPI input zarr")
+                    self._reused_dapi_input_meta = True
+                    self._on_fusion_done(existing_zarr)
+                    return True
+                reason = "metadata changed"
+            except Exception as e:
+                reason = f"failed to read existing meta: {e}"
+        print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
+        print(f"[Step1] DAPI input zarr reuse/regenerate reason: {reason}")
+        if existing_zarr and reason != "force_regenerate_dapi_zarr checked":
+            answer = QMessageBox.question(
+                self,
+                "Regenerate DAPI input zarr?",
+                "Existing DAPI input zarr metadata does not match the current source/ROI/DAPI settings.\n\n"
+                f"Reason: {reason}\n\n"
+                "Regenerate and overwrite the DAPI input zarr?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                print("[Step1] DAPI input zarr reuse/regenerate reason: user cancelled overwrite")
+                return True
+        return False
+
+    def _write_dapi_input_meta(self, expected_meta):
+        meta = dict(expected_meta)
+        meta["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(self._dapi_input_meta_path(), "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+            print(f"[Step1] DAPI input zarr meta: {json.dumps(meta, indent=2, default=str)}")
+        except Exception:
+            print(f"[Step1] failed to write dapi_input_meta.json:\n{traceback.format_exc()}")
 
     # ── Save ────────────────────────────────────────────────────────
 
@@ -2277,11 +2545,19 @@ class MainWindow(QMainWindow):
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
         })
         if selected_method == CELLPOSE_NUCLEI_HQ:
+            step1_weights = {}
+            for gdata in (fcfg.get("groups") or {}).values():
+                for ch, weight in (gdata.get("channels") or {}).items():
+                    step1_weights[str(ch)] = float(weight)
+            nuc_cfg = fcfg.get("nucleus") or {}
+            if nuc_cfg.get("channel"):
+                step1_weights[str(nuc_cfg.get("channel"))] = float(nuc_cfg.get("weight", 0.0) or 0.0)
             hq_source = (
                 self._corrected_zarr_path
                 or (self.step0_output or {}).get("corrected_zarr_path")
                 or ""
             )
+            raw_source = getattr(self.loader, "filepath", OME_TIFF_FILE)
             roi_id = (self.step0_output or {}).get("roi_id", "")
             roi_name = (
                 (self._active_roi or {}).get("name")
@@ -2309,11 +2585,15 @@ class MainWindow(QMainWindow):
             hq_meta = {
                 "hq_source_zarr": os.path.abspath(hq_source) if hq_source else "",
                 "multichannel_source_path": os.path.abspath(hq_source) if hq_source else "",
+                "raw_channel_source_path": os.path.abspath(raw_source) if raw_source else "",
+                "raw_ome_path": os.path.abspath(raw_source) if raw_source else "",
                 "roi_id": roi_id,
                 "roi_name": roi_name,
                 "roi_display_name": roi_name,
                 "hq_available_channels_at_save": available_at_save,
                 "hq_channels": parse_hq_channels(cpcfg.get("hq_channels") or []),
+                "hq_input_mode": cpcfg.get("hq_input_mode", "selected_channels_from_source"),
+                "step1_fusion_weights": step1_weights,
             }
             cpcfg.update(hq_meta)
             cpcfg.setdefault("params", {}).update(hq_meta)
@@ -2337,6 +2617,14 @@ class MainWindow(QMainWindow):
             # saved zarr remains a full fusion preview/QC source: ch0 marker
             # fusion, ch1 DAPI/nucleus.
             worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
+            expected_dapi_meta = self._expected_dapi_input_meta(worker_fcfg, selected_method)
+            self._pending_dapi_input_meta = expected_dapi_meta
+            self._reused_dapi_input_meta = False
+            if self._try_reuse_dapi_input_zarr(expected_dapi_meta):
+                return
+        else:
+            self._pending_dapi_input_meta = None
+            self._reused_dapi_input_meta = False
         active_ch = set([worker_fcfg["nucleus"]["channel"]])
         for gdata in worker_fcfg["groups"].values():
             active_ch.update(gdata["channels"].keys())

@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt, QRectF, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSplitter, QProgressBar, QMessageBox, QFileDialog,
-    QDoubleSpinBox, QScrollArea, QComboBox,
+    QDoubleSpinBox, QScrollArea, QComboBox, QCheckBox,
 )
 import pyqtgraph as pg
 
@@ -344,6 +344,24 @@ class Step2Page(QWidget):
         r, self._cp_minsize_label, _ = _param_row('min_size (px²):', self._cp_minsize)
         cpl.addLayout(r)
 
+        self._cp_gpu = QCheckBox('Use GPU if available')
+        self._cp_gpu.setChecked(True)
+        r, self._cp_gpu_label, _ = _param_row('GPU:', self._cp_gpu)
+        cpl.addLayout(r)
+
+        self._cp_tile_size = QtWidgets.QSpinBox()
+        self._cp_tile_size.setRange(128, 4096)
+        self._cp_tile_size.setSingleStep(128)
+        self._cp_tile_size.setValue(1024)
+        r, self._cp_tile_size_label, _ = _param_row('tile size:', self._cp_tile_size)
+        cpl.addLayout(r)
+
+        self._cp_batch_size = QtWidgets.QSpinBox()
+        self._cp_batch_size.setRange(1, 128)
+        self._cp_batch_size.setValue(8)
+        r, self._cp_batch_size_label, _ = _param_row('batch size:', self._cp_batch_size)
+        cpl.addLayout(r)
+
         self._sd_model = QtWidgets.QLineEdit('2D_versatile_fluo')
         self._sd_model.setStyleSheet('font-size:11px;')
         r, self._sd_model_label, _ = _param_row('StarDist model:', self._sd_model)
@@ -376,6 +394,13 @@ class Step2Page(QWidget):
         self._hq_channels.setPlaceholderText('PanCK;CD45;CD68')
         self._hq_channels.setStyleSheet('font-size:11px;')
         r, self._hq_channels_label, _ = _param_row('hq_channels:', self._hq_channels)
+        cpl.addLayout(r)
+
+        self._hq_input_mode = QComboBox()
+        self._hq_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
+        self._hq_input_mode.addItem('step1_weighted_fusion', 'step1_weighted_fusion')
+        self._hq_input_mode.addItem('hybrid', 'hybrid')
+        r, self._hq_input_mode_label, _ = _param_row('hq input mode:', self._hq_input_mode)
         cpl.addLayout(r)
 
         self._hq_radius = QDoubleSpinBox()
@@ -949,11 +974,16 @@ class Step2Page(QWidget):
             self._cp_flow.setValue(p.get('flow_threshold', 0.4))
             self._cp_prob.setValue(p.get('cellprob_threshold', 0.0))
             self._cp_minsize.setValue(p.get('min_size', 15))
+            self._cp_gpu.setChecked(bool(p.get('use_gpu', True)))
+            self._cp_tile_size.setValue(int(p.get('tile_size', 1024) or 1024))
+            self._cp_batch_size.setValue(int(p.get('batch_size', 8) or 8))
         self._sd_model.setText(str(p.get('model_name') or '2D_versatile_fluo'))
         self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if p.get('nms_thresh') is None else float(p.get('nms_thresh')))
         self._sd_expand.setValue(float(p.get('expand_distance', 8) or 0))
         self._hq_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
+        idx = self._hq_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
+        self._hq_input_mode.setCurrentIndex(max(0, idx))
         self._hq_radius.setValue(float(p.get("max_cell_radius", 12) or 12))
         self._hq_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
         self._hq_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
@@ -970,11 +1000,16 @@ class Step2Page(QWidget):
         self._cp_flow.setValue(cfg.get('flow_threshold', 0.4))
         self._cp_prob.setValue(cfg.get('cellprob_threshold', 0.0))
         self._cp_minsize.setValue(cfg.get('min_size', 15))
+        self._cp_gpu.setChecked(bool(cfg.get('use_gpu', True)))
+        self._cp_tile_size.setValue(int(cfg.get('tile_size', 1024) or 1024))
+        self._cp_batch_size.setValue(int(cfg.get('batch_size', 8) or 8))
         self._sd_model.setText(str(cfg.get('model_name') or '2D_versatile_fluo'))
         self._sd_prob.setValue(-1.0 if cfg.get('prob_thresh') is None else float(cfg.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if cfg.get('nms_thresh') is None else float(cfg.get('nms_thresh')))
         self._sd_expand.setValue(float(cfg.get('expand_distance', 8) or 0))
         self._hq_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
+        idx = self._hq_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
+        self._hq_input_mode.setCurrentIndex(max(0, idx))
         self._hq_radius.setValue(float(cfg.get("max_cell_radius", 12) or 12))
         self._hq_norm_low.setValue(float(cfg.get("normalization_percentile_low", 1.0)))
         self._hq_norm_high.setValue(float(cfg.get("normalization_percentile_high", 99.5)))
@@ -1000,6 +1035,7 @@ class Step2Page(QWidget):
             'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
             'expand_distance':    self._sd_expand.value(),
             'hq_channels':        hq_channels,
+            'hq_input_mode':      self._hq_input_mode.currentData() or 'selected_channels_from_source',
             'max_cell_radius':    self._hq_radius.value(),
             'normalization_percentile_low': self._hq_norm_low.value(),
             'normalization_percentile_high': self._hq_norm_high.value(),
@@ -1015,6 +1051,9 @@ class Step2Page(QWidget):
             'flow_threshold':     self._cp_flow.value(),
             'cellprob_threshold': self._cp_prob.value(),
             'min_size':           self._cp_minsize.value(),
+            'use_gpu':            self._cp_gpu.isChecked(),
+            'tile_size':          self._cp_tile_size.value(),
+            'batch_size':         self._cp_batch_size.value(),
         })
         return normalize_segmentation_config(data)
 
@@ -1038,6 +1077,9 @@ class Step2Page(QWidget):
             self._cp_flow_label, self._cp_flow,
             self._cp_prob_label, self._cp_prob,
             self._cp_minsize_label, self._cp_minsize,
+            self._cp_gpu_label, self._cp_gpu,
+            self._cp_tile_size_label, self._cp_tile_size,
+            self._cp_batch_size_label, self._cp_batch_size,
         ):
             w.setVisible(is_cellpose)
         for w in (
@@ -1050,6 +1092,7 @@ class Step2Page(QWidget):
         self._sd_expand.setVisible(is_expansion)
         for w in (
             self._hq_channels_label, self._hq_channels,
+            self._hq_input_mode_label, self._hq_input_mode,
             self._hq_radius_label, self._hq_radius,
             self._hq_norm_low_label, self._hq_norm_low,
             self._hq_norm_high_label, self._hq_norm_high,
@@ -1194,6 +1237,8 @@ class Step2Page(QWidget):
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
         if seg_cfg.get("method") == CELLPOSE_NUCLEI_HQ:
             print(f"[Step2][HQ] loaded param_file path={param_file or '(manual)'}")
+            print(f"[Step2-HQ] hq_input_mode: {seg_cfg.get('hq_input_mode')}")
+            print(f"[Step2-HQ] requested hq_channels: {seg_cfg.get('hq_channels')}")
             print(f"[Step2][HQ] seg_config hq_channels={seg_cfg.get('hq_channels')}")
             print(
                 "[Step2][HQ] selected hq_source_zarr="

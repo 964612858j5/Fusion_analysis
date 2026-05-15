@@ -24,6 +24,41 @@ def parse_hq_channels(text):
     return [part.strip() for part in str(text or "").split(";") if part.strip()]
 
 
+def resolve_hq_channels(input_channels, available_channels):
+    """Resolve requested HQ channels against available names.
+
+    Exact stripped matches win.  If that fails, use a case-insensitive fallback
+    only when it is unambiguous.  Spelling aliases are intentionally not
+    auto-applied because marker names can be biologically meaningful.
+    """
+    channels = [str(ch).strip() for ch in (input_channels or []) if str(ch).strip()]
+    available_channels = [str(ch).strip() for ch in (available_channels or []) if str(ch).strip()]
+    exact = {ch: ch for ch in available_channels}
+    lower = {}
+    ambiguous = set()
+    for ch in available_channels:
+        key = ch.lower()
+        if key in lower and lower[key] != ch:
+            ambiguous.add(key)
+        else:
+            lower[key] = ch
+
+    resolved = []
+    missing = []
+    warnings = []
+    for ch in channels:
+        if ch in exact:
+            resolved.append(exact[ch])
+            continue
+        key = ch.lower()
+        if key in lower and key not in ambiguous:
+            resolved.append(lower[key])
+            warnings.append(f"Case-insensitive HQ channel match: requested {ch!r}, using {lower[key]!r}.")
+            continue
+        missing.append(ch)
+    return resolved, missing, warnings
+
+
 def validate_hq_channels(input_channels, available_channels, context=None):
     """Validate HQ channels and return a normalized channel list.
 
@@ -36,9 +71,9 @@ def validate_hq_channels(input_channels, available_channels, context=None):
     if not channels:
         raise ValueError("Cellpose nuclei + HQ requires at least one hq_channels entry.")
     available_channels = [str(ch).strip() for ch in (available_channels or []) if str(ch).strip()]
-    available = set(available_channels)
-    missing = [ch for ch in channels if ch not in available]
+    resolved, missing, warnings = resolve_hq_channels(channels, available_channels)
     if missing:
+        available = set(available_channels)
         lines = [
             "Missing HQ channel(s): " + "; ".join(missing),
             "Available channels: " + "; ".join(sorted(available)),
@@ -56,7 +91,10 @@ def validate_hq_channels(input_channels, available_channels, context=None):
         if context:
             lines.append(str(context).rstrip())
         raise ValueError("\n".join(lines))
-    return channels
+    if warnings:
+        for msg in warnings:
+            print(f"[Step2-HQ] warning: {msg}")
+    return resolved
 
 
 def parse_channel_weights(text, channels):

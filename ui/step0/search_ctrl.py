@@ -304,6 +304,16 @@ class SearchCtrlPanel(QWidget):
         self._hq_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
         hq_channels_row.addWidget(self._hq_channels)
 
+        hq_mode_row = QHBoxLayout()
+        self._hq_mode_label = QLabel("hq_input_mode:")
+        self._hq_mode_label.setFixedWidth(130)
+        hq_mode_row.addWidget(self._hq_mode_label)
+        self._hq_input_mode = QComboBox()
+        self._hq_input_mode.addItem("selected_channels_from_source", "selected_channels_from_source")
+        self._hq_input_mode.addItem("step1_weighted_fusion", "step1_weighted_fusion")
+        self._hq_input_mode.addItem("hybrid", "hybrid")
+        hq_mode_row.addWidget(self._hq_input_mode)
+
         hq_radius_row, self._hq_radius = _spin_row("max_cell_radius:", 1, 200, 1, 1, 12)
         hq_low_row, self._hq_norm_low = _spin_row("norm pct low:", 0, 50, 0.5, 1, 1)
         hq_high_row, self._hq_norm_high = _spin_row("norm pct high:", 50, 100, 0.5, 1, 99.5)
@@ -329,6 +339,7 @@ class SearchCtrlPanel(QWidget):
         hq_signal_row, self._hq_min_signal = _spin_row("min signal:", 0, 1, 0.01, 2, 0.08)
         self._hq_param_rows = [
             hq_channels_row,
+            hq_mode_row,
             hq_radius_row,
             hq_low_row,
             hq_high_row,
@@ -561,6 +572,7 @@ class SearchCtrlPanel(QWidget):
         if method == CELLPOSE_NUCLEI_HQ:
             hq_channels = parse_hq_channels(self._hq_channels.text())
             params["hq_channels"] = hq_channels
+            params["hq_input_mode"] = self._hq_input_mode.currentData() or "selected_channels_from_source"
             params["max_cell_radius"] = self._hq_radius.value()
             params["normalization_percentile_low"] = self._hq_norm_low.value()
             params["normalization_percentile_high"] = self._hq_norm_high.value()

@@ -20,7 +20,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QMessageBox, QProgressBar,
-    QApplication, QSplitter, QCheckBox, QDialog,
+    QApplication, QSplitter, QCheckBox, QDialog, QSizePolicy,
 )
 
 from ..config import (
@@ -42,7 +42,6 @@ from ..workers.hq_marker_segmentation import parse_hq_channels, validate_hq_chan
 from ..utils.segmentation_params import (
     save_segmentation_params,
 )
-from ..utils.mask_renderer import render_mask_overlay
 from ..utils.roi_project import (
     resolve_roi_context,
     mark_roi_step,
@@ -86,6 +85,7 @@ class MainWindow(QMainWindow):
         self._step1_patch_overview = None
         self._syncing_step1_patch_manager = False
         self._preserve_view_after_patch_load: dict = {}
+        self._step1_patch_display_origin = (0, 0)
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -292,11 +292,20 @@ class MainWindow(QMainWindow):
         sel_row.addStretch()
         pl.addLayout(sel_row)
 
+        self.patch_cache_status = QLabel(" ")
+        self.patch_cache_status.setAlignment(Qt.AlignCenter)
+        self.patch_cache_status.setWordWrap(False)
+        self.patch_cache_status.setFixedHeight(18)
+        self.patch_cache_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.patch_cache_status.setStyleSheet("color:#777;font-size:10px;padding:0px;")
+        pl.addWidget(self.patch_cache_status)
+
         status_row = QHBoxLayout()
         self.prev_status = QLabel("Please define a patch in Step 0 first")
         self.prev_status.setAlignment(Qt.AlignCenter)
         self.prev_status.setStyleSheet("color:#777;font-size:10px;")
-        self.prev_status.setWordWrap(True)
+        self.prev_status.setWordWrap(False)
+        self.prev_status.setFixedHeight(22)
         status_row.addWidget(self.prev_status, stretch=1)
 
         btn_load_step0 = QPushButton("Load Step0 ROI Result")
@@ -1008,6 +1017,9 @@ class MainWindow(QMainWindow):
             "success": bool(item.get("success", True)),
         }
         rec = self._patch_seg_results.setdefault(patch_idx, {})
+        print(f"[Step1-CellposeResult] received phase={phase}")
+        target_viewer = "phase2" if phase == 2 else "phase1" if phase == 1 else "preview"
+        print(f"[Step1-CellposeResult] dispatch to {target_viewer} viewer")
         print(f"[Step1-Phase2] result received patch_idx={patch_idx}" if phase == 2 else f"[Step1-Phase1] result received patch_idx={patch_idx}")
         print(f"[Step1-Phase2] result phase={phase}" if phase == 2 else f"[Step1-Phase1] result phase={phase}")
         print(f"[Step1-Phase2] masks shape={None if mask_arr is None else mask_arr.shape}" if phase == 2 else f"[Step1-Phase1] masks shape={None if mask_arr is None else mask_arr.shape}")
@@ -1020,12 +1032,15 @@ class MainWindow(QMainWindow):
                 print(f"[Step1-UI] phase2 empty; keeping phase1 overlay patch_id=P{patch_idx + 1}")
         else:
             rec[phase_key] = result
+        if phase == 1:
+            print(f"[Step1-Phase1Viewer] mask labels={labels}")
+        elif phase == 2:
+            print(f"[Step1-Phase2Viewer] mask labels={labels}")
         updating = patch_idx == self._preview_patch_idx
         if phase == 2:
             print(f"[Step1-Phase2] current_patch_idx={self._preview_patch_idx}")
-            print(f"[Step1-Phase2] updating overlay now={updating}")
-        if patch_idx == self._preview_patch_idx:
-            self._render_current_patch(reset_view=False)
+            print("[Step1-Phase2] updating overlay now=False")
+        print("[Step1-FusionPreview] no mask overlay rendered")
 
     def _update_patch_phase_result(self, item):
         self._handle_patch_segmentation_result(item)
@@ -1489,6 +1504,7 @@ class MainWindow(QMainWindow):
             return
         if y1 <= y0 or x1 <= x0:
             return
+        self._step1_patch_display_origin = (y0, x0)
         nuc_ch, _ = self.config.get_nucleus()
         if not nuc_ch or nuc_ch not in self.loader.ch_map:
             nuc_ch = self._choose_step1_nucleus_channel(self.loader.channel_names())
@@ -1496,6 +1512,7 @@ class MainWindow(QMainWindow):
         key = (nuc_ch, y0, y1, x0, x1, ds)
         if getattr(self, "_step1_manager_crop_key", None) == key:
             return
+        print(f"[Step1-ROI] roi_bbox={[y0, y1, x0, x1]}")
         print(f"[Step1-preview] roi_bbox={[y0, y1, x0, x1]}")
         print(f"[Step1-preview] read_region y0,y1,x0,x1={[y0, y1, x0, x1]} downsample={ds}")
         arr = self.loader.read_region(nuc_ch, y0, y1, x0, x1, downsample=ds)
@@ -1511,21 +1528,53 @@ class MainWindow(QMainWindow):
         if mgr is None:
             return
         self._load_step1_manager_roi_crop(mgr)
+        oy, ox = self._step1_patch_display_origin
+        local_patches = []
+        for patch in self._all_patches:
+            y0, y1, x0, x1 = [int(v) for v in patch]
+            local = (y0 - oy, y1 - oy, x0 - ox, x1 - ox)
+            local_patches.append(local)
+        local_rois = []
+        if self._active_roi and self._active_roi.get("bbox_fullres"):
+            ly1 = max(1, int(self._active_roi["bbox_fullres"][1]) - int(self._active_roi["bbox_fullres"][0]))
+            lx1 = max(1, int(self._active_roi["bbox_fullres"][3]) - int(self._active_roi["bbox_fullres"][2]))
+            local_rois = [{
+                "name": self._active_roi.get("name", "ROI_1"),
+                "color": self._active_roi.get("color", "#6bcb77"),
+                "polygon_display": [(0, 0), (lx1 / float(mgr.ds), 0), (lx1 / float(mgr.ds), ly1 / float(mgr.ds)), (0, ly1 / float(mgr.ds))],
+                "polygon_fullres": [(0, 0), (lx1, 0), (lx1, ly1), (0, ly1)],
+                "bbox_fullres": [0, ly1, 0, lx1],
+            }]
+        print(f"[Step1-ROI] patch_count={len(local_patches)}")
         self._syncing_step1_patch_manager = True
         try:
             mgr.set_rois_and_patches(
-                self._rois,
-                self._all_patches,
-                full_wsi_mode=not bool(self._active_roi),
+                local_rois,
+                local_patches,
+                full_wsi_mode=not bool(local_rois),
             )
             mgr.select_patch(self._selected_step1_patch_idx)
+            for i, patch in enumerate(self._all_patches):
+                y0, y1, x0, x1 = [int(v) for v in patch]
+                local = local_patches[i]
+                print(f"[Step1-ROI] patch global bbox={[y0, y1, x0, x1]}")
+                print(f"[Step1-ROI] patch local bbox={list(local)}")
+                print("[Step1-ROI] patch rect added to ROI scene")
+            for rect, _lbl in getattr(mgr, "_patch_artists", []):
+                print(f"[Step1-ROI] patch rect zValue={rect.zValue()}")
+            print(f"[Step1-ROI] scene items count={len(mgr.gview.scene().items())}")
         finally:
             self._syncing_step1_patch_manager = False
 
     def _on_step1_manager_patches_changed(self, patches):
         if self._syncing_step1_patch_manager:
             return
-        self._on_patches([tuple(int(v) for v in p) for p in patches])
+        oy, ox = self._step1_patch_display_origin
+        global_patches = []
+        for p in patches:
+            y0, y1, x0, x1 = [int(v) for v in p]
+            global_patches.append((y0 + oy, y1 + oy, x0 + ox, x1 + ox))
+        self._on_patches(global_patches)
 
     def _show_active_roi_preview(self):
         self._clear_roi_patch_items()
@@ -1637,7 +1686,11 @@ class MainWindow(QMainWindow):
             self.roi_status.setText("Load an ROI before adding a patch.")
             return
         self._sync_step1_patch_manager()
-        mgr.add_center_patch(self._active_roi)
+        local_roi = None
+        if self._active_roi and self._active_roi.get("bbox_fullres"):
+            y0, y1, x0, x1 = [int(v) for v in self._active_roi["bbox_fullres"]]
+            local_roi = {"bbox_fullres": [0, y1 - y0, 0, x1 - x0]}
+        mgr.add_center_patch(local_roi)
 
     def _delete_step1_patch(self):
         if not self._all_patches:
@@ -1740,6 +1793,7 @@ class MainWindow(QMainWindow):
             self._selected_step1_patch_idx = -1
             self.prev_img.clear()
             self.prev_status.setText("No patch selected")
+            self.patch_cache_status.setText(" ")
             self._schedule_step1_session_save()
             return
 
@@ -1776,13 +1830,13 @@ class MainWindow(QMainWindow):
         # Show cached render instantly if available; otherwise wait for preload
         if self._preview_patch_idx in self._patch_load_ready:
             self._render_current_patch(reset_view=True)
-            self.prev_status.setText(
+            self.patch_cache_status.setText(
                 f"P{self._preview_patch_idx+1} (cached) — "
                 f"preloading remaining patches in background…"
             )
         else:
             self.prev_img.clear()
-            self.prev_status.setText("Loading patch...")
+            self.patch_cache_status.setText("Loading patch...")
 
         # Debounce: start background preload 400 ms after last patch change
         self._preload_debounce.start(400)
@@ -1810,17 +1864,17 @@ class MainWindow(QMainWindow):
                 self._patch_channel_cache.pop(idx, None)
                 self._patch_load_ready.discard(idx)
                 self.prev_img.clear()
-                self.prev_status.setText("Loading patch...")
+                self.patch_cache_status.setText("Loading patch...")
                 self._start_loader_for(idx)
             else:
                 self._render_current_patch(reset_view=True)
         elif idx in self._patch_loaders:
             self.prev_img.clear()
-            self.prev_status.setText("Loading patch...")
+            self.patch_cache_status.setText("Loading patch...")
         else:
             # Not yet started — kick off a single loader for this patch immediately
             self.prev_img.clear()
-            self.prev_status.setText("Loading patch...")
+            self.patch_cache_status.setText("Loading patch...")
             self._start_loader_for(idx)
 
     # ── Background preloading ────────────────────────────────────────
@@ -1915,7 +1969,7 @@ class MainWindow(QMainWindow):
 
     def _on_patch_progress(self, patch_idx, done, total, ch):
         if patch_idx == self._preview_patch_idx:
-            self.prev_status.setText(
+            self.patch_cache_status.setText(
                 f"P{patch_idx+1} loading ({done+1}/{total}): {ch}"
             )
 
@@ -1941,7 +1995,7 @@ class MainWindow(QMainWindow):
         if patch_idx == self._preview_patch_idx:
             nuc_ok = "✓" if nuc_ch in cache else "✗(not found!)"
             cyto_n = len([c for c in cache if c != nuc_ch])
-            self.prev_status.setText(
+            self.patch_cache_status.setText(
                 f"P{patch_idx+1} ready  nucleus({nuc_ch}){nuc_ok}  "
                 f"cyto: {cyto_n} ch  {h}×{w} px (full-res crop)"
             )
@@ -1956,15 +2010,12 @@ class MainWindow(QMainWindow):
         n_ready = len(self._patch_load_ready)
         n_total = len(self._all_patches)
         if n_ready == n_total:
-            self.prev_status.setText(
-                f"All {n_total} patches cached ✓  "
-                f"Click P1–P{n_total} to switch instantly"
-            )
+            self.patch_cache_status.setText(f"All {n_total} patches cached. Click P1-P{n_total} to switch instantly.")
 
     def _on_patch_error(self, patch_idx, msg):
         self._set_patch_btn_state(patch_idx, 'error')
         if patch_idx == self._preview_patch_idx:
-            self.prev_status.setText(f"⚠ P{patch_idx+1} load error: {msg}")
+            self.patch_cache_status.setText(f"P{patch_idx+1} load error: {msg}")
         print(f"[Preview] P{patch_idx+1} error: {msg}")
 
     def _on_patch_loader_finished(self, patch_idx, thread):
@@ -2022,7 +2073,7 @@ class MainWindow(QMainWindow):
         self._patch_load_ready.clear()
         for i in range(len(self._all_patches)):
             self._set_patch_btn_state(i, 'idle')
-        self.prev_status.setText("Cache cleared — reloading all patches…")
+        self.patch_cache_status.setText("Cache cleared. Reloading patches...")
         self._preload_all_patches()
 
     # ── Rendering (pure numpy, no disk IO) ──────────────────────────
@@ -2054,47 +2105,6 @@ class MainWindow(QMainWindow):
 
     def restore_patch_view_state(self, state):
         self._restore_patch_preview_view_state(state)
-
-    def _segmentation_result_for_patch(self, patch_idx):
-        rec = self._patch_seg_results.get(int(patch_idx)) or {}
-        if rec.get("phase2", {}).get("success", False):
-            return "phase2", rec["phase2"]
-        if rec.get("phase1") is not None:
-            return "phase1", rec["phase1"]
-        if rec.get("preview") is not None:
-            return "preview", rec["preview"]
-        return "", None
-
-    def _render_patch_segmentation_overlay(self, patch_idx, rgb):
-        source, result = self._segmentation_result_for_patch(patch_idx)
-        if not result:
-            return rgb
-        mask = result.get("local_mask")
-        if mask is None:
-            return rgb
-        try:
-            mask = np.asarray(mask, dtype=np.uint32)
-            if mask.shape[:2] != rgb.shape[:2]:
-                print(
-                    f"[Step1-UI] overlay skipped patch_id=P{patch_idx + 1} "
-                    f"mask shape={mask.shape} preview shape={rgb.shape[:2]}"
-                )
-                return rgb
-            out = render_mask_overlay(
-                np.asarray(rgb, dtype=np.uint8),
-                mask,
-                alpha=0.35,
-                show_outline=True,
-                show_fusion=True,
-            )
-            print(f"[Step1-UI] render overlay source={source}")
-            print(f"[Step1-UI] overlay mask labels={int(mask.max()) if mask.size else 0}")
-            print(f"[Step1-UI] overlay updated patch_id=P{patch_idx + 1}")
-            print(f"[Step1-UI] current displayed patch_id=P{self._preview_patch_idx + 1}")
-            return out
-        except Exception:
-            print(f"[Step1-UI] overlay update failed patch_id=P{patch_idx + 1}:\n{traceback.format_exc()}")
-            return rgb
 
     def _render_current_patch(self, reset_view=False):
         """Compute and display fusion for the currently selected patch from cache.
@@ -2148,7 +2158,8 @@ class MainWindow(QMainWindow):
             return
         rgb = self.fusion.to_rgb(cyto, nuc)
         rgb_u8 = (np.clip(rgb, 0, 1) * 255).astype(np.uint8) if rgb.dtype.kind == "f" else np.asarray(rgb, dtype=np.uint8)
-        rgb_u8 = self._render_patch_segmentation_overlay(idx, rgb_u8)
+        print("[Step1-FusionPreview] update image only, masks ignored")
+        print("[Step1-FusionPreview] no mask overlay rendered")
 
         # Only reset view on first load or explicit patch switch;
         # weight/group changes preserve the current zoom & pan.

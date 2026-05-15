@@ -1641,6 +1641,7 @@ class OverviewPanel(QWidget):
                 pen=pg.mkPen(color, width=width),
                 movable=True, resizable=True,
             )
+            rect.setZValue(20)
             rect.addScaleHandle([1, 1], [0, 0])
             rect.addScaleHandle([0, 0], [1, 1])
             rect.sigRegionChangeFinished.connect(
@@ -1649,6 +1650,7 @@ class OverviewPanel(QWidget):
             rect.sigClicked.connect(lambda _roi, _ev, idx=i: self._select_patch_artist(idx))
             lbl = pg.TextItem(f"P{i+1}", color=color, anchor=(0, 1))
             lbl.setPos(cmin, rmin)
+            lbl.setZValue(21)
             self.vb.addItem(rect)
             self.vb.addItem(lbl)
             self._patch_artists.append((rect, lbl))
@@ -1780,11 +1782,14 @@ class OverviewPanel(QWidget):
             self._step1_bg_item.setZValue(-10)
         self._step1_bg_item.setImage(arr, autoLevels=False)
         ds = max(1, int(downsample or self.ds))
-        self._step1_bg_item.setRect(QRectF(x0 / ds, y0 / ds, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)))
+        self.ds = ds
+        self.full_h = max(1, int(y1 - y0))
+        self.full_w = max(1, int(x1 - x0))
+        self._step1_bg_item.setRect(QRectF(0, 0, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)))
         self.ov_h = max(1, int(np.ceil(self.full_h / float(self.ds))))
         self.ov_w = max(1, int(np.ceil(self.full_w / float(self.ds))))
         self.vb.setRange(
-            QRectF(x0 / ds, y0 / ds, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)),
+            QRectF(0, 0, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)),
             padding=0.02,
         )
 

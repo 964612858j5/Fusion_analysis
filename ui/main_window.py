@@ -1045,6 +1045,33 @@ class MainWindow(QMainWindow):
     def _update_patch_phase_result(self, item):
         self._handle_patch_segmentation_result(item)
 
+    def _cellpose_result_rgb_for_grid(self, item):
+        rgb = item.get("rgb_raw")
+        if rgb is not None:
+            return rgb
+        result_path = item.get("result_path") or ""
+        if result_path and os.path.exists(result_path):
+            try:
+                with np.load(result_path, allow_pickle=False) as data:
+                    if "rgb_raw" in data:
+                        rgb = data["rgb_raw"]
+                        print(f"[Phase2-debug] loaded rgb_raw fallback from result_path={result_path}")
+                        return rgb
+            except Exception:
+                print(f"[Phase2-debug] failed to load rgb fallback result_path={result_path}")
+        masks = item.get("masks")
+        if masks is not None:
+            print("[Phase2-debug] using mask label image fallback")
+            mask_arr = np.asarray(masks, dtype=np.uint32)
+            n = int(mask_arr.max()) if mask_arr.size else 0
+            if n > 0:
+                rng = np.random.default_rng(12345)
+                lut = rng.integers(40, 255, size=(n + 1, 3), dtype=np.uint8)
+                lut[0] = 0
+                return lut[np.clip(mask_arr, 0, n).astype(np.int32)]
+            return np.zeros((*mask_arr.shape, 3), dtype=np.uint8)
+        return None
+
     def _schedule_step1_session_save(self):
         if self._step1_restore_active:
             return
@@ -2383,6 +2410,15 @@ class MainWindow(QMainWindow):
                 break
 
             kind = item.get("type")
+            phase_dbg = item.get("phase")
+            if phase_dbg is None and isinstance(item.get("params"), dict):
+                phase_dbg = item["params"].get("_phase")
+            print(f"[Phase2-debug] queue message type={kind}")
+            print(f"[Phase2-debug] phase={phase_dbg}")
+            print(f"[Phase2-debug] patch_idx={item.get('patch_idx')}")
+            print(f"[Phase2-debug] has masks={item.get('masks') is not None}")
+            print(f"[Phase2-debug] has rgb_raw={item.get('rgb_raw') is not None}")
+            print(f"[Phase2-debug] result_path={item.get('result_path', '')}")
             if kind == "result":
                 print(f"[Step1] received result patch_idx={item.get('patch_idx')}")
                 masks = item.get("masks")
@@ -2404,8 +2440,8 @@ class MainWindow(QMainWindow):
                 self.result_grid.add_result(
                     item["patch_idx"],
                     item["params"],
-                    item["rgb_overlay"],
-                    item["rgb_raw"],
+                    item.get("rgb_overlay"),
+                    self._cellpose_result_rgb_for_grid(item),
                     item.get("masks"),
                 )
             elif kind == "progress":

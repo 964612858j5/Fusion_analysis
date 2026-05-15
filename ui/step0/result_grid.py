@@ -215,7 +215,14 @@ class ResultGridPanel(QWidget):
 
         W = self.IMG_W
 
-        fusion_rgb = np.asarray(rgb_raw, dtype=np.uint8)
+        if rgb_raw is None:
+            fusion_rgb = self._mask_label_rgb(masks)
+        else:
+            fusion_rgb = np.asarray(rgb_raw, dtype=np.uint8)
+            if fusion_rgb.ndim == 2:
+                fusion_rgb = np.stack([fusion_rgb] * 3, axis=-1)
+            if fusion_rgb.ndim != 3 or fusion_rgb.shape[2] < 3:
+                fusion_rgb = self._mask_label_rgb(masks)
         if masks is None:
             masks = np.zeros(fusion_rgb.shape[:2], dtype=np.uint32)
         masks = np.asarray(masks, dtype=np.uint32)
@@ -230,6 +237,14 @@ class ResultGridPanel(QWidget):
         lbl.setToolTip("Click to zoom (scroll to zoom in/out)")
         lbl.setProperty("result_key", key)
         lbl.setPixmap(pm)
+        if params.get("_phase") == 2:
+            print(f"[Phase2-viewer] creating result card title={self._phase_desc}")
+            print(f"[Phase2-viewer] viewer widget visible={lbl.isVisible()}")
+            print(f"[Phase2-viewer] viewer size={lbl.size().width()}x{lbl.size().height()}")
+            print(f"[Phase2-viewer] image shape={fusion_rgb.shape}")
+            print(f"[Phase2-viewer] mask shape={masks.shape}")
+            print(f"[Phase2-viewer] labels count={int(masks.max()) if masks.size else 0}")
+            print("[Phase2-viewer] set image done")
 
         # Click → open single image zoom window
         _fusion = fusion_rgb
@@ -300,7 +315,32 @@ class ResultGridPanel(QWidget):
 
     @staticmethod
     def _pkey(p):
-        return json.dumps(p, sort_keys=True)
+        p = p or {}
+        return json.dumps({
+            "method": p.get("method"),
+            "phase": p.get("_phase"),
+            "diameter": p.get("diameter"),
+            "flow_threshold": p.get("flow_threshold"),
+            "cellprob_threshold": p.get("cellprob_threshold"),
+        }, sort_keys=True)
+
+    @staticmethod
+    def _mask_label_rgb(masks):
+        if masks is None:
+            return np.zeros((64, 64, 3), dtype=np.uint8)
+        masks = np.asarray(masks, dtype=np.uint32)
+        if masks.ndim != 2:
+            return np.zeros((64, 64, 3), dtype=np.uint8)
+        if masks.size == 0:
+            return np.zeros((*masks.shape, 3), dtype=np.uint8)
+        n = int(masks.max())
+        if n <= 0:
+            return np.zeros((*masks.shape, 3), dtype=np.uint8)
+        idx = np.clip(masks, 0, n).astype(np.int32)
+        rng = np.random.default_rng(12345)
+        lut = rng.integers(40, 255, size=(n + 1, 3), dtype=np.uint8)
+        lut[0] = 0
+        return lut[idx]
 
     def _render_result_image(self, fusion_rgb, masks):
         background = self._compose_background(fusion_rgb)

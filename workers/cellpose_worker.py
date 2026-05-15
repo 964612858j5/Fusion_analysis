@@ -403,6 +403,9 @@ def run_cellpose_process(args, result_queue, stop_flag):
         group_weights = args["group_weights"]
         nuc_ch = args["nuc_ch"]
         nuc_w = args["nuc_w"]
+        output_dir = args.get("output_dir") or os.getcwd()
+        preview_result_dir = os.path.join(output_dir, "patch_preview_results")
+        os.makedirs(preview_result_dir, exist_ok=True)
 
         use_gpu = torch.cuda.is_available()
         device = torch.device("cuda" if use_gpu else "cpu")
@@ -439,8 +442,14 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
             params = normalize_segmentation_config(params)
             method = params.get("method", CELLPOSE_WHOLECELL_FUSION)
+            phase = int(params.get("_phase") or 0)
             print(f"[Worker] method={method}")
             y0, y1, x0, x1 = roi
+            patch_id = f"P{patch_idx + 1}"
+            if phase == 1:
+                print(f"[Step1-Phase1] patch_id={patch_id} bbox={[int(y0), int(y1), int(x0), int(x1)]} started")
+            elif phase == 2:
+                print(f"[Step1-Phase2] started patch_id={patch_id}")
             result_queue.put({
                 "type": "progress",
                 "done": done,
@@ -454,6 +463,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
             fused = None
             fused_f32 = None
             dapi_f32 = None
+            preview_background = "fusion" if method == CELLPOSE_WHOLECELL_FUSION else "dapi"
 
             if method == CELLPOSE_WHOLECELL_FUSION:
                 fused = fusion.fuse_fullres(
@@ -477,6 +487,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 )
 
             try:
+                success = True
                 if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
@@ -586,11 +597,50 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 mask = masks_out.astype(np.uint32)
             except Exception as e:
                 result_queue.put({"type": "error", "msg": traceback.format_exc()})
+                success = False
                 mask = np.zeros(seg_img.shape, dtype=np.uint32)
 
             rgb_ov = rgb_raw
             n_cells = int(mask.max())
             mask_payload = mask.copy()
+            result_path = ""
+            try:
+                phase_name = f"phase{phase}" if phase else "preview"
+                result_path = os.path.join(
+                    preview_result_dir,
+                    f"{patch_id}_{method}_{phase_name}.npz",
+                )
+                metadata = {
+                    "patch_id": patch_id,
+                    "patch_idx": int(patch_idx),
+                    "bbox_global": [int(y0), int(y1), int(x0), int(x1)],
+                    "bbox_fullres": [int(y0), int(y1), int(x0), int(x1)],
+                    "preview_image_shape": list(mask_payload.shape),
+                    "params_used": params,
+                    "method": method,
+                    "phase": phase_name,
+                    "labels_count": n_cells,
+                    "success": bool(success),
+                }
+                np.savez_compressed(
+                    result_path,
+                    local_mask=mask_payload,
+                    rgb_raw=rgb_raw,
+                    metadata=json.dumps(metadata, ensure_ascii=False),
+                )
+            except Exception:
+                print(f"[Worker] failed to save patch preview result:\n{traceback.format_exc()}")
+            if phase == 1:
+                print(
+                    f"[Step1-Phase1] patch_id={patch_id} "
+                    f"bbox={[int(y0), int(y1), int(x0), int(x1)]} "
+                    f"mask shape={mask_payload.shape} labels count={n_cells}"
+                )
+            elif phase == 2:
+                print(f"[Step1-Phase2] finished patch_id={patch_id}")
+                print(f"[Step1-Phase2] result path={result_path}")
+                print(f"[Step1-Phase2] mask shape={mask_payload.shape}")
+                print(f"[Step1-Phase2] labels count={n_cells}")
 
             del fused, fused_f32, dapi_f32, mask
             gc.collect()
@@ -607,6 +657,13 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 "rgb_raw": rgb_raw,
                 "masks": mask_payload,
                 "preview_background": preview_bg,
+                "patch_id": patch_id,
+                "bbox_global": [int(y0), int(y1), int(x0), int(x1)],
+                "bbox_fullres": [int(y0), int(y1), int(x0), int(x1)],
+                "preview_image_shape": list(mask_payload.shape),
+                "result_path": result_path,
+                "success": bool(success),
+                "phase": phase,
             })
             print(f"[Worker] emitting result patch_idx={patch_idx}")
             result_queue.put({

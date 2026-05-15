@@ -1707,6 +1707,112 @@ class OverviewPanel(QWidget):
     def get_rois(self):
         return list(self._rois)
 
+    def set_rois_and_patches(self, rois, patches, full_wsi_mode=False):
+        """Replace ROI/patch model and redraw using the Step0 patch machinery."""
+        self.full_wsi_mode = bool(full_wsi_mode)
+        for arts in self._roi_artists:
+            for a in arts:
+                self.vb.removeItem(a)
+        self._roi_artists.clear()
+
+        self._rois = []
+        for idx, src in enumerate(rois or []):
+            roi = dict(src or {})
+            roi["patch_indices"] = []
+            roi.setdefault("color", ROI_COLORS[idx % len(ROI_COLORS)])
+            self._rois.append(roi)
+
+            pts = roi.get("polygon_display") or []
+            if not pts and roi.get("polygon_fullres"):
+                pts = [
+                    (int(x) / float(self.ds), int(y) / float(self.ds))
+                    for x, y in roi.get("polygon_fullres") or []
+                ]
+                roi["polygon_display"] = pts
+            if pts:
+                pts_c = list(pts) + [pts[0]]
+                color = roi.get("color", ROI_COLORS[idx % len(ROI_COLORS)])
+                poly_item = pg.PlotDataItem(
+                    [p[0] for p in pts_c], [p[1] for p in pts_c],
+                    pen=pg.mkPen(color, width=2),
+                    fillLevel=0,
+                    brush=pg.mkBrush(color + "33"),
+                )
+                cx = np.mean([p[0] for p in pts])
+                cy = np.mean([p[1] for p in pts])
+                lbl_item = pg.TextItem(
+                    roi.get("name", f"ROI_{idx + 1}"),
+                    color=color,
+                    anchor=(0.5, 0.5),
+                )
+                lbl_item.setPos(cx, cy)
+                self.vb.addItem(poly_item)
+                self.vb.addItem(lbl_item)
+                self._roi_artists.append([poly_item, lbl_item])
+
+        self._patches = []
+        for patch in patches or []:
+            y0, y1, x0, x1 = [int(v) for v in patch]
+            cy = ((y0 + y1) / 2.0) / float(self.ds)
+            cx = ((x0 + x1) / 2.0) / float(self.ds)
+            roi_idx = None
+            if self._rois and not self.full_wsi_mode:
+                roi_idx = self._find_roi_for_patch(cy, cx)
+            self._patches.append({
+                "roi_idx": roi_idx,
+                "coords": (y0, y1, x0, x1),
+            })
+        for i, patch in enumerate(self._patches):
+            ri = patch.get("roi_idx")
+            if ri is not None and 0 <= ri < len(self._rois):
+                self._rois[ri].setdefault("patch_indices", []).append(i)
+
+        if self._selected_patch_idx >= len(self._patches):
+            self._selected_patch_idx = len(self._patches) - 1
+        self._rebuild_patch_artists()
+        self._update_info()
+
+    def add_center_patch(self, roi=None, size_px=512):
+        """Add a centered patch through the same Step0 add/rebuild path."""
+        if roi and roi.get("bbox_fullres"):
+            y0, y1, x0, x1 = [int(v) for v in roi["bbox_fullres"]]
+        else:
+            y0, y1, x0, x1 = 0, int(self.full_h), 0, int(self.full_w)
+        if y1 <= y0 or x1 <= x0:
+            return
+        size = int(min(size_px, max(64, y1 - y0), max(64, x1 - x0)))
+        cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+        fy0 = max(y0, cy - size // 2)
+        fy1 = min(y1, fy0 + size)
+        fx0 = max(x0, cx - size // 2)
+        fx1 = min(x1, fx0 + size)
+        fy0 = max(y0, fy1 - size)
+        fx0 = max(x0, fx1 - size)
+        roi_idx = None
+        if self._rois and not getattr(self, "full_wsi_mode", False):
+            roi_idx = self._find_roi_for_patch(
+                ((fy0 + fy1) / 2.0) / float(self.ds),
+                ((fx0 + fx1) / 2.0) / float(self.ds),
+            )
+        self._add_patch(
+            fy0, fy1, fx0, fx1,
+            fy0 // self.ds, max(1, fy1 // self.ds),
+            fx0 // self.ds, max(1, fx1 // self.ds),
+            roi_idx,
+        )
+        self._selected_patch_idx = len(self._patches) - 1
+        self._rebuild_patch_artists()
+
+    def delete_selected_or_last_patch(self):
+        idx = self._selected_patch_idx
+        if idx < 0:
+            idx = len(self._patches) - 1
+        self._remove_patch(idx)
+
+    def select_patch(self, patch_idx):
+        if 0 <= patch_idx < len(self._patches):
+            self._select_patch_artist(patch_idx)
+
     # ── Event filter ─────────────────────────────────────────────────
 
     def eventFilter(self, obj, event):

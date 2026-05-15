@@ -25,6 +25,8 @@ class ResultGridPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setMinimumSize(280, 260)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._params       = []
         self._n_patches    = 0
         self._cell_widgets = {}   # (row, col) → QLabel widget
@@ -38,6 +40,12 @@ class ResultGridPanel(QWidget):
         self._show_fusion  = True
         self._show_dapi    = True
         self._setup_ui()
+
+    def sizeHint(self):
+        return QtCore.QSize(430, 360)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(280, 260)
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)

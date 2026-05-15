@@ -64,7 +64,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CODEX Pipeline  |  Fusion + Segmentation")
-        self.resize(1800, 960)
+        self.resize(1400, 900)
+        self.setMinimumSize(900, 650)
 
         self.loader = None   # loaded on demand when user clicks "Load"
         self.fusion = FusionEngine()
@@ -226,6 +227,7 @@ class MainWindow(QMainWindow):
         self._panel_csv_edit = self._step0._panel_csv_edit
 
         page1_w = QWidget()
+        page1_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root = QVBoxLayout(page1_w)
         root.setContentsMargins(6, 4, 6, 6)
         root.setSpacing(4)
@@ -234,16 +236,23 @@ class MainWindow(QMainWindow):
         root.addWidget(title)
 
         main_split = QSplitter(Qt.Horizontal)
+        main_split.setChildrenCollapsible(False)
+        self._step1_main_split = main_split
 
         # Left: read-only ROI/patch overview for Step1. ROI and patches come
         # from Step0; drawing/editing remains owned by Step0.
         left = QWidget()
+        left.setMinimumWidth(240)
+        left.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._step1_left_panel = left
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(4)
         ll.addWidget(self._make_label("① ROI / Patch Overview", bold=True))
         self.roi_gv = pg.GraphicsLayoutWidget()
         self.roi_gv.setBackground("#111")
+        self.roi_gv.setMinimumSize(240, 300)
+        self.roi_gv.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.roi_vb = self.roi_gv.addViewBox()
         self.roi_vb.setAspectLocked(True)
         self.roi_vb.invertY(True)
@@ -252,6 +261,8 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.roi_gv, stretch=1)
         self.roi_gv.setVisible(False)
         self._step1_patch_holder = QWidget()
+        self._step1_patch_holder.setMinimumSize(240, 300)
+        self._step1_patch_holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._step1_patch_holder_lay = QVBoxLayout(self._step1_patch_holder)
         self._step1_patch_holder_lay.setContentsMargins(0, 0, 0, 0)
         self._step1_patch_holder_lay.setSpacing(0)
@@ -275,7 +286,11 @@ class MainWindow(QMainWindow):
         main_split.addWidget(left)
 
         mid = QSplitter(Qt.Vertical)
+        mid.setChildrenCollapsible(False)
+        self._step1_mid_split = mid
         pw = QWidget()
+        pw.setMinimumSize(300, 300)
+        pw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.addWidget(self._make_label(
@@ -352,6 +367,8 @@ class MainWindow(QMainWindow):
         pl.addLayout(status_row)
         self.prev_gv = pg.GraphicsLayoutWidget()
         self.prev_gv.setBackground("#111")
+        self.prev_gv.setMinimumSize(300, 280)
+        self.prev_gv.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.prev_vb = self.prev_gv.addViewBox()
         self.prev_vb.setAspectLocked(True)
         self.prev_vb.invertY(True)
@@ -362,6 +379,8 @@ class MainWindow(QMainWindow):
 
         # Fusion config
         self.config = ConfigPanel([])
+        self.config.setMinimumHeight(220)
+        self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
         mid.addWidget(self.config)
 
@@ -370,7 +389,10 @@ class MainWindow(QMainWindow):
         main_split.addWidget(mid)
 
         right = QSplitter(Qt.Vertical)
+        right.setChildrenCollapsible(False)
+        self._step1_right_split = right
         self.search = SearchCtrlPanel()
+        self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.search.run_p1.connect(self._run_p1)
         self.search.run_p2.connect(self._run_p2)
         self.search.run_preview.connect(self._run_direct_patch_preview)
@@ -380,6 +402,7 @@ class MainWindow(QMainWindow):
         right.addWidget(self.search)
 
         self.result_grid = ResultGridPanel()
+        self.result_grid.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.result_grid.param_selected.connect(self._on_param_sel)
         right.addWidget(self.result_grid)
 
@@ -390,6 +413,7 @@ class MainWindow(QMainWindow):
         main_split.setStretchFactor(0, 2)
         main_split.setStretchFactor(1, 3)
         main_split.setStretchFactor(2, 4)
+        main_split.setSizes([280, 430, 520])
         root.addWidget(main_split, stretch=1)
 
         bot = QHBoxLayout()
@@ -443,7 +467,16 @@ class MainWindow(QMainWindow):
 
         self._fusion_bar_widget.setVisible(False)
         root.addWidget(self._fusion_bar_widget)
-        self._stack.addWidget(page1_w)
+        page1_scroll = QtWidgets.QScrollArea()
+        page1_scroll.setWidgetResizable(True)
+        page1_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        page1_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page1_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page1_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page1_scroll.setWidget(page1_w)
+        self._step1_page_widget = page1_w
+        self._step1_scroll = page1_scroll
+        self._stack.addWidget(page1_scroll)
 
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
@@ -468,6 +501,33 @@ class MainWindow(QMainWindow):
             self._stop_all_loaders()
         self._stack.setCurrentIndex(0)
         self._set_step_active(0)
+
+    def _layout_desc(self, widget):
+        if widget is None:
+            return "none"
+        sh = widget.sizeHint()
+        mn = widget.minimumSize()
+        mx = widget.maximumSize()
+        sz = widget.size()
+        return (
+            f"size={sz.width()}x{sz.height()} "
+            f"sizeHint={sh.width()}x{sh.height()} "
+            f"min={mn.width()}x{mn.height()} "
+            f"max={mx.width()}x{mx.height()}"
+        )
+
+    def _log_step1_layout(self, where):
+        try:
+            print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
+            print(f"[Layout] {where} main window minimumSize={self.minimumSize().width()}x{self.minimumSize().height()}")
+            print(f"[Layout] {where} Step1 sizeHint={self._layout_desc(getattr(self, '_step1_page_widget', None))}")
+            print(f"[Layout] {where} ROI Overview sizeHint/min/max={self._layout_desc(getattr(self, '_step1_patch_holder', None))}")
+            print(f"[Layout] {where} Fusion Preview sizeHint/min/max={self._layout_desc(getattr(self, 'prev_gv', None))}")
+            print(f"[Layout] {where} Phase1 panel sizeHint/min/max={self._layout_desc(getattr(self, 'search', None))}")
+            print(f"[Layout] {where} Phase2 panel sizeHint/min/max={self._layout_desc(getattr(self, 'result_grid', None))}")
+            print("[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code")
+        except Exception as e:
+            print(f"[Layout] log failed: {e}")
 
     def _on_step0_complete(self, payload):
         global OME_TIFF_FILE, OUTPUT_DIR
@@ -513,6 +573,7 @@ class MainWindow(QMainWindow):
         self._step4._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
+        self._log_step1_layout("after Step0 complete enter Step1")
 
     def _load_step0_roi_result(self, _checked=False, auto=False):
         global OME_TIFF_FILE, OUTPUT_DIR
@@ -727,6 +788,7 @@ class MainWindow(QMainWindow):
         print("[Step1] preloading patches...")
         if not auto:
             self.prev_status.setText("Step0 ROI result loaded.")
+        self._log_step1_layout("after load ROI")
         self._schedule_step1_session_save()
 
     @staticmethod
@@ -1334,6 +1396,7 @@ class MainWindow(QMainWindow):
                 )
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
+        self._log_step1_layout("enter Step1")
 
     def _go_to_step3(self, output_dir=None):
         if self._current_step == 1:

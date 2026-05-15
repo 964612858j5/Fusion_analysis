@@ -79,9 +79,17 @@ class SearchCtrlPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setMinimumSize(280, 260)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         self._p2_diam     = None
         self._p2_diam_set = False   # True after Phase 1 completes
         self._setup_ui()
+
+    def sizeHint(self):
+        return QtCore.QSize(420, 320)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(280, 260)
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)

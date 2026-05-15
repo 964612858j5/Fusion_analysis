@@ -1043,6 +1043,8 @@ class OverviewPanel(QWidget):
 
     def __init__(self, loader, nuc_ch: str, lazy: bool = False):
         super().__init__()
+        self.setMinimumSize(260, 300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.loader  = loader
         self.nuc_ch  = nuc_ch
         self.ds      = OVERVIEW_DOWNSAMPLE
@@ -1073,6 +1075,12 @@ class OverviewPanel(QWidget):
         if not lazy:
             self._load_overview()
 
+    def sizeHint(self):
+        return QtCore.QSize(360, 380)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(260, 300)
+
     # ── UI construction ───────────────────────────────────────────────
 
     def _setup_ui(self):
@@ -1092,6 +1100,8 @@ class OverviewPanel(QWidget):
         # ── pyqtgraph canvas ──────────────────────────────────────────
         self.gview = pg.GraphicsLayoutWidget()
         self.gview.setBackground("#111")
+        self.gview.setMinimumSize(240, 260)
+        self.gview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.vb = self.gview.addViewBox(row=0, col=0)
         self.vb.setAspectLocked(True)
         self.vb.invertY(True)

@@ -25,7 +25,7 @@ class ResultGridPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(280, 260)
+        self.setMinimumSize(280, 120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._params       = []
         self._n_patches    = 0
@@ -42,10 +42,10 @@ class ResultGridPanel(QWidget):
         self._setup_ui()
 
     def sizeHint(self):
-        return QtCore.QSize(430, 360)
+        return QtCore.QSize(430, 220)
 
     def minimumSizeHint(self):
-        return QtCore.QSize(280, 260)
+        return QtCore.QSize(280, 120)
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -100,7 +100,10 @@ class ResultGridPanel(QWidget):
         lay.addLayout(hdr)
 
         scroll = QScrollArea()
+        self._grid_scroll = scroll
         scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(80)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll.setStyleSheet("QScrollArea{border:none;}")
         self.grid_w  = QWidget()
         self.grid_lay = QtWidgets.QGridLayout(self.grid_w)

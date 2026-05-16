@@ -80,17 +80,17 @@ class SearchCtrlPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(280, 260)
+        self.setMinimumSize(300, 390)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         self._p2_diam     = None
         self._p2_diam_set = False   # True after Phase 1 completes
         self._setup_ui()
 
     def sizeHint(self):
-        return QtCore.QSize(420, 320)
+        return QtCore.QSize(420, 460)
 
     def minimumSizeHint(self):
-        return QtCore.QSize(280, 260)
+        return QtCore.QSize(300, 390)
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -98,6 +98,8 @@ class SearchCtrlPanel(QWidget):
         lay.setSpacing(5)
 
         method_box = QGroupBox("Segmentation Method")
+        method_box.setMinimumHeight(86)
+        method_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         method_box.setStyleSheet(
             "QGroupBox{border:1px solid #666;border-radius:4px;"
             "font-weight:bold;color:#ccc;font-size:11px;}"
@@ -110,7 +112,8 @@ class SearchCtrlPanel(QWidget):
         method_label.setFixedWidth(54)
         method_row.addWidget(method_label)
         self._method_combo = QComboBox()
-        self._method_combo.setMinimumWidth(260)
+        self._method_combo.setMinimumWidth(280)
+        self._method_combo.setMinimumHeight(28)
         self._method_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for method in available_segmentation_methods():
             cfg = get_segmentation_method_config(method)
@@ -137,12 +140,14 @@ class SearchCtrlPanel(QWidget):
         self._method_hint = QLabel("")
         self._method_hint.setStyleSheet("color:#999;font-size:10px;")
         self._method_hint.setWordWrap(True)
+        self._method_hint.setMaximumHeight(36)
         method_lay.addWidget(self._method_hint)
         self._dapi_only_note = QLabel(
             "Segmentation uses DAPI only. Fusion panel remains available for preview/QC."
         )
         self._dapi_only_note.setStyleSheet("color:#8fb8ff;font-size:10px;")
         self._dapi_only_note.setWordWrap(True)
+        self._dapi_only_note.setMaximumHeight(36)
         method_lay.addWidget(self._dapi_only_note)
         lay.addWidget(method_box)
         self._method_box = method_box
@@ -266,6 +271,7 @@ class SearchCtrlPanel(QWidget):
         # ── Manual entry ───────────────────────────────────────────────
         man_box = QGroupBox("Manual / direct method parameters")
         self._manual_box = man_box
+        man_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         man_box.setStyleSheet(
             "QGroupBox{border:1px solid #888;border-radius:4px;"
             "font-weight:bold;color:#aaa;font-size:11px;}"
@@ -276,11 +282,14 @@ class SearchCtrlPanel(QWidget):
             r = QHBoxLayout()
             l = QLabel(label)
             l.setFixedWidth(130)
+            l.setMinimumHeight(24)
             r.addWidget(l)
             sp = QDoubleSpinBox()
             sp.setRange(lo, hi); sp.setSingleStep(step)
             sp.setDecimals(dec); sp.setValue(val)
             sp.setStyleSheet("font-size:11px;")
+            sp.setMinimumHeight(24)
+            sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             r.addWidget(sp)
             return r, sp
 
@@ -295,9 +304,11 @@ class SearchCtrlPanel(QWidget):
         sd_model_row = QHBoxLayout()
         sd_model_lbl = QLabel("model_name:")
         sd_model_lbl.setFixedWidth(130)
+        sd_model_lbl.setMinimumHeight(24)
         sd_model_row.addWidget(sd_model_lbl)
         self._sd_model = QtWidgets.QLineEdit("2D_versatile_fluo")
         self._sd_model.setStyleSheet("font-size:11px;")
+        self._sd_model.setMinimumHeight(24)
         sd_model_row.addWidget(self._sd_model)
         ml.addLayout(sd_model_row)
 
@@ -313,18 +324,22 @@ class SearchCtrlPanel(QWidget):
         hq_channels_row = QHBoxLayout()
         self._hq_channels_label = QLabel("hq_channels:")
         self._hq_channels_label.setFixedWidth(130)
+        self._hq_channels_label.setMinimumHeight(24)
         hq_channels_row.addWidget(self._hq_channels_label)
         self._hq_channels = QtWidgets.QLineEdit()
         self._hq_channels.setPlaceholderText("PanCK;CD45;CD68")
         self._hq_channels.setStyleSheet("font-size:11px;")
+        self._hq_channels.setMinimumHeight(24)
         self._hq_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
         hq_channels_row.addWidget(self._hq_channels)
 
         hq_mode_row = QHBoxLayout()
         self._hq_mode_label = QLabel("hq_input_mode:")
         self._hq_mode_label.setFixedWidth(130)
+        self._hq_mode_label.setMinimumHeight(24)
         hq_mode_row.addWidget(self._hq_mode_label)
         self._hq_input_mode = QComboBox()
+        self._hq_input_mode.setMinimumHeight(24)
         self._hq_input_mode.addItem("selected_channels_from_source", "selected_channels_from_source")
         self._hq_input_mode.addItem("step1_weighted_fusion", "step1_weighted_fusion")
         self._hq_input_mode.addItem("hybrid", "hybrid")
@@ -337,8 +352,10 @@ class SearchCtrlPanel(QWidget):
         hq_consensus_row = QHBoxLayout()
         self._hq_consensus_label = QLabel("consensus_mode:")
         self._hq_consensus_label.setFixedWidth(130)
+        self._hq_consensus_label.setMinimumHeight(24)
         hq_consensus_row.addWidget(self._hq_consensus_label)
         self._hq_consensus = QComboBox()
+        self._hq_consensus.setMinimumHeight(24)
         for mode in CONSENSUS_MODES:
             self._hq_consensus.addItem(mode, mode)
         hq_consensus_row.addWidget(self._hq_consensus)
@@ -346,10 +363,12 @@ class SearchCtrlPanel(QWidget):
         hq_weights_row = QHBoxLayout()
         self._hq_weights_label = QLabel("channel_weights:")
         self._hq_weights_label.setFixedWidth(130)
+        self._hq_weights_label.setMinimumHeight(24)
         hq_weights_row.addWidget(self._hq_weights_label)
         self._hq_weights = QtWidgets.QLineEdit()
         self._hq_weights.setPlaceholderText("optional: PanCK=1;CD45=0.8;CD68=1")
         self._hq_weights.setStyleSheet("font-size:11px;")
+        self._hq_weights.setMinimumHeight(24)
         hq_weights_row.addWidget(self._hq_weights)
 
         hq_signal_row, self._hq_min_signal = _spin_row("min signal:", 0, 1, 0.01, 2, 0.08)
@@ -370,10 +389,12 @@ class SearchCtrlPanel(QWidget):
             r = QHBoxLayout()
             l = QLabel(label)
             l.setFixedWidth(130)
+            l.setMinimumHeight(24)
             r.addWidget(l)
             edit = QtWidgets.QLineEdit(text)
             edit.setPlaceholderText(placeholder)
             edit.setStyleSheet("font-size:11px;")
+            edit.setMinimumHeight(24)
             r.addWidget(edit)
             return r, edit
 
@@ -381,8 +402,10 @@ class SearchCtrlPanel(QWidget):
             r = QHBoxLayout()
             l = QLabel(label)
             l.setFixedWidth(130)
+            l.setMinimumHeight(24)
             r.addWidget(l)
             combo = QComboBox()
+            combo.setMinimumHeight(24)
             for value in values:
                 combo.addItem(value, value)
             r.addWidget(combo)
@@ -422,6 +445,7 @@ class SearchCtrlPanel(QWidget):
         hq2_irregular_row = QHBoxLayout()
         hq2_irregular_label = QLabel("irregular shape:")
         hq2_irregular_label.setFixedWidth(130)
+        hq2_irregular_label.setMinimumHeight(24)
         hq2_irregular_row.addWidget(hq2_irregular_label)
         self._hq2_irregular = QtWidgets.QCheckBox("allow")
         self._hq2_irregular.setChecked(True)
@@ -469,7 +493,17 @@ class SearchCtrlPanel(QWidget):
         )
         self.btn_patch_preview.clicked.connect(self._emit_patch_preview)
         ml.addWidget(self.btn_patch_preview)
-        lay.addWidget(man_box)
+        self._manual_params_scroll = QtWidgets.QScrollArea()
+        self._manual_params_scroll.setWidgetResizable(True)
+        self._manual_params_scroll.setFrameShape(QFrame.NoFrame)
+        self._manual_params_scroll.setMinimumHeight(180)
+        self._manual_params_scroll.setMaximumHeight(300)
+        self._manual_params_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred,
+        )
+        self._manual_params_scroll.setWidget(man_box)
+        lay.addWidget(self._manual_params_scroll)
         self._on_method_changed()
 
         # ── Progress ──────────────────────────────────────────────────
@@ -497,7 +531,6 @@ class SearchCtrlPanel(QWidget):
         )
         self.btn_stop.clicked.connect(self.stop.emit)
         lay.addWidget(self.btn_stop)
-        lay.addStretch()
 
     # ── Helpers ───────────────────────────────────────────────────────
 
@@ -559,6 +592,12 @@ class SearchCtrlPanel(QWidget):
 
     def _build_hq2_params_panel(self):
         self.hq2_params_panel = QGroupBox("Cellpose nuclei + HQ2 parameters")
+        self.hq2_params_panel.setMinimumHeight(210)
+        self.hq2_params_panel.setMaximumHeight(350)
+        self.hq2_params_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred,
+        )
         self.hq2_params_panel.setStyleSheet(
             "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
             "font-weight:bold;color:#7dd3fc;font-size:11px;}"
@@ -568,13 +607,20 @@ class SearchCtrlPanel(QWidget):
         outer.setSpacing(5)
 
         scroll = QtWidgets.QScrollArea()
+        self._hq2_params_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setMaximumHeight(520)
+        scroll.setMinimumHeight(180)
+        scroll.setMaximumHeight(320)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred,
+        )
         content = QWidget()
+        content.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         form = QVBoxLayout(content)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(5)
+        form.setSpacing(4)
 
         def spin(lo, hi, step, dec, val):
             w = QDoubleSpinBox()
@@ -583,10 +629,14 @@ class SearchCtrlPanel(QWidget):
             w.setDecimals(dec)
             w.setValue(val)
             w.setStyleSheet("font-size:11px;")
+            w.setMinimumHeight(24)
+            w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             return w
 
         def section(title):
             box = QGroupBox(title)
+            box.setMinimumHeight(24)
+            box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
             box.setStyleSheet(
                 "QGroupBox{border:1px solid #444;border-radius:3px;"
                 "margin-top:5px;color:#ccc;font-size:10px;font-weight:bold;}"
@@ -594,20 +644,33 @@ class SearchCtrlPanel(QWidget):
             grid = QtWidgets.QGridLayout(box)
             grid.setContentsMargins(6, 8, 6, 5)
             grid.setHorizontalSpacing(6)
-            grid.setVerticalSpacing(3)
+            grid.setVerticalSpacing(2)
             form.addWidget(box)
-            return grid
+            return box, grid
 
         def add_row(grid, row, label, widget):
             lbl = QLabel(label)
             lbl.setMinimumWidth(132)
+            lbl.setMinimumHeight(24)
             lbl.setStyleSheet("font-size:10px;color:#bbb;")
+            widget.setMinimumHeight(24)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             grid.addWidget(lbl, row, 0)
             grid.addWidget(widget, row, 1)
             return widget
 
-        g = section("Cellpose nuclei parameters")
+        def collapse_section(box, collapsed=True):
+            for child in box.findChildren(QWidget):
+                child.setVisible(not collapsed)
+            box.setMaximumHeight(24 if collapsed else 16777215)
+
+        def make_collapsible(box, collapsed=True):
+            box.setCheckable(True)
+            box.toggled.connect(lambda checked, b=box: collapse_section(b, collapsed=not checked))
+            box.setChecked(not collapsed)
+            collapse_section(box, collapsed=collapsed)
+
+        _, g = section("Cellpose nuclei parameters")
         self._hq2_model_label = QLabel("cpsam nuclei")
         self._hq2_model_label.setStyleSheet("font-size:11px;color:#ddd;")
         add_row(g, 0, "model_type:", self._hq2_model_label)
@@ -621,12 +684,14 @@ class SearchCtrlPanel(QWidget):
         self._hq2_cp_tile = add_row(g, 5, "tile_size:", spin(128, 4096, 128, 0, 1024))
         self._hq2_cp_batch = add_row(g, 6, "batch_size:", spin(1, 128, 1, 0, 8))
 
-        g = section("HQ2 basic parameters")
+        _, g = section("HQ2 basic parameters")
         self._hq2_channels = QtWidgets.QLineEdit()
+        self._hq2_channels.setMinimumHeight(24)
         self._hq2_channels.setPlaceholderText("CD68;CD206;CD45")
         self._hq2_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
         add_row(g, 0, "hq_channels:", self._hq2_channels)
         self._hq2_input_mode = QComboBox()
+        self._hq2_input_mode.setMinimumHeight(24)
         for value in ("selected_channels_from_source", "step1_weighted_fusion", "hybrid"):
             self._hq2_input_mode.addItem(value, value)
         add_row(g, 1, "hq_input_mode:", self._hq2_input_mode)
@@ -635,10 +700,11 @@ class SearchCtrlPanel(QWidget):
         self._hq2_norm_high = add_row(g, 4, "norm pct high:", spin(50, 100, 0.5, 1, 99.5))
         self._hq2_min_signal = add_row(g, 5, "min_signal_threshold:", spin(0, 1, 0.01, 2, 0.08))
 
-        g = section("ImageJ-style proposal")
+        imagej_box, g = section("ImageJ-style proposal")
         self._hq2_imagej_blur = add_row(g, 0, "blur_sigma:", spin(0, 10, 0.1, 1, 1.0))
         self._hq2_bg_radius = add_row(g, 1, "background_radius:", spin(0, 300, 1, 0, 20))
         self._hq2_threshold_method = QComboBox()
+        self._hq2_threshold_method.setMinimumHeight(24)
         for value in ("adaptive", "otsu", "percentile"):
             self._hq2_threshold_method.addItem(value, value)
         add_row(g, 2, "threshold_method:", self._hq2_threshold_method)
@@ -647,13 +713,15 @@ class SearchCtrlPanel(QWidget):
         self._hq2_closing = add_row(g, 5, "closing_radius:", spin(0, 50, 1, 0, 2))
         self._hq2_opening = add_row(g, 6, "opening_radius:", spin(0, 50, 1, 0, 1))
 
-        g = section("Continuous signal expansion")
+        expansion_box, g = section("Continuous signal expansion")
         self._hq2_core_mode = QComboBox()
+        self._hq2_core_mode.setMinimumHeight(24)
         for value in ("weighted_support", "intersection", "majority_support"):
             self._hq2_core_mode.addItem(value, value)
         add_row(g, 0, "core_mode:", self._hq2_core_mode)
         self._hq2_min_core = add_row(g, 1, "min_core_area:", spin(0, 100000, 1, 0, 8))
         self._hq2_signal_mode = QComboBox()
+        self._hq2_signal_mode.setMinimumHeight(24)
         for value in ("per_cell_best_channel", "max", "weighted_max"):
             self._hq2_signal_mode.addItem(value, value)
         add_row(g, 2, "signal_map_mode:", self._hq2_signal_mode)
@@ -663,15 +731,19 @@ class SearchCtrlPanel(QWidget):
         self._hq2_distance_weight = add_row(g, 6, "distance_penalty_weight:", spin(0, 10, 0.01, 2, 0.02))
         self._hq2_neighbor_weight = add_row(g, 7, "neighbor_nucleus_penalty:", spin(0, 10, 0.05, 2, 0.15))
         self._hq2_irregular = QCheckBox("allow irregular shape")
+        self._hq2_irregular.setMinimumHeight(24)
         self._hq2_irregular.setChecked(True)
         add_row(g, 8, "allow_irregular_shape:", self._hq2_irregular)
 
-        g = section("Macrophage refinement")
+        macro_box, g = section("Macrophage refinement")
         self._hq2_macrophage_channels = QtWidgets.QLineEdit("CD68;CD206")
+        self._hq2_macrophage_channels.setMinimumHeight(24)
         self._hq2_macrophage_channels.setPlaceholderText("CD68;CD206")
         add_row(g, 0, "macrophage_channels:", self._hq2_macrophage_channels)
         self._hq2_macrophage_radius = add_row(g, 1, "macrophage_max_radius:", spin(0, 500, 1, 1, 35))
         self._hq2_macrophage_signal = add_row(g, 2, "macrophage_min_signal:", spin(0, 1, 0.01, 2, 0.08))
+        for optional_box in (imagej_box, expansion_box, macro_box):
+            make_collapsible(optional_box, collapsed=True)
 
         scroll.setWidget(content)
         outer.addWidget(scroll)
@@ -974,8 +1046,12 @@ class SearchCtrlPanel(QWidget):
                     w.setVisible(False)
         if is_hq2:
             self._show_hq2_params_panel()
+            self._manual_params_scroll.setMinimumHeight(96)
+            self._manual_params_scroll.setMaximumHeight(150)
         else:
             self._hide_hq2_params_panel()
+            self._manual_params_scroll.setMinimumHeight(180)
+            self._manual_params_scroll.setMaximumHeight(300)
         self._expand_dist.setEnabled(is_expansion)
         self._expand_dist.setVisible(False)
         self._expand_dist_label.setVisible(False)

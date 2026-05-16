@@ -390,9 +390,10 @@ class MainWindow(QMainWindow):
         main_split.addWidget(mid)
 
         right = QSplitter(Qt.Vertical)
-        right.setChildrenCollapsible(False)
+        right.setChildrenCollapsible(True)
         self._step1_right_split = right
         self.search = SearchCtrlPanel()
+        self.search.setMinimumHeight(390)
         self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.search.run_p1.connect(self._run_p1)
         self.search.run_p2.connect(self._run_p2)
@@ -403,12 +404,16 @@ class MainWindow(QMainWindow):
         right.addWidget(self.search)
 
         self.result_grid = ResultGridPanel()
+        self.result_grid.setMinimumHeight(120)
         self.result_grid.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.result_grid.param_selected.connect(self._on_param_sel)
         right.addWidget(self.result_grid)
 
+        right.setCollapsible(0, False)
+        right.setCollapsible(1, True)
         right.setStretchFactor(0, 0)
         right.setStretchFactor(1, 1)
+        right.setSizes([430, 200])
         main_split.addWidget(right)
 
         main_split.setStretchFactor(0, 2)
@@ -517,6 +522,15 @@ class MainWindow(QMainWindow):
             f"max={mx.width()}x{mx.height()}"
         )
 
+    def _layout_height_desc(self, widget):
+        if widget is None:
+            return "none"
+        return (
+            f"height={widget.height()} "
+            f"min={widget.minimumHeight()} "
+            f"sizeHint={widget.sizeHint().height()}"
+        )
+
     def _log_step1_layout(self, where):
         try:
             print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
@@ -527,6 +541,14 @@ class MainWindow(QMainWindow):
             print(f"[Layout] {where} Phase1 panel sizeHint/min/max={self._layout_desc(getattr(self, 'search', None))}")
             print(f"[Layout] {where} Phase2 panel sizeHint/min/max={self._layout_desc(getattr(self, 'result_grid', None))}")
             print("[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code")
+            search = getattr(self, "search", None)
+            print(f"[Layout-Step1] {where} right panel size={self._layout_desc(getattr(self, '_step1_right_split', None))}")
+            print(f"[Layout-Step1] {where} method group height/min/sizeHint={self._layout_height_desc(getattr(search, '_method_box', None))}")
+            print(f"[Layout-Step1] {where} params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_manual_params_scroll', None))}")
+            print(f"[Layout-Step1] {where} HQ2 params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_hq2_params_scroll', None))}")
+            print(f"[Layout-Step1] {where} patch results height/min/sizeHint={self._layout_height_desc(getattr(self, 'result_grid', None))}")
+            splitter = getattr(self, '_step1_right_split', None)
+            print(f"[Layout-Step1] {where} splitter sizes={splitter.sizes() if splitter is not None else 'none'}")
         except Exception as e:
             print(f"[Layout] log failed: {e}")
 
@@ -789,7 +811,7 @@ class MainWindow(QMainWindow):
         print("[Step1] preloading patches...")
         if not auto:
             self.prev_status.setText("Step0 ROI result loaded.")
-        self._log_step1_layout("after load ROI")
+        self._log_step1_layout("after loading ROI sizes")
         self._schedule_step1_session_save()
 
     @staticmethod
@@ -2595,6 +2617,7 @@ class MainWindow(QMainWindow):
             self._params_source = "direct_method"
             self._check_save_unlock()
         self._schedule_step1_session_save()
+        QTimer.singleShot(0, lambda: self._log_step1_layout("after method change sizes"))
 
     def _on_param_sel(self, params):
         if params.get("_phase") == 1:

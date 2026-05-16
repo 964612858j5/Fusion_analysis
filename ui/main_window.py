@@ -1296,6 +1296,8 @@ class MainWindow(QMainWindow):
                     y0, y1, x0, x1 = [int(v) for v in p["bbox_local"]]
                     patches.append((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1))
             self._p2_params = sess.get("p2_params")
+            if self._p2_params and hasattr(self.search, "apply_seg_config_to_ui"):
+                self.search.apply_seg_config_to_ui(self._p2_params)
             self._seg_preview_history = dict(sess.get("segmentation_preview_history") or {})
             self._active_segmentation_method = str(
                 sess.get("active_segmentation_method")

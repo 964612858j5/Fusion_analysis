@@ -444,6 +444,16 @@ class Step2Page(QWidget):
         r, self._hq_min_signal_label, _ = _param_row('min signal threshold:', self._hq_min_signal)
         cpl.addLayout(r)
 
+        self._hq_widgets = [
+            self._hq_channels_label, self._hq_channels,
+            self._hq_input_mode_label, self._hq_input_mode,
+            self._hq_radius_label, self._hq_radius,
+            self._hq_norm_low_label, self._hq_norm_low,
+            self._hq_norm_high_label, self._hq_norm_high,
+            self._hq_consensus_label, self._hq_consensus,
+            self._hq_weights_label, self._hq_weights,
+            self._hq_min_signal_label, self._hq_min_signal,
+        ]
         self._hq2_widgets = []
 
         def _hq2_row(label, widget):
@@ -452,7 +462,49 @@ class Step2Page(QWidget):
             self._hq2_widgets.extend([l, w])
             return w
 
-        self._hq2_section = QLabel('HQ2: ImageJ-style proposal + continuous expansion')
+        self._hq2_base_section = QLabel('HQ2: HQ proposal inputs')
+        self._hq2_base_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        cpl.addWidget(self._hq2_base_section)
+        self._hq2_widgets.append(self._hq2_base_section)
+
+        self._hq2_channels = _hq2_row('hq2 hq_channels:', QtWidgets.QLineEdit())
+        self._hq2_channels.setPlaceholderText('CD68;CD206;CD45')
+        self._hq2_channels.setStyleSheet('font-size:11px;')
+
+        self._hq2_input_mode = _hq2_row('hq2 input mode:', QComboBox())
+        self._hq2_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
+        self._hq2_input_mode.addItem('step1_weighted_fusion', 'step1_weighted_fusion')
+        self._hq2_input_mode.addItem('hybrid', 'hybrid')
+
+        self._hq2_radius = _hq2_row('hq2 max cell radius:', QDoubleSpinBox())
+        self._hq2_radius.setRange(1, 300)
+        self._hq2_radius.setSingleStep(1)
+        self._hq2_radius.setValue(18)
+
+        self._hq2_norm_low = _hq2_row('hq2 norm pct low:', QDoubleSpinBox())
+        self._hq2_norm_low.setRange(0.0, 50.0)
+        self._hq2_norm_low.setSingleStep(0.5)
+        self._hq2_norm_low.setValue(1.0)
+
+        self._hq2_norm_high = _hq2_row('hq2 norm pct high:', QDoubleSpinBox())
+        self._hq2_norm_high.setRange(50.0, 100.0)
+        self._hq2_norm_high.setSingleStep(0.5)
+        self._hq2_norm_high.setValue(99.5)
+
+        self._hq2_consensus = _hq2_row('hq2 level1 consensus:', QComboBox())
+        for mode in CONSENSUS_MODES:
+            self._hq2_consensus.addItem(mode, mode)
+
+        self._hq2_weights = _hq2_row('hq2 channel weights:', QtWidgets.QLineEdit())
+        self._hq2_weights.setPlaceholderText('optional: CD68=1;CD206=1;CD45=0.8')
+        self._hq2_weights.setStyleSheet('font-size:11px;')
+
+        self._hq2_min_signal = _hq2_row('hq2 min signal:', QDoubleSpinBox())
+        self._hq2_min_signal.setRange(0.0, 1.0)
+        self._hq2_min_signal.setSingleStep(0.01)
+        self._hq2_min_signal.setValue(0.08)
+
+        self._hq2_section = QLabel('HQ2: ImageJ-style proposal')
         self._hq2_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
         cpl.addWidget(self._hq2_section)
         self._hq2_widgets.append(self._hq2_section)
@@ -1086,6 +1138,16 @@ class Step2Page(QWidget):
         weights = p.get("channel_weights") or {}
         self._hq_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
         self._hq_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
+        self._hq2_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
+        idx = self._hq2_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
+        self._hq2_input_mode.setCurrentIndex(max(0, idx))
+        self._hq2_radius.setValue(float(p.get("max_cell_radius", 18) or 18))
+        self._hq2_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
+        self._hq2_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
+        idx = self._hq2_consensus.findData(p.get("consensus_mode", "adaptive_best_channel"))
+        self._hq2_consensus.setCurrentIndex(max(0, idx))
+        self._hq2_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
+        self._hq2_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
         self._hq2_imagej_blur.setValue(float(p.get("imagej_blur_sigma", 1.0)))
         self._hq2_bg_radius.setValue(int(p.get("imagej_background_radius", 20) or 0))
         idx = self._hq2_threshold_method.findData(p.get("imagej_threshold_method", "adaptive"))
@@ -1133,6 +1195,16 @@ class Step2Page(QWidget):
         self._hq_consensus.setCurrentIndex(max(0, idx))
         self._hq_weights.setText("")
         self._hq_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
+        self._hq2_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
+        idx = self._hq2_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
+        self._hq2_input_mode.setCurrentIndex(max(0, idx))
+        self._hq2_radius.setValue(float(cfg.get("max_cell_radius", 18) or 18))
+        self._hq2_norm_low.setValue(float(cfg.get("normalization_percentile_low", 1.0)))
+        self._hq2_norm_high.setValue(float(cfg.get("normalization_percentile_high", 99.5)))
+        idx = self._hq2_consensus.findData(cfg.get("consensus_mode", "adaptive_best_channel"))
+        self._hq2_consensus.setCurrentIndex(max(0, idx))
+        self._hq2_weights.setText("")
+        self._hq2_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
         self._hq2_imagej_blur.setValue(float(cfg.get("imagej_blur_sigma", 1.0)))
         self._hq2_bg_radius.setValue(int(cfg.get("imagej_background_radius", 20) or 0))
         idx = self._hq2_threshold_method.findData(cfg.get("imagej_threshold_method", "adaptive"))
@@ -1161,27 +1233,49 @@ class Step2Page(QWidget):
 
     def get_seg_config(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        if self._method_combo.currentText() == "Cellpose nuclei + HQ":
-            method = CELLPOSE_NUCLEI_HQ
-        elif self._method_combo.currentText() == "Cellpose nuclei + HQ2":
-            method = CELLPOSE_NUCLEI_HQ2
         diam = self._cp_diam.value()
-        hq_channels = parse_hq_channels(self._hq_channels.text())
         data = dict(self._seg_config or {})
-        params = dict(data.get("params") or {})
+        params = dict(get_segmentation_method_config(method).get("params") or {})
+        if method == CELLPOSE_NUCLEI_HQ2:
+            hq_channels = parse_hq_channels(self._hq2_channels.text())
+            hq_input_mode = self._hq2_input_mode.currentData() or 'selected_channels_from_source'
+            max_cell_radius = self._hq2_radius.value()
+            norm_low = self._hq2_norm_low.value()
+            norm_high = self._hq2_norm_high.value()
+            consensus_mode = self._hq2_consensus.currentData() or 'adaptive_best_channel'
+            channel_weights = parse_channel_weights(self._hq2_weights.text(), hq_channels)
+            min_signal = self._hq2_min_signal.value()
+        elif method == CELLPOSE_NUCLEI_HQ:
+            hq_channels = parse_hq_channels(self._hq_channels.text())
+            hq_input_mode = self._hq_input_mode.currentData() or 'selected_channels_from_source'
+            max_cell_radius = self._hq_radius.value()
+            norm_low = self._hq_norm_low.value()
+            norm_high = self._hq_norm_high.value()
+            consensus_mode = self._hq_consensus.currentData() or 'adaptive_best_channel'
+            channel_weights = parse_channel_weights(self._hq_weights.text(), hq_channels)
+            min_signal = self._hq_min_signal.value()
+        else:
+            hq_channels = []
+            hq_input_mode = 'selected_channels_from_source'
+            max_cell_radius = params.get('max_cell_radius', 12)
+            norm_low = params.get('normalization_percentile_low', 1.0)
+            norm_high = params.get('normalization_percentile_high', 99.5)
+            consensus_mode = params.get('consensus_mode', 'adaptive_best_channel')
+            channel_weights = {}
+            min_signal = params.get('min_signal_threshold', 0.08)
         params.update({
             'model_name':         self._sd_model.text().strip() or '2D_versatile_fluo',
             'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
             'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
             'expand_distance':    self._sd_expand.value(),
             'hq_channels':        hq_channels,
-            'hq_input_mode':      self._hq_input_mode.currentData() or 'selected_channels_from_source',
-            'max_cell_radius':    self._hq_radius.value(),
-            'normalization_percentile_low': self._hq_norm_low.value(),
-            'normalization_percentile_high': self._hq_norm_high.value(),
-            'consensus_mode':     self._hq_consensus.currentData() or 'adaptive_best_channel',
-            'channel_weights':    parse_channel_weights(self._hq_weights.text(), hq_channels),
-            'min_signal_threshold': self._hq_min_signal.value(),
+            'hq_input_mode':      hq_input_mode,
+            'max_cell_radius':    max_cell_radius,
+            'normalization_percentile_low': norm_low,
+            'normalization_percentile_high': norm_high,
+            'consensus_mode':     consensus_mode,
+            'channel_weights':    channel_weights,
+            'min_signal_threshold': min_signal,
             'imagej_blur_sigma':  self._hq2_imagej_blur.value(),
             'imagej_background_radius': self._hq2_bg_radius.value(),
             'imagej_threshold_method': self._hq2_threshold_method.currentData() or 'adaptive',
@@ -1202,6 +1296,18 @@ class Step2Page(QWidget):
             'macrophage_max_radius': self._hq2_macrophage_radius.value(),
             'macrophage_min_signal': self._hq2_macrophage_signal.value(),
         })
+        if method != CELLPOSE_NUCLEI_HQ2:
+            for key in (
+                'imagej_blur_sigma', 'imagej_background_radius', 'imagej_threshold_method',
+                'imagej_threshold_percentile', 'imagej_min_object_size',
+                'imagej_closing_radius', 'imagej_opening_radius', 'core_mode',
+                'min_core_area', 'signal_map_mode', 'min_continuous_signal',
+                'max_expansion_radius', 'boundary_gradient_weight',
+                'distance_penalty_weight', 'neighbor_nucleus_penalty_weight',
+                'allow_irregular_shape', 'macrophage_channels',
+                'macrophage_max_radius', 'macrophage_min_signal',
+            ):
+                params.pop(key, None)
         data.update({
             'method':             method,
             'params':             params,
@@ -1214,15 +1320,14 @@ class Step2Page(QWidget):
             'tile_size':          self._cp_tile_size.value(),
             'batch_size':         self._cp_batch_size.value(),
         })
-        return normalize_segmentation_config(data)
+        cfg = normalize_segmentation_config(data)
+        if method == CELLPOSE_NUCLEI_HQ2:
+            print(f"[HQ2-UI] collected params={cfg.get('params')}")
+            print(f"[HQ2-UI] worker config keys={sorted(cfg.keys())}")
+        return cfg
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        display_name = self._method_combo.currentText()
-        if display_name == "Cellpose nuclei + HQ":
-            method = CELLPOSE_NUCLEI_HQ
-        elif display_name == "Cellpose nuclei + HQ2":
-            method = CELLPOSE_NUCLEI_HQ2
         if (
             not self._loading_index_selection
             and (self._param_source_combo.currentData() or "manual") == "manual"
@@ -1231,8 +1336,8 @@ class Step2Page(QWidget):
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
-        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or display_name in ("Cellpose nuclei + HQ", "Cellpose nuclei + HQ2")
-        is_hq2 = method == CELLPOSE_NUCLEI_HQ2 or display_name == "Cellpose nuclei + HQ2"
+        is_hq = method == CELLPOSE_NUCLEI_HQ
+        is_hq2 = method == CELLPOSE_NUCLEI_HQ2
         for w in (
             self._cp_model_label, self._cp_model_lbl,
             self._cp_diam_label, self._cp_diam,
@@ -1252,16 +1357,7 @@ class Step2Page(QWidget):
             w.setVisible(is_stardist)
         self._sd_expand_label.setVisible(is_expansion)
         self._sd_expand.setVisible(is_expansion)
-        for w in (
-            self._hq_channels_label, self._hq_channels,
-            self._hq_input_mode_label, self._hq_input_mode,
-            self._hq_radius_label, self._hq_radius,
-            self._hq_norm_low_label, self._hq_norm_low,
-            self._hq_norm_high_label, self._hq_norm_high,
-            self._hq_consensus_label, self._hq_consensus,
-            self._hq_weights_label, self._hq_weights,
-            self._hq_min_signal_label, self._hq_min_signal,
-        ):
+        for w in self._hq_widgets:
             w.setVisible(is_hq)
         for w in self._hq2_widgets:
             w.setVisible(is_hq2)
@@ -1273,7 +1369,10 @@ class Step2Page(QWidget):
         print("[Step2] method changed:", method)
         print("[Step2] is_hq:", is_hq)
         print("[Step2] hq widgets visible:", self._hq_channels.isVisible())
-        print("[Step2] preview enabled:", preview_btn.isEnabled() if preview_btn is not None else None)
+        print("[HQ2-UI] method selected=", method)
+        print("[HQ2-UI] parameter widgets created=", bool(getattr(self, "_hq2_widgets", None)))
+        print("[HQ2-UI] parameter widgets visible=", self._hq2_channels.isVisible() if hasattr(self, "_hq2_channels") else False)
+        print("[HQ2-UI] patch preview enabled=", preview_btn.isEnabled() if preview_btn is not None else None)
 
     def _available_hq_channels(self):
         candidates = []

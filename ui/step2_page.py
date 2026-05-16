@@ -299,6 +299,8 @@ class Step2Page(QWidget):
         cpl.addLayout(r)
 
         self._method_combo = QComboBox()
+        self._method_combo.setMinimumWidth(260)
+        self._method_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for method in available_segmentation_methods():
             cfg = get_segmentation_method_config(method)
             self._method_combo.addItem(cfg["display_name"], method)

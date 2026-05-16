@@ -18,7 +18,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QDoubleSpinBox, QProgressBar, QComboBox,
-    QMessageBox, QFileDialog, QDialog, QFrame,
+    QMessageBox, QFileDialog, QDialog, QFrame, QCheckBox,
 )
 import pyqtgraph as pg
 
@@ -103,9 +103,15 @@ class SearchCtrlPanel(QWidget):
             "font-weight:bold;color:#ccc;font-size:11px;}"
         )
         method_lay = QVBoxLayout(method_box)
+        method_lay.setContentsMargins(8, 8, 8, 6)
+        method_lay.setSpacing(4)
         method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Method:"))
+        method_label = QLabel("Method:")
+        method_label.setFixedWidth(54)
+        method_row.addWidget(method_label)
         self._method_combo = QComboBox()
+        self._method_combo.setMinimumWidth(260)
+        self._method_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for method in available_segmentation_methods():
             cfg = get_segmentation_method_config(method)
             self._method_combo.addItem(cfg["display_name"], method)
@@ -139,6 +145,7 @@ class SearchCtrlPanel(QWidget):
         self._dapi_only_note.setWordWrap(True)
         method_lay.addWidget(self._dapi_only_note)
         lay.addWidget(method_box)
+        self._method_box = method_box
 
         # ── Phase 1 ───────────────────────────────────────────────────
         p1 = QGroupBox("Phase 1 — Auto-diameter preview  (cpsam)")
@@ -435,6 +442,9 @@ class SearchCtrlPanel(QWidget):
         ]
         for r in self._hq2_param_rows:
             ml.addLayout(r)
+        self._legacy_hq2_param_rows = list(self._hq2_param_rows)
+        self._build_hq2_params_panel()
+        lay.insertWidget(1, self.hq2_params_panel)
 
         self._patch_preview_hint = QLabel("")
         self._patch_preview_hint.setStyleSheet("color:#ffb86c;font-size:10px;")
@@ -546,6 +556,175 @@ class SearchCtrlPanel(QWidget):
             self._refresh_patch_preview_state()
             return
         self.run_preview.emit(self.get_current_params())
+
+    def _build_hq2_params_panel(self):
+        self.hq2_params_panel = QGroupBox("Cellpose nuclei + HQ2 parameters")
+        self.hq2_params_panel.setStyleSheet(
+            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
+            "font-weight:bold;color:#7dd3fc;font-size:11px;}"
+        )
+        outer = QVBoxLayout(self.hq2_params_panel)
+        outer.setContentsMargins(6, 8, 6, 6)
+        outer.setSpacing(5)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setMaximumHeight(520)
+        content = QWidget()
+        form = QVBoxLayout(content)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(5)
+
+        def spin(lo, hi, step, dec, val):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            w.setDecimals(dec)
+            w.setValue(val)
+            w.setStyleSheet("font-size:11px;")
+            return w
+
+        def section(title):
+            box = QGroupBox(title)
+            box.setStyleSheet(
+                "QGroupBox{border:1px solid #444;border-radius:3px;"
+                "margin-top:5px;color:#ccc;font-size:10px;font-weight:bold;}"
+            )
+            grid = QtWidgets.QGridLayout(box)
+            grid.setContentsMargins(6, 8, 6, 5)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(3)
+            form.addWidget(box)
+            return grid
+
+        def add_row(grid, row, label, widget):
+            lbl = QLabel(label)
+            lbl.setMinimumWidth(132)
+            lbl.setStyleSheet("font-size:10px;color:#bbb;")
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(widget, row, 1)
+            return widget
+
+        g = section("Cellpose nuclei parameters")
+        self._hq2_model_label = QLabel("cpsam nuclei")
+        self._hq2_model_label.setStyleSheet("font-size:11px;color:#ddd;")
+        add_row(g, 0, "model_type:", self._hq2_model_label)
+        self._hq2_cp_diam = add_row(g, 1, "diameter:", spin(0, 500, 5, 1, 0))
+        self._hq2_cp_diam.setSpecialValueText("auto")
+        self._hq2_cp_flow = add_row(g, 2, "flow_threshold:", spin(0, 3, 0.05, 2, 0.4))
+        self._hq2_cp_prob = add_row(g, 3, "cellprob_threshold:", spin(-6, 6, 0.1, 2, 0.0))
+        self._hq2_cp_gpu = QCheckBox("Use GPU if available")
+        self._hq2_cp_gpu.setChecked(True)
+        add_row(g, 4, "GPU:", self._hq2_cp_gpu)
+        self._hq2_cp_tile = add_row(g, 5, "tile_size:", spin(128, 4096, 128, 0, 1024))
+        self._hq2_cp_batch = add_row(g, 6, "batch_size:", spin(1, 128, 1, 0, 8))
+
+        g = section("HQ2 basic parameters")
+        self._hq2_channels = QtWidgets.QLineEdit()
+        self._hq2_channels.setPlaceholderText("CD68;CD206;CD45")
+        self._hq2_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
+        add_row(g, 0, "hq_channels:", self._hq2_channels)
+        self._hq2_input_mode = QComboBox()
+        for value in ("selected_channels_from_source", "step1_weighted_fusion", "hybrid"):
+            self._hq2_input_mode.addItem(value, value)
+        add_row(g, 1, "hq_input_mode:", self._hq2_input_mode)
+        self._hq2_radius = add_row(g, 2, "max_cell_radius:", spin(1, 300, 1, 1, 18))
+        self._hq2_norm_low = add_row(g, 3, "norm pct low:", spin(0, 50, 0.5, 1, 1))
+        self._hq2_norm_high = add_row(g, 4, "norm pct high:", spin(50, 100, 0.5, 1, 99.5))
+        self._hq2_min_signal = add_row(g, 5, "min_signal_threshold:", spin(0, 1, 0.01, 2, 0.08))
+
+        g = section("ImageJ-style proposal")
+        self._hq2_imagej_blur = add_row(g, 0, "blur_sigma:", spin(0, 10, 0.1, 1, 1.0))
+        self._hq2_bg_radius = add_row(g, 1, "background_radius:", spin(0, 300, 1, 0, 20))
+        self._hq2_threshold_method = QComboBox()
+        for value in ("adaptive", "otsu", "percentile"):
+            self._hq2_threshold_method.addItem(value, value)
+        add_row(g, 2, "threshold_method:", self._hq2_threshold_method)
+        self._hq2_threshold_percentile = add_row(g, 3, "threshold_percentile:", spin(0, 100, 1, 1, 75))
+        self._hq2_min_object = add_row(g, 4, "min_object_size:", spin(0, 100000, 1, 0, 20))
+        self._hq2_closing = add_row(g, 5, "closing_radius:", spin(0, 50, 1, 0, 2))
+        self._hq2_opening = add_row(g, 6, "opening_radius:", spin(0, 50, 1, 0, 1))
+
+        g = section("Continuous signal expansion")
+        self._hq2_core_mode = QComboBox()
+        for value in ("weighted_support", "intersection", "majority_support"):
+            self._hq2_core_mode.addItem(value, value)
+        add_row(g, 0, "core_mode:", self._hq2_core_mode)
+        self._hq2_min_core = add_row(g, 1, "min_core_area:", spin(0, 100000, 1, 0, 8))
+        self._hq2_signal_mode = QComboBox()
+        for value in ("per_cell_best_channel", "max", "weighted_max"):
+            self._hq2_signal_mode.addItem(value, value)
+        add_row(g, 2, "signal_map_mode:", self._hq2_signal_mode)
+        self._hq2_min_cont_signal = add_row(g, 3, "min_continuous_signal:", spin(0, 1, 0.01, 2, 0.08))
+        self._hq2_max_expansion = add_row(g, 4, "max_expansion_radius:", spin(0, 300, 1, 1, 25))
+        self._hq2_boundary_weight = add_row(g, 5, "boundary_gradient_weight:", spin(0, 10, 0.05, 2, 0.25))
+        self._hq2_distance_weight = add_row(g, 6, "distance_penalty_weight:", spin(0, 10, 0.01, 2, 0.02))
+        self._hq2_neighbor_weight = add_row(g, 7, "neighbor_nucleus_penalty:", spin(0, 10, 0.05, 2, 0.15))
+        self._hq2_irregular = QCheckBox("allow irregular shape")
+        self._hq2_irregular.setChecked(True)
+        add_row(g, 8, "allow_irregular_shape:", self._hq2_irregular)
+
+        g = section("Macrophage refinement")
+        self._hq2_macrophage_channels = QtWidgets.QLineEdit("CD68;CD206")
+        self._hq2_macrophage_channels.setPlaceholderText("CD68;CD206")
+        add_row(g, 0, "macrophage_channels:", self._hq2_macrophage_channels)
+        self._hq2_macrophage_radius = add_row(g, 1, "macrophage_max_radius:", spin(0, 500, 1, 1, 35))
+        self._hq2_macrophage_signal = add_row(g, 2, "macrophage_min_signal:", spin(0, 1, 0.01, 2, 0.08))
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        self.hq2_params_panel.setVisible(False)
+        print("[HQ2-UI] parameter widgets created=True")
+
+    def _show_hq2_params_panel(self):
+        if getattr(self, "hq2_params_panel", None) is not None:
+            self.hq2_params_panel.setVisible(True)
+
+    def _hide_hq2_params_panel(self):
+        if getattr(self, "hq2_params_panel", None) is not None:
+            self.hq2_params_panel.setVisible(False)
+
+    def collect_hq2_params(self):
+        hq_channels = parse_hq_channels(self._hq2_channels.text())
+        return {
+            "method": CELLPOSE_NUCLEI_HQ2,
+            "model_type": "cpsam",
+            "diameter": None if self._hq2_cp_diam.value() == 0 else self._hq2_cp_diam.value(),
+            "flow_threshold": self._hq2_cp_flow.value(),
+            "cellprob_threshold": self._hq2_cp_prob.value(),
+            "use_gpu": self._hq2_cp_gpu.isChecked(),
+            "tile_size": int(self._hq2_cp_tile.value()),
+            "batch_size": int(self._hq2_cp_batch.value()),
+            "hq_channels": hq_channels,
+            "hq_input_mode": self._hq2_input_mode.currentData() or "selected_channels_from_source",
+            "max_cell_radius": self._hq2_radius.value(),
+            "normalization_percentile_low": self._hq2_norm_low.value(),
+            "normalization_percentile_high": self._hq2_norm_high.value(),
+            "consensus_mode": "adaptive_best_channel",
+            "channel_weights": {},
+            "min_signal_threshold": self._hq2_min_signal.value(),
+            "imagej_blur_sigma": self._hq2_imagej_blur.value(),
+            "imagej_background_radius": int(self._hq2_bg_radius.value()),
+            "imagej_threshold_method": self._hq2_threshold_method.currentData() or "adaptive",
+            "imagej_threshold_percentile": self._hq2_threshold_percentile.value(),
+            "imagej_min_object_size": int(self._hq2_min_object.value()),
+            "imagej_closing_radius": int(self._hq2_closing.value()),
+            "imagej_opening_radius": int(self._hq2_opening.value()),
+            "core_mode": self._hq2_core_mode.currentData() or "weighted_support",
+            "min_core_area": int(self._hq2_min_core.value()),
+            "signal_map_mode": self._hq2_signal_mode.currentData() or "per_cell_best_channel",
+            "min_continuous_signal": self._hq2_min_cont_signal.value(),
+            "max_expansion_radius": self._hq2_max_expansion.value(),
+            "boundary_gradient_weight": self._hq2_boundary_weight.value(),
+            "distance_penalty_weight": self._hq2_distance_weight.value(),
+            "neighbor_nucleus_penalty_weight": self._hq2_neighbor_weight.value(),
+            "allow_irregular_shape": self._hq2_irregular.isChecked(),
+            "macrophage_channels": self._hq2_macrophage_channels.text().strip(),
+            "macrophage_max_radius": self._hq2_macrophage_radius.value(),
+            "macrophage_min_signal": self._hq2_macrophage_signal.value(),
+        }
 
     def _load_params_file(self):
         """Browse for cellpose_params.json and load it."""
@@ -689,6 +868,10 @@ class SearchCtrlPanel(QWidget):
     def get_current_params(self):
         """Return spinbox values regardless of source."""
         method = self._selected_method()
+        if method == CELLPOSE_NUCLEI_HQ2:
+            params = self.collect_hq2_params()
+            print(f"[HQ2-UI] collected params={params}")
+            return normalize_segmentation_config({"method": CELLPOSE_NUCLEI_HQ2, "params": params, **params})
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
@@ -722,34 +905,7 @@ class SearchCtrlPanel(QWidget):
             params["channel_weights"] = parse_channel_weights(self._hq_weights.text(), hq_channels)
             params["min_signal_threshold"] = self._hq_min_signal.value()
         if method == CELLPOSE_NUCLEI_HQ2:
-            hq_channels = parse_hq_channels(self._hq2_channels.text())
-            params["hq_channels"] = hq_channels
-            params["hq_input_mode"] = self._hq2_input_mode.currentData() or "selected_channels_from_source"
-            params["max_cell_radius"] = self._hq2_radius.value()
-            params["normalization_percentile_low"] = self._hq2_norm_low.value()
-            params["normalization_percentile_high"] = self._hq2_norm_high.value()
-            params["consensus_mode"] = "adaptive_best_channel"
-            params["channel_weights"] = {}
-            params["min_signal_threshold"] = self._hq2_min_signal.value()
-            params["imagej_blur_sigma"] = self._hq2_imagej_blur.value()
-            params["imagej_background_radius"] = int(self._hq2_bg_radius.value())
-            params["imagej_threshold_method"] = self._hq2_threshold_method.currentData() or "adaptive"
-            params["imagej_threshold_percentile"] = self._hq2_threshold_percentile.value()
-            params["imagej_min_object_size"] = int(self._hq2_min_object.value())
-            params["imagej_closing_radius"] = int(self._hq2_closing.value())
-            params["imagej_opening_radius"] = int(self._hq2_opening.value())
-            params["core_mode"] = self._hq2_core_mode.currentData() or "weighted_support"
-            params["min_core_area"] = int(self._hq2_min_core.value())
-            params["signal_map_mode"] = self._hq2_signal_mode.currentData() or "per_cell_best_channel"
-            params["min_continuous_signal"] = self._hq2_min_cont_signal.value()
-            params["max_expansion_radius"] = self._hq2_max_expansion.value()
-            params["boundary_gradient_weight"] = self._hq2_boundary_weight.value()
-            params["distance_penalty_weight"] = self._hq2_distance_weight.value()
-            params["neighbor_nucleus_penalty_weight"] = self._hq2_neighbor_weight.value()
-            params["allow_irregular_shape"] = self._hq2_irregular.isChecked()
-            params["macrophage_channels"] = self._hq2_macrophage_channels.text().strip()
-            params["macrophage_max_radius"] = self._hq2_macrophage_radius.value()
-            params["macrophage_min_signal"] = self._hq2_macrophage_signal.value()
+            params.update(self.collect_hq2_params())
             print(f"[HQ2-UI] collected params={params}")
         return {"method": method, "params": params}
 
@@ -811,11 +967,15 @@ class SearchCtrlPanel(QWidget):
                 w = row.itemAt(i).widget()
                 if w:
                     w.setVisible(is_hq)
-        for row in self._hq2_param_rows:
+        for row in getattr(self, "_legacy_hq2_param_rows", []):
             for i in range(row.count()):
                 w = row.itemAt(i).widget()
                 if w:
-                    w.setVisible(is_hq2)
+                    w.setVisible(False)
+        if is_hq2:
+            self._show_hq2_params_panel()
+        else:
+            self._hide_hq2_params_panel()
         self._expand_dist.setEnabled(is_expansion)
         self._expand_dist.setVisible(False)
         self._expand_dist_label.setVisible(False)
@@ -840,6 +1000,8 @@ class SearchCtrlPanel(QWidget):
         print("[Step2] preview enabled:", self.btn_patch_preview.isEnabled())
         print("[HQ2-UI] method selected=", method)
         print("[HQ2-UI] parameter widgets created=", bool(getattr(self, "_hq2_param_rows", None)))
+        print("[HQ2-UI] hq2_panel exists =", self.hq2_params_panel is not None)
+        print("[HQ2-UI] hq2_panel visible =", self.hq2_params_panel.isVisible())
         print("[HQ2-UI] parameter widgets visible=", self._hq2_channels.isVisible())
         print("[HQ2-UI] patch preview enabled=", self.btn_patch_preview.isEnabled())
         print(f"[Step1] segmentation mode selected={method}")

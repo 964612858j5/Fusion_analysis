@@ -22,6 +22,7 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_NUCLEI_HQ,
+    CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -442,6 +443,99 @@ class Step2Page(QWidget):
         self._hq_min_signal.setValue(0.08)
         r, self._hq_min_signal_label, _ = _param_row('min signal threshold:', self._hq_min_signal)
         cpl.addLayout(r)
+
+        self._hq2_widgets = []
+
+        def _hq2_row(label, widget):
+            r, l, w = _param_row(label, widget)
+            cpl.addLayout(r)
+            self._hq2_widgets.extend([l, w])
+            return w
+
+        self._hq2_section = QLabel('HQ2: ImageJ-style proposal + continuous expansion')
+        self._hq2_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        cpl.addWidget(self._hq2_section)
+        self._hq2_widgets.append(self._hq2_section)
+
+        self._hq2_imagej_blur = _hq2_row('imagej blur sigma:', QDoubleSpinBox())
+        self._hq2_imagej_blur.setRange(0.0, 10.0)
+        self._hq2_imagej_blur.setSingleStep(0.1)
+        self._hq2_imagej_blur.setValue(1.0)
+
+        self._hq2_bg_radius = _hq2_row('imagej background radius:', QtWidgets.QSpinBox())
+        self._hq2_bg_radius.setRange(0, 300)
+        self._hq2_bg_radius.setValue(20)
+
+        self._hq2_threshold_method = _hq2_row('imagej threshold:', QComboBox())
+        for mode in ('adaptive', 'otsu', 'percentile'):
+            self._hq2_threshold_method.addItem(mode, mode)
+
+        self._hq2_threshold_percentile = _hq2_row('threshold percentile:', QDoubleSpinBox())
+        self._hq2_threshold_percentile.setRange(0.0, 100.0)
+        self._hq2_threshold_percentile.setValue(75.0)
+
+        self._hq2_min_object = _hq2_row('imagej min object:', QtWidgets.QSpinBox())
+        self._hq2_min_object.setRange(0, 100000)
+        self._hq2_min_object.setValue(20)
+
+        self._hq2_closing = _hq2_row('imagej closing radius:', QtWidgets.QSpinBox())
+        self._hq2_closing.setRange(0, 50)
+        self._hq2_closing.setValue(2)
+
+        self._hq2_opening = _hq2_row('imagej opening radius:', QtWidgets.QSpinBox())
+        self._hq2_opening.setRange(0, 50)
+        self._hq2_opening.setValue(1)
+
+        self._hq2_core_mode = _hq2_row('core mode:', QComboBox())
+        for mode in ('weighted_support', 'intersection', 'majority_support'):
+            self._hq2_core_mode.addItem(mode, mode)
+
+        self._hq2_min_core = _hq2_row('min core area:', QtWidgets.QSpinBox())
+        self._hq2_min_core.setRange(0, 100000)
+        self._hq2_min_core.setValue(8)
+
+        self._hq2_signal_mode = _hq2_row('signal map mode:', QComboBox())
+        for mode in ('per_cell_best_channel', 'max', 'weighted_max'):
+            self._hq2_signal_mode.addItem(mode, mode)
+
+        self._hq2_min_cont_signal = _hq2_row('min continuous signal:', QDoubleSpinBox())
+        self._hq2_min_cont_signal.setRange(0.0, 1.0)
+        self._hq2_min_cont_signal.setSingleStep(0.01)
+        self._hq2_min_cont_signal.setValue(0.08)
+
+        self._hq2_max_expansion = _hq2_row('max expansion radius:', QDoubleSpinBox())
+        self._hq2_max_expansion.setRange(0, 300)
+        self._hq2_max_expansion.setValue(25)
+
+        self._hq2_boundary_weight = _hq2_row('boundary gradient weight:', QDoubleSpinBox())
+        self._hq2_boundary_weight.setRange(0.0, 10.0)
+        self._hq2_boundary_weight.setSingleStep(0.05)
+        self._hq2_boundary_weight.setValue(0.25)
+
+        self._hq2_distance_weight = _hq2_row('distance penalty weight:', QDoubleSpinBox())
+        self._hq2_distance_weight.setRange(0.0, 10.0)
+        self._hq2_distance_weight.setSingleStep(0.01)
+        self._hq2_distance_weight.setValue(0.02)
+
+        self._hq2_neighbor_weight = _hq2_row('neighbor nucleus penalty:', QDoubleSpinBox())
+        self._hq2_neighbor_weight.setRange(0.0, 10.0)
+        self._hq2_neighbor_weight.setSingleStep(0.05)
+        self._hq2_neighbor_weight.setValue(0.15)
+
+        self._hq2_irregular = _hq2_row('allow irregular shape:', QCheckBox('True'))
+        self._hq2_irregular.setChecked(True)
+
+        self._hq2_macrophage_channels = _hq2_row('macrophage channels:', QtWidgets.QLineEdit('CD68;CD206'))
+        self._hq2_macrophage_channels.setStyleSheet('font-size:11px;')
+
+        self._hq2_macrophage_radius = _hq2_row('macrophage max radius:', QDoubleSpinBox())
+        self._hq2_macrophage_radius.setRange(0, 500)
+        self._hq2_macrophage_radius.setValue(35)
+
+        self._hq2_macrophage_signal = _hq2_row('macrophage min signal:', QDoubleSpinBox())
+        self._hq2_macrophage_signal.setRange(0.0, 1.0)
+        self._hq2_macrophage_signal.setSingleStep(0.01)
+        self._hq2_macrophage_signal.setValue(0.08)
 
         self._method_hint = QLabel('')
         self._method_hint.setStyleSheet('color:#999;font-size:10px;')
@@ -992,6 +1086,28 @@ class Step2Page(QWidget):
         weights = p.get("channel_weights") or {}
         self._hq_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
         self._hq_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
+        self._hq2_imagej_blur.setValue(float(p.get("imagej_blur_sigma", 1.0)))
+        self._hq2_bg_radius.setValue(int(p.get("imagej_background_radius", 20) or 0))
+        idx = self._hq2_threshold_method.findData(p.get("imagej_threshold_method", "adaptive"))
+        self._hq2_threshold_method.setCurrentIndex(max(0, idx))
+        self._hq2_threshold_percentile.setValue(float(p.get("imagej_threshold_percentile", 75.0)))
+        self._hq2_min_object.setValue(int(p.get("imagej_min_object_size", 20) or 0))
+        self._hq2_closing.setValue(int(p.get("imagej_closing_radius", 2) or 0))
+        self._hq2_opening.setValue(int(p.get("imagej_opening_radius", 1) or 0))
+        idx = self._hq2_core_mode.findData(p.get("core_mode", "weighted_support"))
+        self._hq2_core_mode.setCurrentIndex(max(0, idx))
+        self._hq2_min_core.setValue(int(p.get("min_core_area", 8) or 0))
+        idx = self._hq2_signal_mode.findData(p.get("signal_map_mode", "per_cell_best_channel"))
+        self._hq2_signal_mode.setCurrentIndex(max(0, idx))
+        self._hq2_min_cont_signal.setValue(float(p.get("min_continuous_signal", 0.08)))
+        self._hq2_max_expansion.setValue(float(p.get("max_expansion_radius", 25)))
+        self._hq2_boundary_weight.setValue(float(p.get("boundary_gradient_weight", 0.25)))
+        self._hq2_distance_weight.setValue(float(p.get("distance_penalty_weight", 0.02)))
+        self._hq2_neighbor_weight.setValue(float(p.get("neighbor_nucleus_penalty_weight", 0.15)))
+        self._hq2_irregular.setChecked(bool(p.get("allow_irregular_shape", True)))
+        self._hq2_macrophage_channels.setText(str(p.get("macrophage_channels", "CD68;CD206") or ""))
+        self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
+        self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
         self._on_method_changed()
 
     def _apply_method_defaults_to_ui(self, method):
@@ -1017,6 +1133,28 @@ class Step2Page(QWidget):
         self._hq_consensus.setCurrentIndex(max(0, idx))
         self._hq_weights.setText("")
         self._hq_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
+        self._hq2_imagej_blur.setValue(float(cfg.get("imagej_blur_sigma", 1.0)))
+        self._hq2_bg_radius.setValue(int(cfg.get("imagej_background_radius", 20) or 0))
+        idx = self._hq2_threshold_method.findData(cfg.get("imagej_threshold_method", "adaptive"))
+        self._hq2_threshold_method.setCurrentIndex(max(0, idx))
+        self._hq2_threshold_percentile.setValue(float(cfg.get("imagej_threshold_percentile", 75.0)))
+        self._hq2_min_object.setValue(int(cfg.get("imagej_min_object_size", 20) or 0))
+        self._hq2_closing.setValue(int(cfg.get("imagej_closing_radius", 2) or 0))
+        self._hq2_opening.setValue(int(cfg.get("imagej_opening_radius", 1) or 0))
+        idx = self._hq2_core_mode.findData(cfg.get("core_mode", "weighted_support"))
+        self._hq2_core_mode.setCurrentIndex(max(0, idx))
+        self._hq2_min_core.setValue(int(cfg.get("min_core_area", 8) or 0))
+        idx = self._hq2_signal_mode.findData(cfg.get("signal_map_mode", "per_cell_best_channel"))
+        self._hq2_signal_mode.setCurrentIndex(max(0, idx))
+        self._hq2_min_cont_signal.setValue(float(cfg.get("min_continuous_signal", 0.08)))
+        self._hq2_max_expansion.setValue(float(cfg.get("max_expansion_radius", 25)))
+        self._hq2_boundary_weight.setValue(float(cfg.get("boundary_gradient_weight", 0.25)))
+        self._hq2_distance_weight.setValue(float(cfg.get("distance_penalty_weight", 0.02)))
+        self._hq2_neighbor_weight.setValue(float(cfg.get("neighbor_nucleus_penalty_weight", 0.15)))
+        self._hq2_irregular.setChecked(bool(cfg.get("allow_irregular_shape", True)))
+        self._hq2_macrophage_channels.setText(str(cfg.get("macrophage_channels", "CD68;CD206") or ""))
+        self._hq2_macrophage_radius.setValue(float(cfg.get("macrophage_max_radius", 35)))
+        self._hq2_macrophage_signal.setValue(float(cfg.get("macrophage_min_signal", 0.08)))
 
     def get_cp_params(self):
         return self.get_seg_config()
@@ -1025,6 +1163,8 @@ class Step2Page(QWidget):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         if self._method_combo.currentText() == "Cellpose nuclei + HQ":
             method = CELLPOSE_NUCLEI_HQ
+        elif self._method_combo.currentText() == "Cellpose nuclei + HQ2":
+            method = CELLPOSE_NUCLEI_HQ2
         diam = self._cp_diam.value()
         hq_channels = parse_hq_channels(self._hq_channels.text())
         data = dict(self._seg_config or {})
@@ -1042,6 +1182,25 @@ class Step2Page(QWidget):
             'consensus_mode':     self._hq_consensus.currentData() or 'adaptive_best_channel',
             'channel_weights':    parse_channel_weights(self._hq_weights.text(), hq_channels),
             'min_signal_threshold': self._hq_min_signal.value(),
+            'imagej_blur_sigma':  self._hq2_imagej_blur.value(),
+            'imagej_background_radius': self._hq2_bg_radius.value(),
+            'imagej_threshold_method': self._hq2_threshold_method.currentData() or 'adaptive',
+            'imagej_threshold_percentile': self._hq2_threshold_percentile.value(),
+            'imagej_min_object_size': self._hq2_min_object.value(),
+            'imagej_closing_radius': self._hq2_closing.value(),
+            'imagej_opening_radius': self._hq2_opening.value(),
+            'core_mode': self._hq2_core_mode.currentData() or 'weighted_support',
+            'min_core_area': self._hq2_min_core.value(),
+            'signal_map_mode': self._hq2_signal_mode.currentData() or 'per_cell_best_channel',
+            'min_continuous_signal': self._hq2_min_cont_signal.value(),
+            'max_expansion_radius': self._hq2_max_expansion.value(),
+            'boundary_gradient_weight': self._hq2_boundary_weight.value(),
+            'distance_penalty_weight': self._hq2_distance_weight.value(),
+            'neighbor_nucleus_penalty_weight': self._hq2_neighbor_weight.value(),
+            'allow_irregular_shape': self._hq2_irregular.isChecked(),
+            'macrophage_channels': self._hq2_macrophage_channels.text().strip(),
+            'macrophage_max_radius': self._hq2_macrophage_radius.value(),
+            'macrophage_min_signal': self._hq2_macrophage_signal.value(),
         })
         data.update({
             'method':             method,
@@ -1062,15 +1221,18 @@ class Step2Page(QWidget):
         display_name = self._method_combo.currentText()
         if display_name == "Cellpose nuclei + HQ":
             method = CELLPOSE_NUCLEI_HQ
+        elif display_name == "Cellpose nuclei + HQ2":
+            method = CELLPOSE_NUCLEI_HQ2
         if (
             not self._loading_index_selection
             and (self._param_source_combo.currentData() or "manual") == "manual"
         ):
             self._apply_method_defaults_to_ui(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
-        is_hq = method == CELLPOSE_NUCLEI_HQ or display_name == "Cellpose nuclei + HQ"
+        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or display_name in ("Cellpose nuclei + HQ", "Cellpose nuclei + HQ2")
+        is_hq2 = method == CELLPOSE_NUCLEI_HQ2 or display_name == "Cellpose nuclei + HQ2"
         for w in (
             self._cp_model_label, self._cp_model_lbl,
             self._cp_diam_label, self._cp_diam,
@@ -1101,6 +1263,8 @@ class Step2Page(QWidget):
             self._hq_min_signal_label, self._hq_min_signal,
         ):
             w.setVisible(is_hq)
+        for w in self._hq2_widgets:
+            w.setVisible(is_hq2)
         cfg = get_segmentation_method_config(method)
         self._method_hint.setText(
             f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
@@ -1184,7 +1348,7 @@ class Step2Page(QWidget):
                                 'Please load a fused.zarr first.')
             return
         seg_config = self.get_seg_config()
-        if seg_config.get("method") == CELLPOSE_NUCLEI_HQ:
+        if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
             channels = seg_config.get("hq_channels") or []
             try:
                 available = self._available_hq_channels()
@@ -1196,7 +1360,7 @@ class Step2Page(QWidget):
                 QMessageBox.information(
                     self,
                     'HQ channel recommendation',
-                    'Cellpose nuclei + HQ recommends 2-5 high-quality structural channels; '
+                    'Cellpose nuclei + HQ/HQ2 recommends 2-5 high-quality structural channels; '
                     'using more than 3 channels can be slower and may dilute consensus.'
                 )
 
@@ -1235,7 +1399,7 @@ class Step2Page(QWidget):
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
-        if seg_cfg.get("method") == CELLPOSE_NUCLEI_HQ:
+        if seg_cfg.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
             print(f"[Step2][HQ] loaded param_file path={param_file or '(manual)'}")
             print(f"[Step2-HQ] hq_input_mode: {seg_cfg.get('hq_input_mode')}")
             print(f"[Step2-HQ] requested hq_channels: {seg_cfg.get('hq_channels')}")

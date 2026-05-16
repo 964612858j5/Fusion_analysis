@@ -43,6 +43,7 @@ from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_NUCLEI_HQ,
+    CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -458,7 +459,7 @@ class SearchCtrlPanel(QWidget):
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
             return
-        if method == CELLPOSE_NUCLEI_HQ and not parse_hq_channels(self._hq_channels.text()):
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) and not parse_hq_channels(self._hq_channels.text()):
             QMessageBox.warning(
                 self,
                 "HQ channels required",
@@ -577,7 +578,7 @@ class SearchCtrlPanel(QWidget):
             params["device_preference"] = "gpu_first"
         if method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION):
             params["expand_distance"] = self._sd_expand_manual.value()
-        if method == CELLPOSE_NUCLEI_HQ:
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
             hq_channels = parse_hq_channels(self._hq_channels.text())
             params["hq_channels"] = hq_channels
             params["hq_input_mode"] = self._hq_input_mode.currentData() or "selected_channels_from_source"
@@ -593,11 +594,13 @@ class SearchCtrlPanel(QWidget):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         if self._method_combo.currentText() == "Cellpose nuclei + HQ":
             method = CELLPOSE_NUCLEI_HQ
+        elif self._method_combo.currentText() == "Cellpose nuclei + HQ2":
+            method = CELLPOSE_NUCLEI_HQ2
         return method
 
     def _refresh_patch_preview_state(self, running=False):
         method = self._selected_method()
-        is_hq = method == CELLPOSE_NUCLEI_HQ
+        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         enabled = (is_stardist or (is_hq and bool(parse_hq_channels(self._hq_channels.text())))) and not running
         self.btn_patch_preview.setEnabled(enabled)
@@ -612,7 +615,7 @@ class SearchCtrlPanel(QWidget):
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
-        is_hq = method == CELLPOSE_NUCLEI_HQ or self._method_combo.currentText() == "Cellpose nuclei + HQ"
+        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or self._method_combo.currentText() in ("Cellpose nuclei + HQ", "Cellpose nuclei + HQ2")
         self._p1_box.setVisible(is_cellpose)
         self._p2_box.setVisible(is_cellpose)
         self._p1_box.setEnabled(is_cellpose)
@@ -659,6 +662,7 @@ class SearchCtrlPanel(QWidget):
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
             CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
+            CELLPOSE_NUCLEI_HQ2: "cellpose_nuclei_hq2_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")

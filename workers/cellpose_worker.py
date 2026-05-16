@@ -19,6 +19,7 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_NUCLEI_HQ,
+    CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
@@ -30,6 +31,7 @@ from .hq_marker_segmentation import (
     segment_nuclei_hq,
     validate_hq_channels,
 )
+from .hq2_marker_segmentation import run_hq2_segmentation
 
 
 class OverviewLoaderThread(QThread):
@@ -496,7 +498,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
             try:
                 success = True
-                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ):
+                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
@@ -516,7 +518,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         if dist > 0:
                             masks_out = expand_labels(masks_out, distance=dist)
                         print(f"[Worker] expanded cells={int(np.asarray(masks_out).max())}")
-                    if method == CELLPOSE_NUCLEI_HQ:
+                    if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
                         mode = str(params.get("hq_input_mode") or "selected_channels_from_source")
                         if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
                             mode = "selected_channels_from_source"
@@ -559,22 +561,41 @@ def run_cellpose_process(args, result_queue, stop_flag):
                             hq_channel_names = hq_channels
                             if mode == "hybrid":
                                 params["channel_weights"] = {ch: float(weights.get(ch, 1.0)) for ch in hq_channels}
-                        masks_out, nuclei_labels, qc_rows = segment_nuclei_hq(
-                            masks_out.astype(np.uint32, copy=False),
-                            marker_channels,
-                            hq_channel_names,
-                            max_cell_radius=params.get("max_cell_radius", 12),
-                            normalization_low=params.get("normalization_percentile_low", 1.0),
-                            normalization_high=params.get("normalization_percentile_high", 99.5),
-                            consensus_mode=params.get("consensus_mode", "adaptive_best_channel"),
-                            channel_weights=params.get("channel_weights") or {},
-                            min_signal_threshold=params.get("min_signal_threshold", 0.08),
-                        )
+                        if method == CELLPOSE_NUCLEI_HQ2:
+                            hq2 = run_hq2_segmentation(
+                                masks_out.astype(np.uint32, copy=False),
+                                marker_channels,
+                                hq_channel_names,
+                                params,
+                            )
+                            masks_out = hq2["final_labels"]
+                            nuclei_labels = hq2["nuclei_labels"]
+                            qc_rows = hq2.get("qc_rows") or []
+                            params["hq2_preview_layers"] = {
+                                "hq_proposal_cells": int(np.asarray(hq2["hq_proposal_labels"]).max()),
+                                "imagej_proposal_cells": int(np.asarray(hq2["imagej_proposal_labels"]).max()),
+                                "core_cells": int(np.asarray(hq2["high_confidence_core_labels"]).max()),
+                                "expansion_added_pixels": int(np.count_nonzero(hq2["expansion_added_pixels"])),
+                            }
+                            print("[Worker] input=dapi_plus_hq2_channels")
+                            print(f"[Worker] hq2 final cells={int(np.asarray(masks_out).max())}")
+                        else:
+                            masks_out, nuclei_labels, qc_rows = segment_nuclei_hq(
+                                masks_out.astype(np.uint32, copy=False),
+                                marker_channels,
+                                hq_channel_names,
+                                max_cell_radius=params.get("max_cell_radius", 12),
+                                normalization_low=params.get("normalization_percentile_low", 1.0),
+                                normalization_high=params.get("normalization_percentile_high", 99.5),
+                                consensus_mode=params.get("consensus_mode", "adaptive_best_channel"),
+                                channel_weights=params.get("channel_weights") or {},
+                                min_signal_threshold=params.get("min_signal_threshold", 0.08),
+                            )
+                            print("[Worker] input=dapi_plus_hq_channels")
+                            print(f"[Worker] hq final cells={int(np.asarray(masks_out).max())}")
                         params["hq_preview_qc_rows"] = len(qc_rows)
                         params["nuclei_cells"] = int(np.asarray(nuclei_labels).max())
-                        print("[Worker] input=dapi_plus_hq_channels")
                         print(f"[Worker] hq_channels={hq_channels}")
-                        print(f"[Worker] hq final cells={int(np.asarray(masks_out).max())}")
                 elif method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
                     result_queue.put({
                         "type": "progress",

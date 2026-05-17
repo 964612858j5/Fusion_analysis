@@ -7,3 +7,5 @@ Traceback (most recent call last):
   File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1750, in run
     import torch
 ModuleNotFoundError: No module named 'torch'
+
+mesmer小样本跑一下看看能不能通

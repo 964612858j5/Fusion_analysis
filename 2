@@ -1,55 +1,59 @@
-2026-05-17 22:53:26 [INFO] [Step2] segmentation method=mesmer_whole_cell
-2026-05-17 22:53:26 [INFO] [Step2] input_type=dapi_plus_membrane
-2026-05-17 22:53:26 [INFO] === Segmentation started ===
-2026-05-17 22:53:26 [INFO] run_segmentation_params.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/run_segmentation_params.json
-2026-05-17 22:53:26 [INFO] Initial memory: RAM 39.5/134.9GB (29%)
-2026-05-17 22:53:26 [INFO] resource_samples.csv -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/resource_samples.csv
-2026-05-17 22:53:26 [INFO] runtime_partial.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/runtime_partial.json
-[Mesmer] tensorflow version=2.8.4
-2026-05-17 22:53:28 [INFO] [Mesmer] tensorflow version=2.8.4
-[Mesmer] deepcell available=True
-2026-05-17 22:53:29 [INFO] [Mesmer] deepcell available=True
-[Mesmer] device requested=auto
-2026-05-17 22:53:29 [INFO] [Mesmer] device requested=auto
-2026-05-17 22:53:29.593218: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:29.601857: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:29.602433: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-[Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
-2026-05-17 22:53:29 [INFO] [Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
-[Mesmer] device used=gpu
-2026-05-17 22:53:29 [INFO] [Mesmer] device used=gpu
-[Mesmer] loading local model=/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation
-2026-05-17 22:53:29.727066: I tensorflow/core/platform/cpu_feature_guard.cc:151] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 FMA
-To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.
-2026-05-17 22:53:29.734220: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:29.734563: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:29.734808: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:30.374640: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:30.374984: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:30.375241: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:53:30.375454: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1525] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 43731 MB memory:  -> device: 0, name: NVIDIA GeForce RTX 4090, pci bus id: 0000:c5:00.0, compute capability: 8.9
-WARNING:tensorflow:No training configuration found in save file, so the model was *not* compiled. Compile it manually.
-2026-05-17 22:53:37 [INFO] [Mesmer] device_used=gpu
-2026-05-17 22:53:37 [INFO] ROI mode: 1 ROI(s)
-2026-05-17 22:53:37 [INFO] === ROI [1/1]: Full WSI ===
-2026-05-17 22:53:37 [INFO]   zarr: 59040×35520 px
-2026-05-17 22:53:42 [INFO]   [Full WSI] Tile [1/12] row=0 col=0
-[Mesmer] tensorflow version=2.8.4
-2026-05-17 22:53:44 [INFO] [Mesmer] tensorflow version=2.8.4
-[Mesmer] deepcell available=True
-2026-05-17 22:53:44 [INFO] [Mesmer] deepcell available=True
-[Mesmer] device requested=auto
-2026-05-17 22:53:44 [INFO] [Mesmer] device requested=auto
-[Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
-2026-05-17 22:53:44 [INFO] [Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
-[Mesmer] device used=gpu
-2026-05-17 22:53:44 [INFO] [Mesmer] device used=gpu
-[Mesmer] tile_size=None
-[Mesmer] overlap=None
-[Mesmer] nuclear channel=DAPI/fused_zarr_channel_1
-[Mesmer] membrane channels=['fused_zarr_channel_0']
-[Mesmer] input shape=(1, 19880, 9080, 2)
-[Mesmer] prediction started
-2026-05-17 22:54:22.999193: I tensorflow/stream_executor/cuda/cuda_dnn.cc:368] Loaded cuDNN version 8100
-/root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/deepcell_toolbox/deep_watershed.py:108: UserWarning: h_maxima peak finding algorithm was selected, but the provided image is larger than 5k x 5k pixels.This will lead to slow prediction performance.
-  warnings.warn('h_maxima peak finding algorithm was selected, '
+2026-05-17 23:56:17 [INFO] === Segmentation started ===
+INFO:seg_20260517_235617:    dapi tile → /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/tile_masks/Full WSI/tile_r13_c7_dapi.ome.tiff
+2026-05-18 01:27:30 [INFO]     raw mask tile → /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/tile_masks/Full WSI/tile_r13_c7_raw_mask.ome.tiff
+INFO:seg_20260517_235617:    raw mask tile → /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/tile_masks/Full WSI/tile_r13_c7_raw_mask.ome.tiff
+2026-05-18 01:27:31 [INFO]   ✓ [Full WSI] Tile [112/112] kept=9267
+INFO:seg_20260517_235617:  ✓ [Full WSI] Tile [112/112] kept=9267
+DEBUG:seg_20260517_235617:[MEM] RAM 42.9/134.9GB (32%)
+2026-05-18 01:27:36 [INFO]   [Full WSI] total_cells=1,960,971
+INFO:seg_20260517_235617:  [Full WSI] total_cells=1,960,971
+DEBUG:seg_20260517_235617:[MEM] RAM 42.8/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.8/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.8/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 51.1/134.9GB (38%)
+DEBUG:seg_20260517_235617:[MEM] RAM 51.1/134.9GB (38%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 43.3/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 43.9/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 44.5/134.9GB (33%)
+DEBUG:seg_20260517_235617:[MEM] RAM 45.0/134.9GB (33%)
+DEBUG:seg_20260517_235617:[MEM] RAM 45.6/134.9GB (34%)
+DEBUG:seg_20260517_235617:[MEM] RAM 46.2/134.9GB (34%)
+DEBUG:seg_20260517_235617:[MEM] RAM 46.8/134.9GB (35%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+2026-05-18 01:28:30 [INFO] [Step2 runtime] elapsed=1h 32m 12.9s  peak_RAM=35.30 GB  peak_VRAM=9.20 GB  samples=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/resource_samples.csv
+INFO:seg_20260517_235617:[Step2 runtime] elapsed=1h 32m 12.9s  peak_RAM=35.30 GB  peak_VRAM=9.20 GB  samples=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/resource_samples.csv
+[Step2 runtime] elapsed=1h 32m 12.9s  peak_RAM=35.30 GB  peak_VRAM=9.20 GB  samples=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/resource_samples.csv
+DEBUG:seg_20260517_235617:Failed to write runtime partial: [Errno 2] 没有那个文件或目录: '/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/runtime_partial.json.tmp' -> '/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_235617_mesmer_whole_cell/runtime_partial.json'
+DEBUG:seg_20260517_235617:[MEM] RAM 42.7/134.9GB (32%)
+2026-05-18 01:28:30 [CRITICAL] FATAL ERROR:
+Traceback (most recent call last):
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1828, in run
+    n_cells = self._segment_one_zarr(
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1660, in _segment_one_zarr
+    meta.update(mesmer_metadata(
+UnboundLocalError: local variable 'meta' referenced before assignment
+
+CRITICAL:seg_20260517_235617:FATAL ERROR:
+Traceback (most recent call last):
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1828, in run
+    n_cells = self._segment_one_zarr(
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1660, in _segment_one_zarr
+    meta.update(mesmer_metadata(
+UnboundLocalError: local variable 'meta' referenced before assignment
+
+2026-05-18 01:28:30 [CRITICAL] Memory at crash: RAM 42.7/134.9GB (32%)
+CRITICAL:seg_20260517_235617:Memory at crash: RAM 42.7/134.9GB (32%)
+
+[Step2 Error]
+Traceback (most recent call last):
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1828, in run
+    n_cells = self._segment_one_zarr(
+  File "/sda1/Fusion/analysis_pipline/block01/workers/segment_merge_worker.py", line 1660, in _segment_one_zarr
+    meta.update(mesmer_metadata(
+UnboundLocalError: local variable 'meta' referenced before assignment

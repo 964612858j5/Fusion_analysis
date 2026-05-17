@@ -10,3 +10,18 @@ ModuleNotFoundError: No module named 'torch'
 
 
 python /sda1/Fusion/benchmark/run_spacec_wholecell_benchmark.py
+
+
+
+(spacec) root@ubuntu-H12D-8D:/sda1/Fusion/benchmark# python /sda1/Fusion/benchmark/run_spacec_wholecell_benchmark.py
+[benchmark] running: /root/micromamba/envs/spacec/bin/python /sda1/Fusion/benchmark/run_spacec_deepcell_14x8.py --config /sda1/Fusion/benchmark/spacec_14x8_dapi_hsbag/benchmark_config.json
+[deepcell] GPU check: {"tensorflow_version": "2.8.4", "gpus": ["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]}
+[deepcell] calling real SpaceC cell_segmentation once
+[deepcell] estimated SpaceC grid: {'rows': 14, 'cols': 8, 'tiles': 112, 'y_starts': [0, 4488, 8976, 13464, 17952, 22440, 26928, 31416, 35904, 40392, 44880, 49368, 53856, 58344], 'x_starts': [0, 4488, 8976, 13464, 17952, 22440, 26928, 31416]}
+--- Initializing Segmentation Pipeline ---
+GPU(s) available: 1. Memory growth enabled.
+Output basename: 2025.12.20_Final_17209_16_Slice4_Scan1_deepcell_wholecell
+Segmentation method: mesmer
+Differentiate Nucleus/Cytoplasm: False
+--- Loading Image Data (Format: Multichannel) ---
+Loading image: /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/2025.12.20_Final_17209_16_Slice4_Scan1.ome.tif

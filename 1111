@@ -9,3 +9,4 @@ Traceback (most recent call last):
 ModuleNotFoundError: No module named 'torch'
 
 
+python /sda1/Fusion/benchmark/run_spacec_wholecell_benchmark.py

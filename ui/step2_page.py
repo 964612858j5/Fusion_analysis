@@ -24,6 +24,9 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
+    MESMER_WHOLE_CELL,
+    MESMER_NUCLEI,
+    MESMER_NUCLEAR_GUIDED,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     available_segmentation_methods,
@@ -590,6 +593,72 @@ class Step2Page(QWidget):
         self._hq2_macrophage_signal.setRange(0.0, 1.0)
         self._hq2_macrophage_signal.setSingleStep(0.01)
         self._hq2_macrophage_signal.setValue(0.08)
+
+        self._mesmer_widgets = []
+        def _mesmer_row(label, widget):
+            r, l, w = _param_row(label, widget)
+            cpl.addLayout(r)
+            self._mesmer_widgets.extend([l, w])
+            return w
+
+        self._mesmer_section = QLabel('Mesmer parameters')
+        self._mesmer_section.setStyleSheet('color:#56b6c2;font-size:11px;font-weight:bold;padding-top:4px;')
+        cpl.addWidget(self._mesmer_section)
+        self._mesmer_widgets.append(self._mesmer_section)
+        self._mesmer_nuclear_channel = _mesmer_row('nuclear_channel:', QtWidgets.QLineEdit('DAPI'))
+        self._mesmer_membrane_channels = _mesmer_row('membrane_channels:', QtWidgets.QLineEdit())
+        self._mesmer_membrane_channels.setPlaceholderText('PanCK;CD45;CD68;HLA-DR')
+        self._mesmer_input_mode = _mesmer_row('input_mode:', QComboBox())
+        for label, value in (
+            ('DAPI only', 'DAPI only'),
+            ('DAPI + Fusion channel', 'step1_weighted_fusion'),
+            ('DAPI + membrane channels', 'selected_channels'),
+            ('selected channels', 'selected_channels'),
+        ):
+            self._mesmer_input_mode.addItem(label, value)
+        self._mesmer_use_gpu = _mesmer_row('use_gpu:', QComboBox())
+        for label, value in (('Auto', 'auto'), ('GPU', 'gpu'), ('CPU', 'cpu')):
+            self._mesmer_use_gpu.addItem(label, value)
+        self._mesmer_tile_size = _mesmer_row('tile_size:', QtWidgets.QSpinBox())
+        self._mesmer_tile_size.setRange(0, 8192)
+        self._mesmer_tile_size.setSingleStep(128)
+        self._mesmer_tile_size.setSpecialValueText('from Step2 Tile Grid')
+        self._mesmer_tile_size.setToolTip('Step2 uses Rows × Cols and Tile Grid overlap. This optional Mesmer tile_size is not used unless future internal Mesmer tiling is enabled.')
+        self._mesmer_tile_size.setValue(0)
+        self._mesmer_tile_size.setEnabled(False)
+        self._mesmer_overlap = _mesmer_row('overlap:', QtWidgets.QSpinBox())
+        self._mesmer_overlap.setRange(0, 1024)
+        self._mesmer_overlap.setSingleStep(32)
+        self._mesmer_overlap.setSpecialValueText('from Step2 Tile Grid')
+        self._mesmer_overlap.setToolTip('Step2 uses the Tile Grid overlap above for reading padded tiles. This optional Mesmer overlap is not used in current Step2.')
+        self._mesmer_overlap.setValue(0)
+        self._mesmer_overlap.setEnabled(False)
+        self._mesmer_batch_size = _mesmer_row('batch_size:', QtWidgets.QSpinBox())
+        self._mesmer_batch_size.setRange(1, 32)
+        self._mesmer_batch_size.setValue(1)
+        self._mesmer_mpp = _mesmer_row('image_mpp:', QDoubleSpinBox())
+        self._mesmer_mpp.setRange(0.01, 10)
+        self._mesmer_mpp.setSingleStep(0.05)
+        self._mesmer_mpp.setValue(0.5)
+        self._mesmer_norm = _mesmer_row('normalize_input:', QCheckBox('True'))
+        self._mesmer_norm.setChecked(True)
+        self._mesmer_low = _mesmer_row('percentile_low:', QDoubleSpinBox())
+        self._mesmer_low.setRange(0, 50)
+        self._mesmer_low.setValue(1.0)
+        self._mesmer_high = _mesmer_row('percentile_high:', QDoubleSpinBox())
+        self._mesmer_high.setRange(50, 100)
+        self._mesmer_high.setValue(99.8)
+        self._mesmer_min_size = _mesmer_row('postprocess_min_size:', QtWidgets.QSpinBox())
+        self._mesmer_min_size.setRange(0, 100000)
+        self._mesmer_min_size.setValue(0)
+        self._mesmer_step2_tiling_hint = QLabel(
+            'Step2 tiling is controlled by Tile Grid: Rows × Cols plus Overlap (px). '
+            'Mesmer tile_size/overlap are optional and left empty here.'
+        )
+        self._mesmer_step2_tiling_hint.setStyleSheet('color:#999;font-size:10px;')
+        self._mesmer_step2_tiling_hint.setWordWrap(True)
+        cpl.addWidget(self._mesmer_step2_tiling_hint)
+        self._mesmer_widgets.append(self._mesmer_step2_tiling_hint)
 
         self._method_hint = QLabel('')
         self._method_hint.setStyleSheet('color:#999;font-size:10px;')
@@ -1172,6 +1241,21 @@ class Step2Page(QWidget):
         self._hq2_macrophage_channels.setText(str(p.get("macrophage_channels", "CD68;CD206") or ""))
         self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
         self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
+            self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
+            idx = self._mesmer_input_mode.findData(p.get("input_mode", "selected_channels"))
+            self._mesmer_input_mode.setCurrentIndex(max(0, idx))
+            idx = self._mesmer_use_gpu.findData(str(p.get("use_gpu", "auto")).lower())
+            self._mesmer_use_gpu.setCurrentIndex(max(0, idx))
+            self._mesmer_tile_size.setValue(0)
+            self._mesmer_overlap.setValue(0)
+            self._mesmer_batch_size.setValue(int(p.get("batch_size", 1) or 1))
+            self._mesmer_mpp.setValue(float(p.get("image_mpp", p.get("pixel_size", 0.5)) or 0.5))
+            self._mesmer_norm.setChecked(bool(p.get("normalize_input", True)))
+            self._mesmer_low.setValue(float(p.get("percentile_low", 1.0)))
+            self._mesmer_high.setValue(float(p.get("percentile_high", 99.8)))
+            self._mesmer_min_size.setValue(int(p.get("postprocess_min_size", 0) or 0))
         self._on_method_changed()
 
     def _apply_method_defaults_to_ui(self, method):
@@ -1229,6 +1313,21 @@ class Step2Page(QWidget):
         self._hq2_macrophage_channels.setText(str(cfg.get("macrophage_channels", "CD68;CD206") or ""))
         self._hq2_macrophage_radius.setValue(float(cfg.get("macrophage_max_radius", 35)))
         self._hq2_macrophage_signal.setValue(float(cfg.get("macrophage_min_signal", 0.08)))
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            self._mesmer_nuclear_channel.setText(str(cfg.get("nuclear_channel", "DAPI") or "DAPI"))
+            self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(cfg.get("membrane_channels") or [])))
+            idx = self._mesmer_input_mode.findData(cfg.get("input_mode", "selected_channels"))
+            self._mesmer_input_mode.setCurrentIndex(max(0, idx))
+            idx = self._mesmer_use_gpu.findData(str(cfg.get("use_gpu", "auto")).lower())
+            self._mesmer_use_gpu.setCurrentIndex(max(0, idx))
+            self._mesmer_tile_size.setValue(0)
+            self._mesmer_overlap.setValue(0)
+            self._mesmer_batch_size.setValue(int(cfg.get("batch_size", 1) or 1))
+            self._mesmer_mpp.setValue(float(cfg.get("image_mpp", cfg.get("pixel_size", 0.5)) or 0.5))
+            self._mesmer_norm.setChecked(bool(cfg.get("normalize_input", True)))
+            self._mesmer_low.setValue(float(cfg.get("percentile_low", 1.0)))
+            self._mesmer_high.setValue(float(cfg.get("percentile_high", 99.8)))
+            self._mesmer_min_size.setValue(int(cfg.get("postprocess_min_size", 0) or 0))
 
     def get_cp_params(self):
         return self.get_seg_config()
@@ -1238,6 +1337,29 @@ class Step2Page(QWidget):
         diam = self._cp_diam.value()
         data = dict(self._seg_config or {})
         params = dict(get_segmentation_method_config(method).get("params") or {})
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            mode = {
+                MESMER_WHOLE_CELL: "whole_cell",
+                MESMER_NUCLEI: "nuclei",
+                MESMER_NUCLEAR_GUIDED: "nuclear_guided",
+            }.get(method, "whole_cell")
+            params.update({
+                "mesmer_mode": mode,
+                "nuclear_channel": self._mesmer_nuclear_channel.text().strip() or "DAPI",
+                "membrane_channels": parse_hq_channels(self._mesmer_membrane_channels.text()),
+                "input_mode": self._mesmer_input_mode.currentData() or "selected_channels",
+                "compartment": "nuclear" if method == MESMER_NUCLEI else "whole-cell",
+                "use_gpu": self._mesmer_use_gpu.currentData() or "auto",
+                "tile_size": None if self._mesmer_tile_size.value() <= 0 else self._mesmer_tile_size.value(),
+                "overlap": None if self._mesmer_overlap.value() <= 0 else self._mesmer_overlap.value(),
+                "batch_size": self._mesmer_batch_size.value(),
+                "image_mpp": self._mesmer_mpp.value(),
+                "pixel_size": self._mesmer_mpp.value(),
+                "normalize_input": self._mesmer_norm.isChecked(),
+                "percentile_low": self._mesmer_low.value(),
+                "percentile_high": self._mesmer_high.value(),
+                "postprocess_min_size": self._mesmer_min_size.value(),
+            })
         if method == CELLPOSE_NUCLEI_HQ2:
             hq_channels = parse_hq_channels(self._hq2_channels.text())
             hq_input_mode = self._hq2_input_mode.currentData() or 'selected_channels_from_source'
@@ -1322,6 +1444,8 @@ class Step2Page(QWidget):
             'tile_size':          self._cp_tile_size.value(),
             'batch_size':         self._cp_batch_size.value(),
         })
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            data.update(params)
         cfg = normalize_segmentation_config(data)
         if method == CELLPOSE_NUCLEI_HQ2:
             print(f"[HQ2-UI] collected params={cfg.get('params')}")
@@ -1340,6 +1464,7 @@ class Step2Page(QWidget):
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
         is_hq2 = method == CELLPOSE_NUCLEI_HQ2
+        is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         for w in (
             self._cp_model_label, self._cp_model_lbl,
             self._cp_diam_label, self._cp_diam,
@@ -1363,6 +1488,8 @@ class Step2Page(QWidget):
             w.setVisible(is_hq)
         for w in self._hq2_widgets:
             w.setVisible(is_hq2)
+        for w in self._mesmer_widgets:
+            w.setVisible(is_mesmer)
         cfg = get_segmentation_method_config(method)
         self._method_hint.setText(
             f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
@@ -1563,9 +1690,24 @@ class Step2Page(QWidget):
         )
 
     def _on_finished(self, output_dir, total_cells):
+        runtime = {}
+        try:
+            if self._worker is not None and hasattr(self._worker, "runtime_summary"):
+                runtime = self._worker.runtime_summary()
+        except Exception:
+            runtime = {}
+        runtime_text = ""
+        if runtime:
+            runtime_text = (
+                f"Elapsed: {runtime.get('elapsed') or 'N/A'}  |  "
+                f"Peak RAM: {runtime.get('peak_ram') or 'N/A'}  |  "
+                f"Peak VRAM: {runtime.get('peak_vram') or 'N/A'}"
+            )
         self._prog_bar.setValue(100)
         self._prog_lbl.setText(
-            f'✓ Done!  {total_cells:,} cells  →  {output_dir}'
+            f'✓ Done!  {total_cells:,} cells'
+            + (f'  |  {runtime_text}' if runtime_text else '')
+            + f'  →  {output_dir}'
         )
         self._btn_run.setEnabled(True)
         self._btn_back.setEnabled(True)
@@ -1581,8 +1723,15 @@ class Step2Page(QWidget):
 
         msg = QMessageBox(self)
         msg.setWindowTitle('Segmentation Complete')
+        runtime_block = ""
+        if runtime_text:
+            runtime_block = (
+                f'Runtime summary:\n'
+                f'  {runtime_text}\n\n'
+            )
         msg.setText(
             f'Total cells: {total_cells:,}\n\n'
+            f'{runtime_block}'
             f'Output directory:\n  {output_dir}\n\n'
             f'Global outputs:\n'
             f'  global_mask.zarr\n'

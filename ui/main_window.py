@@ -35,6 +35,9 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
+    MESMER_WHOLE_CELL,
+    MESMER_NUCLEI,
+    MESMER_NUCLEAR_GUIDED,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
@@ -48,6 +51,7 @@ from ..utils.roi_project import (
     mark_roi_step,
 )
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
+from ..workers.mesmer_worker import run_mesmer_patch_preview
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
 from .step0.search_ctrl import SearchCtrlPanel
@@ -389,9 +393,32 @@ class MainWindow(QMainWindow):
         mid.setStretchFactor(1, 1)
         main_split.addWidget(mid)
 
-        right = QSplitter(Qt.Vertical)
-        right.setChildrenCollapsible(True)
-        self._step1_right_split = right
+        right_tabs = QtWidgets.QTabWidget()
+        right_tabs.setStyleSheet(
+            "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
+            "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
+            "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
+        )
+        right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.right_tabs = right_tabs
+        self._step1_right_tabs = right_tabs
+        self._step1_right_split = None
+
+        method_params_tab = QWidget()
+        method_params_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        method_params_lay = QVBoxLayout(method_params_tab)
+        method_params_lay.setContentsMargins(0, 0, 0, 0)
+        method_params_lay.setSpacing(0)
+        self.method_params_tab = method_params_tab
+
+        method_params_scroll = QtWidgets.QScrollArea()
+        method_params_scroll.setWidgetResizable(True)
+        method_params_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        method_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        method_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        method_params_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._step1_method_params_scroll = method_params_scroll
+
         self.search = SearchCtrlPanel()
         self.search.setMinimumHeight(390)
         self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -401,20 +428,27 @@ class MainWindow(QMainWindow):
         self.search.stop.connect(self._stop)
         self.search.params_ready.connect(self._on_params_ready)
         self.search.method_changed.connect(self._on_step1_segmentation_mode_changed)
-        right.addWidget(self.search)
+        method_params_scroll.setWidget(self.search)
+        method_params_lay.addWidget(method_params_scroll)
 
+        patch_results_tab = QWidget()
+        patch_results_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        patch_results_lay = QVBoxLayout(patch_results_tab)
+        patch_results_lay.setContentsMargins(0, 0, 0, 0)
+        patch_results_lay.setSpacing(0)
+        self.patch_results_tab = patch_results_tab
         self.result_grid = ResultGridPanel()
         self.result_grid.setMinimumHeight(120)
         self.result_grid.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.result_grid.param_selected.connect(self._on_param_sel)
-        right.addWidget(self.result_grid)
+        patch_results_lay.addWidget(self.result_grid)
 
-        right.setCollapsible(0, False)
-        right.setCollapsible(1, True)
-        right.setStretchFactor(0, 0)
-        right.setStretchFactor(1, 1)
-        right.setSizes([430, 200])
-        main_split.addWidget(right)
+        right_tabs.addTab(method_params_tab, "Method & Parameters")
+        right_tabs.addTab(patch_results_tab, "Patch Results")
+        right_tabs.setCurrentWidget(method_params_tab)
+        print("[Step1-Tabs] right tabs created")
+        print("[Step1-Tabs] default tab=Method & Parameters")
+        main_split.addWidget(right_tabs)
 
         main_split.setStretchFactor(0, 2)
         main_split.setStretchFactor(1, 3)
@@ -531,6 +565,26 @@ class MainWindow(QMainWindow):
             f"sizeHint={widget.sizeHint().height()}"
         )
 
+    def _step1_right_child_names(self):
+        tabs = getattr(self, "right_tabs", None)
+        if tabs is None:
+            return "none"
+        return [tabs.tabText(i) for i in range(tabs.count())]
+
+    def _show_step1_patch_results_tab(self, reason):
+        tabs = getattr(self, "right_tabs", None)
+        tab = getattr(self, "patch_results_tab", None)
+        if tabs is not None and tab is not None:
+            tabs.setCurrentWidget(tab)
+            print(f"[Step1-Tabs] switched to Patch Results due to {reason}")
+
+    def _show_step1_method_params_tab(self, reason):
+        tabs = getattr(self, "right_tabs", None)
+        tab = getattr(self, "method_params_tab", None)
+        if tabs is not None and tab is not None:
+            tabs.setCurrentWidget(tab)
+            print(f"[Step1-Tabs] switched to Method & Parameters due to {reason}")
+
     def _log_step1_layout(self, where):
         try:
             print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
@@ -542,13 +596,17 @@ class MainWindow(QMainWindow):
             print(f"[Layout] {where} Phase2 panel sizeHint/min/max={self._layout_desc(getattr(self, 'result_grid', None))}")
             print("[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code")
             search = getattr(self, "search", None)
-            print(f"[Layout-Step1] {where} right panel size={self._layout_desc(getattr(self, '_step1_right_split', None))}")
+            print(f"[Layout-Step1] {where} right panel size={self._layout_desc(getattr(self, 'right_tabs', None))}")
             print(f"[Layout-Step1] {where} method group height/min/sizeHint={self._layout_height_desc(getattr(search, '_method_box', None))}")
             print(f"[Layout-Step1] {where} params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_manual_params_scroll', None))}")
             print(f"[Layout-Step1] {where} HQ2 params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_hq2_params_scroll', None))}")
             print(f"[Layout-Step1] {where} patch results height/min/sizeHint={self._layout_height_desc(getattr(self, 'result_grid', None))}")
-            splitter = getattr(self, '_step1_right_split', None)
-            print(f"[Layout-Step1] {where} splitter sizes={splitter.sizes() if splitter is not None else 'none'}")
+            tabs = getattr(self, "right_tabs", None)
+            current_tab = tabs.tabText(tabs.currentIndex()) if tabs is not None and tabs.count() else "none"
+            print(f"[Step1-Layout] {where} right main children={self._step1_right_child_names()}")
+            print(f"[Step1-Layout] {where} method tab size={self._layout_desc(getattr(self, 'method_params_tab', None))}")
+            print(f"[Step1-Layout] {where} patch results tab size={self._layout_desc(getattr(self, 'patch_results_tab', None))}")
+            print(f"[Layout-Step1] {where} splitter sizes=not-used tab={current_tab}")
         except Exception as e:
             print(f"[Layout] log failed: {e}")
 
@@ -2313,6 +2371,7 @@ class MainWindow(QMainWindow):
         showing the auto-diameter result for the user to visually confirm.
         After completion, diameter is automatically passed to Phase 2.
         """
+        self._show_step1_patch_results_tab("phase1")
         patches = list(self._all_patches)
         if not patches:
             QMessageBox.warning(self, "Info", "Please add at least one Patch first")
@@ -2343,6 +2402,7 @@ class MainWindow(QMainWindow):
     # ── Phase 2 ─────────────────────────────────────────────────────
 
     def _run_p2(self, cfg):
+        self._show_step1_patch_results_tab("phase2")
         patches = list(self._all_patches)
         if not patches:
             QMessageBox.warning(self, "Info", "Please add Patches first")
@@ -2375,6 +2435,7 @@ class MainWindow(QMainWindow):
         self._launch_worker(tasks)
 
     def _run_direct_patch_preview(self, params):
+        self._show_step1_patch_results_tab("run_patch_preview")
         method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
         if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
             QMessageBox.information(
@@ -2445,8 +2506,15 @@ class MainWindow(QMainWindow):
             "corrected_decisions": self._corrected_decisions,
             "output_dir": (self.step0_output or {}).get("output_dir") or OUTPUT_DIR,
         }
+        first_method = ""
+        if tasks:
+            try:
+                first_method = normalize_segmentation_config(tasks[0][2]).get("method", "")
+            except Exception:
+                first_method = ""
+        target = run_mesmer_patch_preview if first_method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED) else run_cellpose_process
         self.proc = mp.Process(
-            target=run_cellpose_process,
+            target=target,
             args=(args, self._proc_queue, self._proc_stop_flag),
             daemon=True,
         )

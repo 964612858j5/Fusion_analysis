@@ -9,6 +9,9 @@ import shutil
 import traceback
 import logging
 import threading
+import time
+import subprocess
+import csv
 from datetime import datetime
 
 import numpy as np
@@ -24,6 +27,9 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
+    MESMER_WHOLE_CELL,
+    MESMER_NUCLEI,
+    MESMER_NUCLEAR_GUIDED,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
@@ -39,6 +45,8 @@ from ..utils.roi_project import (
     update_roi_segmentation_run,
 )
 from .cellpose_worker import load_stardist_model
+from .mesmer_worker import run_mesmer_on_channel_source, run_mesmer_on_fused_tile
+from ..utils.mesmer_utils import get_mesmer_device_status, load_mesmer_application, mesmer_metadata
 from .hq_marker_segmentation import (
     parse_hq_channels,
     resolve_hq_channels,
@@ -97,6 +105,15 @@ class SegmentMergeWorker(QThread):
         self._stop            = False
         self._logger          = None
         self._mem_timer       = None
+        self._mem_log_active  = False
+        self._run_started_at  = None
+        self._run_finished_at = None
+        self._peak_ram_bytes  = 0
+        self._peak_vram_bytes = 0
+        self._runtime_summary = {}
+        self._resource_samples_path = ""
+        self._runtime_partial_path = ""
+        self._resource_sample_header_written = False
         self._last_region_meta = None
         self._current_region_bbox = None
         self._hq_resolved_source_path = ""
@@ -434,23 +451,299 @@ class SegmentMergeWorker(QThread):
 
         return "  |  ".join(parts)
 
-    def _start_mem_logger(self, interval_s=10):
-        """Start a background daemon thread that logs RAM + VRAM every interval_s seconds."""
+    @staticmethod
+    def _format_bytes(n_bytes):
+        if n_bytes is None:
+            return "N/A"
+        try:
+            value = float(n_bytes)
+        except Exception:
+            return "N/A"
+        if value <= 0:
+            return "N/A"
+        units = ("B", "KB", "MB", "GB", "TB")
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024.0
+            idx += 1
+        return f"{value:.2f} {units[idx]}"
+
+    @staticmethod
+    def _format_duration(seconds):
+        try:
+            seconds = float(seconds)
+        except Exception:
+            return "N/A"
+        if seconds < 0:
+            return "N/A"
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds - h * 3600 - m * 60
+        if h:
+            return f"{h}h {m:02d}m {s:04.1f}s"
+        if m:
+            return f"{m}m {s:04.1f}s"
+        return f"{s:.1f}s"
+
+    def _uses_torch_backend(self):
+        return self.method in (
+            CELLPOSE_WHOLECELL_FUSION,
+            CELLPOSE_NUCLEI_DAPI,
+            CELLPOSE_NUCLEI_EXPANSION,
+            CELLPOSE_NUCLEI_HQ,
+            CELLPOSE_NUCLEI_HQ2,
+        )
+
+    @staticmethod
+    def _empty_torch_cache_if_available():
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def _current_process_ram_bytes(self):
+        """Return RSS for this process plus live child processes."""
+        try:
+            import psutil
+            proc = psutil.Process(os.getpid())
+            rss = proc.memory_info().rss
+            for child in proc.children(recursive=True):
+                try:
+                    rss += child.memory_info().rss
+                except Exception:
+                    pass
+            return int(rss)
+        except Exception:
+            return 0
+
+    def _current_vram_bytes(self):
+        """Return best-effort VRAM currently used by this run's process tree."""
+        max_bytes = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                current_total = 0
+                peak_total = 0
+                for i in range(torch.cuda.device_count()):
+                    current_total += int(torch.cuda.memory_reserved(i))
+                    peak_total += int(torch.cuda.max_memory_reserved(i))
+                max_bytes = max(max_bytes, current_total, peak_total)
+        except Exception:
+            pass
+
+        try:
+            import psutil
+            pids = {os.getpid()}
+            pids.update(child.pid for child in psutil.Process(os.getpid()).children(recursive=True))
+            cmd = [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ]
+            out = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            total_mb = 0
+            for line in (out.stdout or "").splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    used_mb = float(parts[1])
+                except Exception:
+                    continue
+                if pid in pids:
+                    total_mb += used_mb
+            if total_mb > 0:
+                max_bytes = max(max_bytes, int(total_mb * 1024 * 1024))
+        except Exception:
+            pass
+        return int(max_bytes)
+
+    def _sample_runtime_resources(self):
+        ram = self._current_process_ram_bytes()
+        vram = self._current_vram_bytes()
+        if ram > self._peak_ram_bytes:
+            self._peak_ram_bytes = ram
+        if vram > self._peak_vram_bytes:
+            self._peak_vram_bytes = vram
+        now = time.time()
+        elapsed = 0.0
+        if self._run_started_at is not None:
+            elapsed = max(0.0, now - self._run_started_at)
+        sample = {
+            "timestamp": datetime.fromtimestamp(now).isoformat(),
+            "elapsed_seconds": elapsed,
+            "ram_bytes": int(ram),
+            "ram": self._format_bytes(ram),
+            "peak_ram_bytes": int(self._peak_ram_bytes),
+            "peak_ram": self._format_bytes(self._peak_ram_bytes),
+            "vram_bytes": int(vram),
+            "vram": self._format_bytes(vram),
+            "peak_vram_bytes": int(self._peak_vram_bytes),
+            "peak_vram": self._format_bytes(self._peak_vram_bytes),
+        }
+        self._write_runtime_sample(sample)
+        return sample
+
+    def _write_runtime_sample(self, sample):
+        if not self._resource_samples_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._resource_samples_path), exist_ok=True)
+            fieldnames = [
+                "timestamp",
+                "elapsed_seconds",
+                "ram_bytes",
+                "ram",
+                "peak_ram_bytes",
+                "peak_ram",
+                "vram_bytes",
+                "vram",
+                "peak_vram_bytes",
+                "peak_vram",
+            ]
+            write_header = (
+                not self._resource_sample_header_written
+                or not os.path.exists(self._resource_samples_path)
+                or os.path.getsize(self._resource_samples_path) == 0
+            )
+            with open(self._resource_samples_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                    self._resource_sample_header_written = True
+                writer.writerow({key: sample.get(key) for key in fieldnames})
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as exc:
+            if self._logger:
+                self._logger.debug("Failed to write resource sample: %s", exc)
+
+        if self._runtime_partial_path:
+            try:
+                partial = {
+                    "status": "running",
+                    "method": self.method,
+                    "run_id": self.result_id,
+                    "output_dir": self._abs(self.output_dir),
+                    "resource_samples_csv": self._abs(self._resource_samples_path),
+                    "last_sample": sample,
+                    "elapsed_seconds": sample.get("elapsed_seconds", 0.0),
+                    "elapsed": self._format_duration(sample.get("elapsed_seconds", 0.0)),
+                    "peak_ram_bytes": int(self._peak_ram_bytes),
+                    "peak_ram": self._format_bytes(self._peak_ram_bytes),
+                    "peak_vram_bytes": int(self._peak_vram_bytes),
+                    "peak_vram": self._format_bytes(self._peak_vram_bytes),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                tmp_path = self._runtime_partial_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(partial, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self._runtime_partial_path)
+            except Exception as exc:
+                if self._logger:
+                    self._logger.debug("Failed to write runtime partial: %s", exc)
+
+    def _start_runtime_monitor(self, interval_s=2):
+        """Start a daemon sampler for elapsed time plus peak RAM/VRAM."""
+        self._run_started_at = time.time()
+        self._run_finished_at = None
+        self._peak_ram_bytes = 0
+        self._peak_vram_bytes = 0
+        self._runtime_summary = {}
+        self._resource_samples_path = os.path.join(self.output_dir, "resource_samples.csv")
+        self._runtime_partial_path = os.path.join(self.output_dir, "runtime_partial.json")
+        self._resource_sample_header_written = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    torch.cuda.reset_peak_memory_stats(i)
+        except Exception:
+            pass
         self._mem_log_active = True
+        self._sample_runtime_resources()
+        if self._logger:
+            self._logger.info("resource_samples.csv -> %s", self._resource_samples_path)
+            self._logger.info("runtime_partial.json -> %s", self._runtime_partial_path)
 
         def _loop():
             while self._mem_log_active and not self._stop:
+                self._sample_runtime_resources()
                 if self._logger:
                     self._logger.debug(f"[MEM] {self._mem_snapshot()}")
-                import time as _t
-                _t.sleep(interval_s)
+                time.sleep(interval_s)
 
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
         self._mem_timer = t
 
-    def _stop_mem_logger(self):
+    def _finish_runtime_monitor(self):
+        self._sample_runtime_resources()
         self._mem_log_active = False
+        self._run_finished_at = time.time()
+        elapsed = 0.0
+        if self._run_started_at is not None:
+            elapsed = max(0.0, self._run_finished_at - self._run_started_at)
+        self._runtime_summary = {
+            "elapsed_seconds": elapsed,
+            "elapsed": self._format_duration(elapsed),
+            "peak_ram_bytes": int(self._peak_ram_bytes),
+            "peak_ram": self._format_bytes(self._peak_ram_bytes),
+            "peak_vram_bytes": int(self._peak_vram_bytes),
+            "peak_vram": self._format_bytes(self._peak_vram_bytes),
+            "resource_samples_csv": self._abs(self._resource_samples_path) if self._resource_samples_path else "",
+            "runtime_partial_json": self._abs(self._runtime_partial_path) if self._runtime_partial_path else "",
+        }
+        if self._runtime_partial_path:
+            try:
+                final_partial = dict(self._runtime_summary)
+                final_partial.update({
+                    "status": "finished",
+                    "method": self.method,
+                    "run_id": self.result_id,
+                    "output_dir": self._abs(self.output_dir),
+                    "updated_at": datetime.now().isoformat(),
+                })
+                tmp_path = self._runtime_partial_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(final_partial, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self._runtime_partial_path)
+            except Exception as exc:
+                if self._logger:
+                    self._logger.debug("Failed to finalize runtime partial: %s", exc)
+        if self._logger:
+            self._logger.info(
+                "[Step2 runtime] elapsed=%s  peak_RAM=%s  peak_VRAM=%s  samples=%s",
+                self._runtime_summary["elapsed"],
+                self._runtime_summary["peak_ram"],
+                self._runtime_summary["peak_vram"],
+                self._runtime_summary["resource_samples_csv"],
+            )
+        print(
+            "[Step2 runtime] "
+            f"elapsed={self._runtime_summary['elapsed']}  "
+            f"peak_RAM={self._runtime_summary['peak_ram']}  "
+            f"peak_VRAM={self._runtime_summary['peak_vram']}  "
+            f"samples={self._runtime_summary['resource_samples_csv']}"
+        )
+        return dict(self._runtime_summary)
+
+    def runtime_summary(self):
+        return dict(self._runtime_summary or {})
 
     def _read_dapi_from_zarr(self, z, y0, y1, x0, x1):
         """
@@ -603,6 +896,48 @@ class SegmentMergeWorker(QThread):
             self._logger.debug("[HQ] available channel array_keys: %s", available)
         return channels, group
 
+    def _mesmer_uses_selected_channels(self):
+        mode = str(self.seg_config.get("input_mode") or "selected_channels").strip().lower()
+        return mode in {
+            "selected_channels",
+            "dapi + membrane",
+            "dapi + selected channels",
+            "membrane",
+        }
+
+    def _validate_mesmer_config(self, roi_name=None):
+        if not self._mesmer_uses_selected_channels():
+            self.seg_config["mesmer_input_source"] = "fused_zarr"
+            return None
+
+        nuclear = str(self.seg_config.get("nuclear_channel") or "DAPI").strip() or "DAPI"
+        membrane_channels = parse_hq_channels(self.seg_config.get("membrane_channels") or [])
+        requested = [nuclear] + [ch for ch in membrane_channels if ch != nuclear]
+        group = self._open_hq_channel_group(roi_name)
+        available = self._channel_array_names(group)
+        source_path = self._hq_resolved_source_path or self._multichannel_source_path() or self._raw_channel_source_path()
+        context = (
+            "Mesmer source debug:\n"
+            f"  loaded param_file path: {self.param_file or '(none)'}\n"
+            f"  selected channel source: {source_path or '(none)'}\n"
+            f"  input_mode: {self.seg_config.get('input_mode')}\n"
+            f"  nuclear_channel: {nuclear}\n"
+            f"  membrane_channels: {membrane_channels}\n"
+            f"  requested roi_id: {self.seg_config.get('roi_id') or self.roi_id or '(none)'}\n"
+            f"  requested roi_name: {self.seg_config.get('roi_name') or self.seg_config.get('roi_display_name') or roi_name or self.roi_display_name or '(none)'}\n"
+            f"  available channels: {available}"
+        )
+        validate_hq_channels(requested, available, context=context)
+        self.seg_config["nuclear_channel"] = nuclear
+        self.seg_config["membrane_channels"] = membrane_channels
+        self.seg_config["mesmer_input_source"] = "selected_channels_from_source"
+        if self._logger:
+            self._logger.info("[Mesmer] input source=selected_channels_from_source")
+            self._logger.info("[Mesmer] nuclear channel=%s", nuclear)
+            self._logger.info("[Mesmer] membrane channels=%s", membrane_channels)
+            self._logger.info("[Mesmer] selected channel source=%s", source_path)
+        return group
+
     def _hq_meta_fields(self, nuclei_mask_path="", final_cell_mask_path="", qc_table_path=""):
         return {
             "method": "cellpose_nuclei_hq",
@@ -711,6 +1046,25 @@ class SegmentMergeWorker(QThread):
             marker_channels.append(arr)
         return marker_channels
 
+    def _read_mesmer_channel_source(self, group, y0, y1, x0, x1):
+        nuclear = str(self.seg_config.get("nuclear_channel") or "DAPI").strip() or "DAPI"
+        membrane_channels = parse_hq_channels(self.seg_config.get("membrane_channels") or [])
+        requested = [nuclear] + [ch for ch in membrane_channels if ch != nuclear]
+        source = {}
+        if isinstance(group, dict) and group.get("kind") == "raw_ome":
+            loader = group["loader"]
+            by0, _by1, bx0, _bx1 = [0, 0, 0, 0]
+            if self._current_region_bbox and len(self._current_region_bbox) == 4:
+                by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
+            fy0, fy1 = by0 + int(y0), by0 + int(y1)
+            fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
+            for ch in requested:
+                source[ch] = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
+            return source
+        for ch in requested:
+            source[ch] = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+        return source
+
     @staticmethod
     def _normalize01(arr):
         arr = np.asarray(arr, dtype=np.float32)
@@ -727,6 +1081,8 @@ class SegmentMergeWorker(QThread):
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+            if device is None:
+                raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
             from cellpose import models as cp_models
             return {"cellpose": cp_models.CellposeModel(device=device)}
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
@@ -742,9 +1098,17 @@ class SegmentMergeWorker(QThread):
                 "stardist_normalize": stardist_normalize,
                 "stardist_device": stardist_device,
             }
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            status = get_mesmer_device_status(self.seg_config.get("use_gpu", "auto"), logger=self._logger)
+            if not status.mesmer_available:
+                raise RuntimeError(status.error or "DeepCell/Mesmer is not installed in the current environment.")
+            app = load_mesmer_application()
+            if self._logger:
+                self._logger.info(f"[Mesmer] device_used={status.device_used}")
+            return {"mesmer": app, "mesmer_device_status": status}
         raise ValueError(f"Unknown segmentation method: {method}")
 
-    def _segment_tile(self, tile_data, backend, hq_marker_channels=None):
+    def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         tile_f32 = tile_data.astype(np.float32) / 65535.0
@@ -836,6 +1200,31 @@ class SegmentMergeWorker(QThread):
                     masks = expand_labels(masks, distance=dist)
             return masks.astype(np.uint32)
 
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            if mesmer_channel_source is not None:
+                result = run_mesmer_on_channel_source(
+                    mesmer_channel_source,
+                    self.seg_config,
+                    app=backend.get("mesmer"),
+                    logger=self._logger,
+                )
+            else:
+                result = run_mesmer_on_fused_tile(
+                    tile_data,
+                    self.seg_config,
+                    app=backend.get("mesmer"),
+                    logger=self._logger,
+                )
+            self.seg_config["device_used"] = result.get("device_used")
+            self.seg_config["runtime_seconds_last_tile"] = result.get("runtime_seconds")
+            if method == MESMER_NUCLEAR_GUIDED:
+                return {
+                    "mask": result["mask"].astype(np.uint32, copy=False),
+                    "nuclei": result.get("nuclei"),
+                    "qc_rows": [],
+                }
+            return result["mask"].astype(np.uint32, copy=False)
+
         raise ValueError(f"Unknown segmentation method: {method}")
 
     @staticmethod
@@ -869,7 +1258,6 @@ class SegmentMergeWorker(QThread):
 
         Returns total cell count.
         """
-        import torch
         self._current_region_bbox = list(bbox) if bbox else None
         z      = zarr.open(zarr_path, mode='r')
         full_h = z.shape[0]
@@ -915,15 +1303,21 @@ class SegmentMergeWorker(QThread):
         dapi_mmap[:] = 0
 
         is_hq2 = self.method == CELLPOSE_NUCLEI_HQ2
-        is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
+        is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
+        is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
+        is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or is_mesmer_guided
         hq_channels, hq_group = ([], None)
+        mesmer_group = None
         nuclei_mmap = None
         nuclei_mmap_path = ""
         hq_qc_rows = []
         hq2_layer_mmaps = {}
         hq2_layer_mmap_paths = {}
-        if is_hq:
+        if is_hq and not is_mesmer_guided:
             hq_channels, hq_group = self._validate_hq_config(out_prefix)
+        if is_mesmer:
+            mesmer_group = self._validate_mesmer_config(out_prefix)
+        if is_hq:
             nuclei_mmap_path = os.path.join(
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.dat'
             )
@@ -986,11 +1380,21 @@ class SegmentMergeWorker(QThread):
             else:
                 try:
                     hq_marker_channels = None
-                    if is_hq:
+                    mesmer_channel_source = None
+                    if is_hq and not is_mesmer_guided:
                         hq_marker_channels = self._read_hq_marker_channels(
                             hq_group, hq_channels, ry0, ry1, rx0, rx1
                         )
-                    local_result = self._segment_tile(tile_data, model, hq_marker_channels)
+                    if is_mesmer and mesmer_group is not None:
+                        mesmer_channel_source = self._read_mesmer_channel_source(
+                            mesmer_group, ry0, ry1, rx0, rx1
+                        )
+                    local_result = self._segment_tile(
+                        tile_data,
+                        model,
+                        hq_marker_channels,
+                        mesmer_channel_source=mesmer_channel_source,
+                    )
                     local_nuclei = None
                     local_qc_rows = []
                     local_hq2_layers = {}
@@ -1008,7 +1412,7 @@ class SegmentMergeWorker(QThread):
                     local_qc_rows = []
                     local_hq2_layers = {}
                 if use_gpu:
-                    torch.cuda.empty_cache()
+                    self._empty_torch_cache_if_available()
 
             del tile_data
 
@@ -1085,7 +1489,10 @@ class SegmentMergeWorker(QThread):
                 lut[lab] = new_id + global_id_offset
 
             remapped = lut[local_mask]
-            remapped_nuclei = lut[local_nuclei] if is_hq and local_nuclei is not None else None
+            remapped_nuclei = None
+            if is_hq and local_nuclei is not None:
+                safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
+                remapped_nuclei = lut[safe_nuclei]
             remapped_hq2_layers = {}
             if is_hq2 and local_hq2_layers:
                 for layer_key, layer_arr in local_hq2_layers.items():
@@ -1238,7 +1645,9 @@ class SegmentMergeWorker(QThread):
                     photometric='minisblack',
                     metadata=None,
                 )
-            if is_hq2:
+            if is_mesmer_guided:
+                qc_table_path = ""
+            elif is_hq2:
                 qc_table_path = os.path.join(self.output_dir, f'hq2_qc_table_{out_prefix}.csv')
                 write_hq2_qc_table(qc_table_path, hq_qc_rows)
             else:
@@ -1247,7 +1656,18 @@ class SegmentMergeWorker(QThread):
             del nuclei_mmap_ro
 
         hq2_paths = {}
-        if is_hq2:
+        if self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            meta.update(mesmer_metadata(
+                self.method,
+                self.seg_config,
+                getattr(model, "get", lambda _k, _d=None: _d)("mesmer_device_status") if isinstance(model, dict) else None,
+                output_mask_path=self._abs(ome_path),
+                extra={
+                    "nuclei_mask_path": self._abs(nuclei_ome_path),
+                    "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
+                },
+            ))
+        elif is_hq2:
             hq2_paths = self._write_hq2_layer_outputs(
                 hq2_layer_mmap_paths, (full_h, full_w), out_prefix=out_prefix
             )
@@ -1346,8 +1766,6 @@ class SegmentMergeWorker(QThread):
 
     def run(self):
         try:
-            import torch
-
             self._logger, log_path = self._setup_logger()
             log = self._logger
             log.info("=== Segmentation started ===")
@@ -1365,11 +1783,22 @@ class SegmentMergeWorker(QThread):
                 print("[WARNING] pip install psutil  — RAM monitoring disabled")
 
             log.info(f"Initial memory: {self._mem_snapshot()}")
-            self._start_mem_logger(interval_s=10)
+            self._start_runtime_monitor(interval_s=2)
 
             if self.recovery_npy_dir is None:
-                use_gpu = torch.cuda.is_available()
-                device  = torch.device('cuda' if use_gpu else 'cpu')
+                if self._uses_torch_backend():
+                    try:
+                        import torch
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "PyTorch is required for Cellpose/HQ Step2 segmentation, "
+                            "but it is not installed in the current environment."
+                        ) from exc
+                    use_gpu = torch.cuda.is_available()
+                    device = torch.device('cuda' if use_gpu else 'cpu')
+                else:
+                    use_gpu = str(self.seg_config.get("use_gpu", "auto")).lower() != "cpu"
+                    device = None
                 model   = self._init_segmentation_backend(use_gpu, device)
             else:
                 model   = None
@@ -1437,8 +1866,8 @@ class SegmentMergeWorker(QThread):
                 if model is not None:
                     del model
                     gc.collect()
-                    if use_gpu and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    if use_gpu:
+                        self._empty_torch_cache_if_available()
                     self._drop_caches()
 
                 log.info(
@@ -1489,6 +1918,8 @@ class SegmentMergeWorker(QThread):
                         first_roi_meta.get("final_cell_mask_path") or first_roi_meta.get("ome_tiff", ""),
                         first_roi_meta.get("qc_table_path", ""),
                     ))
+                runtime_meta = self._finish_runtime_monitor()
+                summary_meta["runtime"] = runtime_meta
                 with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
                     json.dump(summary_meta, f, indent=2)
                 self._register_completed_result(summary_meta)
@@ -1510,7 +1941,6 @@ class SegmentMergeWorker(QThread):
                     print(f"[Step2] mask_ome={summary_meta['paths']['mask_ome']}")
                     print(f"[Step2] fusion_zarr={summary_meta['paths'].get('fusion_zarr')}")
                     print("[Step2] updated roi_index latest_by_method")
-                self._stop_mem_logger()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return
 
@@ -1557,15 +1987,21 @@ class SegmentMergeWorker(QThread):
             dapi_mmap[:] = 0
 
             is_hq2 = self.method == CELLPOSE_NUCLEI_HQ2
-            is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
+            is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
+            is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
+            is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or is_mesmer_guided
             hq_channels, hq_group = ([], None)
+            mesmer_group = None
             nuclei_mmap = None
             nuclei_mmap_path = ""
             hq_qc_rows = []
             hq2_layer_mmaps = {}
             hq2_layer_mmap_paths = {}
-            if is_hq:
+            if is_hq and not is_mesmer_guided:
                 hq_channels, hq_group = self._validate_hq_config()
+            if is_mesmer:
+                mesmer_group = self._validate_mesmer_config()
+            if is_hq:
                 nuclei_mmap_path = os.path.join(self.output_dir, 'global_nuclei_mask.dat')
                 nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                         shape=(full_h, full_w))
@@ -1622,11 +2058,21 @@ class SegmentMergeWorker(QThread):
                     tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
                     try:
                         hq_marker_channels = None
-                        if is_hq:
+                        mesmer_channel_source = None
+                        if is_hq and not is_mesmer_guided:
                             hq_marker_channels = self._read_hq_marker_channels(
                                 hq_group, hq_channels, ry0, ry1, rx0, rx1
                             )
-                        local_result = self._segment_tile(tile_data, model, hq_marker_channels)
+                        if is_mesmer and mesmer_group is not None:
+                            mesmer_channel_source = self._read_mesmer_channel_source(
+                                mesmer_group, ry0, ry1, rx0, rx1
+                            )
+                        local_result = self._segment_tile(
+                            tile_data,
+                            model,
+                            hq_marker_channels,
+                            mesmer_channel_source=mesmer_channel_source,
+                        )
                         local_nuclei = None
                         local_qc_rows = []
                         local_hq2_layers = {}
@@ -1646,7 +2092,7 @@ class SegmentMergeWorker(QThread):
                         local_hq2_layers = {}
                     del tile_data
                     if use_gpu:
-                        torch.cuda.empty_cache()
+                        self._empty_torch_cache_if_available()
 
                 local_oy0 = oy0 - ry0
                 local_oy1 = oy1 - ry0
@@ -1712,7 +2158,10 @@ class SegmentMergeWorker(QThread):
                     lut[lab] = new_id + global_id_offset
 
                 remapped = lut[local_mask]
-                remapped_nuclei = lut[local_nuclei] if is_hq and local_nuclei is not None else None
+                remapped_nuclei = None
+                if is_hq and local_nuclei is not None:
+                    safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
+                    remapped_nuclei = lut[safe_nuclei]
                 remapped_hq2_layers = {}
                 if is_hq2 and local_hq2_layers:
                     for layer_key, layer_arr in local_hq2_layers.items():
@@ -1766,16 +2215,15 @@ class SegmentMergeWorker(QThread):
                 log.info(_done_msg)
                 log.debug(f"  [MEM after write] {self._mem_snapshot()}")
                 gc.collect()
-                if self.recovery_npy_dir is None and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                if self.recovery_npy_dir is None and use_gpu:
+                    self._empty_torch_cache_if_available()
                 self._drop_caches()
                 log.debug("  [MEM after drop_caches] " + self._mem_snapshot())
 
             if self.recovery_npy_dir is None:
                 del model
                 gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                self._empty_torch_cache_if_available()
                 self._drop_caches()
                 log.info(f"All inference done. {self._mem_snapshot()}")
 
@@ -1789,7 +2237,6 @@ class SegmentMergeWorker(QThread):
             _out_msg = f"Inference done. Total cells: {total_cells:,}. Writing outputs…"
             self.progress.emit(n_tiles, n_tiles, _out_msg)
             log.info(_out_msg)
-            self._stop_mem_logger()
 
             del mmap, dapi_mmap
             if nuclei_mmap is not None:
@@ -1876,7 +2323,9 @@ class SegmentMergeWorker(QThread):
                         photometric='minisblack',
                         metadata=None,
                     )
-                if is_hq2:
+                if is_mesmer_guided:
+                    qc_table_path = ""
+                elif is_hq2:
                     qc_table_path = os.path.join(self.output_dir, 'hq2_qc_table.csv')
                     write_hq2_qc_table(qc_table_path, hq_qc_rows)
                 else:
@@ -1923,7 +2372,18 @@ class SegmentMergeWorker(QThread):
                 'config_path':    self._abs(config_path),
                 'created_at':     datetime.now().isoformat(),
             }
-            if is_hq2:
+            if self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+                meta.update(mesmer_metadata(
+                    self.method,
+                    self.seg_config,
+                    getattr(model, "get", lambda _k, _d=None: _d)("mesmer_device_status") if isinstance(model, dict) else None,
+                    output_mask_path=self._abs(ome_path),
+                    extra={
+                        "nuclei_mask_path": self._abs(nuclei_ome_path),
+                        "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
+                    },
+                ))
+            elif is_hq2:
                 hq2_meta_paths = dict(hq2_paths)
                 hq2_meta_paths.update({
                     "nuclei_mask_path": self._abs(nuclei_ome_path),
@@ -1945,6 +2405,8 @@ class SegmentMergeWorker(QThread):
                 "corrected_channels_zarr": self._multichannel_source_path(),
                 "raw_ome": "",
             }
+            runtime_meta = self._finish_runtime_monitor()
+            meta["runtime"] = runtime_meta
             with open(os.path.join(self.output_dir,
                                    'segmentation_meta.json'), 'w') as f:
                 json.dump(meta, f, indent=2)
@@ -1959,6 +2421,7 @@ class SegmentMergeWorker(QThread):
             self.finished.emit(self.output_dir, total_cells)
 
         except Exception:
+            self._finish_runtime_monitor()
             tb = traceback.format_exc()
             if self._logger:
                 self._logger.critical("FATAL ERROR:\n" + tb)
@@ -1968,5 +2431,4 @@ class SegmentMergeWorker(QThread):
                     )
                 except Exception:
                     pass
-            self._stop_mem_logger()
             self.error.emit(tb)

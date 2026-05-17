@@ -47,6 +47,9 @@ from ...utils.segmentation_config import (
     CELLPOSE_WHOLECELL_FUSION,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
+    MESMER_WHOLE_CELL,
+    MESMER_NUCLEI,
+    MESMER_NUCLEAR_GUIDED,
     available_segmentation_methods,
     get_segmentation_method_config,
     normalize_segmentation_config,
@@ -469,6 +472,8 @@ class SearchCtrlPanel(QWidget):
         self._legacy_hq2_param_rows = list(self._hq2_param_rows)
         self._build_hq2_params_panel()
         lay.insertWidget(1, self.hq2_params_panel)
+        self._build_mesmer_params_panel()
+        lay.insertWidget(2, self.mesmer_params_panel)
 
         self._patch_preview_hint = QLabel("")
         self._patch_preview_hint.setStyleSheet("color:#ffb86c;font-size:10px;")
@@ -578,6 +583,9 @@ class SearchCtrlPanel(QWidget):
                 self, "Segmentation mode",
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
+            return
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            self.run_preview.emit(self.get_current_params())
             return
         hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else self._hq_channels.text()
         if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) and not parse_hq_channels(hq_text):
@@ -758,6 +766,107 @@ class SearchCtrlPanel(QWidget):
         if getattr(self, "hq2_params_panel", None) is not None:
             self.hq2_params_panel.setVisible(False)
 
+    def _build_mesmer_params_panel(self):
+        self.mesmer_params_panel = QGroupBox("Mesmer parameters")
+        self.mesmer_params_panel.setMinimumHeight(210)
+        self.mesmer_params_panel.setMaximumHeight(390)
+        self.mesmer_params_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred,
+        )
+        self.mesmer_params_panel.setStyleSheet(
+            "QGroupBox{border:1px solid #56b6c2;border-radius:4px;"
+            "font-weight:bold;color:#56b6c2;font-size:11px;}"
+        )
+        outer = QVBoxLayout(self.mesmer_params_panel)
+        grid = QtWidgets.QGridLayout()
+        outer.addLayout(grid)
+
+        def add(row, label, widget):
+            lbl = QLabel(label)
+            lbl.setMinimumWidth(130)
+            lbl.setStyleSheet("font-size:10px;color:#bbb;")
+            widget.setMinimumHeight(24)
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(widget, row, 1)
+            return widget
+
+        self._mesmer_nuclear_channel = add(0, "nuclear_channel:", QtWidgets.QLineEdit("DAPI"))
+        self._mesmer_membrane_channels = add(1, "membrane_channels:", QtWidgets.QLineEdit())
+        self._mesmer_membrane_channels.setPlaceholderText("PanCK;CD45;CD68;HLA-DR")
+        self._mesmer_input_mode = add(2, "input_mode:", QComboBox())
+        for label, value in (
+            ("DAPI only", "DAPI only"),
+            ("DAPI + Fusion channel", "step1_weighted_fusion"),
+            ("DAPI + membrane channels", "selected_channels"),
+            ("selected channels", "selected_channels"),
+        ):
+            self._mesmer_input_mode.addItem(label, value)
+        self._mesmer_use_gpu = add(3, "use_gpu:", QComboBox())
+        for label, value in (("Auto", "auto"), ("GPU", "gpu"), ("CPU", "cpu")):
+            self._mesmer_use_gpu.addItem(label, value)
+        self._mesmer_tile_size = add(4, "tile_size:", QDoubleSpinBox())
+        self._mesmer_tile_size.setRange(128, 8192)
+        self._mesmer_tile_size.setSingleStep(128)
+        self._mesmer_tile_size.setDecimals(0)
+        self._mesmer_tile_size.setValue(2048)
+        self._mesmer_overlap = add(5, "overlap:", QDoubleSpinBox())
+        self._mesmer_overlap.setRange(0, 1024)
+        self._mesmer_overlap.setSingleStep(32)
+        self._mesmer_overlap.setDecimals(0)
+        self._mesmer_overlap.setValue(128)
+        self._mesmer_batch_size = add(6, "batch_size:", QDoubleSpinBox())
+        self._mesmer_batch_size.setRange(1, 32)
+        self._mesmer_batch_size.setDecimals(0)
+        self._mesmer_batch_size.setValue(1)
+        self._mesmer_mpp = add(7, "image_mpp:", QDoubleSpinBox())
+        self._mesmer_mpp.setRange(0.01, 10)
+        self._mesmer_mpp.setSingleStep(0.05)
+        self._mesmer_mpp.setDecimals(3)
+        self._mesmer_mpp.setValue(0.5)
+        self._mesmer_norm = add(8, "normalize_input:", QCheckBox("True"))
+        self._mesmer_norm.setChecked(True)
+        self._mesmer_low = add(9, "percentile_low:", QDoubleSpinBox())
+        self._mesmer_low.setRange(0, 50)
+        self._mesmer_low.setValue(1.0)
+        self._mesmer_high = add(10, "percentile_high:", QDoubleSpinBox())
+        self._mesmer_high.setRange(50, 100)
+        self._mesmer_high.setValue(99.8)
+        self._mesmer_min_size = add(11, "postprocess_min_size:", QDoubleSpinBox())
+        self._mesmer_min_size.setRange(0, 100000)
+        self._mesmer_min_size.setDecimals(0)
+        self._mesmer_min_size.setValue(0)
+        self._mesmer_save_intermediate = add(12, "save_intermediate:", QCheckBox("False"))
+        self.mesmer_params_panel.setVisible(False)
+
+    def collect_mesmer_params(self):
+        method = self._selected_method()
+        mode = {
+            MESMER_WHOLE_CELL: "whole_cell",
+            MESMER_NUCLEI: "nuclei",
+            MESMER_NUCLEAR_GUIDED: "nuclear_guided",
+        }.get(method, "whole_cell")
+        return {
+            "method": method,
+            "mesmer_mode": mode,
+            "nuclear_channel": self._mesmer_nuclear_channel.text().strip() or "DAPI",
+            "membrane_channels": parse_hq_channels(self._mesmer_membrane_channels.text()),
+            "cytoplasm_channel": "",
+            "input_mode": self._mesmer_input_mode.currentData() or "selected_channels",
+            "compartment": "nuclear" if method == MESMER_NUCLEI else "whole-cell",
+            "image_mpp": self._mesmer_mpp.value(),
+            "pixel_size": self._mesmer_mpp.value(),
+            "batch_size": int(self._mesmer_batch_size.value()),
+            "tile_size": int(self._mesmer_tile_size.value()),
+            "overlap": int(self._mesmer_overlap.value()),
+            "use_gpu": self._mesmer_use_gpu.currentData() or "auto",
+            "normalize_input": self._mesmer_norm.isChecked(),
+            "percentile_low": self._mesmer_low.value(),
+            "percentile_high": self._mesmer_high.value(),
+            "postprocess_min_size": int(self._mesmer_min_size.value()),
+            "save_intermediate": self._mesmer_save_intermediate.isChecked(),
+        }
+
     def collect_hq2_params(self):
         hq_channels = parse_hq_channels(self._hq2_channels.text())
         return {
@@ -894,6 +1003,21 @@ class SearchCtrlPanel(QWidget):
             self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
             self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
             print(f"[HQ2-UI] restored params={p.get('params')}")
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
+            self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
+            idx = self._mesmer_input_mode.findData(p.get("input_mode", "selected_channels"))
+            self._mesmer_input_mode.setCurrentIndex(max(0, idx))
+            idx = self._mesmer_use_gpu.findData(str(p.get("use_gpu", "auto")).lower())
+            self._mesmer_use_gpu.setCurrentIndex(max(0, idx))
+            self._mesmer_tile_size.setValue(float(p.get("tile_size", 2048) or 2048))
+            self._mesmer_overlap.setValue(float(p.get("overlap", 128) or 128))
+            self._mesmer_batch_size.setValue(float(p.get("batch_size", 1) or 1))
+            self._mesmer_mpp.setValue(float(p.get("image_mpp", p.get("pixel_size", 0.5)) or 0.5))
+            self._mesmer_norm.setChecked(bool(p.get("normalize_input", True)))
+            self._mesmer_low.setValue(float(p.get("percentile_low", 1.0)))
+            self._mesmer_high.setValue(float(p.get("percentile_high", 99.8)))
+            self._mesmer_min_size.setValue(float(p.get("postprocess_min_size", 0) or 0))
         self._on_method_changed()
 
     def _use_manual_params(self):
@@ -944,6 +1068,9 @@ class SearchCtrlPanel(QWidget):
             params = self.collect_hq2_params()
             print(f"[HQ2-UI] collected params={params}")
             return normalize_segmentation_config({"method": CELLPOSE_NUCLEI_HQ2, "params": params, **params})
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            params = self.collect_mesmer_params()
+            return normalize_segmentation_config({"method": method, "params": params, **params})
         d  = self._man_diam.value()
         fl = self._man_flow.value()
         cp = self._man_prob.value()
@@ -979,6 +1106,8 @@ class SearchCtrlPanel(QWidget):
         if method == CELLPOSE_NUCLEI_HQ2:
             params.update(self.collect_hq2_params())
             print(f"[HQ2-UI] collected params={params}")
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            params.update(self.collect_mesmer_params())
         return {"method": method, "params": params}
 
     def _selected_method(self):
@@ -988,9 +1117,10 @@ class SearchCtrlPanel(QWidget):
     def _refresh_patch_preview_state(self, running=False):
         method = self._selected_method()
         is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
+        is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else self._hq_channels.text()
-        enabled = (is_stardist or (is_hq and bool(parse_hq_channels(hq_text)))) and not running
+        enabled = (is_stardist or is_mesmer or (is_hq and bool(parse_hq_channels(hq_text)))) and not running
         self.btn_patch_preview.setEnabled(enabled)
         if is_hq and not parse_hq_channels(hq_text):
             self._patch_preview_hint.setText("Please enter HQ channels, e.g. PanCK;CD45;CD68")
@@ -1007,6 +1137,7 @@ class SearchCtrlPanel(QWidget):
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
         is_hq2 = method == CELLPOSE_NUCLEI_HQ2
+        is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         self._p1_box.setVisible(is_cellpose)
         self._p2_box.setVisible(is_cellpose)
         self._p1_box.setEnabled(is_cellpose)
@@ -1052,6 +1183,8 @@ class SearchCtrlPanel(QWidget):
             self._hide_hq2_params_panel()
             self._manual_params_scroll.setMinimumHeight(180)
             self._manual_params_scroll.setMaximumHeight(300)
+        if getattr(self, "mesmer_params_panel", None) is not None:
+            self.mesmer_params_panel.setVisible(is_mesmer)
         self._expand_dist.setEnabled(is_expansion)
         self._expand_dist.setVisible(False)
         self._expand_dist_label.setVisible(False)
@@ -1069,6 +1202,9 @@ class SearchCtrlPanel(QWidget):
             CELLPOSE_NUCLEI_HQ2: "cellpose_nuclei_hq2_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
+            MESMER_WHOLE_CELL: "mesmer_whole_cell_patch_preview",
+            MESMER_NUCLEI: "mesmer_nuclei_patch_preview",
+            MESMER_NUCLEAR_GUIDED: "mesmer_nuclear_guided_patch_preview",
         }.get(method, "unknown")
         print("[Step2] method changed:", method)
         print("[Step2] is_hq:", is_hq)

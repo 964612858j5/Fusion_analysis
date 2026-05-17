@@ -1,424 +1,55 @@
-(fusion_mesmer) root@ubuntu-H12D-8D:/sda1/Fusion/analysis_pipline# python -m block01.main
-[GPU] cupy not available, using CPU: No module named 'cupy'
-QStandardPaths: runtime directory '/run/user/1000' is not owned by UID 0, but a directory permissions 0700 owned by UID 1000 GID 1000
-QStandardPaths: runtime directory '/run/user/1000' is not owned by UID 0, but a directory permissions 0700 owned by UID 1000 GID 1000
-[HQ2-UI] parameter widgets created=True
-[Step2] method changed: cellpose_wholecell_fusion
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[Step2] preview enabled: False
-[HQ2-UI] method selected= cellpose_wholecell_fusion
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] hq2_panel exists = True
-[HQ2-UI] hq2_panel visible = False
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= False
-[Step1] segmentation mode selected=cellpose_wholecell_fusion
-[Step1] workflow=wholecell_phase1_phase2
-[Step1] phase1_required=True
-[Step1] mode switched=cellpose_wholecell_fusion
-[Step1] layout stable=True
-[Step1-Tabs] right tabs created
-[Step1-Tabs] default tab=Method & Parameters
-[Step2] method changed: cellpose_wholecell_fusion
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[HQ2-UI] method selected= cellpose_wholecell_fusion
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= None
-[Step3] overlay rows=['DAPI', 'Fusion']
-[Step3] overlay sections:
-  DAPI shared=True
-  Fusion shared=True
-  marker_channels_count=0
-[Step3] DAPI color=#3366ff intensity=1.0
-[Step3] Fusion color=#ff3333 intensity=1.0
-[Step3] loaded input file config=/nvme0n1p1/2025.12.20_Final_17209_16_Slice4/Scan1/pipeline_v2/step3_input_files.json
-[Step3] active ROI inferred from input files: ROI_2 (was None)
-[Step3] corrected zarr ROI group not found for active_roi=ROI_2
-[Loader] 52560×28800 px  29 channels
-[Step3] overlay rows=['DAPI', 'Fusion', 'CCR7', 'CD11b', 'CD11c', 'CD14', 'CD15', 'CD163', 'CD22', 'CD31', 'CD3D', 'CD4', 'CD45RA', 'CD45RO', 'CD62L', 'CD68', 'CD8', 'CK19', 'CXCR6', 'DRAG5', 'FOXP3', 'Gp3', 'HLA-DR', 'HsBAg', 'Ki67', 'PD1', 'PDL1', 'TCF1', 'TIM3', 'TOX']
-[Step3] overlay sections:
-  DAPI shared=True
-  Fusion shared=True
-  marker_channels_count=28
-[Step3] marker rows visible=28
-[Step3] DAPI color=#3366ff intensity=1.0
-[Step3] Fusion color=#ff3333 intensity=1.0
-[Step3] channel overlay panel initialized
-[Step3] active_roi=ROI_2
-[Step3] fusion_source=/sda1/Fusion/Chaofan/2025.12.21_Final_28127_22_Slice2/Scan1/TEST/fused_ROI_2.zarr
-[Step3] channel_source=/sda1/Fusion/Chaofan/2025.12.21_Final_28127_22_Slice2/Scan1/test3/corrected_channels.zarr
-[Step3] raw_ome=/sda1/Fusion/Chaofan/2025.12.21_Final_28127_22_Slice2/Scan1/2025.12.21_Final_28127_22_Slice2_Scan1.ome.tif
-[Step3] corrected_channels=[]
-[Step3] raw_channels count=29
-[Step3] merged_channels count=29
-[Step1] searching previous session
-[Step1] session found=False
-[Layout] enter Step1 main window size=1400x900
-[Layout] enter Step1 main window minimumSize=900x650
-[Layout] enter Step1 Step1 sizeHint=size=1400x864 sizeHint=1524x856 min=0x0 max=16777215x16777215
-[Layout] enter Step1 ROI Overview sizeHint/min/max=size=314x710 sizeHint=0x0 min=240x300 max=16777215x16777215
-[Layout] enter Step1 Fusion Preview sizeHint/min/max=size=483x451 sizeHint=483x451 min=300x280 max=16777215x16777215
-[Layout] enter Step1 Phase1 panel sizeHint/min/max=size=567x813 sizeHint=420x460 min=300x390 max=16777215x16777215
-[Layout] enter Step1 Phase2 panel sizeHint/min/max=size=640x480 sizeHint=430x220 min=280x120 max=16777215x16777215
-[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code
-[Layout-Step1] enter Step1 right panel size=size=583x784 sizeHint=434x466 min=0x0 max=16777215x16777215
-[Layout-Step1] enter Step1 method group height/min/sizeHint=height=86 min=86 sizeHint=77
-[Layout-Step1] enter Step1 params scroll height/min/sizeHint=height=300 min=180 sizeHint=432
-[Layout-Step1] enter Step1 HQ2 params scroll height/min/sizeHint=height=320 min=180 sizeHint=432
-[Layout-Step1] enter Step1 patch results height/min/sizeHint=height=480 min=120 sizeHint=220
-[Step1-Layout] enter Step1 right main children=['Method & Parameters', 'Patch Results']
-[Step1-Layout] enter Step1 method tab size=size=581x752 sizeHint=420x432 min=0x0 max=16777215x16777215
-[Step1-Layout] enter Step1 patch results tab size=size=640x480 sizeHint=430x220 min=0x0 max=16777215x16777215
-[Layout-Step1] enter Step1 splitter sizes=not-used tab=Method & Parameters
-[Step1] loading Step0 ROI result
-[Loader] 59040×35520 px  29 channels
-[Step1] bootstrapped from disk output_dir=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step0
-[Step1] raw_ome=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/2025.12.20_Final_17209_16_Slice4_Scan1.ome.tif
-[Step1] manifest found=True
-[Step1] loading ROI context
-[Step1] roi_id=full_wsi_20260517_031629_5adf
-[Step1] step0_result=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step0/step0_roi_result.json
-[Step1] loader initialized=True
-[Step1] loader channels count=29
-[Step1] raw_ome=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/2025.12.20_Final_17209_16_Slice4_Scan1.ome.tif
-[Step1] corrected_zarr=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step0/corrected_channels.zarr
-[Step1] corrected_zarr_mode=roi_only
-[Step1] rois=1
-[Step1] patches=3
-[Step1] active_roi=Full WSI
-[Step1] roi_bbox=[0, 59040, 0, 35520]
-[Step1] n_patches=3
-[Step1] loading channels from corrected_channels.zarr/Full WSI
-[Step1] nucleus_channel=DAPI
-[Step1] panel_groups source=default_all_channels
-[Step1] config panel initialized=True
-[Step1] patch manager source=Step0 OverviewPanel
-[Step1-ROI] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] read_region y0,y1,x0,x1=[0, 59040, 0, 35520] downsample=33
-[Step1-preview] loaded_shape=(1790, 1077, 3)
-[Step1-preview] full_image_load=False
-[Step1-ROI] patch_count=3
-[Step1-ROI] patch global bbox=[19968, 23200, 12128, 14944]
-[Step1-ROI] patch local bbox=[19968, 23200, 12128, 14944]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch global bbox=[40704, 43648, 28064, 30496]
-[Step1-ROI] patch local bbox=[40704, 43648, 28064, 30496]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch global bbox=[5824, 7296, 19360, 20576]
-[Step1-ROI] patch local bbox=[5824, 7296, 19360, 20576]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] scene items count=34
-[Step1-ROI] patch_count=3
-[Step1-ROI] patch global bbox=[19968, 23200, 12128, 14944]
-[Step1-ROI] patch local bbox=[19968, 23200, 12128, 14944]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch global bbox=[40704, 43648, 28064, 30496]
-[Step1-ROI] patch local bbox=[40704, 43648, 28064, 30496]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch global bbox=[5824, 7296, 19360, 20576]
-[Step1-ROI] patch local bbox=[5824, 7296, 19360, 20576]
-[Step1-ROI] patch rect added to ROI scene
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] patch rect zValue=20.0
-[Step1-ROI] scene items count=34
-[Step1] preloading patches...
-[Layout] after loading ROI sizes main window size=1400x900
-[Layout] after loading ROI sizes main window minimumSize=900x650
-[Layout] after loading ROI sizes Step1 sizeHint=size=1400x864 sizeHint=1524x856 min=0x0 max=16777215x16777215
-[Layout] after loading ROI sizes ROI Overview sizeHint/min/max=size=314x710 sizeHint=0x0 min=240x300 max=16777215x16777215
-[Layout] after loading ROI sizes Fusion Preview sizeHint/min/max=size=483x451 sizeHint=483x451 min=300x280 max=16777215x16777215
-[Layout] after loading ROI sizes Phase1 panel sizeHint/min/max=size=567x813 sizeHint=420x460 min=300x390 max=16777215x16777215
-[Layout] after loading ROI sizes Phase2 panel sizeHint/min/max=size=640x480 sizeHint=430x220 min=280x120 max=16777215x16777215
-[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code
-[Layout-Step1] after loading ROI sizes right panel size=size=583x784 sizeHint=434x466 min=0x0 max=16777215x16777215
-[Layout-Step1] after loading ROI sizes method group height/min/sizeHint=height=86 min=86 sizeHint=77
-[Layout-Step1] after loading ROI sizes params scroll height/min/sizeHint=height=300 min=180 sizeHint=432
-[Layout-Step1] after loading ROI sizes HQ2 params scroll height/min/sizeHint=height=320 min=180 sizeHint=432
-[Layout-Step1] after loading ROI sizes patch results height/min/sizeHint=height=480 min=120 sizeHint=220
-[Step1-Layout] after loading ROI sizes right main children=['Method & Parameters', 'Patch Results']
-[Step1-Layout] after loading ROI sizes method tab size=size=581x752 sizeHint=420x432 min=0x0 max=16777215x16777215
-[Step1-Layout] after loading ROI sizes patch results tab size=size=640x480 sizeHint=430x220 min=0x0 max=16777215x16777215
-[Layout-Step1] after loading ROI sizes splitter sizes=not-used tab=Method & Parameters
-[Step1-preview] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] patch_bbox=[19968, 23200, 12128, 14944]
-[Step1-preview] read_region y0,y1,x0,x1=[21072, 22096, 13024, 14048]
-[Step1] patch preview source: fullres
-[Step1] patch bbox: original=[19968, 23200, 12128, 14944] loaded=[21072, 22096, 13024, 14048]
-[Step1] channels loaded for patch: ['DAPI']
-[Step1-preview] full_image_load=False
-[Step1-preview] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] patch_bbox=[40704, 43648, 28064, 30496]
-[Step1-preview] read_region y0,y1,x0,x1=[41664, 42688, 28768, 29792]
-[Step1] patch preview source: fullres
-[Step1] patch bbox: original=[40704, 43648, 28064, 30496] loaded=[41664, 42688, 28768, 29792]
-[Step1] channels loaded for patch: ['DAPI']
-[Step1-preview] full_image_load=False
-[Step1-preview] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] patch_bbox=[5824, 7296, 19360, 20576]
-[Step1-preview] read_region y0,y1,x0,x1=[6048, 7072, 19456, 20480]
-[Step1] patch preview source: fullres
-[Step1] patch bbox: original=[5824, 7296, 19360, 20576] loaded=[6048, 7072, 19456, 20480]
-[Step1] channels loaded for patch: ['DAPI']
-[Step1-preview] full_image_load=False
-[Step1] session autosaved
-[Preview] P2 ready — 1 ch, 1024×1024 px local=[40704,43648,28064,30496]
-[Step1-preview] loaded_shape=(1024, 1024)
-[Preview] P3 ready — 1 ch, 1024×1024 px local=[5824,7296,19360,20576]
-[Step1-preview] loaded_shape=(1024, 1024)
-[Step1-FusionPreview] update image only, masks ignored
-[Step1-FusionPreview] no mask overlay rendered
-[Step1-preview] preserve_view=False
-[Step1-preview] old_view_range=None
-[Step1-preview] reset_view=True
-[Preview] P1 ready — 1 ch, 1024×1024 px local=[19968,23200,12128,14944]
-[Step1-preview] loaded_shape=(1024, 1024)
-[Step1-preview] roi_bbox=[0, 59040, 0, 35520]
-[Step1-preview] patch_bbox=[5824, 7296, 19360, 20576]
-[Step1-preview] read_region y0,y1,x0,x1=[6048, 7072, 19456, 20480]
-[Step1] patch preview source: fullres
-[Step1] patch bbox: original=[5824, 7296, 19360, 20576] loaded=[6048, 7072, 19456, 20480]
-[Step1] channels loaded for patch: ['CD31', 'DAPI']
-[Step1-preview] full_image_load=False
-[Preview] P3 ready — 2 ch, 1024×1024 px local=[5824,7296,19360,20576]
-[Step1-preview] loaded_shape=(1024, 1024)
-[Step1-FusionPreview] update image only, masks ignored
-[Step1-FusionPreview] no mask overlay rendered
-[Step1-preview] preserve_view=True
-[Step1-preview] old_view_range=[[-96.55296371340818, 1120.5529637134082], [-49.4391858775314, 1073.4391858775314]]
-[Step1-preview] reset_view=False
-[Step1-preview] restored_view_range=[[-96.55296371340818, 1120.5529637134082], [-49.4391858775314, 1073.4391858775314]]
-[Step1-preview] restored_view_range=[[-96.55296371340818, 1120.5529637134082], [-49.4391858775314, 1073.4391858775314]]
-[Step1] session autosaved
-[Step2] method changed: mesmer_whole_cell
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[Step2] preview enabled: True
-[HQ2-UI] method selected= mesmer_whole_cell
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] hq2_panel exists = True
-[HQ2-UI] hq2_panel visible = False
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= True
-[Step1] segmentation mode selected=mesmer_whole_cell
-[Step1] workflow=mesmer_whole_cell_patch_preview
-[Step1] phase1_required=False
-[Step1] mode switched=mesmer_whole_cell
-[Step1] layout stable=True
-[Step1] segmentation mode selected=mesmer_whole_cell
-[Step1] segmentation mode=mesmer_whole_cell
-[Step1] workflow=unknown
-[Step1] phase1_required=False
-[Step1] channel_weight_panel_visible=True
-[Step1] fusion_preview_enabled=True
-[Step1] layout resize avoided=True
-[Step1] channel_panel_visible=True
-[Layout] after method change sizes main window size=1400x900
-[Layout] after method change sizes main window minimumSize=900x650
-[Layout] after method change sizes Step1 sizeHint=size=1400x864 sizeHint=1446x860 min=0x0 max=16777215x16777215
-[Layout] after method change sizes ROI Overview sizeHint/min/max=size=314x710 sizeHint=360x586 min=240x300 max=16777215x16777215
-[Layout] after method change sizes Fusion Preview sizeHint/min/max=size=483x447 sizeHint=483x447 min=300x280 max=16777215x16777215
-[Layout] after method change sizes Phase1 panel sizeHint/min/max=size=567x951 sizeHint=420x460 min=300x390 max=16777215x16777215
-[Layout] after method change sizes Phase2 panel sizeHint/min/max=size=640x480 sizeHint=430x220 min=280x120 max=16777215x16777215
-[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code
-[Layout-Step1] after method change sizes right panel size=size=583x784 sizeHint=434x466 min=0x0 max=16777215x16777215
-[Layout-Step1] after method change sizes method group height/min/sizeHint=height=86 min=86 sizeHint=110
-[Layout-Step1] after method change sizes params scroll height/min/sizeHint=height=300 min=180 sizeHint=432
-[Layout-Step1] after method change sizes HQ2 params scroll height/min/sizeHint=height=320 min=180 sizeHint=432
-[Layout-Step1] after method change sizes patch results height/min/sizeHint=height=480 min=120 sizeHint=220
-[Step1-Layout] after method change sizes right main children=['Method & Parameters', 'Patch Results']
-[Step1-Layout] after method change sizes method tab size=size=581x752 sizeHint=420x432 min=0x0 max=16777215x16777215
-[Step1-Layout] after method change sizes patch results tab size=size=640x480 sizeHint=430x220 min=0x0 max=16777215x16777215
-[Layout-Step1] after method change sizes splitter sizes=not-used tab=Method & Parameters
-[Step1] session autosaved
-[Step2] method changed: mesmer_whole_cell
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[Step2] preview enabled: True
-[HQ2-UI] method selected= mesmer_whole_cell
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] hq2_panel exists = True
-[HQ2-UI] hq2_panel visible = False
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= True
-[Step1] segmentation mode selected=mesmer_whole_cell
-[Step1] workflow=mesmer_whole_cell_patch_preview
-[Step1] phase1_required=False
-[Step1] mode switched=mesmer_whole_cell
-[Step1] layout stable=True
-[Step1] segmentation mode selected=mesmer_whole_cell
-[Step1] segmentation mode=mesmer_whole_cell
-[Step1] workflow=unknown
-[Step1] phase1_required=False
-[Step1] channel_weight_panel_visible=True
-[Step1] fusion_preview_enabled=True
-[Step1] layout resize avoided=True
-[Step1] channel_panel_visible=True
-[Layout] after method change sizes main window size=1400x900
-[Layout] after method change sizes main window minimumSize=900x650
-[Layout] after method change sizes Step1 sizeHint=size=1400x864 sizeHint=1446x905 min=0x0 max=16777215x16777215
-[Layout] after method change sizes ROI Overview sizeHint/min/max=size=314x665 sizeHint=360x586 min=240x300 max=16777215x16777215
-[Layout] after method change sizes Fusion Preview sizeHint/min/max=size=483x402 sizeHint=483x402 min=300x280 max=16777215x16777215
-[Layout] after method change sizes Phase1 panel sizeHint/min/max=size=567x951 sizeHint=420x460 min=300x390 max=16777215x16777215
-[Layout] after method change sizes Phase2 panel sizeHint/min/max=size=640x480 sizeHint=430x220 min=280x120 max=16777215x16777215
-[Layout] called adjustSize/resize/fixedSize?=no Step1 runtime layout code
-[Layout-Step1] after method change sizes right panel size=size=583x739 sizeHint=434x466 min=0x0 max=16777215x16777215
-[Layout-Step1] after method change sizes method group height/min/sizeHint=height=86 min=86 sizeHint=110
-[Layout-Step1] after method change sizes params scroll height/min/sizeHint=height=300 min=180 sizeHint=432
-[Layout-Step1] after method change sizes HQ2 params scroll height/min/sizeHint=height=320 min=180 sizeHint=432
-[Layout-Step1] after method change sizes patch results height/min/sizeHint=height=480 min=120 sizeHint=220
-[Step1-Layout] after method change sizes right main children=['Method & Parameters', 'Patch Results']
-[Step1-Layout] after method change sizes method tab size=size=581x707 sizeHint=420x432 min=0x0 max=16777215x16777215
-[Step1-Layout] after method change sizes patch results tab size=size=640x480 sizeHint=430x220 min=0x0 max=16777215x16777215
-[Layout-Step1] after method change sizes splitter sizes=not-used tab=Method & Parameters
-[Step1] session autosaved
-[Save] /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/fusion_config.json
-[Save] /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/segmentation_params/mesmer_whole_cell_20260517_223106.json
-[Step1] saved active segmentation params=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/segmentation_params/mesmer_whole_cell_20260517_223106.json
-[Step1] DAPI input zarr meta: {
-  "version": 1,
-  "purpose": "step1_dapi_input_zarr",
-  "method": "mesmer_whole_cell",
-  "source_path": "/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step0/corrected_channels.zarr",
-  "raw_ome_path": "/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/2025.12.20_Final_17209_16_Slice4_Scan1.ome.tif",
-  "roi_id": "full_wsi_20260517_031629_5adf",
-  "roi_bbox": [
-    0,
-    59040,
-    0,
-    35520
-  ],
-  "regions": [
-    {
-      "roi_name": "Full WSI",
-      "roi_id": "full_wsi_20260517_031629_5adf",
-      "roi_bbox": [
-        0,
-        59040,
-        0,
-        35520
-      ],
-      "shape": [
-        59040,
-        35520,
-        2
-      ]
-    }
-  ],
-  "dapi_channel": "DAPI",
-  "shape": [
-    59040,
-    35520,
-    2
-  ],
-  "dtype": "uint16",
-  "resolution": null,
-  "normalization_source": "corrected",
-  "background_correction_source": "/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step0/corrected_channels.zarr",
-  "pixel_size": null,
-  "code_version": "block01_step1_v8_dapi_meta"
-}
-[Step1] DAPI input zarr reuse/regenerate reason: metadata match
-Reusing existing DAPI input zarr
-[Step1] session autosaved
-[Step2] entered from Step1
-[Step2] method changed: mesmer_whole_cell
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[HQ2-UI] method selected= mesmer_whole_cell
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= None
-[Step2] method changed: mesmer_whole_cell
-[Step2] is_hq: False
-[Step2] hq widgets visible: False
-[HQ2-UI] method selected= mesmer_whole_cell
-[HQ2-UI] parameter widgets created= True
-[HQ2-UI] parameter widgets visible= False
-[HQ2-UI] patch preview enabled= None
-[Step2] loaded active segmentation params
-[Step2] method=mesmer_whole_cell
-[Step2] param_file=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/segmentation_params/mesmer_whole_cell_20260517_223106.json
-[Step2] loaded segmentation params index
-[Step2] index=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/segmentation_params/segmentation_params_index.json
-[Step2] auto-loaded active method=mesmer_whole_cell
-[Step2] active_param_file=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/segmentation_params/mesmer_whole_cell_20260517_223106.json
-[Step2] roi_id=full_wsi_20260517_031629_5adf
-[Step2] output_base=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2
-[Step2] segmentation method=mesmer_whole_cell
-[Step2] input_type=dapi_plus_membrane
-[Step2] roi_id=full_wsi_20260517_031629_5adf
-[Step2] output_base=/sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2
-2026-05-17 22:31:32 [INFO] Log file: /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_223132_mesmer_whole_cell/segmentation_20260517_223132.log
-2026-05-17 22:31:32 [INFO] zarr: /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step1/fused_Full WSI.zarr
-2026-05-17 22:31:32 [INFO] project output_dir: /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2
-2026-05-17 22:31:32 [INFO] result_id: seg_20260517_223132_mesmer_whole_cell
-2026-05-17 22:31:32 [INFO] result output_dir: /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_223132_mesmer_whole_cell
-2026-05-17 22:31:32 [INFO] Grid: 3×4  overlap=200px
-2026-05-17 22:31:32 [INFO] Segmentation config: {'method': 'mesmer_whole_cell', 'display_name': 'Mesmer whole-cell', 'input_type': 'dapi_plus_membrane', 'params': {'mesmer_mode': 'whole_cell', 'nuclear_channel': 'DAPI', 'membrane_channels': [], 'cytoplasm_channel': '', 'input_mode': 'step1_weighted_fusion', 'compartment': 'whole-cell', 'image_mpp': 0.5, 'pixel_size': 0.5, 'batch_size': 1, 'tile_size': None, 'overlap': None, 'use_gpu': 'auto', 'normalize_input': True, 'percentile_low': 1.0, 'percentile_high': 99.8, 'postprocess_min_size': 0, 'fill_holes': False, 'remove_border_objects': False, 'save_intermediate': False, 'channel_weights': {}, 'model_name': '2D_versatile_fluo', 'prob_thresh': None, 'nms_thresh': None, 'expand_distance': 8.0, 'hq_channels': [], 'hq_input_mode': 'selected_channels_from_source', 'max_cell_radius': 12, 'normalization_percentile_low': 1.0, 'normalization_percentile_high': 99.5, 'consensus_mode': 'adaptive_best_channel', 'min_signal_threshold': 0.08, 'model_type': 'cpsam', 'diameter': None, 'flow_threshold': 0.4, 'cellprob_threshold': 0.0, 'min_size': 15, 'phase1_diameter': None, 'params_source': 'loaded'}, 'output_type': 'whole_cell_mask', 'model_type': 'cpsam', 'diameter': None, 'flow_threshold': 0.4, 'cellprob_threshold': 0.0, 'min_size': 15, 'phase1_diameter': None, 'params_source': 'loaded', 'saved_at': '2026-05-17 22:31:06', 'mesmer_mode': 'whole_cell', 'nuclear_channel': 'DAPI', 'membrane_channels': [], 'cytoplasm_channel': '', 'input_mode': 'step1_weighted_fusion', 'compartment': 'whole-cell', 'image_mpp': 0.5, 'pixel_size': 0.5, 'batch_size': 1, 'tile_size': None, 'overlap': None, 'use_gpu': 'auto', 'normalize_input': True, 'percentile_low': 1.0, 'percentile_high': 99.8, 'postprocess_min_size': 0, 'fill_holes': False, 'remove_border_objects': False, 'save_intermediate': False, 'channel_weights': {}, 'created_at': '2026-05-17T22:31:06.202234', 'source': 'Step1', 'model_name': '2D_versatile_fluo', 'prob_thresh': None, 'nms_thresh': None, 'expand_distance': 8.0, 'hq_channels': [], 'hq_input_mode': 'selected_channels_from_source', 'max_cell_radius': 12, 'normalization_percentile_low': 1.0, 'normalization_percentile_high': 99.5, 'consensus_mode': 'adaptive_best_channel', 'min_signal_threshold': 0.08}
-2026-05-17 22:31:32 [INFO] [Step2] segmentation method=mesmer_whole_cell
-2026-05-17 22:31:32 [INFO] [Step2] input_type=dapi_plus_membrane
-2026-05-17 22:31:32 [INFO] === Segmentation started ===
-2026-05-17 22:31:32 [INFO] run_segmentation_params.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_223132_mesmer_whole_cell/run_segmentation_params.json
-2026-05-17 22:31:32 [INFO] Initial memory: RAM 39.4/134.9GB (29%)
-2026-05-17 22:31:32 [INFO] resource_samples.csv -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_223132_mesmer_whole_cell/resource_samples.csv
-2026-05-17 22:31:32 [INFO] runtime_partial.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_223132_mesmer_whole_cell/runtime_partial.json
-2026-05-17 22:31:33.175789: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcudart.so.11.0'; dlerror: libcudart.so.11.0: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:33.175838: I tensorflow/stream_executor/cuda/cudart_stub.cc:29] Ignore above cudart dlerror if you do not have a GPU set up on your machine.
+2026-05-17 22:53:26 [INFO] [Step2] segmentation method=mesmer_whole_cell
+2026-05-17 22:53:26 [INFO] [Step2] input_type=dapi_plus_membrane
+2026-05-17 22:53:26 [INFO] === Segmentation started ===
+2026-05-17 22:53:26 [INFO] run_segmentation_params.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/run_segmentation_params.json
+2026-05-17 22:53:26 [INFO] Initial memory: RAM 39.5/134.9GB (29%)
+2026-05-17 22:53:26 [INFO] resource_samples.csv -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/resource_samples.csv
+2026-05-17 22:53:26 [INFO] runtime_partial.json -> /sda1/Fusion/Chaofan/2025.12.20_Final_17209_16_Slice4/Scan1/test1/rois/full_wsi_20260517_031629_5adf/step2/segmentation_runs/seg_20260517_225326_mesmer_whole_cell/runtime_partial.json
 [Mesmer] tensorflow version=2.8.4
-2026-05-17 22:31:35 [INFO] [Mesmer] tensorflow version=2.8.4
+2026-05-17 22:53:28 [INFO] [Mesmer] tensorflow version=2.8.4
 [Mesmer] deepcell available=True
-2026-05-17 22:31:36 [INFO] [Mesmer] deepcell available=True
+2026-05-17 22:53:29 [INFO] [Mesmer] deepcell available=True
 [Mesmer] device requested=auto
-2026-05-17 22:31:36 [INFO] [Mesmer] device requested=auto
-2026-05-17 22:31:36.046914: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2026-05-17 22:31:36.047234: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcudart.so.11.0'; dlerror: libcudart.so.11.0: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.047335: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcublas.so.11'; dlerror: libcublas.so.11: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.047437: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcublasLt.so.11'; dlerror: libcublasLt.so.11: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.047535: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcufft.so.10'; dlerror: libcufft.so.10: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.095294: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcusparse.so.11'; dlerror: libcusparse.so.11: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.095461: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcudnn.so.8'; dlerror: libcudnn.so.8: 无法打开共享对象文件: 没有那个文件或目录; LD_LIBRARY_PATH: /root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/cv2/../../lib64:/usr/local/cuda-12.2/lib64:
-2026-05-17 22:31:36.095486: W tensorflow/core/common_runtime/gpu/gpu_device.cc:1850] Cannot dlopen some GPU libraries. Please make sure the missing libraries mentioned above are installed properly if you would like to use GPU. Follow the guide at https://www.tensorflow.org/install/gpu for how to download and setup the required libraries for your platform.
-Skipping registering GPU devices...
-[Mesmer] gpu devices=[]
-2026-05-17 22:31:36 [INFO] [Mesmer] gpu devices=[]
-[Mesmer] fallback to CPU reason=TensorFlow sees no GPU
-2026-05-17 22:31:36 [INFO] [Mesmer] fallback to CPU reason=TensorFlow sees no GPU
-[Mesmer] device used=cpu
-2026-05-17 22:31:36 [INFO] [Mesmer] device used=cpu
+2026-05-17 22:53:29 [INFO] [Mesmer] device requested=auto
+2026-05-17 22:53:29.593218: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:29.601857: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:29.602433: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+[Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
+2026-05-17 22:53:29 [INFO] [Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
+[Mesmer] device used=gpu
+2026-05-17 22:53:29 [INFO] [Mesmer] device used=gpu
 [Mesmer] loading local model=/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation
-2026-05-17 22:31:36.219307: I tensorflow/core/platform/cpu_feature_guard.cc:151] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 FMA
+2026-05-17 22:53:29.727066: I tensorflow/core/platform/cpu_feature_guard.cc:151] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 FMA
 To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-05-17 22:53:29.734220: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:29.734563: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:29.734808: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:30.374640: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:30.374984: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:30.375241: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:936] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+2026-05-17 22:53:30.375454: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1525] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 43731 MB memory:  -> device: 0, name: NVIDIA GeForce RTX 4090, pci bus id: 0000:c5:00.0, compute capability: 8.9
 WARNING:tensorflow:No training configuration found in save file, so the model was *not* compiled. Compile it manually.
-2026-05-17 22:31:43 [INFO] [Mesmer] device_used=cpu
-2026-05-17 22:31:43 [INFO] ROI mode: 1 ROI(s)
-2026-05-17 22:31:43 [INFO] === ROI [1/1]: Full WSI ===
-2026-05-17 22:31:43 [INFO]   zarr: 59040×35520 px
-2026-05-17 22:31:48 [INFO]   [Full WSI] Tile [1/12] row=0 col=0
+2026-05-17 22:53:37 [INFO] [Mesmer] device_used=gpu
+2026-05-17 22:53:37 [INFO] ROI mode: 1 ROI(s)
+2026-05-17 22:53:37 [INFO] === ROI [1/1]: Full WSI ===
+2026-05-17 22:53:37 [INFO]   zarr: 59040×35520 px
+2026-05-17 22:53:42 [INFO]   [Full WSI] Tile [1/12] row=0 col=0
 [Mesmer] tensorflow version=2.8.4
-2026-05-17 22:31:49 [INFO] [Mesmer] tensorflow version=2.8.4
+2026-05-17 22:53:44 [INFO] [Mesmer] tensorflow version=2.8.4
 [Mesmer] deepcell available=True
-2026-05-17 22:31:49 [INFO] [Mesmer] deepcell available=True
+2026-05-17 22:53:44 [INFO] [Mesmer] deepcell available=True
 [Mesmer] device requested=auto
-2026-05-17 22:31:49 [INFO] [Mesmer] device requested=auto
-[Mesmer] gpu devices=[]
-2026-05-17 22:31:49 [INFO] [Mesmer] gpu devices=[]
-[Mesmer] fallback to CPU reason=TensorFlow sees no GPU
-2026-05-17 22:31:49 [INFO] [Mesmer] fallback to CPU reason=TensorFlow sees no GPU
-[Mesmer] device used=cpu
-2026-05-17 22:31:49 [INFO] [Mesmer] device used=cpu
+2026-05-17 22:53:44 [INFO] [Mesmer] device requested=auto
+[Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
+2026-05-17 22:53:44 [INFO] [Mesmer] gpu devices=["PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')"]
+[Mesmer] device used=gpu
+2026-05-17 22:53:44 [INFO] [Mesmer] device used=gpu
 [Mesmer] tile_size=None
 [Mesmer] overlap=None
 [Mesmer] nuclear channel=DAPI/fused_zarr_channel_1
 [Mesmer] membrane channels=['fused_zarr_channel_0']
 [Mesmer] input shape=(1, 19880, 9080, 2)
 [Mesmer] prediction started
-
-
+2026-05-17 22:54:22.999193: I tensorflow/stream_executor/cuda/cuda_dnn.cc:368] Loaded cuDNN version 8100
+/root/micromamba/envs/fusion_mesmer/lib/python3.10/site-packages/deepcell_toolbox/deep_watershed.py:108: UserWarning: h_maxima peak finding algorithm was selected, but the provided image is larger than 5k x 5k pixels.This will lead to slow prediction performance.
+  warnings.warn('h_maxima peak finding algorithm was selected, '

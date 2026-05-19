@@ -1,1 +1,3 @@
-/sda1/Fusion/Chaofan/2025.12.21_Final_28127_22_Slice2/Scan1/2025.12.21_Final_28127_22_Slice2_Scan1.ome.tif
+  python batch_separate_crc_masks.py \
+    --root /mnt/MACSimaDumpling/CRC_V2 \
+    --workers 4

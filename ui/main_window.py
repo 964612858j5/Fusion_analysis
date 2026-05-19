@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
         self.step3_done          = False
         self.step4_done          = False
         self._current_step       = 0
+        self._gui_work_dir       = ""
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -134,6 +135,21 @@ class MainWindow(QMainWindow):
         self._step1_session_timer.timeout.connect(self._save_step1_session)
 
         self._build_ui()
+
+    def _set_gui_work_dir(self, path):
+        """Keep GUI file dialogs aligned with the active ROI/step directory."""
+        if not path:
+            return
+        path = os.path.abspath(path)
+        self._gui_work_dir = path
+        if hasattr(self, "_out_path_edit"):
+            self._out_path_edit.setText(path)
+
+    def current_gui_work_dir(self):
+        return self._gui_work_dir or (
+            self._out_path_edit.text().strip()
+            if hasattr(self, "_out_path_edit") else ""
+        )
 
     # ── UI ──────────────────────────────────────────────────────────
 
@@ -853,8 +869,12 @@ class MainWindow(QMainWindow):
         if step1_dir:
             os.makedirs(step1_dir, exist_ok=True)
             OUTPUT_DIR = step1_dir
+        gui_work_dir = step1_dir or out_dir
+        self._set_gui_work_dir(gui_work_dir)
+        if hasattr(self._step2, "set_roi_context"):
+            self._step2.set_roi_context(roi_id=roi_id, roi_dir=roi_dir, step2_dir=step2_dir)
         self.step0_output.update({
-            "output_dir": step1_dir or out_dir,
+            "output_dir": gui_work_dir,
             "project_output_dir": project_dir,
             "roi_id": roi_id,
             "roi_dir": roi_dir,
@@ -991,8 +1011,10 @@ class MainWindow(QMainWindow):
 
         OUTPUT_DIR = step1_dir or out_dir
         OME_TIFF_FILE = ome_path
+        gui_work_dir = step1_dir or out_dir
+        self._set_gui_work_dir(gui_work_dir)
         self.step0_output = {
-            "output_dir": step1_dir or out_dir,
+            "output_dir": gui_work_dir,
             "project_output_dir": manifest.get("project_output_dir") or (ctx or {}).get("project_dir", ""),
             "roi_id": manifest.get("roi_id") or (ctx or {}).get("roi_id", ""),
             "roi_dir": manifest.get("roi_dir") or (ctx or {}).get("roi_dir", ""),
@@ -1073,6 +1095,7 @@ class MainWindow(QMainWindow):
             "roi_dir": (self.step0_output or {}).get("roi_dir", ""),
             "step0_dir": (self.step0_output or {}).get("step0_dir", ""),
             "step1_dir": (self.step0_output or {}).get("step1_dir", out_dir),
+            "step2_dir": (self.step0_output or {}).get("step2_dir", ""),
             "active_roi": active_roi.get("name", "ROI_1") if active_roi else "",
             "roi_bbox": roi_bbox,
             "rois": self._rois,
@@ -1314,15 +1337,21 @@ class MainWindow(QMainWindow):
             if not raw_ome or not os.path.exists(raw_ome):
                 QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing. Please load Step0 or edit the session.")
                 return False
+            roi_dir = sess.get("roi_dir", "")
+            step2_dir = sess.get("step2_dir") or (os.path.join(roi_dir, "step2") if roi_dir else "")
+            if not step2_dir and os.path.basename(os.path.abspath(out_dir)) == "step1":
+                step2_dir = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "step2")
             OUTPUT_DIR = out_dir
             OME_TIFF_FILE = raw_ome
+            self._set_gui_work_dir(out_dir)
             self.step0_output = {
                 "output_dir": out_dir,
                 "ome_tiff_path": raw_ome,
                 "roi_id": sess.get("roi_id", ""),
-                "roi_dir": sess.get("roi_dir", ""),
+                "roi_dir": roi_dir,
                 "step0_dir": sess.get("step0_dir", ""),
                 "step1_dir": sess.get("step1_dir", out_dir),
+                "step2_dir": step2_dir,
             }
             self.loader = OMETIFFLoader(raw_ome)
 
@@ -1394,6 +1423,9 @@ class MainWindow(QMainWindow):
                 "zarr_path": self._fused_zarr_path,
                 "roi_info": self._rois,
                 "output_dir": out_dir,
+                "step2_dir": step2_dir,
+                "roi_id": sess.get("roi_id", ""),
+                "roi_dir": roi_dir,
                 "ome_tiff_path": raw_ome,
             }
 
@@ -1414,9 +1446,16 @@ class MainWindow(QMainWindow):
             self._show_active_roi_preview()
             self.step0_done = True
             self.step1_done = bool(self._fused_zarr_path)
-            self._step2._out_edit.setText(out_dir)
+            if hasattr(self._step2, "set_roi_context"):
+                self._step2.set_roi_context(
+                    roi_id=sess.get("roi_id", ""),
+                    roi_dir=roi_dir,
+                    step2_dir=step2_dir,
+                )
+            else:
+                self._step2._out_edit.setText(step2_dir or out_dir)
             self._step4._ome_edit.setText(raw_ome)
-            self._step4._out_edit.setText(out_dir)
+            self._step4._out_edit.setText(step2_dir or out_dir)
             self._update_next_button()
             self.prev_status.setText("Loaded previous Step1 session.")
             print(f"[Step1] restored patches={len(patches)}")

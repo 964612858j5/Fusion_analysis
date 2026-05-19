@@ -1049,7 +1049,16 @@ class Step3Page(QWidget):
         runs = dict(roi_idx.get("segmentation_runs") or {})
         runs.update(self._scan_roi_segmentation_runs(rdir))
         if self._latest_only_chk.isChecked():
-            wanted = set((roi_idx.get("latest_by_method") or {}).values())
+            latest_by_method = dict(roi_idx.get("latest_by_method") or {})
+            for rid, run in runs.items():
+                method = str(run.get("method") or "")
+                if not method:
+                    continue
+                prev = latest_by_method.get(method)
+                prev_created = str((runs.get(prev) or {}).get("created_at") or "")
+                if not prev or str(run.get("created_at") or "") >= prev_created:
+                    latest_by_method[method] = rid
+            wanted = set(latest_by_method.values())
             runs = {rid: run for rid, run in runs.items() if rid in wanted}
         items = sorted(runs.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
         active = roi_idx.get("active_segmentation_run")
@@ -1330,6 +1339,61 @@ class Step3Page(QWidget):
             )
         return z, tuple(int(v) for v in shape)
 
+    def _fusion_crop_roi_for_patch(self, local_roi):
+        if not self._fused_zarr_path or not os.path.exists(self._fused_zarr_path):
+            return local_roi
+        y0, y1, x0, x1 = [int(v) for v in local_roi]
+        if self._mode != "roi" or not (self._active_bbox and len(self._active_bbox) == 4):
+            return local_roi
+        try:
+            z = zarr.open(self._fused_zarr_path, mode="r")
+            shape = getattr(z, "shape", None)
+            if not shape or len(shape) < 2:
+                return local_roi
+            z_h, z_w = int(shape[0]), int(shape[1])
+            roi_h = int(self._full_h or 0)
+            roi_w = int(self._full_w or 0)
+            by0, by1, bx0, bx1 = [int(v) for v in self._active_bbox]
+            bbox_h, bbox_w = by1 - by0, bx1 - bx0
+            if z_h == roi_h and z_w == roi_w:
+                print("[Step3] fusion zarr coordinate mode=roi_local")
+                return local_roi
+            if z_h == bbox_h and z_w == bbox_w:
+                print("[Step3] fusion zarr coordinate mode=roi_bbox_local")
+                return local_roi
+            if z_h >= by1 and z_w >= bx1:
+                global_roi = (by0 + y0, by0 + y1, bx0 + x0, bx0 + x1)
+                print(f"[Step3] fusion zarr coordinate mode=full_wsi global_bbox={list(global_roi)}")
+                return global_roi
+        except Exception as exc:
+            print(f"[Step3] failed to inspect fusion zarr coordinate mode: {exc}")
+        return local_roi
+
+    def _corrected_roi_group(self, root):
+        if root is None:
+            return None, ""
+        names = []
+        for value in (
+            self._current_selected_roi_id() if hasattr(self, "_current_selected_roi_id") else "",
+            self._active_roi_name,
+        ):
+            if value:
+                names.append(str(value))
+        groups = self._zarr_group_names(root)
+        for group_name in groups:
+            group = root[group_name]
+            attrs = getattr(group, "attrs", {})
+            values = {
+                str(group_name),
+                str(attrs.get("roi_id") or ""),
+                str(attrs.get("roi_name") or ""),
+                str(attrs.get("display_name") or ""),
+                str(attrs.get("roi_display_name") or ""),
+            }
+            if any(name and name in values for name in names):
+                return group, str(group_name)
+        return None, ""
+
     def _channel_config_path(self):
         return os.path.join(self._output_dir or OUTPUT_DIR, "step3_channel_overlay_config.json")
 
@@ -1530,8 +1594,8 @@ class Step3Page(QWidget):
                 self._corrected_zarr = root
                 roi_name = self._active_roi_name or "ROI_1"
                 root_mode = str(root.attrs.get("mode", "")).lower()
-                if roi_name in root and self._array_names(root[roi_name]):
-                    group = root[roi_name]
+                group, matched_name = self._corrected_roi_group(root)
+                if group is not None and self._array_names(group):
                     corrected_channels.extend(self._array_names(group))
                 elif root_mode != "roi_only":
                     corrected_channels.extend(self._array_names(root))
@@ -2317,7 +2381,7 @@ class Step3Page(QWidget):
         dapi_path = self._dapi_path
         mask_path = self._mask_path
         read_y0, read_y1, read_x0, read_x1 = y0, y1, x0, x1
-        fusion_roi = (y0, y1, x0, x1)
+        fusion_roi = self._fusion_crop_roi_for_patch((y0, y1, x0, x1))
         tile_infos = None
         if self._mode == "roi":
             print(f"[Step3] patch local bbox={[y0, y1, x0, x1]}")
@@ -2807,16 +2871,26 @@ class Step3Page(QWidget):
                 roi_name = self._active_roi_name or "ROI_1"
                 root_mode = str(root.attrs.get("mode", "")).lower()
                 groups = self._zarr_group_names(root)
+                group, matched_name = self._corrected_roi_group(root)
                 print(f"[Step3] corrected groups={groups}")
-                print(f"[Step3] selected corrected group={roi_name}")
-                if roi_name in root and ch in root[roi_name]:
-                    arr = np.asarray(root[roi_name][ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
+                print(f"[Step3] selected corrected group={matched_name or roi_name}")
+                if group is not None and ch in group:
+                    arr = np.asarray(group[ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
                     source = "corrected_zarr roi_local"
                     print(f"[Step3] channel={ch} source=corrected_zarr")
-                    print(f"[Step3] corrected_roi={roi_name}")
+                    print(f"[Step3] corrected_roi={matched_name or roi_name}")
                 elif root_mode != "roi_only" and ch in root:
-                    arr = np.asarray(root[ch][y0:y1:sub, x0:x1:sub], dtype=np.float32)
-                    source = "corrected_zarr full_wsi"
+                    if self._mode == "roi" and self._active_bbox and len(self._active_bbox) == 4:
+                        cy0 = int(self._active_bbox[0]) + y0
+                        cy1 = int(self._active_bbox[0]) + y1
+                        cx0 = int(self._active_bbox[2]) + x0
+                        cx1 = int(self._active_bbox[2]) + x1
+                    else:
+                        cy0, cy1, cx0, cx1 = y0, y1, x0, x1
+                    arr = np.asarray(root[ch][cy0:cy1:sub, cx0:cx1:sub], dtype=np.float32)
+                    source = f"corrected_zarr full_wsi global_bbox={[cy0, cy1, cx0, cx1]}"
+                    print(f"[Step3] channel={ch} source=corrected_zarr")
+                    print(f"[Step3] corrected_global_bbox={[cy0, cy1, cx0, cx1]}")
                 elif root_mode == "roi_only":
                     print(f"[Step3] channel={ch} not found in corrected zarr active_roi={roi_name}")
             except Exception as e:

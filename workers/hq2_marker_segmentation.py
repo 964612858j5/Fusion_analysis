@@ -10,6 +10,7 @@ HQ2 keeps Cellpose nuclei as the only seed source, then combines:
 import csv
 import json
 import os
+import time
 
 import numpy as np
 
@@ -365,35 +366,71 @@ def compute_hq2_qc(
     return rows
 
 
-def run_hq2_segmentation(nuclei_labels, marker_channels, channel_names, params=None):
+def _log_stage(logger, message):
+    if logger is not None:
+        logger.info(message)
+    else:
+        print(message)
+
+
+def run_hq2_segmentation(nuclei_labels, marker_channels, channel_names, params=None,
+                         logger=None, return_layers=True):
     params = dict(params or {})
-    print("[HQ2] started")
-    print(f"[HQ2] hq_channels={list(channel_names or [])}")
+    total_started = time.perf_counter()
+    _log_stage(logger, "[HQ2] started")
+    _log_stage(logger, f"[HQ2] hq_channels={list(channel_names or [])}")
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
-    print(f"[HQ2] nuclei labels count={int(nuclei.max())}")
+    _log_stage(logger, f"[HQ2] nuclei labels count={int(nuclei.max())}")
+
+    stage_started = time.perf_counter()
     hq_labels, nuclei, _hq_qc = run_level1_hq_proposal(nuclei, marker_channels, channel_names, params)
+    _log_stage(logger, f"[HQ2 profile] level1_hq_proposal={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     imagej_labels, _imagej_support = run_level2_imagej_style_proposal(nuclei, marker_channels, channel_names, params)
+    _log_stage(logger, f"[HQ2 profile] level2_imagej_proposal={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     core_labels = build_high_confidence_core(nuclei, hq_labels, imagej_labels, params)
+    _log_stage(logger, f"[HQ2 profile] high_confidence_core={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     signal_map, norm_by_name = build_signal_map(marker_channels, channel_names, params, reference_labels=nuclei)
+    _log_stage(logger, f"[HQ2 profile] signal_map={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     final_labels, expansion_labels, stats = continuous_signal_expansion(
         nuclei, hq_labels, imagej_labels, core_labels, signal_map, params
     )
+    _log_stage(logger, f"[HQ2 profile] continuous_expansion={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     final_labels = resolve_hq2_conflicts(final_labels, nuclei)
+    _log_stage(logger, f"[HQ2 profile] conflict_resolution={time.perf_counter() - stage_started:.2f}s")
+
+    stage_started = time.perf_counter()
     qc_rows = compute_hq2_qc(
         nuclei, hq_labels, imagej_labels, core_labels, final_labels, expansion_labels,
         signal_map, channel_names, norm_by_name, stats,
     )
-    print(f"[HQ2] final labels count={int(final_labels.max())}")
-    return {
+    _log_stage(logger, f"[HQ2 profile] qc={time.perf_counter() - stage_started:.2f}s")
+    _log_stage(logger, f"[HQ2] final labels count={int(final_labels.max())}")
+    _log_stage(logger, f"[HQ2 profile] total={time.perf_counter() - total_started:.2f}s")
+
+    result = {
         "final_labels": final_labels.astype(np.uint32, copy=False),
         "nuclei_labels": nuclei.astype(np.uint32, copy=False),
-        "hq_proposal_labels": hq_labels.astype(np.uint32, copy=False),
-        "imagej_proposal_labels": imagej_labels.astype(np.uint32, copy=False),
-        "high_confidence_core_labels": core_labels.astype(np.uint32, copy=False),
-        "expansion_added_pixels": expansion_labels.astype(np.uint32, copy=False),
         "qc_rows": qc_rows,
         "stats": stats,
     }
+    if return_layers:
+        result.update({
+            "hq_proposal_labels": hq_labels.astype(np.uint32, copy=False),
+            "imagej_proposal_labels": imagej_labels.astype(np.uint32, copy=False),
+            "high_confidence_core_labels": core_labels.astype(np.uint32, copy=False),
+            "expansion_added_pixels": expansion_labels.astype(np.uint32, copy=False),
+        })
+    return result
 
 
 HQ2_QC_FIELDS = [

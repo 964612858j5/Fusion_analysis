@@ -42,9 +42,11 @@ from ..workers.hq_marker_segmentation import (
     CONSENSUS_MODES,
     parse_channel_weights,
     parse_hq_channels,
+    resolve_hq_channels,
     validate_hq_channels,
 )
 from ..workers.segment_merge_worker import SegmentMergeWorker
+from ..core.io_loader import OMETIFFLoader
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 2 Page  (Segmentation & Merge)
@@ -99,6 +101,22 @@ class Step2Page(QWidget):
             self._out_edit.setText(self._step2_dir)
         print(f"[Step2] roi_id={self._roi_id}")
         print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
+
+    def _sync_output_dir_from_zarr_path(self, zarr_path):
+        """Use the ROI step2 directory when the input zarr comes from ROI step1."""
+        path = os.path.abspath(zarr_path or "")
+        parts = path.split(os.sep)
+        if "rois" not in parts or "step1" not in parts:
+            return
+        step1_idx = parts.index("step1")
+        if step1_idx < 2 or parts[step1_idx - 2] != "rois":
+            return
+        roi_dir = os.sep + os.path.join(*parts[:step1_idx])
+        roi_id = parts[step1_idx - 1]
+        step2_dir = os.path.join(roi_dir, "step2")
+        current = os.path.abspath(self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR)
+        if current != os.path.abspath(step2_dir):
+            self.set_roi_context(roi_id=roi_id, roi_dir=roi_dir, step2_dir=step2_dir)
 
     # ── UI construction ───────────────────────────────────────────────
 
@@ -793,6 +811,7 @@ class Step2Page(QWidget):
         """Called from MainWindow when Step 1 finishes generating fused.zarr."""
         if path and os.path.exists(path):
             self._zarr_edit.setText(path)
+            self._sync_output_dir_from_zarr_path(path)
             self._load_zarr_info()
 
     def set_rois(self, rois):
@@ -809,6 +828,8 @@ class Step2Page(QWidget):
         path = QFileDialog.getExistingDirectory(self, 'Select fused.zarr directory')
         if path:
             self._zarr_edit.setText(path)
+            self._sync_output_dir_from_zarr_path(path)
+            self._load_zarr_info()
 
     def _browse_seg_params(self):
         dlg = QFileDialog(self, 'Select segmentation_params directory or index JSON', OUTPUT_DIR)
@@ -1056,6 +1077,7 @@ class Step2Page(QWidget):
             self._full_h, self._full_w = z.shape[0], z.shape[1]
             attrs = dict(z.attrs)
             self._zarr_path = path
+            self._sync_output_dir_from_zarr_path(path)
             self._zarr_info.setText(
                 f'Shape: {self._full_h:,} × {self._full_w:,} px  '
                 f'| dtype: {z.dtype}  '
@@ -1506,6 +1528,8 @@ class Step2Page(QWidget):
     def _available_hq_channels(self):
         candidates = []
         cfg = self._seg_config or {}
+        requested = parse_hq_channels(cfg.get("hq_channels") or [])
+        first_available = []
         for key in ("hq_source_zarr", "multichannel_source_path", "corrected_channels_zarr"):
             if cfg.get(key):
                 candidates.append(cfg.get(key))
@@ -1555,7 +1579,20 @@ class Step2Page(QWidget):
                         target = group
                         break
                 if target is not None:
-                    return list(target.array_keys())
+                    available = list(target.array_keys())
+                    if not first_available:
+                        first_available = available
+                    _resolved, missing, _warnings = resolve_hq_channels(requested, available)
+                    if not requested or not missing:
+                        return available
+                    print(
+                        "[Step2-HQ] corrected zarr missing requested channels; trying next source\n"
+                        f"  path={path}\n"
+                        f"  missing={missing}\n"
+                        f"  available={available}",
+                        flush=True,
+                    )
+                    continue
                 print(
                     "[Step2] HQ channel source ROI group not matched\n"
                     f"  path={path}\n"
@@ -1565,8 +1602,38 @@ class Step2Page(QWidget):
                     flush=True,
                 )
                 continue
-            return list(root.array_keys())
-        return []
+            available = list(root.array_keys())
+            if not first_available:
+                first_available = available
+            _resolved, missing, _warnings = resolve_hq_channels(requested, available)
+            if not requested or not missing:
+                return available
+            print(
+                "[Step2-HQ] corrected zarr missing requested channels; trying next source\n"
+                f"  path={path}\n"
+                f"  missing={missing}\n"
+                f"  available={available}",
+                flush=True,
+            )
+
+        for path in (
+            cfg.get("raw_channel_source_path"),
+            cfg.get("raw_ome_path"),
+        ):
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                available = OMETIFFLoader(path).channel_names()
+            except Exception as exc:
+                print(f"[Step2-HQ] failed to inspect raw OME channel source {path}: {exc}", flush=True)
+                continue
+            _resolved, missing, _warnings = resolve_hq_channels(requested, available)
+            if not requested or not missing:
+                print(f"[Step2-HQ] using raw OME channel source for HQ channels: {path}", flush=True)
+                return available
+            if not first_available:
+                first_available = available
+        return first_available
 
     # ── run / stop ────────────────────────────────────────────────────
 
@@ -1575,6 +1642,25 @@ class Step2Page(QWidget):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
             return
+        source = self._param_source_combo.currentData() or "manual"
+        if source == "index":
+            if not self._seg_params_index:
+                path = self._seg_params_edit.text().strip()
+                if path and not self._load_seg_params_index(path, silent=False, apply_active=False):
+                    return
+            resolved = self._update_resolved_param_path()
+            if not resolved or not os.path.exists(resolved):
+                QMessageBox.warning(self, 'Error', 'No indexed segmentation parameter file selected.')
+                return
+            current_method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+            selected_method = self._index_method_combo.currentData()
+            if (
+                not self._applied_param_file
+                or os.path.abspath(self._applied_param_file) != os.path.abspath(resolved)
+                or (selected_method and selected_method != current_method)
+            ):
+                if not self._apply_selected_index_params():
+                    return
         seg_config = self.get_seg_config()
         if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
             channels = seg_config.get("hq_channels") or []
@@ -1600,7 +1686,6 @@ class Step2Page(QWidget):
         nc  = self._cols_spin.value()
         self._n_rows = nr
         self._n_cols = nc
-        source = self._param_source_combo.currentData() or "manual"
         param_file = ""
         if source == "index" and self._applied_param_file:
             param_file = self._applied_param_file

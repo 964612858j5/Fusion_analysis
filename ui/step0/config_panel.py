@@ -130,7 +130,9 @@ class ConfigPanel(QWidget):
     def _load_weights_from_file(self):
         mw = self.window()
         out_dir = ""
-        if hasattr(mw, "_out_path_edit"):
+        if hasattr(mw, "current_gui_work_dir"):
+            out_dir = mw.current_gui_work_dir()
+        if not out_dir and hasattr(mw, "_out_path_edit"):
             out_dir = mw._out_path_edit.text().strip()
         start_dir = out_dir if out_dir and os.path.exists(out_dir) else os.getcwd()
         path, _ = QFileDialog.getOpenFileName(

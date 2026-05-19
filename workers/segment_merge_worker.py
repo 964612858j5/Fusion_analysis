@@ -117,6 +117,15 @@ class SegmentMergeWorker(QThread):
         self._last_region_meta = None
         self._current_region_bbox = None
         self._hq_resolved_source_path = ""
+        self.write_tile_tiffs = self._config_bool("write_tile_tiffs", False)
+        self.write_hq2_debug_layers = self._config_bool("write_hq2_debug_layers", False)
+        self.write_hq2_debug_tiffs = self._config_bool("write_hq2_debug_tiffs", False)
+
+    def _config_bool(self, key, default=False):
+        value = self.seg_config.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @staticmethod
     def _infer_roi_dir(output_dir):
@@ -630,6 +639,7 @@ class SegmentMergeWorker(QThread):
 
         if self._runtime_partial_path:
             try:
+                os.makedirs(os.path.dirname(self._runtime_partial_path), exist_ok=True)
                 partial = {
                     "status": "running",
                     "method": self.method,
@@ -708,6 +718,7 @@ class SegmentMergeWorker(QThread):
         }
         if self._runtime_partial_path:
             try:
+                os.makedirs(os.path.dirname(self._runtime_partial_path), exist_ok=True)
                 final_partial = dict(self._runtime_summary)
                 final_partial.update({
                     "status": "finished",
@@ -844,6 +855,26 @@ class SegmentMergeWorker(QThread):
         group = self._open_hq_channel_group(roi_name)
         available = self._channel_array_names(group)
         source_path = self._hq_resolved_source_path or self._multichannel_source_path() or self._raw_channel_source_path()
+        resolved, missing, warnings = resolve_hq_channels(channels, available)
+        if missing and not (isinstance(group, dict) and group.get("kind") == "raw_ome"):
+            raw_path = self._raw_channel_source_path()
+            if raw_path:
+                try:
+                    raw_loader = OMETIFFLoader(raw_path)
+                    raw_available = raw_loader.channel_names()
+                    raw_resolved, raw_missing, raw_warnings = resolve_hq_channels(channels, raw_available)
+                    if not raw_missing:
+                        print(
+                            "[Step2-HQ] corrected zarr missing requested channels; "
+                            f"falling back to raw OME channel source: {raw_path}"
+                        )
+                        group = {"kind": "raw_ome", "path": raw_path, "loader": raw_loader}
+                        available = raw_available
+                        source_path = self._abs(raw_path)
+                        self._hq_resolved_source_path = source_path
+                        resolved, missing, warnings = raw_resolved, raw_missing, raw_warnings
+                except Exception as exc:
+                    print(f"[Step2-HQ] failed to inspect raw OME fallback source {raw_path}: {exc}")
         root_attrs = {}
         if source_path and os.path.exists(source_path) and str(source_path).endswith(".zarr"):
             try:
@@ -865,7 +896,6 @@ class SegmentMergeWorker(QThread):
             f"  available channels from full source: {available}\n"
             f"  available channels from Step1 fusion weights: {sorted(fusion_weights.keys())}"
         )
-        resolved, missing, warnings = resolve_hq_channels(channels, available)
         print(f"[Step2-HQ] hq_input_mode: {mode}")
         print(f"[Step2-HQ] requested hq_channels: {requested}")
         print(f"[Step2-HQ] full source path: {source_path or '(none)'}")
@@ -965,7 +995,7 @@ class SegmentMergeWorker(QThread):
         }
 
     def _write_label_memmap_outputs(self, mmap_path, shape, zarr_path, ome_path, log_label):
-        """Stream a uint32 memmap label image to zarr and OME-TIFF."""
+        """Stream a uint32 memmap label image to zarr and optionally OME-TIFF."""
         full_h, full_w = shape
         chunk_rows = 4096
         arr_ro = np.memmap(mmap_path, dtype='uint32', mode='r', shape=(full_h, full_w))
@@ -976,22 +1006,25 @@ class SegmentMergeWorker(QThread):
         )
         for y in range(0, full_h, chunk_rows):
             out_z[y:y + chunk_rows, :] = arr_ro[y:y + chunk_rows, :]
-        with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-            tif.write(
-                arr_ro.astype(np.float32),
-                tile=(512, 512),
-                compression='lzw',
-                photometric='minisblack',
-                metadata=None,
-            )
+        if ome_path:
+            with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
+                tif.write(
+                    arr_ro.astype(np.float32),
+                    tile=(512, 512),
+                    compression='lzw',
+                    photometric='minisblack',
+                    metadata=None,
+                )
         if self._logger:
-            self._logger.info("%s → %s", log_label, ome_path)
+            self._logger.info("%s → %s", log_label, ome_path or zarr_path)
         del arr_ro
         self._drop_caches()
 
     def _write_hq2_layer_outputs(self, layer_mmap_paths, shape, out_prefix=""):
-        """Write HQ2 debug/proposal layers and return metadata path keys."""
+        """Write optional HQ2 debug/proposal layers and return metadata path keys."""
         paths = {}
+        if not self.write_hq2_debug_layers:
+            return paths
         name_map = {
             "hq_proposal": "hq_proposal_mask_path",
             "imagej_proposal": "imagej_proposal_mask_path",
@@ -1006,8 +1039,12 @@ class SegmentMergeWorker(QThread):
             base = f"global_hq2_{layer_key}_mask{suffix}"
             zarr_path = os.path.join(self.output_dir, f"{base}.zarr")
             ome_path = os.path.join(self.output_dir, f"{base}.ome.tiff")
-            self._write_label_memmap_outputs(mmap_path, shape, zarr_path, ome_path, f"HQ2 {layer_key}")
-            paths[meta_key] = self._abs(ome_path)
+            self._write_label_memmap_outputs(
+                mmap_path, shape, zarr_path,
+                ome_path if self.write_hq2_debug_tiffs else "",
+                f"HQ2 {layer_key}",
+            )
+            paths[meta_key] = self._abs(ome_path if self.write_hq2_debug_tiffs else zarr_path)
         return paths
 
     def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
@@ -1171,17 +1208,19 @@ class SegmentMergeWorker(QThread):
                     hq_marker_channels or [],
                     hq_names,
                     self.seg_config,
+                    logger=self._logger,
+                    return_layers=self.write_hq2_debug_layers,
                 )
                 return {
                     "mask": hq2["final_labels"].astype(np.uint32, copy=False),
                     "nuclei": hq2["nuclei_labels"].astype(np.uint32, copy=False),
                     "qc_rows": hq2.get("qc_rows") or [],
-                    "hq2_layers": {
+                    "hq2_layers": ({
                         "hq_proposal": hq2["hq_proposal_labels"].astype(np.uint32, copy=False),
                         "imagej_proposal": hq2["imagej_proposal_labels"].astype(np.uint32, copy=False),
                         "core": hq2["high_confidence_core_labels"].astype(np.uint32, copy=False),
                         "expansion": hq2["expansion_added_pixels"].astype(np.uint32, copy=False),
-                    },
+                    } if self.write_hq2_debug_layers else {}),
                 }
             return masks.astype(np.uint32)
 
@@ -1324,7 +1363,7 @@ class SegmentMergeWorker(QThread):
             nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                     shape=(full_h, full_w))
             nuclei_mmap[:] = 0
-        if is_hq2:
+        if is_hq2 and self.write_hq2_debug_layers:
             for layer_key in ("hq_proposal", "imagej_proposal", "core", "expansion"):
                 layer_path = os.path.join(
                     self.output_dir, f'global_hq2_{layer_key}_mask_{out_prefix}.dat'
@@ -1431,33 +1470,36 @@ class SegmentMergeWorker(QThread):
             raw_own_mask = local_mask[local_oy0:local_oy1,
                                       local_ox0:local_ox1].copy()
 
-            dapi_tile_path = os.path.join(
-                tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
-            )
-            try:
-                self._write_tile_ometiff(
-                    dapi_tile_path,
-                    dapi_own[:own_h, :own_w].astype(np.uint16),
-                    description=f'DAPI  row={row} col={col}  '
-                                f'own=({oy0},{oy1},{ox0},{ox1})',
+            dapi_tile_path = ""
+            raw_mask_tile_path = ""
+            if self.write_tile_tiffs:
+                dapi_tile_path = os.path.join(
+                    tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
                 )
-                log.info(f"    dapi tile → {dapi_tile_path}")
-            except Exception as e:
-                log.warning(f"    dapi tile write failed: {e}")
+                try:
+                    self._write_tile_ometiff(
+                        dapi_tile_path,
+                        dapi_own[:own_h, :own_w].astype(np.uint16),
+                        description=f'DAPI  row={row} col={col}  '
+                                    f'own=({oy0},{oy1},{ox0},{ox1})',
+                    )
+                    log.info(f"    dapi tile → {dapi_tile_path}")
+                except Exception as e:
+                    log.warning(f"    dapi tile write failed: {e}")
 
-            raw_mask_tile_path = os.path.join(
-                tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
-            )
-            try:
-                self._write_tile_ometiff(
-                    raw_mask_tile_path,
-                    raw_own_mask.astype(np.float32),
-                    description=f'raw segmentation mask  row={row} col={col}  '
-                                f'n_cells={int(raw_own_mask.max())}',
+                raw_mask_tile_path = os.path.join(
+                    tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
                 )
-                log.info(f"    raw mask tile → {raw_mask_tile_path}")
-            except Exception as e:
-                log.warning(f"    raw mask tile write failed: {e}")
+                try:
+                    self._write_tile_ometiff(
+                        raw_mask_tile_path,
+                        raw_own_mask.astype(np.float32),
+                        description=f'raw segmentation mask  row={row} col={col}  '
+                                    f'n_cells={int(raw_own_mask.max())}',
+                    )
+                    log.info(f"    raw mask tile → {raw_mask_tile_path}")
+                except Exception as e:
+                    log.warning(f"    raw mask tile write failed: {e}")
             del raw_own_mask
 
             n_raw = int(local_mask.max())
@@ -1656,18 +1698,7 @@ class SegmentMergeWorker(QThread):
             del nuclei_mmap_ro
 
         hq2_paths = {}
-        if self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            meta.update(mesmer_metadata(
-                self.method,
-                self.seg_config,
-                getattr(model, "get", lambda _k, _d=None: _d)("mesmer_device_status") if isinstance(model, dict) else None,
-                output_mask_path=self._abs(ome_path),
-                extra={
-                    "nuclei_mask_path": self._abs(nuclei_ome_path),
-                    "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
-                },
-            ))
-        elif is_hq2:
+        if is_hq2:
             hq2_paths = self._write_hq2_layer_outputs(
                 hq2_layer_mmap_paths, (full_h, full_w), out_prefix=out_prefix
             )
@@ -1702,6 +1733,17 @@ class SegmentMergeWorker(QThread):
             'bbox':            list(bbox) if bbox else None,
             'created_at':      datetime.now().isoformat(),
         }
+        if self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            meta.update(mesmer_metadata(
+                self.method,
+                self.seg_config,
+                getattr(model, "get", lambda _k, _d=None: _d)("mesmer_device_status") if isinstance(model, dict) else None,
+                output_mask_path=self._abs(ome_path),
+                extra={
+                    "nuclei_mask_path": self._abs(nuclei_ome_path),
+                    "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
+                },
+            ))
         if is_hq2:
             hq2_meta_paths = dict(hq2_paths)
             hq2_meta_paths.update({
@@ -2006,7 +2048,7 @@ class SegmentMergeWorker(QThread):
                 nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                         shape=(full_h, full_w))
                 nuclei_mmap[:] = 0
-            if is_hq2:
+            if is_hq2 and self.write_hq2_debug_layers:
                 for layer_key in ("hq_proposal", "imagej_proposal", "core", "expansion"):
                     layer_path = os.path.join(self.output_dir, f'global_hq2_{layer_key}_mask.dat')
                     hq2_layer_mmap_paths[layer_key] = layer_path
@@ -2101,31 +2143,34 @@ class SegmentMergeWorker(QThread):
                 raw_own_mask = local_mask[local_oy0:local_oy1,
                                           local_ox0:local_ox1].copy()
 
-                dapi_tile_path = os.path.join(
-                    tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
-                )
-                try:
-                    self._write_tile_ometiff(
-                        dapi_tile_path,
-                        dapi_own[:own_h, :own_w].astype(np.uint16),
-                        description=f'DAPI row={row} col={col} '
-                                    f'own=({oy0},{oy1},{ox0},{ox1})',
+                dapi_tile_path = ""
+                raw_mask_tile_path = ""
+                if self.write_tile_tiffs:
+                    dapi_tile_path = os.path.join(
+                        tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
                     )
-                except Exception as e:
-                    log.warning(f"  dapi tile write failed: {e}")
+                    try:
+                        self._write_tile_ometiff(
+                            dapi_tile_path,
+                            dapi_own[:own_h, :own_w].astype(np.uint16),
+                            description=f'DAPI row={row} col={col} '
+                                        f'own=({oy0},{oy1},{ox0},{ox1})',
+                        )
+                    except Exception as e:
+                        log.warning(f"  dapi tile write failed: {e}")
 
-                raw_mask_tile_path = os.path.join(
-                    tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
-                )
-                try:
-                    self._write_tile_ometiff(
-                        raw_mask_tile_path,
-                        raw_own_mask.astype(np.float32),
-                        description=f'raw mask row={row} col={col} '
-                                    f'n_cells={int(raw_own_mask.max())}',
+                    raw_mask_tile_path = os.path.join(
+                        tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
                     )
-                except Exception as e:
-                    log.warning(f"  raw mask tile write failed: {e}")
+                    try:
+                        self._write_tile_ometiff(
+                            raw_mask_tile_path,
+                            raw_own_mask.astype(np.float32),
+                            description=f'raw mask row={row} col={col} '
+                                        f'n_cells={int(raw_own_mask.max())}',
+                        )
+                    except Exception as e:
+                        log.warning(f"  raw mask tile write failed: {e}")
                 del raw_own_mask, dapi_own
 
                 n_raw = int(local_mask.max())
@@ -2411,6 +2456,17 @@ class SegmentMergeWorker(QThread):
                                    'segmentation_meta.json'), 'w') as f:
                 json.dump(meta, f, indent=2)
             self._register_completed_result(meta)
+            if self.roi_dir and self.roi_id:
+                rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
+                update_roi_segmentation_run(self.roi_dir, {
+                    "run_id": self.result_id,
+                    "method": self.method,
+                    "created_at": self.created_at,
+                    "path": rel_run_path,
+                    "status": "done",
+                    "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
+                })
+                log.info("[Step2] updated roi_index latest_by_method")
 
             log.info(
                 f"=== Segmentation complete ===  "

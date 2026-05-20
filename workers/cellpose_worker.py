@@ -363,6 +363,13 @@ def _dapi_f32_to_rgb(dapi_f32):
     ], axis=-1)
 
 
+def _range_text(arr):
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return "nan,nan"
+    return f"{float(np.nanmin(arr)):.4f},{float(np.nanmax(arr)):.4f}"
+
+
 def _preview_rgb_from_fusion_or_dapi(fusion, loader, roi, groups, group_weights, nuc_ch, nuc_w, dapi_f32, method):
     y0, y1, x0, x1 = roi
     dapi_rgb = _dapi_f32_to_rgb(dapi_f32)
@@ -476,8 +483,18 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 )
                 print(f"[Step1-preview] loaded_shape={fused.shape}")
                 print("[Step1-preview] full_image_load=False")
-                fused_f32 = np.array(fused.astype(np.float32) / 65535.0)
-                seg_img = np.ascontiguousarray(fused_f32[:, :, 1])
+                fused_f32 = np.asarray(fused, dtype=np.float32) / 65535.0
+                cyto = np.ascontiguousarray(fused_f32[:, :, 0])
+                nuc = np.ascontiguousarray(fused_f32[:, :, 1])
+                seg_img = np.stack([cyto, nuc], axis=-1).astype(np.float32, copy=False)
+                seg_img = np.ascontiguousarray(seg_img)
+                segmentation_input = "fusion_plus_dapi"
+                cellpose_channels = [1, 2]
+                fusion_channel_order = ["cyto_or_fusion", "DAPI"]
+                print("[Worker] segmentation_input=fusion_plus_dapi")
+                print(f"[Worker] seg_img shape={seg_img.shape}")
+                print(f"[Worker] cyto range=[{_range_text(cyto)}]")
+                print(f"[Worker] nuc range=[{_range_text(nuc)}]")
                 rgb_raw = np.stack([
                     (np.clip(fused_f32[:, :, 0], 0, 1) * 255).astype(np.uint8),
                     np.zeros_like(fused_f32[:, :, 0], dtype=np.uint8),
@@ -491,6 +508,11 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 print("[Step1-preview] full_image_load=False")
                 dapi_f32 = fusion._normalize_intensity(dapi_raw).astype(np.float32)
                 seg_img = np.ascontiguousarray(dapi_f32)
+                segmentation_input = "dapi_only"
+                cellpose_channels = None
+                fusion_channel_order = []
+                print("[Worker] segmentation_input=dapi_only")
+                print(f"[Worker] seg_img shape={seg_img.shape}")
                 rgb_raw, preview_background = _preview_rgb_from_fusion_or_dapi(
                     fusion, loader, (y0, y1, x0, x1),
                     groups, group_weights, nuc_ch, nuc_w, dapi_f32, method,
@@ -502,14 +524,17 @@ def run_cellpose_process(args, result_queue, stop_flag):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
-                    masks_out, _, _ = cellpose_model.eval(
-                        seg_img,
-                        diameter=params.get("diameter"),
-                        flow_threshold=params.get("flow_threshold", 0.4),
-                        cellprob_threshold=params.get("cellprob_threshold", 0.0),
-                        min_size=int(params.get("min_size", 15) or 15),
-                        do_3D=False,
-                    )
+                    eval_kwargs = {
+                        "diameter": params.get("diameter"),
+                        "flow_threshold": params.get("flow_threshold", 0.4),
+                        "cellprob_threshold": params.get("cellprob_threshold", 0.0),
+                        "min_size": int(params.get("min_size", 15) or 15),
+                        "do_3D": False,
+                    }
+                    if method == CELLPOSE_WHOLECELL_FUSION:
+                        eval_kwargs["channels"] = cellpose_channels
+                        eval_kwargs["channel_axis"] = -1
+                    masks_out, _, _ = cellpose_model.eval(seg_img, **eval_kwargs)
                     if method == CELLPOSE_NUCLEI_EXPANSION:
                         from skimage.segmentation import expand_labels
                         dist = float(params.get("expand_distance", 8) or 0)
@@ -627,12 +652,15 @@ def run_cellpose_process(args, result_queue, stop_flag):
             except Exception as e:
                 result_queue.put({"type": "error", "msg": traceback.format_exc()})
                 success = False
-                mask = np.zeros(seg_img.shape, dtype=np.uint32)
+                mask = np.zeros(seg_img.shape[:2], dtype=np.uint32)
 
             rgb_ov = rgb_raw
             n_cells = int(mask.max())
             mask_payload = mask.copy()
             result_path = ""
+            params["segmentation_input"] = segmentation_input
+            params["fusion_channel_order"] = fusion_channel_order
+            params["cellpose_channels"] = cellpose_channels
             try:
                 phase_name = f"phase{phase}" if phase else "preview"
                 result_path = os.path.join(
@@ -650,6 +678,9 @@ def run_cellpose_process(args, result_queue, stop_flag):
                     "phase": phase_name,
                     "labels_count": n_cells,
                     "success": bool(success),
+                    "segmentation_input": segmentation_input,
+                    "fusion_channel_order": fusion_channel_order,
+                    "cellpose_channels": cellpose_channels,
                 }
                 np.savez_compressed(
                     result_path,
@@ -765,6 +796,8 @@ class CellposeWorker(QThread):
             for done, (patch_idx, roi, params) in enumerate(self.tasks):
                 if self._stop:
                     break
+                params = normalize_segmentation_config(params)
+                method = params.get("method", CELLPOSE_WHOLECELL_FUSION)
 
                 y0, y1, x0, x1 = roi
                 self.progress.emit(
@@ -784,7 +817,7 @@ class CellposeWorker(QThread):
                 print(f"[Cellpose] fused: shape={fused.shape} dtype={fused.dtype} "
                       f"min={fused.min()} max={fused.max()}")
 
-                fused_f32 = np.array(fused.astype(np.float32) / 65535.0)
+                fused_f32 = np.asarray(fused, dtype=np.float32) / 65535.0
 
                 print(f"[Cellpose] fused_f32: type={type(fused_f32)} "
                       f"shape={fused_f32.shape} "
@@ -792,17 +825,31 @@ class CellposeWorker(QThread):
                       f"ch1 range=[{fused_f32[:,:,1].min():.3f},{fused_f32[:,:,1].max():.3f}]")
 
                 try:
-                    nuc_2d = np.ascontiguousarray(fused_f32[:, :, 1])
-                    print(f"[Cellpose] nuc_2d: type={type(nuc_2d)} shape={nuc_2d.shape} "
-                          f"dtype={nuc_2d.dtype} contiguous={nuc_2d.flags['C_CONTIGUOUS']}")
-                    masks_out, _, _ = model.eval(
-                        nuc_2d,
-                        diameter           = params.get("diameter"),
-                        flow_threshold     = params.get("flow_threshold", 0.4),
-                        cellprob_threshold = params.get("cellprob_threshold", 0.0),
-                        min_size           = 15,
-                        do_3D              = False,
-                    )
+                    eval_kwargs = {
+                        "diameter": params.get("diameter"),
+                        "flow_threshold": params.get("flow_threshold", 0.4),
+                        "cellprob_threshold": params.get("cellprob_threshold", 0.0),
+                        "min_size": int(params.get("min_size", 15) or 15),
+                        "do_3D": False,
+                    }
+                    if method == CELLPOSE_WHOLECELL_FUSION:
+                        cyto = np.ascontiguousarray(fused_f32[:, :, 0])
+                        nuc = np.ascontiguousarray(fused_f32[:, :, 1])
+                        seg_img = np.stack([cyto, nuc], axis=-1).astype(np.float32, copy=False)
+                        seg_img = np.ascontiguousarray(seg_img)
+                        eval_kwargs["channels"] = [1, 2]
+                        eval_kwargs["channel_axis"] = -1
+                        print(f"[Worker] method={method}")
+                        print("[Worker] segmentation_input=fusion_plus_dapi")
+                        print(f"[Worker] seg_img shape={seg_img.shape}")
+                        print(f"[Worker] cyto range=[{_range_text(cyto)}]")
+                        print(f"[Worker] nuc range=[{_range_text(nuc)}]")
+                    else:
+                        seg_img = np.ascontiguousarray(fused_f32[:, :, 1])
+                        print(f"[Worker] method={method}")
+                        print("[Worker] segmentation_input=dapi_only")
+                        print(f"[Worker] seg_img shape={seg_img.shape}")
+                    masks_out, _, _ = model.eval(seg_img, **eval_kwargs)
                     mask = masks_out.astype(np.uint32)
                     print(f"[Cellpose] ✓ masks: shape={masks_out.shape} "
                           f"n_cells={mask.max()} unique={len(np.unique(mask))}")

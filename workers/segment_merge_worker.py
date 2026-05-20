@@ -47,6 +47,7 @@ from ..utils.roi_project import (
 )
 from ..utils.step2_profiler import Step2Profiler
 from ..utils.channel_cache import SharedChannelStore
+from ..utils.step2_tile import Step2Tile
 from ..utils.tile_prefetch import TilePrefetcher
 from ..utils.tile_strategy import suggest_tile_strategy
 from .cellpose_worker import load_stardist_model
@@ -840,7 +841,7 @@ class SegmentMergeWorker(QThread):
             return self._channel_store.read_dapi(source_path, y0, y1, x0, x1)
         return np.array(z[y0:y1, x0:x1, 1])
 
-    def _build_step2_tiles(self, full_h, full_w):
+    def _build_step2_tiles(self, full_h, full_w, out_prefix=""):
         tile_h = -(-int(full_h) // int(self.n_rows))
         tile_w = -(-int(full_w) // int(self.n_cols))
         tiles = []
@@ -854,11 +855,15 @@ class SegmentMergeWorker(QThread):
                 ry1 = min(full_h, oy1 + self.overlap_px)
                 rx0 = max(0, ox0 - self.overlap_px)
                 rx1 = min(full_w, ox1 + self.overlap_px)
-                tiles.append({
-                    'row': r, 'col': c,
-                    'own':  (oy0, oy1, ox0, ox1),
-                    'read': (ry0, ry1, rx0, rx1),
-                })
+                tiles.append(Step2Tile(
+                    index=len(tiles),
+                    row=r,
+                    col=c,
+                    own_bbox=(oy0, oy1, ox0, ox1),
+                    read_bbox=(ry0, ry1, rx0, rx1),
+                    overlap=int(self.overlap_px),
+                    out_prefix=str(out_prefix or ""),
+                ))
         return tile_h, tile_w, tiles
 
     def _record_tile_strategy(self, full_h, full_w, channel_count=1):
@@ -951,8 +956,12 @@ class SegmentMergeWorker(QThread):
     def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
                               hq_group, hq_channels, is_mesmer, mesmer_group,
                               dapi_mmap=None, profile_tile_base=None):
-        ry0, ry1, rx0, rx1 = tile['read']
-        oy0, oy1, ox0, ox1 = tile['own']
+        if hasattr(tile, "read_bbox"):
+            ry0, ry1, rx0, rx1 = tile.read_bbox
+            oy0, oy1, ox0, ox1 = tile.own_bbox
+        else:
+            ry0, ry1, rx0, rx1 = tile['read']
+            oy0, oy1, ox0, ox1 = tile['own']
         own_h = oy1 - oy0
         own_w = ox1 - ox0
         profile_tile_base = profile_tile_base or {}
@@ -1565,7 +1574,7 @@ class SegmentMergeWorker(QThread):
         tile_w = -(-full_w // self.n_cols)
 
         with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
-            tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w)
+            tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w, out_prefix=out_prefix)
         n_tiles = len(tiles)
 
         mmap_path = os.path.join(
@@ -1640,9 +1649,9 @@ class SegmentMergeWorker(QThread):
                 del mmap, dapi_mmap
                 return 0
 
-            row, col           = tile['row'], tile['col']
-            oy0, oy1, ox0, ox1 = tile['own']
-            ry0, ry1, rx0, rx1 = tile['read']
+            row, col           = tile.row, tile.col
+            oy0, oy1, ox0, ox1 = tile.own_bbox
+            ry0, ry1, rx0, rx1 = tile.read_bbox
             own_h = oy1 - oy0
             own_w = ox1 - ox0
 
@@ -1656,7 +1665,7 @@ class SegmentMergeWorker(QThread):
                 f"({ry1-ry0}×{rx1-rx0}px)"
             )
 
-            profile_tile_id = f"{out_prefix}:{i}" if out_prefix else str(i)
+            profile_tile_id = tile.tile_id
             stage_seconds = {}
             tile_shape = (ry1 - ry0, rx1 - rx0)
             tile_profile_base = {
@@ -2458,9 +2467,9 @@ class SegmentMergeWorker(QThread):
                     self.error.emit('Stopped by user.')
                     return
 
-                row, col            = tile['row'], tile['col']
-                oy0, oy1, ox0, ox1  = tile['own']
-                ry0, ry1, rx0, rx1  = tile['read']
+                row, col            = tile.row, tile.col
+                oy0, oy1, ox0, ox1  = tile.own_bbox
+                ry0, ry1, rx0, rx1  = tile.read_bbox
                 own_h = oy1 - oy0
                 own_w = ox1 - ox0
 
@@ -2472,7 +2481,7 @@ class SegmentMergeWorker(QThread):
                 log.info(_msg)
                 log.debug(f"  [MEM before inference] {self._mem_snapshot()}")
 
-                profile_tile_id = str(i)
+                profile_tile_id = tile.tile_id
                 stage_seconds = {}
                 tile_shape = (ry1 - ry0, rx1 - rx0)
                 tile_profile_base = {

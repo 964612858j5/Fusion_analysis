@@ -47,7 +47,8 @@ from ..utils.roi_project import (
 )
 from ..utils.step2_profiler import Step2Profiler
 from ..utils.channel_cache import SharedChannelStore
-from ..utils.step2_tile import Step2Tile
+from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
+from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_prefetch import TilePrefetcher
 from ..utils.tile_strategy import suggest_tile_strategy
 from .cellpose_worker import load_stardist_model
@@ -842,29 +843,15 @@ class SegmentMergeWorker(QThread):
         return np.array(z[y0:y1, x0:x1, 1])
 
     def _build_step2_tiles(self, full_h, full_w, out_prefix=""):
-        tile_h = -(-int(full_h) // int(self.n_rows))
-        tile_w = -(-int(full_w) // int(self.n_cols))
-        tiles = []
-        for r in range(self.n_rows):
-            for c in range(self.n_cols):
-                oy0 = r * tile_h
-                oy1 = min(oy0 + tile_h, full_h)
-                ox0 = c * tile_w
-                ox1 = min(ox0 + tile_w, full_w)
-                ry0 = max(0, oy0 - self.overlap_px)
-                ry1 = min(full_h, oy1 + self.overlap_px)
-                rx0 = max(0, ox0 - self.overlap_px)
-                rx1 = min(full_w, ox1 + self.overlap_px)
-                tiles.append(Step2Tile(
-                    index=len(tiles),
-                    row=r,
-                    col=c,
-                    own_bbox=(oy0, oy1, ox0, ox1),
-                    read_bbox=(ry0, ry1, rx0, rx1),
-                    overlap=int(self.overlap_px),
-                    out_prefix=str(out_prefix or ""),
-                ))
-        return tile_h, tile_w, tiles
+        scheduler = TileScheduler(
+            full_h=full_h,
+            full_w=full_w,
+            n_rows=self.n_rows,
+            n_cols=self.n_cols,
+            overlap_px=self.overlap_px,
+            out_prefix=out_prefix,
+        )
+        return scheduler.tile_h, scheduler.tile_w, list(scheduler.iter_tiles())
 
     def _record_tile_strategy(self, full_h, full_w, channel_count=1):
         suggested = suggest_tile_strategy(
@@ -901,6 +888,47 @@ class SegmentMergeWorker(QThread):
         if self._logger:
             self._logger.info(msg)
         return info
+
+    def _record_tile_grid_metrics(self, tiles, full_h, full_w, scheduler=None):
+        metrics = scheduler.metrics() if scheduler is not None else compute_tile_grid_metrics(tiles, full_h, full_w)
+        self._tile_strategy_info.update({
+            "tile_grid_metrics": metrics,
+            "duplicate_factor": metrics["duplicate_factor"],
+            "read_mpx_total": metrics["read_mpx_total"],
+            "own_mpx_total": metrics["own_mpx_total"],
+        })
+        messages = [
+            (
+                "[TileMetrics] "
+                f"grid={metrics['n_rows']}x{metrics['n_cols']} "
+                f"tiles={metrics['n_tiles']} overlap={metrics['overlap']}"
+            ),
+            (
+                "[TileMetrics] "
+                f"own={metrics['own_mpx_total']:.3f}MP "
+                f"read={metrics['read_mpx_total']:.3f}MP "
+                f"duplicate_factor={metrics['duplicate_factor']:.3f}"
+            ),
+            (
+                "[TileMetrics] "
+                f"mean_read={metrics['mean_read_mpx']:.3f}MP "
+                f"max_read={metrics['max_read_mpx']:.3f}MP"
+            ),
+        ]
+        for msg in messages:
+            print(msg)
+            if self._logger:
+                self._logger.info(msg)
+        try:
+            self.step2_profiler.log_tile_stage(
+                None,
+                "tile_grid_metrics",
+                0.0,
+                **metrics,
+            )
+        except Exception:
+            pass
+        return metrics
 
     def _step2_engine_meta(self):
         cache = {}
@@ -1574,8 +1602,19 @@ class SegmentMergeWorker(QThread):
         tile_w = -(-full_w // self.n_cols)
 
         with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
-            tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w, out_prefix=out_prefix)
-        n_tiles = len(tiles)
+            scheduler = TileScheduler(
+                full_h=full_h,
+                full_w=full_w,
+                n_rows=self.n_rows,
+                n_cols=self.n_cols,
+                overlap_px=self.overlap_px,
+                out_prefix=out_prefix,
+            )
+            tile_h = scheduler.tile_h
+            tile_w = scheduler.tile_w
+            tiles = list(scheduler.iter_tiles())
+        n_tiles = len(scheduler)
+        self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
 
         mmap_path = os.path.join(
             self.output_dir, f'global_mask_{out_prefix}.dat'
@@ -1793,8 +1832,7 @@ class SegmentMergeWorker(QThread):
             local_ox1 = ox1 - rx0
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
-                raw_own_mask = local_mask[local_oy0:local_oy1,
-                                          local_ox0:local_ox1].copy()
+                raw_own_mask = crop_valid_region(local_mask, tile, copy=True)
             stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
             dapi_tile_path = ""
@@ -2398,8 +2436,18 @@ class SegmentMergeWorker(QThread):
             tile_w = -(-full_w // self.n_cols)
 
             with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
-                tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w)
-            n_tiles = len(tiles)
+                scheduler = TileScheduler(
+                    full_h=full_h,
+                    full_w=full_w,
+                    n_rows=self.n_rows,
+                    n_cols=self.n_cols,
+                    overlap_px=self.overlap_px,
+                )
+                tile_h = scheduler.tile_h
+                tile_w = scheduler.tile_w
+                tiles = list(scheduler.iter_tiles())
+            n_tiles = len(scheduler)
+            self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
 
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -2602,8 +2650,7 @@ class SegmentMergeWorker(QThread):
                 local_ox1 = ox1 - rx0
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
-                    raw_own_mask = local_mask[local_oy0:local_oy1,
-                                              local_ox0:local_ox1].copy()
+                    raw_own_mask = crop_valid_region(local_mask, tile, copy=True)
                 stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
                 dapi_tile_path = ""

@@ -5,6 +5,7 @@ block01/ui/main_window.py — MainWindow.
 import os
 import gc
 import glob
+import hashlib
 import json
 import time
 import traceback
@@ -492,10 +493,10 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled{background:#333;color:#555;}"
         )
         self.btn_save.clicked.connect(self._save)
-        self._force_dapi_zarr = QCheckBox("force_regenerate_dapi_zarr")
+        self._force_dapi_zarr = QCheckBox("force_overwrite_zarr")
         self._force_dapi_zarr.setChecked(False)
         self._force_dapi_zarr.setStyleSheet("color:#aaa;font-size:10px;")
-        self._force_dapi_zarr.setToolTip("Regenerate DAPI input zarr even when dapi_input_meta.json matches.")
+        self._force_dapi_zarr.setToolTip("Regenerate Step1 fused/DAPI input zarr even when existing metadata matches.")
         bot.addWidget(self.btn_save)
         bot.addWidget(self._force_dapi_zarr)
         root.addLayout(bot)
@@ -2827,6 +2828,12 @@ class MainWindow(QMainWindow):
             and not getattr(self, "_reused_dapi_input_meta", False)
         ):
             self._write_dapi_input_meta(self._pending_dapi_input_meta)
+        if (
+            is_wholecell
+            and getattr(self, "_pending_fused_zarr_meta", None)
+            and not getattr(self, "_reused_fused_zarr_meta", False)
+        ):
+            self._write_fused_zarr_meta(self._pending_fused_zarr_meta, zarr_path)
         self._save_step1_session()
         self._unlock_ui()
         # Count per-ROI zarrs from meta
@@ -2930,6 +2937,215 @@ class MainWindow(QMainWindow):
         else:
             path = os.path.join(OUTPUT_DIR, "fused.zarr")
         return path if os.path.exists(path) else ""
+
+    def _fusion_meta_path(self):
+        return os.path.join(OUTPUT_DIR, "fusion_meta.json")
+
+    @staticmethod
+    def _canonical_step1_config_value(value):
+        transient = {
+            "generated_at", "created_at", "saved_at", "last_used",
+            "runtime_seconds", "avg_tile_s", "tile_seconds",
+            "preview_path", "config_hash", "old_hash", "new_hash",
+        }
+        if isinstance(value, dict):
+            return {
+                str(k): MainWindow._canonical_step1_config_value(v)
+                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+                if str(k) not in transient
+            }
+        if isinstance(value, (list, tuple)):
+            return [MainWindow._canonical_step1_config_value(v) for v in value]
+        if isinstance(value, float):
+            return round(value, 6)
+        if isinstance(value, np.floating):
+            return round(float(value), 6)
+        if isinstance(value, np.integer):
+            return int(value)
+        return value
+
+    @classmethod
+    def _step1_config_hash(cls, value):
+        canonical = cls._canonical_step1_config_value(value)
+        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _expected_fused_zarr_meta(self, worker_fcfg, selected_method):
+        active_roi = self._active_roi or (self._rois[0] if self._rois else None)
+        regions = []
+        if self._rois:
+            for roi in self._rois:
+                bbox = [int(v) for v in roi.get("bbox_fullres", [])]
+                if len(bbox) == 4:
+                    regions.append({
+                        "roi_name": roi.get("name") or roi.get("display_name") or "",
+                        "roi_id": (self.step0_output or {}).get("roi_id", ""),
+                        "roi_bbox": bbox,
+                        "shape": [bbox[1] - bbox[0], bbox[3] - bbox[2], 2],
+                    })
+        else:
+            h, w = self.loader.shape
+            regions.append({
+                "roi_name": "full",
+                "roi_id": "",
+                "roi_bbox": [0, h, 0, w],
+                "shape": [h, w, 2],
+            })
+        source_path = (
+            self._corrected_zarr_path
+            or (self.step0_output or {}).get("corrected_zarr_path")
+            or getattr(self.loader, "filepath", "")
+        )
+        meta = {
+            "version": 1,
+            "purpose": "step1_fused_zarr",
+            "method": selected_method,
+            "source_path": os.path.abspath(source_path) if source_path else "",
+            "raw_ome_path": os.path.abspath(getattr(self.loader, "filepath", OME_TIFF_FILE)),
+            "roi_id": (self.step0_output or {}).get("roi_id", ""),
+            "roi_bbox": active_roi.get("bbox_fullres") if active_roi else None,
+            "regions": regions,
+            "shape": regions[0]["shape"] if len(regions) == 1 else [r["shape"] for r in regions],
+            "dtype": "uint16",
+            "resolution": worker_fcfg.get("resolution") or None,
+            "normalization_source": "corrected" if self._corrected_zarr_path else "raw",
+            "background_correction_source": os.path.abspath(self._corrected_zarr_path) if self._corrected_zarr_path else "",
+            "pixel_size": (self.step0_output or {}).get("pixel_size"),
+            "fusion_config": worker_fcfg,
+            "code_version": "block01_step1_v11_fused_reuse",
+        }
+        meta["config_hash"] = self._step1_config_hash(meta)
+        return meta
+
+    def _existing_fused_zarr_path(self):
+        meta_path = self._fusion_meta_path()
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                regions = meta.get("regions") or []
+                if regions:
+                    path = regions[0].get("zarr_path")
+                    if path and os.path.isdir(path):
+                        return path
+            except Exception:
+                pass
+        if self._rois:
+            name = self._rois[0].get("name", "ROI_1")
+            path = os.path.join(OUTPUT_DIR, f"fused_{name}.zarr")
+        else:
+            path = os.path.join(OUTPUT_DIR, "fused.zarr")
+        return path if os.path.isdir(path) else ""
+
+    @staticmethod
+    def _is_valid_existing_fused_zarr(path):
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            z = zarr.open(path, mode="r")
+            shape = getattr(z, "shape", None)
+            if shape is not None and len(shape) >= 3 and int(shape[-1]) == 2:
+                return True
+            attrs = dict(getattr(z, "attrs", {}) or {})
+            if attrs.get("cellpose_channels") == [1, 2] or attrs.get("channel_1") == "nucleus":
+                return True
+            for key in ("fused", "data", "0"):
+                if key in z:
+                    arr = z[key]
+                    arr_shape = getattr(arr, "shape", None)
+                    if arr_shape is not None and len(arr_shape) >= 3 and int(arr_shape[-1]) == 2:
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def _write_fused_zarr_meta(self, expected_meta, zarr_path=""):
+        meta_path = self._fusion_meta_path()
+        meta = {}
+        try:
+            if os.path.exists(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+        except Exception:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.update({
+            "purpose": expected_meta.get("purpose"),
+            "method": expected_meta.get("method"),
+            "source_path": expected_meta.get("source_path"),
+            "raw_ome_path": expected_meta.get("raw_ome_path"),
+            "roi_id": expected_meta.get("roi_id"),
+            "roi_bbox": expected_meta.get("roi_bbox"),
+            "shape": expected_meta.get("shape"),
+            "dtype": expected_meta.get("dtype"),
+            "resolution": expected_meta.get("resolution"),
+            "normalization_source": expected_meta.get("normalization_source"),
+            "background_correction_source": expected_meta.get("background_correction_source"),
+            "pixel_size": expected_meta.get("pixel_size"),
+            "fusion_config": expected_meta.get("fusion_config"),
+            "config_hash": expected_meta.get("config_hash"),
+            "last_used": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "code_version": expected_meta.get("code_version"),
+        })
+        if not meta.get("regions"):
+            regions = []
+            for region in expected_meta.get("regions") or []:
+                item = {
+                    "roi_name": region.get("roi_name", "full"),
+                    "zarr_path": zarr_path or self._existing_fused_zarr_path(),
+                    "zarr_shape": region.get("shape"),
+                    "bbox": region.get("roi_bbox"),
+                }
+                regions.append(item)
+            meta["regions"] = regions
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+        except Exception:
+            print(f"[Step1] failed to write fusion_meta.json:\n{traceback.format_exc()}")
+
+    def _try_reuse_fused_zarr(self, expected_meta):
+        existing_zarr = self._existing_fused_zarr_path()
+        if bool(getattr(self, "_force_dapi_zarr", None) and self._force_dapi_zarr.isChecked()):
+            print("[Step1] force overwrite enabled, regenerating fused zarr")
+            return False
+        if not existing_zarr or not self._is_valid_existing_fused_zarr(existing_zarr):
+            return False
+
+        print(f"[Step1] existing fused zarr found: {existing_zarr}")
+        meta_path = self._fusion_meta_path()
+        old_hash = ""
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    old_meta = json.load(f)
+                old_hash = str(old_meta.get("config_hash") or "")
+            except Exception as e:
+                print(f"[Step1] failed to read fusion_meta.json; reusing valid zarr: {e}")
+
+        new_hash = str(expected_meta.get("config_hash") or "")
+        if not old_hash:
+            print("[Step1] existing fused zarr has no config hash; reusing because zarr is valid")
+            self._write_fused_zarr_meta(expected_meta, existing_zarr)
+            self._reused_fused_zarr_meta = True
+            self._on_fusion_done(existing_zarr)
+            print("[Step1] config unchanged, skip generation")
+            print("[Step1] Next unlocked")
+            return True
+        if old_hash == new_hash:
+            print("[Step1] config unchanged, skip generation")
+            self._write_fused_zarr_meta(expected_meta, existing_zarr)
+            self._reused_fused_zarr_meta = True
+            self._on_fusion_done(existing_zarr)
+            print("[Step1] Next unlocked")
+            return True
+
+        print("[Step1] fused zarr exists but config changed")
+        print(f"[Step1] old_hash={old_hash}")
+        print(f"[Step1] new_hash={new_hash}")
+        print("[Step1] regenerating fused zarr")
+        return False
 
     def _try_reuse_dapi_input_zarr(self, expected_meta):
         meta_path = self._dapi_input_meta_path()
@@ -3102,12 +3318,15 @@ class MainWindow(QMainWindow):
         print(f"[Save] {fp1}")
         print(f"[Save] {fp_method}")
         print(f"[Step1] saved active segmentation params={fp_method}")
+        self._pending_segmentation_param_path = fp_method
 
         # ── Tile selection dialog ─────────────────────────────────────
         # Count active channels for RAM estimate
         is_wholecell = selected_method == CELLPOSE_WHOLECELL_FUSION
         worker_fcfg = dict(fcfg)
         if not is_wholecell:
+            self._pending_fused_zarr_meta = None
+            self._reused_fused_zarr_meta = False
             nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nuc_combo.currentText()
             worker_fcfg = dict(fcfg)
             # DAPI-only methods use channel 1 as segmentation input, but the
@@ -3122,6 +3341,11 @@ class MainWindow(QMainWindow):
         else:
             self._pending_dapi_input_meta = None
             self._reused_dapi_input_meta = False
+            expected_fused_meta = self._expected_fused_zarr_meta(worker_fcfg, selected_method)
+            self._pending_fused_zarr_meta = expected_fused_meta
+            self._reused_fused_zarr_meta = False
+            if self._try_reuse_fused_zarr(expected_fused_meta):
+                return
         active_ch = set([worker_fcfg["nucleus"]["channel"]])
         for gdata in worker_fcfg["groups"].values():
             active_ch.update(gdata["channels"].keys())
@@ -3172,7 +3396,6 @@ class MainWindow(QMainWindow):
             f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
         )
         self._fusion_worker.start()
-        self._pending_segmentation_param_path = fp_method
 
 
 

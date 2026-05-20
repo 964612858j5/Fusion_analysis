@@ -336,6 +336,7 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "fill_holes",
         "remove_border_objects",
         "save_intermediate",
+        "enable_step2_profiling",
     ):
         if key in raw:
             params[key] = raw[key]

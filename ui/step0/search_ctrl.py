@@ -708,40 +708,62 @@ class SearchCtrlPanel(QWidget):
         self._hq2_norm_high = add_row(g, 4, "norm pct high:", spin(50, 100, 0.5, 1, 99.5))
         self._hq2_min_signal = add_row(g, 5, "min_signal_threshold:", spin(0, 1, 0.01, 2, 0.08))
 
-        imagej_box, g = section("ImageJ-style proposal")
-        self._hq2_imagej_blur = add_row(g, 0, "blur_sigma:", spin(0, 10, 0.1, 1, 1.0))
-        self._hq2_bg_radius = add_row(g, 1, "background_radius:", spin(0, 300, 1, 0, 20))
+        imagej_box, g = section("Advanced/Experimental ImageJ-style proposal")
+        self._hq2_enable_imagej = QCheckBox("enable ImageJ proposal")
+        self._hq2_enable_imagej.setMinimumHeight(24)
+        self._hq2_enable_imagej.setChecked(False)
+        add_row(g, 0, "enable_imagej_proposal:", self._hq2_enable_imagej)
+        self._hq2_imagej_blur = add_row(g, 1, "blur_sigma:", spin(0, 10, 0.1, 1, 1.0))
+        self._hq2_bg_radius = add_row(g, 2, "background_radius:", spin(0, 300, 1, 0, 20))
         self._hq2_threshold_method = QComboBox()
         self._hq2_threshold_method.setMinimumHeight(24)
         for value in ("adaptive", "otsu", "percentile"):
             self._hq2_threshold_method.addItem(value, value)
-        add_row(g, 2, "threshold_method:", self._hq2_threshold_method)
-        self._hq2_threshold_percentile = add_row(g, 3, "threshold_percentile:", spin(0, 100, 1, 1, 75))
-        self._hq2_min_object = add_row(g, 4, "min_object_size:", spin(0, 100000, 1, 0, 20))
-        self._hq2_closing = add_row(g, 5, "closing_radius:", spin(0, 50, 1, 0, 2))
-        self._hq2_opening = add_row(g, 6, "opening_radius:", spin(0, 50, 1, 0, 1))
+        add_row(g, 3, "threshold_method:", self._hq2_threshold_method)
+        self._hq2_threshold_percentile = add_row(g, 4, "threshold_percentile:", spin(0, 100, 1, 1, 75))
+        self._hq2_min_object = add_row(g, 5, "min_object_size:", spin(0, 100000, 1, 0, 20))
+        self._hq2_closing = add_row(g, 6, "closing_radius:", spin(0, 50, 1, 0, 2))
+        self._hq2_opening = add_row(g, 7, "opening_radius:", spin(0, 50, 1, 0, 1))
 
-        expansion_box, g = section("Continuous signal expansion")
+        expansion_box, g = section("Conservative refinement")
         self._hq2_core_mode = QComboBox()
         self._hq2_core_mode.setMinimumHeight(24)
         for value in ("weighted_support", "intersection", "majority_support"):
             self._hq2_core_mode.addItem(value, value)
-        add_row(g, 0, "core_mode:", self._hq2_core_mode)
-        self._hq2_min_core = add_row(g, 1, "min_core_area:", spin(0, 100000, 1, 0, 8))
+        self._hq2_min_core = spin(0, 100000, 1, 0, 8)
         self._hq2_signal_mode = QComboBox()
         self._hq2_signal_mode.setMinimumHeight(24)
-        for value in ("per_cell_best_channel", "max", "weighted_max"):
+        for value in ("per_cell_best_channel", "max_fusion", "weighted_max"):
             self._hq2_signal_mode.addItem(value, value)
-        add_row(g, 2, "signal_map_mode:", self._hq2_signal_mode)
-        self._hq2_min_cont_signal = add_row(g, 3, "min_continuous_signal:", spin(0, 1, 0.01, 2, 0.08))
-        self._hq2_max_expansion = add_row(g, 4, "max_expansion_radius:", spin(0, 300, 1, 1, 25))
-        self._hq2_boundary_weight = add_row(g, 5, "boundary_gradient_weight:", spin(0, 10, 0.05, 2, 0.25))
-        self._hq2_distance_weight = add_row(g, 6, "distance_penalty_weight:", spin(0, 10, 0.01, 2, 0.02))
-        self._hq2_neighbor_weight = add_row(g, 7, "neighbor_nucleus_penalty:", spin(0, 10, 0.05, 2, 0.15))
-        self._hq2_irregular = QCheckBox("allow irregular shape")
-        self._hq2_irregular.setMinimumHeight(24)
-        self._hq2_irregular.setChecked(True)
-        add_row(g, 8, "allow_irregular_shape:", self._hq2_irregular)
+        add_row(g, 0, "signal_map_mode:", self._hq2_signal_mode)
+        self._hq2_enable_refinement = QCheckBox("enable conservative refinement")
+        self._hq2_enable_refinement.setMinimumHeight(24)
+        self._hq2_enable_refinement.setChecked(True)
+        add_row(g, 1, "enable_refinement:", self._hq2_enable_refinement)
+        self._hq2_max_refine_radius = add_row(g, 2, "max_refine_radius:", spin(1, 50, 1, 0, 6))
+        self._hq2_min_refine_signal = add_row(g, 3, "min_refine_signal:", spin(0, 1, 0.01, 2, 0.08))
+        self._hq2_refine_mad = add_row(g, 4, "refine_signal_mad_factor:", spin(0, 20, 0.1, 1, 1.5))
+        self._hq2_max_added_fraction = add_row(g, 5, "max_added_area_fraction:", spin(0, 5, 0.05, 2, 0.35))
+        self._hq2_max_cell_nuc_ratio = add_row(g, 6, "max_cell_to_nucleus_ratio:", spin(1, 100, 0.5, 1, 10))
+        self._hq2_prevent_nuclei = QCheckBox("prevent crossing neighbor nuclei")
+        self._hq2_prevent_nuclei.setMinimumHeight(24)
+        self._hq2_prevent_nuclei.setChecked(True)
+        add_row(g, 7, "prevent_neighbor_nuclei:", self._hq2_prevent_nuclei)
+        self._hq2_protect_core = QCheckBox("protect other cell core")
+        self._hq2_protect_core.setMinimumHeight(24)
+        self._hq2_protect_core.setChecked(True)
+        add_row(g, 8, "protect_other_cell_core:", self._hq2_protect_core)
+        self._hq2_fallback_over = QCheckBox("fallback if overexpanded")
+        self._hq2_fallback_over.setMinimumHeight(24)
+        self._hq2_fallback_over.setChecked(True)
+        add_row(g, 9, "fallback_overexpanded:", self._hq2_fallback_over)
+        self._hq2_expansion_engine = QComboBox()
+        self._hq2_expansion_engine.setMinimumHeight(24)
+        for value in ("conservative", "disabled", "priority_queue"):
+            self._hq2_expansion_engine.addItem(value, value)
+        add_row(g, 10, "expansion_engine:", self._hq2_expansion_engine)
+        self._hq2_max_pixels_cell = add_row(g, 11, "max_candidate_pixels_per_cell:", spin(1, 10000000, 100, 0, 3000))
+        self._hq2_timeout_seconds = add_row(g, 12, "timeout_seconds:", spin(1, 86400, 10, 0, 600))
 
         macro_box, g = section("Macrophage refinement")
         self._hq2_macrophage_channels = QtWidgets.QLineEdit("CD68;CD206")
@@ -750,7 +772,7 @@ class SearchCtrlPanel(QWidget):
         add_row(g, 0, "macrophage_channels:", self._hq2_macrophage_channels)
         self._hq2_macrophage_radius = add_row(g, 1, "macrophage_max_radius:", spin(0, 500, 1, 1, 35))
         self._hq2_macrophage_signal = add_row(g, 2, "macrophage_min_signal:", spin(0, 1, 0.01, 2, 0.08))
-        for optional_box in (imagej_box, expansion_box, macro_box):
+        for optional_box in (imagej_box, macro_box):
             make_collapsible(optional_box, collapsed=True)
 
         scroll.setWidget(content)
@@ -886,6 +908,7 @@ class SearchCtrlPanel(QWidget):
             "consensus_mode": "adaptive_best_channel",
             "channel_weights": {},
             "min_signal_threshold": self._hq2_min_signal.value(),
+            "enable_imagej_proposal": self._hq2_enable_imagej.isChecked(),
             "imagej_blur_sigma": self._hq2_imagej_blur.value(),
             "imagej_background_radius": int(self._hq2_bg_radius.value()),
             "imagej_threshold_method": self._hq2_threshold_method.currentData() or "adaptive",
@@ -895,13 +918,19 @@ class SearchCtrlPanel(QWidget):
             "imagej_opening_radius": int(self._hq2_opening.value()),
             "core_mode": self._hq2_core_mode.currentData() or "weighted_support",
             "min_core_area": int(self._hq2_min_core.value()),
+            "enable_refinement": self._hq2_enable_refinement.isChecked(),
             "signal_map_mode": self._hq2_signal_mode.currentData() or "per_cell_best_channel",
-            "min_continuous_signal": self._hq2_min_cont_signal.value(),
-            "max_expansion_radius": self._hq2_max_expansion.value(),
-            "boundary_gradient_weight": self._hq2_boundary_weight.value(),
-            "distance_penalty_weight": self._hq2_distance_weight.value(),
-            "neighbor_nucleus_penalty_weight": self._hq2_neighbor_weight.value(),
-            "allow_irregular_shape": self._hq2_irregular.isChecked(),
+            "max_refine_radius": int(self._hq2_max_refine_radius.value()),
+            "min_refine_signal": self._hq2_min_refine_signal.value(),
+            "refine_signal_mad_factor": self._hq2_refine_mad.value(),
+            "max_added_area_fraction": self._hq2_max_added_fraction.value(),
+            "max_cell_to_nucleus_ratio": self._hq2_max_cell_nuc_ratio.value(),
+            "prevent_crossing_neighbor_nuclei": self._hq2_prevent_nuclei.isChecked(),
+            "protect_other_cell_core": self._hq2_protect_core.isChecked(),
+            "fallback_to_hq_if_overexpanded": self._hq2_fallback_over.isChecked(),
+            "hq2_expansion_engine": self._hq2_expansion_engine.currentData() or "conservative",
+            "max_candidate_pixels_per_cell": int(self._hq2_max_pixels_cell.value()),
+            "timeout_seconds": int(self._hq2_timeout_seconds.value()),
             "macrophage_channels": self._hq2_macrophage_channels.text().strip(),
             "macrophage_max_radius": self._hq2_macrophage_radius.value(),
             "macrophage_min_signal": self._hq2_macrophage_signal.value(),
@@ -980,6 +1009,7 @@ class SearchCtrlPanel(QWidget):
             self._hq2_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
             self._hq2_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
             self._hq2_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
+            self._hq2_enable_imagej.setChecked(bool(p.get("enable_imagej_proposal", False)))
             self._hq2_imagej_blur.setValue(float(p.get("imagej_blur_sigma", 1.0)))
             self._hq2_bg_radius.setValue(float(p.get("imagej_background_radius", 20)))
             idx = self._hq2_threshold_method.findData(p.get("imagej_threshold_method", "adaptive"))
@@ -993,12 +1023,19 @@ class SearchCtrlPanel(QWidget):
             self._hq2_min_core.setValue(float(p.get("min_core_area", 8)))
             idx = self._hq2_signal_mode.findData(p.get("signal_map_mode", "per_cell_best_channel"))
             self._hq2_signal_mode.setCurrentIndex(max(0, idx))
-            self._hq2_min_cont_signal.setValue(float(p.get("min_continuous_signal", 0.08)))
-            self._hq2_max_expansion.setValue(float(p.get("max_expansion_radius", 25)))
-            self._hq2_boundary_weight.setValue(float(p.get("boundary_gradient_weight", 0.25)))
-            self._hq2_distance_weight.setValue(float(p.get("distance_penalty_weight", 0.02)))
-            self._hq2_neighbor_weight.setValue(float(p.get("neighbor_nucleus_penalty_weight", 0.15)))
-            self._hq2_irregular.setChecked(bool(p.get("allow_irregular_shape", True)))
+            self._hq2_enable_refinement.setChecked(bool(p.get("enable_refinement", True)))
+            self._hq2_max_refine_radius.setValue(float(p.get("max_refine_radius", 6)))
+            self._hq2_min_refine_signal.setValue(float(p.get("min_refine_signal", 0.08)))
+            self._hq2_refine_mad.setValue(float(p.get("refine_signal_mad_factor", 1.5)))
+            self._hq2_max_added_fraction.setValue(float(p.get("max_added_area_fraction", 0.35)))
+            self._hq2_max_cell_nuc_ratio.setValue(float(p.get("max_cell_to_nucleus_ratio", 10)))
+            self._hq2_prevent_nuclei.setChecked(bool(p.get("prevent_crossing_neighbor_nuclei", True)))
+            self._hq2_protect_core.setChecked(bool(p.get("protect_other_cell_core", True)))
+            self._hq2_fallback_over.setChecked(bool(p.get("fallback_to_hq_if_overexpanded", True)))
+            idx = self._hq2_expansion_engine.findData(p.get("hq2_expansion_engine", "conservative"))
+            self._hq2_expansion_engine.setCurrentIndex(max(0, idx))
+            self._hq2_max_pixels_cell.setValue(float(p.get("max_candidate_pixels_per_cell", 3000)))
+            self._hq2_timeout_seconds.setValue(float(p.get("timeout_seconds", 600)))
             self._hq2_macrophage_channels.setText(str(p.get("macrophage_channels", "CD68;CD206") or ""))
             self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
             self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))

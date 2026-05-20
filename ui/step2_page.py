@@ -37,6 +37,7 @@ from ..utils.segmentation_params import (
     PARAM_INDEX,
     params_index_path,
 )
+from ..utils.tile_strategy import suggest_tile_strategy
 from ..utils.roi_project import mark_roi_step
 from ..workers.hq_marker_segmentation import (
     CONSENSUS_MODES,
@@ -89,6 +90,7 @@ class Step2Page(QWidget):
         self._roi_id = ""
         self._roi_dir = ""
         self._step2_dir = ""
+        self._suggested_tile_strategy = {}
 
         self._build_ui()
 
@@ -242,6 +244,16 @@ class Step2Page(QWidget):
         tile_box.setStyleSheet(self._box_style('#e5c07b'))
         til = QVBoxLayout(tile_box)
 
+        self._auto_tile_strategy = QCheckBox('Auto tile strategy')
+        self._auto_tile_strategy.setChecked(False)
+        self._auto_tile_strategy.stateChanged.connect(self._on_auto_tile_strategy_changed)
+        til.addWidget(self._auto_tile_strategy)
+
+        self._tile_suggestion_lbl = QLabel('Suggested: —')
+        self._tile_suggestion_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        self._tile_suggestion_lbl.setWordWrap(True)
+        til.addWidget(self._tile_suggestion_lbl)
+
         grid_row = QHBoxLayout()
         grid_row.addWidget(QLabel('Rows:'))
         self._rows_spin = QtWidgets.QSpinBox()
@@ -272,6 +284,7 @@ class Step2Page(QWidget):
 
         self._rows_spin.valueChanged.connect(self._update_tile_info)
         self._cols_spin.valueChanged.connect(self._update_tile_info)
+        self._overlap_spin.valueChanged.connect(self._update_tile_info)
         rl.addWidget(tile_box)
 
         # Segmentation params
@@ -1130,6 +1143,7 @@ class Step2Page(QWidget):
     def _update_tile_info(self):
         if self._full_h == 0:
             return
+        self._refresh_tile_suggestion(apply=False)
         nr  = self._rows_spin.value()
         nc  = self._cols_spin.value()
         th  = -(-self._full_h // nr)
@@ -1142,6 +1156,55 @@ class Step2Page(QWidget):
             f'est. VRAM/tile: {ram:.1f} GB'
         )
         self._draw_tile_grid()
+
+    def _on_auto_tile_strategy_changed(self):
+        self._refresh_tile_suggestion(apply=self._auto_tile_strategy.isChecked())
+
+    def _refresh_tile_suggestion(self, apply=False):
+        if self._full_h <= 0 or self._full_w <= 0:
+            return
+        method = self._method_combo.currentData() if hasattr(self, "_method_combo") else CELLPOSE_WHOLECELL_FUSION
+        cfg = self.get_seg_config() if hasattr(self, "_method_combo") else {}
+        channel_count = 2
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+            channel_count = max(2, len(parse_hq_channels(cfg.get("hq_channels") or [])) + 1)
+        elif method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            channel_count = max(2, len(parse_hq_channels(cfg.get("membrane_channels") or [])) + 1)
+        suggestion = suggest_tile_strategy(
+            self._full_h,
+            self._full_w,
+            method,
+            vram_gb=self._detect_vram_gb(),
+            channel_count=channel_count,
+        )
+        self._suggested_tile_strategy = suggestion
+        self._tile_suggestion_lbl.setText(
+            f"Suggested: {suggestion['n_rows']}×{suggestion['n_cols']} grid "
+            f"(~{suggestion['estimated_tile_mpx']:.0f} MP/tile)"
+        )
+        if apply:
+            self._rows_spin.blockSignals(True)
+            self._cols_spin.blockSignals(True)
+            self._overlap_spin.blockSignals(True)
+            try:
+                self._rows_spin.setValue(int(suggestion["n_rows"]))
+                self._cols_spin.setValue(int(suggestion["n_cols"]))
+                self._overlap_spin.setValue(int(suggestion["overlap"]))
+            finally:
+                self._rows_spin.blockSignals(False)
+                self._cols_spin.blockSignals(False)
+                self._overlap_spin.blockSignals(False)
+            self._update_tile_info()
+
+    @staticmethod
+    def _detect_vram_gb():
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 3)
+        except Exception:
+            pass
+        return None
 
     def _draw_tile_grid(self):
         """Overlay tile rectangles on the overview."""
@@ -1465,6 +1528,11 @@ class Step2Page(QWidget):
             'use_gpu':            self._cp_gpu.isChecked(),
             'tile_size':          self._cp_tile_size.value(),
             'batch_size':         self._cp_batch_size.value(),
+            'tile_strategy_mode': 'auto' if self._auto_tile_strategy.isChecked() else 'manual',
+            'suggested_tile_strategy': dict(self._suggested_tile_strategy or {}),
+            'enable_tile_prefetch': True,
+            'prefetch_queue_size': 2,
+            'channel_cache_items': 32,
         })
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
@@ -1524,6 +1592,8 @@ class Step2Page(QWidget):
         print("[HQ2-UI] parameter widgets created=", bool(getattr(self, "_hq2_widgets", None)))
         print("[HQ2-UI] parameter widgets visible=", self._hq2_channels.isVisible() if hasattr(self, "_hq2_channels") else False)
         print("[HQ2-UI] patch preview enabled=", preview_btn.isEnabled() if preview_btn is not None else None)
+        if getattr(self, "_full_h", 0):
+            self._refresh_tile_suggestion(apply=getattr(self, "_auto_tile_strategy", None) is not None and self._auto_tile_strategy.isChecked())
 
     def _available_hq_channels(self):
         candidates = []
@@ -1681,6 +1751,9 @@ class Step2Page(QWidget):
         recovery_dir = None
         if self._rec_box.isChecked():
             recovery_dir = self._rec_edit.text().strip() or None
+
+        if self._auto_tile_strategy.isChecked():
+            self._refresh_tile_suggestion(apply=True)
 
         nr  = self._rows_spin.value()
         nc  = self._cols_spin.value()

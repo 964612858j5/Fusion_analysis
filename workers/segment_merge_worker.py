@@ -13,6 +13,7 @@ import time
 import subprocess
 import csv
 from datetime import datetime
+from contextlib import nullcontext
 
 import numpy as np
 import tifffile
@@ -44,6 +45,10 @@ from ..utils.roi_project import (
     roi_manifest_path,
     update_roi_segmentation_run,
 )
+from ..utils.step2_profiler import Step2Profiler
+from ..utils.channel_cache import SharedChannelStore
+from ..utils.tile_prefetch import TilePrefetcher
+from ..utils.tile_strategy import suggest_tile_strategy
 from .cellpose_worker import load_stardist_model
 from .mesmer_worker import run_mesmer_on_channel_source, run_mesmer_on_fused_tile
 from ..utils.mesmer_utils import get_mesmer_device_status, load_mesmer_application, mesmer_metadata
@@ -120,6 +125,26 @@ class SegmentMergeWorker(QThread):
         self.write_tile_tiffs = self._config_bool("write_tile_tiffs", False)
         self.write_hq2_debug_layers = self._config_bool("write_hq2_debug_layers", False)
         self.write_hq2_debug_tiffs = self._config_bool("write_hq2_debug_tiffs", False)
+        self._hq2_tile_metadata = []
+        self.step2_profiler = Step2Profiler(
+            enabled=self._step2_profiling_enabled(),
+            output_dir=self.output_dir,
+            run_id=self.result_id,
+            method=self.method,
+        )
+        self._channel_store = SharedChannelStore(
+            max_cache_items=int(self.seg_config.get("channel_cache_items", 32) or 32),
+            logger=self._logger,
+        )
+        self._tile_strategy_info = {}
+
+    def _step2_profiling_enabled(self):
+        env = str(os.environ.get("FUSION_STEP2_PROFILE", "")).strip().lower()
+        if env in {"0", "false", "no", "off"}:
+            return False
+        if env in {"1", "true", "yes", "on"}:
+            return True
+        return self._config_bool("enable_step2_profiling", True)
 
     def _config_bool(self, key, default=False):
         value = self.seg_config.get(key, default)
@@ -428,6 +453,8 @@ class SegmentMergeWorker(QThread):
         logger.info(f"Segmentation config: {self.seg_config}")
         logger.info(f"[Step2] segmentation method={self.seg_config.get('method')}")
         logger.info(f"[Step2] input_type={self.seg_config.get('input_type')}")
+        if getattr(self, "_channel_store", None) is not None:
+            self._channel_store.logger = logger
         return logger, log_path
 
     @staticmethod
@@ -756,13 +783,195 @@ class SegmentMergeWorker(QThread):
     def runtime_summary(self):
         return dict(self._runtime_summary or {})
 
+    def _profile_summary(self, summary):
+        if not summary:
+            return
+        try:
+            msg = (
+                "[Step2Profile] "
+                f"total={summary.get('total_runtime', 0.0):.1f}s "
+                f"bottleneck={summary.get('suspected_bottleneck') or 'unknown'} "
+                f"slowest_tile={summary.get('slowest_tile')}"
+            )
+            print(msg)
+            if self._logger:
+                self._logger.info(msg)
+                if summary.get("summary_path"):
+                    self._logger.info("[Step2Profile] summary -> %s", summary.get("summary_path"))
+        except Exception:
+            pass
+
+    def _profile_tile_line(self, tile_id, n_tiles, stage_seconds, labels_count, tile_shape):
+        try:
+            if not getattr(self.step2_profiler, "enabled", False):
+                return
+            profile_tile_id = stage_seconds.pop("_profile_tile_id", None)
+            if profile_tile_id is not None:
+                profiled = self.step2_profiler._tile_stage_totals.get(str(profile_tile_id), {}) or {}
+                if profiled:
+                    stage_seconds = {key: float(value or 0.0) for key, value in profiled.items()}
+            total = sum(float(v or 0.0) for v in stage_seconds.values())
+            mem = self.step2_profiler.snapshot_memory() or {}
+            msg = (
+                f"[Step2Profile] tile={int(tile_id) + 1}/{n_tiles} "
+                f"read={stage_seconds.get('read_tile', 0.0):.1f}s "
+                f"prep={stage_seconds.get('preprocess', 0.0):.1f}s "
+                f"infer={stage_seconds.get('model_inference', 0.0):.1f}s "
+                f"post={stage_seconds.get('postprocess', 0.0):.1f}s "
+                f"merge={stage_seconds.get('merge_or_write', 0.0):.1f}s "
+                f"total={total:.1f}s labels={int(labels_count or 0)} "
+                f"shape={tuple(tile_shape or ())} rss={mem.get('rss_mb', 0.0):.0f}MB"
+            )
+            print(msg)
+            if self._logger:
+                self._logger.info(msg)
+        except Exception:
+            pass
+
     def _read_dapi_from_zarr(self, z, y0, y1, x0, x1):
         """
         Read the nucleus (DAPI) channel directly from fused zarr channel index 1.
         fused zarr shape: (H, W, 2)  ch0=cyto  ch1=nucleus(DAPI)  dtype=uint16
         Returns uint16 ndarray (H, W).
         """
+        source = getattr(z, "store", None)
+        source_path = getattr(source, "path", None) or getattr(source, "dir_path", None)
+        if source_path and getattr(self, "_channel_store", None) is not None:
+            return self._channel_store.read_dapi(source_path, y0, y1, x0, x1)
         return np.array(z[y0:y1, x0:x1, 1])
+
+    def _build_step2_tiles(self, full_h, full_w):
+        tile_h = -(-int(full_h) // int(self.n_rows))
+        tile_w = -(-int(full_w) // int(self.n_cols))
+        tiles = []
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                oy0 = r * tile_h
+                oy1 = min(oy0 + tile_h, full_h)
+                ox0 = c * tile_w
+                ox1 = min(ox0 + tile_w, full_w)
+                ry0 = max(0, oy0 - self.overlap_px)
+                ry1 = min(full_h, oy1 + self.overlap_px)
+                rx0 = max(0, ox0 - self.overlap_px)
+                rx1 = min(full_w, ox1 + self.overlap_px)
+                tiles.append({
+                    'row': r, 'col': c,
+                    'own':  (oy0, oy1, ox0, ox1),
+                    'read': (ry0, ry1, rx0, rx1),
+                })
+        return tile_h, tile_w, tiles
+
+    def _record_tile_strategy(self, full_h, full_w, channel_count=1):
+        suggested = suggest_tile_strategy(
+            full_h,
+            full_w,
+            self.method,
+            vram_gb=self._available_vram_gb(),
+            channel_count=channel_count,
+            target_tile_mpx=self.seg_config.get("target_tile_mpx"),
+        )
+        actual_tile_h = -(-int(full_h) // int(self.n_rows))
+        actual_tile_w = -(-int(full_w) // int(self.n_cols))
+        mode = str(self.seg_config.get("tile_strategy_mode") or "manual")
+        info = {
+            "tile_strategy_mode": mode,
+            "suggested_tile_h": int(suggested["tile_h"]),
+            "suggested_tile_w": int(suggested["tile_w"]),
+            "suggested_n_rows": int(suggested["n_rows"]),
+            "suggested_n_cols": int(suggested["n_cols"]),
+            "suggested_overlap": int(suggested["overlap"]),
+            "actual_tile_h": int(actual_tile_h),
+            "actual_tile_w": int(actual_tile_w),
+            "estimated_tile_mpx": float(actual_tile_h * actual_tile_w / 1e6),
+            "estimated_vram_usage": float(suggested.get("estimated_vram_usage") or 0.0),
+        }
+        self._tile_strategy_info = info
+        msg = (
+            "[TileStrategy] "
+            f"backend={self.method} suggested={suggested['n_rows']}x{suggested['n_cols']} "
+            f"(~{suggested['estimated_tile_mpx']:.0f}MP/tile) "
+            f"actual={self.n_rows}x{self.n_cols}"
+        )
+        print(msg)
+        if self._logger:
+            self._logger.info(msg)
+        return info
+
+    def _step2_engine_meta(self):
+        cache = {}
+        try:
+            cache = self._channel_store.snapshot_metrics() if self._channel_store is not None else {}
+        except Exception:
+            cache = {}
+        return {
+            **dict(self._tile_strategy_info or {}),
+            "channel_cache": cache,
+        }
+
+    def _record_engine_metrics(self):
+        try:
+            metrics = self._channel_store.snapshot_metrics() if self._channel_store is not None else {}
+            if metrics:
+                self.step2_profiler.log_tile_stage(None, "cache_lookup", 0.0, **metrics)
+                msg = (
+                    "[Step2Engine] "
+                    f"cache_hit={metrics.get('cache_hit', 0)} "
+                    f"cache_miss={metrics.get('cache_miss', 0)} "
+                    f"cache_bytes={metrics.get('cache_bytes', 0)}"
+                )
+                print(msg)
+                if self._logger:
+                    self._logger.info(msg)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _available_vram_gb():
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 3)
+        except Exception:
+            pass
+        return None
+
+    def _prefetch_enabled(self):
+        if self.recovery_npy_dir is not None:
+            return False
+        return self._config_bool("enable_tile_prefetch", True)
+
+    def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
+                              hq_group, hq_channels, is_mesmer, mesmer_group,
+                              dapi_mmap=None, profile_tile_base=None):
+        ry0, ry1, rx0, rx1 = tile['read']
+        oy0, oy1, ox0, ox1 = tile['own']
+        own_h = oy1 - oy0
+        own_w = ox1 - ox0
+        profile_tile_base = profile_tile_base or {}
+        cache_ctx = self.step2_profiler.time_stage("cache_lookup", **profile_tile_base) if profile_tile_base else nullcontext()
+        with cache_ctx:
+            if getattr(self, "_channel_store", None) is not None:
+                tile_data = self._channel_store.read_fused(zarr_path, ry0, ry1, rx0, rx1)
+                dapi_own = self._channel_store.read_dapi(zarr_path, oy0, oy1, ox0, ox1)
+            else:
+                tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
+                dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
+        if dapi_mmap is not None:
+            dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+        hq_marker_channels = None
+        mesmer_channel_source = None
+        prepare_ctx = self.step2_profiler.time_stage("tile_prepare", **profile_tile_base) if profile_tile_base else nullcontext()
+        with prepare_ctx:
+            if is_hq and not is_mesmer_guided:
+                hq_marker_channels = self._read_hq_marker_channels(hq_group, hq_channels, ry0, ry1, rx0, rx1)
+            if is_mesmer and mesmer_group is not None:
+                mesmer_channel_source = self._read_mesmer_channel_source(mesmer_group, ry0, ry1, rx0, rx1)
+        return {
+            "tile_data": tile_data,
+            "dapi_own": dapi_own,
+            "hq_marker_channels": hq_marker_channels,
+            "mesmer_channel_source": mesmer_channel_source,
+        }
 
     @staticmethod
     def _group_keys(root):
@@ -1004,17 +1213,19 @@ class SegmentMergeWorker(QThread):
             shape=(full_h, full_w), dtype='uint32',
             chunks=(1024, 1024),
         )
-        for y in range(0, full_h, chunk_rows):
-            out_z[y:y + chunk_rows, :] = arr_ro[y:y + chunk_rows, :]
+        with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(zarr_path)):
+            for y in range(0, full_h, chunk_rows):
+                out_z[y:y + chunk_rows, :] = arr_ro[y:y + chunk_rows, :]
         if ome_path:
-            with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-                tif.write(
-                    arr_ro.astype(np.float32),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
+                with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
+                    tif.write(
+                        arr_ro.astype(np.float32),
+                        tile=(512, 512),
+                        compression='lzw',
+                        photometric='minisblack',
+                        metadata=None,
+                    )
         if self._logger:
             self._logger.info("%s → %s", log_label, ome_path or zarr_path)
         del arr_ro
@@ -1061,25 +1272,37 @@ class SegmentMergeWorker(QThread):
                 fused = None
                 weights = dict(self.seg_config.get("channel_weights") or {})
                 for ch in channels:
-                    arr = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
+                    if getattr(self, "_channel_store", None) is not None:
+                        arr = self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
+                    else:
+                        arr = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
                     arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
                     fused = arr if fused is None else np.maximum(fused, arr)
                 marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
                 return marker_channels
             for ch in channels:
-                marker_channels.append(loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False))
+                if getattr(self, "_channel_store", None) is not None:
+                    marker_channels.append(self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False))
+                else:
+                    marker_channels.append(loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False))
             return marker_channels
         if mode == "step1_weighted_fusion":
             fused = None
             weights = dict(self.seg_config.get("channel_weights") or {})
             for ch in channels:
-                arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+                if getattr(self, "_channel_store", None) is not None:
+                    arr = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
+                else:
+                    arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
                 arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
                 fused = arr if fused is None else np.maximum(fused, arr)
             marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
             return marker_channels
         for ch in channels:
-            arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+            if getattr(self, "_channel_store", None) is not None:
+                arr = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
+            else:
+                arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
             marker_channels.append(arr)
         return marker_channels
 
@@ -1096,10 +1319,16 @@ class SegmentMergeWorker(QThread):
             fy0, fy1 = by0 + int(y0), by0 + int(y1)
             fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
             for ch in requested:
-                source[ch] = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
+                if getattr(self, "_channel_store", None) is not None:
+                    source[ch] = self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
+                else:
+                    source[ch] = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
             return source
         for ch in requested:
-            source[ch] = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+            if getattr(self, "_channel_store", None) is not None:
+                source[ch] = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
+            else:
+                source[ch] = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
         return source
 
     @staticmethod
@@ -1145,55 +1374,61 @@ class SegmentMergeWorker(QThread):
             return {"mesmer": app, "mesmer_device_status": status}
         raise ValueError(f"Unknown segmentation method: {method}")
 
-    def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None):
+    def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None,
+                      profile_tile_id=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        tile_f32 = tile_data.astype(np.float32) / 65535.0
+        with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
+            tile_f32 = tile_data.astype(np.float32) / 65535.0
 
         if method == CELLPOSE_WHOLECELL_FUSION:
-            masks, _, _ = backend["cellpose"].eval(
-                tile_f32,
-                diameter=self.seg_config.get("diameter"),
-                flow_threshold=self.seg_config.get("flow_threshold", 0.4),
-                cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
-                min_size=self.seg_config.get("min_size", 15),
-                do_3D=False,
-            )
+            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
+                masks, _, _ = backend["cellpose"].eval(
+                    tile_f32,
+                    diameter=self.seg_config.get("diameter"),
+                    flow_threshold=self.seg_config.get("flow_threshold", 0.4),
+                    cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
+                    min_size=self.seg_config.get("min_size", 15),
+                    do_3D=False,
+                )
             return masks.astype(np.uint32)
 
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
         if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
-            masks, _, _ = backend["cellpose"].eval(
-                dapi,
-                diameter=self.seg_config.get("diameter"),
-                flow_threshold=self.seg_config.get("flow_threshold", 0.4),
-                cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
-                min_size=self.seg_config.get("min_size", 15),
-                do_3D=False,
-            )
+            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
+                masks, _, _ = backend["cellpose"].eval(
+                    dapi,
+                    diameter=self.seg_config.get("diameter"),
+                    flow_threshold=self.seg_config.get("flow_threshold", 0.4),
+                    cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
+                    min_size=self.seg_config.get("min_size", 15),
+                    do_3D=False,
+                )
             if method == CELLPOSE_NUCLEI_EXPANSION:
                 from skimage.segmentation import expand_labels
                 dist = float(self.seg_config.get("expand_distance", 8) or 0)
                 if self._logger:
                     self._logger.info(f"[Step2] applying expand_labels distance={dist}")
                 print(f"[Step2] applying expand_labels distance={dist}")
-                if dist > 0:
-                    masks = expand_labels(masks, distance=dist)
+                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                    if dist > 0:
+                        masks = expand_labels(masks, distance=dist)
             if method == CELLPOSE_NUCLEI_HQ:
                 hq_names = self.seg_config.get("hq_channels") or []
                 if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
                     hq_names = ["step1_weighted_fusion"]
-                final_mask, nuclei_mask, qc_rows = segment_nuclei_hq(
-                    masks.astype(np.uint32, copy=False),
-                    hq_marker_channels or [],
-                    hq_names,
-                    max_cell_radius=self.seg_config.get("max_cell_radius", 12),
-                    normalization_low=self.seg_config.get("normalization_percentile_low", 1.0),
-                    normalization_high=self.seg_config.get("normalization_percentile_high", 99.5),
-                    consensus_mode=self.seg_config.get("consensus_mode", "adaptive_best_channel"),
-                    channel_weights=self.seg_config.get("channel_weights") or {},
-                    min_signal_threshold=self.seg_config.get("min_signal_threshold", 0.08),
-                )
+                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                    final_mask, nuclei_mask, qc_rows = segment_nuclei_hq(
+                        masks.astype(np.uint32, copy=False),
+                        hq_marker_channels or [],
+                        hq_names,
+                        max_cell_radius=self.seg_config.get("max_cell_radius", 12),
+                        normalization_low=self.seg_config.get("normalization_percentile_low", 1.0),
+                        normalization_high=self.seg_config.get("normalization_percentile_high", 99.5),
+                        consensus_mode=self.seg_config.get("consensus_mode", "adaptive_best_channel"),
+                        channel_weights=self.seg_config.get("channel_weights") or {},
+                        min_signal_threshold=self.seg_config.get("min_signal_threshold", 0.08),
+                    )
                 return {
                     "mask": final_mask.astype(np.uint32, copy=False),
                     "nuclei": nuclei_mask.astype(np.uint32, copy=False),
@@ -1203,18 +1438,22 @@ class SegmentMergeWorker(QThread):
                 hq_names = self.seg_config.get("hq_channels") or []
                 if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
                     hq_names = ["step1_weighted_fusion"]
-                hq2 = run_hq2_segmentation(
-                    masks.astype(np.uint32, copy=False),
-                    hq_marker_channels or [],
-                    hq_names,
-                    self.seg_config,
-                    logger=self._logger,
-                    return_layers=self.write_hq2_debug_layers,
-                )
+                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                    hq2 = run_hq2_segmentation(
+                        masks.astype(np.uint32, copy=False),
+                        hq_marker_channels or [],
+                        hq_names,
+                        self.seg_config,
+                        logger=self._logger,
+                        return_layers=self.write_hq2_debug_layers,
+                        progress_callback=lambda msg: self.progress.emit(0, 1, msg),
+                        cancel_check=lambda: bool(self._stop),
+                    )
                 return {
                     "mask": hq2["final_labels"].astype(np.uint32, copy=False),
                     "nuclei": hq2["nuclei_labels"].astype(np.uint32, copy=False),
                     "qc_rows": hq2.get("qc_rows") or [],
+                    "hq2_metadata": hq2.get("metadata") or {},
                     "hq2_layers": ({
                         "hq_proposal": hq2["hq_proposal_labels"].astype(np.uint32, copy=False),
                         "imagej_proposal": hq2["imagej_proposal_labels"].astype(np.uint32, copy=False),
@@ -1225,44 +1464,49 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            img = backend["stardist_normalize"](dapi, 1, 99.8, axis=(0, 1))
+            with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
+                img = backend["stardist_normalize"](dapi, 1, 99.8, axis=(0, 1))
             kwargs = {}
             if self.seg_config.get("prob_thresh") is not None:
                 kwargs["prob_thresh"] = self.seg_config.get("prob_thresh")
             if self.seg_config.get("nms_thresh") is not None:
                 kwargs["nms_thresh"] = self.seg_config.get("nms_thresh")
-            masks, _ = backend["stardist"].predict_instances(img, **kwargs)
+            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
+                masks, _ = backend["stardist"].predict_instances(img, **kwargs)
             if method == STARDIST_NUCLEI_EXPANSION:
                 from skimage.segmentation import expand_labels
                 dist = float(self.seg_config.get("expand_distance", 8) or 0)
-                if dist > 0:
-                    masks = expand_labels(masks, distance=dist)
+                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                    if dist > 0:
+                        masks = expand_labels(masks, distance=dist)
             return masks.astype(np.uint32)
 
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            if mesmer_channel_source is not None:
-                result = run_mesmer_on_channel_source(
-                    mesmer_channel_source,
-                    self.seg_config,
-                    app=backend.get("mesmer"),
-                    logger=self._logger,
-                )
-            else:
-                result = run_mesmer_on_fused_tile(
-                    tile_data,
-                    self.seg_config,
-                    app=backend.get("mesmer"),
-                    logger=self._logger,
-                )
+            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
+                if mesmer_channel_source is not None:
+                    result = run_mesmer_on_channel_source(
+                        mesmer_channel_source,
+                        self.seg_config,
+                        app=backend.get("mesmer"),
+                        logger=self._logger,
+                    )
+                else:
+                    result = run_mesmer_on_fused_tile(
+                        tile_data,
+                        self.seg_config,
+                        app=backend.get("mesmer"),
+                        logger=self._logger,
+                    )
             self.seg_config["device_used"] = result.get("device_used")
             self.seg_config["runtime_seconds_last_tile"] = result.get("runtime_seconds")
-            if method == MESMER_NUCLEAR_GUIDED:
-                return {
-                    "mask": result["mask"].astype(np.uint32, copy=False),
-                    "nuclei": result.get("nuclei"),
-                    "qc_rows": [],
-                }
-            return result["mask"].astype(np.uint32, copy=False)
+            with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                if method == MESMER_NUCLEAR_GUIDED:
+                    return {
+                        "mask": result["mask"].astype(np.uint32, copy=False),
+                        "nuclei": result.get("nuclei"),
+                        "qc_rows": [],
+                    }
+                return result["mask"].astype(np.uint32, copy=False)
 
         raise ValueError(f"Unknown segmentation method: {method}")
 
@@ -1298,30 +1542,22 @@ class SegmentMergeWorker(QThread):
         Returns total cell count.
         """
         self._current_region_bbox = list(bbox) if bbox else None
-        z      = zarr.open(zarr_path, mode='r')
-        full_h = z.shape[0]
-        full_w = z.shape[1]
+        with self.step2_profiler.time_stage("load_roi", input_source=self._abs(zarr_path), method=self.method):
+            z      = zarr.open(zarr_path, mode='r')
+            full_h = z.shape[0]
+            full_w = z.shape[1]
         log.info(f"  zarr: {full_h}×{full_w} px")
 
+        strategy_info = self._record_tile_strategy(
+            full_h,
+            full_w,
+            channel_count=max(2, len(parse_hq_channels(self.seg_config.get("hq_channels") or [])) or 2),
+        )
         tile_h = -(-full_h // self.n_rows)
         tile_w = -(-full_w // self.n_cols)
 
-        tiles = []
-        for r in range(self.n_rows):
-            for c in range(self.n_cols):
-                oy0 = r * tile_h
-                oy1 = min(oy0 + tile_h, full_h)
-                ox0 = c * tile_w
-                ox1 = min(ox0 + tile_w, full_w)
-                ry0 = max(0, oy0 - self.overlap_px)
-                ry1 = min(full_h, oy1 + self.overlap_px)
-                rx0 = max(0, ox0 - self.overlap_px)
-                rx1 = min(full_w, ox1 + self.overlap_px)
-                tiles.append({
-                    'row': r, 'col': c,
-                    'own':  (oy0, oy1, ox0, ox1),
-                    'read': (ry0, ry1, rx0, rx1),
-                })
+        with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
+            tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w)
         n_tiles = len(tiles)
 
         mmap_path = os.path.join(
@@ -1376,8 +1612,22 @@ class SegmentMergeWorker(QThread):
 
         global_id_offset = 0
         tile_stats = []
+        prefetcher = None
+        if self._prefetch_enabled():
+            prefetcher = TilePrefetcher(
+                tiles,
+                lambda idx, t: self._prepare_tile_payload(
+                    zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                    is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
+                ),
+                prefetch_queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
+                logger=log,
+                profiler=self.step2_profiler,
+            )
+            log.info("[TilePrefetch] enabled queue_size=%s", prefetcher.prefetch_queue_size)
 
-        for i, tile in enumerate(tiles):
+        with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(zarr_path)):
+          for i, tile in enumerate(tiles):
             if self._stop:
                 del mmap, dapi_mmap
                 return 0
@@ -1398,15 +1648,55 @@ class SegmentMergeWorker(QThread):
                 f"({ry1-ry0}×{rx1-rx0}px)"
             )
 
-            tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
+            profile_tile_id = f"{out_prefix}:{i}" if out_prefix else str(i)
+            stage_seconds = {}
+            tile_shape = (ry1 - ry0, rx1 - rx0)
+            tile_profile_base = {
+                "tile_id": profile_tile_id,
+                "bbox_global": list(bbox) if bbox else [oy0, oy1, ox0, ox1],
+                "bbox_local": [oy0, oy1, ox0, ox1],
+                "tile_shape": list(tile_shape),
+                "tile_h": int(tile_shape[0]),
+                "tile_w": int(tile_shape[1]),
+                "overlap": int(self.overlap_px),
+                "channels_used": list(hq_channels or []),
+                "method": self.method,
+                "dtype": str(getattr(z, "dtype", "")),
+                "input_source": self._abs(zarr_path),
+            }
+            self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
-            dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
-            dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+            _t = time.perf_counter()
+            if prefetcher is not None:
+                payload = prefetcher.get(
+                    i,
+                    sync_load_fn=lambda idx, t: self._prepare_tile_payload(
+                        zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                        is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=tile_profile_base,
+                    ),
+                )
+                tile_data = payload["tile_data"]
+                dapi_own = payload["dapi_own"]
+                hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+                mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+            else:
+                with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
+                    payload = self._prepare_tile_payload(
+                        zarr_path, z, tile, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                        is_mesmer, mesmer_group, dapi_mmap=dapi_mmap, profile_tile_base=None,
+                    )
+                    tile_data = payload["tile_data"]
+                    dapi_own = payload["dapi_own"]
+                    hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+                    mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+            stage_seconds["read_tile"] = time.perf_counter() - _t
 
             if self.recovery_npy_dir is not None:
                 local_nuclei = None
                 local_qc_rows = []
                 local_hq2_layers = {}
+                local_hq2_metadata = {}
                 npy_path = os.path.join(
                     self.recovery_npy_dir,
                     f'tile_{out_prefix}_{row}_{col}.npy'
@@ -1415,33 +1705,43 @@ class SegmentMergeWorker(QThread):
                     log.warning(f"  Missing: {npy_path}, skipping")
                     del tile_data
                     continue
-                local_mask = np.load(npy_path)
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("model_inference", **tile_profile_base):
+                    local_mask = np.load(npy_path)
+                stage_seconds["model_inference"] = time.perf_counter() - _t
             else:
                 try:
-                    hq_marker_channels = None
-                    mesmer_channel_source = None
-                    if is_hq and not is_mesmer_guided:
-                        hq_marker_channels = self._read_hq_marker_channels(
-                            hq_group, hq_channels, ry0, ry1, rx0, rx1
-                        )
-                    if is_mesmer and mesmer_group is not None:
-                        mesmer_channel_source = self._read_mesmer_channel_source(
-                            mesmer_group, ry0, ry1, rx0, rx1
-                        )
+                    hq_marker_channels = hq_marker_channels_prefetched
+                    mesmer_channel_source = mesmer_channel_source_prefetched
+                    _t = time.perf_counter()
+                    if hq_marker_channels is None and mesmer_channel_source is None:
+                        with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
+                            if is_hq and not is_mesmer_guided:
+                                hq_marker_channels = self._read_hq_marker_channels(
+                                    hq_group, hq_channels, ry0, ry1, rx0, rx1
+                                )
+                            if is_mesmer and mesmer_group is not None:
+                                mesmer_channel_source = self._read_mesmer_channel_source(
+                                    mesmer_group, ry0, ry1, rx0, rx1
+                                )
+                        stage_seconds["read_tile"] += time.perf_counter() - _t
                     local_result = self._segment_tile(
                         tile_data,
                         model,
                         hq_marker_channels,
                         mesmer_channel_source=mesmer_channel_source,
+                        profile_tile_id=profile_tile_id,
                     )
                     local_nuclei = None
                     local_qc_rows = []
                     local_hq2_layers = {}
+                    local_hq2_metadata = {}
                     if isinstance(local_result, dict):
                         local_mask = local_result["mask"]
                         local_nuclei = local_result.get("nuclei")
                         local_qc_rows = local_result.get("qc_rows") or []
                         local_hq2_layers = local_result.get("hq2_layers") or {}
+                        local_hq2_metadata = local_result.get("hq2_metadata") or {}
                     else:
                         local_mask = local_result
                 except Exception as e:
@@ -1450,8 +1750,10 @@ class SegmentMergeWorker(QThread):
                     local_nuclei = None
                     local_qc_rows = []
                     local_hq2_layers = {}
+                    local_hq2_metadata = {}
                 if use_gpu:
                     self._empty_torch_cache_if_available()
+                self.step2_profiler.log_tile_stage(profile_tile_id, "inference_wait", 0.0, **tile_profile_base)
 
             del tile_data
 
@@ -1467,8 +1769,11 @@ class SegmentMergeWorker(QThread):
             local_oy1 = oy1 - ry0
             local_ox0 = ox0 - rx0
             local_ox1 = ox1 - rx0
-            raw_own_mask = local_mask[local_oy0:local_oy1,
-                                      local_ox0:local_ox1].copy()
+            _t = time.perf_counter()
+            with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
+                raw_own_mask = local_mask[local_oy0:local_oy1,
+                                          local_ox0:local_ox1].copy()
+            stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
             dapi_tile_path = ""
             raw_mask_tile_path = ""
@@ -1476,97 +1781,126 @@ class SegmentMergeWorker(QThread):
                 dapi_tile_path = os.path.join(
                     tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
                 )
-                try:
-                    self._write_tile_ometiff(
-                        dapi_tile_path,
-                        dapi_own[:own_h, :own_w].astype(np.uint16),
-                        description=f'DAPI  row={row} col={col}  '
-                                    f'own=({oy0},{oy1},{ox0},{ox1})',
-                    )
-                    log.info(f"    dapi tile → {dapi_tile_path}")
-                except Exception as e:
-                    log.warning(f"    dapi tile write failed: {e}")
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("merge_or_write", output_path=self._abs(dapi_tile_path), **tile_profile_base):
+                    try:
+                        self._write_tile_ometiff(
+                            dapi_tile_path,
+                            dapi_own[:own_h, :own_w].astype(np.uint16),
+                            description=f'DAPI  row={row} col={col}  '
+                                        f'own=({oy0},{oy1},{ox0},{ox1})',
+                        )
+                        log.info(f"    dapi tile → {dapi_tile_path}")
+                    except Exception as e:
+                        log.warning(f"    dapi tile write failed: {e}")
+                stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
 
                 raw_mask_tile_path = os.path.join(
                     tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
                 )
-                try:
-                    self._write_tile_ometiff(
-                        raw_mask_tile_path,
-                        raw_own_mask.astype(np.float32),
-                        description=f'raw segmentation mask  row={row} col={col}  '
-                                    f'n_cells={int(raw_own_mask.max())}',
-                    )
-                    log.info(f"    raw mask tile → {raw_mask_tile_path}")
-                except Exception as e:
-                    log.warning(f"    raw mask tile write failed: {e}")
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("merge_or_write", output_path=self._abs(raw_mask_tile_path), **tile_profile_base):
+                    try:
+                        self._write_tile_ometiff(
+                            raw_mask_tile_path,
+                            raw_own_mask.astype(np.float32),
+                            description=f'raw segmentation mask  row={row} col={col}  '
+                                        f'n_cells={int(raw_own_mask.max())}',
+                        )
+                        log.info(f"    raw mask tile → {raw_mask_tile_path}")
+                    except Exception as e:
+                        log.warning(f"    raw mask tile write failed: {e}")
+                stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
             del raw_own_mask
 
             n_raw = int(local_mask.max())
             if n_raw == 0:
+                self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
+                stage_seconds["_profile_tile_id"] = profile_tile_id
+                self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                 self.tile_done.emit(i, n_tiles, 0)
                 del local_mask
                 gc.collect()
                 self._drop_caches()
                 continue
 
-            cy, cx = self._centroids_vectorised(local_mask)
+            _t = time.perf_counter()
+            with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
+                cy, cx = self._centroids_vectorised(local_mask)
+            stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
             keep_labels = []
-            for label_idx in range(n_raw):
-                lcy, lcx = cy[label_idx], cx[label_idx]
-                if (lcy >= local_oy0 and lcy < local_oy1 and
-                        lcx >= local_ox0 and lcx < local_ox1):
-                    keep_labels.append(label_idx + 1)
+            _t = time.perf_counter()
+            with self.step2_profiler.time_stage("relabel", labels_count=n_raw, **tile_profile_base):
+                for label_idx in range(n_raw):
+                    lcy, lcx = cy[label_idx], cx[label_idx]
+                    if (lcy >= local_oy0 and lcy < local_oy1 and
+                            lcx >= local_ox0 and lcx < local_ox1):
+                        keep_labels.append(label_idx + 1)
+
+                if not keep_labels:
+                    pass
+                else:
+                    lut = np.zeros(n_raw + 1, dtype=np.uint32)
+                    for new_id, lab in enumerate(keep_labels, start=1):
+                        lut[lab] = new_id + global_id_offset
+
+                    remapped = lut[local_mask]
+                    remapped_nuclei = None
+                    if is_hq and local_nuclei is not None:
+                        safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
+                        remapped_nuclei = lut[safe_nuclei]
+                    remapped_hq2_layers = {}
+                    if is_hq2 and local_hq2_layers:
+                        for layer_key, layer_arr in local_hq2_layers.items():
+                            layer_arr = np.asarray(layer_arr, dtype=np.uint32)
+                            safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
+                            remapped_hq2_layers[layer_key] = lut[safe]
+                    if is_hq and local_qc_rows:
+                        kept_set = set(keep_labels)
+                        for row_qc in local_qc_rows:
+                            old_id = int(row_qc.get("cell_id", 0) or 0)
+                            if old_id not in kept_set:
+                                continue
+                            new_row = dict(row_qc)
+                            new_row["cell_id"] = int(lut[old_id])
+                            hq_qc_rows.append(new_row)
+                    if is_hq2 and local_hq2_metadata:
+                        tile_meta = dict(local_hq2_metadata)
+                        tile_meta.update({"row": row, "col": col, "out_prefix": out_prefix})
+                        self._hq2_tile_metadata.append(tile_meta)
+            stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
 
             if not keep_labels:
+                self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
+                stage_seconds["_profile_tile_id"] = profile_tile_id
+                self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                 self.tile_done.emit(i, n_tiles, 0)
                 del local_mask, cy, cx
                 gc.collect()
                 self._drop_caches()
                 continue
+            del local_mask, cy, cx
 
-            lut = np.zeros(n_raw + 1, dtype=np.uint32)
-            for new_id, lab in enumerate(keep_labels, start=1):
-                lut[lab] = new_id + global_id_offset
-
-            remapped = lut[local_mask]
-            remapped_nuclei = None
-            if is_hq and local_nuclei is not None:
-                safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
-                remapped_nuclei = lut[safe_nuclei]
-            remapped_hq2_layers = {}
-            if is_hq2 and local_hq2_layers:
-                for layer_key, layer_arr in local_hq2_layers.items():
-                    layer_arr = np.asarray(layer_arr, dtype=np.uint32)
-                    safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
-                    remapped_hq2_layers[layer_key] = lut[safe]
-            if is_hq and local_qc_rows:
-                kept_set = set(keep_labels)
-                for row_qc in local_qc_rows:
-                    old_id = int(row_qc.get("cell_id", 0) or 0)
-                    if old_id not in kept_set:
-                        continue
-                    new_row = dict(row_qc)
-                    new_row["cell_id"] = int(lut[old_id])
-                    hq_qc_rows.append(new_row)
-            del local_mask, lut, cy, cx
-
-            dst = mmap[ry0:ry1, rx0:rx1]
-            np.copyto(dst, remapped, where=(remapped > 0))
-            del remapped
-            if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
-                ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
-                np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
-                del remapped_nuclei
-            if is_hq2 and remapped_hq2_layers:
-                for layer_key, layer_arr in remapped_hq2_layers.items():
-                    layer_mmap = hq2_layer_mmaps.get(layer_key)
-                    if layer_mmap is None:
-                        continue
-                    ldst = layer_mmap[ry0:ry1, rx0:rx1]
-                    np.copyto(ldst, layer_arr, where=(layer_arr > 0))
-                del remapped_hq2_layers
+            _t = time.perf_counter()
+            with self.step2_profiler.time_stage("merge_or_write", labels_count=len(keep_labels), **tile_profile_base):
+                dst = mmap[ry0:ry1, rx0:rx1]
+                np.copyto(dst, remapped, where=(remapped > 0))
+                del remapped
+                if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                    ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
+                    np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
+                    del remapped_nuclei
+                if is_hq2 and remapped_hq2_layers:
+                    for layer_key, layer_arr in remapped_hq2_layers.items():
+                        layer_mmap = hq2_layer_mmaps.get(layer_key)
+                        if layer_mmap is None:
+                            continue
+                        ldst = layer_mmap[ry0:ry1, rx0:rx1]
+                        np.copyto(ldst, layer_arr, where=(layer_arr > 0))
+                    del remapped_hq2_layers
+            stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
+            self.step2_profiler.log_tile_stage(profile_tile_id, "tile_write", stage_seconds.get("merge_or_write", 0.0), **tile_profile_base)
 
             n_kept = len(keep_labels)
             global_id_offset += n_kept
@@ -1578,19 +1912,31 @@ class SegmentMergeWorker(QThread):
                 'dapi_path': self._abs(dapi_tile_path),
                 'mask_path': self._abs(raw_mask_tile_path),
             })
+            self.step2_profiler.record_tile_metadata(
+                profile_tile_id,
+                labels_count=n_kept,
+                output_path=self._abs(raw_mask_tile_path or mmap_path),
+            )
 
             self.tile_done.emit(i, n_tiles, n_kept)
             log.info(f"  ✓ [{out_prefix}] Tile [{i+1}/{n_tiles}] kept={n_kept}")
+            stage_seconds["_profile_tile_id"] = profile_tile_id
+            self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
             gc.collect()
             self._drop_caches()
+        if prefetcher is not None:
+            metrics = prefetcher.snapshot_metrics()
+            self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
+            prefetcher.close()
 
         # ── Flush memmaps ─────────────────────────────────────────────
-        mmap.flush()
-        dapi_mmap.flush()
-        if nuclei_mmap is not None:
-            nuclei_mmap.flush()
-        for layer_mmap in hq2_layer_mmaps.values():
-            layer_mmap.flush()
+        with self.step2_profiler.time_stage("merge_all_tiles", method=self.method, output_path=self._abs(mmap_path)):
+            mmap.flush()
+            dapi_mmap.flush()
+            if nuclei_mmap is not None:
+                nuclei_mmap.flush()
+            for layer_mmap in hq2_layer_mmaps.values():
+                layer_mmap.flush()
         total_cells = int(global_id_offset)
         log.info(f"  [{out_prefix}] total_cells={total_cells:,}")
 
@@ -1624,12 +1970,13 @@ class SegmentMergeWorker(QThread):
             shape=(full_h, full_w), dtype='uint32',
             chunks=(1024, 1024),
         )
-        for y in range(0, full_h, CHUNK):
-            if self._stop:
-                log.info(f"  [{out_prefix}] Stopped during zarr write.")
-                del mmap_ro, dapi_mmap_ro
-                return 0
-            out_z[y:y+CHUNK, :] = mmap_ro[y:y+CHUNK, :]
+        with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(out_zarr_path)):
+            for y in range(0, full_h, CHUNK):
+                if self._stop:
+                    log.info(f"  [{out_prefix}] Stopped during zarr write.")
+                    del mmap_ro, dapi_mmap_ro
+                    return 0
+                out_z[y:y+CHUNK, :] = mmap_ro[y:y+CHUNK, :]
         self._drop_caches()
 
         if self._stop:
@@ -1638,14 +1985,15 @@ class SegmentMergeWorker(QThread):
         ome_path = os.path.join(
             self.output_dir, f'global_mask_{out_prefix}.ome.tiff'
         )
-        with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-            tif.write(
-                mmap_ro.astype(np.float32),
-                tile=(512, 512),
-                compression='lzw',
-                photometric='minisblack',
-                metadata=None,
-            )
+        with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
+            with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
+                tif.write(
+                    mmap_ro.astype(np.float32),
+                    tile=(512, 512),
+                    compression='lzw',
+                    photometric='minisblack',
+                    metadata=None,
+                )
         self._drop_caches()
 
         if self._stop:
@@ -1654,14 +2002,15 @@ class SegmentMergeWorker(QThread):
         global_dapi_path = os.path.join(
             self.output_dir, f'global_dapi_{out_prefix}.ome.tiff'
         )
-        with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
-            tif.write(
-                np.array(dapi_mmap_ro),
-                tile=(512, 512),
-                compression='lzw',
-                photometric='minisblack',
-                metadata=None,
-            )
+        with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
+            with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
+                tif.write(
+                    np.array(dapi_mmap_ro),
+                    tile=(512, 512),
+                    compression='lzw',
+                    photometric='minisblack',
+                    metadata=None,
+                )
         self._drop_caches()
 
         nuclei_ome_path = ""
@@ -1674,27 +2023,31 @@ class SegmentMergeWorker(QThread):
             nz = zarr.open(nuclei_zarr_path, mode='w',
                            shape=(full_h, full_w), dtype='uint32',
                            chunks=(1024, 1024))
-            for y in range(0, full_h, CHUNK):
-                nz[y:y+CHUNK, :] = nuclei_mmap_ro[y:y+CHUNK, :]
+            with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(nuclei_zarr_path)):
+                for y in range(0, full_h, CHUNK):
+                    nz[y:y+CHUNK, :] = nuclei_mmap_ro[y:y+CHUNK, :]
             nuclei_ome_path = os.path.join(
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.ome.tiff'
             )
-            with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
-                tif.write(
-                    nuclei_mmap_ro.astype(np.float32),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
+                with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
+                    tif.write(
+                        nuclei_mmap_ro.astype(np.float32),
+                        tile=(512, 512),
+                        compression='lzw',
+                        photometric='minisblack',
+                        metadata=None,
+                    )
             if is_mesmer_guided:
                 qc_table_path = ""
             elif is_hq2:
                 qc_table_path = os.path.join(self.output_dir, f'hq2_qc_table_{out_prefix}.csv')
-                write_hq2_qc_table(qc_table_path, hq_qc_rows)
+                with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
+                    write_hq2_qc_table(qc_table_path, hq_qc_rows)
             else:
                 qc_table_path = os.path.join(self.output_dir, f'hq_qc_table_{out_prefix}.csv')
-                write_hq_qc_table(qc_table_path, hq_qc_rows)
+                with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
+                    write_hq_qc_table(qc_table_path, hq_qc_rows)
             del nuclei_mmap_ro
 
         hq2_paths = {}
@@ -1727,6 +2080,13 @@ class SegmentMergeWorker(QThread):
             'total_cells':     total_cells,
             'image_shape':      [full_h, full_w],
             'tile_grid':        [self.n_rows, self.n_cols],
+            'tile_strategy':     self._step2_engine_meta(),
+            'tile_strategy_mode': self._tile_strategy_info.get("tile_strategy_mode", "manual"),
+            'suggested_tile_h':  self._tile_strategy_info.get("suggested_tile_h"),
+            'suggested_tile_w':  self._tile_strategy_info.get("suggested_tile_w"),
+            'actual_tile_h':     self._tile_strategy_info.get("actual_tile_h"),
+            'actual_tile_w':     self._tile_strategy_info.get("actual_tile_w"),
+            'estimated_tile_mpx': self._tile_strategy_info.get("estimated_tile_mpx"),
             'tile_stats':      tile_stats,
             'seg_config':      self.seg_config,
             'cp_params':       self.seg_config,
@@ -1752,6 +2112,7 @@ class SegmentMergeWorker(QThread):
                 "qc_table_path": self._abs(qc_table_path),
             })
             meta.update(hq2_metadata_fields(self.seg_config, hq2_meta_paths))
+            meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
         elif is_hq:
             meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
         if self.roi_id:
@@ -1772,11 +2133,10 @@ class SegmentMergeWorker(QThread):
             }
             meta["roi_bbox_fullres"] = list(bbox) if bbox else self.roi_manifest.get("bbox_fullres")
             meta["roi_shape"] = meta.get("image_shape")
-        with open(
-            os.path.join(self.output_dir,
-                         f'segmentation_meta_{out_prefix}.json'), 'w'
-        ) as f:
-            json.dump(meta, f, indent=2)
+        meta_path = os.path.join(self.output_dir, f'segmentation_meta_{out_prefix}.json')
+        with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
+            with open(meta_path, 'w') as f:
+                json.dump(meta, f, indent=2)
 
         self._last_region_meta = meta
         log.info(f"  [{out_prefix}] outputs written")
@@ -1943,6 +2303,7 @@ class SegmentMergeWorker(QThread):
                     "total_cells": total_cells_all,
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
+                    "tile_strategy": self._step2_engine_meta(),
                 }
                 if self.method == CELLPOSE_NUCLEI_HQ2:
                     summary_meta.update(hq2_metadata_fields(self.seg_config, {
@@ -1954,6 +2315,7 @@ class SegmentMergeWorker(QThread):
                         "final_cell_mask_path": first_roi_meta.get("final_cell_mask_path") or first_roi_meta.get("ome_tiff", ""),
                         "qc_table_path": first_roi_meta.get("qc_table_path", ""),
                     }))
+                    summary_meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
                 elif self.method == CELLPOSE_NUCLEI_HQ:
                     summary_meta.update(self._hq_meta_fields(
                         first_roi_meta.get("nuclei_mask_path", ""),
@@ -1962,8 +2324,10 @@ class SegmentMergeWorker(QThread):
                     ))
                 runtime_meta = self._finish_runtime_monitor()
                 summary_meta["runtime"] = runtime_meta
-                with open(os.path.join(self.output_dir, "segmentation_meta.json"), "w") as f:
-                    json.dump(summary_meta, f, indent=2)
+                summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
+                with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
+                    with open(summary_meta_path, "w") as f:
+                        json.dump(summary_meta, f, indent=2)
                 self._register_completed_result(summary_meta)
                 if self.roi_dir and self.roi_id:
                     rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
@@ -1983,34 +2347,31 @@ class SegmentMergeWorker(QThread):
                     print(f"[Step2] mask_ome={summary_meta['paths']['mask_ome']}")
                     print(f"[Step2] fusion_zarr={summary_meta['paths'].get('fusion_zarr')}")
                     print("[Step2] updated roi_index latest_by_method")
+                self._record_engine_metrics()
+                profile_summary = self.step2_profiler.finalize()
+                self._profile_summary(profile_summary)
+                if getattr(self, "_channel_store", None) is not None:
+                    self._channel_store.close()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return
 
             # ── Full WSI mode ─────────────────────────────────────────
-            z       = zarr.open(self.zarr_path, mode='r')
-            full_h  = z.shape[0]
-            full_w  = z.shape[1]
+            with self.step2_profiler.time_stage("load_roi", input_source=self._abs(self.zarr_path), method=self.method):
+                z       = zarr.open(self.zarr_path, mode='r')
+                full_h  = z.shape[0]
+                full_w  = z.shape[1]
             log.info(f"Input zarr: {full_h}×{full_w} px")
 
+            strategy_info = self._record_tile_strategy(
+                full_h,
+                full_w,
+                channel_count=max(2, len(parse_hq_channels(self.seg_config.get("hq_channels") or [])) or 2),
+            )
             tile_h = -(-full_h // self.n_rows)
             tile_w = -(-full_w // self.n_cols)
 
-            tiles = []
-            for r in range(self.n_rows):
-                for c in range(self.n_cols):
-                    oy0 = r * tile_h
-                    oy1 = min(oy0 + tile_h, full_h)
-                    ox0 = c * tile_w
-                    ox1 = min(ox0 + tile_w, full_w)
-                    ry0 = max(0, oy0 - self.overlap_px)
-                    ry1 = min(full_h, oy1 + self.overlap_px)
-                    rx0 = max(0, ox0 - self.overlap_px)
-                    rx1 = min(full_w, ox1 + self.overlap_px)
-                    tiles.append({
-                        'row': r, 'col': c,
-                        'own':  (oy0, oy1, ox0, ox1),
-                        'read': (ry0, ry1, rx0, rx1),
-                    })
+            with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
+                tile_h, tile_w, tiles = self._build_step2_tiles(full_h, full_w)
             n_tiles = len(tiles)
 
             os.makedirs(self.output_dir, exist_ok=True)
@@ -2059,8 +2420,22 @@ class SegmentMergeWorker(QThread):
 
             global_id_offset = 0
             tile_stats = []
+            prefetcher = None
+            if self._prefetch_enabled():
+                prefetcher = TilePrefetcher(
+                    tiles,
+                    lambda idx, t: self._prepare_tile_payload(
+                        self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                        is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
+                    ),
+                    prefetch_queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
+                    logger=log,
+                    profiler=self.step2_profiler,
+                )
+                log.info("[TilePrefetch] enabled queue_size=%s", prefetcher.prefetch_queue_size)
 
-            for i, tile in enumerate(tiles):
+            with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(self.zarr_path)):
+              for i, tile in enumerate(tiles):
                 if self._stop:
                     self.error.emit('Stopped by user.')
                     return
@@ -2079,13 +2454,55 @@ class SegmentMergeWorker(QThread):
                 log.info(_msg)
                 log.debug(f"  [MEM before inference] {self._mem_snapshot()}")
 
-                dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
-                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+                profile_tile_id = str(i)
+                stage_seconds = {}
+                tile_shape = (ry1 - ry0, rx1 - rx0)
+                tile_profile_base = {
+                    "tile_id": profile_tile_id,
+                    "bbox_global": [oy0, oy1, ox0, ox1],
+                    "bbox_local": [oy0, oy1, ox0, ox1],
+                    "tile_shape": list(tile_shape),
+                    "tile_h": int(tile_shape[0]),
+                    "tile_w": int(tile_shape[1]),
+                    "overlap": int(self.overlap_px),
+                    "channels_used": list(hq_channels or []),
+                    "method": self.method,
+                    "dtype": str(getattr(z, "dtype", "")),
+                    "input_source": self._abs(self.zarr_path),
+                }
+                self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
+
+                _t = time.perf_counter()
+                if prefetcher is not None:
+                    payload = prefetcher.get(
+                        i,
+                        sync_load_fn=lambda idx, t: self._prepare_tile_payload(
+                            self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                            is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=tile_profile_base,
+                        ),
+                    )
+                    tile_data = payload["tile_data"]
+                    dapi_own = payload["dapi_own"]
+                    hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+                    mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+                    dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+                else:
+                    with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
+                        payload = self._prepare_tile_payload(
+                            self.zarr_path, z, tile, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                            is_mesmer, mesmer_group, dapi_mmap=dapi_mmap, profile_tile_base=None,
+                        )
+                        tile_data = payload["tile_data"]
+                        dapi_own = payload["dapi_own"]
+                        hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+                        mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+                stage_seconds["read_tile"] = time.perf_counter() - _t
 
                 if self.recovery_npy_dir is not None:
                     local_nuclei = None
                     local_qc_rows = []
                     local_hq2_layers = {}
+                    local_hq2_metadata = {}
                     npy_path = os.path.join(
                         self.recovery_npy_dir, f'tile_{row}_{col}.npy'
                     )
@@ -2095,34 +2512,43 @@ class SegmentMergeWorker(QThread):
                             f'  ⚠ {npy_path} not found, skipping'
                         )
                         continue
-                    local_mask = np.load(npy_path)
+                    _t = time.perf_counter()
+                    with self.step2_profiler.time_stage("model_inference", **tile_profile_base):
+                        local_mask = np.load(npy_path)
+                    stage_seconds["model_inference"] = time.perf_counter() - _t
                 else:
-                    tile_data = np.array(z[ry0:ry1, rx0:rx1, :])
                     try:
-                        hq_marker_channels = None
-                        mesmer_channel_source = None
-                        if is_hq and not is_mesmer_guided:
-                            hq_marker_channels = self._read_hq_marker_channels(
-                                hq_group, hq_channels, ry0, ry1, rx0, rx1
-                            )
-                        if is_mesmer and mesmer_group is not None:
-                            mesmer_channel_source = self._read_mesmer_channel_source(
-                                mesmer_group, ry0, ry1, rx0, rx1
-                            )
+                        hq_marker_channels = hq_marker_channels_prefetched
+                        mesmer_channel_source = mesmer_channel_source_prefetched
+                        _t = time.perf_counter()
+                        if hq_marker_channels is None and mesmer_channel_source is None:
+                            with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
+                                if is_hq and not is_mesmer_guided:
+                                    hq_marker_channels = self._read_hq_marker_channels(
+                                        hq_group, hq_channels, ry0, ry1, rx0, rx1
+                                    )
+                                if is_mesmer and mesmer_group is not None:
+                                    mesmer_channel_source = self._read_mesmer_channel_source(
+                                        mesmer_group, ry0, ry1, rx0, rx1
+                                    )
+                            stage_seconds["read_tile"] += time.perf_counter() - _t
                         local_result = self._segment_tile(
                             tile_data,
                             model,
                             hq_marker_channels,
                             mesmer_channel_source=mesmer_channel_source,
+                            profile_tile_id=profile_tile_id,
                         )
                         local_nuclei = None
                         local_qc_rows = []
                         local_hq2_layers = {}
+                        local_hq2_metadata = {}
                         if isinstance(local_result, dict):
                             local_mask = local_result["mask"]
                             local_nuclei = local_result.get("nuclei")
                             local_qc_rows = local_result.get("qc_rows") or []
                             local_hq2_layers = local_result.get("hq2_layers") or {}
+                            local_hq2_metadata = local_result.get("hq2_metadata") or {}
                         else:
                             local_mask = local_result
                     except Exception as e:
@@ -2132,16 +2558,21 @@ class SegmentMergeWorker(QThread):
                         local_nuclei = None
                         local_qc_rows = []
                         local_hq2_layers = {}
+                        local_hq2_metadata = {}
                     del tile_data
                     if use_gpu:
                         self._empty_torch_cache_if_available()
+                    self.step2_profiler.log_tile_stage(profile_tile_id, "inference_wait", 0.0, **tile_profile_base)
 
                 local_oy0 = oy0 - ry0
                 local_oy1 = oy1 - ry0
                 local_ox0 = ox0 - rx0
                 local_ox1 = ox1 - rx0
-                raw_own_mask = local_mask[local_oy0:local_oy1,
-                                          local_ox0:local_ox1].copy()
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
+                    raw_own_mask = local_mask[local_oy0:local_oy1,
+                                              local_ox0:local_ox1].copy()
+                stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
                 dapi_tile_path = ""
                 raw_mask_tile_path = ""
@@ -2149,96 +2580,125 @@ class SegmentMergeWorker(QThread):
                     dapi_tile_path = os.path.join(
                         tile_dir, f'tile_r{row}_c{col}_dapi.ome.tiff'
                     )
-                    try:
-                        self._write_tile_ometiff(
-                            dapi_tile_path,
-                            dapi_own[:own_h, :own_w].astype(np.uint16),
-                            description=f'DAPI row={row} col={col} '
-                                        f'own=({oy0},{oy1},{ox0},{ox1})',
-                        )
-                    except Exception as e:
-                        log.warning(f"  dapi tile write failed: {e}")
+                    _t = time.perf_counter()
+                    with self.step2_profiler.time_stage("merge_or_write", output_path=self._abs(dapi_tile_path), **tile_profile_base):
+                        try:
+                            self._write_tile_ometiff(
+                                dapi_tile_path,
+                                dapi_own[:own_h, :own_w].astype(np.uint16),
+                                description=f'DAPI row={row} col={col} '
+                                            f'own=({oy0},{oy1},{ox0},{ox1})',
+                            )
+                        except Exception as e:
+                            log.warning(f"  dapi tile write failed: {e}")
+                    stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
 
                     raw_mask_tile_path = os.path.join(
                         tile_dir, f'tile_r{row}_c{col}_raw_mask.ome.tiff'
                     )
-                    try:
-                        self._write_tile_ometiff(
-                            raw_mask_tile_path,
-                            raw_own_mask.astype(np.float32),
-                            description=f'raw mask row={row} col={col} '
-                                        f'n_cells={int(raw_own_mask.max())}',
-                        )
-                    except Exception as e:
-                        log.warning(f"  raw mask tile write failed: {e}")
+                    _t = time.perf_counter()
+                    with self.step2_profiler.time_stage("merge_or_write", output_path=self._abs(raw_mask_tile_path), **tile_profile_base):
+                        try:
+                            self._write_tile_ometiff(
+                                raw_mask_tile_path,
+                                raw_own_mask.astype(np.float32),
+                                description=f'raw mask row={row} col={col} '
+                                            f'n_cells={int(raw_own_mask.max())}',
+                            )
+                        except Exception as e:
+                            log.warning(f"  raw mask tile write failed: {e}")
+                    stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
                 del raw_own_mask, dapi_own
 
                 n_raw = int(local_mask.max())
                 if n_raw == 0:
+                    self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
+                    stage_seconds["_profile_tile_id"] = profile_tile_id
+                    self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                     self.tile_done.emit(i, n_tiles, 0)
                     del local_mask
                     gc.collect()
                     self._drop_caches()
                     continue
 
-                cy, cx = self._centroids_vectorised(local_mask)
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
+                    cy, cx = self._centroids_vectorised(local_mask)
+                stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
                 keep_labels = []
-                for label_idx in range(n_raw):
-                    lcy = cy[label_idx]
-                    lcx = cx[label_idx]
-                    if (lcy >= local_oy0 and lcy < local_oy1 and
-                            lcx >= local_ox0 and lcx < local_ox1):
-                        keep_labels.append(label_idx + 1)
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("relabel", labels_count=n_raw, **tile_profile_base):
+                    for label_idx in range(n_raw):
+                        lcy = cy[label_idx]
+                        lcx = cx[label_idx]
+                        if (lcy >= local_oy0 and lcy < local_oy1 and
+                                lcx >= local_ox0 and lcx < local_ox1):
+                            keep_labels.append(label_idx + 1)
+                stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
 
                 if not keep_labels:
+                    self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
+                    stage_seconds["_profile_tile_id"] = profile_tile_id
+                    self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                     self.tile_done.emit(i, n_tiles, 0)
                     del local_mask, cy, cx
                     gc.collect()
                     self._drop_caches()
                     continue
 
-                lut = np.zeros(n_raw + 1, dtype=np.uint32)
-                for new_id, lab in enumerate(keep_labels, start=1):
-                    lut[lab] = new_id + global_id_offset
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("relabel", labels_count=len(keep_labels), **tile_profile_base):
+                    lut = np.zeros(n_raw + 1, dtype=np.uint32)
+                    for new_id, lab in enumerate(keep_labels, start=1):
+                        lut[lab] = new_id + global_id_offset
 
-                remapped = lut[local_mask]
-                remapped_nuclei = None
-                if is_hq and local_nuclei is not None:
-                    safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
-                    remapped_nuclei = lut[safe_nuclei]
-                remapped_hq2_layers = {}
-                if is_hq2 and local_hq2_layers:
-                    for layer_key, layer_arr in local_hq2_layers.items():
-                        layer_arr = np.asarray(layer_arr, dtype=np.uint32)
-                        safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
-                        remapped_hq2_layers[layer_key] = lut[safe]
-                if is_hq and local_qc_rows:
-                    kept_set = set(keep_labels)
-                    for row_qc in local_qc_rows:
-                        old_id = int(row_qc.get("cell_id", 0) or 0)
-                        if old_id not in kept_set:
-                            continue
-                        new_row = dict(row_qc)
-                        new_row["cell_id"] = int(lut[old_id])
-                        hq_qc_rows.append(new_row)
+                    remapped = lut[local_mask]
+                    remapped_nuclei = None
+                    if is_hq and local_nuclei is not None:
+                        safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
+                        remapped_nuclei = lut[safe_nuclei]
+                    remapped_hq2_layers = {}
+                    if is_hq2 and local_hq2_layers:
+                        for layer_key, layer_arr in local_hq2_layers.items():
+                            layer_arr = np.asarray(layer_arr, dtype=np.uint32)
+                            safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
+                            remapped_hq2_layers[layer_key] = lut[safe]
+                    if is_hq and local_qc_rows:
+                        kept_set = set(keep_labels)
+                        for row_qc in local_qc_rows:
+                            old_id = int(row_qc.get("cell_id", 0) or 0)
+                            if old_id not in kept_set:
+                                continue
+                            new_row = dict(row_qc)
+                            new_row["cell_id"] = int(lut[old_id])
+                            hq_qc_rows.append(new_row)
+                    if is_hq2 and local_hq2_metadata:
+                        tile_meta = dict(local_hq2_metadata)
+                        tile_meta.update({"row": row, "col": col, "out_prefix": ""})
+                        self._hq2_tile_metadata.append(tile_meta)
+                stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
                 del local_mask, lut, cy, cx
 
-                dst = mmap[ry0:ry1, rx0:rx1]
-                np.copyto(dst, remapped, where=(remapped > 0))
-                del remapped
-                if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
-                    ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
-                    np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
-                    del remapped_nuclei
-                if is_hq2 and remapped_hq2_layers:
-                    for layer_key, layer_arr in remapped_hq2_layers.items():
-                        layer_mmap = hq2_layer_mmaps.get(layer_key)
-                        if layer_mmap is None:
-                            continue
-                        ldst = layer_mmap[ry0:ry1, rx0:rx1]
-                        np.copyto(ldst, layer_arr, where=(layer_arr > 0))
-                    del remapped_hq2_layers
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("merge_or_write", labels_count=len(keep_labels), **tile_profile_base):
+                    dst = mmap[ry0:ry1, rx0:rx1]
+                    np.copyto(dst, remapped, where=(remapped > 0))
+                    del remapped
+                    if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                        ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
+                        np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
+                        del remapped_nuclei
+                    if is_hq2 and remapped_hq2_layers:
+                        for layer_key, layer_arr in remapped_hq2_layers.items():
+                            layer_mmap = hq2_layer_mmaps.get(layer_key)
+                            if layer_mmap is None:
+                                continue
+                            ldst = layer_mmap[ry0:ry1, rx0:rx1]
+                            np.copyto(ldst, layer_arr, where=(layer_arr > 0))
+                        del remapped_hq2_layers
+                stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
+                self.step2_profiler.log_tile_stage(profile_tile_id, "tile_write", stage_seconds.get("merge_or_write", 0.0), **tile_profile_base)
 
                 n_kept = len(keep_labels)
                 global_id_offset += n_kept
@@ -2250,6 +2710,11 @@ class SegmentMergeWorker(QThread):
                     'dapi_path': self._abs(dapi_tile_path),
                     'mask_path': self._abs(raw_mask_tile_path),
                 })
+                self.step2_profiler.record_tile_metadata(
+                    profile_tile_id,
+                    labels_count=n_kept,
+                    output_path=self._abs(raw_mask_tile_path or mmap_path),
+                )
 
                 self.tile_done.emit(i, n_tiles, n_kept)
                 _done_msg = (
@@ -2258,12 +2723,19 @@ class SegmentMergeWorker(QThread):
                 )
                 self.progress.emit(i + 1, n_tiles, _done_msg)
                 log.info(_done_msg)
+                stage_seconds["_profile_tile_id"] = profile_tile_id
+                self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
                 log.debug(f"  [MEM after write] {self._mem_snapshot()}")
                 gc.collect()
                 if self.recovery_npy_dir is None and use_gpu:
                     self._empty_torch_cache_if_available()
                 self._drop_caches()
                 log.debug("  [MEM after drop_caches] " + self._mem_snapshot())
+
+            if prefetcher is not None:
+                metrics = prefetcher.snapshot_metrics()
+                self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
+                prefetcher.close()
 
             if self.recovery_npy_dir is None:
                 del model
@@ -2272,12 +2744,13 @@ class SegmentMergeWorker(QThread):
                 self._drop_caches()
                 log.info(f"All inference done. {self._mem_snapshot()}")
 
-            mmap.flush()
-            dapi_mmap.flush()
-            if nuclei_mmap is not None:
-                nuclei_mmap.flush()
-            for layer_mmap in hq2_layer_mmaps.values():
-                layer_mmap.flush()
+            with self.step2_profiler.time_stage("merge_all_tiles", method=self.method, output_path=self._abs(mmap_path)):
+                mmap.flush()
+                dapi_mmap.flush()
+                if nuclei_mmap is not None:
+                    nuclei_mmap.flush()
+                for layer_mmap in hq2_layer_mmaps.values():
+                    layer_mmap.flush()
             total_cells = int(global_id_offset)
             _out_msg = f"Inference done. Total cells: {total_cells:,}. Writing outputs…"
             self.progress.emit(n_tiles, n_tiles, _out_msg)
@@ -2310,39 +2783,42 @@ class SegmentMergeWorker(QThread):
                 dtype='uint32',
                 chunks=(1024, 1024),
             )
-            for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
-                y1 = min(y + CHUNK_ROWS, full_h)
-                out_z[y:y1, :] = mmap_ro[y:y1, :]
-                self.progress.emit(n_tiles, n_tiles,
-                                   f'Writing mask zarr… chunk {ci+1}/{n_chunks}')
+            with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(out_zarr_path)):
+                for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
+                    y1 = min(y + CHUNK_ROWS, full_h)
+                    out_z[y:y1, :] = mmap_ro[y:y1, :]
+                    self.progress.emit(n_tiles, n_tiles,
+                                       f'Writing mask zarr… chunk {ci+1}/{n_chunks}')
             self.progress.emit(n_tiles, n_tiles, '✓ mask zarr written')
             log.info(f"zarr → {out_zarr_path}  {self._mem_snapshot()}")
             self._drop_caches()
 
             ome_path = os.path.join(self.output_dir, 'global_mask.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global mask OME-TIFF…')
-            with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-                tif.write(
-                    mmap_ro.astype(np.float32),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
+                with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
+                    tif.write(
+                        mmap_ro.astype(np.float32),
+                        tile=(512, 512),
+                        compression='lzw',
+                        photometric='minisblack',
+                        metadata=None,
+                    )
             self.progress.emit(n_tiles, n_tiles, '✓ global mask OME-TIFF written')
             log.info(f"mask OME-TIFF → {ome_path}  {self._mem_snapshot()}")
             self._drop_caches()
 
             global_dapi_path = os.path.join(self.output_dir, 'global_dapi.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global DAPI OME-TIFF…')
-            with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
-                tif.write(
-                    np.array(dapi_mmap_ro),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
+                with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
+                    tif.write(
+                        np.array(dapi_mmap_ro),
+                        tile=(512, 512),
+                        compression='lzw',
+                        photometric='minisblack',
+                        metadata=None,
+                    )
             self.progress.emit(n_tiles, n_tiles, '✓ global DAPI OME-TIFF written')
             log.info(f"DAPI OME-TIFF → {global_dapi_path}  {self._mem_snapshot()}")
 
@@ -2356,26 +2832,30 @@ class SegmentMergeWorker(QThread):
                     shape=(full_h, full_w), dtype='uint32',
                     chunks=(1024, 1024),
                 )
-                for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
-                    y1 = min(y + CHUNK_ROWS, full_h)
-                    nz[y:y1, :] = nuclei_mmap_ro[y:y1, :]
+                with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(nuclei_zarr_path)):
+                    for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
+                        y1 = min(y + CHUNK_ROWS, full_h)
+                        nz[y:y1, :] = nuclei_mmap_ro[y:y1, :]
                 nuclei_ome_path = os.path.join(self.output_dir, 'global_nuclei_mask.ome.tiff')
-                with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
-                    tif.write(
-                        nuclei_mmap_ro.astype(np.float32),
-                        tile=(512, 512),
-                        compression='lzw',
-                        photometric='minisblack',
-                        metadata=None,
-                    )
+                with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
+                    with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
+                        tif.write(
+                            nuclei_mmap_ro.astype(np.float32),
+                            tile=(512, 512),
+                            compression='lzw',
+                            photometric='minisblack',
+                            metadata=None,
+                        )
                 if is_mesmer_guided:
                     qc_table_path = ""
                 elif is_hq2:
                     qc_table_path = os.path.join(self.output_dir, 'hq2_qc_table.csv')
-                    write_hq2_qc_table(qc_table_path, hq_qc_rows)
+                    with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
+                        write_hq2_qc_table(qc_table_path, hq_qc_rows)
                 else:
                     qc_table_path = os.path.join(self.output_dir, 'hq_qc_table.csv')
-                    write_hq_qc_table(qc_table_path, hq_qc_rows)
+                    with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
+                        write_hq_qc_table(qc_table_path, hq_qc_rows)
                 del nuclei_mmap_ro
 
             hq2_paths = {}
@@ -2411,6 +2891,13 @@ class SegmentMergeWorker(QThread):
                 'image_shape':    [full_h, full_w],
                 'tile_grid':      [self.n_rows, self.n_cols],
                 'overlap_px':     self.overlap_px,
+                'tile_strategy':   self._step2_engine_meta(),
+                'tile_strategy_mode': self._tile_strategy_info.get("tile_strategy_mode", "manual"),
+                'suggested_tile_h': self._tile_strategy_info.get("suggested_tile_h"),
+                'suggested_tile_w': self._tile_strategy_info.get("suggested_tile_w"),
+                'actual_tile_h':   self._tile_strategy_info.get("actual_tile_h"),
+                'actual_tile_w':   self._tile_strategy_info.get("actual_tile_w"),
+                'estimated_tile_mpx': self._tile_strategy_info.get("estimated_tile_mpx"),
                 'tile_stats':     tile_stats,
                 'seg_config':     self.seg_config,
                 'cp_params':      self.seg_config,
@@ -2436,6 +2923,7 @@ class SegmentMergeWorker(QThread):
                     "qc_table_path": self._abs(qc_table_path),
                 })
                 meta.update(hq2_metadata_fields(self.seg_config, hq2_meta_paths))
+                meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
             elif is_hq:
                 meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
             fusion_path = self._fusion_source_path()
@@ -2452,9 +2940,10 @@ class SegmentMergeWorker(QThread):
             }
             runtime_meta = self._finish_runtime_monitor()
             meta["runtime"] = runtime_meta
-            with open(os.path.join(self.output_dir,
-                                   'segmentation_meta.json'), 'w') as f:
-                json.dump(meta, f, indent=2)
+            meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
+            with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
+                with open(meta_path, 'w') as f:
+                    json.dump(meta, f, indent=2)
             self._register_completed_result(meta)
             if self.roi_dir and self.roi_id:
                 rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
@@ -2474,10 +2963,20 @@ class SegmentMergeWorker(QThread):
                 f"output={self.output_dir}"
             )
             log.info(f"Final memory: {self._mem_snapshot()}")
+            self._record_engine_metrics()
+            profile_summary = self.step2_profiler.finalize()
+            self._profile_summary(profile_summary)
+            if getattr(self, "_channel_store", None) is not None:
+                self._channel_store.close()
             self.finished.emit(self.output_dir, total_cells)
 
         except Exception:
             self._finish_runtime_monitor()
+            self._record_engine_metrics()
+            profile_summary = self.step2_profiler.finalize()
+            self._profile_summary(profile_summary)
+            if getattr(self, "_channel_store", None) is not None:
+                self._channel_store.close()
             tb = traceback.format_exc()
             if self._logger:
                 self._logger.critical("FATAL ERROR:\n" + tb)

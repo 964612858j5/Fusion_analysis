@@ -53,17 +53,10 @@ class TestHQ2MarkerSegmentation(unittest.TestCase):
             "normalization_percentile_low": 1.0,
             "normalization_percentile_high": 99.5,
             "min_signal_threshold": 0.05,
-            "imagej_threshold_method": "adaptive",
-            "imagej_blur_sigma": 1.0,
-            "imagej_background_radius": 12,
-            "imagej_min_object_size": 8,
-            "core_mode": "weighted_support",
-            "min_core_area": 4,
             "signal_map_mode": "per_cell_best_channel",
-            "min_continuous_signal": 0.05,
-            "max_expansion_radius": 24,
-            "macrophage_channels": "CD68;CD206",
-            "macrophage_max_radius": 30,
+            "hq2_expansion_engine": "conservative",
+            "max_refine_radius": 6,
+            "min_refine_signal": 0.05,
         }
 
         result = run_hq2_segmentation(
@@ -96,10 +89,11 @@ class TestHQ2MarkerSegmentation(unittest.TestCase):
                 meta = json.load(f)
             self.assertEqual(meta["method"], "cellpose_nuclei_hq2")
             self.assertEqual(meta["display_name"], "Cellpose nuclei + HQ2")
+            self.assertEqual(meta["hq2_mode"], "conservative_refinement")
+            self.assertFalse(meta["imagej_proposal_enabled"])
             self.assertTrue(meta["hq_proposal_mask_path"])
-            self.assertTrue(meta["imagej_proposal_mask_path"])
-            self.assertTrue(meta["core_mask_path"])
-            self.assertTrue(meta["expansion_mask_path"])
+            self.assertTrue(meta["initial_hq_mask_path"])
+            self.assertTrue(meta["refinement_added_pixels_path"])
 
 
 if __name__ == "__main__":

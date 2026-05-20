@@ -133,11 +133,17 @@ class Step2Profiler:
             except Exception:
                 pass
 
-    def log_tile_stage(self, tile_id, stage, seconds, **metrics):
+    def log_tile_stage(self, *args, **metrics):
         if not getattr(self, "enabled", False):
             return None
         try:
+            tile_id = args[0] if len(args) > 0 else metrics.pop("tile_id", None)
+            stage = args[1] if len(args) > 1 else metrics.pop("stage", "")
+            seconds = args[2] if len(args) > 2 else metrics.pop("seconds", 0.0)
             metrics = dict(metrics or {})
+            metrics.pop("tile_id", None)
+            metrics.pop("stage", None)
+            metrics.pop("seconds", None)
             metrics["tile_id"] = tile_id
             event = self._build_event(str(stage), float(seconds or 0.0), metrics)
             self._record_event(event)

@@ -926,6 +926,14 @@ class SegmentMergeWorker(QThread):
             pass
 
     @staticmethod
+    def _prof_metrics(base):
+        metrics = dict(base or {})
+        metrics.pop("tile_id", None)
+        metrics.pop("stage", None)
+        metrics.pop("seconds", None)
+        return metrics
+
+    @staticmethod
     def _available_vram_gb():
         try:
             import torch
@@ -1753,7 +1761,12 @@ class SegmentMergeWorker(QThread):
                     local_hq2_metadata = {}
                 if use_gpu:
                     self._empty_torch_cache_if_available()
-                self.step2_profiler.log_tile_stage(profile_tile_id, "inference_wait", 0.0, **tile_profile_base)
+                self.step2_profiler.log_tile_stage(
+                    profile_tile_id,
+                    "inference_wait",
+                    0.0,
+                    **self._prof_metrics(tile_profile_base),
+                )
 
             del tile_data
 
@@ -1900,7 +1913,12 @@ class SegmentMergeWorker(QThread):
                         np.copyto(ldst, layer_arr, where=(layer_arr > 0))
                     del remapped_hq2_layers
             stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
-            self.step2_profiler.log_tile_stage(profile_tile_id, "tile_write", stage_seconds.get("merge_or_write", 0.0), **tile_profile_base)
+            self.step2_profiler.log_tile_stage(
+                profile_tile_id,
+                "tile_write",
+                stage_seconds.get("merge_or_write", 0.0),
+                **self._prof_metrics(tile_profile_base),
+            )
 
             n_kept = len(keep_labels)
             global_id_offset += n_kept
@@ -2562,7 +2580,12 @@ class SegmentMergeWorker(QThread):
                     del tile_data
                     if use_gpu:
                         self._empty_torch_cache_if_available()
-                    self.step2_profiler.log_tile_stage(profile_tile_id, "inference_wait", 0.0, **tile_profile_base)
+                    self.step2_profiler.log_tile_stage(
+                        profile_tile_id,
+                        "inference_wait",
+                        0.0,
+                        **self._prof_metrics(tile_profile_base),
+                    )
 
                 local_oy0 = oy0 - ry0
                 local_oy1 = oy1 - ry0
@@ -2698,7 +2721,12 @@ class SegmentMergeWorker(QThread):
                             np.copyto(ldst, layer_arr, where=(layer_arr > 0))
                         del remapped_hq2_layers
                 stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
-                self.step2_profiler.log_tile_stage(profile_tile_id, "tile_write", stage_seconds.get("merge_or_write", 0.0), **tile_profile_base)
+                self.step2_profiler.log_tile_stage(
+                    profile_tile_id,
+                    "tile_write",
+                    stage_seconds.get("merge_or_write", 0.0),
+                    **self._prof_metrics(tile_profile_base),
+                )
 
                 n_kept = len(keep_labels)
                 global_id_offset += n_kept

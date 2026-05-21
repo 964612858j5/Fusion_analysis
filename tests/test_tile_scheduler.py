@@ -182,6 +182,84 @@ class TileSchedulerTests(unittest.TestCase):
         self.assertIsNone(scheduler.prefetcher)
         self.assertFalse(scheduler.prefetch_enabled)
 
+    def test_scheduler_load_tile_sync(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+        scheduler.attach_payload_loader(
+            lambda idx, tile, profile_tile_base=None: {
+                "idx": idx,
+                "tile_id": tile.tile_id,
+                "profile": profile_tile_base,
+            }
+        )
+
+        payload = scheduler.load_tile(1, profile_tile_base={"tile_id": "1"})
+
+        self.assertEqual(payload["idx"], 1)
+        self.assertEqual(payload["tile_id"], "1")
+        self.assertEqual(payload["profile"], {"tile_id": "1"})
+
+    def test_scheduler_load_tile_prefetch(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+        scheduler.attach_payload_loader(
+            lambda idx, tile, profile_tile_base=None: {
+                "idx": idx,
+                "tile_id": tile.tile_id,
+                "profile": profile_tile_base,
+            }
+        )
+        scheduler.attach_prefetcher(enabled=True, queue_size=1)
+
+        payload = scheduler.load_tile(0, profile_tile_base={"tile_id": "0"})
+
+        self.assertEqual(payload["idx"], 0)
+        self.assertEqual(payload["tile_id"], "0")
+        self.assertIsNone(payload["profile"])
+        scheduler.close()
+
+    def test_scheduler_payload_passthrough(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+        expected = {
+            "tile_data": object(),
+            "dapi_own": object(),
+            "hq_marker_channels": ["A", "B"],
+            "mesmer_channel_source": {"DAPI": object()},
+        }
+        scheduler.attach_payload_loader(lambda idx, tile, profile_tile_base=None: expected)
+
+        payload = scheduler.load_tile(0)
+
+        self.assertIs(payload, expected)
+
+    def test_scheduler_without_loader(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+
+        with self.assertRaises(RuntimeError):
+            scheduler.load_tile(0)
+
 
 if __name__ == "__main__":
     unittest.main()

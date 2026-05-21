@@ -30,6 +30,8 @@ class TileScheduler:
         self.merge_policy = merge_policy or CentroidOwnershipMergePolicy()
         self.prefetcher = None
         self.prefetch_enabled = False
+        self._load_fn = None
+        self._load_logger = None
         self.tile_h, self.tile_w, self.tiles = self._build_tiles()
 
     def _build_tiles(self):
@@ -72,7 +74,26 @@ class TileScheduler:
     def as_legacy_tiles(self):
         return [tile.as_legacy_dict() for tile in self.tiles]
 
-    def attach_prefetcher(self, load_fn, enabled=True, queue_size=2, logger=None, profiler=None):
+    def attach_payload_loader(self, load_fn, logger=None):
+        """
+        Register payload loading function.
+
+        load_fn signature:
+            load_fn(index, tile, profile_tile_base=None) -> payload
+
+        TileScheduler does not know payload structure.
+        It only orchestrates loading.
+        """
+        self._load_fn = load_fn
+        self._load_logger = logger
+        return load_fn
+
+    def _call_payload_loader(self, index, tile, profile_tile_base=None):
+        if self._load_fn is None:
+            raise RuntimeError("TileScheduler.load_tile requires attach_payload_loader() before use")
+        return self._load_fn(index, tile, profile_tile_base=profile_tile_base)
+
+    def attach_prefetcher(self, load_fn=None, enabled=True, queue_size=2, logger=None, profiler=None):
         """
         Attach a TilePrefetcher to this scheduler.
 
@@ -86,6 +107,9 @@ class TileScheduler:
             self.prefetcher = None
             self.prefetch_enabled = False
             return None
+
+        if load_fn is None:
+            load_fn = lambda idx, tile: self._call_payload_loader(idx, tile, profile_tile_base=None)
 
         from .tile_prefetch import TilePrefetcher
         self.prefetcher = TilePrefetcher(
@@ -109,6 +133,34 @@ class TileScheduler:
         if sync_load_fn is None:
             raise RuntimeError("TileScheduler.get_payload requires sync_load_fn when no prefetcher is attached")
         return sync_load_fn(index, tile)
+
+    def load_tile(self, index, profile_tile_base=None, sync_load_fn=None):
+        """
+        Unified tile payload loading entry.
+
+        Behavior:
+        - if prefetcher attached:
+            use scheduler.get_payload()
+        - else:
+            call load_fn directly
+        """
+        tile = self.tiles[index]
+        effective_load_fn = sync_load_fn or (
+            lambda idx, t: self._call_payload_loader(
+                idx,
+                t,
+                profile_tile_base=profile_tile_base,
+            )
+        )
+        path = "prefetch" if self.prefetcher is not None else "sync"
+        if self._load_logger:
+            try:
+                self._load_logger.debug("[TileScheduler] load_tile index=%s path=%s", index, path)
+            except Exception:
+                pass
+        if self.prefetcher is not None:
+            return self.get_payload(index, sync_load_fn=effective_load_fn)
+        return effective_load_fn(index, tile)
 
     def prefetch_metrics(self):
         if self.prefetcher is None:

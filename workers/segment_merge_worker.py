@@ -1676,12 +1676,15 @@ class SegmentMergeWorker(QThread):
         global_id_offset = 0
         tile_stats = []
         prefetcher = None
+        scheduler.attach_payload_loader(
+            lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
+                zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+            ),
+            logger=log,
+        )
         if self._prefetch_enabled():
             prefetcher = scheduler.attach_prefetcher(
-                lambda idx, t: self._prepare_tile_payload(
-                    zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                    is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
-                ),
                 enabled=True,
                 queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                 logger=log,
@@ -1731,29 +1734,15 @@ class SegmentMergeWorker(QThread):
             self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
             _t = time.perf_counter()
-            if scheduler.prefetcher is not None:
-                payload = scheduler.get_payload(
-                    i,
-                    sync_load_fn=lambda idx, t: self._prepare_tile_payload(
-                        zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                        is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=tile_profile_base,
-                    ),
-                )
-                tile_data = payload["tile_data"]
-                dapi_own = payload["dapi_own"]
-                hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-                mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
-                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
-            else:
-                with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
-                    payload = self._prepare_tile_payload(
-                        zarr_path, z, tile, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                        is_mesmer, mesmer_group, dapi_mmap=dapi_mmap, profile_tile_base=None,
-                    )
-                    tile_data = payload["tile_data"]
-                    dapi_own = payload["dapi_own"]
-                    hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-                    mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+            payload = scheduler.load_tile(
+                i,
+                profile_tile_base=tile_profile_base,
+            )
+            tile_data = payload["tile_data"]
+            dapi_own = payload["dapi_own"]
+            hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+            mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+            dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
 
             if self.recovery_npy_dir is not None:
@@ -2505,12 +2494,15 @@ class SegmentMergeWorker(QThread):
             global_id_offset = 0
             tile_stats = []
             prefetcher = None
+            scheduler.attach_payload_loader(
+                lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
+                    self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
+                    is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+                ),
+                logger=log,
+            )
             if self._prefetch_enabled():
                 prefetcher = scheduler.attach_prefetcher(
-                    lambda idx, t: self._prepare_tile_payload(
-                        self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                        is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
-                    ),
                     enabled=True,
                     queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                     logger=log,
@@ -2558,29 +2550,15 @@ class SegmentMergeWorker(QThread):
                 self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
                 _t = time.perf_counter()
-                if scheduler.prefetcher is not None:
-                    payload = scheduler.get_payload(
-                        i,
-                        sync_load_fn=lambda idx, t: self._prepare_tile_payload(
-                            self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                            is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=tile_profile_base,
-                        ),
-                    )
-                    tile_data = payload["tile_data"]
-                    dapi_own = payload["dapi_own"]
-                    hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-                    mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
-                    dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
-                else:
-                    with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
-                        payload = self._prepare_tile_payload(
-                            self.zarr_path, z, tile, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                            is_mesmer, mesmer_group, dapi_mmap=dapi_mmap, profile_tile_base=None,
-                        )
-                        tile_data = payload["tile_data"]
-                        dapi_own = payload["dapi_own"]
-                        hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-                        mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+                payload = scheduler.load_tile(
+                    i,
+                    profile_tile_base=tile_profile_base,
+                )
+                tile_data = payload["tile_data"]
+                dapi_own = payload["dapi_own"]
+                hq_marker_channels_prefetched = payload.get("hq_marker_channels")
+                mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
+                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
 
                 if self.recovery_npy_dir is not None:

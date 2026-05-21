@@ -93,6 +93,95 @@ class TileSchedulerTests(unittest.TestCase):
         self.assertEqual(len(legacy), 2)
         self.assertEqual(legacy[0], scheduler.tiles[0].as_legacy_dict())
 
+    def test_scheduler_attach_prefetcher_disabled(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+
+        prefetcher = scheduler.attach_prefetcher(
+            lambda idx, tile: {"idx": idx, "tile_id": tile.tile_id},
+            enabled=False,
+        )
+
+        self.assertIsNone(prefetcher)
+        self.assertIsNone(scheduler.prefetcher)
+        self.assertFalse(scheduler.prefetch_enabled)
+
+    def test_scheduler_get_payload_without_prefetch(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+
+        payload = scheduler.get_payload(
+            1,
+            sync_load_fn=lambda idx, tile: {"idx": idx, "own_bbox": tile.own_bbox},
+        )
+
+        self.assertEqual(payload["idx"], 1)
+        self.assertEqual(payload["own_bbox"], scheduler.tiles[1].own_bbox)
+
+    def test_scheduler_get_payload_requires_sync_loader_without_prefetch(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+
+        with self.assertRaises(RuntimeError):
+            scheduler.get_payload(0)
+
+    def test_scheduler_attach_prefetcher_enabled(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+
+        prefetcher = scheduler.attach_prefetcher(
+            lambda idx, tile: {"idx": idx, "tile_id": tile.tile_id},
+            enabled=True,
+            queue_size=1,
+        )
+        payload = scheduler.get_payload(0)
+
+        self.assertIs(prefetcher, scheduler.prefetcher)
+        self.assertTrue(scheduler.prefetch_enabled)
+        self.assertEqual(prefetcher.prefetch_queue_size, 1)
+        self.assertEqual(payload, {"idx": 0, "tile_id": "0"})
+        self.assertIn("prefetch_hit", scheduler.prefetch_metrics())
+        scheduler.close()
+
+    def test_scheduler_close_prefetcher(self):
+        scheduler = TileScheduler(
+            full_h=50,
+            full_w=60,
+            n_rows=1,
+            n_cols=2,
+            overlap_px=5,
+        )
+        scheduler.attach_prefetcher(
+            lambda idx, tile: {"idx": idx},
+            enabled=True,
+            queue_size=1,
+        )
+
+        scheduler.close()
+
+        self.assertIsNone(scheduler.prefetcher)
+        self.assertFalse(scheduler.prefetch_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()

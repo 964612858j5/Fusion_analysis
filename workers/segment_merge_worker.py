@@ -49,7 +49,6 @@ from ..utils.step2_profiler import Step2Profiler
 from ..utils.channel_cache import SharedChannelStore
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
 from ..utils.tile_scheduler import TileScheduler
-from ..utils.tile_prefetch import TilePrefetcher
 from ..utils.tile_strategy import suggest_tile_strategy
 from .cellpose_worker import load_stardist_model
 from .mesmer_worker import run_mesmer_on_channel_source, run_mesmer_on_fused_tile
@@ -930,6 +929,14 @@ class SegmentMergeWorker(QThread):
             pass
         return metrics
 
+    @staticmethod
+    def _close_tile_scheduler(scheduler):
+        try:
+            if scheduler is not None:
+                scheduler.close()
+        except Exception:
+            pass
+
     def _step2_engine_meta(self):
         cache = {}
         try:
@@ -1670,13 +1677,13 @@ class SegmentMergeWorker(QThread):
         tile_stats = []
         prefetcher = None
         if self._prefetch_enabled():
-            prefetcher = TilePrefetcher(
-                tiles,
+            prefetcher = scheduler.attach_prefetcher(
                 lambda idx, t: self._prepare_tile_payload(
                     zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                     is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
                 ),
-                prefetch_queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
+                enabled=True,
+                queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                 logger=log,
                 profiler=self.step2_profiler,
             )
@@ -1685,6 +1692,7 @@ class SegmentMergeWorker(QThread):
         with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(zarr_path)):
           for i, tile in enumerate(tiles):
             if self._stop:
+                self._close_tile_scheduler(scheduler)
                 del mmap, dapi_mmap
                 return 0
 
@@ -1723,8 +1731,8 @@ class SegmentMergeWorker(QThread):
             self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
             _t = time.perf_counter()
-            if prefetcher is not None:
-                payload = prefetcher.get(
+            if scheduler.prefetcher is not None:
+                payload = scheduler.get_payload(
                     i,
                     sync_load_fn=lambda idx, t: self._prepare_tile_payload(
                         zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
@@ -1820,6 +1828,7 @@ class SegmentMergeWorker(QThread):
 
             if self._stop:
                 del local_mask, dapi_own
+                self._close_tile_scheduler(scheduler)
                 mmap.flush()
                 dapi_mmap.flush()
                 del mmap, dapi_mmap
@@ -1989,10 +1998,10 @@ class SegmentMergeWorker(QThread):
             self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
             gc.collect()
             self._drop_caches()
-        if prefetcher is not None:
-            metrics = prefetcher.snapshot_metrics()
+        if scheduler.prefetcher is not None:
+            metrics = scheduler.prefetch_metrics()
             self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
-            prefetcher.close()
+        self._close_tile_scheduler(scheduler)
 
         # ── Flush memmaps ─────────────────────────────────────────────
         with self.step2_profiler.time_stage("merge_all_tiles", method=self.method, output_path=self._abs(mmap_path)):
@@ -2497,13 +2506,13 @@ class SegmentMergeWorker(QThread):
             tile_stats = []
             prefetcher = None
             if self._prefetch_enabled():
-                prefetcher = TilePrefetcher(
-                    tiles,
+                prefetcher = scheduler.attach_prefetcher(
                     lambda idx, t: self._prepare_tile_payload(
                         self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                         is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=None,
                     ),
-                    prefetch_queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
+                    enabled=True,
+                    queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                     logger=log,
                     profiler=self.step2_profiler,
                 )
@@ -2513,6 +2522,7 @@ class SegmentMergeWorker(QThread):
               for i, tile in enumerate(tiles):
                 if self._stop:
                     self.error.emit('Stopped by user.')
+                    self._close_tile_scheduler(scheduler)
                     return
 
                 row, col            = tile.row, tile.col
@@ -2548,8 +2558,8 @@ class SegmentMergeWorker(QThread):
                 self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
                 _t = time.perf_counter()
-                if prefetcher is not None:
-                    payload = prefetcher.get(
+                if scheduler.prefetcher is not None:
+                    payload = scheduler.get_payload(
                         i,
                         sync_load_fn=lambda idx, t: self._prepare_tile_payload(
                             self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
@@ -2816,10 +2826,10 @@ class SegmentMergeWorker(QThread):
                 self._drop_caches()
                 log.debug("  [MEM after drop_caches] " + self._mem_snapshot())
 
-            if prefetcher is not None:
-                metrics = prefetcher.snapshot_metrics()
+            if scheduler.prefetcher is not None:
+                metrics = scheduler.prefetch_metrics()
                 self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
-                prefetcher.close()
+            self._close_tile_scheduler(scheduler)
 
             if self.recovery_npy_dir is None:
                 del model

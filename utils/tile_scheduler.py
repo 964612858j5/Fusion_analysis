@@ -28,6 +28,8 @@ class TileScheduler:
         self.overlap_px = int(overlap_px)
         self.out_prefix = str(out_prefix or "")
         self.merge_policy = merge_policy or CentroidOwnershipMergePolicy()
+        self.prefetcher = None
+        self.prefetch_enabled = False
         self.tile_h, self.tile_w, self.tiles = self._build_tiles()
 
     def _build_tiles(self):
@@ -69,3 +71,52 @@ class TileScheduler:
 
     def as_legacy_tiles(self):
         return [tile.as_legacy_dict() for tile in self.tiles]
+
+    def attach_prefetcher(self, load_fn, enabled=True, queue_size=2, logger=None, profiler=None):
+        """
+        Attach a TilePrefetcher to this scheduler.
+
+        load_fn signature:
+            load_fn(index, tile) -> payload
+
+        This method only wires TilePrefetcher to scheduler.tiles.
+        It does not define payload loading itself.
+        """
+        if not enabled:
+            self.prefetcher = None
+            self.prefetch_enabled = False
+            return None
+
+        from .tile_prefetch import TilePrefetcher
+        self.prefetcher = TilePrefetcher(
+            self.tiles,
+            load_fn,
+            prefetch_queue_size=queue_size,
+            logger=logger,
+            profiler=profiler,
+        )
+        self.prefetch_enabled = self.prefetcher is not None
+        return self.prefetcher
+
+    def get_payload(self, index, sync_load_fn=None):
+        """
+        Return payload for tile index using prefetcher if attached.
+        If no prefetcher is attached, call sync_load_fn(index, tile).
+        """
+        tile = self.tiles[index]
+        if self.prefetcher is not None:
+            return self.prefetcher.get(index, sync_load_fn=sync_load_fn)
+        if sync_load_fn is None:
+            raise RuntimeError("TileScheduler.get_payload requires sync_load_fn when no prefetcher is attached")
+        return sync_load_fn(index, tile)
+
+    def prefetch_metrics(self):
+        if self.prefetcher is None:
+            return {}
+        return self.prefetcher.snapshot_metrics()
+
+    def close(self):
+        if self.prefetcher is not None:
+            self.prefetcher.close()
+            self.prefetcher = None
+            self.prefetch_enabled = False

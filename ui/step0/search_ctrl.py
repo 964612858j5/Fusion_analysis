@@ -90,15 +90,18 @@ class SearchCtrlPanel(QWidget):
         self._setup_ui()
 
     def sizeHint(self):
-        return QtCore.QSize(420, 460)
+        hint = self.layout().sizeHint() if self.layout() is not None else QtCore.QSize(420, 460)
+        return QtCore.QSize(max(420, hint.width()), max(460, hint.height()))
 
     def minimumSizeHint(self):
-        return QtCore.QSize(300, 390)
+        hint = self.layout().minimumSize() if self.layout() is not None else QtCore.QSize(300, 390)
+        return QtCore.QSize(max(300, hint.width()), max(390, hint.height()))
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(5)
+        lay.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
 
         method_box = QGroupBox("Segmentation Method")
         method_box.setMinimumHeight(86)
@@ -498,17 +501,14 @@ class SearchCtrlPanel(QWidget):
         )
         self.btn_patch_preview.clicked.connect(self._emit_patch_preview)
         ml.addWidget(self.btn_patch_preview)
-        self._manual_params_scroll = QtWidgets.QScrollArea()
-        self._manual_params_scroll.setWidgetResizable(True)
-        self._manual_params_scroll.setFrameShape(QFrame.NoFrame)
-        self._manual_params_scroll.setMinimumHeight(180)
-        self._manual_params_scroll.setMaximumHeight(300)
+        self._manual_params_scroll = man_box
+        self._manual_params_scroll.setMinimumHeight(0)
+        self._manual_params_scroll.setMaximumHeight(16777215)
         self._manual_params_scroll.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.MinimumExpanding,
         )
-        self._manual_params_scroll.setWidget(man_box)
-        lay.addWidget(self._manual_params_scroll)
+        lay.addWidget(man_box)
         self._on_method_changed()
 
         # ── Progress ──────────────────────────────────────────────────
@@ -600,11 +600,11 @@ class SearchCtrlPanel(QWidget):
 
     def _build_hq2_params_panel(self):
         self.hq2_params_panel = QGroupBox("Cellpose nuclei + HQ2 parameters")
-        self.hq2_params_panel.setMinimumHeight(210)
-        self.hq2_params_panel.setMaximumHeight(350)
+        self.hq2_params_panel.setMinimumHeight(0)
+        self.hq2_params_panel.setMaximumHeight(16777215)
         self.hq2_params_panel.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.MinimumExpanding,
         )
         self.hq2_params_panel.setStyleSheet(
             "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
@@ -614,18 +614,9 @@ class SearchCtrlPanel(QWidget):
         outer.setContentsMargins(6, 8, 6, 6)
         outer.setSpacing(5)
 
-        scroll = QtWidgets.QScrollArea()
-        self._hq2_params_scroll = scroll
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setMinimumHeight(180)
-        scroll.setMaximumHeight(320)
-        scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Preferred,
-        )
+        self._hq2_params_scroll = None
         content = QWidget()
-        content.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        content.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.MinimumExpanding)
         form = QVBoxLayout(content)
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(4)
@@ -637,40 +628,50 @@ class SearchCtrlPanel(QWidget):
             w.setDecimals(dec)
             w.setValue(val)
             w.setStyleSheet("font-size:11px;")
-            w.setMinimumHeight(24)
+            w.setMinimumHeight(26)
             w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             return w
 
         def section(title):
             box = QGroupBox(title)
-            box.setMinimumHeight(24)
-            box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            box.setMinimumHeight(30)
+            box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.MinimumExpanding)
             box.setStyleSheet(
                 "QGroupBox{border:1px solid #444;border-radius:3px;"
                 "margin-top:5px;color:#ccc;font-size:10px;font-weight:bold;}"
             )
-            grid = QtWidgets.QGridLayout(box)
-            grid.setContentsMargins(6, 8, 6, 5)
-            grid.setHorizontalSpacing(6)
-            grid.setVerticalSpacing(2)
+            rows = QVBoxLayout(box)
+            rows.setContentsMargins(6, 10, 6, 6)
+            rows.setSpacing(2)
             form.addWidget(box)
-            return box, grid
+            return box, rows
 
-        def add_row(grid, row, label, widget):
+        def add_param_row(layout, label, widget):
+            row_widget = QWidget()
+            row_widget.setObjectName("hq2_param_row")
+            row_widget.setMinimumHeight(30)
+            row_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(6)
             lbl = QLabel(label)
-            lbl.setMinimumWidth(132)
-            lbl.setMinimumHeight(24)
+            lbl.setMinimumWidth(190)
+            lbl.setMinimumHeight(26)
             lbl.setStyleSheet("font-size:10px;color:#bbb;")
-            widget.setMinimumHeight(24)
+            widget.setMinimumHeight(26)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-            grid.addWidget(lbl, row, 0)
-            grid.addWidget(widget, row, 1)
+            row_layout.addWidget(lbl)
+            row_layout.addWidget(widget, stretch=1)
+            layout.addWidget(row_widget)
             return widget
+
+        def add_row(layout, row, label, widget):
+            return add_param_row(layout, label, widget)
 
         def collapse_section(box, collapsed=True):
             for child in box.findChildren(QWidget):
                 child.setVisible(not collapsed)
-            box.setMaximumHeight(24 if collapsed else 16777215)
+            box.setMaximumHeight(30 if collapsed else 16777215)
 
         def make_collapsible(box, collapsed=True):
             box.setCheckable(True)
@@ -775,8 +776,7 @@ class SearchCtrlPanel(QWidget):
         for optional_box in (imagej_box, macro_box):
             make_collapsible(optional_box, collapsed=True)
 
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
+        outer.addWidget(content)
         self.hq2_params_panel.setVisible(False)
         print("[HQ2-UI] parameter widgets created=True")
 
@@ -1147,6 +1147,23 @@ class SearchCtrlPanel(QWidget):
             params.update(self.collect_mesmer_params())
         return {"method": method, "params": params}
 
+    def _log_params_layout(self, method):
+        scroll = getattr(self, "_method_params_scroll", None)
+        bar = scroll.verticalScrollBar() if scroll is not None else None
+        hq2_rows = len(getattr(self, "_hq2_param_rows", []) or [])
+        sample_widget = None
+        if getattr(self, "hq2_params_panel", None) is not None:
+            children = self.hq2_params_panel.findChildren(QWidget)
+            sample_widget = next((w for w in children if w.objectName() == "hq2_param_row"), None)
+        print(f"[Step1-Params] method={method}")
+        print(f"[Step1-Params] method_params_scroll exists={scroll is not None}")
+        print(f"[Step1-Params] scroll_area size={scroll.size().width()}x{scroll.size().height() if scroll is not None else 0}" if scroll is not None else "[Step1-Params] scroll_area size=None")
+        print(f"[Step1-Params] content sizeHint={self.sizeHint().width()}x{self.sizeHint().height()}")
+        print(f"[Step1-Params] vertical scrollbar range={bar.minimum()}..{bar.maximum()}" if bar is not None else "[Step1-Params] vertical scrollbar range=None")
+        print(f"[Step1-Params] hq2 params rows={hq2_rows}")
+        if sample_widget is not None:
+            print(f"[Step1-Params] row height min/sizeHint={sample_widget.minimumHeight()}/{sample_widget.sizeHint().height()}")
+
     def _selected_method(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         return method
@@ -1214,12 +1231,12 @@ class SearchCtrlPanel(QWidget):
                     w.setVisible(False)
         if is_hq2:
             self._show_hq2_params_panel()
-            self._manual_params_scroll.setMinimumHeight(96)
-            self._manual_params_scroll.setMaximumHeight(150)
+            self._manual_params_scroll.setMinimumHeight(0)
+            self._manual_params_scroll.setMaximumHeight(16777215)
         else:
             self._hide_hq2_params_panel()
-            self._manual_params_scroll.setMinimumHeight(180)
-            self._manual_params_scroll.setMaximumHeight(300)
+            self._manual_params_scroll.setMinimumHeight(0)
+            self._manual_params_scroll.setMaximumHeight(16777215)
         if getattr(self, "mesmer_params_panel", None) is not None:
             self.mesmer_params_panel.setVisible(is_mesmer)
         self._expand_dist.setEnabled(is_expansion)
@@ -1258,6 +1275,9 @@ class SearchCtrlPanel(QWidget):
         print(f"[Step1] phase1_required={is_cellpose}")
         print(f"[Step1] mode switched={method}")
         print("[Step1] layout stable=True")
+        if method == CELLPOSE_NUCLEI_HQ2:
+            self._log_params_layout(method)
+
         self.method_changed.emit(method)
 
 

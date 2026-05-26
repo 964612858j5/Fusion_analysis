@@ -431,12 +431,14 @@ class MainWindow(QMainWindow):
         method_params_scroll = QtWidgets.QScrollArea()
         method_params_scroll.setWidgetResizable(True)
         method_params_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        method_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        method_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         method_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        method_params_scroll.viewport().setAutoFillBackground(False)
         method_params_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._step1_method_params_scroll = method_params_scroll
 
         self.search = SearchCtrlPanel()
+        self.search._method_params_scroll = method_params_scroll
         self.search.setMinimumHeight(390)
         self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.search.run_p1.connect(self._run_p1)

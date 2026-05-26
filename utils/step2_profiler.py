@@ -65,6 +65,7 @@ class Step2Profiler:
             self._created_at = datetime.now().isoformat()
             self._peak_rss_mb = None
             self._peak_gpu_mb = None
+            self._runtime_diagnosis = {}
             os.makedirs(self.output_dir, exist_ok=True)
         except Exception:
             self.enabled = False
@@ -236,6 +237,8 @@ class Step2Profiler:
             total_runtime = max(0.0, time.perf_counter() - self._started_at)
             self.log_tile_stage(None, "total_runtime", total_runtime)
             summary = self._summary(total_runtime)
+            if self._runtime_diagnosis:
+                summary["runtime_diagnosis"] = self._jsonable(self._runtime_diagnosis)
             payload = {
                 "version": 1,
                 "run_id": self.run_id,
@@ -288,9 +291,44 @@ class Step2Profiler:
             lines.append(f"io_hidden_by_prefetch={summary.get('io_hidden_by_prefetch_seconds', 0.0):.1f}s")
             lines.append(f"gpu_idle_estimate={summary.get('gpu_idle_estimate_seconds', 0.0):.1f}s")
             lines.append(f"suspected_bottleneck={summary.get('suspected_bottleneck') or 'unknown'}")
+            diagnosis = summary.get("runtime_diagnosis") or {}
+            if diagnosis:
+                lines.append("")
+                lines.append("Runtime diagnosis:")
+                lines.append(f"backend_runtime_device = {diagnosis.get('backend_runtime_device') or 'unknown'}")
+                lines.append(f"likely_gpu_inference = {bool(diagnosis.get('likely_gpu_inference'))}")
+                lines.append(f"likely_cpu_fallback = {bool(diagnosis.get('likely_cpu_fallback'))}")
+                lines.append(f"actual_cuda_execution = {bool(diagnosis.get('actual_cuda_execution'))}")
+                lines.append(f"Cellpose requested GPU = {diagnosis.get('cellpose_requested_gpu', 'unknown')}")
+                lines.append(f"Cellpose actual device = {diagnosis.get('cellpose_actual_device') or 'unknown'}")
+                lines.append(f"GPU morphology available = {diagnosis.get('gpu_morphology_available', 'unknown')}")
+                lines.append(f"CuPy smoke test = {diagnosis.get('cupy_smoke_test') or 'unknown'}")
+                lines.append(f"cuCIM smoke test = {diagnosis.get('cucim_smoke_test') or 'unknown'}")
+                lines.append(f"likely_io_bottleneck = {bool(diagnosis.get('likely_io_bottleneck'))}")
+                lines.append(f"likely_merge_bottleneck = {bool(diagnosis.get('likely_merge_bottleneck'))}")
+                if diagnosis.get("gpu_peak_memory_mb") is not None:
+                    lines.append(f"gpu_peak_memory = {float(diagnosis.get('gpu_peak_memory_mb') or 0.0) / 1024.0:.1f}GB")
+                if diagnosis.get("gpu_peak_utilization") is not None:
+                    lines.append(f"gpu_peak_utilization = {float(diagnosis.get('gpu_peak_utilization') or 0.0):.0f}%")
+                if diagnosis.get("cpu_peak") is not None:
+                    lines.append(f"cpu_peak = {float(diagnosis.get('cpu_peak') or 0.0):.0f}%")
+                reasons = diagnosis.get("possible_reasons") or []
+                if reasons:
+                    lines.append("")
+                    lines.append("Possible reasons:")
+                    for reason in reasons:
+                        lines.append(f"- {reason}")
             return "\n".join(lines) + "\n"
         except Exception:
             return "Summary:\nsuspected_bottleneck=unknown\n"
+
+    def set_runtime_diagnosis(self, diagnosis):
+        if not getattr(self, "enabled", False):
+            return
+        try:
+            self._runtime_diagnosis = self._jsonable(dict(diagnosis or {}))
+        except Exception:
+            self._runtime_diagnosis = {}
 
     def _summary(self, total_runtime):
         stage_totals = dict(sorted(self._stage_totals.items(), key=lambda kv: kv[1], reverse=True))

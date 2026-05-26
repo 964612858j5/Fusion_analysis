@@ -46,6 +46,7 @@ from ..utils.roi_project import (
     update_roi_segmentation_run,
 )
 from ..utils.step2_profiler import Step2Profiler
+from ..utils.runtime_resource_monitor import RuntimeResourceMonitor
 from ..utils.channel_cache import SharedChannelStore
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
 from ..utils.tile_scheduler import TileScheduler
@@ -117,6 +118,8 @@ class SegmentMergeWorker(QThread):
         self._peak_ram_bytes  = 0
         self._peak_vram_bytes = 0
         self._runtime_summary = {}
+        self._runtime_monitor = None
+        self._runtime_stage = "startup"
         self._resource_samples_path = ""
         self._runtime_partial_path = ""
         self._resource_sample_header_written = False
@@ -138,6 +141,8 @@ class SegmentMergeWorker(QThread):
             logger=self._logger,
         )
         self._tile_strategy_info = {}
+        self._merge_shadow_mismatch_count = 0
+        self._merge_shadow_compare_count = 0
 
     def _step2_profiling_enabled(self):
         env = str(os.environ.get("FUSION_STEP2_PROFILE", "")).strip().lower()
@@ -628,6 +633,14 @@ class SegmentMergeWorker(QThread):
             "peak_vram_bytes": int(self._peak_vram_bytes),
             "peak_vram": self._format_bytes(self._peak_vram_bytes),
         }
+        if self._runtime_monitor is not None:
+            try:
+                self._runtime_monitor.set_stage(self._runtime_stage)
+                resource_sample = self._runtime_monitor.sample(stage=self._runtime_stage)
+                sample.update(resource_sample)
+            except Exception as exc:
+                if self._logger:
+                    self._logger.debug("Runtime resource monitor sample failed: %s", exc)
         self._write_runtime_sample(sample)
         return sample
 
@@ -647,6 +660,22 @@ class SegmentMergeWorker(QThread):
                 "vram",
                 "peak_vram_bytes",
                 "peak_vram",
+                "backend",
+                "stage",
+                "cpu_percent",
+                "ram_used_gb",
+                "ram_total_gb",
+                "gpu_available",
+                "gpu_name",
+                "gpu_utilization_percent",
+                "gpu_memory_used_mb",
+                "gpu_memory_total_mb",
+                "gpu_temperature",
+                "backend_runtime_device",
+                "likely_gpu_inference",
+                "likely_cpu_fallback",
+                "likely_io_bottleneck",
+                "likely_merge_bottleneck",
             ]
             write_header = (
                 not self._resource_sample_header_written
@@ -681,6 +710,7 @@ class SegmentMergeWorker(QThread):
                     "peak_ram": self._format_bytes(self._peak_ram_bytes),
                     "peak_vram_bytes": int(self._peak_vram_bytes),
                     "peak_vram": self._format_bytes(self._peak_vram_bytes),
+                    "runtime_diagnosis": self._runtime_monitor.diagnose() if self._runtime_monitor is not None else {},
                     "updated_at": datetime.now().isoformat(),
                 }
                 tmp_path = self._runtime_partial_path + ".tmp"
@@ -700,6 +730,14 @@ class SegmentMergeWorker(QThread):
         self._peak_ram_bytes = 0
         self._peak_vram_bytes = 0
         self._runtime_summary = {}
+        self._runtime_monitor = None
+        self._runtime_stage = "startup"
+        self._runtime_monitor = RuntimeResourceMonitor(
+            backend=self.method,
+            logger=self._logger,
+            seg_config=self.seg_config,
+        )
+        self._runtime_monitor.set_stage(self._runtime_stage)
         self._resource_samples_path = os.path.join(self.output_dir, "resource_samples.csv")
         self._runtime_partial_path = os.path.join(self.output_dir, "runtime_partial.json")
         self._resource_sample_header_written = False
@@ -734,6 +772,7 @@ class SegmentMergeWorker(QThread):
         elapsed = 0.0
         if self._run_started_at is not None:
             elapsed = max(0.0, self._run_finished_at - self._run_started_at)
+        runtime_diagnosis = self._runtime_monitor.diagnose() if self._runtime_monitor is not None else {}
         self._runtime_summary = {
             "elapsed_seconds": elapsed,
             "elapsed": self._format_duration(elapsed),
@@ -743,6 +782,7 @@ class SegmentMergeWorker(QThread):
             "peak_vram": self._format_bytes(self._peak_vram_bytes),
             "resource_samples_csv": self._abs(self._resource_samples_path) if self._resource_samples_path else "",
             "runtime_partial_json": self._abs(self._runtime_partial_path) if self._runtime_partial_path else "",
+            "runtime_diagnosis": runtime_diagnosis,
         }
         if self._runtime_partial_path:
             try:
@@ -779,7 +819,20 @@ class SegmentMergeWorker(QThread):
             f"peak_VRAM={self._runtime_summary['peak_vram']}  "
             f"samples={self._runtime_summary['resource_samples_csv']}"
         )
+        try:
+            if getattr(self, "step2_profiler", None) is not None:
+                self.step2_profiler.set_runtime_diagnosis(runtime_diagnosis)
+        except Exception:
+            pass
         return dict(self._runtime_summary)
+
+    def _set_runtime_stage(self, stage):
+        self._runtime_stage = str(stage or "unknown")
+        try:
+            if self._runtime_monitor is not None:
+                self._runtime_monitor.set_stage(self._runtime_stage)
+        except Exception:
+            pass
 
     def runtime_summary(self):
         return dict(self._runtime_summary or {})
@@ -937,6 +990,74 @@ class SegmentMergeWorker(QThread):
         except Exception:
             pass
 
+    def _merge_policy_shadow_compare(
+        self,
+        scheduler,
+        local_mask,
+        legacy_remapped,
+        legacy_keep_labels,
+        global_id_offset_before,
+        tile,
+        profile_tile_id,
+        logger,
+    ):
+        if scheduler is None or not self._config_bool("enable_merge_policy_shadow_compare", True):
+            return True
+        try:
+            policy = scheduler.merge_policy
+            policy_keep_labels = policy.filter_owned_labels(local_mask, tile)
+            policy_remapped, policy_offset_after, policy_meta = policy.relabel_owned_region(
+                local_mask,
+                policy_keep_labels,
+                global_id_offset_before,
+            )
+            if legacy_remapped is None:
+                legacy_remapped = np.zeros_like(policy_remapped, dtype=np.uint32)
+            legacy_own = policy.crop_valid_region(legacy_remapped, tile, copy=True)
+            policy_own = policy.crop_valid_region(policy_remapped, tile, copy=True)
+            labels_equal = list(legacy_keep_labels or []) == list(policy_keep_labels or [])
+            count_equal = len(legacy_keep_labels or []) == len(policy_keep_labels or [])
+            max_equal = int(legacy_own.max()) == int(policy_own.max())
+            shape_equal = tuple(legacy_own.shape) == tuple(policy_own.shape)
+            array_equal = np.array_equal(legacy_own, policy_own)
+            equal = bool(labels_equal and count_equal and max_equal and shape_equal and array_equal)
+            self._merge_shadow_compare_count += 1
+            if not equal:
+                self._merge_shadow_mismatch_count += 1
+                debug_dir = os.path.join(self.output_dir, "debug_merge_compare")
+                os.makedirs(debug_dir, exist_ok=True)
+                safe_tile = str(profile_tile_id).replace(os.sep, "_").replace(":", "_")
+                np.save(os.path.join(debug_dir, f"tile_{safe_tile}_legacy_own.npy"), legacy_own)
+                np.save(os.path.join(debug_dir, f"tile_{safe_tile}_policy_own.npy"), policy_own)
+                np.save(os.path.join(debug_dir, f"tile_{safe_tile}_local_mask.npy"), np.asarray(local_mask))
+                msg = (
+                    f"[MergePolicy] mismatch tile={profile_tile_id} "
+                    f"legacy_labels={list(legacy_keep_labels or [])} "
+                    f"policy_labels={list(policy_keep_labels or [])}"
+                )
+                print(msg)
+                if logger:
+                    logger.warning(msg)
+            else:
+                msg = f"[MergePolicy] tile={profile_tile_id} equal=True"
+                if logger:
+                    logger.info(msg)
+            self.step2_profiler.log_tile_stage(
+                profile_tile_id,
+                "merge_policy_shadow_compare",
+                0.0,
+                merge_shadow_equal=1 if equal else 0,
+                merge_shadow_mismatch_count=int(self._merge_shadow_mismatch_count),
+                policy_global_id_offset_after=int(policy_offset_after),
+                policy_labels_count=int(policy_meta.get("n_raw", 0)),
+                policy_kept_labels_count=int(policy_meta.get("n_kept", 0)),
+            )
+            return equal
+        except Exception:
+            if logger:
+                logger.warning("[MergePolicy] shadow compare failed:\n%s", traceback.format_exc())
+            return False
+
     def _step2_engine_meta(self):
         cache = {}
         try:
@@ -946,6 +1067,12 @@ class SegmentMergeWorker(QThread):
         return {
             **dict(self._tile_strategy_info or {}),
             "channel_cache": cache,
+            "merge_policy": {
+                "shadow_compare_enabled": self._config_bool("enable_merge_policy_shadow_compare", True),
+                "primary_enabled": self._config_bool("enable_merge_policy_primary", False),
+                "shadow_compare_count": int(self._merge_shadow_compare_count),
+                "shadow_mismatch_count": int(self._merge_shadow_mismatch_count),
+            },
         }
 
     def _record_engine_metrics(self):
@@ -1402,7 +1529,31 @@ class SegmentMergeWorker(QThread):
             if device is None:
                 raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
             from cellpose import models as cp_models
-            return {"cellpose": cp_models.CellposeModel(device=device)}
+            requested_use_gpu = str(self.seg_config.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
+            torch_cuda_available = False
+            torch_cuda_version = "unknown"
+            gpu_check_result = "not_run"
+            try:
+                import torch
+                torch_cuda_version = str(getattr(torch.version, "cuda", None))
+                torch_cuda_available = bool(torch.cuda.is_available())
+                gpu_check_result = "torch_cuda_available" if torch_cuda_available else "torch_cuda_unavailable"
+            except Exception as exc:
+                gpu_check_result = f"torch_cuda_check_failed: {exc}"
+            selected_device = str(device)
+            print(f"[Cellpose-GPU] requested_use_gpu={requested_use_gpu}")
+            print(f"[Cellpose-GPU] torch.cuda.is_available={torch_cuda_available}")
+            print(f"[Cellpose-GPU] torch.version.cuda={torch_cuda_version}")
+            print(f"[Cellpose-GPU] device selected={selected_device}")
+            model = cp_models.CellposeModel(device=device)
+            model_device = str(getattr(model, "device", "unknown"))
+            print(f"[Cellpose-GPU] model_device={model_device}")
+            print(f"[Cellpose-GPU] gpu_check_result={gpu_check_result}")
+            if requested_use_gpu and "cuda" not in selected_device.lower() and "cuda" not in model_device.lower():
+                print("[Cellpose-GPU] WARNING: requested GPU but Cellpose is running on CPU.")
+            if self._logger:
+                self._logger.info("[Cellpose-GPU] requested_use_gpu=%s torch_cuda=%s torch.version.cuda=%s selected=%s model_device=%s gpu_check_result=%s", requested_use_gpu, torch_cuda_available, torch_cuda_version, selected_device, model_device, gpu_check_result)
+            return {"cellpose": model}
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
             model_name = self.seg_config.get("model_name", "2D_versatile_fluo")
             model, stardist_normalize, stardist_device = load_stardist_model(
@@ -1430,10 +1581,12 @@ class SegmentMergeWorker(QThread):
                       profile_tile_id=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
+        self._set_runtime_stage("preprocess")
         with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
             tile_f32 = tile_data.astype(np.float32) / 65535.0
 
         if method == CELLPOSE_WHOLECELL_FUSION:
+            self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 masks, _, _ = backend["cellpose"].eval(
                     tile_f32,
@@ -1447,6 +1600,7 @@ class SegmentMergeWorker(QThread):
 
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
         if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+            self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 masks, _, _ = backend["cellpose"].eval(
                     dapi,
@@ -1516,6 +1670,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
+            self._set_runtime_stage("preprocess")
             with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
                 img = backend["stardist_normalize"](dapi, 1, 99.8, axis=(0, 1))
             kwargs = {}
@@ -1523,6 +1678,7 @@ class SegmentMergeWorker(QThread):
                 kwargs["prob_thresh"] = self.seg_config.get("prob_thresh")
             if self.seg_config.get("nms_thresh") is not None:
                 kwargs["nms_thresh"] = self.seg_config.get("nms_thresh")
+            self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 masks, _ = backend["stardist"].predict_instances(img, **kwargs)
             if method == STARDIST_NUCLEI_EXPANSION:
@@ -1534,6 +1690,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 if mesmer_channel_source is not None:
                     result = run_mesmer_on_channel_source(
@@ -1622,6 +1779,8 @@ class SegmentMergeWorker(QThread):
             tiles = list(scheduler.iter_tiles())
         n_tiles = len(scheduler)
         self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
+        if self._config_bool("enable_merge_policy_shadow_compare", True):
+            log.info("[MergePolicy] shadow_compare=enabled")
 
         mmap_path = os.path.join(
             self.output_dir, f'global_mask_{out_prefix}.dat'
@@ -1759,6 +1918,7 @@ class SegmentMergeWorker(QThread):
                     del tile_data
                     continue
                 _t = time.perf_counter()
+                self._set_runtime_stage("model_inference")
                 with self.step2_profiler.time_stage("model_inference", **tile_profile_base):
                     local_mask = np.load(npy_path)
                 stage_seconds["model_inference"] = time.perf_counter() - _t
@@ -1768,6 +1928,7 @@ class SegmentMergeWorker(QThread):
                     mesmer_channel_source = mesmer_channel_source_prefetched
                     _t = time.perf_counter()
                     if hq_marker_channels is None and mesmer_channel_source is None:
+                        self._set_runtime_stage("read_tile")
                         with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
                             if is_hq and not is_mesmer_guided:
                                 hq_marker_channels = self._read_hq_marker_channels(
@@ -1873,6 +2034,16 @@ class SegmentMergeWorker(QThread):
 
             n_raw = int(local_mask.max())
             if n_raw == 0:
+                self._merge_policy_shadow_compare(
+                    scheduler,
+                    local_mask,
+                    None,
+                    [],
+                    global_id_offset,
+                    tile,
+                    profile_tile_id,
+                    log,
+                )
                 self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                 stage_seconds["_profile_tile_id"] = profile_tile_id
                 self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -1928,6 +2099,17 @@ class SegmentMergeWorker(QThread):
                         tile_meta.update({"row": row, "col": col, "out_prefix": out_prefix})
                         self._hq2_tile_metadata.append(tile_meta)
             stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
+            # MERGE POLICY PATH: shadow compare only; legacy remains authoritative.
+            self._merge_policy_shadow_compare(
+                scheduler,
+                local_mask,
+                remapped if keep_labels else None,
+                keep_labels,
+                global_id_offset,
+                tile,
+                profile_tile_id,
+                log,
+            )
 
             if not keep_labels:
                 self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
@@ -1940,6 +2122,7 @@ class SegmentMergeWorker(QThread):
                 continue
             del local_mask, cy, cx
 
+            # LEGACY MERGE PATH: authoritative Step2 merge behavior.
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("merge_or_write", labels_count=len(keep_labels), **tile_profile_base):
                 dst = mmap[ry0:ry1, rx0:rx1]
@@ -2265,6 +2448,8 @@ class SegmentMergeWorker(QThread):
                     use_gpu = str(self.seg_config.get("use_gpu", "auto")).lower() != "cpu"
                     device = None
                 model   = self._init_segmentation_backend(use_gpu, device)
+                if self._runtime_monitor is not None:
+                    self._runtime_monitor.set_backend_context(backend=self.method, backend_obj=model, seg_config=self.seg_config)
             else:
                 model   = None
                 use_gpu = False
@@ -2446,6 +2631,8 @@ class SegmentMergeWorker(QThread):
                 tiles = list(scheduler.iter_tiles())
             n_tiles = len(scheduler)
             self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
+            if self._config_bool("enable_merge_policy_shadow_compare", True):
+                log.info("[MergePolicy] shadow_compare=enabled")
 
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -2576,6 +2763,7 @@ class SegmentMergeWorker(QThread):
                         )
                         continue
                     _t = time.perf_counter()
+                    self._set_runtime_stage("model_inference")
                     with self.step2_profiler.time_stage("model_inference", **tile_profile_base):
                         local_mask = np.load(npy_path)
                     stage_seconds["model_inference"] = time.perf_counter() - _t
@@ -2585,6 +2773,7 @@ class SegmentMergeWorker(QThread):
                         mesmer_channel_source = mesmer_channel_source_prefetched
                         _t = time.perf_counter()
                         if hq_marker_channels is None and mesmer_channel_source is None:
+                            self._set_runtime_stage("read_tile")
                             with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
                                 if is_hq and not is_mesmer_guided:
                                     hq_marker_channels = self._read_hq_marker_channels(
@@ -2679,6 +2868,16 @@ class SegmentMergeWorker(QThread):
 
                 n_raw = int(local_mask.max())
                 if n_raw == 0:
+                    self._merge_policy_shadow_compare(
+                        scheduler,
+                        local_mask,
+                        None,
+                        [],
+                        global_id_offset,
+                        tile,
+                        profile_tile_id,
+                        log,
+                    )
                     self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -2705,6 +2904,16 @@ class SegmentMergeWorker(QThread):
                 stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
 
                 if not keep_labels:
+                    self._merge_policy_shadow_compare(
+                        scheduler,
+                        local_mask,
+                        None,
+                        keep_labels,
+                        global_id_offset,
+                        tile,
+                        profile_tile_id,
+                        log,
+                    )
                     self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -2745,8 +2954,20 @@ class SegmentMergeWorker(QThread):
                         tile_meta.update({"row": row, "col": col, "out_prefix": ""})
                         self._hq2_tile_metadata.append(tile_meta)
                 stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
+                # MERGE POLICY PATH: shadow compare only; legacy remains authoritative.
+                self._merge_policy_shadow_compare(
+                    scheduler,
+                    local_mask,
+                    remapped,
+                    keep_labels,
+                    global_id_offset,
+                    tile,
+                    profile_tile_id,
+                    log,
+                )
                 del local_mask, lut, cy, cx
 
+                # LEGACY MERGE PATH: authoritative Step2 merge behavior.
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("merge_or_write", labels_count=len(keep_labels), **tile_profile_base):
                     dst = mmap[ry0:ry1, rx0:rx1]

@@ -418,6 +418,11 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
         use_gpu = torch.cuda.is_available()
         device = torch.device("cuda" if use_gpu else "cpu")
+        requested_use_gpu = any(str(normalize_segmentation_config(t[2]).get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"} for t in tasks)
+        print(f"[Cellpose-GPU] requested_use_gpu={requested_use_gpu}")
+        print(f"[Cellpose-GPU] torch.cuda.is_available={use_gpu}")
+        print(f"[Cellpose-GPU] torch.version.cuda={getattr(torch.version, 'cuda', None)}")
+        print(f"[Cellpose-GPU] device selected={device}")
         if use_gpu:
             free, total_vram = torch.cuda.mem_get_info(0)
             result_queue.put({
@@ -486,12 +491,12 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 fused_f32 = np.asarray(fused, dtype=np.float32) / 65535.0
                 cyto = np.ascontiguousarray(fused_f32[:, :, 0])
                 nuc = np.ascontiguousarray(fused_f32[:, :, 1])
-                seg_img = np.stack([cyto, nuc], axis=-1).astype(np.float32, copy=False)
+                seg_img = np.stack([cyto, cyto, nuc], axis=-1).astype(np.float32, copy=False)
                 seg_img = np.ascontiguousarray(seg_img)
-                segmentation_input = "fusion_plus_dapi"
-                cellpose_channels = [1, 2]
-                fusion_channel_order = ["cyto_or_fusion", "DAPI"]
-                print("[Worker] segmentation_input=fusion_plus_dapi")
+                segmentation_input = "cpsam_rgb_fusion_fusion_dapi"
+                cellpose_channels = None
+                fusion_channel_order = ["fusion", "fusion", "DAPI"]
+                print("[Worker] segmentation_input=cpsam_rgb_fusion_fusion_dapi")
                 print(f"[Worker] seg_img shape={seg_img.shape}")
                 print(f"[Worker] cyto range=[{_range_text(cyto)}]")
                 print(f"[Worker] nuc range=[{_range_text(nuc)}]")
@@ -524,6 +529,11 @@ def run_cellpose_process(args, result_queue, stop_flag):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
+                        model_device = str(getattr(cellpose_model, "device", "unknown"))
+                        print(f"[Cellpose-GPU] model_device={model_device}")
+                        print(f"[Cellpose-GPU] gpu_check_result={'torch_cuda_available' if use_gpu else 'torch_cuda_unavailable'}")
+                        if requested_use_gpu and "cuda" not in str(device).lower() and "cuda" not in model_device.lower():
+                            print("[Cellpose-GPU] WARNING: requested GPU but Cellpose is running on CPU.")
                     eval_kwargs = {
                         "diameter": params.get("diameter"),
                         "flow_threshold": params.get("flow_threshold", 0.4),
@@ -532,7 +542,6 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         "do_3D": False,
                     }
                     if method == CELLPOSE_WHOLECELL_FUSION:
-                        eval_kwargs["channels"] = cellpose_channels
                         eval_kwargs["channel_axis"] = -1
                     masks_out, _, _ = cellpose_model.eval(seg_img, **eval_kwargs)
                     if method == CELLPOSE_NUCLEI_EXPANSION:
@@ -783,6 +792,11 @@ class CellposeWorker(QThread):
 
             use_gpu = torch.cuda.is_available()
             device  = torch.device("cuda" if use_gpu else "cpu")
+            requested_use_gpu = any(str(normalize_segmentation_config(t[2]).get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"} for t in self.tasks)
+            print(f"[Cellpose-GPU] requested_use_gpu={requested_use_gpu}")
+            print(f"[Cellpose-GPU] torch.cuda.is_available={use_gpu}")
+            print(f"[Cellpose-GPU] torch.version.cuda={getattr(torch.version, 'cuda', None)}")
+            print(f"[Cellpose-GPU] device selected={device}")
             if use_gpu:
                 free, total_vram = torch.cuda.mem_get_info(0)
                 print(f"[Cellpose] GPU: {torch.cuda.get_device_name(0)}  "
@@ -791,6 +805,11 @@ class CellposeWorker(QThread):
                 print("[Cellpose] ⚠ CUDA not available, using CPU (slower)")
             # Cellpose 4.0.1+: model_type is ignored, always loads cpsam
             model = models.CellposeModel(device=device)
+            model_device = str(getattr(model, "device", "unknown"))
+            print(f"[Cellpose-GPU] model_device={model_device}")
+            print(f"[Cellpose-GPU] gpu_check_result={'torch_cuda_available' if use_gpu else 'torch_cuda_unavailable'}")
+            if requested_use_gpu and "cuda" not in str(device).lower() and "cuda" not in model_device.lower():
+                print("[Cellpose-GPU] WARNING: requested GPU but Cellpose is running on CPU.")
             total = len(self.tasks)
 
             for done, (patch_idx, roi, params) in enumerate(self.tasks):
@@ -835,12 +854,11 @@ class CellposeWorker(QThread):
                     if method == CELLPOSE_WHOLECELL_FUSION:
                         cyto = np.ascontiguousarray(fused_f32[:, :, 0])
                         nuc = np.ascontiguousarray(fused_f32[:, :, 1])
-                        seg_img = np.stack([cyto, nuc], axis=-1).astype(np.float32, copy=False)
+                        seg_img = np.stack([cyto, cyto, nuc], axis=-1).astype(np.float32, copy=False)
                         seg_img = np.ascontiguousarray(seg_img)
-                        eval_kwargs["channels"] = [1, 2]
                         eval_kwargs["channel_axis"] = -1
                         print(f"[Worker] method={method}")
-                        print("[Worker] segmentation_input=fusion_plus_dapi")
+                        print("[Worker] segmentation_input=cpsam_rgb_fusion_fusion_dapi")
                         print(f"[Worker] seg_img shape={seg_img.shape}")
                         print(f"[Worker] cyto range=[{_range_text(cyto)}]")
                         print(f"[Worker] nuc range=[{_range_text(nuc)}]")

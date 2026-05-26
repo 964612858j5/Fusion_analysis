@@ -39,17 +39,74 @@ class MergePolicyTests(unittest.TestCase):
 
         self.assertEqual(policy.local_own_bbox(tile), (5, 25, 15, 45))
 
-    def test_policy_placeholders_not_used(self):
+    def test_filter_owned_labels_matches_legacy(self):
         policy = CentroidOwnershipMergePolicy()
         labels = np.zeros((8, 8), dtype=np.uint32)
-        tile = Step2Tile(0, 0, 0, (0, 4, 0, 4), (0, 8, 0, 8), 4)
+        labels[2:4, 2:4] = 1
+        labels[0:2, 0:2] = 2
+        tile = Step2Tile(0, 0, 0, (2, 6, 2, 6), (0, 8, 0, 8), 2)
 
-        with self.assertRaises(NotImplementedError):
-            policy.filter_owned_labels(labels, tile)
-        with self.assertRaises(NotImplementedError):
-            policy.relabel_owned_region(labels, [1], 10)
-        with self.assertRaises(NotImplementedError):
-            policy.merge_into_global(labels, labels, tile, 10)
+        kept = policy.filter_owned_labels(labels, tile)
+
+        self.assertEqual(kept, [1])
+
+    def test_relabel_owned_region(self):
+        policy = CentroidOwnershipMergePolicy()
+        labels = np.zeros((5, 5), dtype=np.uint32)
+        labels[1:3, 1:3] = 1
+        labels[3:5, 3:5] = 2
+
+        relabeled, new_offset, metadata = policy.relabel_owned_region(labels, [2], 10)
+
+        self.assertEqual(new_offset, 11)
+        self.assertEqual(metadata["n_raw"], 2)
+        self.assertEqual(metadata["n_kept"], 1)
+        self.assertEqual(int(relabeled.max()), 11)
+        self.assertTrue(np.all(relabeled[labels == 1] == 0))
+        self.assertTrue(np.all(relabeled[labels == 2] == 11))
+
+    def test_merge_into_global_basic(self):
+        policy = CentroidOwnershipMergePolicy()
+        global_mask = np.zeros((10, 10), dtype=np.uint32)
+        local_labels = np.zeros((8, 8), dtype=np.uint32)
+        local_labels[2:6, 2:6] = 11
+        tile = Step2Tile(0, 0, 0, (2, 6, 2, 6), (0, 8, 0, 8), 2)
+
+        result = policy.merge_into_global(global_mask, local_labels, tile, global_id_offset=10)
+
+        self.assertEqual(result.merged_count, 1)
+        self.assertEqual(result.global_id_offset_before, 10)
+        self.assertTrue(np.all(global_mask[2:6, 2:6] == 11))
+        self.assertEqual(int(global_mask[:2, :].max()), 0)
+
+    def test_shadow_compare_equal(self):
+        policy = CentroidOwnershipMergePolicy()
+        labels = np.zeros((8, 8), dtype=np.uint32)
+        labels[2:4, 2:4] = 1
+        tile = Step2Tile(0, 0, 0, (2, 6, 2, 6), (0, 8, 0, 8), 2)
+        kept = policy.filter_owned_labels(labels, tile)
+        policy_remapped, _, _ = policy.relabel_owned_region(labels, kept, 10)
+        legacy_remapped = np.zeros_like(labels, dtype=np.uint32)
+        legacy_remapped[labels == 1] = 11
+
+        self.assertTrue(np.array_equal(
+            policy.crop_valid_region(legacy_remapped, tile),
+            policy.crop_valid_region(policy_remapped, tile),
+        ))
+
+    def test_shadow_compare_mismatch_detection(self):
+        policy = CentroidOwnershipMergePolicy()
+        labels = np.zeros((8, 8), dtype=np.uint32)
+        labels[2:4, 2:4] = 1
+        tile = Step2Tile(0, 0, 0, (2, 6, 2, 6), (0, 8, 0, 8), 2)
+        kept = policy.filter_owned_labels(labels, tile)
+        policy_remapped, _, _ = policy.relabel_owned_region(labels, kept, 10)
+        legacy_remapped = np.zeros_like(labels, dtype=np.uint32)
+
+        self.assertFalse(np.array_equal(
+            policy.crop_valid_region(legacy_remapped, tile),
+            policy.crop_valid_region(policy_remapped, tile),
+        ))
 
     def test_scheduler_has_merge_policy(self):
         scheduler = TileScheduler(

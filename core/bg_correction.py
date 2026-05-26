@@ -15,19 +15,79 @@ from ..config import (
 )
 
 # ── GPU availability ──────────────────────────────────────────────────
+_GPU_FAILURE_CACHE = set()
+GPU_MORPH_AVAILABLE = False
+GPU_MORPH_SMOKE_TEST = {"cupy": "not_run", "cupyx_ndimage": "not_run", "cucim": "not_run"}
+
+
+def _gpu_failure_key(exc):
+    text = str(exc)
+    if "cudaErrorCompatNotSupportedOnDevice" in text or "forward compatibility was attempted on non supported HW" in text:
+        return "cuda_compat_not_supported"
+    return text.splitlines()[0][:160] if text else exc.__class__.__name__
+
+
+def _warn_gpu_once(key, message):
+    if key in _GPU_FAILURE_CACHE:
+        return
+    _GPU_FAILURE_CACHE.add(key)
+    print(message)
+
+
+def _disable_gpu_morph(exc, context):
+    global GPU_MORPH_AVAILABLE, CUCIM_AVAILABLE
+    GPU_MORPH_AVAILABLE = False
+    CUCIM_AVAILABLE = False
+    key = _gpu_failure_key(exc)
+    _warn_gpu_once(
+        key,
+        f"[GPU] {context} disabled for this session due to {key}: {exc}\n"
+        "[GPU] Falling back to CPU morphology.",
+    )
+
+
+def _run_gpu_morph_smoke_test():
+    arr = cp.asarray(np.arange(64, dtype=np.float32).reshape(8, 8))
+    arr = arr + cp.float32(1.0)
+    _ = cp.asnumpy(arr)
+    GPU_MORPH_SMOKE_TEST["cupy"] = "pass"
+    eroded = _cupyx_ndi.grey_erosion(arr, size=(3, 3), mode="reflect")
+    dilated = _cupyx_ndi.grey_dilation(eroded, size=(3, 3), mode="reflect")
+    gauss = _cupyx_ndi.gaussian_filter(arr, sigma=1, mode="reflect")
+    _ = cp.asnumpy(dilated + gauss)
+    GPU_MORPH_SMOKE_TEST["cupyx_ndimage"] = "pass"
+    try:
+        import cucim  # noqa: F401
+        GPU_MORPH_SMOKE_TEST["cucim"] = "import_pass"
+    except Exception as exc:
+        GPU_MORPH_SMOKE_TEST["cucim"] = f"import_fail: {exc}"
+
 
 try:
     import cupy as cp
     import cupyx.scipy.ndimage as _cupyx_ndi
-    CUCIM_AVAILABLE = True
     CUCIM_IMPORT_ERROR = ""
-    print(f"[GPU] cupy {cp.__version__} ready, using cupyx.scipy.ndimage for morphology")
+    try:
+        _run_gpu_morph_smoke_test()
+        GPU_MORPH_AVAILABLE = True
+        CUCIM_AVAILABLE = True
+        print(f"[GPU] cupy {cp.__version__} ready, GPU morphology smoke test passed")
+    except Exception as _smoke_exc:
+        CUCIM_IMPORT_ERROR = str(_smoke_exc)
+        CUCIM_AVAILABLE = False
+        GPU_MORPH_AVAILABLE = False
+        _warn_gpu_once(
+            _gpu_failure_key(_smoke_exc),
+            f"[GPU] CuPy import ok but GPU morphology smoke test failed: {_smoke_exc}\n"
+            "[GPU] Falling back to CPU morphology.",
+        )
 except Exception as _cucim_exc:
     cp = None
     _cupyx_ndi = None
     CUCIM_AVAILABLE = False
     CUCIM_IMPORT_ERROR = str(_cucim_exc)
     print(f"[GPU] cupy not available, using CPU: {_cucim_exc}")
+
 
 
 def _normalize_correction_config(cfg):
@@ -125,7 +185,7 @@ def _apply_tophat_gpu_or_cpu(arr, radius):
     """
     radius = max(1, int(radius))
     arr32 = arr.astype(np.float32, copy=False)
-    if CUCIM_AVAILABLE:
+    if GPU_MORPH_AVAILABLE:
         try:
             size = 2 * radius + 1
             gpu_arr = cp.asarray(arr32)
@@ -136,7 +196,7 @@ def _apply_tophat_gpu_or_cpu(arr, radius):
             del gpu_arr, eroded, dilated, tophat
             return out
         except Exception as _e:
-            print(f"[GPU tophat fallback] {_e}")
+            _disable_gpu_morph(_e, "tophat")
     return white_tophat(arr32, footprint=disk(radius), mode='reflect').astype(np.float32)
 
 
@@ -153,7 +213,7 @@ def _apply_cucim_or_cpu(arr, sigma, prefer_gpu=True):
     """
     sigma = max(1, int(sigma))
     arr32 = arr.astype(np.float32, copy=False)
-    if prefer_gpu and CUCIM_AVAILABLE:
+    if prefer_gpu and GPU_MORPH_AVAILABLE:
         try:
             gpu_arr = cp.asarray(arr32)
             bg_gpu  = _cupyx_ndi.gaussian_filter(gpu_arr, sigma=sigma, mode='reflect')
@@ -162,7 +222,7 @@ def _apply_cucim_or_cpu(arr, sigma, prefer_gpu=True):
             del gpu_arr, bg_gpu, out_gpu
             return out
         except Exception as _e:
-            print(f"[GPU cucim fallback] {_e}")
+            _disable_gpu_morph(_e, "cucim")
     bg = sk_gaussian(arr32, sigma=sigma, preserve_range=True, mode='reflect')
     return np.clip(arr32 - bg.astype(np.float32, copy=False), 0, None).astype(np.float32)
 

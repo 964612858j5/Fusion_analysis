@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
+import numpy as np
+
 from .step2_tile import crop_valid_region, local_own_bbox
 
 
@@ -56,19 +58,73 @@ class CentroidOwnershipMergePolicy:
         - keep labels whose centroids fall inside tile.local_own_bbox.
         - return kept label ids.
 
-        Step 4B intentionally does not replace SegmentMergeWorker logic.
         """
-        raise NotImplementedError("Centroid ownership filtering is not wired in Step 4B.")
+        labels = np.asarray(labels)
+        n = int(labels.max()) if labels.size else 0
+        if n == 0:
+            return []
+        h, w = labels.shape
+        flat = labels.ravel()
+        ys = np.repeat(np.arange(h, dtype=np.float32), w)
+        xs = np.tile(np.arange(w, dtype=np.float32), h)
+        cnts = np.bincount(flat, minlength=n + 2)
+        sum_y = np.bincount(flat, weights=ys, minlength=n + 2)
+        sum_x = np.bincount(flat, weights=xs, minlength=n + 2)
+        valid = cnts[1:n + 1] > 0
+        cy = np.where(valid, sum_y[1:n + 1] / np.maximum(cnts[1:n + 1], 1), -1)
+        cx = np.where(valid, sum_x[1:n + 1] / np.maximum(cnts[1:n + 1], 1), -1)
+
+        local_y0, local_y1, local_x0, local_x1 = self.local_own_bbox(tile)
+        kept = []
+        for label_idx in range(n):
+            lcy, lcx = cy[label_idx], cx[label_idx]
+            if (
+                lcy >= local_y0 and lcy < local_y1
+                and lcx >= local_x0 and lcx < local_x1
+            ):
+                kept.append(label_idx + 1)
+        return kept
 
     def relabel_owned_region(self, labels, kept_labels, global_id_offset):
         """
-        Interface placeholder for relabeling kept labels into global ids.
+        Relabel kept labels into global ids.
         """
-        raise NotImplementedError("Owned-region relabeling is not wired in Step 4B.")
+        labels = np.asarray(labels)
+        n_raw = int(labels.max()) if labels.size else 0
+        offset_before = int(global_id_offset)
+        kept_labels = [int(v) for v in (kept_labels or [])]
+        lut = np.zeros(n_raw + 1, dtype=np.uint32)
+        for new_id, lab in enumerate(kept_labels, start=1):
+            if 0 < lab <= n_raw:
+                lut[lab] = new_id + offset_before
+        relabeled = lut[labels] if n_raw > 0 else np.zeros_like(labels, dtype=np.uint32)
+        offset_after = offset_before + len(kept_labels)
+        metadata = {
+            "n_raw": n_raw,
+            "n_kept": len(kept_labels),
+            "global_id_offset_before": offset_before,
+            "global_id_offset_after": offset_after,
+        }
+        return relabeled, offset_after, metadata
 
-    def merge_into_global(self, global_mask, labels, tile, global_id_offset):
+    def merge_into_global(self, global_mask, local_labels, tile, global_id_offset=0):
         """
-        Interface placeholder for future full merge.
-        Must not be used by SegmentMergeWorker in Step 4B.
+        Merge relabeled own-region labels into global mmap.
         """
-        raise NotImplementedError("Global merge policy is not wired in Step 4B.")
+        oy0, oy1, ox0, ox1 = tile.own_bbox if hasattr(tile, "own_bbox") else tile["own"]
+        own_labels = self.crop_valid_region(local_labels, tile, copy=False)
+        dst = global_mask[oy0:oy1, ox0:ox1]
+        np.copyto(dst, own_labels, where=(own_labels > 0))
+        labels_count = int(np.asarray(local_labels).max()) if np.asarray(local_labels).size else 0
+        merged_count = int(len(np.unique(own_labels[own_labels > 0]))) if np.any(own_labels > 0) else 0
+        return MergeResult(
+            merged_count=merged_count,
+            labels_count=labels_count,
+            kept_labels_count=merged_count,
+            global_id_offset_before=int(global_id_offset),
+            global_id_offset_after=int(global_id_offset) + merged_count,
+            metadata={
+                "own_bbox": [int(oy0), int(oy1), int(ox0), int(ox1)],
+                "own_shape": list(own_labels.shape),
+            },
+        )

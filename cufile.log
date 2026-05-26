@@ -10,3 +10,5 @@
 
  05-05-2026 05:37:59:485 [pid=473668 tid=473668] WARN   0:168 failed to open /proc/driver/nvidia-fs/devcount  error: No such file or directory
  05-05-2026 05:37:59:485 [pid=473668 tid=473668] NOTICE  cufio-drv:720 running in compatible mode
+ 26-05-2026 16:49:33:133 [pid=2570786 tid=2570786] ERROR  cufio_core:919 cuInit Failed, error CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE
+ 26-05-2026 16:49:33:133 [pid=2570786 tid=2570786] ERROR  cufio_core:1038 cuFile initialization failed

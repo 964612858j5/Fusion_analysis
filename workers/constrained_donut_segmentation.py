@@ -37,6 +37,7 @@ DEFAULT_CSD_PARAMS = {
     "max_circularity": 0.92,
     "circularity_ratio_threshold": 3.0,
     "circularity_fallback_expand": 3,
+    "min_channel_support": 1,
     "use_gpu": True,
     "timeout_seconds": 600,
     "memory_guard_mb": 0,
@@ -112,26 +113,40 @@ def _check_safety(params, started, cancel_check=None, stage="CSD"):
         raise CSDFallback(f"{stage} exceeded memory_guard_mb={guard:g} (rss={rss:.1f} MB)")
 
 
-def _channel_threshold(raw_np, far_bg, bg_sigma_factor, saturation_percentile):
-    raw = np.asarray(raw_np)
+def _channel_threshold(raw_np, far_bg, nuclei_bg, bg_sigma_factor, saturation_percentile):
+    raw = np.asarray(raw_np, dtype=np.float32)
     finite = np.isfinite(raw)
     bg_vals = raw[far_bg & finite]
+
+    if bg_vals.size < 200:
+        all_finite = raw[finite]
+        if all_finite.size > 0:
+            p25 = float(np.percentile(all_finite, 25))
+            bg_vals = raw[nuclei_bg & finite & (raw <= p25)]
+
+    if bg_vals.size < 200:
+        all_finite = raw[finite]
+        if all_finite.size > 0:
+            p10 = float(np.percentile(all_finite, 10))
+            bg_vals = raw[finite & (raw <= p10)]
+
     if bg_vals.size == 0:
-        bg_vals = raw[(raw > 0) & finite]
-    if bg_vals.size == 0:
-        bg_mean = 0.0
-        bg_std = 0.0
+        bg_median = 0.0
+        bg_mad = 0.0
     else:
-        bg_mean = float(np.mean(bg_vals))
-        bg_std = float(np.std(bg_vals))
-    auto_low = bg_mean + float(bg_sigma_factor) * bg_std
-    if bg_std == 0.0:
-        auto_low = float(np.nextafter(auto_low, np.inf))
+        bg_median = float(np.median(bg_vals))
+        bg_mad = float(np.median(np.abs(bg_vals - bg_median)))
+
+    bg_sigma_est = bg_mad * 1.4826
+    auto_low = bg_median + float(bg_sigma_factor) * bg_sigma_est
+    if bg_sigma_est == 0.0:
+        auto_low = bg_median * 1.1 + 1.0
+
     positive = raw[(raw > 0) & finite]
     auto_high = float(np.percentile(positive, float(saturation_percentile))) if positive.size else float("inf")
     if auto_high < auto_low:
         auto_high = float("inf")
-    return float(auto_low), float(auto_high), bg_mean, bg_std
+    return float(auto_low), float(auto_high), float(bg_median), float(bg_sigma_est)
 
 
 def _perimeter(mask):
@@ -238,6 +253,7 @@ def run_constrained_donut_segmentation(
                 "high_confidence_core_labels": empty.copy(),
                 "expansion_added_pixels": empty.copy(),
                 "refinement_added_pixels": empty.copy(),
+                "signal_map": empty.astype(np.float32),
             })
         return result
 
@@ -273,30 +289,52 @@ def run_constrained_donut_segmentation(
         donut_size = float(p.get("donut_size", 40) or 40)
         donut_mask_x = (dist_x > 0) & (dist_x <= donut_size)
         far_bg = _asnumpy(dist_x > (donut_size * 1.5))
+        nuclei_bg = _asnumpy(~nuclei_mask_x).astype(bool, copy=False)
         dist_from_nuc = _asnumpy(dist_x).astype(np.float32, copy=False)
         donut_mask = _asnumpy(donut_mask_x).astype(bool, copy=False)
         timings["donut_distance_seconds"] = time.perf_counter() - t0
 
         _check_safety(p, started, cancel_check, "CSD-gating")
         t0 = time.perf_counter()
-        gated_union_x = xp.zeros(nuclei.shape, dtype=bool)
+        min_support = max(1, int(p.get("min_channel_support", 1) or 1))
+        support_count_x = xp.zeros(nuclei.shape, dtype=xp.int16)
         channel_thresholds = {}
         gated_counts = {}
+        per_channel_gated = {}
+        signal_layers = []
         for name, raw in zip(channel_names, marker_channels):
-            auto_low, auto_high, bg_mean, bg_std = _channel_threshold(
-                raw, far_bg, p.get("bg_sigma_factor", 3.0), p.get("saturation_percentile", 99.8)
+            auto_low, auto_high, bg_median, bg_sigma_est = _channel_threshold(
+                raw,
+                far_bg,
+                nuclei_bg,
+                p.get("bg_sigma_factor", 3.0),
+                p.get("saturation_percentile", 99.8),
             )
-            raw_x = xp.asarray(raw)
+            raw_x = xp.asarray(raw, dtype=xp.float32)
             channel_gated_x = donut_mask_x & (raw_x >= auto_low) & (raw_x <= auto_high)
-            gated_union_x |= channel_gated_x
+            support_count_x += channel_gated_x.astype(xp.int16)
+            per_channel_gated[name] = channel_gated_x
             gated_counts[name] = int(_asnumpy(xp.count_nonzero(channel_gated_x)))
             channel_thresholds[name] = {
                 "auto_low": float(auto_low),
                 "auto_high": float(auto_high),
-                "bg_mean": float(bg_mean),
-                "bg_std": float(bg_std),
+                "bg_median": float(bg_median),
+                "bg_sigma_est": float(bg_sigma_est),
                 "gated_pixels": int(gated_counts[name]),
             }
+            norm_high = auto_high
+            if norm_high <= auto_low or not np.isfinite(norm_high):
+                norm_high = auto_low + 1.0
+            normed = xp.clip((raw_x - auto_low) / (norm_high - auto_low), 0.0, 1.0)
+            signal_layers.append(normed)
+        gated_union_x = support_count_x >= min_support
+        if signal_layers:
+            signal_map_x = signal_layers[0]
+            for layer in signal_layers[1:]:
+                signal_map_x = xp.maximum(signal_map_x, layer)
+        else:
+            signal_map_x = xp.zeros(nuclei.shape, dtype=xp.float32)
+        signal_map_cpu = _asnumpy(signal_map_x).astype(np.float32, copy=False)
         gated_union = _asnumpy(gated_union_x).astype(bool, copy=False)
         timings["gating_seconds"] = time.perf_counter() - t0
 
@@ -305,10 +343,10 @@ def run_constrained_donut_segmentation(
         gated_region_x = gated_union_x | nuclei_mask_x
         gated_region = _asnumpy(gated_region_x).astype(bool, copy=False)
         labels, watershed_backend = _watershed_with_gpu_preference(
-            dist_x,
+            -signal_map_x,
             nuclei_x,
             gated_region_x,
-            dist_from_nuc,
+            -signal_map_cpu,
             nuclei,
             gated_region,
         )
@@ -390,6 +428,7 @@ def run_constrained_donut_segmentation(
         labels = nuclei.copy()
         shrunk_labels = nuclei.copy()
         gated_union = np.zeros_like(nuclei, dtype=bool)
+        signal_map_cpu = np.zeros_like(nuclei, dtype=np.float32)
         channel_thresholds = {}
         watershed_backend = "fallback_not_run"
         qc_rows = []
@@ -397,6 +436,7 @@ def run_constrained_donut_segmentation(
         disconnected_removed = 0
         added_pixels_total = 0
         conflict_total = 0
+        min_support = max(1, int(p.get("min_channel_support", 1) or 1))
         log_msg(f"[CSD] fallback to nuclei only: {exc}")
     except Exception as exc:
         if backend_name == "cupy":
@@ -436,6 +476,8 @@ def run_constrained_donut_segmentation(
         "watershed_backend": watershed_backend,
         "csd_mode": "constrained_signal_donut",
         "hq2_mode": "constrained_signal_donut",
+        "min_channel_support": int(min_support),
+        "signal_map_mode": "max_channel_normalized_by_auto_threshold",
         "imagej_proposal_enabled": False,
         "channel_thresholds": channel_thresholds,
         "fallback_count": int(fallback_count),
@@ -463,6 +505,7 @@ def run_constrained_donut_segmentation(
             "high_confidence_core_labels": shrunk_labels.astype(np.uint32, copy=False),
             "expansion_added_pixels": expansion_added,
             "refinement_added_pixels": expansion_added.copy(),
+            "signal_map": signal_map_cpu,
         })
     return result
 
@@ -495,10 +538,13 @@ def csd_metadata_fields(params, paths):
             "max_circularity": params.get("max_circularity", 0.92),
             "circularity_ratio_threshold": params.get("circularity_ratio_threshold", 3.0),
             "circularity_fallback_expand": params.get("circularity_fallback_expand", 3),
+            "min_channel_support": params.get("min_channel_support", 1),
             "timeout_seconds": params.get("timeout_seconds", 600),
             "memory_guard_mb": params.get("memory_guard_mb", 0),
         },
         "channel_thresholds": runtime.get("channel_thresholds", {}),
+        "min_channel_support": runtime.get("min_channel_support", params.get("min_channel_support", 1)),
+        "signal_map_mode": runtime.get("signal_map_mode", "max_channel_normalized_by_auto_threshold"),
         "fallback_count": int(runtime.get("fallback_count", 0) or 0),
         "overexpanded_cell_count": int(runtime.get("overexpanded_cell_count", 0) or 0),
         "runtime_by_stage": runtime.get("timings", {}),

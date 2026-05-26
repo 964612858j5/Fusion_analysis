@@ -17,7 +17,7 @@ from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QDoubleSpinBox, QProgressBar, QComboBox,
+    QGroupBox, QDoubleSpinBox, QProgressBar, QComboBox, QScrollArea,
     QMessageBox, QFileDialog, QDialog, QFrame, QCheckBox,
 )
 import pyqtgraph as pg
@@ -794,7 +794,7 @@ class SearchCtrlPanel(QWidget):
             self.hq2_params_panel.setVisible(False)
 
     def _build_csd_params_panel(self):
-        self.csd_params_panel = QGroupBox("Cellpose nuclei + CSD parameters")
+        self.csd_params_panel = QGroupBox("Cellpose nuclei + CDS parameters")
         self.csd_params_panel.setMinimumHeight(0)
         self.csd_params_panel.setMaximumHeight(16777215)
         self.csd_params_panel.setSizePolicy(
@@ -808,8 +808,15 @@ class SearchCtrlPanel(QWidget):
         outer = QVBoxLayout(self.csd_params_panel)
         outer.setContentsMargins(6, 8, 6, 6)
         outer.setSpacing(5)
-        grid = QtWidgets.QGridLayout()
-        outer.addLayout(grid)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(260)
+        scroll.setMaximumHeight(520)
+        scroll.setStyleSheet("QScrollArea{border:none;}")
+        content = QWidget()
+        grid = QtWidgets.QGridLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         def spin(lo, hi, step, dec, value):
             sp = QDoubleSpinBox()
@@ -847,17 +854,38 @@ class SearchCtrlPanel(QWidget):
         self._csd_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
         add(7, "hq_channels:", self._csd_channels)
         self._csd_input_mode = QComboBox()
-        for value in ("selected_channels_from_source", "step1_weighted_fusion", "hybrid"):
+        for value in ("selected_channels_from_source", "hybrid"):
             self._csd_input_mode.addItem(value, value)
         add(8, "hq_input_mode:", self._csd_input_mode)
-        self._csd_donut_size = add(9, "donut_size:", spin(5, 200, 5, 1, 40))
-        self._csd_nucleus_shrink = add(10, "nucleus_shrink:", spin(0, 20, 1, 1, 3))
-        self._csd_bg_sigma = add(11, "bg_sigma_factor:", spin(1, 10, 0.5, 1, 3.0))
-        self._csd_saturation = add(12, "saturation_percentile:", spin(90, 100, 0.1, 1, 99.8))
-        self._csd_max_circularity = add(13, "max_circularity:", spin(0.5, 1.0, 0.01, 2, 0.92))
-        self._csd_circularity_ratio = add(14, "circularity ratio:", spin(1, 20, 0.5, 1, 3.0))
-        self._csd_fallback_expand = add(15, "fallback expand:", spin(0, 20, 1, 1, 3))
-        self._csd_timeout_seconds = add(16, "timeout_seconds:", spin(1, 86400, 10, 0, 600))
+        self._csd_donut_size = add(9, "donut_size:", spin(5, 200, 5, 1, 18))
+        self._csd_minimal_radius = add(10, "minimal_radius:", spin(0, 30, 1, 1, 3))
+        self._csd_max_radius = add(11, "max_cell_radius:", spin(5, 200, 5, 1, 18))
+        self._csd_shrink = add(12, "shrink_pixels:", spin(0, 30, 1, 1, 2))
+        self._csd_strong_threshold = add(13, "strong_support_threshold:", spin(0, 1, 0.01, 2, 0.12))
+        self._csd_hotspot_threshold = add(14, "weak_hotspot_threshold:", spin(0, 10, 0.1, 2, 1.5))
+        self._csd_gi_kernel = add(15, "gi_kernel_size:", spin(3, 51, 2, 0, 7))
+        self._csd_gi_bg_kernel = add(16, "gi_background_kernel_size:", spin(7, 151, 2, 0, 31))
+        self._csd_max_ratio = add(17, "max_cell_to_nucleus_ratio:", spin(1, 50, 0.5, 1, 8))
+        self._csd_lymph_ratio = add(18, "lymphocyte_ratio:", spin(1, 20, 0.5, 1, 4))
+        self._csd_large_ratio = add(19, "large_cell_ratio:", spin(1, 50, 0.5, 1, 12))
+        self._csd_support_weight = add(20, "support_weight:", spin(0, 10, 0.1, 2, 1.0))
+        self._csd_weak_weight = add(21, "weak_support_weight:", spin(0, 10, 0.1, 2, 0.5))
+        self._csd_distance_weight = add(22, "distance_penalty_weight:", spin(0, 1, 0.01, 3, 0.03))
+        self._csd_gradient_weight = add(23, "boundary_gradient_weight:", spin(0, 5, 0.05, 2, 0.25))
+        self._csd_low_pct = add(24, "constraint_low_percentile:", spin(0, 10, 0.1, 2, 0.5))
+        self._csd_high_pct = add(25, "constraint_high_percentile:", spin(90, 100, 0.1, 2, 99.5))
+        self._csd_constraint_mode = QComboBox()
+        for label, value in (("per_cell_best_channel", "per_cell_best_channel"), ("max", "max"), ("weighted_max", "weighted_max")):
+            self._csd_constraint_mode.addItem(label, value)
+        add(26, "constraint_mode:", self._csd_constraint_mode)
+        self._csd_weak_z = add(27, "weak_local_z_threshold:", spin(0, 5, 0.05, 2, 0.75))
+        self._csd_weak_area = add(28, "weak_min_component_area:", spin(0, 500, 1, 0, 8))
+        self._csd_hotspot_conn = add(29, "weak_hotspot_connectivity:", spin(4, 8, 4, 0, 8))
+        self._csd_local_contrast = QCheckBox("enabled")
+        self._csd_local_contrast.setChecked(False)
+        add(30, "local_contrast_enabled:", self._csd_local_contrast)
+        self._csd_local_radius = add(31, "local_contrast_radius:", spin(3, 100, 1, 0, 15))
+        self._csd_timeout_seconds = add(32, "timeout_seconds:", spin(1, 86400, 10, 0, 600))
         self.csd_params_panel.setVisible(False)
 
     def _show_csd_params_panel(self):
@@ -1030,12 +1058,29 @@ class SearchCtrlPanel(QWidget):
             "hq_channels": hq_channels,
             "hq_input_mode": self._csd_input_mode.currentData() or "selected_channels_from_source",
             "donut_size": self._csd_donut_size.value(),
-            "nucleus_shrink": self._csd_nucleus_shrink.value(),
-            "bg_sigma_factor": self._csd_bg_sigma.value(),
-            "saturation_percentile": self._csd_saturation.value(),
-            "max_circularity": self._csd_max_circularity.value(),
-            "circularity_ratio_threshold": self._csd_circularity_ratio.value(),
-            "circularity_fallback_expand": self._csd_fallback_expand.value(),
+            "minimal_radius": self._csd_minimal_radius.value(),
+            "max_cell_radius": self._csd_max_radius.value(),
+            "shrink_pixels": self._csd_shrink.value(),
+            "strong_support_threshold": self._csd_strong_threshold.value(),
+            "weak_hotspot_threshold": self._csd_hotspot_threshold.value(),
+            "gi_kernel_size": self._csd_gi_kernel.value(),
+            "gi_background_kernel_size": self._csd_gi_bg_kernel.value(),
+            "gi_background_mode": "local",
+            "max_cell_to_nucleus_ratio": self._csd_max_ratio.value(),
+            "lymphocyte_max_cell_to_nucleus_ratio": self._csd_lymph_ratio.value(),
+            "large_cell_max_cell_to_nucleus_ratio": self._csd_large_ratio.value(),
+            "support_weight": self._csd_support_weight.value(),
+            "weak_support_weight": self._csd_weak_weight.value(),
+            "distance_penalty_weight": self._csd_distance_weight.value(),
+            "boundary_gradient_weight": self._csd_gradient_weight.value(),
+            "constraint_low_percentile": self._csd_low_pct.value(),
+            "constraint_high_percentile": self._csd_high_pct.value(),
+            "constraint_mode": self._csd_constraint_mode.currentData() or "per_cell_best_channel",
+            "weak_local_z_threshold": self._csd_weak_z.value(),
+            "weak_min_component_area": self._csd_weak_area.value(),
+            "weak_hotspot_connectivity": self._csd_hotspot_conn.value(),
+            "local_contrast_enabled": self._csd_local_contrast.isChecked(),
+            "local_contrast_radius": self._csd_local_radius.value(),
             "timeout_seconds": int(self._csd_timeout_seconds.value()),
         }
 
@@ -1147,13 +1192,30 @@ class SearchCtrlPanel(QWidget):
             self._csd_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
             idx = self._csd_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
             self._csd_input_mode.setCurrentIndex(max(0, idx))
-            self._csd_donut_size.setValue(float(p.get("donut_size", 40) or 40))
-            self._csd_nucleus_shrink.setValue(float(p.get("nucleus_shrink", 3) or 0))
-            self._csd_bg_sigma.setValue(float(p.get("bg_sigma_factor", 3.0) or 3.0))
-            self._csd_saturation.setValue(float(p.get("saturation_percentile", 99.8) or 99.8))
-            self._csd_max_circularity.setValue(float(p.get("max_circularity", 0.92) or 0.92))
-            self._csd_circularity_ratio.setValue(float(p.get("circularity_ratio_threshold", 3.0) or 3.0))
-            self._csd_fallback_expand.setValue(float(p.get("circularity_fallback_expand", 3) or 0))
+            self._csd_donut_size.setValue(float(p.get("donut_size", 18) or 18))
+            self._csd_minimal_radius.setValue(float(p.get("minimal_radius", 3) or 0))
+            self._csd_max_radius.setValue(float(p.get("max_cell_radius", p.get("donut_size", 18)) or 18))
+            self._csd_shrink.setValue(float(p.get("shrink_pixels", p.get("nucleus_shrink", 2)) or 0))
+            self._csd_strong_threshold.setValue(float(p.get("strong_support_threshold", 0.12) or 0))
+            self._csd_hotspot_threshold.setValue(float(p.get("weak_hotspot_threshold", 1.5) or 0))
+            self._csd_gi_kernel.setValue(float(p.get("gi_kernel_size", 7) or 7))
+            self._csd_gi_bg_kernel.setValue(float(p.get("gi_background_kernel_size", 31) or 31))
+            self._csd_max_ratio.setValue(float(p.get("max_cell_to_nucleus_ratio", 8.0) or 8.0))
+            self._csd_lymph_ratio.setValue(float(p.get("lymphocyte_max_cell_to_nucleus_ratio", 4.0) or 4.0))
+            self._csd_large_ratio.setValue(float(p.get("large_cell_max_cell_to_nucleus_ratio", 12.0) or 12.0))
+            self._csd_support_weight.setValue(float(p.get("support_weight", 1.0) or 0))
+            self._csd_weak_weight.setValue(float(p.get("weak_support_weight", 0.5) or 0))
+            self._csd_distance_weight.setValue(float(p.get("distance_penalty_weight", 0.03) or 0))
+            self._csd_gradient_weight.setValue(float(p.get("boundary_gradient_weight", 0.25) or 0))
+            self._csd_low_pct.setValue(float(p.get("constraint_low_percentile", 0.5) or 0))
+            self._csd_high_pct.setValue(float(p.get("constraint_high_percentile", 99.5) or 99.5))
+            idx = self._csd_constraint_mode.findData(p.get("constraint_mode", "per_cell_best_channel"))
+            self._csd_constraint_mode.setCurrentIndex(max(0, idx))
+            self._csd_weak_z.setValue(float(p.get("weak_local_z_threshold", 0.75) or 0))
+            self._csd_weak_area.setValue(float(p.get("weak_min_component_area", 8) or 0))
+            self._csd_hotspot_conn.setValue(float(p.get("weak_hotspot_connectivity", 8) or 8))
+            self._csd_local_contrast.setChecked(bool(p.get("local_contrast_enabled", False)))
+            self._csd_local_radius.setValue(float(p.get("local_contrast_radius", 15) or 15))
             self._csd_timeout_seconds.setValue(float(p.get("timeout_seconds", 600) or 600))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))

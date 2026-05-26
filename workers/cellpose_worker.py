@@ -561,6 +561,8 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         requested = parse_hq_channels(params.get("hq_channels") or [])
                         available = loader.channel_names()
                         weights = dict(params.get("step1_fusion_weights") or params.get("channel_weights") or {})
+                        if method == CELLPOSE_NUCLEI_CSD and mode == "step1_weighted_fusion":
+                            mode = "selected_channels_from_source"
                         query_channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in weights.items() if float(w or 0) > 0]
                         resolved, missing, warnings = resolve_hq_channels(query_channels, available)
                         print(f"[Step2-HQ] hq_input_mode: {mode}")

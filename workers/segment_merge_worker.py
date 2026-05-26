@@ -1244,6 +1244,8 @@ class SegmentMergeWorker(QThread):
         mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source").strip()
         if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
             mode = "selected_channels_from_source"
+        if self.method == CELLPOSE_NUCLEI_CSD and mode == "step1_weighted_fusion":
+            mode = "selected_channels_from_source"
         requested = parse_hq_channels(self.seg_config.get("hq_channels") or [])
         fusion_weights = dict(self.seg_config.get("step1_fusion_weights") or self.seg_config.get("channel_weights") or {})
         channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in fusion_weights.items() if float(w or 0) > 0]
@@ -1454,7 +1456,7 @@ class SegmentMergeWorker(QThread):
                 by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
             fy0, fy1 = by0 + int(y0), by0 + int(y1)
             fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
-            if mode == "step1_weighted_fusion":
+            if mode == "step1_weighted_fusion" and self.method != CELLPOSE_NUCLEI_CSD:
                 fused = None
                 weights = dict(self.seg_config.get("channel_weights") or {})
                 for ch in channels:
@@ -1472,7 +1474,7 @@ class SegmentMergeWorker(QThread):
                 else:
                     marker_channels.append(loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False))
             return marker_channels
-        if mode == "step1_weighted_fusion":
+        if mode == "step1_weighted_fusion" and self.method != CELLPOSE_NUCLEI_CSD:
             fused = None
             weights = dict(self.seg_config.get("channel_weights") or {})
             for ch in channels:
@@ -1676,8 +1678,6 @@ class SegmentMergeWorker(QThread):
                 }
             if method == CELLPOSE_NUCLEI_CSD:
                 hq_names = self.seg_config.get("hq_channels") or []
-                if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
-                    hq_names = ["step1_weighted_fusion"]
                 with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
                     csd = run_constrained_donut_segmentation(
                         masks.astype(np.uint32, copy=False),

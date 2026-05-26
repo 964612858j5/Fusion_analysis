@@ -21,6 +21,7 @@ from ..config import OUTPUT_DIR
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
@@ -625,6 +626,48 @@ class Step2Page(QWidget):
         self._hq2_macrophage_signal.setSingleStep(0.01)
         self._hq2_macrophage_signal.setValue(0.08)
 
+        self._csd_widgets = []
+        def _csd_row(label, widget):
+            r, l, w = _param_row(label, widget)
+            cpl.addLayout(r)
+            self._csd_widgets.extend([l, w])
+            return w
+
+        self._csd_section = QLabel('CSD: constrained signal donut')
+        self._csd_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        cpl.addWidget(self._csd_section)
+        self._csd_widgets.append(self._csd_section)
+
+        self._csd_channels = _csd_row('csd hq_channels:', QtWidgets.QLineEdit())
+        self._csd_channels.setPlaceholderText('CD68;CD206;CD45')
+        self._csd_channels.setStyleSheet('font-size:11px;')
+
+        self._csd_input_mode = _csd_row('csd input mode:', QComboBox())
+        self._csd_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
+        self._csd_input_mode.addItem('step1_weighted_fusion', 'step1_weighted_fusion')
+        self._csd_input_mode.addItem('hybrid', 'hybrid')
+
+        self._csd_donut_size = _csd_row('donut size:', QDoubleSpinBox())
+        self._csd_donut_size.setRange(5, 200)
+        self._csd_donut_size.setSingleStep(5)
+        self._csd_donut_size.setValue(40)
+
+        self._csd_nucleus_shrink = _csd_row('nucleus shrink:', QDoubleSpinBox())
+        self._csd_nucleus_shrink.setRange(0, 20)
+        self._csd_nucleus_shrink.setSingleStep(1)
+        self._csd_nucleus_shrink.setValue(3)
+
+        self._csd_bg_sigma = _csd_row('background sigma:', QDoubleSpinBox())
+        self._csd_bg_sigma.setRange(1.0, 10.0)
+        self._csd_bg_sigma.setSingleStep(0.5)
+        self._csd_bg_sigma.setValue(3.0)
+
+        self._csd_max_circularity = _csd_row('max circularity:', QDoubleSpinBox())
+        self._csd_max_circularity.setRange(0.5, 1.0)
+        self._csd_max_circularity.setSingleStep(0.01)
+        self._csd_max_circularity.setDecimals(2)
+        self._csd_max_circularity.setValue(0.92)
+
         self._mesmer_widgets = []
         def _mesmer_row(label, widget):
             r, l, w = _param_row(label, widget)
@@ -1166,7 +1209,7 @@ class Step2Page(QWidget):
         method = self._method_combo.currentData() if hasattr(self, "_method_combo") else CELLPOSE_WHOLECELL_FUSION
         cfg = self.get_seg_config() if hasattr(self, "_method_combo") else {}
         channel_count = 2
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             channel_count = max(2, len(parse_hq_channels(cfg.get("hq_channels") or [])) + 1)
         elif method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             channel_count = max(2, len(parse_hq_channels(cfg.get("membrane_channels") or [])) + 1)
@@ -1326,6 +1369,13 @@ class Step2Page(QWidget):
         self._hq2_macrophage_channels.setText(str(p.get("macrophage_channels", "CD68;CD206") or ""))
         self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
         self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
+        self._csd_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
+        idx = self._csd_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
+        self._csd_input_mode.setCurrentIndex(max(0, idx))
+        self._csd_donut_size.setValue(float(p.get("donut_size", 40) or 40))
+        self._csd_nucleus_shrink.setValue(float(p.get("nucleus_shrink", 3) or 0))
+        self._csd_bg_sigma.setValue(float(p.get("bg_sigma_factor", 3.0) or 3.0))
+        self._csd_max_circularity.setValue(float(p.get("max_circularity", 0.92) or 0.92))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
@@ -1398,6 +1448,13 @@ class Step2Page(QWidget):
         self._hq2_macrophage_channels.setText(str(cfg.get("macrophage_channels", "CD68;CD206") or ""))
         self._hq2_macrophage_radius.setValue(float(cfg.get("macrophage_max_radius", 35)))
         self._hq2_macrophage_signal.setValue(float(cfg.get("macrophage_min_signal", 0.08)))
+        self._csd_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
+        idx = self._csd_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
+        self._csd_input_mode.setCurrentIndex(max(0, idx))
+        self._csd_donut_size.setValue(float(cfg.get("donut_size", 40) or 40))
+        self._csd_nucleus_shrink.setValue(float(cfg.get("nucleus_shrink", 3) or 0))
+        self._csd_bg_sigma.setValue(float(cfg.get("bg_sigma_factor", 3.0) or 3.0))
+        self._csd_max_circularity.setValue(float(cfg.get("max_circularity", 0.92) or 0.92))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(cfg.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(cfg.get("membrane_channels") or [])))
@@ -1454,6 +1511,15 @@ class Step2Page(QWidget):
             consensus_mode = self._hq2_consensus.currentData() or 'adaptive_best_channel'
             channel_weights = parse_channel_weights(self._hq2_weights.text(), hq_channels)
             min_signal = self._hq2_min_signal.value()
+        elif method == CELLPOSE_NUCLEI_CSD:
+            hq_channels = parse_hq_channels(self._csd_channels.text())
+            hq_input_mode = self._csd_input_mode.currentData() or 'selected_channels_from_source'
+            max_cell_radius = params.get('max_cell_radius', 12)
+            norm_low = params.get('normalization_percentile_low', 1.0)
+            norm_high = params.get('normalization_percentile_high', 99.5)
+            consensus_mode = params.get('consensus_mode', 'adaptive_best_channel')
+            channel_weights = {}
+            min_signal = params.get('min_signal_threshold', 0.08)
         elif method == CELLPOSE_NUCLEI_HQ:
             hq_channels = parse_hq_channels(self._hq_channels.text())
             hq_input_mode = self._hq_input_mode.currentData() or 'selected_channels_from_source'
@@ -1504,6 +1570,13 @@ class Step2Page(QWidget):
             'macrophage_channels': self._hq2_macrophage_channels.text().strip(),
             'macrophage_max_radius': self._hq2_macrophage_radius.value(),
             'macrophage_min_signal': self._hq2_macrophage_signal.value(),
+            'donut_size': self._csd_donut_size.value(),
+            'nucleus_shrink': self._csd_nucleus_shrink.value(),
+            'bg_sigma_factor': self._csd_bg_sigma.value(),
+            'saturation_percentile': params.get('saturation_percentile', 99.8),
+            'max_circularity': self._csd_max_circularity.value(),
+            'circularity_ratio_threshold': params.get('circularity_ratio_threshold', 3.0),
+            'circularity_fallback_expand': params.get('circularity_fallback_expand', 3),
         })
         if method != CELLPOSE_NUCLEI_HQ2:
             for key in (
@@ -1515,6 +1588,13 @@ class Step2Page(QWidget):
                 'distance_penalty_weight', 'neighbor_nucleus_penalty_weight',
                 'allow_irregular_shape', 'macrophage_channels',
                 'macrophage_max_radius', 'macrophage_min_signal',
+            ):
+                params.pop(key, None)
+        if method != CELLPOSE_NUCLEI_CSD:
+            for key in (
+                'donut_size', 'nucleus_shrink', 'bg_sigma_factor',
+                'saturation_percentile', 'max_circularity',
+                'circularity_ratio_threshold', 'circularity_fallback_expand',
             ):
                 params.pop(key, None)
         data.update({
@@ -1537,7 +1617,7 @@ class Step2Page(QWidget):
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
         cfg = normalize_segmentation_config(data)
-        if method == CELLPOSE_NUCLEI_HQ2:
+        if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[HQ2-UI] collected params={cfg.get('params')}")
             print(f"[HQ2-UI] worker config keys={sorted(cfg.keys())}")
         return cfg
@@ -1549,11 +1629,12 @@ class Step2Page(QWidget):
             and (self._param_source_combo.currentData() or "manual") == "manual"
         ):
             self._apply_method_defaults_to_ui(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
         is_hq2 = method == CELLPOSE_NUCLEI_HQ2
+        is_csd = method == CELLPOSE_NUCLEI_CSD
         is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         for w in (
             self._cp_model_label, self._cp_model_lbl,
@@ -1578,6 +1659,8 @@ class Step2Page(QWidget):
             w.setVisible(is_hq)
         for w in self._hq2_widgets:
             w.setVisible(is_hq2)
+        for w in self._csd_widgets:
+            w.setVisible(is_csd)
         for w in self._mesmer_widgets:
             w.setVisible(is_mesmer)
         cfg = get_segmentation_method_config(method)
@@ -1732,7 +1815,7 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
-        if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             channels = seg_config.get("hq_channels") or []
             try:
                 available = self._available_hq_channels()
@@ -1744,7 +1827,7 @@ class Step2Page(QWidget):
                 QMessageBox.information(
                     self,
                     'HQ channel recommendation',
-                    'Cellpose nuclei + HQ/HQ2 recommends 2-5 high-quality structural channels; '
+                    'Cellpose nuclei + HQ/HQ2/CSD recommends 2-5 high-quality structural channels; '
                     'using more than 3 channels can be slower and may dilute consensus.'
                 )
 
@@ -1785,7 +1868,7 @@ class Step2Page(QWidget):
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
-        if seg_cfg.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if seg_cfg.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[Step2][HQ] loaded param_file path={param_file or '(manual)'}")
             print(f"[Step2-HQ] hq_input_mode: {seg_cfg.get('hq_input_mode')}")
             print(f"[Step2-HQ] requested hq_channels: {seg_cfg.get('hq_channels')}")

@@ -13,6 +13,7 @@ CELLPOSE_NUCLEI_DAPI = "cellpose_nuclei_dapi"
 CELLPOSE_NUCLEI_EXPANSION = "cellpose_nuclei_expansion"
 CELLPOSE_NUCLEI_HQ = "cellpose_nuclei_hq"
 CELLPOSE_NUCLEI_HQ2 = "cellpose_nuclei_hq2"
+CELLPOSE_NUCLEI_CSD = "cellpose_nuclei_csd"
 STARDIST_NUCLEI_DAPI = "stardist_nuclei_dapi"
 STARDIST_NUCLEI_EXPANSION = "stardist_nuclei_expansion"
 MESMER_WHOLE_CELL = "mesmer_whole_cell"
@@ -136,6 +137,32 @@ SEGMENTATION_METHODS = {
             "macrophage_channels": "CD68;CD206",
             "macrophage_max_radius": 35,
             "macrophage_min_signal": 0.08,
+        },
+        "output_type": "whole_cell_mask",
+    },
+    CELLPOSE_NUCLEI_CSD: {
+        "method": CELLPOSE_NUCLEI_CSD,
+        "display_name": "Cellpose nuclei + CSD",
+        "input_type": "dapi_plus_hq_structural_channels",
+        "process": "cellpose_nuclei_then_constrained_signal_donut",
+        "params": {
+            "model_type": "cpsam",
+            "diameter": None,
+            "flow_threshold": 0.4,
+            "cellprob_threshold": 0.0,
+            "min_size": 15,
+            "use_gpu": True,
+            "tile_size": 1024,
+            "batch_size": 8,
+            "hq_channels": [],
+            "hq_input_mode": "selected_channels_from_source",
+            "donut_size": 40,
+            "nucleus_shrink": 3,
+            "bg_sigma_factor": 3.0,
+            "saturation_percentile": 99.8,
+            "max_circularity": 0.92,
+            "circularity_ratio_threshold": 3.0,
+            "circularity_fallback_expand": 3,
         },
         "output_type": "whole_cell_mask",
     },
@@ -320,6 +347,13 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "macrophage_channels",
         "macrophage_max_radius",
         "macrophage_min_signal",
+        "donut_size",
+        "nucleus_shrink",
+        "bg_sigma_factor",
+        "saturation_percentile",
+        "max_circularity",
+        "circularity_ratio_threshold",
+        "circularity_fallback_expand",
         "mesmer_mode",
         "nuclear_channel",
         "membrane_channels",

@@ -25,6 +25,7 @@ from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
@@ -65,6 +66,11 @@ from .hq2_marker_segmentation import (
     hq2_metadata_fields,
     run_hq2_segmentation,
     write_hq2_qc_table,
+)
+from .constrained_donut_segmentation import (
+    csd_metadata_fields,
+    run_constrained_donut_segmentation,
+    write_csd_qc_table,
 )
 
 
@@ -534,6 +540,7 @@ class SegmentMergeWorker(QThread):
             CELLPOSE_NUCLEI_EXPANSION,
             CELLPOSE_NUCLEI_HQ,
             CELLPOSE_NUCLEI_HQ2,
+            CELLPOSE_NUCLEI_CSD,
         )
 
     @staticmethod
@@ -1525,7 +1532,7 @@ class SegmentMergeWorker(QThread):
 
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             if device is None:
                 raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
             from cellpose import models as cp_models
@@ -1599,7 +1606,7 @@ class SegmentMergeWorker(QThread):
             return masks.astype(np.uint32)
 
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
-        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 masks, _, _ = backend["cellpose"].eval(
@@ -1665,6 +1672,33 @@ class SegmentMergeWorker(QThread):
                         "imagej_proposal": hq2["imagej_proposal_labels"].astype(np.uint32, copy=False),
                         "core": hq2["high_confidence_core_labels"].astype(np.uint32, copy=False),
                         "expansion": hq2["expansion_added_pixels"].astype(np.uint32, copy=False),
+                    } if self.write_hq2_debug_layers else {}),
+                }
+            if method == CELLPOSE_NUCLEI_CSD:
+                hq_names = self.seg_config.get("hq_channels") or []
+                if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
+                    hq_names = ["step1_weighted_fusion"]
+                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
+                    csd = run_constrained_donut_segmentation(
+                        masks.astype(np.uint32, copy=False),
+                        hq_marker_channels or [],
+                        hq_names,
+                        self.seg_config,
+                        logger=self._logger,
+                        return_layers=self.write_hq2_debug_layers,
+                        progress_callback=lambda msg: self.progress.emit(0, 1, msg),
+                        cancel_check=lambda: bool(self._stop),
+                    )
+                return {
+                    "mask": csd["final_labels"].astype(np.uint32, copy=False),
+                    "nuclei": csd["nuclei_labels"].astype(np.uint32, copy=False),
+                    "qc_rows": csd.get("qc_rows") or [],
+                    "hq2_metadata": csd.get("metadata") or {},
+                    "hq2_layers": ({
+                        "hq_proposal": csd.get("hq_proposal_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
+                        "imagej_proposal": csd.get("imagej_proposal_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
+                        "core": csd.get("high_confidence_core_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
+                        "expansion": csd.get("expansion_added_pixels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
                     } if self.write_hq2_debug_layers else {}),
                 }
             return masks.astype(np.uint32)
@@ -1799,10 +1833,10 @@ class SegmentMergeWorker(QThread):
                               shape=(full_h, full_w))
         dapi_mmap[:] = 0
 
-        is_hq2 = self.method == CELLPOSE_NUCLEI_HQ2
+        is_hq2 = self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
         is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
         is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
-        is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or is_mesmer_guided
+        is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
         hq_channels, hq_group = ([], None)
         mesmer_group = None
         nuclei_mmap = None
@@ -2287,9 +2321,10 @@ class SegmentMergeWorker(QThread):
             if is_mesmer_guided:
                 qc_table_path = ""
             elif is_hq2:
-                qc_table_path = os.path.join(self.output_dir, f'hq2_qc_table_{out_prefix}.csv')
+                qc_name = "csd_qc_table" if self.method == CELLPOSE_NUCLEI_CSD else "hq2_qc_table"
+                qc_table_path = os.path.join(self.output_dir, f'{qc_name}_{out_prefix}.csv')
                 with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                    write_hq2_qc_table(qc_table_path, hq_qc_rows)
+                    (write_csd_qc_table if self.method == CELLPOSE_NUCLEI_CSD else write_hq2_qc_table)(qc_table_path, hq_qc_rows)
             else:
                 qc_table_path = os.path.join(self.output_dir, f'hq_qc_table_{out_prefix}.csv')
                 with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
@@ -2357,7 +2392,7 @@ class SegmentMergeWorker(QThread):
                 "final_cell_mask_path": self._abs(ome_path),
                 "qc_table_path": self._abs(qc_table_path),
             })
-            meta.update(hq2_metadata_fields(self.seg_config, hq2_meta_paths))
+            meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, hq2_meta_paths))
             meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
         elif is_hq:
             meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
@@ -2553,8 +2588,8 @@ class SegmentMergeWorker(QThread):
                     "config_path": self._abs(config_path),
                     "tile_strategy": self._step2_engine_meta(),
                 }
-                if self.method == CELLPOSE_NUCLEI_HQ2:
-                    summary_meta.update(hq2_metadata_fields(self.seg_config, {
+                if self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
+                    summary_meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, {
                         "nuclei_mask_path": first_roi_meta.get("nuclei_mask_path", ""),
                         "hq_proposal_mask_path": first_roi_meta.get("hq_proposal_mask_path", ""),
                         "imagej_proposal_mask_path": first_roi_meta.get("imagej_proposal_mask_path", ""),
@@ -2649,10 +2684,10 @@ class SegmentMergeWorker(QThread):
                                   shape=(full_h, full_w))
             dapi_mmap[:] = 0
 
-            is_hq2 = self.method == CELLPOSE_NUCLEI_HQ2
+            is_hq2 = self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
             is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
             is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
-            is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) or is_mesmer_guided
+            is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
             hq_channels, hq_group = ([], None)
             mesmer_group = None
             nuclei_mmap = None
@@ -3142,9 +3177,12 @@ class SegmentMergeWorker(QThread):
                 if is_mesmer_guided:
                     qc_table_path = ""
                 elif is_hq2:
-                    qc_table_path = os.path.join(self.output_dir, 'hq2_qc_table.csv')
+                    qc_table_path = os.path.join(
+                        self.output_dir,
+                        'csd_qc_table.csv' if self.method == CELLPOSE_NUCLEI_CSD else 'hq2_qc_table.csv',
+                    )
                     with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                        write_hq2_qc_table(qc_table_path, hq_qc_rows)
+                        (write_csd_qc_table if self.method == CELLPOSE_NUCLEI_CSD else write_hq2_qc_table)(qc_table_path, hq_qc_rows)
                 else:
                     qc_table_path = os.path.join(self.output_dir, 'hq_qc_table.csv')
                     with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
@@ -3215,7 +3253,7 @@ class SegmentMergeWorker(QThread):
                     "final_cell_mask_path": self._abs(ome_path),
                     "qc_table_path": self._abs(qc_table_path),
                 })
-                meta.update(hq2_metadata_fields(self.seg_config, hq2_meta_paths))
+                meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, hq2_meta_paths))
                 meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
             elif is_hq:
                 meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))

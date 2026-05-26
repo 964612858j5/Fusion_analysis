@@ -33,6 +33,7 @@ from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
@@ -2485,7 +2486,7 @@ class MainWindow(QMainWindow):
                 "Use Phase 1 / Phase 2 for Cellpose patch preview."
             )
             return
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             params = normalize_segmentation_config(params or {})
             hq_channels = parse_hq_channels(params.get("hq_channels") or [])
             if not hq_channels:
@@ -2696,6 +2697,7 @@ class MainWindow(QMainWindow):
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
             CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
             CELLPOSE_NUCLEI_HQ2: "cellpose_nuclei_hq2_patch_preview",
+            CELLPOSE_NUCLEI_CSD: "cellpose_nuclei_csd_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")
@@ -3259,7 +3261,7 @@ class MainWindow(QMainWindow):
             "params_source":      self._params_source or "unknown",
             "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
         })
-        if selected_method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+        if selected_method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             step1_weights = {}
             for gdata in (fcfg.get("groups") or {}).values():
                 for ch, weight in (gdata.get("channels") or {}).items():

@@ -398,6 +398,22 @@ def run_constrained_donut_segmentation(
         added_pixels_total = 0
         conflict_total = 0
         log_msg(f"[CSD] fallback to nuclei only: {exc}")
+    except Exception as exc:
+        if backend_name == "cupy":
+            cpu_params = dict(p)
+            cpu_params["use_gpu"] = False
+            log_msg(f"[CSD] GPU path failed, retrying CPU: {exc}")
+            return run_constrained_donut_segmentation(
+                nuclei,
+                marker_channels,
+                channel_names,
+                cpu_params,
+                logger=logger,
+                return_layers=return_layers,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+        raise
 
     expansion_added = np.where((final > 0) & (nuclei == 0), final, 0).astype(np.uint32, copy=False)
     timings["total_seconds"] = time.perf_counter() - started

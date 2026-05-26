@@ -18,6 +18,7 @@ from ..core.fusion_engine import FusionEngine
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
@@ -32,6 +33,7 @@ from .hq_marker_segmentation import (
     validate_hq_channels,
 )
 from .hq2_marker_segmentation import run_hq2_segmentation
+from .constrained_donut_segmentation import run_constrained_donut_segmentation
 
 
 class OverviewLoaderThread(QThread):
@@ -525,7 +527,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
 
             try:
                 success = True
-                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+                if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
                     params["device_used"] = "gpu" if use_gpu else "cpu"
                     if cellpose_model is None:
                         cellpose_model = models.CellposeModel(device=device)
@@ -552,7 +554,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                         if dist > 0:
                             masks_out = expand_labels(masks_out, distance=dist)
                         print(f"[Worker] expanded cells={int(np.asarray(masks_out).max())}")
-                    if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2):
+                    if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
                         mode = str(params.get("hq_input_mode") or "selected_channels_from_source")
                         if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
                             mode = "selected_channels_from_source"
@@ -595,7 +597,33 @@ def run_cellpose_process(args, result_queue, stop_flag):
                             hq_channel_names = hq_channels
                             if mode == "hybrid":
                                 params["channel_weights"] = {ch: float(weights.get(ch, 1.0)) for ch in hq_channels}
-                        if method == CELLPOSE_NUCLEI_HQ2:
+                        if method == CELLPOSE_NUCLEI_CSD:
+                            nuclei_preview = masks_out.astype(np.uint32, copy=False)
+                            try:
+                                csd = run_constrained_donut_segmentation(
+                                    nuclei_preview,
+                                    marker_channels,
+                                    hq_channel_names,
+                                    params,
+                                )
+                                masks_out = csd["final_labels"]
+                                nuclei_labels = csd["nuclei_labels"]
+                                qc_rows = csd.get("qc_rows") or []
+                                params["csd_preview_layers"] = {
+                                    "hq_proposal_cells": int(np.asarray(csd.get("hq_proposal_labels", np.zeros_like(masks_out))).max()),
+                                    "core_cells": int(np.asarray(csd.get("high_confidence_core_labels", np.zeros_like(masks_out))).max()),
+                                    "expansion_added_pixels": int(np.count_nonzero(csd.get("expansion_added_pixels", np.zeros_like(masks_out)))),
+                                    "watershed_backend": (csd.get("metadata") or {}).get("watershed_backend", ""),
+                                }
+                            except Exception:
+                                print(f"[Worker] CSD preview failed; showing nuclei mask fallback:\n{traceback.format_exc()}")
+                                masks_out = nuclei_preview.copy()
+                                nuclei_labels = nuclei_preview.copy()
+                                qc_rows = []
+                                params["csd_preview_fallback"] = "nuclei_only_after_error"
+                            print("[Worker] input=dapi_plus_csd_channels")
+                            print(f"[Worker] csd preview mask labels={int(np.asarray(masks_out).max())}")
+                        elif method == CELLPOSE_NUCLEI_HQ2:
                             hq2 = run_hq2_segmentation(
                                 masks_out.astype(np.uint32, copy=False),
                                 marker_channels,

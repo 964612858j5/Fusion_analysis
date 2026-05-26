@@ -237,6 +237,11 @@ class ResultGridPanel(QWidget):
         if masks is None:
             masks = np.zeros(fusion_rgb.shape[:2], dtype=np.uint32)
         masks = np.asarray(masks, dtype=np.uint32)
+        print(
+            f"[Step1-ResultGrid] add_result patch={patch_idx + 1} col={col} "
+            f"method={params.get('method')} labels={int(masks.max()) if masks.size else 0} "
+            f"rgb_shape={fusion_rgb.shape} mask_shape={masks.shape}"
+        )
         rendered = self._render_result_image(fusion_rgb, masks)
         pm = self._to_pixmap(rendered, W)
 

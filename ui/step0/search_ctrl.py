@@ -42,6 +42,7 @@ from ...core.io_loader import OMETIFFLoader
 from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
@@ -475,8 +476,10 @@ class SearchCtrlPanel(QWidget):
         self._legacy_hq2_param_rows = list(self._hq2_param_rows)
         self._build_hq2_params_panel()
         lay.insertWidget(1, self.hq2_params_panel)
+        self._build_csd_params_panel()
+        lay.insertWidget(2, self.csd_params_panel)
         self._build_mesmer_params_panel()
-        lay.insertWidget(2, self.mesmer_params_panel)
+        lay.insertWidget(3, self.mesmer_params_panel)
 
         self._patch_preview_hint = QLabel("")
         self._patch_preview_hint.setStyleSheet("color:#ffb86c;font-size:10px;")
@@ -587,8 +590,10 @@ class SearchCtrlPanel(QWidget):
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self.run_preview.emit(self.get_current_params())
             return
-        hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else self._hq_channels.text()
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2) and not parse_hq_channels(hq_text):
+        hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else (
+            self._csd_channels.text() if method == CELLPOSE_NUCLEI_CSD else self._hq_channels.text()
+        )
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) and not parse_hq_channels(hq_text):
             QMessageBox.warning(
                 self,
                 "HQ channels required",
@@ -788,6 +793,81 @@ class SearchCtrlPanel(QWidget):
         if getattr(self, "hq2_params_panel", None) is not None:
             self.hq2_params_panel.setVisible(False)
 
+    def _build_csd_params_panel(self):
+        self.csd_params_panel = QGroupBox("Cellpose nuclei + CSD parameters")
+        self.csd_params_panel.setMinimumHeight(0)
+        self.csd_params_panel.setMaximumHeight(16777215)
+        self.csd_params_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.MinimumExpanding,
+        )
+        self.csd_params_panel.setStyleSheet(
+            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
+            "font-weight:bold;color:#7dd3fc;font-size:11px;}"
+        )
+        outer = QVBoxLayout(self.csd_params_panel)
+        outer.setContentsMargins(6, 8, 6, 6)
+        outer.setSpacing(5)
+        grid = QtWidgets.QGridLayout()
+        outer.addLayout(grid)
+
+        def spin(lo, hi, step, dec, value):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setDecimals(dec)
+            sp.setValue(value)
+            sp.setMinimumHeight(24)
+            return sp
+
+        def add(row, label, widget):
+            lbl = QLabel(label)
+            lbl.setMinimumWidth(130)
+            lbl.setStyleSheet("font-size:10px;color:#bbb;")
+            widget.setMinimumHeight(24)
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(widget, row, 1)
+            return widget
+
+        self._csd_model_label = QLabel("cpsam nuclei")
+        self._csd_model_label.setStyleSheet("font-size:11px;color:#ddd;")
+        add(0, "model_type:", self._csd_model_label)
+        self._csd_cp_diam = add(1, "diameter:", spin(0, 500, 5, 1, 0))
+        self._csd_cp_diam.setSpecialValueText("auto")
+        self._csd_cp_flow = add(2, "flow_threshold:", spin(0, 3, 0.05, 2, 0.4))
+        self._csd_cp_prob = add(3, "cellprob_threshold:", spin(-6, 6, 0.1, 2, 0.0))
+        self._csd_cp_gpu = QCheckBox("Use GPU if available")
+        self._csd_cp_gpu.setChecked(True)
+        add(4, "GPU:", self._csd_cp_gpu)
+        self._csd_cp_tile = add(5, "tile_size:", spin(128, 4096, 128, 0, 1024))
+        self._csd_cp_batch = add(6, "batch_size:", spin(1, 128, 1, 0, 8))
+
+        self._csd_channels = QtWidgets.QLineEdit()
+        self._csd_channels.setPlaceholderText("CD68;CD206;CD45")
+        self._csd_channels.textChanged.connect(lambda _txt: self._refresh_patch_preview_state())
+        add(7, "hq_channels:", self._csd_channels)
+        self._csd_input_mode = QComboBox()
+        for value in ("selected_channels_from_source", "step1_weighted_fusion", "hybrid"):
+            self._csd_input_mode.addItem(value, value)
+        add(8, "hq_input_mode:", self._csd_input_mode)
+        self._csd_donut_size = add(9, "donut_size:", spin(5, 200, 5, 1, 40))
+        self._csd_nucleus_shrink = add(10, "nucleus_shrink:", spin(0, 20, 1, 1, 3))
+        self._csd_bg_sigma = add(11, "bg_sigma_factor:", spin(1, 10, 0.5, 1, 3.0))
+        self._csd_saturation = add(12, "saturation_percentile:", spin(90, 100, 0.1, 1, 99.8))
+        self._csd_max_circularity = add(13, "max_circularity:", spin(0.5, 1.0, 0.01, 2, 0.92))
+        self._csd_circularity_ratio = add(14, "circularity ratio:", spin(1, 20, 0.5, 1, 3.0))
+        self._csd_fallback_expand = add(15, "fallback expand:", spin(0, 20, 1, 1, 3))
+        self._csd_timeout_seconds = add(16, "timeout_seconds:", spin(1, 86400, 10, 0, 600))
+        self.csd_params_panel.setVisible(False)
+
+    def _show_csd_params_panel(self):
+        if getattr(self, "csd_params_panel", None) is not None:
+            self.csd_params_panel.setVisible(True)
+
+    def _hide_csd_params_panel(self):
+        if getattr(self, "csd_params_panel", None) is not None:
+            self.csd_params_panel.setVisible(False)
+
     def _build_mesmer_params_panel(self):
         self.mesmer_params_panel = QGroupBox("Mesmer parameters")
         self.mesmer_params_panel.setMinimumHeight(210)
@@ -936,6 +1016,29 @@ class SearchCtrlPanel(QWidget):
             "macrophage_min_signal": self._hq2_macrophage_signal.value(),
         }
 
+    def collect_csd_params(self):
+        hq_channels = parse_hq_channels(self._csd_channels.text())
+        return {
+            "method": CELLPOSE_NUCLEI_CSD,
+            "model_type": "cpsam",
+            "diameter": None if self._csd_cp_diam.value() == 0 else self._csd_cp_diam.value(),
+            "flow_threshold": self._csd_cp_flow.value(),
+            "cellprob_threshold": self._csd_cp_prob.value(),
+            "use_gpu": self._csd_cp_gpu.isChecked(),
+            "tile_size": int(self._csd_cp_tile.value()),
+            "batch_size": int(self._csd_cp_batch.value()),
+            "hq_channels": hq_channels,
+            "hq_input_mode": self._csd_input_mode.currentData() or "selected_channels_from_source",
+            "donut_size": self._csd_donut_size.value(),
+            "nucleus_shrink": self._csd_nucleus_shrink.value(),
+            "bg_sigma_factor": self._csd_bg_sigma.value(),
+            "saturation_percentile": self._csd_saturation.value(),
+            "max_circularity": self._csd_max_circularity.value(),
+            "circularity_ratio_threshold": self._csd_circularity_ratio.value(),
+            "circularity_fallback_expand": self._csd_fallback_expand.value(),
+            "timeout_seconds": int(self._csd_timeout_seconds.value()),
+        }
+
     def _load_params_file(self):
         """Browse for cellpose_params.json and load it."""
         path, _ = QFileDialog.getOpenFileName(
@@ -1040,6 +1143,18 @@ class SearchCtrlPanel(QWidget):
             self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
             self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
             print(f"[HQ2-UI] restored params={p.get('params')}")
+        if method == CELLPOSE_NUCLEI_CSD:
+            self._csd_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
+            idx = self._csd_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
+            self._csd_input_mode.setCurrentIndex(max(0, idx))
+            self._csd_donut_size.setValue(float(p.get("donut_size", 40) or 40))
+            self._csd_nucleus_shrink.setValue(float(p.get("nucleus_shrink", 3) or 0))
+            self._csd_bg_sigma.setValue(float(p.get("bg_sigma_factor", 3.0) or 3.0))
+            self._csd_saturation.setValue(float(p.get("saturation_percentile", 99.8) or 99.8))
+            self._csd_max_circularity.setValue(float(p.get("max_circularity", 0.92) or 0.92))
+            self._csd_circularity_ratio.setValue(float(p.get("circularity_ratio_threshold", 3.0) or 3.0))
+            self._csd_fallback_expand.setValue(float(p.get("circularity_fallback_expand", 3) or 0))
+            self._csd_timeout_seconds.setValue(float(p.get("timeout_seconds", 600) or 600))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
@@ -1105,6 +1220,10 @@ class SearchCtrlPanel(QWidget):
             params = self.collect_hq2_params()
             print(f"[HQ2-UI] collected params={params}")
             return normalize_segmentation_config({"method": CELLPOSE_NUCLEI_HQ2, "params": params, **params})
+        if method == CELLPOSE_NUCLEI_CSD:
+            params = self.collect_csd_params()
+            print(f"[CSD-UI] collected params={params}")
+            return normalize_segmentation_config({"method": CELLPOSE_NUCLEI_CSD, "params": params, **params})
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             params = self.collect_mesmer_params()
             return normalize_segmentation_config({"method": method, "params": params, **params})
@@ -1143,6 +1262,9 @@ class SearchCtrlPanel(QWidget):
         if method == CELLPOSE_NUCLEI_HQ2:
             params.update(self.collect_hq2_params())
             print(f"[HQ2-UI] collected params={params}")
+        if method == CELLPOSE_NUCLEI_CSD:
+            params.update(self.collect_csd_params())
+            print(f"[CSD-UI] collected params={params}")
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             params.update(self.collect_mesmer_params())
         return {"method": method, "params": params}
@@ -1170,10 +1292,12 @@ class SearchCtrlPanel(QWidget):
 
     def _refresh_patch_preview_state(self, running=False):
         method = self._selected_method()
-        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2)
+        is_hq = method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
         is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
-        hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else self._hq_channels.text()
+        hq_text = self._hq2_channels.text() if method == CELLPOSE_NUCLEI_HQ2 else (
+            self._csd_channels.text() if method == CELLPOSE_NUCLEI_CSD else self._hq_channels.text()
+        )
         enabled = (is_stardist or is_mesmer or (is_hq and bool(parse_hq_channels(hq_text)))) and not running
         self.btn_patch_preview.setEnabled(enabled)
         if is_hq and not parse_hq_channels(hq_text):
@@ -1191,6 +1315,7 @@ class SearchCtrlPanel(QWidget):
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
         is_hq2 = method == CELLPOSE_NUCLEI_HQ2
+        is_csd = method == CELLPOSE_NUCLEI_CSD
         is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         self._p1_box.setVisible(is_cellpose)
         self._p2_box.setVisible(is_cellpose)
@@ -1237,6 +1362,10 @@ class SearchCtrlPanel(QWidget):
             self._hide_hq2_params_panel()
             self._manual_params_scroll.setMinimumHeight(0)
             self._manual_params_scroll.setMaximumHeight(16777215)
+        if is_csd:
+            self._show_csd_params_panel()
+        else:
+            self._hide_csd_params_panel()
         if getattr(self, "mesmer_params_panel", None) is not None:
             self.mesmer_params_panel.setVisible(is_mesmer)
         self._expand_dist.setEnabled(is_expansion)
@@ -1254,6 +1383,7 @@ class SearchCtrlPanel(QWidget):
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
             CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
             CELLPOSE_NUCLEI_HQ2: "cellpose_nuclei_hq2_patch_preview",
+            CELLPOSE_NUCLEI_CSD: "cellpose_nuclei_csd_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
             MESMER_WHOLE_CELL: "mesmer_whole_cell_patch_preview",

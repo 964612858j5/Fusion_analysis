@@ -208,6 +208,15 @@ class Step4Page(QWidget):
         nav.addWidget(btn_back)
         nav.addStretch()
 
+        self._batch_btn = QPushButton('Batch...')
+        self._batch_btn.setStyleSheet(
+            'QPushButton{color:#61afef;border:1px solid #61afef;'
+            'border-radius:4px;padding:6px 16px;}'
+            'QPushButton:hover{background:#123;}'
+        )
+        self._batch_btn.clicked.connect(self._open_batch)
+        nav.addWidget(self._batch_btn)
+
         self._btn_stop = QPushButton('⏹ Stop')
         self._btn_stop.setEnabled(False)
         self._btn_stop.setStyleSheet(
@@ -237,6 +246,11 @@ class Step4Page(QWidget):
                                             OUTPUT_DIR, filt)
         if p:
             edit.setText(p)
+
+    def _open_batch(self):
+        from .batch_step4_dialog import BatchStep4Dialog
+        dlg = BatchStep4Dialog(parent=self)
+        dlg.exec_()
 
     def _run(self):
         mask_path = self._mask_edit.text().strip()

@@ -495,8 +495,9 @@ class BatchStep4Dialog(QDialog):
         )
         worker.progress.connect(
             lambda cur, tot, msg, r=row: self._set_status(r, f"running... {msg}"))
-        # FeatureExtractWorker emits finished(output_dir, base_name) on success.
-        worker.finished.connect(lambda *_a, r=row: self._on_worker_done(r))
+        # FeatureExtractWorker emits extraction_done(output_dir, base_name) on
+        # success — a custom signal that does not shadow QThread.finished.
+        worker.extraction_done.connect(lambda *_a, r=row: self._on_worker_done(r))
         worker.error.connect(lambda e, r=row: self._on_worker_error(r, e))
 
         self._current_worker = worker

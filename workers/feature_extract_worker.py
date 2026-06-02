@@ -34,12 +34,15 @@ class FeatureExtractWorker(QThread):
 
     Signals:
         progress(done_channels, total_channels, msg)
-        finished(output_dir)
+        extraction_done(output_dir, base_name)
         error(traceback_str)
     """
 
     progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(str, str)   # (output_dir, base_name)
+    # Renamed from `finished` so it does NOT shadow QThread's built-in
+    # finished() signal. Overriding it left the C++ thread-exit finished()
+    # still firing, double-triggering connected slots.
+    extraction_done = pyqtSignal(str, str)   # (output_dir, base_name)
     error    = pyqtSignal(str)
 
     def __init__(self, mask_path, ome_tiff_path, output_dir,
@@ -397,7 +400,7 @@ class FeatureExtractWorker(QThread):
             del mask
             gc.collect()
 
-            self.finished.emit(self.output_dir, self.base_name)
+            self.extraction_done.emit(self.output_dir, self.base_name)
 
         except Exception:
             self.error.emit(traceback.format_exc())

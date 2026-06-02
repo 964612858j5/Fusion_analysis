@@ -284,7 +284,7 @@ class Step4Page(QWidget):
             correction_config = correction_config,
         )
         self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.extraction_done.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
 
         self._btn_run.setEnabled(False)

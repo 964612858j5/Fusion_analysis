@@ -20,12 +20,11 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QTableWidget, QTableWidgetItem, QCheckBox, QWidget, QFileDialog,
-    QMessageBox, QStyledItemDelegate, QHeaderView, QGroupBox,
+    QMessageBox, QStyledItemDelegate, QHeaderView, QGroupBox, QProgressBar,
 )
 
 from ..config import OUTPUT_DIR
 from ..core.bg_correction import _load_correction_config
-from ..core.io_loader import OMETIFFLoader
 from ..workers.feature_extract_worker import FeatureExtractWorker
 
 # ── column layout ──────────────────────────────────────────────────────
@@ -53,6 +52,7 @@ _BG_BAD     = QColor(80, 20, 20)
 _BG_CLEAR   = QColor(0, 0, 0, 0)
 _BG_DONE    = QColor(20, 60, 20)
 _BG_RUNNING = QColor(60, 60, 20)
+_BG_SKIP    = QColor(60, 60, 60)
 
 _NOT_FOUND = "(not found)"
 
@@ -272,7 +272,16 @@ class BatchStep4Dialog(QDialog):
             sl.addWidget(cb)
             self._stat_checkboxes[key] = cb
         sl.addStretch()
+        self._force_cb = QCheckBox("Overwrite existing results")
+        self._force_cb.setChecked(False)
+        sl.addWidget(self._force_cb)
         root.addWidget(stat_box)
+
+        # Progress bar (hidden until a batch runs)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setTextVisible(True)
+        root.addWidget(self._progress_bar)
 
         # Bottom: run / close
         bottom = QHBoxLayout()
@@ -430,13 +439,9 @@ class BatchStep4Dialog(QDialog):
     # ── batch execution ───────────────────────────────────────────────
 
     def _run_batch(self):
-        print(f"[BATCH] _run_batch called, table rows={self.table.rowCount()}", flush=True)  # DEBUG: temp
         tasks = []
         for row in range(self.table.rowCount()):
             cb = self.table.cellWidget(row, COL_CHECK)
-            checked = cb.isChecked() if cb else False  # DEBUG: temp
-            sample = self._cell_text(row, COL_SAMPLE)  # DEBUG: temp
-            print(f"[BATCH]   row {row}: checked={checked} sample={sample}", flush=True)  # DEBUG: temp
             if not cb or not cb.isChecked():
                 continue
             ome_tiff = self._cell_text(row, COL_OME_TIFF)
@@ -446,10 +451,14 @@ class BatchStep4Dialog(QDialog):
             if not os.path.exists(ome_tiff) or not os.path.exists(mask):
                 self._set_status(row, "error ✖ (path missing)")
                 continue
+            existing_h5ad = glob.glob(os.path.join(output_dir, "*_cell_features.h5ad"))
+            if existing_h5ad and not self._force_cb.isChecked():
+                self._set_status(row, "skipped (exists)")
+                print(f"[BATCH]   ⏭ skipped: h5ad already exists ({prefix})", flush=True)
+                continue
             tasks.append({"row": row, "ome_tiff": ome_tiff, "mask": mask,
                           "output_dir": output_dir, "prefix": prefix})
 
-        print(f"[BATCH] collected {len(tasks)} tasks", flush=True)  # DEBUG: temp
         if not tasks:
             QMessageBox.warning(self, "No tasks", "No valid samples selected.")
             return
@@ -464,13 +473,17 @@ class BatchStep4Dialog(QDialog):
         self._batch_tasks = tasks
         self._batch_stats = stats
         self._batch_idx = 0
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setMaximum(len(tasks))
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("Processing %v / %m")
         self._run_next()
 
     def _run_next(self):
-        print(f"[BATCH] _run_next called, idx={self._batch_idx}/{len(self._batch_tasks)}", flush=True)  # DEBUG: temp
         if self._batch_idx >= len(self._batch_tasks):
             self._run_btn.setEnabled(True)
             self._current_worker = None
+            self._progress_bar.setFormat("Done: %v / %m")
             QMessageBox.information(
                 self, "Done",
                 f"Batch complete: {len(self._batch_tasks)} samples processed.")
@@ -479,19 +492,18 @@ class BatchStep4Dialog(QDialog):
         task = self._batch_tasks[self._batch_idx]
         row = task["row"]
         self._set_status(row, "running...")
+        self.table.selectRow(row)  # highlight the sample being processed
 
-        try:
-            print(f"[BATCH]   loading OME-TIFF: {task['ome_tiff']}", flush=True)  # DEBUG: temp
-            loader = OMETIFFLoader(task["ome_tiff"])
-            ch_names = loader.channel_names
-            print(f"[BATCH]   loaded OK, {len(ch_names)} channels", flush=True)  # DEBUG: temp
-        except Exception as e:
-            print(f"[BATCH]   OMETIFFLoader FAILED: {e}", flush=True)  # DEBUG: temp
-            self._set_status(row, f"error ✖ ({e})")
-            self._advance()
-            return
+        # Match single-sample Step4Page: let the worker parse channel names
+        # from the OME-TIFF itself (avoids a duplicate load).
+        ch_names = None
 
         correction_config = _find_correction_config(task["output_dir"])
+
+        print(f"[BATCH] [{self._batch_idx + 1}/{len(self._batch_tasks)}] {task['prefix']}", flush=True)
+        print(f"[BATCH]   OME-TIFF:   {task['ome_tiff']}", flush=True)
+        print(f"[BATCH]   Mask:       {task['mask']}", flush=True)
+        print(f"[BATCH]   Output dir: {task['output_dir']}", flush=True)
 
         worker = FeatureExtractWorker(
             mask_path=task["mask"],
@@ -509,23 +521,21 @@ class BatchStep4Dialog(QDialog):
         worker.extraction_done.connect(lambda *_a, r=row: self._on_worker_done(r))
         worker.error.connect(lambda e, r=row: self._on_worker_error(r, e))
 
-        print(f"[BATCH]   starting worker for row {row}", flush=True)  # DEBUG: temp
         self._current_worker = worker
         worker.start()
-        print(f"[BATCH]   worker.start() returned", flush=True)  # DEBUG: temp
 
     def _advance(self):
-        print(f"[BATCH] _advance idx {self._batch_idx} -> {self._batch_idx+1}", flush=True)  # DEBUG: temp
         self._batch_idx += 1
+        self._progress_bar.setValue(self._batch_idx)
         self._run_next()
 
     def _on_worker_done(self, row):
-        print(f"[BATCH] _on_worker_done row={row}", flush=True)  # DEBUG: temp
+        print(f"[BATCH]   ✓ done → {self._cell_text(row, COL_OUTPUT_DIR)}", flush=True)
         self._set_status(row, "done ✓")
         self._advance()
 
     def _on_worker_error(self, row, err):
-        print(f"[BATCH] _on_worker_error row={row} err={err}", flush=True)  # DEBUG: temp
+        print(f"[BATCH]   ✖ error: {err}", flush=True)
         self._set_status(row, "error ✖")
         # A failed sample never aborts the batch — move to the next one.
         self._advance()
@@ -539,6 +549,8 @@ class BatchStep4Dialog(QDialog):
         item.setText(text)
         if "error" in text:
             item.setBackground(_BG_BAD)
+        elif "skipped" in text:
+            item.setBackground(_BG_SKIP)
         elif "done" in text:
             item.setBackground(_BG_DONE)
         elif "running" in text:

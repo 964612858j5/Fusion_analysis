@@ -1806,10 +1806,12 @@ class Step2Page(QWidget):
             self._cp_prob_label, self._cp_prob,
             self._cp_minsize_label, self._cp_minsize,
             self._cp_gpu_label, self._cp_gpu,
-            self._cp_tile_size_label, self._cp_tile_size,
-            self._cp_batch_size_label, self._cp_batch_size,
         ):
             w.setVisible(is_cellpose)
+        self._cp_tile_size_label.setVisible(is_mesmer)
+        self._cp_tile_size.setVisible(is_mesmer)
+        self._cp_batch_size_label.setVisible(is_mesmer)
+        self._cp_batch_size.setVisible(is_mesmer)
         for w in (
             self._sd_model_label, self._sd_model,
             self._sd_prob_label, self._sd_prob,

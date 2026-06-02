@@ -42,6 +42,10 @@ DEFAULT_CSD_PARAMS = {
     "gi_top_k": 0,
     "gi_specificity_floor": 0.05,
     "weak_hotspot_connectivity": 8,
+    "gradient_barrier_sigma": 1.0,
+    "gradient_barrier_threshold": 0.15,
+    "gradient_valley_kernel": 5,
+    "enable_gradient_barrier": True,
     "max_added_area_fraction": 3.0,
     "max_cell_to_nucleus_ratio": 8.0,
     "lymphocyte_max_cell_to_nucleus_ratio": 4.0,
@@ -174,7 +178,14 @@ def _channel_threshold(raw_np, bg_mask, bg_sigma_factor, saturation_percentile):
     sigma = mad * 1.4826
     low = med + float(bg_sigma_factor) * sigma
     if sigma == 0.0:
-        low = med * 1.1 + 1.0
+        # 背景全是同一个值（通常是 0），用非零像素的分布来确定阈值
+        # 取非零正值的低百分位作为"信号起点"的参考
+        positive = raw[(raw > 0) & finite]
+        if positive.size > 0:
+            # 用正值分布的 p10 作为阈值——低于此值的视为接近背景的微弱噪声
+            low = float(np.percentile(positive, 10))
+        else:
+            low = med + 1.0e-6  # 没有正值，几乎不设门槛
     positive = raw[(raw > 0) & finite]
     high = float(np.percentile(positive, float(saturation_percentile))) if positive.size else float("inf")
     if high < low:
@@ -332,6 +343,10 @@ def build_soft_constraint_maps(nuclei_labels, base_territory, marker_channels, c
         auto_low, auto_high, bg_median, bg_sigma_est = _channel_threshold(
             raw, bg_mask, p.get("bg_sigma_factor", 3.0), p.get("saturation_percentile", 99.8)
         )
+        print(f"[DEBUG] {name}: auto_low={auto_low:.1f}, bg_median={bg_median:.1f}, bg_sigma={bg_sigma_est:.1f}, bg_mask_count={int(np.count_nonzero(bg_mask))}")
+        pos = raw[raw > 0]
+        if pos.size > 0:
+                print(f"[DEBUG] {name}: signal p25={np.percentile(pos,25):.3f}, p50={np.percentile(pos,50):.3f}, p75={np.percentile(pos,75):.3f}, p99={np.percentile(pos,99):.3f}, max={pos.max():.3f}")
         thresholds[name] = {
             "auto_low": float(auto_low),
             "auto_high": float(auto_high),
@@ -375,18 +390,127 @@ def build_soft_constraint_maps(nuclei_labels, base_territory, marker_channels, c
     )
 
 
-def build_strong_signal_keep(base_territory, support_map, nuclei_labels, minimal_keep_labels, params=None):
-    """Retain explicitly supported cytoplasm inside the upper-bound territory."""
+def build_gradient_barriers(marker_channels, channel_names, base_territory, channel_thresholds, params=None):
+    """Build per-channel valley-only barriers for channel-local flood fill blocking."""
+    p = _params(params)
+    base = np.asarray(base_territory, dtype=np.uint32)
+    territory_mask = base > 0
+    marker_channels = list(marker_channels or [])
+    names = list(channel_names or [])[:len(marker_channels)]
+    if not names:
+        names = [f"channel_{idx + 1}" for idx in range(len(marker_channels))]
+
+    if (
+        not bool(p.get("enable_gradient_barrier", True))
+        or not marker_channels
+        or not np.any(territory_mask)
+    ):
+        return {name: np.zeros(base.shape, dtype=bool) for name in names}, "none"
+
+    gradient_sigma = float(p.get("gradient_barrier_sigma", 1.0) or 1.0)
+    gradient_threshold = float(p.get("gradient_barrier_threshold", 0.15) or 0.15)
+    valley_kernel = max(3, int(p.get("gradient_valley_kernel", 5) or 5))
+    if valley_kernel % 2 == 0:
+        valley_kernel += 1
+    use_gpu = str(p.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
+    backend = "cupy" if (use_gpu and _cupy_hotspot_available()) else "scipy"
+    xp = _cupy if backend == "cupy" else np
+    xndi = _cupyx_ndi if backend == "cupy" else _scipy_ndi
+
+    try:
+        territory_x = xp.asarray(territory_mask)
+        per_channel_barriers = {}
+        for name, raw in zip(names, marker_channels):
+            info = channel_thresholds.get(name, {}) if channel_thresholds else {}
+            auto_low = float(info.get("auto_low", 0.0) or 0.0)
+            clip_low = float(info.get("clip_low", 0.0) or 0.0)
+            clip_high = float(info.get("clip_high", 1.0) or 1.0)
+            dynamic_range = max(clip_high - clip_low, 1.0e-6)
+
+            raw_x = xp.asarray(raw, dtype=xp.float32)
+            normed = xp.clip(
+                (raw_x - xp.float32(clip_low)) / xp.float32(dynamic_range),
+                0.0,
+                1.0,
+            )
+            grad = xndi.gaussian_gradient_magnitude(normed, sigma=gradient_sigma)
+            local_mean = xndi.uniform_filter(normed, size=valley_kernel, mode="nearest")
+            is_valley = normed < local_mean
+            has_signal = raw_x >= xp.float32(auto_low)
+            signal_neighborhood = xndi.binary_dilation(has_signal, iterations=2)
+            barrier = (
+                (grad >= xp.float32(gradient_threshold))
+                & is_valley
+                & (has_signal | signal_neighborhood)
+                & territory_x
+            )
+            per_channel_barriers[name] = _asnumpy(barrier).astype(bool, copy=False)
+
+        if backend == "cupy":
+            _cupy.get_default_memory_pool().free_all_blocks()
+        return per_channel_barriers, backend
+    except Exception:
+        if backend == "cupy":
+            cpu_params = dict(p)
+            cpu_params["use_gpu"] = False
+            return build_gradient_barriers(
+                marker_channels, channel_names, base_territory, channel_thresholds, cpu_params
+            )
+        raise
+
+
+def build_flood_fill_keep(
+    base_territory,
+    nuclei_labels,
+    minimal_keep_labels,
+    marker_channels,
+    channel_names,
+    channel_thresholds,
+    per_channel_barriers,
+    params=None,
+):
+    """Flood fill from nuclei along per-channel strong signal, constrained by that channel's barriers."""
     p = _params(params)
     if not bool(p.get("enable_strong_signal_keep", True)):
         return np.zeros_like(base_territory, dtype=np.uint32)
+
     base = np.asarray(base_territory, dtype=np.uint32)
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
     minimal = np.asarray(minimal_keep_labels, dtype=np.uint32)
-    support = np.asarray(support_map, dtype=np.float32)
-    threshold = float(p.get("strong_support_threshold", 0.12) or 0.12)
-    candidate = (support >= threshold) & (base > 0) & (nuclei == 0)
-    labels = np.where(candidate, base, 0).astype(np.uint32, copy=False)
+    if int(nuclei.max()) == 0 or not marker_channels:
+        return np.zeros_like(base, dtype=np.uint32)
+
+    names = list(channel_names or [])[:len(marker_channels)]
+    if not names:
+        names = [f"channel_{idx + 1}" for idx in range(len(marker_channels))]
+
+    structure = np.ones((3, 3), dtype=bool)
+    union_keep = np.zeros_like(base, dtype=bool)
+    base_mask = base > 0
+    nucleus_mask = nuclei > 0
+
+    for name, raw in zip(names, marker_channels):
+        info = channel_thresholds.get(name, {}) if channel_thresholds else {}
+        auto_low = float(info.get("auto_low", 0.0) or 0.0)
+        raw_arr = np.asarray(raw, dtype=np.float32)
+        barrier = np.asarray(
+            (per_channel_barriers or {}).get(name, np.zeros_like(base, dtype=bool)),
+            dtype=bool,
+        )
+        reachable = (raw_arr >= auto_low) & base_mask & (~barrier)
+        if not np.any(reachable):
+            continue
+        comps, n_comp = _scipy_ndi.label(reachable | nucleus_mask, structure=structure)
+        if n_comp == 0:
+            continue
+        nucleus_comp_ids = np.unique(comps[nucleus_mask])
+        nucleus_comp_ids = nucleus_comp_ids[nucleus_comp_ids > 0]
+        if nucleus_comp_ids.size == 0:
+            continue
+        channel_keep = np.isin(comps, nucleus_comp_ids) & reachable & (~nucleus_mask)
+        union_keep |= channel_keep
+
+    labels = np.where(union_keep & base_mask, base, 0).astype(np.uint32, copy=False)
     return _keep_connected_to_seed(labels, nuclei, minimal, base)
 
 
@@ -912,7 +1036,9 @@ def run_constrained_donut_segmentation(
                 "base_territory_mask": empty.copy(),
                 "minimal_keep_mask": empty.copy(),
                 "strong_keep_mask": empty.copy(),
+                "flood_fill_keep_mask": empty.copy(),
                 "weak_hotspot_keep_mask": empty.copy(),
+                "gradient_barrier_mask": empty.astype(np.uint8),
                 "gi_star_map": empty.astype(np.float32),
                 "per_channel_gi_maps": {},
                 "support_map": empty.astype(np.float32),
@@ -937,20 +1063,54 @@ def run_constrained_donut_segmentation(
         timings["support_maps_seconds"] = time.perf_counter() - t0
         _log(logger, progress_callback, f"[CDS] support maps seconds={timings['support_maps_seconds']:.3f}")
 
+        _check_safety(p, started, cancel_check, "CDS-gradient-barrier")
+        t0 = time.perf_counter()
+        per_channel_barriers, barrier_backend = build_gradient_barriers(
+            marker_channels, channel_names, base_territory, channel_thresholds, p
+        )
+        gradient_barrier_union = np.zeros_like(nuclei, dtype=bool)
+        for barrier in per_channel_barriers.values():
+            gradient_barrier_union |= np.asarray(barrier, dtype=bool)
+        timings["gradient_barrier_seconds"] = time.perf_counter() - t0
+        _log(
+            logger,
+            progress_callback,
+            f"[CDS] per-channel gradient barriers built, "
+            f"union={int(np.count_nonzero(gradient_barrier_union))} pixels, "
+            f"{timings['gradient_barrier_seconds']:.3f}s",
+        )
+
         _check_safety(p, started, cancel_check, "CDS-retained-cytoplasm")
         t0 = time.perf_counter()
         minimal_keep = _expand_labels(nuclei, float(p.get("minimal_radius", 3) or 3)).astype(np.uint32, copy=False)
         minimal_keep[base_territory == 0] = 0
         minimal_keep[nuclei > 0] = nuclei[nuclei > 0]
-        strong_keep = build_strong_signal_keep(base_territory, support_map, nuclei, minimal_keep, p)
-        timings["strong_keep_seconds"] = time.perf_counter() - t0
-        _log(logger, progress_callback, f"[CDS] strong keep seconds={timings['strong_keep_seconds']:.3f}")
+        flood_fill_keep = build_flood_fill_keep(
+            base_territory,
+            nuclei,
+            minimal_keep,
+            marker_channels,
+            channel_names,
+            channel_thresholds,
+            per_channel_barriers,
+            p,
+        )
+        timings["flood_fill_keep_seconds"] = time.perf_counter() - t0
+        _log(logger, progress_callback, f"[CDS] flood fill keep: {int(np.count_nonzero(flood_fill_keep > 0))} pixels")
 
         _check_safety(p, started, cancel_check, "CDS-weak-hotspot")
         t0 = time.perf_counter()
         gi_star_map, per_channel_gi, gi_backend = build_multichannel_gi_star(
             marker_channels, channel_names, base_territory, p
         )
+        gi_star_map = gi_star_map.astype(np.float32, copy=False)
+        if per_channel_barriers:
+            gi_barrier = np.ones_like(nuclei, dtype=bool)
+            for barrier in per_channel_barriers.values():
+                gi_barrier &= np.asarray(barrier, dtype=bool)
+        else:
+            gi_barrier = np.zeros_like(nuclei, dtype=bool)
+        gi_star_map[gi_barrier] = 0.0
         weak_hotspot_keep = build_weak_hotspot_keep(base_territory, nuclei, minimal_keep, gi_star_map, p)
         weak_support_map = np.clip(gi_star_map / max(float(p.get("weak_hotspot_threshold", 0.8) or 0.8), 1.0e-6), 0.0, 1.0)
         timings["weak_hotspot_seconds"] = time.perf_counter() - t0
@@ -959,7 +1119,7 @@ def run_constrained_donut_segmentation(
         _check_safety(p, started, cancel_check, "CDS-compose")
         t0 = time.perf_counter()
         retained, guard_info = compose_cds_retained_mask(
-            nuclei, minimal_keep, strong_keep, weak_hotspot_keep, base_territory,
+            nuclei, minimal_keep, flood_fill_keep, weak_hotspot_keep, base_territory,
             support_map, gi_star_map, dominant, p
         )
         timings["compose_seconds"] = time.perf_counter() - t0
@@ -976,7 +1136,7 @@ def run_constrained_donut_segmentation(
         _log(logger, progress_callback, f"[CDS] shrink seconds={timings['shrink_seconds']:.3f}")
 
         qc_rows, prevented_qc, weak_signal_cells = _qc_rows(
-            nuclei, base_territory, minimal_keep, strong_keep, weak_hotspot_keep, final,
+            nuclei, base_territory, minimal_keep, flood_fill_keep, weak_hotspot_keep, final,
             marker_channels, channel_names, channel_thresholds, support_map, gi_star_map,
             dominant, guard_info
         )
@@ -995,8 +1155,11 @@ def run_constrained_donut_segmentation(
         gi_star_map = np.zeros_like(nuclei, dtype=np.float32)
         per_channel_gi = {}
         minimal_keep = nuclei.copy()
-        strong_keep = np.zeros_like(nuclei, dtype=np.uint32)
+        flood_fill_keep = np.zeros_like(nuclei, dtype=np.uint32)
         weak_hotspot_keep = np.zeros_like(nuclei, dtype=np.uint32)
+        per_channel_barriers = {}
+        barrier_backend = "not_run"
+        gradient_barrier_union = np.zeros_like(nuclei, dtype=bool)
         boundary_energy = np.zeros_like(nuclei, dtype=np.float32)
         boundary_band = np.zeros_like(nuclei, dtype=bool)
         channel_thresholds = {}
@@ -1037,6 +1200,15 @@ def run_constrained_donut_segmentation(
         "hq2_mode": "retained_cytoplasm_constrained_donut",
         "signal_map_mode": "raw_clipped_signal_for_retention",
         "gating_role": "qc_annotation_only",
+        "strong_signal_mode": "flood_fill_per_channel_union",
+        "weak_signal_mode": "multichannel_gi_specificity",
+        "gradient_barrier_mode": "per_channel_valley_only",
+        "gradient_barrier_backend": barrier_backend,
+        "gradient_barrier_enabled": bool(p.get("enable_gradient_barrier", True)),
+        "gradient_barrier_sigma": float(p.get("gradient_barrier_sigma", 1.0) or 1.0),
+        "gradient_barrier_threshold": float(p.get("gradient_barrier_threshold", 0.15) or 0.15),
+        "gradient_valley_kernel": int(p.get("gradient_valley_kernel", 5) or 5),
+        "gradient_barrier_pixels": int(np.count_nonzero(gradient_barrier_union)),
         "segmentation_retention_thresholds": {
             "strong_support_threshold": p.get("strong_support_threshold", 0.12),
             "weak_hotspot_threshold": p.get("weak_hotspot_threshold", 0.8),
@@ -1055,6 +1227,10 @@ def run_constrained_donut_segmentation(
         "shrink_pixels": p.get("shrink_pixels", p.get("nucleus_shrink", 2)),
         "strong_support_threshold": p.get("strong_support_threshold", 0.12),
         "weak_hotspot_threshold": p.get("weak_hotspot_threshold", 0.8),
+        "gradient_barrier_enabled": bool(p.get("enable_gradient_barrier", True)),
+        "gradient_barrier_sigma": float(p.get("gradient_barrier_sigma", 1.0) or 1.0),
+        "gradient_barrier_threshold": float(p.get("gradient_barrier_threshold", 0.15) or 0.15),
+        "gradient_valley_kernel": int(p.get("gradient_valley_kernel", 5) or 5),
         "gi_mode": "multichannel_specificity_weighted",
         "gi_kernel_size": p.get("gi_kernel_size", 7),
         "gi_background_kernel_size": p.get("gi_background_kernel_size", 31),
@@ -1108,8 +1284,14 @@ def run_constrained_donut_segmentation(
             "refinement_added_pixels": expansion_added.copy(),
             "base_territory_mask": base_territory.astype(np.uint32, copy=False),
             "minimal_keep_mask": minimal_keep.astype(np.uint32, copy=False),
-            "strong_keep_mask": strong_keep.astype(np.uint32, copy=False),
+            "strong_keep_mask": flood_fill_keep.astype(np.uint32, copy=False),
+            "flood_fill_keep_mask": flood_fill_keep.astype(np.uint32, copy=False),
             "weak_hotspot_keep_mask": weak_hotspot_keep.astype(np.uint32, copy=False),
+            "gradient_barrier_mask": gradient_barrier_union.astype(np.uint8, copy=False),
+            "per_channel_barriers": {
+                name: barrier.astype(np.uint8, copy=False)
+                for name, barrier in per_channel_barriers.items()
+            },
             "gi_star_map": gi_star_map.astype(np.float32, copy=False),
             "support_map": support_map.astype(np.float32, copy=False),
             "weak_support_map": weak_support_map.astype(np.float32, copy=False),
@@ -1178,6 +1360,10 @@ def csd_metadata_fields(params, paths):
             "weak_local_z_threshold": params.get("weak_local_z_threshold", 0.75),
             "weak_min_component_area": params.get("weak_min_component_area", 8),
             "weak_hotspot_connectivity": params.get("weak_hotspot_connectivity", 8),
+            "enable_gradient_barrier": params.get("enable_gradient_barrier", True),
+            "gradient_barrier_sigma": params.get("gradient_barrier_sigma", 1.0),
+            "gradient_barrier_threshold": params.get("gradient_barrier_threshold", 0.15),
+            "gradient_valley_kernel": params.get("gradient_valley_kernel", 5),
             "timeout_seconds": params.get("timeout_seconds", 600),
             "memory_guard_mb": params.get("memory_guard_mb", 0),
         },
@@ -1189,6 +1375,15 @@ def csd_metadata_fields(params, paths):
         "gi_top_k": int(runtime.get("gi_top_k", params.get("gi_top_k", 0)) or 0),
         "gi_specificity_enabled": bool(runtime.get("gi_specificity_enabled", params.get("gi_specificity_enabled", True))),
         "gi_specificity_floor": float(runtime.get("gi_specificity_floor", params.get("gi_specificity_floor", 0.05)) or 0.0),
+        "strong_signal_mode": runtime.get("strong_signal_mode", "flood_fill_per_channel_union"),
+        "weak_signal_mode": runtime.get("weak_signal_mode", "multichannel_gi_specificity"),
+        "gradient_barrier_mode": runtime.get("gradient_barrier_mode", "per_channel_valley_only"),
+        "gradient_barrier_backend": runtime.get("gradient_barrier_backend", ""),
+        "gradient_barrier_enabled": bool(runtime.get("gradient_barrier_enabled", params.get("enable_gradient_barrier", True))),
+        "gradient_barrier_sigma": float(runtime.get("gradient_barrier_sigma", params.get("gradient_barrier_sigma", 1.0)) or 1.0),
+        "gradient_barrier_threshold": float(runtime.get("gradient_barrier_threshold", params.get("gradient_barrier_threshold", 0.15)) or 0.15),
+        "gradient_valley_kernel": int(runtime.get("gradient_valley_kernel", params.get("gradient_valley_kernel", 5)) or 5),
+        "gradient_barrier_pixels": int(runtime.get("gradient_barrier_pixels", 0) or 0),
         "segmentation_retention_thresholds": runtime.get("segmentation_retention_thresholds", {}),
         "qc_gating_threshold": runtime.get("qc_gating_threshold", {}),
         "prevented_nucleus_only_collapse": int(runtime.get("prevented_nucleus_only_collapse", 0) or 0),
@@ -1206,7 +1401,9 @@ def csd_metadata_fields(params, paths):
         "base_territory_mask_path": paths.get("base_territory_mask_path", ""),
         "minimal_keep_mask_path": paths.get("minimal_keep_mask_path", ""),
         "strong_keep_mask_path": paths.get("strong_keep_mask_path", ""),
+        "flood_fill_keep_mask_path": paths.get("flood_fill_keep_mask_path", ""),
         "weak_hotspot_keep_mask_path": paths.get("weak_hotspot_keep_mask_path", ""),
+        "gradient_barrier_mask_path": paths.get("gradient_barrier_mask_path", ""),
         "gi_star_map_path": paths.get("gi_star_map_path", ""),
         "support_map_path": paths.get("support_map_path", ""),
         "weak_support_map_path": paths.get("weak_support_map_path", ""),
@@ -1232,7 +1429,9 @@ def save_csd_outputs(output_dir, prefix, result, params):
         "base_territory_mask_path": "base_territory_mask",
         "minimal_keep_mask_path": "minimal_keep_mask",
         "strong_keep_mask_path": "strong_keep_mask",
+        "flood_fill_keep_mask_path": "flood_fill_keep_mask",
         "weak_hotspot_keep_mask_path": "weak_hotspot_keep_mask",
+        "gradient_barrier_mask_path": "gradient_barrier_mask",
         "shrinked_mask_path": "shrinked_mask",
     }
     for path_key, result_key in mask_mapping.items():

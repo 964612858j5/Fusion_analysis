@@ -206,9 +206,9 @@ class FeatureExtractWorker(QThread):
             del ys, xs, ones
             gc.collect()
 
-            mu20 = m20 - cx * cx
-            mu02 = m02 - cy * cy
-            mu11 = m11 - cx * cy
+            mu20 = m20 - cx_local * cx_local
+            mu02 = m02 - cy_local * cy_local
+            mu11 = m11 - cx_local * cy_local
             del m20, m02, m11
 
             tmp   = np.sqrt(np.maximum(0.0, (mu20 - mu02)**2 + 4.0 * mu11**2))

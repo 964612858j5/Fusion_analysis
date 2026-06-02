@@ -430,9 +430,13 @@ class BatchStep4Dialog(QDialog):
     # ── batch execution ───────────────────────────────────────────────
 
     def _run_batch(self):
+        print(f"[BATCH] _run_batch called, table rows={self.table.rowCount()}", flush=True)  # DEBUG: temp
         tasks = []
         for row in range(self.table.rowCount()):
             cb = self.table.cellWidget(row, COL_CHECK)
+            checked = cb.isChecked() if cb else False  # DEBUG: temp
+            sample = self._cell_text(row, COL_SAMPLE)  # DEBUG: temp
+            print(f"[BATCH]   row {row}: checked={checked} sample={sample}", flush=True)  # DEBUG: temp
             if not cb or not cb.isChecked():
                 continue
             ome_tiff = self._cell_text(row, COL_OME_TIFF)
@@ -445,6 +449,7 @@ class BatchStep4Dialog(QDialog):
             tasks.append({"row": row, "ome_tiff": ome_tiff, "mask": mask,
                           "output_dir": output_dir, "prefix": prefix})
 
+        print(f"[BATCH] collected {len(tasks)} tasks", flush=True)  # DEBUG: temp
         if not tasks:
             QMessageBox.warning(self, "No tasks", "No valid samples selected.")
             return
@@ -462,6 +467,7 @@ class BatchStep4Dialog(QDialog):
         self._run_next()
 
     def _run_next(self):
+        print(f"[BATCH] _run_next called, idx={self._batch_idx}/{len(self._batch_tasks)}", flush=True)  # DEBUG: temp
         if self._batch_idx >= len(self._batch_tasks):
             self._run_btn.setEnabled(True)
             self._current_worker = None
@@ -475,9 +481,12 @@ class BatchStep4Dialog(QDialog):
         self._set_status(row, "running...")
 
         try:
+            print(f"[BATCH]   loading OME-TIFF: {task['ome_tiff']}", flush=True)  # DEBUG: temp
             loader = OMETIFFLoader(task["ome_tiff"])
             ch_names = loader.channel_names
+            print(f"[BATCH]   loaded OK, {len(ch_names)} channels", flush=True)  # DEBUG: temp
         except Exception as e:
+            print(f"[BATCH]   OMETIFFLoader FAILED: {e}", flush=True)  # DEBUG: temp
             self._set_status(row, f"error ✖ ({e})")
             self._advance()
             return
@@ -500,18 +509,23 @@ class BatchStep4Dialog(QDialog):
         worker.extraction_done.connect(lambda *_a, r=row: self._on_worker_done(r))
         worker.error.connect(lambda e, r=row: self._on_worker_error(r, e))
 
+        print(f"[BATCH]   starting worker for row {row}", flush=True)  # DEBUG: temp
         self._current_worker = worker
         worker.start()
+        print(f"[BATCH]   worker.start() returned", flush=True)  # DEBUG: temp
 
     def _advance(self):
+        print(f"[BATCH] _advance idx {self._batch_idx} -> {self._batch_idx+1}", flush=True)  # DEBUG: temp
         self._batch_idx += 1
         self._run_next()
 
     def _on_worker_done(self, row):
+        print(f"[BATCH] _on_worker_done row={row}", flush=True)  # DEBUG: temp
         self._set_status(row, "done ✓")
         self._advance()
 
     def _on_worker_error(self, row, err):
+        print(f"[BATCH] _on_worker_error row={row} err={err}", flush=True)  # DEBUG: temp
         self._set_status(row, "error ✖")
         # A failed sample never aborts the batch — move to the next one.
         self._advance()

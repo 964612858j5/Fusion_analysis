@@ -763,6 +763,19 @@ class Step2Page(QWidget):
         self._csd_local_radius.setSingleStep(1)
         self._csd_local_radius.setValue(15)
 
+        self._csd_engine = _csd_row('cytoplasm engine:', QComboBox())
+        self._csd_engine.addItem('outside_in', 'outside_in')
+        self._csd_engine.addItem('flood_fill', 'flood_fill')
+
+        self._csd_fusion_mode = _csd_row('fusion mode:', QComboBox())
+        for _fm in ('union', 'vote', 'graded'):
+            self._csd_fusion_mode.addItem(_fm, _fm)
+
+        self._csd_tau = _csd_row('outside-in tau (z):', QDoubleSpinBox())
+        self._csd_tau.setRange(0.0, 10.0)
+        self._csd_tau.setSingleStep(0.05)
+        self._csd_tau.setValue(0.5)
+
         self._mesmer_widgets = []
         def _mesmer_row(label, widget):
             r, l, w = _param_row(label, widget)
@@ -1491,6 +1504,11 @@ class Step2Page(QWidget):
         self._csd_hotspot_conn.setValue(float(p.get("weak_hotspot_connectivity", 8) or 8))
         self._csd_local_contrast.setChecked(bool(p.get("local_contrast_enabled", False)))
         self._csd_local_radius.setValue(float(p.get("local_contrast_radius", 15) or 15))
+        idx = self._csd_engine.findData(p.get("cytoplasm_engine", "outside_in"))
+        self._csd_engine.setCurrentIndex(max(0, idx))
+        idx = self._csd_fusion_mode.findData(p.get("fusion_mode", "union"))
+        self._csd_fusion_mode.setCurrentIndex(max(0, idx))
+        self._csd_tau.setValue(float(p.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
@@ -1590,6 +1608,11 @@ class Step2Page(QWidget):
         self._csd_hotspot_conn.setValue(float(cfg.get("weak_hotspot_connectivity", 8) or 8))
         self._csd_local_contrast.setChecked(bool(cfg.get("local_contrast_enabled", False)))
         self._csd_local_radius.setValue(float(cfg.get("local_contrast_radius", 15) or 15))
+        idx = self._csd_engine.findData(cfg.get("cytoplasm_engine", "outside_in"))
+        self._csd_engine.setCurrentIndex(max(0, idx))
+        idx = self._csd_fusion_mode.findData(cfg.get("fusion_mode", "union"))
+        self._csd_fusion_mode.setCurrentIndex(max(0, idx))
+        self._csd_tau.setValue(float(cfg.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(cfg.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(cfg.get("membrane_channels") or [])))
@@ -1732,6 +1755,9 @@ class Step2Page(QWidget):
                 'weak_hotspot_connectivity': self._csd_hotspot_conn.value(),
                 'local_contrast_enabled': self._csd_local_contrast.isChecked(),
                 'local_contrast_radius': self._csd_local_radius.value(),
+                'cytoplasm_engine': self._csd_engine.currentData() or 'outside_in',
+                'fusion_mode': self._csd_fusion_mode.currentData() or 'union',
+                'outside_in_z_threshold': self._csd_tau.value(),
             })
         if method != CELLPOSE_NUCLEI_HQ2:
             for key in (
@@ -1757,7 +1783,8 @@ class Step2Page(QWidget):
                 'constraint_high_percentile', 'constraint_mode',
                 'weak_local_z_threshold', 'weak_min_component_area',
                 'weak_hotspot_connectivity', 'local_contrast_enabled',
-                'local_contrast_radius',
+                'local_contrast_radius', 'cytoplasm_engine',
+                'fusion_mode', 'outside_in_z_threshold',
             ):
                 params.pop(key, None)
         data.update({

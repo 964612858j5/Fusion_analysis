@@ -69,6 +69,13 @@ DEFAULT_CSD_PARAMS = {
     "use_gpu": True,
     "timeout_seconds": 600,
     "memory_guard_mb": 0,
+    "cytoplasm_engine": "outside_in",
+    "outside_in_z_threshold": 0.5,
+    "outside_in_auto_threshold": False,
+    "outside_in_auto_percentile": 35.0,
+    "fusion_mode": "union",
+    "vote_k": 2,
+    "inner_union_radius": 6.0,
 }
 
 
@@ -92,6 +99,8 @@ CSD_QC_FIELDS = list(HQ2_QC_FIELDS) + [
     "weak_hotspot_area",
     "unsupported_outer_area_removed",
     "oversegmentation_guard_applied",
+    "cytoplasm_engine",
+    "fusion_mode",
 ]
 
 
@@ -896,6 +905,8 @@ def _qc_rows(
     gi_star_map,
     dominant,
     guard_info,
+    cytoplasm_engine="",
+    fusion_mode="",
 ):
     n_labels = int(nuclei.max())
     nucleus_area = np.bincount(nuclei.ravel(), minlength=n_labels + 1)
@@ -989,6 +1000,8 @@ def _qc_rows(
             "weak_hotspot_area": weak_keep_area,
             "unsupported_outer_area_removed": removed,
             "oversegmentation_guard_applied": guard_applied,
+            "cytoplasm_engine": cytoplasm_engine,
+            "fusion_mode": fusion_mode,
         })
     return rows, prevented_count, weak_count
 
@@ -1085,25 +1098,43 @@ def run_constrained_donut_segmentation(
         minimal_keep = _expand_labels(nuclei, float(p.get("minimal_radius", 3) or 3)).astype(np.uint32, copy=False)
         minimal_keep[base_territory == 0] = 0
         minimal_keep[nuclei > 0] = nuclei[nuclei > 0]
-        flood_fill_keep = build_flood_fill_keep(
-            base_territory,
-            nuclei,
-            minimal_keep,
-            marker_channels,
-            channel_names,
-            channel_thresholds,
-            per_channel_barriers,
-            p,
-        )
-        timings["flood_fill_keep_seconds"] = time.perf_counter() - t0
-        _log(logger, progress_callback, f"[CDS] flood fill keep: {int(np.count_nonzero(flood_fill_keep > 0))} pixels")
-
-        _check_safety(p, started, cancel_check, "CDS-weak-hotspot")
-        t0 = time.perf_counter()
+        # Gi* is computed here (ahead of the engine branch) so per-channel maps can
+        # feed the outside-in carve; weak_hotspot still consumes gi_star_map below.
         gi_star_map, per_channel_gi, gi_backend = build_multichannel_gi_star(
             marker_channels, channel_names, base_territory, p
         )
         gi_star_map = gi_star_map.astype(np.float32, copy=False)
+        engine = str(p.get("cytoplasm_engine", "outside_in") or "outside_in").strip().lower()
+        if engine == "outside_in":
+            from .outside_in_segmentation import build_outside_in_segmentation
+            flood_fill_keep, _outside_in_keeps = build_outside_in_segmentation(
+                base_territory,
+                nuclei,
+                minimal_keep,
+                marker_channels,
+                channel_names,
+                p,
+                per_channel_gi=per_channel_gi,
+                dist_from_nuc=dist_from_nuc,
+            )
+            timings["outside_in_keep_seconds"] = time.perf_counter() - t0
+            _log(logger, progress_callback, f"[CDS] outside-in keep: {int(np.count_nonzero(flood_fill_keep > 0))} pixels")
+        else:
+            flood_fill_keep = build_flood_fill_keep(
+                base_territory,
+                nuclei,
+                minimal_keep,
+                marker_channels,
+                channel_names,
+                channel_thresholds,
+                per_channel_barriers,
+                p,
+            )
+            timings["flood_fill_keep_seconds"] = time.perf_counter() - t0
+            _log(logger, progress_callback, f"[CDS] flood fill keep: {int(np.count_nonzero(flood_fill_keep > 0))} pixels")
+
+        _check_safety(p, started, cancel_check, "CDS-weak-hotspot")
+        t0 = time.perf_counter()
         if per_channel_barriers:
             gi_barrier = np.ones_like(nuclei, dtype=bool)
             for barrier in per_channel_barriers.values():
@@ -1138,7 +1169,9 @@ def run_constrained_donut_segmentation(
         qc_rows, prevented_qc, weak_signal_cells = _qc_rows(
             nuclei, base_territory, minimal_keep, flood_fill_keep, weak_hotspot_keep, final,
             marker_channels, channel_names, channel_thresholds, support_map, gi_star_map,
-            dominant, guard_info
+            dominant, guard_info,
+            cytoplasm_engine=str(p.get("cytoplasm_engine", "outside_in") or "outside_in").strip().lower(),
+            fusion_mode=str(p.get("fusion_mode", "union") or "union").strip().lower(),
         )
         prevented_nucleus_only = int(max(prevented_by_shrink, prevented_qc))
         fallback_count = 0

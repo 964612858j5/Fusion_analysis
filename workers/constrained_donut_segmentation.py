@@ -218,6 +218,29 @@ def _expand_slice(slc, shape, pad):
     return tuple(out)
 
 
+def _label_slices(label_img):
+    """find_objects that allocates by the NUMBER of labels, not the max id value.
+    scipy find_objects(max_label=L) allocates O(L) by the maximum label VALUE;
+    tile pipelines pass globally-offset ids (e.g. 1.5e9) on small crops -> OOM.
+    Compact present labels to 1..K, run find_objects, map slices back to original ids.
+    Yields (original_label, slice_tuple) pairs, skipping empty labels.
+    """
+    import numpy as _np
+    label_img = _np.asarray(label_img)
+    present = _np.unique(label_img)
+    present = present[present > 0]
+    if present.size == 0:
+        return []
+    if int(present[-1]) == present.size:            # already dense 1..K
+        sl = _scipy_ndi.find_objects(label_img, max_label=int(present[-1]))
+        return [(int(present[i]), sl[i]) for i in range(present.size)
+                if i < len(sl) and sl[i] is not None]
+    comp = (_np.searchsorted(present, label_img) + 1).astype(_np.int32)
+    comp[label_img == 0] = 0
+    sl = _scipy_ndi.find_objects(comp, max_label=int(present.size))
+    return [(int(present[i]), sl[i]) for i in range(present.size) if sl[i] is not None]
+
+
 def _safe_percentiles(raw, low_pct, high_pct):
     vals = np.asarray(raw, dtype=np.float32)
     vals = vals[np.isfinite(vals)]
@@ -299,16 +322,12 @@ def build_nucleus_owned_territory(nuclei_labels, params=None):
 
 
 def _choose_dominant_channels(base_territory, norm_maps, channel_names):
-    n_labels = int(base_territory.max())
     dominant = {}
     if not norm_maps:
-        return {lab: "" for lab in range(1, n_labels + 1)}
-    slices = _scipy_ndi.find_objects(base_territory, max_label=n_labels)
-    for lab in range(1, n_labels + 1):
-        slc = slices[lab - 1] if lab - 1 < len(slices) else None
-        if slc is None:
-            dominant[lab] = channel_names[0] if channel_names else ""
-            continue
+        present = np.unique(base_territory)
+        present = present[present > 0]
+        return {int(lab): (channel_names[0] if channel_names else "") for lab in present}
+    for lab, slc in _label_slices(base_territory):
         local = base_territory[slc] == lab
         if not np.any(local):
             dominant[lab] = channel_names[0] if channel_names else ""
@@ -652,13 +671,8 @@ def _keep_connected_to_seed(labels, nuclei, seed_labels, base_territory):
     labels = np.asarray(labels, dtype=np.uint32).copy()
     nuclei = np.asarray(nuclei, dtype=np.uint32)
     seed_labels = np.asarray(seed_labels, dtype=np.uint32)
-    n_labels = int(max(labels.max(), nuclei.max(), seed_labels.max()))
-    slices = _scipy_ndi.find_objects(base_territory, max_label=n_labels)
     structure = np.ones((3, 3), dtype=bool)
-    for lab in range(1, n_labels + 1):
-        slc = slices[lab - 1] if lab - 1 < len(slices) else None
-        if slc is None:
-            continue
+    for lab, slc in _label_slices(base_territory):
         local = labels[slc] == lab
         if not np.any(local):
             continue
@@ -674,13 +688,8 @@ def _keep_connected_to_seed(labels, nuclei, seed_labels, base_territory):
 
 def _drop_small_per_cell(labels, min_area):
     out = np.asarray(labels, dtype=np.uint32).copy()
-    n_labels = int(out.max())
     structure = np.ones((3, 3), dtype=bool)
-    slices = _scipy_ndi.find_objects(out, max_label=n_labels)
-    for lab in range(1, n_labels + 1):
-        slc = slices[lab - 1] if lab - 1 < len(slices) else None
-        if slc is None:
-            continue
+    for lab, slc in _label_slices(out):
         local = out[slc] == lab
         comps, n_comp = _scipy_ndi.label(local, structure=structure)
         if n_comp == 0:
@@ -727,14 +736,12 @@ def _apply_area_guard(final, nuclei, minimal, strong, weak, support_map, gi_star
     nuclei = np.asarray(nuclei, dtype=np.uint32)
     support = np.asarray(support_map, dtype=np.float32)
     gi = np.asarray(gi_star_map, dtype=np.float32)
-    n_labels = int(nuclei.max())
     info = {
         "unsupported_outer_area_removed": {},
         "oversegmentation_guard_applied": {},
     }
     max_added_frac = float(params.get("max_added_area_fraction", 3.0) or 3.0)
-    slices = _scipy_ndi.find_objects(out, max_label=n_labels)
-    for lab in range(1, n_labels + 1):
+    for lab, slc0 in _label_slices(out):
         nuc_area = int(np.count_nonzero(nuclei == lab))
         if nuc_area <= 0:
             continue
@@ -749,9 +756,6 @@ def _apply_area_guard(final, nuclei, minimal, strong, weak, support_map, gi_star
         if final_area <= max_area:
             info["unsupported_outer_area_removed"][lab] = 0
             info["oversegmentation_guard_applied"][lab] = False
-            continue
-        slc0 = slices[lab - 1] if lab - 1 < len(slices) else None
-        if slc0 is None:
             continue
         slc = _expand_slice(slc0, out.shape, 2)
         local_cell = out[slc] == lab
@@ -815,12 +819,8 @@ def run_cds_boundary_adjustment(base_territory, nuclei_labels, dist_from_nuc, su
 
 def _connectivity_cleanup(labels, nuclei, n_labels):
     final = np.asarray(labels, dtype=np.uint32).copy()
-    object_slices = _scipy_ndi.find_objects(final, max_label=n_labels)
     removed = 0
-    for lab in range(1, n_labels + 1):
-        slc = object_slices[lab - 1] if lab - 1 < len(object_slices) else None
-        if slc is None:
-            continue
+    for lab, slc in _label_slices(final):
         local = final[slc] == lab
         comps, _ = _scipy_ndi.label(local, structure=np.ones((3, 3), dtype=bool))
         touching = np.unique(comps[(nuclei[slc] == lab) & local])
@@ -844,16 +844,21 @@ def apply_cds_shrink_and_smooth(adjusted_labels, nuclei_labels, base_territory, 
     shrink = max(0, int(round(float(p.get("shrink_pixels", p.get("nucleus_shrink", 3)) or 0))))
     fallback_expand = max(2, min(4, shrink if shrink > 0 else 2))
     fallback = _expand_labels(nuclei, fallback_expand).astype(np.uint32, copy=False)
-    object_slices = _scipy_ndi.find_objects(labels, max_label=n_labels)
+    label_slice_map = dict(_label_slices(labels))
+    nuclei_slice_map = None
     prevented = 0
 
-    for lab in range(1, n_labels + 1):
-        nuc_mask_full = nuclei == lab
-        if not np.any(nuc_mask_full):
-            continue
-        slc0 = object_slices[lab - 1] if lab - 1 < len(object_slices) else None
+    present_nuclei = np.unique(nuclei)
+    present_nuclei = present_nuclei[present_nuclei > 0]
+    for lab in present_nuclei.tolist():
+        lab = int(lab)
+        slc0 = label_slice_map.get(lab)
         if slc0 is None:
-            slc0 = _scipy_ndi.find_objects(nuc_mask_full.astype(np.uint8), max_label=1)[0]
+            if nuclei_slice_map is None:
+                nuclei_slice_map = dict(_label_slices(nuclei))
+            slc0 = nuclei_slice_map.get(lab)
+            if slc0 is None:
+                continue
         slc = _expand_slice(slc0, labels.shape, shrink + 3)
         local = labels[slc] == lab
         nuc_local = nuclei[slc] == lab
@@ -908,20 +913,24 @@ def _qc_rows(
     cytoplasm_engine="",
     fusion_mode="",
 ):
-    n_labels = int(nuclei.max())
-    nucleus_area = np.bincount(nuclei.ravel(), minlength=n_labels + 1)
-    base_area = np.bincount(base.ravel(), minlength=n_labels + 1)
-    minimal_area = np.bincount(minimal.ravel(), minlength=n_labels + 1)
-    strong_area = np.bincount(strong.ravel(), minlength=n_labels + 1)
-    weak_hotspot_area = np.bincount(weak_hotspot.ravel(), minlength=n_labels + 1)
-    final_area_bins = np.bincount(final.ravel(), minlength=n_labels + 1)
+    # Count areas by label VALUE present, never by max id, so globally-offset
+    # ids (e.g. 2e9) on small crops don't allocate huge bincount arrays.
+    def _area_map(img):
+        u, c = np.unique(np.asarray(img), return_counts=True)
+        return {int(k): int(v) for k, v in zip(u.tolist(), c.tolist()) if k > 0}
+    nucleus_area = _area_map(nuclei)
+    base_area = _area_map(base)
+    minimal_area = _area_map(minimal)
+    strong_area = _area_map(strong)
+    weak_hotspot_area = _area_map(weak_hotspot)
+    final_area_bins = _area_map(final)
     rows = []
     prevented_count = 0
     weak_count = 0
-    for lab in range(1, n_labels + 1):
-        nuc_area = int(nucleus_area[lab]) if lab < len(nucleus_area) else 0
-        init_area = int(base_area[lab]) if lab < len(base_area) else 0
-        final_area = int(final_area_bins[lab]) if lab < len(final_area_bins) else 0
+    for lab in sorted(nucleus_area.keys()):
+        nuc_area = nucleus_area.get(lab, 0)
+        init_area = base_area.get(lab, 0)
+        final_area = final_area_bins.get(lab, 0)
         cell = final == lab
         added = cell & (nuclei != lab)
         added_area = int(np.count_nonzero(added))
@@ -941,8 +950,8 @@ def _qc_rows(
             marker_support_score = float(np.clip((mean_signal - local_threshold) / local_threshold, 0.0, 1.0))
         elif mean_signal > 0:
             marker_support_score = 1.0
-        strong_keep_area = int(strong_area[lab]) if lab < len(strong_area) else 0
-        weak_keep_area = int(weak_hotspot_area[lab]) if lab < len(weak_hotspot_area) else 0
+        strong_keep_area = strong_area.get(lab, 0)
+        weak_keep_area = weak_hotspot_area.get(lab, 0)
         if strong_keep_area > 0 and marker_support_score >= 0.20:
             signal_mode = "strong_signal"
             weak_flag = False
@@ -964,7 +973,7 @@ def _qc_rows(
         prevented_count += int(prevented)
         removed = int((guard_info.get("unsupported_outer_area_removed") or {}).get(lab, 0))
         guard_applied = bool((guard_info.get("oversegmentation_guard_applied") or {}).get(lab, False))
-        min_area = int(minimal_area[lab]) if lab < len(minimal_area) else 0
+        min_area = minimal_area.get(lab, 0)
         rows.append({
             "cell_id": lab,
             "nucleus_area": nuc_area,
@@ -1024,7 +1033,9 @@ def run_constrained_donut_segmentation(
     backend_name = "cupy_available" if (_HAS_CUPY and p.get("use_gpu", True)) else "numpy"
 
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
-    n_labels = int(nuclei.max())
+    # Count of distinct cells, not the max id value: globally-offset ids (e.g. 2e9)
+    # must not drive allocations or be reported as a count.
+    n_labels = int(np.count_nonzero(np.unique(nuclei) > 0))
     marker_channels = [np.asarray(arr) for arr in (marker_channels or [])]
     channel_names = list(channel_names or [])[:len(marker_channels)]
     if not channel_names:

@@ -886,6 +886,19 @@ class SearchCtrlPanel(QWidget):
         add(30, "local_contrast_enabled:", self._csd_local_contrast)
         self._csd_local_radius = add(31, "local_contrast_radius:", spin(3, 100, 1, 0, 15))
         self._csd_timeout_seconds = add(32, "timeout_seconds:", spin(1, 86400, 10, 0, 600))
+
+        self._csd_engine = QComboBox()
+        for _eng in ("lean_carve", "cds2", "outside_in", "flood_fill"):
+            self._csd_engine.addItem(_eng, _eng)
+        add(33, "cytoplasm_engine:", self._csd_engine)
+        self._csd_fusion_mode = QComboBox()
+        for _fm in ("union", "vote", "graded"):
+            self._csd_fusion_mode.addItem(_fm, _fm)
+        add(34, "fusion_mode:", self._csd_fusion_mode)
+        self._csd_tau = add(35, "outside_in_tau(z):", spin(0, 10, 0.05, 2, 0.5))
+        self._csd_cds2_area = add(36, "cds2_area_frac:", spin(0, 1, 0.05, 2, 0.20))
+        self._csd_cds2_lo = add(37, "cds2_strength_lo:", spin(0, 1, 0.05, 2, 0.50))
+        self._csd_cds2_hi = add(38, "cds2_strength_hi:", spin(0, 1, 0.05, 2, 0.90))
         self.csd_params_panel.setVisible(False)
 
     def _show_csd_params_panel(self):
@@ -1082,6 +1095,12 @@ class SearchCtrlPanel(QWidget):
             "local_contrast_enabled": self._csd_local_contrast.isChecked(),
             "local_contrast_radius": self._csd_local_radius.value(),
             "timeout_seconds": int(self._csd_timeout_seconds.value()),
+            "cytoplasm_engine": self._csd_engine.currentData() or "lean_carve",
+            "fusion_mode": self._csd_fusion_mode.currentData() or "union",
+            "outside_in_z_threshold": float(self._csd_tau.value()),
+            "cds2_area_frac": float(self._csd_cds2_area.value()),
+            "cds2_strength_lo": float(self._csd_cds2_lo.value()),
+            "cds2_strength_hi": float(self._csd_cds2_hi.value()),
         }
 
     def _load_params_file(self):
@@ -1217,6 +1236,12 @@ class SearchCtrlPanel(QWidget):
             self._csd_local_contrast.setChecked(bool(p.get("local_contrast_enabled", False)))
             self._csd_local_radius.setValue(float(p.get("local_contrast_radius", 15) or 15))
             self._csd_timeout_seconds.setValue(float(p.get("timeout_seconds", 600) or 600))
+            self._csd_engine.setCurrentIndex(max(0, self._csd_engine.findData(p.get("cytoplasm_engine", "lean_carve"))))
+            self._csd_fusion_mode.setCurrentIndex(max(0, self._csd_fusion_mode.findData(p.get("fusion_mode", "union"))))
+            self._csd_tau.setValue(float(p.get("outside_in_z_threshold", 0.5) or 0.5))
+            self._csd_cds2_area.setValue(float(p.get("cds2_area_frac", 0.20) or 0.20))
+            self._csd_cds2_lo.setValue(float(p.get("cds2_strength_lo", 0.50) or 0.50))
+            self._csd_cds2_hi.setValue(float(p.get("cds2_strength_hi", 0.90) or 0.90))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
             self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))

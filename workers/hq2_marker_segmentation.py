@@ -47,6 +47,38 @@ def _region_sizes(labels, n_labels=None):
     return np.bincount(labels.ravel(), minlength=n_labels + 1)
 
 
+def _label_slices(label_img):
+    """find_objects that allocates by the NUMBER of labels, not the max id value.
+    scipy find_objects(max_label=L) allocates O(L) by the maximum label VALUE;
+    tile pipelines pass globally-offset ids (e.g. 2e9) on small crops -> OOM.
+    Compact present labels to 1..K, run find_objects, map slices back to original ids.
+    Yields (original_label, slice_tuple) pairs, skipping empty labels.
+
+    Copied from constrained_donut_segmentation to avoid a circular import
+    (constrained_donut_segmentation imports from this module at top level).
+    """
+    from scipy import ndimage as ndi
+    label_img = np.asarray(label_img)
+    present = np.unique(label_img)
+    present = present[present > 0]
+    if present.size == 0:
+        return []
+    if int(present[-1]) == present.size:            # already dense 1..K
+        sl = ndi.find_objects(label_img, max_label=int(present[-1]))
+        return [(int(present[i]), sl[i]) for i in range(present.size)
+                if i < len(sl) and sl[i] is not None]
+    comp = (np.searchsorted(present, label_img) + 1).astype(np.int32)
+    comp[label_img == 0] = 0
+    sl = ndi.find_objects(comp, max_label=int(present.size))
+    return [(int(present[i]), sl[i]) for i in range(present.size) if sl[i] is not None]
+
+
+def _area_by_label(label_img):
+    """Map present label id -> pixel count, allocating by label count not max id."""
+    labs, cnt = np.unique(np.asarray(label_img), return_counts=True)
+    return {int(k): int(v) for k, v in zip(labs.tolist(), cnt.tolist()) if k > 0}
+
+
 class HQ2SafetyFallback(RuntimeError):
     """Raised when HQ2 must stop an expensive stage and use a safe fallback."""
 
@@ -373,19 +405,22 @@ def run_conservative_refinement(
 
     enabled = bool(params.get("enable_refinement", True))
     engine = str(params.get("hq2_expansion_engine", "conservative") or "conservative").lower()
+    # Area lookups keyed by label VALUE present, never sized by max id.
+    area_nucleus = _area_by_label(nuclei)
+    area_initial = _area_by_label(initial)
     if not enabled or engine == "disabled":
         rows = []
-        nuc_area = _region_sizes(nuclei, n_labels)
-        init_area = _region_sizes(initial, n_labels)
-        for lab in range(1, n_labels + 1):
+        for lab in sorted(set(area_nucleus) | set(area_initial)):
+            nuc_area = int(area_nucleus.get(lab, 0))
+            init_area = int(area_initial.get(lab, 0))
             rows.append({
                 "cell_id": lab,
-                "nucleus_area": int(nuc_area[lab]),
-                "initial_hq_area": int(init_area[lab]),
-                "refined_area": int(init_area[lab]),
+                "nucleus_area": nuc_area,
+                "initial_hq_area": init_area,
+                "refined_area": init_area,
                 "added_area": 0,
                 "added_area_fraction": 0.0,
-                "cell_to_nucleus_ratio": float(init_area[lab]) / max(float(nuc_area[lab]), 1.0),
+                "cell_to_nucleus_ratio": float(init_area) / max(float(nuc_area), 1.0),
                 "main_channel": "",
                 "local_threshold": 0.0,
                 "mean_refine_signal": 0.0,
@@ -416,21 +451,17 @@ def run_conservative_refinement(
 
     structure = _disk_structure(radius)
     bounded_nuclei = _expand_labels(nuclei, max_cell_radius)
-    initial_area = _region_sizes(initial, n_labels)
-    nucleus_area = _region_sizes(nuclei, n_labels)
-    object_slices = ndi.find_objects(initial, max_label=n_labels)
     rows = []
     cells_refined = 0
     cells_fallback = 0
     overexpanded = 0
     conflict_total = 0
 
-    for lab in range(1, n_labels + 1):
+    for lab, slc in _label_slices(initial):
         if total_started is not None:
             _check_safety(params, total_started, cancel_check, stage="HQ2-Refinement")
-        slc = object_slices[lab - 1] if lab - 1 < len(object_slices) else None
-        init_area = int(initial_area[lab]) if lab < len(initial_area) else 0
-        nuc_area = int(nucleus_area[lab]) if lab < len(nucleus_area) else 0
+        init_area = int(area_initial.get(lab, 0))
+        nuc_area = int(area_nucleus.get(lab, 0))
         row = {
             "cell_id": lab,
             "nucleus_area": nuc_area,
@@ -765,6 +796,19 @@ def run_hq2_segmentation(nuclei_labels, marker_channels, channel_names, params=N
     _log_stage(logger, "[HQ2] started")
     _log_stage(logger, f"[HQ2] hq_channels={list(channel_names or [])}")
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
+    # Compact globally-offset ids (e.g. 2e9) to a dense 1..K space so every stage
+    # allocates/loops by cell COUNT, not by the max id value (OOM otherwise). The
+    # id space is restored on every returned mask and QC cell_id at the end, so
+    # outputs are byte-identical to running with the original ids.
+    _present = np.unique(nuclei)
+    _present = _present[_present > 0]
+    _id_lut = None
+    if _present.size and int(_present[-1]) != _present.size:
+        _compact = (np.searchsorted(_present, nuclei) + 1).astype(np.uint32)
+        _compact[nuclei == 0] = 0
+        nuclei = _compact
+        _id_lut = np.zeros(_present.size + 1, dtype=np.uint32)
+        _id_lut[1:] = _present                      # compact id c -> original _id_lut[c]
     _log_stage(logger, f"[HQ2] input shape={tuple(nuclei.shape)}")
     _log_stage(logger, f"[HQ2] nuclei labels count={int(nuclei.max())}")
     _log_stage(logger, f"[HQ2] mode=conservative_refinement")
@@ -837,6 +881,17 @@ def run_hq2_segmentation(nuclei_labels, marker_channels, channel_names, params=N
     _log_stage(logger, f"[HQ2] peak memory estimate={peak_mb:.1f} MB")
     _log_stage(logger, f"[HQ2] final labels count={int(final_labels.max())}")
     _log_stage(logger, f"[HQ2 profile] total={timings['total_seconds']:.2f}s")
+
+    # Restore the original id space on every label image and QC cell_id.
+    if _id_lut is not None:
+        def _restore_ids(img):
+            return _id_lut[np.asarray(img, dtype=np.uint32)]
+        nuclei = _restore_ids(nuclei)
+        final_labels = _restore_ids(final_labels)
+        hq_labels = _restore_ids(hq_labels)
+        refinement_added = _restore_ids(refinement_added)
+        for _row in qc_rows:
+            _row["cell_id"] = int(_id_lut[int(_row["cell_id"])])
 
     result = {
         "final_labels": final_labels.astype(np.uint32, copy=False),

@@ -1026,6 +1026,8 @@ def run_constrained_donut_segmentation(
     return_layers=True,
     progress_callback=None,
     cancel_check=None,
+    marker_channels_loader=None,
+    output_labels=None,
 ):
     """Run CDS and return a dict compatible with run_hq2_segmentation()."""
     started = time.perf_counter()
@@ -1038,20 +1040,25 @@ def run_constrained_donut_segmentation(
     # Count of distinct cells, not the max id value: globally-offset ids (e.g. 2e9)
     # must not drive allocations or be reported as a count.
     n_labels = int(np.count_nonzero(np.unique(nuclei) > 0))
-    marker_channels = [np.asarray(arr) for arr in (marker_channels or [])]
-    channel_names = list(channel_names or [])[:len(marker_channels)]
-    if not channel_names:
-        channel_names = [f"channel_{idx + 1}" for idx in range(len(marker_channels))]
 
     # Lean engine must branch BEFORE any whole-image territory/Gi*/intermediate is
-    # built, so its constant-memory streaming profile is preserved.
+    # built, so its constant-memory streaming profile is preserved. It can take a
+    # lazy per-block channel loader (no whole-ROI channel arrays) and an in-place
+    # output buffer (e.g. a global-mask memmap view).
     engine = str(p.get("cytoplasm_engine", "lean_carve") or "lean_carve").strip().lower()
     if engine == "lean_carve":
         from .lean_carve_segmentation import run_lean_carve_segmentation  # function-local: avoid import cycle
         return run_lean_carve_segmentation(
-            nuclei, marker_channels, channel_names, p,
+            nuclei,
+            marker_channels_loader if marker_channels_loader is not None else (marker_channels or []),
+            list(channel_names or []), p, output_labels=output_labels,
             logger=logger, progress_callback=progress_callback, cancel_check=cancel_check,
         )
+
+    marker_channels = [np.asarray(arr) for arr in (marker_channels or [])]
+    channel_names = list(channel_names or [])[:len(marker_channels)]
+    if not channel_names:
+        channel_names = [f"channel_{idx + 1}" for idx in range(len(marker_channels))]
 
     if n_labels == 0:
         empty = np.zeros_like(nuclei, dtype=np.uint32)

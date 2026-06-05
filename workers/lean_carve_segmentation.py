@@ -34,6 +34,39 @@ from .outside_in_segmentation import _voronoi_faces
 _FULL8 = np.ones((3, 3), dtype=bool)
 
 
+def _expand_labels_gpu(labels, distance):
+    """GPU territory via cupy EDT nearest-label; returns None to signal fallback.
+
+    Mirrors skimage.segmentation.expand_labels (nearest label within ``distance``,
+    label pixels kept). On well-separated cells (no equidistant ridges) this is
+    pixel-identical to the CPU path.
+    """
+    if _cupy is None or not _cupy_hotspot_available():
+        return None
+    try:
+        from cupyx.scipy import ndimage as _cndi
+        lab = _cupy.asarray(np.asarray(labels, dtype=np.uint32))
+        bg = lab == 0
+        dist, inds = _cndi.distance_transform_edt(bg, return_indices=True)
+        nearest = lab[tuple(inds)]
+        out = _cupy.where(dist <= _cupy.float32(distance), nearest, _cupy.uint32(0))
+        res = _cupy.asnumpy(out).astype(np.uint32, copy=False)
+        del lab, bg, dist, inds, nearest, out
+        _cupy.get_default_memory_pool().free_all_blocks()
+        return res
+    except Exception:
+        return None
+
+
+def _territory_expand(labels, distance, use_gpu):
+    """_expand_labels on GPU when available, else the existing skimage CPU path."""
+    if use_gpu:
+        gpu = _expand_labels_gpu(labels, distance)
+        if gpu is not None:
+            return gpu
+    return _expand_labels(labels, distance).astype(np.uint32, copy=False)
+
+
 def _make_block_getter(marker_channels, channel_names):
     """Return a callable (name, y0, y1, x0, x1) -> 2D float32 block, or None.
 
@@ -86,11 +119,11 @@ def _carve_block(
     use_gpu,
 ):
     """Segment one halo-padded sub-block; return (interior_labels, used_cupy)."""
-    terr = _expand_labels(sub_nuclei, max_radius).astype(np.uint32, copy=False)
+    terr = _territory_expand(sub_nuclei, max_radius, use_gpu)
     terr[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
     terr_mask = terr > 0
 
-    minimal = _expand_labels(sub_nuclei, minimal_radius).astype(np.uint32, copy=False)
+    minimal = _territory_expand(sub_nuclei, minimal_radius, use_gpu)
     minimal[~terr_mask] = 0
     minimal[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
 

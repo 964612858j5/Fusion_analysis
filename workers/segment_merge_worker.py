@@ -1148,7 +1148,7 @@ class SegmentMergeWorker(QThread):
         mesmer_channel_source = None
         prepare_ctx = self.step2_profiler.time_stage("tile_prepare", **profile_tile_base) if profile_tile_base else nullcontext()
         with prepare_ctx:
-            if is_hq and not is_mesmer_guided:
+            if is_hq and not is_mesmer_guided and not self._is_lean_csd():
                 hq_marker_channels = self._read_hq_marker_channels(hq_group, hq_channels, ry0, ry1, rx0, rx1)
             if is_mesmer and mesmer_group is not None:
                 mesmer_channel_source = self._read_mesmer_channel_source(mesmer_group, ry0, ry1, rx0, rx1)
@@ -1494,6 +1494,28 @@ class SegmentMergeWorker(QThread):
             marker_channels.append(arr)
         return marker_channels
 
+    def _is_lean_csd(self):
+        """True when the active method is CSD with the streaming lean_carve engine."""
+        if self.method != CELLPOSE_NUCLEI_CSD:
+            return False
+        eng = str(self.seg_config.get("cytoplasm_engine", "lean_carve") or "lean_carve").strip().lower()
+        return eng == "lean_carve"
+
+    def _hq_block_loader(self, group, channels, ry0, rx0):
+        """Lazy per-block channel loader for lean_carve (no whole-ROI channel arrays).
+
+        Reuses the exact single-channel read path of ``_read_hq_marker_channels``,
+        windowed to the requested block, so values are byte-identical to reading
+        the whole tile and slicing. ``y0..x1`` are tile/read-bbox-local coords.
+        """
+        known = set(channels or [])
+        def loader(name, y0, y1, x0, x1):
+            if name not in known:
+                return None
+            sub = self._read_hq_marker_channels(group, [name], ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1)
+            return np.asarray(sub[0], dtype=np.float32) if sub else None
+        return loader
+
     def _read_mesmer_channel_source(self, group, y0, y1, x0, x1):
         nuclear = str(self.seg_config.get("nuclear_channel") or "DAPI").strip() or "DAPI"
         membrane_channels = parse_hq_channels(self.seg_config.get("membrane_channels") or [])
@@ -1587,7 +1609,7 @@ class SegmentMergeWorker(QThread):
         raise ValueError(f"Unknown segmentation method: {method}")
 
     def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None,
-                      profile_tile_id=None):
+                      profile_tile_id=None, hq_block_loader=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         self._set_runtime_stage("preprocess")
@@ -1678,6 +1700,13 @@ class SegmentMergeWorker(QThread):
                 }
             if method == CELLPOSE_NUCLEI_CSD:
                 hq_names = self.seg_config.get("hq_channels") or []
+                if hq_block_loader is not None:
+                    # lean_carve streams channels per block; free DAPI + GPU cache
+                    # before the carve so peak memory stays low.
+                    del dapi
+                    import gc as _gc
+                    _gc.collect()
+                    self._empty_torch_cache_if_available()
                 with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
                     csd = run_constrained_donut_segmentation(
                         masks.astype(np.uint32, copy=False),
@@ -1688,6 +1717,7 @@ class SegmentMergeWorker(QThread):
                         return_layers=self.write_hq2_debug_layers,
                         progress_callback=lambda msg: self.progress.emit(0, 1, msg),
                         cancel_check=lambda: bool(self._stop),
+                        marker_channels_loader=hq_block_loader,
                     )
                 return {
                     "mask": csd["final_labels"].astype(np.uint32, copy=False),
@@ -1973,12 +2003,17 @@ class SegmentMergeWorker(QThread):
                                     mesmer_group, ry0, ry1, rx0, rx1
                                 )
                         stage_seconds["read_tile"] += time.perf_counter() - _t
+                    hq_block_loader = (
+                        self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
+                        if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
+                    )
                     local_result = self._segment_tile(
                         tile_data,
                         model,
                         hq_marker_channels,
                         mesmer_channel_source=mesmer_channel_source,
                         profile_tile_id=profile_tile_id,
+                        hq_block_loader=hq_block_loader,
                     )
                     local_nuclei = None
                     local_qc_rows = []
@@ -2810,7 +2845,7 @@ class SegmentMergeWorker(QThread):
                         if hq_marker_channels is None and mesmer_channel_source is None:
                             self._set_runtime_stage("read_tile")
                             with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
-                                if is_hq and not is_mesmer_guided:
+                                if is_hq and not is_mesmer_guided and not self._is_lean_csd():
                                     hq_marker_channels = self._read_hq_marker_channels(
                                         hq_group, hq_channels, ry0, ry1, rx0, rx1
                                     )
@@ -2819,12 +2854,17 @@ class SegmentMergeWorker(QThread):
                                         mesmer_group, ry0, ry1, rx0, rx1
                                     )
                             stage_seconds["read_tile"] += time.perf_counter() - _t
+                        hq_block_loader = (
+                            self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
+                            if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
+                        )
                         local_result = self._segment_tile(
                             tile_data,
                             model,
                             hq_marker_channels,
                             mesmer_channel_source=mesmer_channel_source,
                             profile_tile_id=profile_tile_id,
+                            hq_block_loader=hq_block_loader,
                         )
                         local_nuclei = None
                         local_qc_rows = []

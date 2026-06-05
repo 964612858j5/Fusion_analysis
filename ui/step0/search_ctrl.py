@@ -875,7 +875,7 @@ class SearchCtrlPanel(QWidget):
         self._csd_low_pct = add(24, "constraint_low_percentile:", spin(0, 10, 0.1, 2, 0.5))
         self._csd_high_pct = add(25, "constraint_high_percentile:", spin(90, 100, 0.1, 2, 99.5))
         self._csd_constraint_mode = QComboBox()
-        for label, value in (("per_cell_best_channel", "per_cell_best_channel"), ("max", "max"), ("weighted_max", "weighted_max")):
+        for label, value in (("per_cell_best_channel", "per_cell_best_channel"), ("max", "max"), ("weighted_max", "weighted_max"), ("none", "none")):
             self._csd_constraint_mode.addItem(label, value)
         add(26, "constraint_mode:", self._csd_constraint_mode)
         self._csd_weak_z = add(27, "weak_local_z_threshold:", spin(0, 5, 0.05, 2, 0.75))
@@ -891,8 +891,9 @@ class SearchCtrlPanel(QWidget):
         for _eng in ("lean_carve", "cds2", "outside_in", "flood_fill"):
             self._csd_engine.addItem(_eng, _eng)
         add(33, "cytoplasm_engine:", self._csd_engine)
+        self._csd_engine.currentIndexChanged.connect(self._on_csd_engine_changed)
         self._csd_fusion_mode = QComboBox()
-        for _fm in ("union", "vote", "graded"):
+        for _fm in ("union", "vote"):
             self._csd_fusion_mode.addItem(_fm, _fm)
         add(34, "fusion_mode:", self._csd_fusion_mode)
         self._csd_tau = add(35, "outside_in_tau(z):", spin(0, 10, 0.05, 2, 0.5))
@@ -908,6 +909,15 @@ class SearchCtrlPanel(QWidget):
     def _hide_csd_params_panel(self):
         if getattr(self, "csd_params_panel", None) is not None:
             self.csd_params_panel.setVisible(False)
+
+    def _on_csd_engine_changed(self):
+        """cds2 ignores constraint_mode -> force it to 'none' and grey it out."""
+        is_cds2 = (self._csd_engine.currentData() == "cds2")
+        self._csd_constraint_mode.setEnabled(not is_cds2)
+        if is_cds2:
+            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData("none")))
+        elif self._csd_constraint_mode.currentData() == "none":
+            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData("per_cell_best_channel")))
 
     def _build_mesmer_params_panel(self):
         self.mesmer_params_panel = QGroupBox("Mesmer parameters")
@@ -1088,7 +1098,7 @@ class SearchCtrlPanel(QWidget):
             "boundary_gradient_weight": self._csd_gradient_weight.value(),
             "constraint_low_percentile": self._csd_low_pct.value(),
             "constraint_high_percentile": self._csd_high_pct.value(),
-            "constraint_mode": self._csd_constraint_mode.currentData() or "per_cell_best_channel",
+            "constraint_mode": "none" if self._csd_engine.currentData() == "cds2" else (self._csd_constraint_mode.currentData() or "per_cell_best_channel"),
             "weak_local_z_threshold": self._csd_weak_z.value(),
             "weak_min_component_area": self._csd_weak_area.value(),
             "weak_hotspot_connectivity": self._csd_hotspot_conn.value(),

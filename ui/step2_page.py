@@ -737,6 +737,7 @@ class Step2Page(QWidget):
             ('per cell best channel', 'per_cell_best_channel'),
             ('max', 'max'),
             ('weighted max', 'weighted_max'),
+            ('none', 'none'),
         ):
             self._csd_constraint_mode.addItem(label, value)
 
@@ -768,9 +769,10 @@ class Step2Page(QWidget):
         self._csd_engine.addItem('cds2', 'cds2')
         self._csd_engine.addItem('outside_in', 'outside_in')
         self._csd_engine.addItem('flood_fill', 'flood_fill')
+        self._csd_engine.currentIndexChanged.connect(self._on_csd_engine_changed)
 
         self._csd_fusion_mode = _csd_row('fusion mode:', QComboBox())
-        for _fm in ('union', 'vote', 'graded'):
+        for _fm in ('union', 'vote'):
             self._csd_fusion_mode.addItem(_fm, _fm)
 
         self._csd_tau = _csd_row('outside-in tau (z):', QDoubleSpinBox())
@@ -1419,6 +1421,15 @@ class Step2Page(QWidget):
         print(f"[Step2] active_param_file={self._seg_param_file}")
         return True
 
+    def _on_csd_engine_changed(self):
+        """cds2 ignores constraint_mode -> force it to 'none' and grey it out."""
+        is_cds2 = (self._csd_engine.currentData() == 'cds2')
+        self._csd_constraint_mode.setEnabled(not is_cds2)
+        if is_cds2:
+            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData('none')))
+        elif self._csd_constraint_mode.currentData() == 'none':
+            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData('per_cell_best_channel')))
+
     def _apply_seg_config_to_ui(self, p):
         method = p.get('method', CELLPOSE_WHOLECELL_FUSION)
         idx = self._method_combo.findData(method)
@@ -1751,7 +1762,7 @@ class Step2Page(QWidget):
                 'boundary_gradient_weight': self._csd_gradient_weight.value(),
                 'constraint_low_percentile': self._csd_low_pct.value(),
                 'constraint_high_percentile': self._csd_high_pct.value(),
-                'constraint_mode': self._csd_constraint_mode.currentData() or 'per_cell_best_channel',
+                'constraint_mode': 'none' if self._csd_engine.currentData() == 'cds2' else (self._csd_constraint_mode.currentData() or 'per_cell_best_channel'),
                 'weak_local_z_threshold': self._csd_weak_z.value(),
                 'weak_min_component_area': self._csd_weak_area.value(),
                 'weak_hotspot_connectivity': self._csd_hotspot_conn.value(),

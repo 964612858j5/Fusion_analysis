@@ -187,10 +187,19 @@ class SegmentMergeWorker(QThread):
                 return roi.get("display_name") or roi.get("name")
         return ""
 
+    def _name_method(self):
+        """Naming method: append _cds2 only for CSD with the cds2 cytoplasm engine,
+        so cds2 runs are distinguishable from default lean_carve (cds) results."""
+        m = str(self.seg_config.get("method", self.method))
+        eng = str(self.seg_config.get("cytoplasm_engine", "") or "").strip().lower()
+        if m == "cellpose_nuclei_csd" and eng == "cds2":
+            return m + "_cds2"
+        return m
+
     def _create_output_dir(self):
         now = datetime.now()
         created_at = now.isoformat()
-        safe_method = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(self.method)).strip("._")
+        safe_method = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(self._name_method())).strip("._")
         if self.roi_dir or os.path.basename(self.project_output_dir) == "step2":
             base = f"seg_{now.strftime('%Y%m%d_%H%M%S')}_{safe_method}"
             parent = os.path.join(self.project_output_dir, "segmentation_runs")
@@ -232,7 +241,7 @@ class SegmentMergeWorker(QThread):
     def _write_run_metadata(self, summary_meta):
         meta = {
             "run_id": self.result_id,
-            "method": self.seg_config.get("method", self.method),
+            "method": self._name_method(),
             "parameter_source": self.parameter_source,
             "param_file": self.param_file or None,
             "created_at": self.created_at,
@@ -335,8 +344,10 @@ class SegmentMergeWorker(QThread):
     def _register_completed_result(self, summary_meta):
         config_path = os.path.join(self.output_dir, "run_segmentation_params.json")
         meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
-        method = self.seg_config.get("method", self.method)
+        method = self._name_method()
         display_name = self.seg_config.get("display_name", method)
+        if method != str(self.seg_config.get("method", self.method)):
+            display_name = f"{display_name} (cds2)"
 
         mask_path = summary_meta.get("ome_tiff") or summary_meta.get("mask_path") or ""
         dapi_path = summary_meta.get("global_dapi") or summary_meta.get("dapi_path") or ""

@@ -78,6 +78,9 @@ DEFAULT_CSD_PARAMS = {
     "inner_union_radius": 6.0,
     "lean_block_size": 4096,
     "lean_halo_margin": 8,
+    "cds2_area_frac": 0.20,
+    "cds2_strength_lo": 0.50,
+    "cds2_strength_hi": 0.90,
 }
 
 
@@ -1046,9 +1049,12 @@ def run_constrained_donut_segmentation(
     # lazy per-block channel loader (no whole-ROI channel arrays) and an in-place
     # output buffer (e.g. a global-mask memmap view).
     engine = str(p.get("cytoplasm_engine", "lean_carve") or "lean_carve").strip().lower()
-    if engine == "lean_carve":
-        from .lean_carve_segmentation import run_lean_carve_segmentation  # function-local: avoid import cycle
-        return run_lean_carve_segmentation(
+    if engine in ("lean_carve", "cds2"):
+        if engine == "cds2":
+            from .cds2_segmentation import run_cds2_segmentation as _run_stream  # function-local: avoid cycle
+        else:
+            from .lean_carve_segmentation import run_lean_carve_segmentation as _run_stream
+        return _run_stream(
             nuclei,
             marker_channels_loader if marker_channels_loader is not None else (marker_channels or []),
             list(channel_names or []), p, output_labels=output_labels,

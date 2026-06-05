@@ -102,6 +102,45 @@ def _block_gi(raw, territory_mask, k, bg_k, use_gpu):
     return gi, used_cupy
 
 
+def _block_geometry(sub_nuclei, max_radius, minimal_radius, use_gpu):
+    """Geometric territory / minimal-keep / protect / outside / Voronoi faces."""
+    terr = _territory_expand(sub_nuclei, max_radius, use_gpu)
+    terr[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+    terr_mask = terr > 0
+
+    minimal = _territory_expand(sub_nuclei, minimal_radius, use_gpu)
+    minimal[~terr_mask] = 0
+    minimal[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+
+    protect = (sub_nuclei > 0) | (minimal > 0)
+    outside = ~terr_mask
+    faces = _voronoi_faces(terr) & ~protect
+    return terr, terr_mask, minimal, protect, outside, faces
+
+
+def _channel_keep(gi, terr_mask, outside, faces, protect, tau):
+    """One channel's outside-in keep mask (free-boundary carve through low-z bg)."""
+    low = gi < tau
+    carveable = outside | (low & terr_mask & ~faces & ~protect)
+    reached = _ndi.binary_propagation(outside, mask=carveable, structure=_FULL8)
+    return (terr_mask & ~(terr_mask & reached)) | (protect & terr_mask)
+
+
+def _finalize_block(kept, terr, sub_nuclei, minimal, protect, separate_px,
+                    y0, y1, x0, x1, sy0, sx0):
+    """Connect-to-seed, inter-cell gap, nucleus reassert; return interior crop."""
+    labels = np.where(kept, terr, 0).astype(np.uint32, copy=False)
+    labels = _keep_connected_to_seed(labels, sub_nuclei, minimal, terr)
+    if separate_px > 0:
+        gap = _ndi.binary_dilation(_voronoi_faces(labels), iterations=int(separate_px))
+        gap &= (labels > 0) & ~protect
+        labels[gap] = 0
+    labels[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+    iy0, iy1 = y0 - sy0, y1 - sy0
+    ix0, ix1 = x0 - sx0, x1 - sx0
+    return labels[iy0:iy1, ix0:ix1].copy()
+
+
 def _carve_block(
     sub_nuclei,
     names,
@@ -119,17 +158,8 @@ def _carve_block(
     use_gpu,
 ):
     """Segment one halo-padded sub-block; return (interior_labels, used_cupy)."""
-    terr = _territory_expand(sub_nuclei, max_radius, use_gpu)
-    terr[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
-    terr_mask = terr > 0
-
-    minimal = _territory_expand(sub_nuclei, minimal_radius, use_gpu)
-    minimal[~terr_mask] = 0
-    minimal[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
-
-    protect = (sub_nuclei > 0) | (minimal > 0)
-    outside = ~terr_mask
-    faces = _voronoi_faces(terr) & ~protect
+    terr, terr_mask, minimal, protect, outside, faces = _block_geometry(
+        sub_nuclei, max_radius, minimal_radius, use_gpu)
 
     union_mode = str(fusion_mode or "union").strip().lower() != "vote"
     fused = np.zeros(terr.shape, dtype=bool)
@@ -143,33 +173,20 @@ def _carve_block(
             continue
         gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
         used_cupy = used_cupy or uc
-        low = gi < tau
-        carveable = outside | (low & terr_mask & ~faces & ~protect)
-        reached = _ndi.binary_propagation(outside, mask=carveable, structure=_FULL8)
-        keep = (terr_mask & ~(terr_mask & reached)) | (protect & terr_mask)
+        keep = _channel_keep(gi, terr_mask, outside, faces, protect, tau)
         if union_mode:
             fused |= keep
         else:
             votes += keep.astype(np.uint16)
-        del raw, gi, low, carveable, reached, keep
+        del raw, gi, keep
     if not union_mode:
         fused = votes >= max(1, int(vote_k))
         del votes
 
     kept = (fused & terr_mask) | (protect & terr_mask)   # anti-collapse floor
-    labels = np.where(kept, terr, 0).astype(np.uint32, copy=False)
-    labels = _keep_connected_to_seed(labels, sub_nuclei, minimal, terr)
-
-    if separate_px > 0:
-        gap = _ndi.binary_dilation(_voronoi_faces(labels), iterations=int(separate_px))
-        gap &= (labels > 0) & ~protect
-        labels[gap] = 0
-
-    labels[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
-
-    iy0, iy1 = y0 - sy0, y1 - sy0
-    ix0, ix1 = x0 - sx0, x1 - sx0
-    return labels[iy0:iy1, ix0:ix1].copy(), used_cupy
+    interior = _finalize_block(kept, terr, sub_nuclei, minimal, protect, separate_px,
+                               y0, y1, x0, x1, sy0, sx0)
+    return interior, used_cupy
 
 
 def run_lean_carve_segmentation(
@@ -183,6 +200,27 @@ def run_lean_carve_segmentation(
     cancel_check=None,
 ):
     """Tiled, streaming outside-in carve. Same return contract as CDS."""
+    return _run_streaming(
+        nuclei_labels, marker_channels_loader, channel_names, params, output_labels,
+        logger, progress_callback, cancel_check,
+        carve_fn=_carve_block, engine_name="lean_carve",
+    )
+
+
+def _run_streaming(
+    nuclei_labels,
+    marker_channels_loader,
+    channel_names,
+    params=None,
+    output_labels=None,
+    logger=None,
+    progress_callback=None,
+    cancel_check=None,
+    carve_fn=_carve_block,
+    engine_name="lean_carve",
+    extra_meta=None,
+):
+    """Shared block-streaming driver; ``carve_fn`` is the per-block segmenter."""
     started = time.perf_counter()
     p = _params(params)
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
@@ -226,7 +264,7 @@ def run_lean_carve_segmentation(
                 done += 1
                 if int(sub_nuclei.max()) == 0:
                     continue
-                interior, used_cupy = _carve_block(
+                interior, used_cupy = carve_fn(
                     sub_nuclei, names, get_block,
                     y0, y1, x0, x1, sy0, sx0,
                     max_radius, minimal_radius, separate_px, tau, fusion_mode, vote_k,
@@ -247,7 +285,7 @@ def run_lean_carve_segmentation(
                     backend = "cupy"
                 del interior
                 if progress_callback is not None:
-                    progress_callback(f"[lean_carve] block {done}/{n_blocks}")
+                    progress_callback(f"[{engine_name}] block {done}/{n_blocks}")
 
     qc_rows = []
     for lab in sorted(nucleus_area.keys()):
@@ -260,8 +298,8 @@ def run_lean_carve_segmentation(
             "refined_area": fin,
             "cell_to_nucleus_ratio": float(fin) / max(float(nuc), 1.0),
             "refinement_applied": bool(fin > nuc),
-            "signal_mode": "lean_carve",
-            "cytoplasm_engine": "lean_carve",
+            "signal_mode": engine_name,
+            "cytoplasm_engine": engine_name,
             "fusion_mode": str(fusion_mode).strip().lower(),
         })
 
@@ -273,10 +311,10 @@ def run_lean_carve_segmentation(
         "cell_count": len(qc_rows),
     }
     metadata = {
-        "engine": "lean_carve",
-        "cytoplasm_engine": "lean_carve",
-        "csd_mode": "lean_carve_streaming_outside_in",
-        "hq2_mode": "lean_carve_streaming_outside_in",
+        "engine": engine_name,
+        "cytoplasm_engine": engine_name,
+        "csd_mode": f"{engine_name}_streaming_outside_in",
+        "hq2_mode": f"{engine_name}_streaming_outside_in",
         "lean_block_size": int(block),
         "lean_halo_margin": int(p.get("lean_halo_margin", 8) or 0),
         "lean_halo": int(halo),
@@ -291,9 +329,11 @@ def run_lean_carve_segmentation(
         "timings": {"total_seconds": total_seconds},
         "channel_thresholds": {},
     }
+    if extra_meta:
+        metadata.update(extra_meta)
     if logger is not None:
         try:
-            logger.info(f"[lean_carve] cells={len(qc_rows)} seconds={total_seconds:.3f} backend={backend}")
+            logger.info(f"[{engine_name}] cells={len(qc_rows)} seconds={total_seconds:.3f} backend={backend}")
         except Exception:
             pass
 

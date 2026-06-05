@@ -765,6 +765,7 @@ class Step2Page(QWidget):
 
         self._csd_engine = _csd_row('cytoplasm engine:', QComboBox())
         self._csd_engine.addItem('lean_carve', 'lean_carve')
+        self._csd_engine.addItem('cds2', 'cds2')
         self._csd_engine.addItem('outside_in', 'outside_in')
         self._csd_engine.addItem('flood_fill', 'flood_fill')
 

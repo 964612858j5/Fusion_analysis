@@ -764,6 +764,7 @@ class Step2Page(QWidget):
         self._csd_local_radius.setValue(15)
 
         self._csd_engine = _csd_row('cytoplasm engine:', QComboBox())
+        self._csd_engine.addItem('lean_carve', 'lean_carve')
         self._csd_engine.addItem('outside_in', 'outside_in')
         self._csd_engine.addItem('flood_fill', 'flood_fill')
 
@@ -1504,7 +1505,7 @@ class Step2Page(QWidget):
         self._csd_hotspot_conn.setValue(float(p.get("weak_hotspot_connectivity", 8) or 8))
         self._csd_local_contrast.setChecked(bool(p.get("local_contrast_enabled", False)))
         self._csd_local_radius.setValue(float(p.get("local_contrast_radius", 15) or 15))
-        idx = self._csd_engine.findData(p.get("cytoplasm_engine", "outside_in"))
+        idx = self._csd_engine.findData(p.get("cytoplasm_engine", "lean_carve"))
         self._csd_engine.setCurrentIndex(max(0, idx))
         idx = self._csd_fusion_mode.findData(p.get("fusion_mode", "union"))
         self._csd_fusion_mode.setCurrentIndex(max(0, idx))
@@ -1608,7 +1609,7 @@ class Step2Page(QWidget):
         self._csd_hotspot_conn.setValue(float(cfg.get("weak_hotspot_connectivity", 8) or 8))
         self._csd_local_contrast.setChecked(bool(cfg.get("local_contrast_enabled", False)))
         self._csd_local_radius.setValue(float(cfg.get("local_contrast_radius", 15) or 15))
-        idx = self._csd_engine.findData(cfg.get("cytoplasm_engine", "outside_in"))
+        idx = self._csd_engine.findData(cfg.get("cytoplasm_engine", "lean_carve"))
         self._csd_engine.setCurrentIndex(max(0, idx))
         idx = self._csd_fusion_mode.findData(cfg.get("fusion_mode", "union"))
         self._csd_fusion_mode.setCurrentIndex(max(0, idx))
@@ -1755,7 +1756,7 @@ class Step2Page(QWidget):
                 'weak_hotspot_connectivity': self._csd_hotspot_conn.value(),
                 'local_contrast_enabled': self._csd_local_contrast.isChecked(),
                 'local_contrast_radius': self._csd_local_radius.value(),
-                'cytoplasm_engine': self._csd_engine.currentData() or 'outside_in',
+                'cytoplasm_engine': self._csd_engine.currentData() or 'lean_carve',
                 'fusion_mode': self._csd_fusion_mode.currentData() or 'union',
                 'outside_in_z_threshold': self._csd_tau.value(),
             })

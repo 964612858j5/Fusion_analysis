@@ -69,13 +69,15 @@ DEFAULT_CSD_PARAMS = {
     "use_gpu": True,
     "timeout_seconds": 600,
     "memory_guard_mb": 0,
-    "cytoplasm_engine": "outside_in",
+    "cytoplasm_engine": "lean_carve",
     "outside_in_z_threshold": 0.5,
     "outside_in_auto_threshold": False,
     "outside_in_auto_percentile": 35.0,
     "fusion_mode": "union",
     "vote_k": 2,
     "inner_union_radius": 6.0,
+    "lean_block_size": 4096,
+    "lean_halo_margin": 8,
 }
 
 
@@ -1040,6 +1042,16 @@ def run_constrained_donut_segmentation(
     channel_names = list(channel_names or [])[:len(marker_channels)]
     if not channel_names:
         channel_names = [f"channel_{idx + 1}" for idx in range(len(marker_channels))]
+
+    # Lean engine must branch BEFORE any whole-image territory/Gi*/intermediate is
+    # built, so its constant-memory streaming profile is preserved.
+    engine = str(p.get("cytoplasm_engine", "lean_carve") or "lean_carve").strip().lower()
+    if engine == "lean_carve":
+        from .lean_carve_segmentation import run_lean_carve_segmentation  # function-local: avoid import cycle
+        return run_lean_carve_segmentation(
+            nuclei, marker_channels, channel_names, p,
+            logger=logger, progress_callback=progress_callback, cancel_check=cancel_check,
+        )
 
     if n_labels == 0:
         empty = np.zeros_like(nuclei, dtype=np.uint32)

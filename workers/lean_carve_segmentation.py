@@ -1,0 +1,273 @@
+"""Lean, constant-memory cytoplasm engine for CDS ("lean_carve").
+
+Profile goal (MACSiQView-like): peak memory barely grows with image size; a
+425 MP whole slide runs in seconds-to-minutes. The default CDS path materialises
+~20 whole-image arrays (peak ~145 bytes/pixel -> ~113 GB OOM on 425 MP). This
+engine never does that: it tiles the image and streams one marker channel of one
+block at a time, so the resident set is only
+
+    nuclei input  +  label output  +  a few small per-block temporaries.
+
+Semantics are the same geometric territory + per-channel free-boundary
+"outside-in" signal carve + multi-channel fusion as
+``outside_in_segmentation``; the difference is purely the streaming, channel-at-a
+-time, discard-immediately execution. With ``halo >= max_cell_radius`` every
+block's interior pixel sees the full neighbourhood its territory/carve needs, so
+the tiled result equals the whole-image result (asserted in tests).
+"""
+
+import time
+
+import numpy as np
+from scipy import ndimage as _ndi
+
+from .constrained_donut_segmentation import (
+    _params,
+    _expand_labels,
+    _keep_connected_to_seed,
+    _uniform_filter,
+    _cupy_hotspot_available,
+    _cupy,
+)
+from .outside_in_segmentation import _voronoi_faces
+
+_FULL8 = np.ones((3, 3), dtype=bool)
+
+
+def _make_block_getter(marker_channels, channel_names):
+    """Return a callable (name, y0, y1, x0, x1) -> 2D float32 block, or None.
+
+    Accepts either a real lazy loader (already callable) or an in-memory list of
+    whole-image arrays. In the list case we keep references (no copy, no stacking)
+    and slice per request, so no extra whole-image array is created here.
+    """
+    if callable(marker_channels):
+        return marker_channels
+    arrs = {}
+    for name, arr in zip(channel_names, marker_channels or []):
+        arrs[name] = np.asarray(arr)
+    def getter(name, y0, y1, x0, x1):
+        a = arrs.get(name)
+        if a is None:
+            return None
+        return np.asarray(a[y0:y1, x0:x1], dtype=np.float32)
+    return getter
+
+
+def _block_gi(raw, territory_mask, k, bg_k, use_gpu):
+    """Per-channel Gi* z-map for one block (local mean vs large-kernel background)."""
+    local_mean, b1 = _uniform_filter(raw, k, use_gpu)
+    bg, b2 = _uniform_filter(raw, bg_k, use_gpu)
+    sq, b3 = _uniform_filter(raw * raw, bg_k, use_gpu)
+    var = np.maximum(sq - bg * bg, np.float32(0.0))
+    std = np.sqrt(var)
+    gi = (local_mean - bg) / (std + np.float32(1.0e-3))
+    gi = np.where(territory_mask, gi, np.float32(0.0))
+    gi = np.where(np.isfinite(gi), gi, np.float32(0.0))
+    gi = np.maximum(gi, np.float32(0.0)).astype(np.float32, copy=False)
+    used_cupy = "cupy" in (b1, b2, b3)
+    return gi, used_cupy
+
+
+def _carve_block(
+    sub_nuclei,
+    names,
+    get_block,
+    y0, y1, x0, x1,          # full-image interior bounds
+    sy0, sx0,                # full-image origin of the sub (halo) block
+    max_radius,
+    minimal_radius,
+    separate_px,
+    tau,
+    fusion_mode,
+    vote_k,
+    gi_k,
+    gi_bg_k,
+    use_gpu,
+):
+    """Segment one halo-padded sub-block; return (interior_labels, used_cupy)."""
+    terr = _expand_labels(sub_nuclei, max_radius).astype(np.uint32, copy=False)
+    terr[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+    terr_mask = terr > 0
+
+    minimal = _expand_labels(sub_nuclei, minimal_radius).astype(np.uint32, copy=False)
+    minimal[~terr_mask] = 0
+    minimal[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+
+    protect = (sub_nuclei > 0) | (minimal > 0)
+    outside = ~terr_mask
+    faces = _voronoi_faces(terr) & ~protect
+
+    union_mode = str(fusion_mode or "union").strip().lower() != "vote"
+    fused = np.zeros(terr.shape, dtype=bool)
+    votes = None if union_mode else np.zeros(terr.shape, dtype=np.uint16)
+    used_cupy = False
+
+    sh, sw = sub_nuclei.shape
+    for name in names:
+        raw = get_block(name, sy0, sy0 + sh, sx0, sx0 + sw)
+        if raw is None:
+            continue
+        gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
+        used_cupy = used_cupy or uc
+        low = gi < tau
+        carveable = outside | (low & terr_mask & ~faces & ~protect)
+        reached = _ndi.binary_propagation(outside, mask=carveable, structure=_FULL8)
+        keep = (terr_mask & ~(terr_mask & reached)) | (protect & terr_mask)
+        if union_mode:
+            fused |= keep
+        else:
+            votes += keep.astype(np.uint16)
+        del raw, gi, low, carveable, reached, keep
+    if not union_mode:
+        fused = votes >= max(1, int(vote_k))
+        del votes
+
+    kept = (fused & terr_mask) | (protect & terr_mask)   # anti-collapse floor
+    labels = np.where(kept, terr, 0).astype(np.uint32, copy=False)
+    labels = _keep_connected_to_seed(labels, sub_nuclei, minimal, terr)
+
+    if separate_px > 0:
+        gap = _ndi.binary_dilation(_voronoi_faces(labels), iterations=int(separate_px))
+        gap &= (labels > 0) & ~protect
+        labels[gap] = 0
+
+    labels[sub_nuclei > 0] = sub_nuclei[sub_nuclei > 0]
+
+    iy0, iy1 = y0 - sy0, y1 - sy0
+    ix0, ix1 = x0 - sx0, x1 - sx0
+    return labels[iy0:iy1, ix0:ix1].copy(), used_cupy
+
+
+def run_lean_carve_segmentation(
+    nuclei_labels,
+    marker_channels_loader,
+    channel_names,
+    params=None,
+    output_labels=None,
+    logger=None,
+    progress_callback=None,
+    cancel_check=None,
+):
+    """Tiled, streaming outside-in carve. Same return contract as CDS."""
+    started = time.perf_counter()
+    p = _params(params)
+    nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
+    names = list(channel_names or [])
+
+    max_radius = int(p.get("max_cell_radius") or p.get("donut_size") or 18)
+    minimal_radius = int(p.get("minimal_radius", 3) or 0)
+    block = int(p.get("lean_block_size", 4096) or 4096)
+    halo = max_radius + int(p.get("lean_halo_margin", 8) or 0)
+    separate_px = int(p.get("shrink_pixels", p.get("nucleus_shrink", 2)) or 0)
+    tau = float(p.get("outside_in_z_threshold", 0.5) or 0.5)
+    fusion_mode = str(p.get("fusion_mode", "union") or "union")
+    vote_k = int(p.get("vote_k", 2) or 2)
+    gi_k = max(3, int(p.get("gi_kernel_size", 7) or 7))
+    gi_bg_k = max(gi_k + 2, int(p.get("gi_background_kernel_size", 31) or 31))
+    use_gpu = str(p.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
+
+    if output_labels is None:
+        out = np.zeros(nuclei.shape, dtype=np.uint32)
+    else:
+        out = output_labels
+        out[...] = 0
+
+    get_block = _make_block_getter(marker_channels_loader, names)
+    h, w = nuclei.shape
+    nucleus_area = {}
+    final_area = {}
+    n_blocks = max(1, ((h + block - 1) // block) * ((w + block - 1) // block))
+    done = 0
+    backend = "numpy"
+
+    if int(nuclei.max()) != 0:
+        for y0 in range(0, h, block):
+            for x0 in range(0, w, block):
+                if cancel_check is not None and cancel_check():
+                    raise RuntimeError("lean_carve cancelled")
+                y1, x1 = min(h, y0 + block), min(w, x0 + block)
+                sy0, sy1 = max(0, y0 - halo), min(h, y1 + halo)
+                sx0, sx1 = max(0, x0 - halo), min(w, x1 + halo)
+                sub_nuclei = nuclei[sy0:sy1, sx0:sx1]
+                done += 1
+                if int(sub_nuclei.max()) == 0:
+                    continue
+                interior, used_cupy = _carve_block(
+                    sub_nuclei, names, get_block,
+                    y0, y1, x0, x1, sy0, sx0,
+                    max_radius, minimal_radius, separate_px, tau, fusion_mode, vote_k,
+                    gi_k, gi_bg_k, use_gpu,
+                )
+                out[y0:y1, x0:x1] = interior
+                # Cheap per-cell areas accumulated per block (no whole-image QC layers).
+                nlab, ncnt = np.unique(nuclei[y0:y1, x0:x1], return_counts=True)
+                for lab, c in zip(nlab.tolist(), ncnt.tolist()):
+                    if lab:
+                        nucleus_area[lab] = nucleus_area.get(lab, 0) + int(c)
+                flab, fcnt = np.unique(interior, return_counts=True)
+                for lab, c in zip(flab.tolist(), fcnt.tolist()):
+                    if lab:
+                        final_area[lab] = final_area.get(lab, 0) + int(c)
+                if used_cupy and _cupy is not None and _cupy_hotspot_available():
+                    _cupy.get_default_memory_pool().free_all_blocks()
+                    backend = "cupy"
+                del interior
+                if progress_callback is not None:
+                    progress_callback(f"[lean_carve] block {done}/{n_blocks}")
+
+    qc_rows = []
+    for lab in sorted(nucleus_area.keys()):
+        nuc = int(nucleus_area.get(lab, 0))
+        fin = int(final_area.get(lab, 0))
+        qc_rows.append({
+            "cell_id": int(lab),
+            "nucleus_area": nuc,
+            "final_area": fin,
+            "refined_area": fin,
+            "cell_to_nucleus_ratio": float(fin) / max(float(nuc), 1.0),
+            "refinement_applied": bool(fin > nuc),
+            "signal_mode": "lean_carve",
+            "cytoplasm_engine": "lean_carve",
+            "fusion_mode": str(fusion_mode).strip().lower(),
+        })
+
+    total_seconds = time.perf_counter() - started
+    stats = {
+        "cells_refined": int(sum(1 for r in qc_rows if r["refinement_applied"])),
+        "cells_fallback": 0,
+        "added_pixels_total": int(sum(max(0, r["final_area"] - r["nucleus_area"]) for r in qc_rows)),
+        "cell_count": len(qc_rows),
+    }
+    metadata = {
+        "engine": "lean_carve",
+        "cytoplasm_engine": "lean_carve",
+        "csd_mode": "lean_carve_streaming_outside_in",
+        "hq2_mode": "lean_carve_streaming_outside_in",
+        "lean_block_size": int(block),
+        "lean_halo_margin": int(p.get("lean_halo_margin", 8) or 0),
+        "lean_halo": int(halo),
+        "max_cell_radius": int(max_radius),
+        "minimal_radius": int(minimal_radius),
+        "outside_in_z_threshold": float(tau),
+        "fusion_mode": str(fusion_mode).strip().lower(),
+        "vote_k": int(vote_k),
+        "separate_px": int(separate_px),
+        "csd_backend": backend,
+        "gi_backend": backend,
+        "timings": {"total_seconds": total_seconds},
+        "channel_thresholds": {},
+    }
+    if logger is not None:
+        try:
+            logger.info(f"[lean_carve] cells={len(qc_rows)} seconds={total_seconds:.3f} backend={backend}")
+        except Exception:
+            pass
+
+    return {
+        "final_labels": out.astype(np.uint32, copy=False) if not isinstance(out, np.memmap) else out,
+        "nuclei_labels": nuclei.astype(np.uint32, copy=False),
+        "qc_rows": qc_rows,
+        "stats": stats,
+        "metadata": metadata,
+    }

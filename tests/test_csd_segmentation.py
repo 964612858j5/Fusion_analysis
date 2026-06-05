@@ -34,7 +34,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
                 "shrink_pixels": 2,
                 "support_weight": 0.0,
                 "weak_support_weight": 0.0,
-                "use_gpu": False,
+                "use_gpu": False, "cytoplasm_engine": "outside_in",
             },
         )
 
@@ -57,7 +57,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
             nuclei,
             [weak],
             ["CD3"],
-            {"donut_size": 8, "max_cell_radius": 8, "shrink_pixels": 2, "use_gpu": False},
+            {"donut_size": 8, "max_cell_radius": 8, "shrink_pixels": 2, "use_gpu": False, "cytoplasm_engine": "outside_in"},
         )
 
         nuc_area = int(np.count_nonzero(nuclei == 1))
@@ -88,7 +88,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
                 "nucleus_shrink": 2,
                 "bg_sigma_factor": 3.0,
                 "max_circularity": 0.99,
-                "use_gpu": False,
+                "use_gpu": False, "cytoplasm_engine": "outside_in",
             },
         )
 
@@ -111,7 +111,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
             nuclei,
             [marker],
             ["CD68"],
-            {"donut_size": 10, "max_cell_radius": 10, "shrink_pixels": 2, "use_gpu": False},
+            {"donut_size": 10, "max_cell_radius": 10, "shrink_pixels": 2, "use_gpu": False, "cytoplasm_engine": "outside_in"},
         )
 
         nuc1 = int(np.count_nonzero(nuclei == 1))
@@ -140,7 +140,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
                 "shrink_pixels": 0,
                 "strong_support_threshold": 0.01,
                 "lymphocyte_max_cell_to_nucleus_ratio": 4.0,
-                "use_gpu": False,
+                "use_gpu": False, "cytoplasm_engine": "outside_in",
             },
         )
 
@@ -165,7 +165,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
                 "donut_size": 12,
                 "max_cell_radius": 12,
                 "shrink_pixels": 20,
-                "use_gpu": False,
+                "use_gpu": False, "cytoplasm_engine": "outside_in",
             },
         )
 
@@ -188,7 +188,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
             nuclei,
             [marker],
             ["bridge"],
-            {"donut_size": 22, "nucleus_shrink": 2, "max_circularity": 1.1, "use_gpu": False},
+            {"donut_size": 22, "nucleus_shrink": 2, "max_circularity": 1.1, "use_gpu": False, "cytoplasm_engine": "outside_in"},
         )
 
         final = result["final_labels"]
@@ -203,7 +203,7 @@ class TestConstrainedDonutSegmentation(unittest.TestCase):
         nuclei[_disk(shape, 24, 24, 4)] = 1
         marker = np.zeros(shape, dtype=np.float32)
         marker[_disk(shape, 24, 30, 8)] = 50.0
-        params = {"hq_channels": ["CD45"], "donut_size": 12, "use_gpu": False}
+        params = {"hq_channels": ["CD45"], "donut_size": 12, "use_gpu": False, "cytoplasm_engine": "outside_in"}
         result = run_constrained_donut_segmentation(nuclei, [marker], ["CD45"], params)
 
         with tempfile.TemporaryDirectory() as td:

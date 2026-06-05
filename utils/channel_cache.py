@@ -47,6 +47,20 @@ class SharedChannelStore:
         with self._lock:
             return dict(self.metrics)
 
+    def set_max_cache_items(self, n):
+        """Shrink (or grow) the cache cap and immediately evict down to it.
+
+        Used by whole-ROI (1x1) lean_carve so the one-shot whole-image fused/dapi
+        entries and per-block reads don't sit resident; correctness is unchanged
+        (hits still return correct data), only the resident count drops.
+        """
+        with self._lock:
+            self.max_cache_items = max(1, int(n or 1))
+            while len(self._cache) > self.max_cache_items:
+                _old_key, old = self._cache.popitem(last=False)
+                self.metrics["cache_bytes"] -= int(getattr(old, "nbytes", 0))
+                self.metrics["cache_evictions"] += 1
+
     def zarr_group(self, path):
         path = str(path)
         with self._lock:

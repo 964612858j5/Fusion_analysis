@@ -1609,7 +1609,7 @@ class SegmentMergeWorker(QThread):
         raise ValueError(f"Unknown segmentation method: {method}")
 
     def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None,
-                      profile_tile_id=None, hq_block_loader=None):
+                      profile_tile_id=None, hq_block_loader=None, output_labels=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         self._set_runtime_stage("preprocess")
@@ -1702,11 +1702,16 @@ class SegmentMergeWorker(QThread):
                 hq_names = self.seg_config.get("hq_channels") or []
                 if hq_block_loader is not None:
                     # lean_carve streams channels per block; free DAPI + GPU cache
-                    # before the carve so peak memory stays low.
+                    # and shrink the channel cache (drop the one-shot whole-image
+                    # fused/dapi entries) before the carve so peak memory stays low.
                     del dapi
                     import gc as _gc
                     _gc.collect()
                     self._empty_torch_cache_if_available()
+                    if getattr(self, "_channel_store", None) is not None:
+                        self._channel_store.set_max_cache_items(
+                            int(self.seg_config.get("lean_cache_max_items", 2) or 2)
+                        )
                 with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
                     csd = run_constrained_donut_segmentation(
                         masks.astype(np.uint32, copy=False),
@@ -1718,6 +1723,7 @@ class SegmentMergeWorker(QThread):
                         progress_callback=lambda msg: self.progress.emit(0, 1, msg),
                         cancel_check=lambda: bool(self._stop),
                         marker_channels_loader=hq_block_loader,
+                        output_labels=output_labels,
                     )
                 return {
                     "mask": csd["final_labels"].astype(np.uint32, copy=False),
@@ -2007,6 +2013,14 @@ class SegmentMergeWorker(QThread):
                         self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
                         if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
                     )
+                    # Whole-ROI (single tile, no overlap): let lean_carve write its
+                    # labels straight into the global-mask memmap view instead of a
+                    # RAM-resident whole-image array (the later lut remap overwrites
+                    # cell pixels with global ids; background 0 stays 0).
+                    csd_output = (
+                        mmap[ry0:ry1, rx0:rx1]
+                        if (hq_block_loader is not None and n_tiles == 1) else None
+                    )
                     local_result = self._segment_tile(
                         tile_data,
                         model,
@@ -2014,6 +2028,7 @@ class SegmentMergeWorker(QThread):
                         mesmer_channel_source=mesmer_channel_source,
                         profile_tile_id=profile_tile_id,
                         hq_block_loader=hq_block_loader,
+                        output_labels=csd_output,
                     )
                     local_nuclei = None
                     local_qc_rows = []
@@ -2858,6 +2873,12 @@ class SegmentMergeWorker(QThread):
                             self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
                             if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
                         )
+                        # Whole-ROI single tile: write straight into the global-mask
+                        # memmap view rather than a RAM whole-image array.
+                        csd_output = (
+                            mmap[ry0:ry1, rx0:rx1]
+                            if (hq_block_loader is not None and n_tiles == 1) else None
+                        )
                         local_result = self._segment_tile(
                             tile_data,
                             model,
@@ -2865,6 +2886,7 @@ class SegmentMergeWorker(QThread):
                             mesmer_channel_source=mesmer_channel_source,
                             profile_tile_id=profile_tile_id,
                             hq_block_loader=hq_block_loader,
+                            output_labels=csd_output,
                         )
                         local_nuclei = None
                         local_qc_rows = []

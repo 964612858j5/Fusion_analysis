@@ -268,11 +268,13 @@ The software offers several algorithms for "circling cells". **Beginners can jus
 | **Cellpose whole-cell (Fusion + DAPI)** | Uses the "fused outline image + nucleus" to circle **the whole cell** directly | Default first choice, most situations |
 | **Cellpose nuclei (DAPI)** | Circles only the **nucleus** | Only care about nuclei, or membrane stains are poor |
 | **Cellpose nuclei + expansion** | Circle the nucleus first, then "expand" outward a ring as the cell | An approximation when there's no good membrane signal |
-| **Cellpose nuclei + HQ / HQ2** | Circle the nucleus first, then use structural channels for finer cytoplasm expansion | Want a closer fit to the real shape |
-| **Cellpose nuclei + CDS** | Circle the nucleus first, then do a "donut-style" signal-constrained expansion | Irregular cytoplasm shapes that need signal-based constraints |
+| **Cellpose nuclei + HQ / HQ2** ⚠️ | Circle the nucleus first, then use structural channels for finer cytoplasm expansion | **Still in testing, not yet mature** — use with caution for real analysis |
+| **Cellpose nuclei + CDS** ⚠️ | Circle the nucleus first, then do a "donut-style" signal-constrained expansion | **Still in testing, not yet mature** — use with caution for real analysis |
 | **StarDist nuclei (+expansion)** | Another nucleus-circling algorithm (good for dense round nuclei) | When nuclei are dense and round |
 | **Mesmer (whole-cell / nuclei / nuclear-guided)** | Whole-cell segmentation designed specifically for tissue imaging | Clear membrane channels, want whole-cell segmentation |
 
+> ⚠️ **Note**: the methods marked ⚠️ — **HQ / HQ2 / CDS — are still in testing and not yet mature**. Results may be unstable; do not use them for final output. Prefer `Cellpose whole-cell`.
+>
 > Simple rule: **run `Cellpose whole-cell` once first and look at the result**, then switch if unsatisfied. Each method has its own detailed parameters; leaving them untouched usually works fine.
 
 ---

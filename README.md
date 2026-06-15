@@ -1,42 +1,74 @@
-# Block01 — CODEX Multi-Channel Imaging Analysis Pipeline
+# Block01 — Spatial Proteomics Cell Segmentation & Quantification Pipeline
 
-A desktop (PyQt5) pipeline that turns a **giant multi-channel CODEX tissue image**
-(tens of GB, dozens of stain channels) into a **per-cell data table** —
-one row per cell, one column per channel intensity — ready for single-cell analysis.
+An end-to-end, GUI-driven pipeline for **highly multiplexed tissue imaging** (CODEX / PhenoCycler-style
+multiplexed immunofluorescence). It converts a multi-gigabyte, dozens-of-marker whole-slide OME-TIFF
+into a **single-cell expression matrix** — a cell-by-marker table suitable for downstream spatial
+single-cell analysis (phenotyping, clustering, and neighborhood/niche characterization).
 
-> 把一张几十 GB 的多通道组织大图，变成一张「每行一个细胞、每列一个通道亮度」的数据表。
+In short: **raw multiplexed image → segmented cells → per-cell marker quantification → AnnData (`.h5ad`) / CSV.**
 
-<!-- image placeholder: docs/images/00_goal_overview.png — big multi-channel image → cell × channel table -->
-
----
-
-## What it does
-
-The work is split into **5 steps**, driven from a single window:
-
-```
-Step 0          Step 1          Step 2            Step 3        Step 4
- Setup     →     Fusion+Tune  →   Segment+Merge  →   QC        →   Features
-```
-
-| Step | Does | Output |
-|------|------|--------|
-| **0 · Setup** | Pick region (ROI), group channels, remove background | corrected image + configs |
-| **1 · Fusion + Tuning** | Merge channels into a cell-outline image; tune segmentation params on small patches | `cellpose_params.json`, `fused.zarr` |
-| **2 · Segmentation + Merge** | Segment every cell across the whole ROI (tiled, then stitched) | whole-image cell mask |
-| **3 · QC Viewer** | Visually verify the mask over DAPI | manual confirmation |
-| **4 · Feature Extraction** | Measure each cell's per-channel intensity + morphology | `cell_features.csv` / `.h5ad` |
+<!-- image placeholder: docs/images/00_goal_overview.png — multiplexed WSI → single-cell expression matrix -->
 
 ---
 
-## 📖 User manual / 用户手册
+## Background
 
-Full beginner-friendly walkthroughs (written so a high-schooler can follow along):
+Highly multiplexed imaging platforms (CODEX/PhenoCycler, IMC, MIBI, multi-cycle IF) capture **dozens of
+protein markers** on a single tissue section, registered into one multi-channel whole-slide image (WSI).
+Extracting biological meaning requires turning pixels into cells: each cell must be **segmented**, and the
+**intensity of every marker** quantified within its boundary. The resulting single-cell spatial proteome
+is the substrate for cell-type calling, spatial neighborhood analysis, and tissue architecture studies.
+
+This pipeline addresses the practical bottlenecks of that workflow at WSI scale: autofluorescence/background
+correction, nuclear- and membrane-guided segmentation, memory-bounded **tiled inference with cross-tile
+label reconciliation**, and reproducible single-cell marker quantification.
+
+---
+
+## Pipeline overview
+
+A single application drives a five-stage workflow:
+
+```
+Step 0          Step 1            Step 2                Step 3        Step 4
+ Setup     →     Fusion + Tuning →  Segmentation+Merge →  QC        →   Quantification
+```
+
+| Stage | Function | Key output |
+|-------|----------|-----------|
+| **0 · Setup** | ROI definition on the WSI overview, marker-to-lineage grouping, nuclear-channel assignment, and background/autofluorescence correction (top-hat or GPU Gaussian subtraction) | `corrected_channels.zarr`, ROI/correction configs |
+| **1 · Fusion + Tuning** | Composite a membrane/cytoplasm fusion image from weighted lineage markers (paired with the nuclear channel); tune segmentation method and parameters on representative patches | `cellpose_params.json`, `fused.zarr` |
+| **2 · Segmentation + Merge** | Whole-ROI instance segmentation via memory-bounded tiled inference, followed by cross-tile label stitching into one global cell-label mask | global cell mask (`uint32`) |
+| **3 · QC** | Visual QC of the segmentation overlaid on the nuclear (DAPI) channel | manual sign-off |
+| **4 · Quantification** | Per-cell marker intensity statistics + morphology over the global mask | `cell_features.csv`, `cell_features.h5ad` |
+
+---
+
+## Segmentation backends
+
+The pipeline wraps multiple instance-segmentation backends behind a unified configuration:
+
+- **Cellpose whole-cell (fusion + nuclear)** — *default / recommended.* Nuclear-anchored whole-cell
+  segmentation driven by the membrane/cytoplasm fusion composite.
+- **Cellpose nuclei (DAPI)** and **nuclei + expansion** — nuclear segmentation, optionally dilated to
+  approximate cell boundaries when membrane signal is weak.
+- **StarDist** — star-convex nuclear segmentation, well suited to dense, round nuclei.
+- **Mesmer (DeepCell)** — whole-cell / nuclear / nuclear-guided segmentation tuned for tissue imaging
+  with membrane markers.
+
+> ⚠️ The **HQ / HQ2 / CDS** cytoplasm-carving backends are **experimental and not yet validated** —
+> not recommended for production output. Use Cellpose whole-cell for routine analysis.
+
+See **Appendix A** of the user manual for backend selection guidance.
+
+---
+
+## Documentation
+
+Step-by-step user manuals (written to onboard non-specialists):
 
 - **English** → [`docs/user_guide.md`](docs/user_guide.md)
 - **中文** → [`docs/用户指南.md`](docs/用户指南.md)
-
-Start there if you've never used this tool before.
 
 ---
 
@@ -44,8 +76,8 @@ Start there if you've never used this tool before.
 
 ```bash
 # 1. Create the environment (once)
-conda env create -f ../environment.yml      # env name: fusion
-#   or: bash ../setup_env.sh                 # env name: fusion_test2
+conda env create -f ../environment.yml      # env: fusion
+#   or: bash ../setup_env.sh                 # env: fusion_test2
 
 # 2. Launch (run from the PARENT directory, as a module)
 conda activate fusion
@@ -53,36 +85,35 @@ cd /sda1/Fusion/analysis_pipline
 python -m block01.main
 ```
 
-A dark-themed window titled `CODEX Pipeline | Fusion + Segmentation` opens on Step 0.
-Then follow Step 0 → 4 in the UI (see the user manual for each step).
+The application opens on Step 0 (`CODEX Pipeline | Fusion + Segmentation`); proceed Step 0 → 4 in the UI.
+Default input/output paths can be preset in [`config.py`](config.py) (`OME_TIFF_FILE`, `OUTPUT_DIR`).
 
-Optional: edit default paths in [`config.py`](config.py) (`OME_TIFF_FILE`, `OUTPUT_DIR`).
-
-**Requirements:** NVIDIA GPU recommended (CUDA 12.x), Python 3.10. See `../environment.yml`.
+**Requirements:** NVIDIA GPU recommended (CUDA 12.x), Python 3.10. Full dependency list in `../environment.yml`.
 
 ---
 
-## Segmentation methods
+## Inputs & outputs
 
-Default and recommended: **Cellpose whole-cell (Fusion + DAPI)**.
-Also available: Cellpose nuclei (DAPI) / +expansion, StarDist, Mesmer.
-
-> ⚠️ **HQ / HQ2 / CDS** methods are **still in testing and not yet mature** — avoid for final output.
-
-See Appendix A in the user manual for how to choose.
+- **Input:** multi-channel OME-TIFF whole-slide image (lazily read per-ROI/per-tile via the `zarr` interface
+  to bound I/O and memory).
+- **Output:**
+  - `global_mask` — whole-ROI instance label image (`uint32`, one ID per cell, 0 = background).
+  - `cell_features.csv` — single-cell table: rows = cells, columns = per-marker statistics (mean / median /
+    sum / std / min / max / 90th percentile) plus morphology.
+  - `cell_features.h5ad` — **AnnData** matrix for downstream single-cell / spatial analysis (e.g. scanpy, squidpy).
 
 ---
 
-## Repo layout
+## Repository layout
 
 ```
 block01/
 ├── main.py            # entry point (python -m block01.main)
 ├── config.py          # default paths & constants
 ├── ui/                # Step 0–4 pages (PyQt5)
-├── core/              # OME-TIFF loader, fusion, background correction
-├── workers/           # segmentation / merge / feature-extraction workers
+├── core/              # OME-TIFF lazy loader, channel fusion, background correction
+├── workers/           # segmentation / tile-merge / quantification workers
 ├── utils/             # tiling, segmentation config, helpers
 ├── tests/             # pytest suite
-└── docs/              # 📖 user guides (EN + 中文) + images
+└── docs/              # user manuals (EN + 中文) + figures
 ```

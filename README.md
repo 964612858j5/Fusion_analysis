@@ -30,14 +30,14 @@ label reconciliation**, and reproducible single-cell marker quantification.
 A single application drives a five-stage workflow:
 
 ```
-Step 0          Step 1            Step 2                Step 3        Step 4
- Setup     →     Fusion + Tuning →  Segmentation+Merge →  QC        →   Quantification
+Step 0          Step 1              Step 2                Step 3        Step 4
+ Setup     →     Segment + Tune  →   Segmentation+Merge →  QC        →   Quantification
 ```
 
 | Stage | Function | Key output |
 |-------|----------|-----------|
 | **0 · Setup** | ROI definition on the WSI overview, marker-to-lineage grouping, nuclear-channel assignment, and background/autofluorescence correction (top-hat or GPU Gaussian subtraction) | `corrected_channels.zarr`, ROI/correction configs |
-| **1 · Fusion + Tuning** | Composite a membrane/cytoplasm fusion image from weighted lineage markers (paired with the nuclear channel); tune segmentation method and parameters on representative patches | `cellpose_params.json`, `fused.zarr` |
+| **1 · Segmentation + Fusion Tuning** | Select and tune the **cell-segmentation backend** — Cellpose, Mesmer, or watershed-variant cytoplasm carving — on representative patches. Inputs may be the nuclear channel alone, individual markers, or a weighted membrane/cytoplasm **fusion composite** paired with the nuclear channel | `cellpose_params.json`, `fused.zarr` |
 | **2 · Segmentation + Merge** | Whole-ROI instance segmentation via memory-bounded tiled inference, followed by cross-tile label stitching into one global cell-label mask | global cell mask (`uint32`) |
 | **3 · QC** | Visual QC of the segmentation overlaid on the nuclear (DAPI) channel | manual sign-off |
 | **4 · Quantification** | Per-cell marker intensity statistics + morphology over the global mask | `cell_features.csv`, `cell_features.h5ad` |

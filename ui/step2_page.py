@@ -226,6 +226,27 @@ class Step2Page(QWidget):
         pr.addWidget(btn_params)
         inl.addLayout(pr)
 
+        # v13.1 Phase 5b — optional manual channel remap (experimental).
+        # Empty = unchanged v13 behavior. A source-aligned config applies the
+        # remap to the segmentation signal path only (not h5ad/expression).
+        rmp = QHBoxLayout()
+        rmp.addWidget(QLabel('Channel remap (opt):'))
+        self._remap_config_edit = QtWidgets.QLineEdit()
+        self._remap_config_edit.setPlaceholderText(
+            'channel_remap_config.json (leave empty to disable)')
+        self._remap_config_edit.setStyleSheet('font-size:11px;')
+        rmp.addWidget(self._remap_config_edit, stretch=1)
+        btn_remap = QPushButton('Browse')
+        btn_remap.setFixedWidth(64)
+        btn_remap.clicked.connect(self._browse_remap_config)
+        rmp.addWidget(btn_remap)
+        self._allow_preview_remap = QCheckBox('allow preview')
+        self._allow_preview_remap.setToolTip(
+            'Required to run a preview_only / step2_ready=false remap config '
+            '(experimental Phase 5b).')
+        rmp.addWidget(self._allow_preview_remap)
+        inl.addLayout(rmp)
+
         btn_load = QPushButton('Load zarr info & overview')
         btn_load.setStyleSheet(
             'QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}'
@@ -998,6 +1019,13 @@ class Step2Page(QWidget):
             self._zarr_edit.setText(path)
             self._sync_output_dir_from_zarr_path(path)
             self._load_zarr_info()
+
+    def _browse_remap_config(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Select channel_remap_config.json', OUTPUT_DIR,
+            'Channel remap config (*.json);;All files (*)')
+        if path:
+            self._remap_config_edit.setText(os.path.abspath(path))
 
     def _browse_seg_params(self):
         dlg = QFileDialog(self, 'Select segmentation_params directory or index JSON', OUTPUT_DIR)
@@ -1819,6 +1847,12 @@ class Step2Page(QWidget):
         })
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
+        # v13.1 Phase 5b — optional manual channel remap (experimental).
+        remap_path = self._remap_config_edit.text().strip() if hasattr(self, "_remap_config_edit") else ""
+        if remap_path:
+            data["channel_remap_config_path"] = remap_path
+            data["allow_preview_remap"] = bool(
+                hasattr(self, "_allow_preview_remap") and self._allow_preview_remap.isChecked())
         cfg = normalize_segmentation_config(data)
         if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[HQ2-UI] collected params={cfg.get('params')}")

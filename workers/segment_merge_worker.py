@@ -49,6 +49,11 @@ from ..utils.roi_project import (
 from ..utils.step2_profiler import Step2Profiler
 from ..utils.runtime_resource_monitor import RuntimeResourceMonitor
 from ..utils.channel_cache import SharedChannelStore
+from ..utils.channel_remap_config import (
+    load_channel_remap_config,
+    validate_step2_remap_config,
+    channel_remap_config_hash,
+)
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
 from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
@@ -111,6 +116,11 @@ class SegmentMergeWorker(QThread):
         self.roi_id = str(self.roi_manifest.get("roi_id") or self._roi_id_from_rois(rois) or "")
         self.roi_display_name = str(self.roi_manifest.get("display_name") or self._roi_display_from_rois(rois) or "ROI_1")
         self.result_id, self.output_dir, self.created_at = self._create_output_dir()
+        # v13.1 Phase 5b: optional manual channel remap. Loads/validates once;
+        # no config -> unchanged v13 behavior. Raises on a rejected config.
+        self._manual_remap_enabled = False
+        self._remap_provenance = {}
+        self._resolve_channel_remap()
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
         self.param_file       = self._abs(param_file) if param_file else ""
@@ -214,6 +224,63 @@ class SegmentMergeWorker(QThread):
             os.makedirs(out_dir, exist_ok=True)
             return run_id, out_dir, created_at
         return create_result_dir(self.project_output_dir, self.method)
+
+    def _resolve_channel_remap(self):
+        """Load + validate the optional channel remap config once per run.
+
+        No `channel_remap_config_path` in seg_config -> manual remap stays off and
+        v13 behavior is unchanged. A provided config is validated for Step2 use
+        (source-aligned, no reference layers, concrete Min/Max). Preview-only
+        configs require allow_preview_remap=true. On rejection this raises with a
+        clear, channel-level reason. On success it injects resolved per-channel
+        params into seg_config (consumed by HQ2/CDS2/lean_carve) and writes
+        provenance into the run output dir. h5ad / feature extraction untouched.
+        """
+        path = str(self.seg_config.get("channel_remap_config_path") or "").strip()
+        if not path:
+            return
+        allow = str(self.seg_config.get("allow_preview_remap", False)).strip().lower() \
+            in {"1", "true", "yes", "on"}
+        cfg = load_channel_remap_config(path)  # raises on missing/invalid file
+        errors, resolved = validate_step2_remap_config(cfg, allow_preview_remap=allow)
+        if errors:
+            raise ValueError(
+                "channel_remap_config rejected for Step2 segmentation:\n  "
+                + "\n  ".join(errors))
+
+        gate_mode = str(self.seg_config.get("remap_gate_mode", "remap") or "remap").strip().lower()
+        gate_thr = float(self.seg_config.get("remap_gate_threshold", 0.05) or 0.05)
+        # Reserved keys consumed by the engines (HQ2 reads params; CDS2/lean read p).
+        self.seg_config["_channel_remap_params"] = resolved
+        self.seg_config["_remap_gate_mode"] = gate_mode
+        self.seg_config["_remap_gate_threshold"] = gate_thr
+        self._manual_remap_enabled = True
+        self._remap_provenance = {
+            "manual_remap_enabled": True,
+            "channel_remap_config_path": os.path.abspath(path),
+            "channel_remap_config_hash": channel_remap_config_hash(cfg),
+            "allow_preview_remap": allow,
+            "gate_mode": gate_mode,
+            "remap_gate_threshold": gate_thr,
+            "used_for": cfg.get("used_for"),
+            "source_policy": cfg.get("source_policy", {}),
+            "channels": sorted(resolved.keys()),
+        }
+        try:
+            self._write_remap_provenance(cfg)
+        except Exception as exc:  # provenance is best-effort, never fail the run
+            print(f"[Step2] remap provenance write failed: {exc}")
+
+    def _write_remap_provenance(self, cfg):
+        """Copy the used remap config + provenance into the run output dir."""
+        out = self.output_dir
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "channel_remap_config.used.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        with open(os.path.join(out, "channel_remap_provenance.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(self._remap_provenance, f, indent=2)
 
     @staticmethod
     def _abs(path):

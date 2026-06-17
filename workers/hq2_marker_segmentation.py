@@ -21,6 +21,21 @@ from .hq_marker_segmentation import (
     parse_hq_channels,
     percentile_normalize,
 )
+from ..core.channel_remap import apply_channel_remap
+
+
+def _marker_conditioning(name, arr, params, norm_low, norm_high):
+    """Return the 0–1 conditioning signal for one marker.
+
+    v13.1 Phase 5b: when an active channel_remap config supplies params for this
+    channel, use the manual remap 0–1 conditioning map as the watershed signal
+    instead of percentile_normalize. Remap and percentile_normalize are never
+    both applied to the same marker. No remap config -> unchanged behavior.
+    """
+    remap_params = (params or {}).get("_channel_remap_params") or None
+    if remap_params and name in remap_params:
+        return apply_channel_remap(arr, remap_params[name]).astype(np.float32, copy=False)
+    return percentile_normalize(arr, norm_low, norm_high)
 
 
 def _expand_labels(labels, distance):
@@ -156,7 +171,7 @@ def run_level1_hq_proposal(
     candidates = []
     scores = []
     for name, arr in zip(channel_names, marker_channels):
-        norm = percentile_normalize(arr, norm_low, norm_high)
+        norm = _marker_conditioning(name, arr, params, norm_low, norm_high)
         mask = (bounded > 0) & (norm >= min_signal)
         mask[nuclei > 0] = True
         labels = watershed(-norm.astype(np.float32), markers=nuclei, mask=mask)

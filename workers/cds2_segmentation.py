@@ -31,6 +31,7 @@ from .lean_carve_segmentation import (
     _channel_keep,
     _finalize_block,
 )
+from ..core.channel_remap import apply_channel_remap
 
 # Mutually-exclusive camps: markers within a camp coexist; camps are pairwise
 # exclusive. Channels not listed here (and DAPI) carry no fingerprint.
@@ -65,7 +66,8 @@ def _make_cds2_carve(p):
 
     def carve(sub_nuclei, names, get_block, y0, y1, x0, x1, sy0, sx0,
               max_radius, minimal_radius, separate_px, tau, fusion_mode, vote_k,
-              gi_k, gi_bg_k, use_gpu):
+              gi_k, gi_bg_k, use_gpu,
+              remap_params=None, gate_mode="remap", gate_thr=0.05):
         terr, terr_mask, minimal, protect, outside, faces = _block_geometry(
             sub_nuclei, max_radius, minimal_radius, use_gpu)
 
@@ -83,16 +85,28 @@ def _make_cds2_carve(p):
             raw = get_block(name, sy0, sy0 + sh, sx0, sx0 + sw)
             if raw is None:
                 continue
+            # gi is ALWAYS computed: camp arbitration requires the native local-z
+            # contrast map (doc 09 — manual remap must not replace _block_gi/camp).
             gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
             used_cupy = used_cupy or uc
-            keep = _channel_keep(gi, terr_mask, outside, faces, protect, tau)  # identical to lean
+            # Signal gate: from the manual remap 0–1 conditioning map when active,
+            # else the gi-based gate (identical to lean). camp still uses gi below.
+            use_remap = bool(remap_params) and name in remap_params and gate_mode != "gi"
+            if use_remap:
+                cond = apply_channel_remap(raw, remap_params[name])
+                keep = _channel_keep(cond, terr_mask, outside, faces, protect, gate_thr)
+                if gate_mode == "remap_and_gi":
+                    keep = keep & _channel_keep(gi, terr_mask, outside, faces, protect, tau)
+                del cond
+            else:
+                keep = _channel_keep(gi, terr_mask, outside, faces, protect, tau)
             if union_mode:
                 fused |= keep
             else:
                 votes += keep.astype(np.uint16)
             cid = marker_to_id.get(_norm(name))
             if cid is not None:
-                np.maximum(camp_z[cid], gi, out=camp_z[cid])
+                np.maximum(camp_z[cid], gi, out=camp_z[cid])  # camp: native gi, unchanged
             del raw, gi, keep
         if not union_mode:
             fused = votes >= max(1, int(vote_k))

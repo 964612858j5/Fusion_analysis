@@ -30,6 +30,21 @@ from .constrained_donut_segmentation import (
     _cupy,
 )
 from .outside_in_segmentation import _voronoi_faces
+from ..core.channel_remap import apply_channel_remap
+
+
+def resolve_remap_gate(params):
+    """Extract v13.1 remap gate settings from the engine params dict.
+
+    Returns (remap_params|None, gate_mode, gate_thr). With no active remap config
+    remap_params is None and callers fall back to the unchanged gi-based gate.
+    """
+    remap_params = (params or {}).get("_channel_remap_params") or None
+    gate_mode = str((params or {}).get("_remap_gate_mode", "remap") or "remap").strip().lower()
+    gate_thr = float((params or {}).get("_remap_gate_threshold", 0.05) or 0.05)
+    if gate_mode not in ("remap", "gi", "remap_and_gi"):
+        gate_mode = "remap"
+    return remap_params, gate_mode, gate_thr
 
 _FULL8 = np.ones((3, 3), dtype=bool)
 
@@ -156,8 +171,18 @@ def _carve_block(
     gi_k,
     gi_bg_k,
     use_gpu,
+    remap_params=None,
+    gate_mode="remap",
+    gate_thr=0.05,
 ):
-    """Segment one halo-padded sub-block; return (interior_labels, used_cupy)."""
+    """Segment one halo-padded sub-block; return (interior_labels, used_cupy).
+
+    v13.1: when remap_params supplies a channel, the signal gate is derived from
+    the manual remap 0–1 conditioning map (low = cond < gate_thr) instead of the
+    gi-based gate. lean_carve has no camp, so gi is only needed for the default
+    gate and is skipped when remap drives the gate. See
+    docs/v13_1_channel_conditioning/11_STEP2_REMAP_INTEGRATION_AUDIT.md.
+    """
     terr, terr_mask, minimal, protect, outside, faces = _block_geometry(
         sub_nuclei, max_radius, minimal_radius, use_gpu)
 
@@ -171,14 +196,26 @@ def _carve_block(
         raw = get_block(name, sy0, sy0 + sh, sx0, sx0 + sw)
         if raw is None:
             continue
-        gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
-        used_cupy = used_cupy or uc
-        keep = _channel_keep(gi, terr_mask, outside, faces, protect, tau)
+        use_remap = bool(remap_params) and name in remap_params and gate_mode != "gi"
+        if use_remap:
+            cond = apply_channel_remap(raw, remap_params[name])
+            keep = _channel_keep(cond, terr_mask, outside, faces, protect, gate_thr)
+            if gate_mode == "remap_and_gi":
+                gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
+                used_cupy = used_cupy or uc
+                keep = keep & _channel_keep(gi, terr_mask, outside, faces, protect, tau)
+                del gi
+            del cond
+        else:
+            gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)
+            used_cupy = used_cupy or uc
+            keep = _channel_keep(gi, terr_mask, outside, faces, protect, tau)
+            del gi
         if union_mode:
             fused |= keep
         else:
             votes += keep.astype(np.uint16)
-        del raw, gi, keep
+        del raw, keep
     if not union_mode:
         fused = votes >= max(1, int(vote_k))
         del votes
@@ -237,6 +274,7 @@ def _run_streaming(
     gi_k = max(3, int(p.get("gi_kernel_size", 7) or 7))
     gi_bg_k = max(gi_k + 2, int(p.get("gi_background_kernel_size", 31) or 31))
     use_gpu = str(p.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
+    remap_params, gate_mode, gate_thr = resolve_remap_gate(p)
 
     if output_labels is None:
         out = np.zeros(nuclei.shape, dtype=np.uint32)
@@ -269,6 +307,7 @@ def _run_streaming(
                     y0, y1, x0, x1, sy0, sx0,
                     max_radius, minimal_radius, separate_px, tau, fusion_mode, vote_k,
                     gi_k, gi_bg_k, use_gpu,
+                    remap_params=remap_params, gate_mode=gate_mode, gate_thr=gate_thr,
                 )
                 out[y0:y1, x0:x1] = interior
                 # Cheap per-cell areas accumulated per block (no whole-image QC layers).

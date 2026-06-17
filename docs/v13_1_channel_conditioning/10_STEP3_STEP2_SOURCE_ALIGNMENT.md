@@ -121,6 +121,50 @@ Per-marker metadata (in `channels[name]`) additionally records `step2_compatible
 plus `value_min_observed`/`value_max_observed`, so each channel is
 self-describing.
 
+## Per-channel source alignment (Phase 2.1d)
+
+A top-level config may be source-aligned even when channels come from a **valid
+per-channel native mix** — e.g. CD45 from `corrected_zarr_native_float` and CK19
+from `raw_ome_native_float` (CK19 not present in the corrected store). Both match
+the source Step2 would read for that channel, so the run is aligned; but the mix
+must be recorded, never hidden behind a single top-level flag.
+
+Each marker channel therefore records its own alignment in `channels[name]`:
+
+```json
+{
+  "source": "raw_ome_native",
+  "intensity_space": "raw_ome_native_float",
+  "normalization": "none",
+  "value_min_observed": 0.0,
+  "value_max_observed": 65535.0,
+  "step2_pre_remap_source": "raw_ome_native_float",
+  "calibration_source_matches_step2": true,
+  "step2_compatible": true,
+  "fallback_reason": "channel_not_found_in_corrected_zarr"
+}
+```
+
+`fallback_reason` is present only when a fallback occurred:
+`channel_not_found_in_corrected_zarr` (used raw native because the corrected
+store lacks the channel — still aligned), `native_source_unavailable` (native
+re-read failed → normalized preview, NOT aligned), or `unknown_source`.
+
+The top-level `source_policy.source_alignment_mode` summarizes the per-channel
+picture without flattening it:
+
+| mode | meaning | `calibration_source_matches_step2` |
+|---|---|---|
+| `single_native_source` | all markers, one native source | true |
+| `per_channel_native` | valid per-channel native mix, each matched | true |
+| `partial_or_preview_fallback` | ≥1 marker normalized/unknown | false |
+| `none` | no markers | false |
+
+`calibration_source_matches_step2` is true **only when every marker** matches its
+own expected Step2 pre-remap source. A single preview-only/mismatched channel
+flips it to false. `step2_ready` stays **false** and `preview_only` stays
+**true** in all of these — until Step2 runtime actually consumes the config.
+
 ## Reference layers do not affect alignment
 
 DAPI / mask / fusion are reference/viewer layers. They are excluded from the

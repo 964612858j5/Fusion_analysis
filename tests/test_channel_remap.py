@@ -346,6 +346,26 @@ def test_default_source_policy_includes_step2_alignment_fields():
     assert "alignment_note" in sp
 
 
+def test_default_source_policy_includes_alignment_mode():
+    sp = default_source_policy()
+    assert sp["source_alignment_mode"] == "unknown"
+
+
+def test_save_load_preserves_source_alignment_mode(tmp_path):
+    cfg = default_channel_remap_config(["A"])
+    cfg["channels"]["A"].update({"min": 0.0, "max": 100.0})
+    cfg["source_policy"].update({
+        "source_alignment_mode": "per_channel_native",
+        "intensity_space": "mixed_native",
+        "calibration_source_matches_step2": True,
+    })
+    path = os.path.join(str(tmp_path), "c.json")
+    save_channel_remap_config(cfg, path)
+    sp = load_channel_remap_config(path)["source_policy"]
+    assert sp["source_alignment_mode"] == "per_channel_native"
+    assert sp["step2_ready"] is False
+
+
 def test_normalize_source_policy_coerces_alignment_bools():
     sp = normalize_source_policy({
         "calibration_source_matches_step2": 1,

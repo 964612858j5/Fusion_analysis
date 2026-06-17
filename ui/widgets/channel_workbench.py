@@ -484,11 +484,16 @@ class ChannelWorkbench(QtWidgets.QWidget):
         scope = policy.get("scope", "unknown")
         preview = bool(policy.get("preview_only", True))
         matches = bool(policy.get("calibration_source_matches_step2", False))
-        if ispace == "unknown":
+        mode = policy.get("source_alignment_mode", "unknown")
+        if mode == "per_channel_native":
+            intensity_note = "Markers: per-channel native mix"
+        elif mode == "partial_or_preview_fallback":
+            intensity_note = "Markers: preview fallback present"
+        elif ispace == "unknown":
             intensity_note = "Markers: scale unknown"
         else:
             intensity_note = f"Markers: {ispace}"
-        match_note = f"Step2 source match: {'yes' if matches else 'no'}"
+        match_note = f"Step2 match: {'yes' if matches else 'no'}"
         warn = ("  ⚠ PREVIEW-ONLY (not Step2-ready)" if preview else "")
         if not matches:
             warn += " fallback"

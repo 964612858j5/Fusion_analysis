@@ -3016,10 +3016,19 @@ class Step3Page(QWidget):
             ch, self._channel_sources.get(ch, "unknown"))
         s = str(src).lower()
         cached = self._patch_channel_cache.get(ch)
+        expected = self._expected_step2_pre_remap_source()
 
-        def _meta(source, ispace, norm, compatible, arr):
+        def _meta(source, ispace, norm, compatible, arr,
+                  step2_src, fallback=None):
+            # Per-channel Step2 alignment (Phase 2.1d): each channel records the
+            # source Step2 will read pre-remap and whether it matches, so a
+            # top-level match can never hide a per-channel fallback.
             m = {"source": str(source), "intensity_space": ispace,
-                 "normalization": norm, "step2_compatible": bool(compatible)}
+                 "normalization": norm, "step2_compatible": bool(compatible),
+                 "step2_pre_remap_source": step2_src,
+                 "calibration_source_matches_step2": bool(compatible)}
+            if fallback:
+                m["fallback_reason"] = fallback
             if arr is not None and np.asarray(arr).size:
                 finite = np.asarray(arr)[np.isfinite(arr)]
                 if finite.size:
@@ -3030,21 +3039,27 @@ class Step3Page(QWidget):
         # 1) corrected-zarr cache is already native float (read without normalize)
         if "corrected" in s and cached is not None:
             return cached, _meta(src, "corrected_zarr_native_float", "none",
-                                 True, cached)
+                                 True, cached, "corrected_zarr_native_float")
 
         # 2) raw-OME: the QC cache is normalized; re-read NATIVE for Step2 match
         if "raw_ome" in s or s == "raw":
             native = self._read_raw_native_patch(ch)
             if native is not None:
-                return native, _meta("raw_ome_native",
-                                     "raw_ome_native_float", "none", True,
-                                     native)
+                # Native and Step2-compatible. If a corrected store exists but
+                # this channel is not in it, record why we used raw native.
+                fb = ("channel_not_found_in_corrected_zarr"
+                      if expected == "corrected_zarr_native_float" else None)
+                return native, _meta("raw_ome_native", "raw_ome_native_float",
+                                     "none", True, native,
+                                     "raw_ome_native_float", fallback=fb)
             # 3) fallback: normalized display array -> preview-only, not aligned
-            return cached, _meta(src, "raw_ome_normalized_0_1",
-                                 "minmax_per_read", False, cached)
+            return cached, _meta("raw_ome_normalized", "raw_ome_normalized_0_1",
+                                 "minmax_per_read", False, cached, "unknown",
+                                 fallback="native_source_unavailable")
 
         # 4) unknown source -> preview-only fallback
-        return cached, _meta(src, "unknown", "unknown", False, cached)
+        return cached, _meta(src, "unknown", "unknown", False, cached,
+                             "unknown", fallback="unknown_source")
 
     def _read_raw_native_patch(self, ch):
         """Re-read a raw-OME marker for the current patch with normalize=False
@@ -3134,10 +3149,9 @@ class Step3Page(QWidget):
         from a Step2-compatible native source. step2_ready stays False this
         phase — Step2 runtime integration is not implemented (Phase 2.1c).
         """
-        spaces = {m.get("intensity_space", "unknown")
-                  for m in channel_metadata.values()}
-        norms = {m.get("normalization", "unknown")
-                 for m in channel_metadata.values()}
+        metas = list(channel_metadata.values())
+        spaces = {m.get("intensity_space", "unknown") for m in metas}
+        norms = {m.get("normalization", "unknown") for m in metas}
 
         def _collapse(values):
             values = {v for v in values if v}
@@ -3147,29 +3161,58 @@ class Step3Page(QWidget):
                 return next(iter(values))
             return "mixed"
 
-        matches = bool(channel_metadata) and all(
-            m.get("step2_compatible", False) for m in channel_metadata.values())
-        step2_source = self._expected_step2_pre_remap_source()
+        all_compatible = bool(metas) and all(
+            m.get("step2_compatible", False) for m in metas)
 
-        if matches:
-            align_note = (
-                "Markers calibrated on the native/corrected source expected by "
-                "Step2. Config stays preview_only/step2_ready=false until Step2 "
-                "runtime integration is implemented.")
+        # source_alignment_mode summarizes per-channel behavior without hiding it.
+        if not metas:
+            mode = "none"
+            intensity_space = "unknown"
+            step2_source = "unknown"
+        elif all_compatible and len(spaces) == 1:
+            mode = "single_native_source"
+            intensity_space = next(iter(spaces))
+            step2_source = intensity_space
+        elif all_compatible:
+            # valid per-channel native mix (e.g. corrected_native + raw_native)
+            mode = "per_channel_native"
+            intensity_space = "mixed_native"
+            step2_source = "per_channel_native"
         else:
+            mode = "partial_or_preview_fallback"
+            intensity_space = "mixed_or_preview"
+            step2_source = "per_channel_or_unknown"
+
+        matches = all_compatible
+
+        if mode == "single_native_source":
             align_note = (
-                "Some markers use a normalized/unknown display source that does "
-                "NOT match the Step2 pre-remap source. Preview-only fallback; "
-                "saved Min/Max are not Step2-aligned.")
+                f"All markers calibrated on {intensity_space}, the source "
+                "Step2 will read. preview_only/step2_ready=false until Step2 "
+                "runtime integration is implemented.")
+        elif mode == "per_channel_native":
+            align_note = (
+                "Markers use a valid per-channel native source mix (each matches "
+                "its own expected Step2 source). preview_only/step2_ready=false "
+                "until Step2 runtime integration is implemented.")
+        elif mode == "partial_or_preview_fallback":
+            align_note = (
+                "At least one marker uses a normalized/unknown source that does "
+                "NOT match its expected Step2 source. Preview-only fallback; "
+                "saved Min/Max are not fully Step2-aligned (see per-channel "
+                "fallback_reason).")
+        else:
+            align_note = "No marker channels available."
 
         return {
             "source": "step3_current_roi",
-            "intensity_space": _collapse(spaces),
+            "intensity_space": intensity_space,
             "normalization": _collapse(norms),
             "scope": "roi_preview",
             "preview_only": True,
             "step2_pre_remap_source": step2_source,
             "calibration_source_matches_step2": matches,
+            "source_alignment_mode": mode,
             "step2_ready": False,  # Step2 integration not implemented yet
             "alignment_note": align_note,
             "note": (

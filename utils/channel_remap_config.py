@@ -42,6 +42,12 @@ _SOURCE_POLICY_DEFAULTS = {
     # docs/v13_1_channel_conditioning/10_STEP3_STEP2_SOURCE_ALIGNMENT.md.
     "step2_pre_remap_source": "unknown",      # source Step2 will read pre-remap
     "calibration_source_matches_step2": False,  # marker source == Step2 source?
+    # How the marker channels align with the Step2 source (Phase 2.1d):
+    #   single_native_source        — all markers, one native source, matched
+    #   per_channel_native          — valid per-channel native mix, all matched
+    #   partial_or_preview_fallback — >=1 marker preview-only/mismatched
+    #   none                        — no markers
+    "source_alignment_mode": "unknown",
     "step2_ready": False,           # always False until Step2 integration lands
     "alignment_note": (
         "step2_ready stays false until Step2 runtime integration is "
@@ -118,7 +124,7 @@ def normalize_source_policy(policy):
     for key in ("preview_only", "calibration_source_matches_step2", "step2_ready"):
         out[key] = bool(out.get(key, _SOURCE_POLICY_DEFAULTS[key]))
     for key in ("source", "intensity_space", "normalization", "scope",
-                "step2_pre_remap_source"):
+                "step2_pre_remap_source", "source_alignment_mode"):
         out[key] = str(out.get(key, "unknown"))
     return out
 

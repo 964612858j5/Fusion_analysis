@@ -11,6 +11,7 @@ import pytest
 from block01.utils.channel_remap_config import (
     channel_remap_config_hash,
     default_channel_remap_config,
+    validate_remap_covers_selected_channels,
     validate_step2_remap_config,
 )
 
@@ -27,6 +28,7 @@ def _aligned_config(names=("CD45", "CK19"), compatible=True,
             "normalization": "none",
             "step2_compatible": compatible,
             "calibration_source_matches_step2": compatible,
+            "step2_pre_remap_source": intensity_space,
         })
     cfg["source_policy"].update({
         "source": "step3_current_roi",
@@ -101,6 +103,81 @@ def test_config_hash_stable_and_changes():
     assert h1 == h2 and len(h1) == 16
     cfg["channels"]["CD45"]["gamma"] = 0.5
     assert channel_remap_config_hash(cfg) != h1
+
+
+# ── Phase 5b.1 hardening ────────────────────────────────────────────────────
+
+def test_step2_rejects_raw_used_for_not_segmentation_only():
+    # normalize() force-sets used_for; validation must catch the RAW value.
+    cfg = _aligned_config()
+    cfg["used_for"] = "expression"
+    errors, resolved = validate_step2_remap_config(cfg, allow_preview_remap=True)
+    assert any("used_for" in e for e in errors)
+    assert resolved == {}
+
+
+def test_step2_rejects_missing_used_for():
+    cfg = _aligned_config()
+    del cfg["used_for"]
+    errors, _ = validate_step2_remap_config(cfg, allow_preview_remap=True)
+    assert any("used_for" in e for e in errors)
+
+
+def test_reject_channel_intensity_space_step2_source_mismatch():
+    cfg = _aligned_config()
+    # claims match but the two source fields disagree
+    cfg["channels"]["CD45"]["step2_pre_remap_source"] = "raw_ome_native_float"
+    cfg["channels"]["CD45"]["intensity_space"] = "corrected_zarr_native_float"
+    cfg["channels"]["CD45"]["calibration_source_matches_step2"] = True
+    errors, _ = validate_step2_remap_config(cfg, allow_preview_remap=True)
+    assert any("!=" in e and "step2_pre_remap_source" in e for e in errors)
+
+
+def test_reject_channel_unknown_step2_pre_remap_source():
+    cfg = _aligned_config()
+    cfg["channels"]["CD45"]["step2_pre_remap_source"] = "unknown"
+    errors, _ = validate_step2_remap_config(cfg, allow_preview_remap=True)
+    assert any("step2_pre_remap_source" in e and "native source" in e
+               for e in errors)
+
+
+# ── selected-channel coverage helper ────────────────────────────────────────
+
+def test_reject_missing_selected_marker_channel():
+    resolved = {"CD45": {"min": 0.0, "max": 1.0}}
+    errors = validate_remap_covers_selected_channels(resolved, ["CD45", "CK19"])
+    assert any("missing selected Step2 marker channels: CK19" in e for e in errors)
+
+
+def test_accept_all_selected_marker_channels_present():
+    resolved = {"CD45": {}, "CK19": {}}
+    errors = validate_remap_covers_selected_channels(resolved, ["CD45", "CK19"])
+    assert errors == []
+
+
+def test_coverage_ignores_reference_layers():
+    resolved = {"CD45": {}, "CK19": {}}
+    # DAPI selected but not in config -> not required (reference layer)
+    errors = validate_remap_covers_selected_channels(
+        resolved, ["CD45", "CK19", "DAPI"])
+    assert errors == []
+
+
+def test_reject_step1_weighted_fusion_with_remap():
+    resolved = {"CD45": {}, "CK19": {}}
+    errors = validate_remap_covers_selected_channels(
+        resolved, ["step1_weighted_fusion"],
+        hq_input_mode="step1_weighted_fusion")
+    assert errors
+    assert any("step1_weighted_fusion" in e for e in errors)
+
+
+def test_reject_step1_weighted_fusion_marker_even_if_mode_unset():
+    resolved = {"CD45": {}}
+    errors = validate_remap_covers_selected_channels(
+        resolved, ["step1_weighted_fusion"])
+    assert errors
+    assert any("step1_weighted_fusion" in e for e in errors)
 
 
 # ── HQ2 conditioning swap ───────────────────────────────────────────────────

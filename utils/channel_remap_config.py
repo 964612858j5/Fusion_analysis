@@ -330,11 +330,18 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
         resolved_params : dict[str, dict] — per-channel remap params for engines
             (only populated when errors is empty)
     """
+    # Check the RAW used_for before normalization: normalize_channel_remap_config
+    # force-sets used_for="segmentation_only", which would otherwise mask a config
+    # that explicitly declared a different (non-segmentation) purpose.
+    raw_used_for = config.get("used_for") if isinstance(config, dict) else None
+
     cfg = normalize_channel_remap_config(config)
     errors = list(validate_channel_remap_config(cfg))
 
-    if cfg.get("used_for") != USED_FOR:
-        errors.append(f"used_for must be '{USED_FOR}' for Step2 remap")
+    if raw_used_for != USED_FOR:
+        errors.append(
+            f"used_for must be '{USED_FOR}' for Step2 remap (raw config "
+            f"declared {raw_used_for!r})")
 
     sp = cfg.get("source_policy", {}) or {}
     mode = sp.get("source_alignment_mode", "unknown")
@@ -371,9 +378,24 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
                 "Step2-compatible native source")
         if not bool(params.get("step2_compatible", False)):
             errors.append(f"channel '{name}': step2_compatible is false")
-        if not bool(params.get("calibration_source_matches_step2", False)):
+        ch_matches = bool(params.get("calibration_source_matches_step2", False))
+        if not ch_matches:
             errors.append(
                 f"channel '{name}': calibration_source_matches_step2 is false")
+        # Per-channel source self-consistency: step2_pre_remap_source must be a
+        # native Step2 source, and when the channel claims to match Step2 its
+        # intensity_space must equal that source (conservative — no equivalence
+        # mappings in Phase 5b).
+        step2_src = str(params.get("step2_pre_remap_source", "unknown"))
+        if step2_src in _NON_STEP2_INTENSITY_SPACES:
+            errors.append(
+                f"channel '{name}': step2_pre_remap_source '{step2_src}' is not "
+                "a Step2-compatible native source")
+        elif ch_matches and ispace != step2_src:
+            errors.append(
+                f"channel '{name}': intensity_space '{ispace}' != "
+                f"step2_pre_remap_source '{step2_src}' while "
+                "calibration_source_matches_step2 is true (inconsistent metadata)")
         mn, mx = params.get("min"), params.get("max")
         if mn is None or mx is None:
             errors.append(
@@ -385,3 +407,47 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
 
     resolved = {name: dict(params) for name, params in channels.items()}
     return [], resolved
+
+
+def validate_remap_covers_selected_channels(resolved_params, selected_channels,
+                                            hq_input_mode=None):
+    """Ensure every active Step2 marker channel has remap params.
+
+    Prevents a hidden mixed mode where some selected markers are remapped and
+    others silently fall back to the legacy percentile/Gi gate.
+
+    Parameters
+    ----------
+    resolved_params : dict[str, dict]  — channels present in the remap config
+    selected_channels : iterable[str]  — Step2's active marker channels
+    hq_input_mode : str | None         — Step2 hq_input_mode
+
+    Returns
+    -------
+    list[str] — errors (empty == OK). Reference layers (DAPI/mask/fusion) are
+    not required. step1_weighted_fusion is rejected: manual remap is
+    marker-channel based, not a fused single signal.
+    """
+    if str(hq_input_mode or "").strip().lower() == "step1_weighted_fusion":
+        return [
+            "channel_remap_config is not supported with "
+            "hq_input_mode='step1_weighted_fusion'; manual remap is "
+            "marker-channel based. Use a per-marker channel mode."
+        ]
+    present = set(resolved_params or {})
+    missing = [
+        str(ch) for ch in (selected_channels or [])
+        if str(ch) == "step1_weighted_fusion"
+        or (not _is_reference_channel_name(ch) and str(ch) not in present)
+    ]
+    if any(str(ch) == "step1_weighted_fusion" for ch in (selected_channels or [])):
+        return [
+            "channel_remap_config is not supported with the "
+            "'step1_weighted_fusion' marker; manual remap is marker-channel based."
+        ]
+    if missing:
+        return [
+            "channel_remap_config missing selected Step2 marker channels: "
+            + ", ".join(missing)
+        ]
+    return []

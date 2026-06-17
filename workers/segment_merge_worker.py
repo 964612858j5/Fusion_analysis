@@ -50,8 +50,9 @@ from ..utils.step2_profiler import Step2Profiler
 from ..utils.runtime_resource_monitor import RuntimeResourceMonitor
 from ..utils.channel_cache import SharedChannelStore
 from ..utils.channel_remap_config import (
-    load_channel_remap_config,
+    normalize_channel_remap_config,
     validate_step2_remap_config,
+    validate_remap_covers_selected_channels,
     channel_remap_config_hash,
 )
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
@@ -241,13 +242,30 @@ class SegmentMergeWorker(QThread):
             return
         allow = str(self.seg_config.get("allow_preview_remap", False)).strip().lower() \
             in {"1", "true", "yes", "on"}
-        cfg = load_channel_remap_config(path)  # raises on missing/invalid file
-        errors, resolved = validate_step2_remap_config(cfg, allow_preview_remap=allow)
+        # Read the RAW config (not load_channel_remap_config, which normalizes and
+        # would force used_for) so used_for is validated as written on disk.
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"channel remap config not found: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            raw_cfg = json.load(f)
+        errors, resolved = validate_step2_remap_config(raw_cfg, allow_preview_remap=allow)
         if errors:
             raise ValueError(
                 "channel_remap_config rejected for Step2 segmentation:\n  "
                 + "\n  ".join(errors))
 
+        # Every active Step2 marker channel must be covered by the remap config —
+        # no silent mixed (remap + legacy gate) mode.
+        selected = (self.seg_config.get("hq_channels")
+                    or self.seg_config.get("channel_names") or [])
+        cov_errors = validate_remap_covers_selected_channels(
+            resolved, selected, self.seg_config.get("hq_input_mode"))
+        if cov_errors:
+            raise ValueError(
+                "channel_remap_config rejected for Step2 segmentation:\n  "
+                + "\n  ".join(cov_errors))
+
+        cfg = normalize_channel_remap_config(raw_cfg)  # for provenance / hash
         gate_mode = str(self.seg_config.get("remap_gate_mode", "remap") or "remap").strip().lower()
         gate_thr = float(self.seg_config.get("remap_gate_threshold", 0.05) or 0.05)
         # Reserved keys consumed by the engines (HQ2 reads params; CDS2/lean read p).

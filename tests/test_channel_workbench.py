@@ -118,3 +118,86 @@ def test_step3_page_instantiates_with_workbench(app):
     assert page._get_current_channel_images_for_conditioning() == {}
     page._sync_step3_to_workbench()
     assert page._channel_workbench.has_channel_data() is False
+
+
+# ── source provenance guard (Phase 2.1b) ────────────────────────────────────
+
+def test_build_config_includes_source_policy_from_context(workbench):
+    policy = {
+        "source": "step3_current_roi",
+        "intensity_space": "corrected_zarr_native_float",
+        "normalization": "none",
+        "scope": "roi_preview",
+        "preview_only": True,
+    }
+    workbench.set_channel_images(_real_like_channels(), source="step3",
+                                source_policy=policy)
+    cfg = workbench.build_config()
+    sp = cfg["source_policy"]
+    assert sp["source"] == "step3_current_roi"
+    assert sp["intensity_space"] == "corrected_zarr_native_float"
+    assert sp["preview_only"] is True
+    assert validate_channel_remap_config(cfg) == []
+
+
+def test_build_config_records_per_channel_metadata(workbench):
+    meta = {
+        "CD45": {"source": "corrected_zarr roi_local",
+                 "intensity_space": "corrected_zarr_native_float",
+                 "normalization": "none"},
+    }
+    workbench.set_channel_images(_real_like_channels(), source="step3",
+                                channel_metadata=meta)
+    cfg = workbench.build_config()
+    cd45 = cfg["channels"]["CD45"]
+    assert cd45["intensity_space"] == "corrected_zarr_native_float"
+    assert "value_min_observed" in cd45 and "value_max_observed" in cd45
+    # channels without supplied metadata still get a self-describing space
+    assert "intensity_space" in cfg["channels"]["DAPI"]
+
+
+def test_unknown_source_policy_defaults_preview_only(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    cfg = workbench.build_config()
+    sp = cfg["source_policy"]
+    assert sp["preview_only"] is True
+    assert sp["intensity_space"] == "unknown"
+    # status surfaces the preview-only / unknown warning
+    assert "Preview" in workbench._status_lbl.text() or \
+           "PREVIEW" in workbench._status_lbl.text()
+
+
+def test_status_shows_intensity_space_when_known(workbench):
+    policy = {"source": "step3_current_roi",
+              "intensity_space": "corrected_zarr_native_float",
+              "normalization": "none", "scope": "roi_preview",
+              "preview_only": True}
+    workbench.set_channel_images(_real_like_channels(), source="step3",
+                                source_policy=policy)
+    txt = workbench._status_lbl.text()
+    assert "corrected_zarr_native_float" in txt
+    assert "roi_preview" in txt
+
+
+def test_step3_sync_passes_source_metadata(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    # Map a couple of source strings to intensity spaces (no guessing).
+    assert page._intensity_space_for_source("corrected_zarr roi_local") == (
+        "corrected_zarr_native_float", "none")
+    assert page._intensity_space_for_source("raw_ome global_bbox=[]") == (
+        "raw_ome_normalized_0_1", "minmax_per_read")
+    assert page._intensity_space_for_source("canonical_step3_dapi") == (
+        "step3_dapi_normalized_0_1", "display_minmax")
+    assert page._intensity_space_for_source("weird") == ("unknown", "unknown")
+    # mixed channel spaces collapse to "mixed" at the top level
+    meta = {
+        "CD45": {"intensity_space": "corrected_zarr_native_float",
+                 "normalization": "none"},
+        "DAPI": {"intensity_space": "step3_dapi_normalized_0_1",
+                 "normalization": "display_minmax"},
+    }
+    sp = page._build_conditioning_source_policy(meta)
+    assert sp["intensity_space"] == "mixed"
+    assert sp["preview_only"] is True
+    assert sp["scope"] == "roi_preview"

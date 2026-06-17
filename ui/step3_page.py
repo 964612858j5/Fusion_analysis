@@ -475,6 +475,7 @@ class Step3Page(QWidget):
         self._channel_rows = {}
         self._channel_search_text = ""
         self._patch_channel_cache = {}
+        self._patch_channel_source = {}   # ch -> actual load source string (v13.1 provenance)
         self._last_patch_bbox = None
 
         self._thumb_loader  = None
@@ -1097,6 +1098,7 @@ class Step3Page(QWidget):
         self._stop_loaders()
         self._clear_region_cache()
         self._patch_channel_cache.clear()
+        self._patch_channel_source.clear()
         self._load_thumbnail()
 
     def _apply_segmentation_meta(self, roi_dir, roi_id, run_id, meta, meta_path):
@@ -2388,6 +2390,7 @@ class Step3Page(QWidget):
 
         self._clear_region_cache(clear_image=False)
         self._patch_channel_cache.clear()
+        self._patch_channel_source.clear()
         self._last_patch_bbox = (y0, y1, x0, x1)
         self._roi_status.setText('Loading…')
         self._cell_count_lbl.setText('')
@@ -2558,6 +2561,7 @@ class Step3Page(QWidget):
         self._patch_fusion_available = False
         self._mask_labels = None
         self._patch_channel_cache.clear()
+        self._patch_channel_source.clear()
         if clear_image and hasattr(self, "_roi_img"):
             self._roi_img.clear()
 
@@ -2881,6 +2885,7 @@ class Step3Page(QWidget):
                 source = "canonical_step3_dapi"
                 print(f"[Step3] channel={ch} source={source}")
                 self._patch_channel_cache[ch] = self._match_channel_shape(ch, arr, source)
+                self._patch_channel_source[ch] = source
                 return
 
         if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
@@ -2948,10 +2953,12 @@ class Step3Page(QWidget):
                 print(f"[Step3] channel missing/skipped {ch}: {e}")
                 return
         if arr is not None:
-            print(f"[Step3] channel={ch} source={source or self._channel_sources.get(ch, 'unknown')}")
+            resolved_source = source or self._channel_sources.get(ch, "unknown")
+            print(f"[Step3] channel={ch} source={resolved_source}")
             self._patch_channel_cache[ch] = self._match_channel_shape(
-                ch, arr, source or self._channel_sources.get(ch, "unknown")
+                ch, arr, resolved_source
             )
+            self._patch_channel_source[ch] = resolved_source
 
     # ── v13.1 Channel Conditioning bridge ─────────────────────────────
     #  Step3 owns project/ROI loading; the workbench owns visualization and
@@ -2990,19 +2997,86 @@ class Step3Page(QWidget):
                 print(f"[Step3] conditioning: skip channel {ch}: {exc}")
         return images
 
+    @staticmethod
+    def _intensity_space_for_source(src):
+        """Map a Step3 channel-load source string to (intensity_space,
+        normalization). Never guesses: unknown sources map to ('unknown',
+        'unknown')."""
+        s = str(src or "").lower()
+        if "dapi" in s:
+            return "step3_dapi_normalized_0_1", "display_minmax"
+        if "corrected" in s:
+            return "corrected_zarr_native_float", "none"
+        if "raw_ome" in s or s == "raw":
+            return "raw_ome_normalized_0_1", "minmax_per_read"
+        return "unknown", "unknown"
+
+    def _build_conditioning_source_policy(self, channel_metadata):
+        """Derive a top-level source_policy from per-channel intensity spaces.
+
+        If channels disagree (e.g. corrected-native markers + normalized DAPI),
+        the top-level space is reported as 'mixed' and the config stays
+        preview_only — exactly the ambiguity Phase 2.1b guards against. The
+        per-channel metadata disambiguates each channel's actual scale.
+        """
+        spaces = {m.get("intensity_space", "unknown")
+                  for m in channel_metadata.values()}
+        norms = {m.get("normalization", "unknown")
+                 for m in channel_metadata.values()}
+
+        def _collapse(values):
+            values = {v for v in values if v}
+            if not values:
+                return "unknown"
+            if len(values) == 1:
+                return next(iter(values))
+            return "mixed"
+
+        return {
+            "source": "step3_current_roi",
+            "intensity_space": _collapse(spaces),
+            "normalization": _collapse(norms),
+            "scope": "roi_preview",
+            "preview_only": True,
+            "note": (
+                "Generated from Step3 ChannelWorkbench preview. Min/Max are in "
+                "each channel's intensity_space (see per-channel metadata). Not "
+                "guaranteed to match the Step2 segmentation input."
+            ),
+        }
+
     def _sync_step3_to_workbench(self):
-        """Push the current ROI/patch channels into the conditioning workbench."""
+        """Push the current ROI/patch channels into the conditioning workbench,
+        tagged with intensity-space provenance (Phase 2.1b)."""
         if not hasattr(self, "_channel_workbench"):
             return
         images = self._get_current_channel_images_for_conditioning()
+
+        channel_metadata = {}
+        for ch in images:
+            if self._is_canonical_dapi_channel(ch):
+                src = "canonical_step3_dapi"
+            else:
+                src = self._patch_channel_source.get(
+                    ch, self._channel_sources.get(ch, "unknown"))
+            ispace, norm = self._intensity_space_for_source(src)
+            channel_metadata[ch] = {
+                "source": str(src),
+                "intensity_space": ispace,
+                "normalization": norm,
+            }
+
+        source_policy = self._build_conditioning_source_policy(channel_metadata)
         context = {
             "roi": self._active_roi_name,
             "patch_source": self._patch_source,
             "mode": self._mode,
         }
         self._channel_workbench.set_channel_images(
-            images, context=context, source="step3")
-        print(f"[Step3] conditioning workbench synced: {len(images)} channels")
+            images, context=context, source="step3",
+            source_policy=source_policy, channel_metadata=channel_metadata)
+        print(f"[Step3] conditioning workbench synced: {len(images)} channels "
+              f"intensity_space={source_policy['intensity_space']}")
 
     def _on_step3_tab_changed(self, idx):
         """Auto-load Step3 data into the conditioning tab the first time it is

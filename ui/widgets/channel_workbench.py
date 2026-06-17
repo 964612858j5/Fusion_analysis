@@ -32,7 +32,9 @@ from ...utils.channel_remap_config import (
     DEFAULT_AUTO_SATURATION,
     default_channel_remap_config,
     default_channel_remap_params,
+    default_source_policy,
     normalize_channel_remap_params,
+    normalize_source_policy,
     save_channel_remap_config,
     validate_channel_remap_config,
 )
@@ -72,6 +74,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._loading = False            # guard against signal recursion
         self._source = "none"            # "none" | "step3" | "demo" | "file"
         self._context = {}               # provenance/context from the host
+        self._source_policy = default_source_policy()  # intensity provenance
+        self._channel_meta = {}          # name -> per-channel source metadata
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -251,7 +255,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     # ── public API (host feeds data here) ─────────────────────────────
     def set_channel_images(self, channel_images, colors=None, context=None,
-                           source="manual"):
+                           source="manual", source_policy=None,
+                           channel_metadata=None):
         """Load a set of named channel preview patches.
 
         Parameters
@@ -268,12 +273,23 @@ class ChannelWorkbench(QtWidgets.QWidget):
             surfaced in the status label.
         source : str
             "step3" | "demo" | "file" | "manual" — drives the status label.
+        source_policy : dict, optional
+            Intensity-space provenance recorded into saved configs
+            (source / intensity_space / normalization / scope / preview_only).
+            The arrays passed here ARE the intensity space the saved Min/Max
+            live in — do not pre-normalize them differently from what this
+            policy declares.
+        channel_metadata : dict[str, dict], optional
+            per-channel source metadata (e.g. source, intensity_space,
+            normalization) merged into the saved per-channel params.
 
         Empty / all-invalid input is handled gracefully (no crash): the
         workbench clears and shows a friendly "no data" message.
         """
         self._source = source
         self._context = dict(context or {})
+        self._source_policy = normalize_source_policy(source_policy)
+        self._channel_meta = dict(channel_metadata or {})
 
         # Normalize + validate: keep only real 2D arrays.
         clean = {}
@@ -326,6 +342,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._colors = {}
         self._visible = {}
         self._active = None
+        self._channel_meta = {}
+        self._source_policy = default_source_policy()
         self._layer_list.set_channels([])
         self._canvas.clear()
         self._histogram.set_data(np.zeros((1, 1), np.float32))
@@ -374,18 +392,53 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if roi:
             ctx = f"  ROI: {roi}"
         extra = f"  (skipped {len(skipped)})" if skipped else ""
+
+        policy = self._source_policy or {}
+        ispace = policy.get("intensity_space", "unknown")
+        scope = policy.get("scope", "unknown")
+        preview = bool(policy.get("preview_only", True))
+        if ispace == "unknown":
+            intensity_note = "Intensity scale unknown · Preview config only"
+        else:
+            intensity_note = f"Intensity: {ispace}"
+        warn = "  ⚠ PREVIEW-ONLY (not Step2-ready)" if preview else ""
+
         self._status_lbl.setText(
-            f"Source: {src}{ctx}   Channels: {len(self._names)}   "
-            f"Patch shape: {shape[0]} × {shape[1]}{extra}")
+            f"Source: {src}{ctx}   Scope: {scope}   {intensity_note}   "
+            f"Channels: {len(self._names)}   "
+            f"Patch shape: {shape[0]} × {shape[1]}{extra}{warn}")
+        self._status_lbl.setStyleSheet(
+            "color:%s; font-size:10px; padding:1px 2px;"
+            % ("#f0b020" if (preview or ispace == "unknown") else "#9fd"))
         self._info_lbl.setText(
             f"{len(self._names)} channels — {shape[0]}×{shape[1]}")
 
     def build_config(self):
-        """Build (and normalize) the current segmentation_preprocess_config."""
+        """Build (and normalize) the current segmentation_preprocess_config.
+
+        Records intensity-space provenance (source_policy) and, per channel,
+        the source metadata and the observed value range so saved Min/Max are
+        never ambiguous about their intensity space.
+        """
         cfg = default_channel_remap_config()
         cfg["auto_saturation"] = self._auto_saturation
+        cfg["source_policy"] = normalize_source_policy(self._source_policy)
         for n in self._names:
-            cfg["channels"][n] = dict(self._params[n])
+            params = dict(self._params[n])
+            meta = dict(self._channel_meta.get(n, {}))
+            arr = self._raw.get(n)
+            if arr is not None and arr.size:
+                finite = arr[np.isfinite(arr)]
+                if finite.size:
+                    meta.setdefault("value_min_observed", float(finite.min()))
+                    meta.setdefault("value_max_observed", float(finite.max()))
+            # Fall back to the top-level policy's intensity space if the host
+            # gave no per-channel detail, so each channel is self-describing.
+            meta.setdefault("intensity_space", self._source_policy.get(
+                "intensity_space", "unknown"))
+            meta.setdefault("source", self._source_policy.get("source", "unknown"))
+            params.update(meta)
+            cfg["channels"][n] = params
         return cfg
 
     # ── layer list / active channel ───────────────────────────────────

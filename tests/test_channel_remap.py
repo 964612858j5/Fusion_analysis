@@ -13,8 +13,11 @@ from block01.core.channel_remap import (
 from block01.utils.channel_remap_config import (
     default_channel_remap_config,
     default_channel_remap_params,
+    default_source_policy,
     load_channel_remap_config,
+    normalize_channel_remap_config,
     normalize_channel_remap_params,
+    normalize_source_policy,
     save_channel_remap_config,
     validate_channel_remap_config,
 )
@@ -265,3 +268,69 @@ def test_save_refuses_invalid_config(tmp_path):
     with pytest.raises(ValueError):
         save_channel_remap_config(cfg, path)
     assert not os.path.isfile(path)
+
+
+# ── source_policy / provenance guard (Phase 2.1b) ───────────────────────────
+
+def test_default_config_includes_source_policy_preview_only():
+    cfg = default_channel_remap_config()
+    assert "source_policy" in cfg
+    sp = cfg["source_policy"]
+    assert sp["preview_only"] is True
+    assert sp["intensity_space"] == "unknown"
+    assert sp["normalization"] == "unknown"
+
+
+def test_validate_requires_source_policy():
+    cfg = default_channel_remap_config(["A"])
+    del cfg["source_policy"]
+    errors = validate_channel_remap_config(cfg)
+    assert any("source_policy" in e for e in errors)
+
+
+def test_validate_requires_preview_only_field():
+    cfg = default_channel_remap_config(["A"])
+    cfg["source_policy"] = {"source": "x"}  # missing preview_only
+    errors = validate_channel_remap_config(cfg)
+    assert any("preview_only" in e for e in errors)
+
+
+def test_normalize_fills_source_policy_defaults():
+    cfg = normalize_channel_remap_config({"channels": {}})
+    assert isinstance(cfg["source_policy"], dict)
+    assert cfg["source_policy"]["preview_only"] is True
+
+
+def test_normalize_source_policy_coerces():
+    sp = normalize_source_policy({"intensity_space": "corrected_zarr_native_float",
+                                  "preview_only": 0})
+    assert sp["intensity_space"] == "corrected_zarr_native_float"
+    assert sp["preview_only"] is False
+    assert sp["source"] == "unknown"  # filled from defaults
+
+
+def test_save_load_preserves_source_policy(tmp_path):
+    cfg = default_channel_remap_config(["CD45"])
+    cfg["channels"]["CD45"]["min"] = 350.0
+    cfg["channels"]["CD45"]["max"] = 12000.0
+    cfg["source_policy"] = {
+        "source": "step3_current_roi",
+        "intensity_space": "corrected_zarr_native_float",
+        "normalization": "none",
+        "scope": "roi_preview",
+        "preview_only": True,
+    }
+    path = os.path.join(str(tmp_path), "channel_remap_config.json")
+    save_channel_remap_config(cfg, path)
+    loaded = load_channel_remap_config(path)
+    sp = loaded["source_policy"]
+    assert sp["intensity_space"] == "corrected_zarr_native_float"
+    assert sp["normalization"] == "none"
+    assert sp["scope"] == "roi_preview"
+    assert sp["preview_only"] is True
+
+
+def test_default_source_policy_is_independent_copy():
+    a = default_source_policy()
+    a["preview_only"] = False
+    assert default_source_policy()["preview_only"] is True

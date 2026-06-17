@@ -22,6 +22,24 @@ AUTO_ALGORITHM = "qupath_percentile"
 USED_FOR = "segmentation_only"
 DEFAULT_AUTO_SATURATION = 0.1
 
+# Source / intensity provenance. Min/Max parameters are meaningless without
+# knowing what intensity space they live in (normalized display vs raw vs
+# corrected-native float). Every config records this. Conservative defaults
+# mark a config preview-only and the intensity space unknown until the producer
+# (e.g. Step3) states otherwise. See
+# docs/v13_1_channel_conditioning/05_DATA_PROVENANCE_AND_H5AD.md.
+_SOURCE_POLICY_DEFAULTS = {
+    "source": "unknown",            # who produced it, e.g. step3_current_roi
+    "intensity_space": "unknown",   # e.g. corrected_zarr_native_float
+    "normalization": "unknown",     # e.g. none / minmax_per_read
+    "scope": "unknown",             # e.g. roi_preview
+    "preview_only": True,           # not yet guaranteed Step2-ready
+    "note": (
+        "Min/Max are in the intensity_space named here. A preview_only config "
+        "is not guaranteed to match the Step2 segmentation input."
+    ),
+}
+
 # Per-channel parameter defaults for a freshly added channel. min/max are None
 # until set manually or via Auto (then frozen to concrete numbers).
 _CHANNEL_DEFAULTS = {
@@ -73,6 +91,22 @@ def normalize_channel_remap_params(params):
     return out
 
 
+def default_source_policy():
+    """Return a fresh copy of the conservative source-policy defaults."""
+    return dict(_SOURCE_POLICY_DEFAULTS)
+
+
+def normalize_source_policy(policy):
+    """Return a full source_policy, filling missing keys from defaults."""
+    out = dict(_SOURCE_POLICY_DEFAULTS)
+    if policy:
+        out.update(policy)
+    out["preview_only"] = bool(out.get("preview_only", True))
+    for key in ("source", "intensity_space", "normalization", "scope"):
+        out[key] = str(out.get(key, "unknown"))
+    return out
+
+
 def default_channel_remap_config(channel_names=None):
     """Build a default top-level config, optionally seeding channel entries."""
     channels = {}
@@ -84,6 +118,7 @@ def default_channel_remap_config(channel_names=None):
         "auto_algorithm": AUTO_ALGORITHM,
         "auto_saturation": DEFAULT_AUTO_SATURATION,
         "used_for": USED_FOR,
+        "source_policy": default_source_policy(),
         "channels": channels,
     }
 
@@ -101,6 +136,7 @@ def normalize_channel_remap_config(config):
     cfg["auto_algorithm"] = cfg.get("auto_algorithm", AUTO_ALGORITHM) or AUTO_ALGORITHM
     cfg["auto_saturation"] = float(cfg.get("auto_saturation", DEFAULT_AUTO_SATURATION))
     cfg["used_for"] = USED_FOR  # forced — segmentation only
+    cfg["source_policy"] = normalize_source_policy(cfg.get("source_policy"))
 
     channels = cfg.get("channels", {}) or {}
     cfg["channels"] = {
@@ -134,6 +170,16 @@ def validate_channel_remap_config(config):
             errors.append("auto_saturation must be in [0, 50)")
     except (TypeError, ValueError):
         errors.append("auto_saturation must be a number")
+
+    # source_policy is required: Min/Max are ambiguous without an intensity
+    # space. It must at least declare preview_only.
+    policy = config.get("source_policy", None)
+    if not isinstance(policy, dict):
+        errors.append(
+            "config missing 'source_policy' (records source / intensity_space "
+            "/ preview_only — Min/Max are ambiguous without it)")
+    elif "preview_only" not in policy:
+        errors.append("source_policy missing 'preview_only'")
 
     channels = config.get("channels", None)
     if channels is None:

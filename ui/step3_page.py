@@ -30,6 +30,7 @@ from ..utils.roi_project import (
     roi_index_path,
     load_json,
 )
+from .widgets.channel_workbench import ChannelWorkbench  # v13.1 channel-first prototype
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 3 Page  — Segmentation QC Viewer
@@ -2222,7 +2223,18 @@ class Step3Page(QWidget):
         split.addWidget(right_w)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 4)
-        root.addWidget(split, stretch=1)
+
+        # ── v13.1: host the QC viewer and the channel-first conditioning
+        #    prototype side-by-side as tabs. The existing QC view is unchanged;
+        #    the new tab is the Phase 2 channel conditioning workbench. Step3 is
+        #    intentionally the first prototype host (see
+        #    docs/v13_1_channel_conditioning/04_UI_REDESIGN_SPEC.md); the
+        #    workbench widgets are reusable for Step1.5 later.
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(split, 'QC Viewer')
+        self._channel_workbench = ChannelWorkbench()
+        tabs.addTab(self._channel_workbench, 'Channel Conditioning (v13.1)')
+        root.addWidget(tabs, stretch=1)
 
         # ── Bottom nav ────────────────────────────────────────────────
         nav = QHBoxLayout()

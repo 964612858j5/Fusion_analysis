@@ -409,6 +409,25 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
     return [], resolved
 
 
+def _coerce_channel_list(selected_channels):
+    """Normalize selected_channels into a list[str] of channel names.
+
+    Defensive: a bare string must NOT be iterated character-by-character. A
+    string is split on ';' ',' and whitespace; list/tuple/set are stringified
+    and stripped; None -> []. (Mirrors parse_hq_channels without importing the
+    workers layer.)
+    """
+    if selected_channels is None:
+        return []
+    if isinstance(selected_channels, str):
+        import re
+        return [p.strip() for p in re.split(r"[;,\s]+", selected_channels) if p.strip()]
+    if isinstance(selected_channels, (list, tuple, set)):
+        return [str(p).strip() for p in selected_channels if str(p).strip()]
+    # Any other scalar -> single name.
+    return [str(selected_channels).strip()] if str(selected_channels).strip() else []
+
+
 def validate_remap_covers_selected_channels(resolved_params, selected_channels,
                                             hq_input_mode=None):
     """Ensure every active Step2 marker channel has remap params.
@@ -434,17 +453,17 @@ def validate_remap_covers_selected_channels(resolved_params, selected_channels,
             "hq_input_mode='step1_weighted_fusion'; manual remap is "
             "marker-channel based. Use a per-marker channel mode."
         ]
-    present = set(resolved_params or {})
-    missing = [
-        str(ch) for ch in (selected_channels or [])
-        if str(ch) == "step1_weighted_fusion"
-        or (not _is_reference_channel_name(ch) and str(ch) not in present)
-    ]
-    if any(str(ch) == "step1_weighted_fusion" for ch in (selected_channels or [])):
+    selected = _coerce_channel_list(selected_channels)
+    if any(ch == "step1_weighted_fusion" for ch in selected):
         return [
             "channel_remap_config is not supported with the "
             "'step1_weighted_fusion' marker; manual remap is marker-channel based."
         ]
+    present = set(resolved_params or {})
+    missing = [
+        ch for ch in selected
+        if not _is_reference_channel_name(ch) and ch not in present
+    ]
     if missing:
         return [
             "channel_remap_config missing selected Step2 marker channels: "

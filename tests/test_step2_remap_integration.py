@@ -5,6 +5,8 @@ CDS2/lean_carve remap gate (with _block_gi/camp preserved). No GUI; light
 synthetic segmentation only.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -178,6 +180,117 @@ def test_reject_step1_weighted_fusion_marker_even_if_mode_unset():
         resolved, ["step1_weighted_fusion"])
     assert errors
     assert any("step1_weighted_fusion" in e for e in errors)
+
+
+# ── Phase 5c — selected_channels string parsing robustness ──────────────────
+
+def test_validate_remap_covers_selected_channels_accepts_semicolon_string():
+    resolved = {"CD45": {}, "CK19": {}}
+    assert validate_remap_covers_selected_channels(resolved, "CD45;CK19") == []
+    miss = validate_remap_covers_selected_channels(resolved, "CD45;CK19;CD68")
+    assert any("CD68" in e for e in miss)
+
+
+def test_validate_remap_covers_selected_channels_accepts_comma_string():
+    resolved = {"CD45": {}, "CK19": {}}
+    assert validate_remap_covers_selected_channels(resolved, "CD45, CK19") == []
+
+
+def test_validate_remap_covers_selected_channels_does_not_iterate_characters():
+    # "CD45" must be ONE channel, not characters C,D,4,5.
+    resolved = {"CD45": {}}
+    assert validate_remap_covers_selected_channels(resolved, "CD45") == []
+    # a single missing channel string reports the whole token, not a char
+    errors = validate_remap_covers_selected_channels({"CK19": {}}, "CD45")
+    assert any("CD45" in e for e in errors)
+    assert not any(e.endswith(": C") for e in errors)
+
+
+def test_validate_remap_covers_selected_channels_accepts_tuple_and_set():
+    resolved = {"CD45": {}, "CK19": {}}
+    assert validate_remap_covers_selected_channels(resolved, ("CD45", "CK19")) == []
+    assert validate_remap_covers_selected_channels(resolved, {"CD45", "CK19"}) == []
+
+
+# ── Phase 5c — smoke-test helpers ───────────────────────────────────────────
+
+def test_build_mode_seg_config_baseline_has_no_remap_keys():
+    from block01.scripts.smoke_test_step2_remap_small_roi import build_mode_seg_config
+    cfg = build_mode_seg_config({"method": "cds2"}, "baseline")
+    assert "channel_remap_config_path" not in cfg
+    assert cfg["method"] == "cds2"
+
+
+def test_build_mode_seg_config_remap_modes():
+    from block01.scripts.smoke_test_step2_remap_small_roi import build_mode_seg_config
+    for mode, gate in (("gi", "gi"), ("remap", "remap"),
+                       ("remap_and_gi", "remap_and_gi")):
+        cfg = build_mode_seg_config({"method": "cds2"}, mode,
+                                    remap_config_path="/tmp/x.json",
+                                    allow_preview_remap=True)
+        assert cfg["remap_gate_mode"] == gate
+        assert cfg["allow_preview_remap"] is True
+        assert cfg["channel_remap_config_path"].endswith("x.json")
+
+
+def test_build_mode_seg_config_requires_config_for_remap():
+    from block01.scripts.smoke_test_step2_remap_small_roi import build_mode_seg_config
+    with pytest.raises(ValueError):
+        build_mode_seg_config({}, "remap", remap_config_path=None)
+
+
+def test_build_mode_seg_config_strips_stale_remap_keys_for_baseline():
+    from block01.scripts.smoke_test_step2_remap_small_roi import build_mode_seg_config
+    base = {"method": "cds2", "channel_remap_config_path": "/old.json",
+            "remap_gate_mode": "remap"}
+    cfg = build_mode_seg_config(base, "baseline")
+    assert "channel_remap_config_path" not in cfg
+    assert "remap_gate_mode" not in cfg
+
+
+def test_check_remap_provenance_missing(tmp_path):
+    from block01.scripts.smoke_test_step2_remap_small_roi import check_remap_provenance
+    info = check_remap_provenance(str(tmp_path), expect_remap=True)
+    assert info["used_json_exists"] is False
+    assert info["provenance_json_exists"] is False
+    assert info["ok"] is False
+
+
+def test_check_remap_provenance_ok(tmp_path):
+    import json as _json
+    from block01.scripts.smoke_test_step2_remap_small_roi import check_remap_provenance
+    d = str(tmp_path)
+    with open(os.path.join(d, "channel_remap_config.used.json"), "w") as f:
+        _json.dump({"used_for": "segmentation_only"}, f)
+    with open(os.path.join(d, "channel_remap_provenance.json"), "w") as f:
+        _json.dump({"manual_remap_enabled": True, "allow_preview_remap": True,
+                    "gate_mode": "remap", "channel_remap_config_hash": "abc",
+                    "used_for": "segmentation_only",
+                    "source_policy": {"calibration_source_matches_step2": True}}, f)
+    info = check_remap_provenance(d, expect_remap=True)
+    assert info["ok"] is True
+    assert info["remap_gate_mode"] == "remap"
+
+
+def test_check_remap_provenance_baseline_ok_when_absent(tmp_path):
+    from block01.scripts.smoke_test_step2_remap_small_roi import check_remap_provenance
+    info = check_remap_provenance(str(tmp_path), expect_remap=False)
+    assert info["ok"] is True
+
+
+def test_format_smoke_summary_table():
+    from block01.scripts.smoke_test_step2_remap_small_roi import format_smoke_summary_table
+    rows = [
+        {"roi": "clean", "mode": "remap", "status": "ok", "runtime": "3s",
+         "cells": 120, "mask_area": 4000, "mean_area": 33, "provenance": "yes"},
+        {"roi": "AF_heavy", "mode": "gi", "status": "ok"},
+    ]
+    table = format_smoke_summary_table(rows)
+    assert "roi" in table and "mode" in table and "provenance" in table
+    assert "clean" in table and "AF_heavy" in table
+    assert "remap" in table
+    # missing fields render as '-'
+    assert "-" in table.splitlines()[-1]
 
 
 # ── HQ2 conditioning swap ───────────────────────────────────────────────────

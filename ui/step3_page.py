@@ -476,6 +476,7 @@ class Step3Page(QWidget):
         self._channel_search_text = ""
         self._patch_channel_cache = {}
         self._patch_channel_source = {}   # ch -> actual load source string (v13.1 provenance)
+        self._conditioning_channel_meta = {}  # ch -> source-alignment metadata (Phase 2.1c)
         self._last_patch_bbox = None
 
         self._thumb_loader  = None
@@ -2971,20 +2972,28 @@ class Step3Page(QWidget):
 
         MARKER channels only — canonical DAPI/nuclei are excluded here and
         instead supplied as a viewer reference layer (see
-        _get_current_reference_layers_for_conditioning). Reuses Step3's existing
-        per-channel patch cache (loading any not-yet-cached channel for the
-        current bbox). Returns an empty dict when no patch is loaded yet.
+        _get_current_reference_layers_for_conditioning).
+
+        Phase 2.1c source alignment: prefer the NATIVE/corrected float source
+        that future Step2/HQ2/CDS2 will read pre-remap (Step2 reads markers with
+        normalize=False). Corrected-zarr channels are already native; raw-OME
+        markers are re-read natively (normalize=False) so the saved Min/Max live
+        in the same intensity space as Step2. If a native read is unavailable,
+        the normalized display array is used and clearly marked preview-only.
+
+        Side effect: populates self._conditioning_channel_meta with per-channel
+        source / intensity_space / step2_compatible. Returns {} when no patch is
+        loaded yet.
         """
         images = {}
+        self._conditioning_channel_meta = {}
         # Nothing loaded yet -> let the workbench show its friendly empty state.
         if self._last_patch_bbox is None and self._patch_dapi_rgb is None:
             return images
 
         for ch in self._marker_channels():
             try:
-                if ch not in self._patch_channel_cache:
-                    self._load_patch_channel(ch)
-                arr = self._patch_channel_cache.get(ch)
+                arr, meta = self._marker_native_patch(ch)
                 if arr is None:
                     continue
                 arr = np.asarray(arr, dtype=np.float32)
@@ -2992,9 +3001,89 @@ class Step3Page(QWidget):
                     arr = arr[:, :, 0]
                 if arr.ndim == 2 and arr.size:
                     images[str(ch)] = arr
+                    self._conditioning_channel_meta[str(ch)] = meta
             except Exception as exc:
                 print(f"[Step3] conditioning: skip channel {ch}: {exc}")
         return images
+
+    def _marker_native_patch(self, ch):
+        """Return (2D float32 array, metadata) for one marker, preferring the
+        Step2-compatible native/corrected source. metadata records source,
+        intensity_space, normalization, step2_compatible, and observed range."""
+        if ch not in self._patch_channel_cache:
+            self._load_patch_channel(ch)
+        src = self._patch_channel_source.get(
+            ch, self._channel_sources.get(ch, "unknown"))
+        s = str(src).lower()
+        cached = self._patch_channel_cache.get(ch)
+
+        def _meta(source, ispace, norm, compatible, arr):
+            m = {"source": str(source), "intensity_space": ispace,
+                 "normalization": norm, "step2_compatible": bool(compatible)}
+            if arr is not None and np.asarray(arr).size:
+                finite = np.asarray(arr)[np.isfinite(arr)]
+                if finite.size:
+                    m["value_min_observed"] = float(finite.min())
+                    m["value_max_observed"] = float(finite.max())
+            return m
+
+        # 1) corrected-zarr cache is already native float (read without normalize)
+        if "corrected" in s and cached is not None:
+            return cached, _meta(src, "corrected_zarr_native_float", "none",
+                                 True, cached)
+
+        # 2) raw-OME: the QC cache is normalized; re-read NATIVE for Step2 match
+        if "raw_ome" in s or s == "raw":
+            native = self._read_raw_native_patch(ch)
+            if native is not None:
+                return native, _meta("raw_ome_native",
+                                     "raw_ome_native_float", "none", True,
+                                     native)
+            # 3) fallback: normalized display array -> preview-only, not aligned
+            return cached, _meta(src, "raw_ome_normalized_0_1",
+                                 "minmax_per_read", False, cached)
+
+        # 4) unknown source -> preview-only fallback
+        return cached, _meta(src, "unknown", "unknown", False, cached)
+
+    def _read_raw_native_patch(self, ch):
+        """Re-read a raw-OME marker for the current patch with normalize=False
+        (native counts), matching the Step2 pre-remap source. Reuses the
+        existing loader/bbox logic — no new loader, no full-WSI read. Returns
+        None on any failure (caller falls back to the normalized cache)."""
+        if self._last_patch_bbox is None:
+            return None
+        y0, y1, x0, x1 = self._last_patch_bbox
+        sub = self._sub_spin.value() if hasattr(self, "_sub_spin") else 1
+        raw_loader = self._raw_loader
+        if raw_loader is None and self._raw_ome_path:
+            try:
+                raw_loader = OMETIFFLoader(self._raw_ome_path)
+                self._raw_loader = raw_loader
+            except Exception as e:
+                print(f"[Step3] native raw loader init failed {ch}: {e}")
+                raw_loader = None
+        if raw_loader is None:
+            raw_loader = self._loader
+        if raw_loader is None:
+            return None
+        try:
+            if self._mode == "roi" and self._active_bbox and len(self._active_bbox) == 4:
+                gy0 = int(self._active_bbox[0]) + y0
+                gy1 = int(self._active_bbox[0]) + y1
+                gx0 = int(self._active_bbox[2]) + x0
+                gx1 = int(self._active_bbox[2]) + x1
+            elif self._mode == "roi":
+                return None
+            else:
+                gy0, gy1, gx0, gx1 = y0, y1, x0, x1
+            arr = raw_loader.read_region(
+                ch, gy0, gy1, gx0, gx1, downsample=sub, normalize=False)
+            arr = np.asarray(arr, dtype=np.float32)
+            return self._match_channel_shape(ch, arr, "raw_ome_native")
+        except Exception as e:
+            print(f"[Step3] native raw read failed {ch}: {e}")
+            return None
 
     def _get_current_reference_layers_for_conditioning(self):
         """Return {'dapi','mask','fusion'} viewer reference layers for the
@@ -3021,17 +3110,29 @@ class Step3Page(QWidget):
             return "step3_dapi_normalized_0_1", "display_minmax"
         if "corrected" in s:
             return "corrected_zarr_native_float", "none"
+        if "native" in s:  # raw read with normalize=False (Step2-aligned)
+            return "raw_ome_native_float", "none"
         if "raw_ome" in s or s == "raw":
             return "raw_ome_normalized_0_1", "minmax_per_read"
         return "unknown", "unknown"
 
-    def _build_conditioning_source_policy(self, channel_metadata):
-        """Derive a top-level source_policy from per-channel intensity spaces.
+    def _expected_step2_pre_remap_source(self):
+        """The source future Step2/HQ2/CDS2 will read pre-remap: corrected-zarr
+        native float if a corrected store is configured, else raw-OME native
+        float, else unknown. Step2 reads markers with normalize=False."""
+        if self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
+            return "corrected_zarr_native_float"
+        if self._raw_ome_path or self._loader is not None:
+            return "raw_ome_native_float"
+        return "unknown"
 
-        If channels disagree (e.g. corrected-native markers + normalized DAPI),
-        the top-level space is reported as 'mixed' and the config stays
-        preview_only — exactly the ambiguity Phase 2.1b guards against. The
-        per-channel metadata disambiguates each channel's actual scale.
+    def _build_conditioning_source_policy(self, channel_metadata):
+        """Derive a top-level source_policy + Step2 alignment from MARKER
+        per-channel metadata only (reference layers never reach here).
+
+        calibration_source_matches_step2 is true only when every marker was read
+        from a Step2-compatible native source. step2_ready stays False this
+        phase — Step2 runtime integration is not implemented (Phase 2.1c).
         """
         spaces = {m.get("intensity_space", "unknown")
                   for m in channel_metadata.values()}
@@ -3046,12 +3147,31 @@ class Step3Page(QWidget):
                 return next(iter(values))
             return "mixed"
 
+        matches = bool(channel_metadata) and all(
+            m.get("step2_compatible", False) for m in channel_metadata.values())
+        step2_source = self._expected_step2_pre_remap_source()
+
+        if matches:
+            align_note = (
+                "Markers calibrated on the native/corrected source expected by "
+                "Step2. Config stays preview_only/step2_ready=false until Step2 "
+                "runtime integration is implemented.")
+        else:
+            align_note = (
+                "Some markers use a normalized/unknown display source that does "
+                "NOT match the Step2 pre-remap source. Preview-only fallback; "
+                "saved Min/Max are not Step2-aligned.")
+
         return {
             "source": "step3_current_roi",
             "intensity_space": _collapse(spaces),
             "normalization": _collapse(norms),
             "scope": "roi_preview",
             "preview_only": True,
+            "step2_pre_remap_source": step2_source,
+            "calibration_source_matches_step2": matches,
+            "step2_ready": False,  # Step2 integration not implemented yet
+            "alignment_note": align_note,
             "note": (
                 "Generated from Step3 ChannelWorkbench preview. Min/Max are in "
                 "each channel's intensity_space (see per-channel metadata). Not "
@@ -3065,18 +3185,8 @@ class Step3Page(QWidget):
         if not hasattr(self, "_channel_workbench"):
             return
         images = self._get_current_channel_images_for_conditioning()
-
-        channel_metadata = {}
-        for ch in images:
-            src = self._patch_channel_source.get(
-                ch, self._channel_sources.get(ch, "unknown"))
-            ispace, norm = self._intensity_space_for_source(src)
-            channel_metadata[ch] = {
-                "source": str(src),
-                "intensity_space": ispace,
-                "normalization": norm,
-            }
-
+        # Per-channel source/alignment metadata built natively in the getter.
+        channel_metadata = dict(self._conditioning_channel_meta)
         source_policy = self._build_conditioning_source_policy(channel_metadata)
         context = {
             "roi": self._active_roi_name,

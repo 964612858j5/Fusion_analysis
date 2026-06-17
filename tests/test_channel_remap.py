@@ -334,3 +334,59 @@ def test_default_source_policy_is_independent_copy():
     a = default_source_policy()
     a["preview_only"] = False
     assert default_source_policy()["preview_only"] is True
+
+
+# ── Step2 source alignment fields (Phase 2.1c) ──────────────────────────────
+
+def test_default_source_policy_includes_step2_alignment_fields():
+    sp = default_source_policy()
+    assert sp["step2_pre_remap_source"] == "unknown"
+    assert sp["calibration_source_matches_step2"] is False
+    assert sp["step2_ready"] is False
+    assert "alignment_note" in sp
+
+
+def test_normalize_source_policy_coerces_alignment_bools():
+    sp = normalize_source_policy({
+        "calibration_source_matches_step2": 1,
+        "step2_ready": 0,
+        "step2_pre_remap_source": "corrected_zarr_native_float",
+    })
+    assert sp["calibration_source_matches_step2"] is True
+    assert sp["step2_ready"] is False
+    assert sp["step2_pre_remap_source"] == "corrected_zarr_native_float"
+
+
+def test_save_load_preserves_step2_alignment_fields(tmp_path):
+    cfg = default_channel_remap_config(["CD45"])
+    cfg["channels"]["CD45"].update({"min": 350.0, "max": 12000.0})
+    cfg["source_policy"].update({
+        "intensity_space": "corrected_zarr_native_float",
+        "normalization": "none",
+        "scope": "roi_preview",
+        "preview_only": True,
+        "step2_pre_remap_source": "corrected_zarr_native_float",
+        "calibration_source_matches_step2": True,
+        "step2_ready": False,
+    })
+    path = os.path.join(str(tmp_path), "channel_remap_config.json")
+    save_channel_remap_config(cfg, path)
+    sp = load_channel_remap_config(path)["source_policy"]
+    assert sp["step2_pre_remap_source"] == "corrected_zarr_native_float"
+    assert sp["calibration_source_matches_step2"] is True
+    assert sp["step2_ready"] is False
+
+
+def test_validate_rejects_step2_ready_while_preview_only():
+    cfg = default_channel_remap_config(["A"])
+    cfg["channels"]["A"].update({"min": 0.0, "max": 100.0})
+    cfg["source_policy"].update({"step2_ready": True, "preview_only": True})
+    errors = validate_channel_remap_config(cfg)
+    assert any("step2_ready" in e for e in errors)
+
+
+def test_validate_allows_step2_ready_when_not_preview_only():
+    cfg = default_channel_remap_config(["A"])
+    cfg["channels"]["A"].update({"min": 0.0, "max": 100.0})
+    cfg["source_policy"].update({"step2_ready": True, "preview_only": False})
+    assert validate_channel_remap_config(cfg) == []

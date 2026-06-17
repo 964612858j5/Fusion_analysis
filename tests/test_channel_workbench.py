@@ -350,6 +350,97 @@ def test_canvas_request_fit_sets_flag(app):
     assert c._need_fit is False  # consumed
 
 
+def _aligned_policy():
+    return {
+        "source": "step3_current_roi",
+        "intensity_space": "corrected_zarr_native_float",
+        "normalization": "none",
+        "scope": "roi_preview",
+        "preview_only": True,
+        "step2_pre_remap_source": "corrected_zarr_native_float",
+        "calibration_source_matches_step2": True,
+        "step2_ready": False,
+    }
+
+
+def test_status_shows_step2_source_match(workbench):
+    markers = {"CD45": (np.random.default_rng(8).random((40, 40)) * 8000).astype(np.float32)}
+    workbench.set_channel_images(markers, source="step3",
+                                source_policy=_aligned_policy())
+    txt = workbench._status_lbl.text()
+    assert "corrected_zarr_native_float" in txt
+    assert "Step2 source match: yes" in txt
+    assert "PREVIEW-ONLY" in txt
+
+
+def test_status_shows_fallback_when_not_aligned(workbench):
+    policy = dict(_aligned_policy())
+    policy.update({"intensity_space": "raw_ome_normalized_0_1",
+                   "calibration_source_matches_step2": False})
+    markers = {"CD45": np.random.default_rng(9).random((40, 40)).astype(np.float32)}
+    workbench.set_channel_images(markers, source="step3", source_policy=policy)
+    txt = workbench._status_lbl.text()
+    assert "Step2 source match: no" in txt
+    assert "fallback" in txt
+
+
+def test_build_config_keeps_step2_ready_false(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3",
+                                source_policy=_aligned_policy())
+    sp = workbench.build_config()["source_policy"]
+    assert sp["step2_ready"] is False
+    assert sp["preview_only"] is True
+    assert sp["calibration_source_matches_step2"] is True
+
+
+def test_step3_build_policy_corrected_matches_but_not_ready(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
+                     "step2_compatible": True},
+            "CK19": {"intensity_space": "corrected_zarr_native_float",
+                     "step2_compatible": True}}
+    sp = page._build_conditioning_source_policy(meta)
+    assert sp["calibration_source_matches_step2"] is True
+    assert sp["step2_ready"] is False
+    assert sp["preview_only"] is True
+
+
+def test_step3_build_policy_mixed_sources_not_matching(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
+                     "step2_compatible": True},
+            "CK19": {"intensity_space": "raw_ome_normalized_0_1",
+                     "step2_compatible": False}}
+    sp = page._build_conditioning_source_policy(meta)
+    assert sp["calibration_source_matches_step2"] is False
+    assert sp["step2_ready"] is False
+
+
+def test_step3_build_policy_raw_normalized_is_fallback(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    meta = {"CD45": {"intensity_space": "raw_ome_normalized_0_1",
+                     "step2_compatible": False}}
+    sp = page._build_conditioning_source_policy(meta)
+    assert sp["calibration_source_matches_step2"] is False
+    assert sp["preview_only"] is True
+
+
+def test_reference_layers_do_not_affect_marker_source_policy(app):
+    # DAPI reference must not enter the marker source policy computation.
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    # only markers are passed to the policy builder; a DAPI reference is never
+    # part of channel_metadata
+    marker_meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
+                            "step2_compatible": True}}
+    sp = page._build_conditioning_source_policy(marker_meta)
+    assert sp["intensity_space"] == "corrected_zarr_native_float"
+    assert sp["calibration_source_matches_step2"] is True
+
+
 def test_reference_display_norm_does_not_touch_config(workbench, tmp_path):
     # A native-scale DAPI reference must not influence saved marker Min/Max.
     markers = {"CD45": (np.random.default_rng(5).random((40, 40)) * 8000).astype(np.float32)}

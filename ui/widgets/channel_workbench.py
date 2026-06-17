@@ -483,11 +483,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
         ispace = policy.get("intensity_space", "unknown")
         scope = policy.get("scope", "unknown")
         preview = bool(policy.get("preview_only", True))
+        matches = bool(policy.get("calibration_source_matches_step2", False))
         if ispace == "unknown":
-            intensity_note = "Intensity scale unknown · Preview config only"
+            intensity_note = "Markers: scale unknown"
         else:
-            intensity_note = f"Intensity: {ispace}"
-        warn = "  ⚠ PREVIEW-ONLY (not Step2-ready)" if preview else ""
+            intensity_note = f"Markers: {ispace}"
+        match_note = f"Step2 source match: {'yes' if matches else 'no'}"
+        warn = ("  ⚠ PREVIEW-ONLY (not Step2-ready)" if preview else "")
+        if not matches:
+            warn += " fallback"
 
         def _tick(name):
             return "✓" if self._ref_available.get(name) else "—"
@@ -496,11 +500,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         self._status_lbl.setText(
             f"Source: {src}{ctx}   Scope: {scope}   {intensity_note}   "
-            f"Channels: {len(self._names)}   "
+            f"{match_note}   Channels: {len(self._names)}   "
             f"Patch shape: {shape[0]} × {shape[1]}{ref_note}{extra}{warn}")
         self._status_lbl.setStyleSheet(
             "color:%s; font-size:10px; padding:1px 2px;"
-            % ("#f0b020" if (preview or ispace == "unknown") else "#9fd"))
+            % ("#f0b020" if (preview or not matches or ispace == "unknown")
+               else "#9fd"))
         self._info_lbl.setText(
             f"{len(self._names)} channels — {shape[0]}×{shape[1]}")
 

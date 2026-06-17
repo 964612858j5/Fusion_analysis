@@ -34,6 +34,20 @@ _SOURCE_POLICY_DEFAULTS = {
     "normalization": "unknown",     # e.g. none / minmax_per_read
     "scope": "unknown",             # e.g. roi_preview
     "preview_only": True,           # not yet guaranteed Step2-ready
+    # ── Step3<->Step2 source alignment (Phase 2.1c) ──────────────────
+    # The remap Min/Max live in the PRE-REMAP source intensity space. A config
+    # is only Step2-ready when Step3 calibrated on the same pre-remap source
+    # that Step2 will read (native/corrected float, normalize=False), AND Step2
+    # runtime integration exists. See
+    # docs/v13_1_channel_conditioning/10_STEP3_STEP2_SOURCE_ALIGNMENT.md.
+    "step2_pre_remap_source": "unknown",      # source Step2 will read pre-remap
+    "calibration_source_matches_step2": False,  # marker source == Step2 source?
+    "step2_ready": False,           # always False until Step2 integration lands
+    "alignment_note": (
+        "step2_ready stays false until Step2 runtime integration is "
+        "implemented. calibration_source_matches_step2 reports only whether the "
+        "marker pre-remap source matches the expected Step2 source."
+    ),
     "note": (
         "Min/Max are in the intensity_space named here. A preview_only config "
         "is not guaranteed to match the Step2 segmentation input."
@@ -101,8 +115,10 @@ def normalize_source_policy(policy):
     out = dict(_SOURCE_POLICY_DEFAULTS)
     if policy:
         out.update(policy)
-    out["preview_only"] = bool(out.get("preview_only", True))
-    for key in ("source", "intensity_space", "normalization", "scope"):
+    for key in ("preview_only", "calibration_source_matches_step2", "step2_ready"):
+        out[key] = bool(out.get(key, _SOURCE_POLICY_DEFAULTS[key]))
+    for key in ("source", "intensity_space", "normalization", "scope",
+                "step2_pre_remap_source"):
         out[key] = str(out.get(key, "unknown"))
     return out
 
@@ -180,6 +196,11 @@ def validate_channel_remap_config(config):
             "/ preview_only — Min/Max are ambiguous without it)")
     elif "preview_only" not in policy:
         errors.append("source_policy missing 'preview_only'")
+    elif bool(policy.get("step2_ready", False)) and bool(policy.get("preview_only", True)):
+        # A config cannot be both preview_only and Step2-ready.
+        errors.append(
+            "source_policy inconsistent: step2_ready=true requires "
+            "preview_only=false")
 
     channels = config.get("channels", None)
     if channels is None:

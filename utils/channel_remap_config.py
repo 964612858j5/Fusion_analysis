@@ -286,3 +286,102 @@ def save_channel_remap_config(config, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, sort_keys=False)
     return cfg
+
+
+def channel_remap_config_hash(config):
+    """Stable short hash of a (normalized) config — for run provenance."""
+    import hashlib
+    cfg = normalize_channel_remap_config(config)
+    blob = json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+# Intensity spaces that are NOT a Step2-compatible native pre-remap source.
+_NON_STEP2_INTENSITY_SPACES = {"raw_ome_normalized_0_1", "unknown", ""}
+
+# Reference-layer name fragments that must never appear as marker remap channels.
+_REFERENCE_NAME_FRAGMENTS = ("dapi", "nuclei", "nucleus", "mask", "fusion")
+
+
+def _is_reference_channel_name(name):
+    n = str(name or "").strip().lower()
+    return any(frag in n for frag in _REFERENCE_NAME_FRAGMENTS)
+
+
+def validate_step2_remap_config(config, allow_preview_remap=False):
+    """Validate a remap config for Step2 *runtime* use (Phase 5b).
+
+    Stricter than validate_channel_remap_config: enforces source alignment so the
+    saved Min/Max live in Step2's native pre-remap source intensity space, and
+    that no reference layer leaked into the marker channels.
+
+    Parameters
+    ----------
+    config : dict (raw or normalized)
+    allow_preview_remap : bool
+        Required True to accept a config that is still preview_only / not
+        step2_ready (all Phase 2.1c/d Step3 configs are). Without it such a
+        config is rejected as experimental.
+
+    Returns
+    -------
+    (errors, resolved_params)
+        errors : list[str] — empty == OK to run
+        resolved_params : dict[str, dict] — per-channel remap params for engines
+            (only populated when errors is empty)
+    """
+    cfg = normalize_channel_remap_config(config)
+    errors = list(validate_channel_remap_config(cfg))
+
+    if cfg.get("used_for") != USED_FOR:
+        errors.append(f"used_for must be '{USED_FOR}' for Step2 remap")
+
+    sp = cfg.get("source_policy", {}) or {}
+    mode = sp.get("source_alignment_mode", "unknown")
+    if mode == "partial_or_preview_fallback":
+        errors.append(
+            "source_alignment_mode is 'partial_or_preview_fallback'; at least one "
+            "marker is a normalized/unknown preview fallback — refusing to run")
+    if not bool(sp.get("calibration_source_matches_step2", False)):
+        errors.append(
+            "source_policy.calibration_source_matches_step2 is false; marker "
+            "source does not match the Step2 pre-remap source")
+
+    preview = bool(sp.get("preview_only", True))
+    ready = bool(sp.get("step2_ready", False))
+    if (preview or not ready) and not allow_preview_remap:
+        errors.append(
+            "config is preview_only/step2_ready=false; pass allow_preview_remap="
+            "true to run it experimentally")
+
+    channels = cfg.get("channels", {}) or {}
+    if not channels:
+        errors.append("config has no marker channels")
+
+    for name, params in channels.items():
+        if _is_reference_channel_name(name):
+            errors.append(
+                f"channel '{name}' looks like a reference layer "
+                "(DAPI/nuclei/mask/fusion); reference layers must not be marker "
+                "remap channels")
+        ispace = str(params.get("intensity_space", "unknown"))
+        if ispace in _NON_STEP2_INTENSITY_SPACES:
+            errors.append(
+                f"channel '{name}': intensity_space '{ispace}' is not a "
+                "Step2-compatible native source")
+        if not bool(params.get("step2_compatible", False)):
+            errors.append(f"channel '{name}': step2_compatible is false")
+        if not bool(params.get("calibration_source_matches_step2", False)):
+            errors.append(
+                f"channel '{name}': calibration_source_matches_step2 is false")
+        mn, mx = params.get("min"), params.get("max")
+        if mn is None or mx is None:
+            errors.append(
+                f"channel '{name}': min/max must be concrete numbers for Step2 "
+                "(Auto must be frozen at calibration, never per tile)")
+
+    if errors:
+        return errors, {}
+
+    resolved = {name: dict(params) for name, params in channels.items()}
+    return [], resolved

@@ -2967,25 +2967,24 @@ class Step3Page(QWidget):
     #  existing per-channel patch cache and DAPI patch, no new loaders.
 
     def _get_current_channel_images_for_conditioning(self):
-        """Return {channel_name: 2D float32 array} for the current ROI/patch.
+        """Return {marker_name: 2D float32 array} for the current ROI/patch.
 
-        Reuses Step3's existing data paths: the DAPI patch and the per-channel
-        patch cache (loading any not-yet-cached channel for the current bbox).
-        Returns an empty dict when no patch is loaded yet.
+        MARKER channels only — canonical DAPI/nuclei are excluded here and
+        instead supplied as a viewer reference layer (see
+        _get_current_reference_layers_for_conditioning). Reuses Step3's existing
+        per-channel patch cache (loading any not-yet-cached channel for the
+        current bbox). Returns an empty dict when no patch is loaded yet.
         """
         images = {}
         # Nothing loaded yet -> let the workbench show its friendly empty state.
         if self._last_patch_bbox is None and self._patch_dapi_rgb is None:
             return images
 
-        for ch in self._available_channels:
+        for ch in self._marker_channels():
             try:
-                if self._is_canonical_dapi_channel(ch):
-                    arr = self._patch_dapi_channel_array()
-                else:
-                    if ch not in self._patch_channel_cache:
-                        self._load_patch_channel(ch)
-                    arr = self._patch_channel_cache.get(ch)
+                if ch not in self._patch_channel_cache:
+                    self._load_patch_channel(ch)
+                arr = self._patch_channel_cache.get(ch)
                 if arr is None:
                     continue
                 arr = np.asarray(arr, dtype=np.float32)
@@ -2996,6 +2995,21 @@ class Step3Page(QWidget):
             except Exception as exc:
                 print(f"[Step3] conditioning: skip channel {ch}: {exc}")
         return images
+
+    def _get_current_reference_layers_for_conditioning(self):
+        """Return {'dapi','mask','fusion'} viewer reference layers for the
+        current ROI/patch, reusing Step3's already-loaded arrays. Any value may
+        be None. These are visualization-only — NOT marker remap channels."""
+        refs = {"dapi": None, "mask": None, "fusion": None}
+        try:
+            refs["dapi"] = self._patch_dapi_channel_array()
+        except Exception as exc:
+            print(f"[Step3] conditioning: dapi ref unavailable: {exc}")
+        if self._mask_labels is not None:
+            refs["mask"] = np.asarray(self._mask_labels)
+        if getattr(self, "_patch_fusion_rgb", None) is not None:
+            refs["fusion"] = np.asarray(self._patch_fusion_rgb)
+        return refs
 
     @staticmethod
     def _intensity_space_for_source(src):
@@ -3054,11 +3068,8 @@ class Step3Page(QWidget):
 
         channel_metadata = {}
         for ch in images:
-            if self._is_canonical_dapi_channel(ch):
-                src = "canonical_step3_dapi"
-            else:
-                src = self._patch_channel_source.get(
-                    ch, self._channel_sources.get(ch, "unknown"))
+            src = self._patch_channel_source.get(
+                ch, self._channel_sources.get(ch, "unknown"))
             ispace, norm = self._intensity_space_for_source(src)
             channel_metadata[ch] = {
                 "source": str(src),
@@ -3075,8 +3086,16 @@ class Step3Page(QWidget):
         self._channel_workbench.set_channel_images(
             images, context=context, source="step3",
             source_policy=source_policy, channel_metadata=channel_metadata)
-        print(f"[Step3] conditioning workbench synced: {len(images)} channels "
-              f"intensity_space={source_policy['intensity_space']}")
+
+        # Viewer reference layers (visualization only; not remap channels).
+        refs = self._get_current_reference_layers_for_conditioning()
+        self._channel_workbench.set_reference_layers(
+            dapi=refs["dapi"], mask=refs["mask"], fusion=refs["fusion"])
+
+        avail = self._channel_workbench.reference_layer_availability()
+        print(f"[Step3] conditioning workbench synced: {len(images)} markers "
+              f"intensity_space={source_policy['intensity_space']} "
+              f"refs={avail}")
 
     def _on_step3_tab_changed(self, idx):
         """Auto-load Step3 data into the conditioning tab the first time it is

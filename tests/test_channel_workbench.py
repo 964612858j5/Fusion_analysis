@@ -201,3 +201,96 @@ def test_step3_sync_passes_source_metadata(app):
     assert sp["intensity_space"] == "mixed"
     assert sp["preview_only"] is True
     assert sp["scope"] == "roi_preview"
+
+
+# ── reference layer overlays (Phase 2.2) ────────────────────────────────────
+
+def _mask_labels():
+    m = np.zeros((48, 48), dtype=np.uint32)
+    m[5:15, 5:15] = 1
+    m[20:30, 22:38] = 2
+    return m
+
+
+def test_set_reference_layers_accepts_all(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    dapi = np.random.default_rng(1).random((48, 48)).astype(np.float32)
+    fusion = (np.random.default_rng(2).random((48, 48, 3)) * 255).astype(np.uint8)
+    workbench.set_reference_layers(dapi=dapi, mask=_mask_labels(), fusion=fusion)
+    avail = workbench.reference_layer_availability()
+    assert avail == {"dapi": True, "mask": True, "fusion": True}
+
+
+def test_missing_reference_layers_do_not_crash(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench.set_reference_layers(dapi=None, mask=None, fusion=None)
+    assert workbench.reference_layer_availability() == {
+        "dapi": False, "mask": False, "fusion": False}
+
+
+def test_partial_reference_layers(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    dapi = np.random.default_rng(3).random((48, 48)).astype(np.float32)
+    workbench.set_reference_layers(dapi=dapi)  # mask/fusion absent
+    avail = workbench.reference_layer_availability()
+    assert avail["dapi"] is True
+    assert avail["mask"] is False and avail["fusion"] is False
+    # the DAPI control becomes enabled, mask/fusion stay disabled
+    assert workbench._ref_chk["dapi"].isEnabled() is True
+    assert workbench._ref_chk["mask"].isEnabled() is False
+
+
+def test_reference_layers_not_saved_as_marker_channels(workbench, tmp_path):
+    # Markers here are real markers only (no DAPI); reference layers are
+    # supplied separately and must not appear in the saved channel list.
+    rng = np.random.default_rng(7)
+    markers = {
+        "CD45": (rng.random((48, 48)) * 8000).astype(np.float32),
+        "CK19": (rng.random((48, 48)) * 5000).astype(np.float32),
+        "CD68": (rng.random((48, 48)) * 3000).astype(np.float32),
+    }
+    workbench.set_channel_images(markers, source="step3")
+    workbench.set_reference_layers(
+        dapi=np.ones((48, 48), np.float32), mask=_mask_labels(),
+        fusion=np.ones((48, 48, 3), np.float32))
+    cfg = workbench.build_config()
+    channels = {c.lower() for c in cfg["channels"]}
+    assert "dapi" not in channels
+    assert "mask" not in channels
+    assert "fusion" not in channels
+    assert set(cfg["channels"].keys()) == {"CD45", "CK19", "CD68"}  # markers only
+    # still saves cleanly with markers only
+    path = os.path.join(str(tmp_path), "channel_remap_config.json")
+    save_channel_remap_config(cfg, path)
+    loaded = load_channel_remap_config(path)
+    assert set(loaded["channels"].keys()) == set(cfg["channels"].keys())
+
+
+def test_reference_visibility_toggle_no_crash(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench.set_reference_layers(
+        dapi=np.ones((48, 48), np.float32), mask=_mask_labels())
+    workbench._ref_chk["dapi"].setChecked(True)
+    workbench._ref_chk["mask"].setChecked(True)
+    workbench._ref_op["dapi"].setValue(30)
+    txt = workbench._status_lbl.text()
+    assert "DAPI ✓" in txt and "Mask ✓" in txt and "Fusion —" in txt
+
+
+def test_clear_reference_layers(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench.set_reference_layers(dapi=np.ones((48, 48), np.float32))
+    workbench.clear_reference_layers()
+    assert workbench.reference_layer_availability() == {
+        "dapi": False, "mask": False, "fusion": False}
+
+
+def test_step3_sync_reference_layers_no_crash_when_missing(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    # no patch loaded -> all reference layers None, sync must not crash
+    refs = page._get_current_reference_layers_for_conditioning()
+    assert set(refs.keys()) == {"dapi", "mask", "fusion"}
+    page._sync_step3_to_workbench()
+    assert page._channel_workbench.reference_layer_availability() == {
+        "dapi": False, "mask": False, "fusion": False}

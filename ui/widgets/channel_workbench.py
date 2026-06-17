@@ -76,6 +76,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._context = {}               # provenance/context from the host
         self._source_policy = default_source_policy()  # intensity provenance
         self._channel_meta = {}          # name -> per-channel source metadata
+        self._ref_available = {"dapi": False, "mask": False, "fusion": False}
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -127,6 +128,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         view_bar.addWidget(self._chk_split)
         view_bar.addStretch()
         cl.addLayout(view_bar)
+        cl.addLayout(self._build_reference_bar())
         split.addWidget(center)
 
         # Right — active channel inspector
@@ -215,6 +217,37 @@ class ChannelWorkbench(QtWidgets.QWidget):
         container.setLayout(row)
         form.addRow(label, container)
         return sl, val_lbl
+
+    def _build_reference_bar(self):
+        """Reference-layer controls (visualization only): show toggles + opacity.
+
+        Reference layers (DAPI / mask / fusion) are NOT marker remap channels;
+        they never enter channel_remap_config["channels"]. Controls are disabled
+        until the host supplies the corresponding layer.
+        """
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("Reference:"))
+        self._ref_chk = {}
+        self._ref_op = {}
+        for key, label in (("dapi", "DAPI"), ("mask", "Mask"), ("fusion", "Fusion")):
+            chk = QtWidgets.QCheckBox(label)
+            chk.setEnabled(False)
+            chk.toggled.connect(
+                lambda v, k=key: self._canvas.set_layer_visibility(**{k: v}))
+            bar.addWidget(chk)
+            self._ref_chk[key] = chk
+
+            op = QtWidgets.QSlider(Qt.Horizontal)
+            op.setRange(0, 100)
+            op.setValue(int(self._canvas._opacity[key] * 100))
+            op.setFixedWidth(60)
+            op.setEnabled(False)
+            op.valueChanged.connect(
+                lambda v, k=key: self._canvas.set_layer_opacity(**{k: v / 100.0}))
+            bar.addWidget(op)
+            self._ref_op[key] = op
+        bar.addStretch()
+        return bar
 
     def _build_bottom_bar(self):
         bar = QtWidgets.QHBoxLayout()
@@ -355,6 +388,53 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """True if real channel data is currently loaded."""
         return bool(self._names)
 
+    def set_reference_layers(self, dapi=None, mask=None, fusion=None,
+                             context=None):
+        """Set optional viewer reference layers (visualization only).
+
+        Parameters
+        ----------
+        dapi   : 2D nuclei intensity array, or None.
+        mask   : 2D label array (0=bg), or None — rendered as outline overlay.
+        fusion : RGB or 2D structural map, or None.
+        context : dict, optional — merged into provenance context.
+
+        These are NOT marker remap channels: they are never written to
+        channel_remap_config["channels"]. Any missing layer is fine (no crash).
+        Each control is enabled only when its layer is present and is left OFF
+        by default so the active marker stays primary.
+        """
+        if context:
+            self._context.update(context)
+        self._canvas.set_reference_layers(dapi=dapi, mask=mask, fusion=fusion)
+        self._ref_available = self._canvas.available_reference_layers()
+        for key, present in self._ref_available.items():
+            chk = self._ref_chk[key]
+            op = self._ref_op[key]
+            chk.setEnabled(present)
+            op.setEnabled(present)
+            if not present:
+                chk.blockSignals(True)
+                chk.setChecked(False)
+                chk.blockSignals(False)
+        self._update_status()
+
+    def clear_reference_layers(self):
+        """Drop all reference layers and disable their controls."""
+        self._canvas.clear_reference_layers()
+        self._ref_available = {"dapi": False, "mask": False, "fusion": False}
+        for key in self._ref_chk:
+            self._ref_chk[key].blockSignals(True)
+            self._ref_chk[key].setChecked(False)
+            self._ref_chk[key].blockSignals(False)
+            self._ref_chk[key].setEnabled(False)
+            self._ref_op[key].setEnabled(False)
+        self._update_status()
+
+    def reference_layer_availability(self):
+        """Return {name: bool} of which reference layers are present."""
+        return dict(self._ref_available)
+
     def set_context(self, context):
         """Update provenance/context without changing channel data."""
         self._context = dict(context or {})
@@ -403,10 +483,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
             intensity_note = f"Intensity: {ispace}"
         warn = "  ⚠ PREVIEW-ONLY (not Step2-ready)" if preview else ""
 
+        def _tick(name):
+            return "✓" if self._ref_available.get(name) else "—"
+        ref_note = (f"   Reference layers: DAPI {_tick('dapi')} · "
+                    f"Mask {_tick('mask')} · Fusion {_tick('fusion')}")
+
         self._status_lbl.setText(
             f"Source: {src}{ctx}   Scope: {scope}   {intensity_note}   "
             f"Channels: {len(self._names)}   "
-            f"Patch shape: {shape[0]} × {shape[1]}{extra}{warn}")
+            f"Patch shape: {shape[0]} × {shape[1]}{ref_note}{extra}{warn}")
         self._status_lbl.setStyleSheet(
             "color:%s; font-size:10px; padding:1px 2px;"
             % ("#f0b020" if (preview or ispace == "unknown") else "#9fd"))

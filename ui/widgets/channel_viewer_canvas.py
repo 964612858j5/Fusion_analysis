@@ -41,8 +41,38 @@ def _to_display(img):
     return np.clip(arr, 0.0, 1.0)
 
 
-def _to_rgb01(img):
-    """Coerce an RGB/gray array to float32 [0,1] RGB (H,W,3), or None."""
+def display_normalize(img, p_low=1.0, p_high=99.5):
+    """Percentile-normalize an array to [0,1] for DISPLAY only.
+
+    Reference layers (DAPI / fusion) may be native 0–255 / 0–4095 / 0–65535 /
+    float. A naive clip would saturate them. This stretches finite pixels by a
+    conservative percentile window so they render well regardless of dtype.
+
+    IMPORTANT: this is display-only. It never touches marker remap parameters
+    or channel_remap_config Min/Max — those live in the native array intensity
+    space and are computed by core.channel_remap, not here.
+    """
+    arr = np.asarray(img).astype(np.float32)
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return np.zeros(arr.shape, dtype=np.float32)
+    vals = arr[finite]
+    lo = float(np.percentile(vals, p_low))
+    hi = float(np.percentile(vals, p_high))
+    if hi <= lo:  # constant / degenerate -> nothing to stretch
+        lo = float(vals.min())
+        hi = float(vals.max())
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=np.float32)
+    out = (np.where(finite, arr, lo) - lo) / (hi - lo)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def _to_rgb01(img, p_low=1.0, p_high=99.5):
+    """Coerce an RGB/gray array to display-normalized float32 [0,1] RGB.
+
+    Normalizes by a single global percentile window across all channels so
+    color ratios are preserved (display only — see display_normalize)."""
     arr = np.asarray(img).astype(np.float32)
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     if arr.ndim == 2:
@@ -50,10 +80,18 @@ def _to_rgb01(img):
     if arr.ndim != 3 or arr.shape[2] < 3:
         return None
     arr = arr[:, :, :3]
-    hi = float(arr.max()) if arr.size else 0.0
-    if hi > 1.0:  # e.g. uint8 RGB
-        arr = arr / 255.0
-    return np.clip(arr, 0.0, 1.0)
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return np.zeros(arr.shape, dtype=np.float32)
+    vals = arr[finite]
+    lo = float(np.percentile(vals, p_low))
+    hi = float(np.percentile(vals, p_high))
+    if hi <= lo:
+        lo, hi = float(vals.min()), float(vals.max())
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=np.float32)
+    out = (arr - lo) / (hi - lo)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 class ChannelViewerCanvas(QtWidgets.QWidget):
@@ -65,8 +103,14 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
         self._raw = None
         self._remapped = None
 
+        # View-fit guard: only fit-to-view on first load / new patch / shape
+        # change — never on display-parameter changes (Min/Max/gamma/opacity/
+        # toggles). See _refresh.
+        self._prev_shape = None
+        self._need_fit = True
+
         # Reference layers (visualization only).
-        self._dapi = None            # 2D float [0,1]
+        self._dapi = None            # 2D float [0,1] (display-normalized)
         self._mask_outline = None    # 2D bool
         self._fusion = None          # (H,W,3) float [0,1]
         self._show = {"dapi": False, "mask": False, "fusion": False}
@@ -95,10 +139,19 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
         self._refresh()
 
     def set_images(self, raw=None, remapped=None):
-        """Provide raw and/or remapped versions of the active marker channel."""
+        """Provide raw and/or remapped versions of the active marker channel.
+
+        Display parameters changing (Min/Max/gamma/opacity) call this every
+        time; it must NOT refit the view. Fit happens only on shape change or
+        an explicit request_fit() (new patch / first load).
+        """
         self._raw = None if raw is None else _to_display(raw)
         self._remapped = None if remapped is None else _to_display(remapped)
         self._refresh()
+
+    def request_fit(self):
+        """Ask for one fit-to-view on the next refresh (new patch / first load)."""
+        self._need_fit = True
 
     # ── reference layers (visualization only) ─────────────────────────
     def set_reference_layers(self, dapi=None, mask=None, fusion=None):
@@ -109,8 +162,10 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
         fusion : RGB or 2D structural map; alpha-blended.
 
         Missing/invalid layers are stored as None and never crash the UI.
+        DAPI/fusion are display-normalized (percentile) so native-dtype layers
+        do not saturate — display only, never affects marker remap params.
         """
-        self._dapi = None if dapi is None else _to_display(dapi)
+        self._dapi = None if dapi is None else display_normalize(dapi)
 
         if mask is None:
             self._mask_outline = None
@@ -148,6 +203,8 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
         self._raw = None
         self._remapped = None
         self._img_item.clear()
+        self._prev_shape = None
+        self._need_fit = True
         self._status.setText("No image loaded")
 
     def clear_reference_layers(self):
@@ -168,7 +225,7 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
             composed = self._compose_split(self._raw, self._remapped)
             self._img_item.setImage(composed, levels=(0.0, 1.0))
             self._status.setText("Split view — left: raw   right: remapped")
-            self._vb.autoRange()
+            self._maybe_fit(composed.shape[:2])
             return
 
         rgb = np.stack([primary] * 3, axis=-1).astype(np.float32)
@@ -203,7 +260,18 @@ class ChannelViewerCanvas(QtWidgets.QWidget):
         label = "remapped" if self._remapped is not None else "raw"
         extra = (" + " + " + ".join(active_overlays)) if active_overlays else ""
         self._status.setText(f"Active channel — {label}{extra}")
-        self._vb.autoRange()
+        self._maybe_fit(shape)
+
+    def _maybe_fit(self, shape):
+        """Fit-to-view only on first load / new patch / shape change.
+
+        Preserves the user's zoom/pan across display-parameter changes
+        (Min/Max, gamma, opacity, layer toggles, histogram edits)."""
+        shape = tuple(int(v) for v in shape)
+        if self._need_fit or shape != self._prev_shape:
+            self._vb.autoRange()
+            self._need_fit = False
+        self._prev_shape = shape
 
     @staticmethod
     def _compose_split(raw, remapped):

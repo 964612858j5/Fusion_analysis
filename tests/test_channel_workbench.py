@@ -294,3 +294,71 @@ def test_step3_sync_reference_layers_no_crash_when_missing(app):
     page._sync_step3_to_workbench()
     assert page._channel_workbench.reference_layer_availability() == {
         "dapi": False, "mask": False, "fusion": False}
+
+
+# ── viewer stability + reference display normalization (Phase 2.2b) ──────────
+
+def test_display_normalize_handles_all_dtypes(app):
+    from block01.ui.widgets.channel_viewer_canvas import display_normalize
+    cases = [
+        np.linspace(0, 1, 100).reshape(10, 10).astype(np.float32),       # 0–1
+        (np.random.default_rng(1).random((10, 10)) * 255).astype(np.uint8),    # 0–255
+        (np.random.default_rng(2).random((10, 10)) * 65535).astype(np.uint16),  # 0–65535
+        np.full((6, 6), 7.0, np.float32),                                # constant
+        np.array([[np.nan, np.inf], [1.0, 2.0]], np.float32),            # NaN/inf
+        np.zeros((4, 4), np.float32),                                     # all-zero
+    ]
+    for arr in cases:
+        out = display_normalize(arr)
+        assert out.dtype == np.float32
+        assert out.shape == arr.shape
+        assert np.all(np.isfinite(out))
+        assert float(out.min()) >= 0.0 and float(out.max()) <= 1.0
+
+
+def test_canvas_preserves_view_on_param_change(app):
+    from block01.ui.widgets.channel_viewer_canvas import ChannelViewerCanvas
+    c = ChannelViewerCanvas()
+    img = np.random.default_rng(0).random((32, 32)).astype(np.float32)
+    c.set_images(remapped=img)          # first load -> fits, need_fit cleared
+    assert c._need_fit is False
+    assert c._prev_shape == (32, 32)
+    # display-parameter change (same shape) must not request a refit
+    c.set_images(remapped=img * 0.5)
+    assert c._need_fit is False
+    assert c._prev_shape == (32, 32)
+
+
+def test_canvas_refits_on_shape_change(app):
+    from block01.ui.widgets.channel_viewer_canvas import ChannelViewerCanvas
+    c = ChannelViewerCanvas()
+    c.set_images(remapped=np.zeros((16, 16), np.float32))
+    assert c._prev_shape == (16, 16)
+    c.set_images(remapped=np.zeros((24, 40), np.float32))
+    assert c._prev_shape == (24, 40)
+    assert c._need_fit is False  # fit consumed by the shape change
+
+
+def test_canvas_request_fit_sets_flag(app):
+    from block01.ui.widgets.channel_viewer_canvas import ChannelViewerCanvas
+    c = ChannelViewerCanvas()
+    c.set_images(remapped=np.zeros((16, 16), np.float32))
+    assert c._need_fit is False
+    c.request_fit()
+    assert c._need_fit is True
+    c.set_images(remapped=np.zeros((16, 16), np.float32))  # same shape, but forced
+    assert c._need_fit is False  # consumed
+
+
+def test_reference_display_norm_does_not_touch_config(workbench, tmp_path):
+    # A native-scale DAPI reference must not influence saved marker Min/Max.
+    markers = {"CD45": (np.random.default_rng(5).random((40, 40)) * 8000).astype(np.float32)}
+    workbench.set_channel_images(markers, source="step3")
+    cfg_before = workbench.build_config()
+    cd45_before = dict(cfg_before["channels"]["CD45"])
+    workbench.set_reference_layers(
+        dapi=(np.random.default_rng(6).random((40, 40)) * 65535).astype(np.uint16))
+    cfg_after = workbench.build_config()
+    assert cfg_after["channels"]["CD45"]["min"] == cd45_before["min"]
+    assert cfg_after["channels"]["CD45"]["max"] == cd45_before["max"]
+    assert set(c.lower() for c in cfg_after["channels"]) == {"cd45"}

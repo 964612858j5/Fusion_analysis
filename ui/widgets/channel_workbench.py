@@ -126,6 +126,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._chk_split.toggled.connect(self._canvas.set_split)
         view_bar.addWidget(self._chk_remapped)
         view_bar.addWidget(self._chk_split)
+        btn_fit = QtWidgets.QPushButton("Fit view")
+        btn_fit.setToolTip("Reset zoom/pan to fit the whole patch.")
+        btn_fit.clicked.connect(self._on_fit_view)
+        view_bar.addWidget(btn_fit)
         view_bar.addStretch()
         cl.addLayout(view_bar)
         cl.addLayout(self._build_reference_bar())
@@ -363,6 +367,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._refresh_layer_list()
         self._set_controls_enabled(True)
         self._active = None
+        # New patch -> fit the view once on the first preview below.
+        self._canvas.request_fit()
         self._layer_list.set_active(self._names[0])
         self._on_active_changed(self._names[0])
         self._update_status(skipped=skipped)
@@ -648,6 +654,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._params[self._active] = normalize_channel_remap_params(p)
         self._load_params_into_controls(self._active)
         self._layer_list.update_mini(self._active, p["weight"], "w")
+        self._refresh_preview()
+
+    def _on_fit_view(self):
+        """Explicit user-triggered fit-to-view."""
+        self._canvas.request_fit()
         self._refresh_preview()
 
     # ── preview ───────────────────────────────────────────────────────

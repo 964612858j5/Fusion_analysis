@@ -2233,7 +2233,15 @@ class Step3Page(QWidget):
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(split, 'QC Viewer')
         self._channel_workbench = ChannelWorkbench()
-        tabs.addTab(self._channel_workbench, 'Channel Conditioning (v13.1)')
+        # Workbench is host-agnostic: it asks for data via refresh_requested and
+        # we feed it real ROI/channel arrays. Also auto-sync when the user opens
+        # the conditioning tab.
+        self._channel_workbench.refresh_requested.connect(
+            self._sync_step3_to_workbench)
+        self._cond_tab_index = tabs.addTab(
+            self._channel_workbench, 'Channel Conditioning (v13.1)')
+        tabs.currentChanged.connect(self._on_step3_tab_changed)
+        self._tabs = tabs
         root.addWidget(tabs, stretch=1)
 
         # ── Bottom nav ────────────────────────────────────────────────
@@ -2944,6 +2952,66 @@ class Step3Page(QWidget):
             self._patch_channel_cache[ch] = self._match_channel_shape(
                 ch, arr, source or self._channel_sources.get(ch, "unknown")
             )
+
+    # ── v13.1 Channel Conditioning bridge ─────────────────────────────
+    #  Step3 owns project/ROI loading; the workbench owns visualization and
+    #  remap-parameter editing. These adapters hand the workbench the *current*
+    #  ROI/patch channel arrays only — never a full WSI. They reuse Step3's
+    #  existing per-channel patch cache and DAPI patch, no new loaders.
+
+    def _get_current_channel_images_for_conditioning(self):
+        """Return {channel_name: 2D float32 array} for the current ROI/patch.
+
+        Reuses Step3's existing data paths: the DAPI patch and the per-channel
+        patch cache (loading any not-yet-cached channel for the current bbox).
+        Returns an empty dict when no patch is loaded yet.
+        """
+        images = {}
+        # Nothing loaded yet -> let the workbench show its friendly empty state.
+        if self._last_patch_bbox is None and self._patch_dapi_rgb is None:
+            return images
+
+        for ch in self._available_channels:
+            try:
+                if self._is_canonical_dapi_channel(ch):
+                    arr = self._patch_dapi_channel_array()
+                else:
+                    if ch not in self._patch_channel_cache:
+                        self._load_patch_channel(ch)
+                    arr = self._patch_channel_cache.get(ch)
+                if arr is None:
+                    continue
+                arr = np.asarray(arr, dtype=np.float32)
+                if arr.ndim == 3 and arr.shape[2] == 1:
+                    arr = arr[:, :, 0]
+                if arr.ndim == 2 and arr.size:
+                    images[str(ch)] = arr
+            except Exception as exc:
+                print(f"[Step3] conditioning: skip channel {ch}: {exc}")
+        return images
+
+    def _sync_step3_to_workbench(self):
+        """Push the current ROI/patch channels into the conditioning workbench."""
+        if not hasattr(self, "_channel_workbench"):
+            return
+        images = self._get_current_channel_images_for_conditioning()
+        context = {
+            "roi": self._active_roi_name,
+            "patch_source": self._patch_source,
+            "mode": self._mode,
+        }
+        self._channel_workbench.set_channel_images(
+            images, context=context, source="step3")
+        print(f"[Step3] conditioning workbench synced: {len(images)} channels")
+
+    def _on_step3_tab_changed(self, idx):
+        """Auto-load Step3 data into the conditioning tab the first time it is
+        opened. Re-syncs only when the workbench is empty so user edits are not
+        clobbered; the 'Load current Step3 ROI' button forces a manual refresh."""
+        if idx != getattr(self, "_cond_tab_index", -1):
+            return
+        if not self._channel_workbench.has_channel_data():
+            self._sync_step3_to_workbench()
 
     # ── Browse helpers ────────────────────────────────────────────────
 

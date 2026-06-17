@@ -25,7 +25,7 @@ import os
 
 import numpy as np
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 
 from ...core.channel_remap import apply_channel_remap, compute_qupath_auto_minmax
 from ...utils.channel_remap_config import (
@@ -48,7 +48,16 @@ _PALETTE = [
 
 
 class ChannelWorkbench(QtWidgets.QWidget):
-    """Channel-first conditioning workbench (v13.1 prototype)."""
+    """Channel-first conditioning workbench (v13.1 prototype).
+
+    Signals
+    -------
+    refresh_requested() : the user asked to (re)load the host's current data
+        (e.g. Step3's current ROI). The host connects this to its adapter and
+        calls set_channel_images(). The workbench stays ignorant of Step3.
+    """
+
+    refresh_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,9 +70,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._active = None              # active channel name
         self._auto_saturation = DEFAULT_AUTO_SATURATION
         self._loading = False            # guard against signal recursion
+        self._source = "none"            # "none" | "step3" | "demo" | "file"
+        self._context = {}               # provenance/context from the host
 
         self._build_ui()
         self._set_controls_enabled(False)
+        self._update_status()
 
     # ── UI construction ───────────────────────────────────────────────
     def _build_ui(self):
@@ -81,6 +93,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
             "border-radius:4px;padding:4px;font-size:10px;"
         )
         root.addWidget(banner)
+
+        self._status_lbl = QtWidgets.QLabel()
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setStyleSheet("color:#9fd; font-size:10px; padding:1px 2px;")
+        root.addWidget(self._status_lbl)
 
         split = QtWidgets.QSplitter(Qt.Horizontal)
 
@@ -197,6 +214,16 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def _build_bottom_bar(self):
         bar = QtWidgets.QHBoxLayout()
+        btn_step3 = QtWidgets.QPushButton("Load current Step3 ROI")
+        btn_step3.setToolTip(
+            "Pull the channels currently loaded in Step3's QC viewer "
+            "(current ROI/patch) into this workbench.")
+        btn_step3.setStyleSheet(
+            "QPushButton{background:#2c3e50;color:#cde;border-radius:3px;padding:4px;}"
+            "QPushButton:hover{background:#34495e;}")
+        btn_step3.clicked.connect(self.refresh_requested.emit)
+        bar.addWidget(btn_step3)
+
         btn_demo = QtWidgets.QPushButton("Load demo patch")
         btn_demo.clicked.connect(self._load_demo)
         bar.addWidget(btn_demo)
@@ -223,18 +250,51 @@ class ChannelWorkbench(QtWidgets.QWidget):
         return bar
 
     # ── public API (host feeds data here) ─────────────────────────────
-    def set_channel_images(self, images, colors=None):
+    def set_channel_images(self, channel_images, colors=None, context=None,
+                           source="manual"):
         """Load a set of named channel preview patches.
 
         Parameters
         ----------
-        images : dict[str, np.ndarray]
-            channel name -> 2D preview patch (raw intensities).
+        channel_images : dict[str, np.ndarray]
+            channel name -> 2D preview patch (raw or display intensities). The
+            host (e.g. Step3) owns ROI/patch loading; this widget only
+            visualizes and edits remap parameters. Pass only the current
+            ROI/patch arrays — never a full WSI.
         colors : dict[str, str], optional
-            channel name -> hex color for the swatch.
+            channel name -> hex swatch color.
+        context : dict, optional
+            free-form provenance (e.g. roi name, patch shape, source paths);
+            surfaced in the status label.
+        source : str
+            "step3" | "demo" | "file" | "manual" — drives the status label.
+
+        Empty / all-invalid input is handled gracefully (no crash): the
+        workbench clears and shows a friendly "no data" message.
         """
-        self._names = list(images.keys())
-        self._raw = {n: np.asarray(images[n]) for n in self._names}
+        self._source = source
+        self._context = dict(context or {})
+
+        # Normalize + validate: keep only real 2D arrays.
+        clean = {}
+        skipped = []
+        for name, img in (channel_images or {}).items():
+            arr = self._coerce_2d(img)
+            if arr is None:
+                skipped.append(str(name))
+                continue
+            clean[str(name)] = arr
+
+        if not clean:
+            self.clear_channel_images()
+            if skipped:
+                self._status_lbl.setText(
+                    "No usable 2D channel images "
+                    f"(skipped: {', '.join(skipped)}).")
+            return
+
+        self._names = list(clean.keys())
+        self._raw = clean
         self._params = {}
         self._colors = {}
         self._visible = {}
@@ -252,15 +312,73 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._visible[n] = True
 
         self._refresh_layer_list()
-        self._set_controls_enabled(bool(self._names))
-        if self._names:
-            self._layer_list.set_active(self._names[0])
-            self._on_active_changed(self._names[0])
+        self._set_controls_enabled(True)
+        self._active = None
+        self._layer_list.set_active(self._names[0])
+        self._on_active_changed(self._names[0])
+        self._update_status(skipped=skipped)
+
+    def clear_channel_images(self):
+        """Drop all channel data and show the friendly empty state."""
+        self._names = []
+        self._raw = {}
+        self._params = {}
+        self._colors = {}
+        self._visible = {}
+        self._active = None
+        self._layer_list.set_channels([])
+        self._canvas.clear()
+        self._histogram.set_data(np.zeros((1, 1), np.float32))
+        self._active_lbl.setText("(no channel)")
+        self._set_controls_enabled(False)
+        self._update_status()
+
+    def has_channel_data(self):
+        """True if real channel data is currently loaded."""
+        return bool(self._names)
+
+    def set_context(self, context):
+        """Update provenance/context without changing channel data."""
+        self._context = dict(context or {})
+        self._update_status()
+
+    @staticmethod
+    def _coerce_2d(img):
+        """Return a 2D float32 array, or None if the input is not a 2D image."""
+        if img is None:
+            return None
+        arr = np.asarray(img)
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        if arr.ndim != 2 or arr.size == 0:
+            return None
+        return arr.astype(np.float32, copy=False)
+
+    def _update_status(self, skipped=None):
+        if not self._names:
+            self._status_lbl.setText(
+                "No Step3 channel data available yet. Load/select an ROI in "
+                "Step3 first (or use 'Load demo patch').")
+            self._info_lbl.setText("No preview loaded")
+            return
+        shape = self._raw[self._names[0]].shape
+        labels = {
+            "step3": "Step3 current ROI",
+            "demo": "demo data",
+            "file": "manually loaded image",
+            "manual": "manual",
+        }
+        src = labels.get(self._source, self._source)
+        ctx = ""
+        roi = self._context.get("roi")
+        if roi:
+            ctx = f"  ROI: {roi}"
+        extra = f"  (skipped {len(skipped)})" if skipped else ""
+        self._status_lbl.setText(
+            f"Source: {src}{ctx}   Channels: {len(self._names)}   "
+            f"Patch shape: {shape[0]} × {shape[1]}{extra}")
         self._info_lbl.setText(
-            f"{len(self._names)} channels loaded "
-            f"({'×'.join(str(d) for d in self._raw[self._names[0]].shape)})"
-            if self._names else "No preview loaded"
-        )
+            f"{len(self._names)} channels — {shape[0]}×{shape[1]}")
 
     def build_config(self):
         """Build (and normalize) the current segmentation_preprocess_config."""
@@ -435,7 +553,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
                           + 300 * (xx > 180)).astype(np.float32)
         images["PanCK"] = (2000 * (xx / w) + rng.normal(500, 120, (h, w))
                            ).astype(np.float32)
-        self.set_channel_images(images)
+        self.set_channel_images(images, source="demo")
 
     def _load_from_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -453,7 +571,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(
                 self, "No channels", "No channels found in the image.")
             return
-        self.set_channel_images(images)
+        self.set_channel_images(images, context={"path": path}, source="file")
 
     @staticmethod
     def _read_image_channels(path):

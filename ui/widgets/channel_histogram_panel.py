@@ -46,7 +46,7 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
         lay.addWidget(self._plot)
 
         # stepMode is supplied per-setData call (histogram edges = counts+1);
-        # constructing with stepMode=True and no data raises, so defer it.
+        # constructing with stepMode and no data raises, so defer it.
         self._curve = pg.PlotCurveItem(
             fillLevel=0, brush=(80, 140, 200, 120),
             pen=pg.mkPen("#61afef", width=1),
@@ -70,14 +70,14 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
             arr = arr[np.isfinite(arr)]
             if arr.size == 0:
                 self._curve.setData(np.array([0.0, 1.0]), np.array([0.0]),
-                                    stepMode=True)
+                                    stepMode="center")
             else:
                 lo = float(arr.min())
                 hi = float(arr.max())
                 if hi <= lo:
                     hi = lo + 1.0
                 counts, edges = np.histogram(arr, bins=bins, range=(lo, hi))
-                self._curve.setData(edges, counts.astype(float), stepMode=True)
+                self._curve.setData(edges, counts.astype(float), stepMode="center")
 
             if min_value is not None:
                 self._min_line.setValue(float(min_value))

@@ -165,6 +165,15 @@ class ChannelLayerList(QtWidgets.QWidget):
         if row:
             row.set_mini(value, label)
 
+    def set_all_visible(self, checked):
+        """Set every row's visibility checkbox without emitting per-row signals.
+
+        Used by the workbench Select all / Clear all controls; the workbench
+        updates its own model directly, so signals stay blocked here.
+        """
+        for row in self._rows.values():
+            row.set_visible_checked(bool(checked))
+
     def _on_current_changed(self, current, _previous):
         if current is not None:
             self.active_changed.emit(current.data(Qt.UserRole))

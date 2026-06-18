@@ -610,3 +610,70 @@ def test_reference_display_norm_does_not_touch_config(workbench, tmp_path):
     assert cfg_after["channels"]["CD45"]["min"] == cd45_before["min"]
     assert cfg_after["channels"]["CD45"]["max"] == cd45_before["max"]
     assert set(c.lower() for c in cfg_after["channels"]) == {"cd45"}
+
+
+# ── Phase 5c.1: DAPI reference default-on + Select all / Clear all (B1/B2/B4) ──
+
+def test_dapi_reference_visible_by_default(workbench):
+    # B1: when a DAPI reference layer is supplied it is shown by default so the
+    # conditioning viewer has nuclei context (mask/fusion stay off).
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench.set_reference_layers(
+        dapi=np.ones((48, 48), np.float32), mask=_mask_labels(),
+        fusion=np.ones((48, 48, 3), np.float32))
+    assert workbench._ref_chk["dapi"].isChecked() is True
+    assert workbench._ref_chk["mask"].isChecked() is False
+    assert workbench._ref_chk["fusion"].isChecked() is False
+
+
+def test_dapi_reference_not_a_marker_channel(workbench):
+    # B1/B6: DAPI default-on as a reference must NOT add DAPI to config channels.
+    markers = {
+        "CD45": (np.random.default_rng(1).random((48, 48)) * 8000).astype(np.float32),
+        "CK19": (np.random.default_rng(2).random((48, 48)) * 5000).astype(np.float32),
+    }
+    workbench.set_channel_images(markers, source="step3")
+    workbench.set_reference_layers(dapi=np.ones((48, 48), np.float32))
+    cfg = workbench.build_config()
+    assert "dapi" not in {c.lower() for c in cfg["channels"]}
+    assert set(cfg["channels"].keys()) == {"CD45", "CK19"}
+
+
+def test_select_all_markers_enables_all(workbench):
+    # B2/B4: Clear then Select all flips every marker's enabled flag.
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._set_all_markers_enabled(False)
+    cfg = workbench.build_config()
+    assert all(c["enabled"] is False for c in cfg["channels"].values())
+    workbench._set_all_markers_enabled(True)
+    cfg = workbench.build_config()
+    assert all(c["enabled"] is True for c in cfg["channels"].values())
+
+
+def test_clear_all_markers_disables_all(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._set_all_markers_enabled(True)
+    workbench._set_all_markers_enabled(False)
+    cfg = workbench.build_config()
+    assert all(c["enabled"] is False for c in cfg["channels"].values())
+    # disabled markers are still saved (with enabled=false), not dropped, so
+    # Step2 channel-coverage validation can still resolve them.
+    assert set(cfg["channels"].keys()) == set(workbench._names)
+
+
+def test_select_all_no_data_no_crash(workbench):
+    # No channels loaded -> bulk control is a safe no-op.
+    workbench._set_all_markers_enabled(True)
+    assert workbench.has_channel_data() is False
+
+
+def test_channel_order_preserved_not_alphabetical(workbench):
+    # B3: the workbench preserves the supplied (panel/OME) order, not sorted().
+    ordered = {}
+    rng = np.random.default_rng(9)
+    for name in ("CK19", "CD68", "CD3D", "CD163", "AFP"):
+        ordered[name] = (rng.random((32, 32)) * 4000).astype(np.float32)
+    workbench.set_channel_images(ordered, source="step3")
+    assert workbench._names == ["CK19", "CD68", "CD3D", "CD163", "AFP"]
+    cfg = workbench.build_config()
+    assert list(cfg["channels"].keys()) == ["CK19", "CD68", "CD3D", "CD163", "AFP"]

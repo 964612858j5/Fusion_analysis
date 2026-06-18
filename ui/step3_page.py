@@ -1627,9 +1627,23 @@ class Step3Page(QWidget):
             except Exception:
                 print(f"[Step3] failed to inspect raw OME channels:\n{traceback.format_exc()}")
 
-        self._corrected_channel_names = sorted(set(map(str, corrected_channels)))
-        self._raw_channel_names = sorted(set(map(str, raw_channels)))
-        merged = sorted(set(self._corrected_channel_names) | set(self._raw_channel_names))
+        # B3 (Phase 5c.1): preserve the original OME / panel / loader channel
+        # order. The corrected-zarr array order and the raw-OME loader order are
+        # the panel order; do NOT alphabetize (sorted() reorders e.g. CD3/CD11b
+        # away from the acquisition/panel order operators expect). Dedup keeps
+        # first occurrence so corrected channels lead, then raw-only extras.
+        def _dedup_keep_order(seq):
+            seen = set()
+            out = []
+            for x in map(str, seq):
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+
+        self._corrected_channel_names = _dedup_keep_order(corrected_channels)
+        self._raw_channel_names = _dedup_keep_order(raw_channels)
+        merged = _dedup_keep_order(list(corrected_channels) + list(raw_channels))
         self._available_channels = merged
         for ch in merged:
             self._channel_sources[ch] = "corrected" if ch in self._corrected_channel_names else "raw"

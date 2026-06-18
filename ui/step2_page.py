@@ -226,27 +226,6 @@ class Step2Page(QWidget):
         pr.addWidget(btn_params)
         inl.addLayout(pr)
 
-        # v13.1 Phase 5b — optional manual channel remap (experimental).
-        # Empty = unchanged v13 behavior. A source-aligned config applies the
-        # remap to the segmentation signal path only (not h5ad/expression).
-        rmp = QHBoxLayout()
-        rmp.addWidget(QLabel('Channel remap (opt):'))
-        self._remap_config_edit = QtWidgets.QLineEdit()
-        self._remap_config_edit.setPlaceholderText(
-            'channel_remap_config.json (leave empty to disable)')
-        self._remap_config_edit.setStyleSheet('font-size:11px;')
-        rmp.addWidget(self._remap_config_edit, stretch=1)
-        btn_remap = QPushButton('Browse')
-        btn_remap.setFixedWidth(64)
-        btn_remap.clicked.connect(self._browse_remap_config)
-        rmp.addWidget(btn_remap)
-        self._allow_preview_remap = QCheckBox('allow preview')
-        self._allow_preview_remap.setToolTip(
-            'Required to run a preview_only / step2_ready=false remap config '
-            '(experimental Phase 5b).')
-        rmp.addWidget(self._allow_preview_remap)
-        inl.addLayout(rmp)
-
         btn_load = QPushButton('Load zarr info & overview')
         btn_load.setStyleSheet(
             'QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}'
@@ -260,6 +239,9 @@ class Step2Page(QWidget):
         self._zarr_info.setWordWrap(True)
         inl.addWidget(self._zarr_info)
         rl.addWidget(inp_box)
+
+        # ── Manual channel remap (v13.1 experimental) ──────────────────
+        rl.addWidget(self._build_remap_box())
 
         # Tile grid
         tile_box = QGroupBox('Tile Grid (for segmentation)')
@@ -1019,6 +1001,94 @@ class Step2Page(QWidget):
             self._zarr_edit.setText(path)
             self._sync_output_dir_from_zarr_path(path)
             self._load_zarr_info()
+
+    # ── v13.1 manual channel remap controls ───────────────────────────
+    def _build_remap_box(self):
+        """Experimental Step2 manual channel remap controls (v13.1 Phase 5c.1).
+
+        Empty path = unchanged v13 behavior. A source-aligned config applies the
+        remap to the segmentation signal path only (never h5ad/expression).
+        Exposes channel_remap_config_path, allow_preview_remap and
+        remap_gate_mode so users can enable the remap runtime without editing
+        JSON by hand.
+        """
+        box = QGroupBox('Manual channel remap (v13.1 experimental)')
+        box.setStyleSheet(self._box_style('#d19a66'))
+        lay = QVBoxLayout(box)
+
+        # 1) config file picker: path + Browse + Clear
+        pr = QHBoxLayout()
+        pr.addWidget(QLabel('Channel remap config:'))
+        self._remap_config_edit = QtWidgets.QLineEdit()
+        self._remap_config_edit.setPlaceholderText(
+            'channel_remap_config.json (leave empty to disable)')
+        self._remap_config_edit.setStyleSheet('font-size:11px;')
+        self._remap_config_edit.textChanged.connect(self._update_remap_status)
+        pr.addWidget(self._remap_config_edit, stretch=1)
+        btn_remap = QPushButton('Browse')
+        btn_remap.setFixedWidth(64)
+        btn_remap.clicked.connect(self._browse_remap_config)
+        pr.addWidget(btn_remap)
+        btn_clear = QPushButton('Clear')
+        btn_clear.setFixedWidth(56)
+        btn_clear.clicked.connect(self._clear_remap_config)
+        pr.addWidget(btn_clear)
+        lay.addLayout(pr)
+
+        # 2) allow_preview_remap checkbox (default False)
+        self._allow_preview_remap = QCheckBox(
+            'Allow preview remap config (experimental)')
+        self._allow_preview_remap.setChecked(False)
+        self._allow_preview_remap.setToolTip(
+            'Required to run a preview_only / step2_ready=false remap config. '
+            'Without this, Step2 rejects a preview config with a clear message.')
+        self._allow_preview_remap.toggled.connect(self._update_remap_status)
+        lay.addWidget(self._allow_preview_remap)
+
+        # 3) remap_gate_mode combo (HCC default: remap_and_gi)
+        gr = QHBoxLayout()
+        gr.addWidget(QLabel('Remap gate mode:'))
+        self._remap_gate_mode = QComboBox()
+        for _m in ('remap', 'remap_and_gi', 'gi'):
+            self._remap_gate_mode.addItem(_m, _m)
+        # Default to the HCC recommendation; only written when a config is set.
+        self._remap_gate_mode.setCurrentIndex(
+            max(0, self._remap_gate_mode.findData('remap_and_gi')))
+        self._remap_gate_mode.setToolTip(
+            'remap: manual Min/Max/Gamma replaces the signal gate. '
+            'remap_and_gi: remap gate AND local-z gate. '
+            'gi: legacy local-z gate (config loaded but gate unchanged).')
+        self._remap_gate_mode.currentIndexChanged.connect(self._update_remap_status)
+        gr.addWidget(self._remap_gate_mode, stretch=1)
+        lay.addLayout(gr)
+
+        self._remap_status_lbl = QLabel('Remap: off')
+        self._remap_status_lbl.setStyleSheet('color:#888;font-size:10px;')
+        self._remap_status_lbl.setWordWrap(True)
+        lay.addWidget(self._remap_status_lbl)
+        self._update_remap_status()
+        return box
+
+    def _clear_remap_config(self):
+        self._remap_config_edit.clear()
+        self._update_remap_status()
+
+    def _update_remap_status(self, *_):
+        if not hasattr(self, '_remap_status_lbl'):
+            return
+        path = self._remap_config_edit.text().strip()
+        if not path:
+            self._remap_status_lbl.setText('Remap: off')
+            self._remap_status_lbl.setStyleSheet('color:#888;font-size:10px;')
+            return
+        allow = self._allow_preview_remap.isChecked()
+        gate = self._remap_gate_mode.currentData() or 'remap'
+        preview_note = ('preview allowed' if allow
+                        else 'preview NOT allowed (preview config will be rejected)')
+        self._remap_status_lbl.setText(
+            f'Remap: config selected, {preview_note}, gate={gate}')
+        self._remap_status_lbl.setStyleSheet(
+            'color:%s;font-size:10px;' % ('#9c6' if allow else '#f0b020'))
 
     def _browse_remap_config(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1847,12 +1917,16 @@ class Step2Page(QWidget):
         })
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
-        # v13.1 Phase 5b — optional manual channel remap (experimental).
+        # v13.1 Phase 5b/5c.1 — optional manual channel remap (experimental).
+        # No path -> remap keys are omitted entirely so Step2 runs exactly as v13
+        # (the backend keeps manual_remap_enabled=False / its own gate default).
         remap_path = self._remap_config_edit.text().strip() if hasattr(self, "_remap_config_edit") else ""
         if remap_path:
             data["channel_remap_config_path"] = remap_path
             data["allow_preview_remap"] = bool(
                 hasattr(self, "_allow_preview_remap") and self._allow_preview_remap.isChecked())
+            if hasattr(self, "_remap_gate_mode"):
+                data["remap_gate_mode"] = self._remap_gate_mode.currentData() or "remap"
         cfg = normalize_segmentation_config(data)
         if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[HQ2-UI] collected params={cfg.get('params')}")

@@ -386,3 +386,77 @@ def test_cds2_unchanged_without_remap():
     b = run_cds2_segmentation(nuclei, [marker], ["CK19"],
                               _base_params(cytoplasm_engine="cds2"))
     assert np.array_equal(a["final_labels"], b["final_labels"])
+
+
+# ── Phase 5c.1: Step2 GUI exposes remap controls into seg_config ─────────────
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.fixture(scope="module")
+def _qapp():
+    pytest.importorskip("PyQt5")
+    from PyQt5 import QtWidgets
+    try:
+        return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    except Exception as exc:  # no usable Qt platform -> skip
+        pytest.skip(f"Qt unavailable: {exc}")
+
+
+@pytest.fixture()
+def _step2(_qapp):
+    from block01.ui.step2_page import Step2Page
+    return Step2Page()
+
+
+def test_step2_gui_no_remap_path_leaves_keys_absent(_step2):
+    cfg = _step2.get_seg_config()
+    assert "channel_remap_config_path" not in cfg
+    assert "allow_preview_remap" not in cfg
+    assert "remap_gate_mode" not in cfg
+
+
+def test_step2_gui_writes_remap_config_path(_step2):
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    cfg = _step2.get_seg_config()
+    assert cfg["channel_remap_config_path"] == "/tmp/remap.json"
+
+
+def test_step2_gui_writes_allow_preview_boolean(_step2):
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    _step2._allow_preview_remap.setChecked(True)
+    cfg = _step2.get_seg_config()
+    assert cfg["allow_preview_remap"] is True
+    _step2._allow_preview_remap.setChecked(False)
+    cfg = _step2.get_seg_config()
+    assert cfg["allow_preview_remap"] is False
+
+
+def test_step2_gui_writes_remap_gate_mode(_step2):
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    idx = _step2._remap_gate_mode.findData("gi")
+    _step2._remap_gate_mode.setCurrentIndex(idx)
+    cfg = _step2.get_seg_config()
+    assert cfg["remap_gate_mode"] == "gi"
+
+
+def test_step2_gui_default_gate_mode_is_remap_and_gi(_step2):
+    # HCC recommendation surfaces as the GUI default once a config is selected.
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    cfg = _step2.get_seg_config()
+    assert cfg["remap_gate_mode"] == "remap_and_gi"
+
+
+def test_step2_gui_clear_disables_remap(_step2):
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    _step2._clear_remap_config()
+    cfg = _step2.get_seg_config()
+    assert "channel_remap_config_path" not in cfg
+    assert _step2._remap_status_lbl.text() == "Remap: off"
+
+
+def test_step2_gui_status_label_reflects_selection(_step2):
+    _step2._remap_config_edit.setText("/tmp/remap.json")
+    _step2._allow_preview_remap.setChecked(True)
+    txt = _step2._remap_status_lbl.text()
+    assert "config selected" in txt and "preview allowed" in txt and "gate=" in txt

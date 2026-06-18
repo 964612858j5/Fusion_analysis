@@ -106,11 +106,30 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         split = QtWidgets.QSplitter(Qt.Horizontal)
 
-        # Left — channel layer list
+        # Left — channel layer list + marker bulk controls
+        left = QtWidgets.QWidget()
+        left_l = QtWidgets.QVBoxLayout(left)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.setSpacing(4)
         self._layer_list = ChannelLayerList()
         self._layer_list.active_changed.connect(self._on_active_changed)
         self._layer_list.visibility_changed.connect(self._on_visibility_changed)
-        split.addWidget(self._layer_list)
+        left_l.addWidget(self._layer_list, stretch=1)
+
+        # Select all / Clear all marker remap channels (B2). These toggle the
+        # marker channels only; reference layers (DAPI/mask/fusion) have their
+        # own controls and are NOT affected.
+        marker_bar = QtWidgets.QHBoxLayout()
+        self._btn_select_all = QtWidgets.QPushButton("Select all markers")
+        self._btn_select_all.setToolTip("Enable all marker remap channels.")
+        self._btn_select_all.clicked.connect(lambda: self._set_all_markers_enabled(True))
+        self._btn_clear_all = QtWidgets.QPushButton("Clear all markers")
+        self._btn_clear_all.setToolTip("Disable all marker remap channels.")
+        self._btn_clear_all.clicked.connect(lambda: self._set_all_markers_enabled(False))
+        marker_bar.addWidget(self._btn_select_all)
+        marker_bar.addWidget(self._btn_clear_all)
+        left_l.addLayout(marker_bar)
+        split.addWidget(left)
 
         # Center — viewer
         center = QtWidgets.QWidget()
@@ -423,6 +442,17 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 chk.blockSignals(True)
                 chk.setChecked(False)
                 chk.blockSignals(False)
+        # B1 (Phase 5c.1): DAPI is the primary anatomical reference — show it by
+        # default when available so the conditioning viewer has nuclei context.
+        # Mask/Fusion stay OFF by default so the active marker stays primary.
+        # DAPI remains a reference layer only: it never enters
+        # channel_remap_config["channels"] and is not a marker remap channel.
+        if self._ref_available.get("dapi"):
+            chk = self._ref_chk["dapi"]
+            chk.blockSignals(True)
+            chk.setChecked(True)
+            chk.blockSignals(False)
+            self._canvas.set_layer_visibility(dapi=True)
         self._update_status()
 
     def clear_reference_layers(self):
@@ -618,6 +648,27 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return
         self._collect_params_from_controls()
 
+    def _set_all_markers_enabled(self, enabled):
+        """Enable/disable every marker remap channel at once (B2).
+
+        Sets each channel's `enabled` param (the flag saved into
+        channel_remap_config["channels"][name]["enabled"]) and mirrors it into
+        the layer-list visibility so the bulk action is visible. Reference
+        layers are untouched. No-op when no channel data is loaded.
+        """
+        if not self._names:
+            return
+        enabled = bool(enabled)
+        for n in self._names:
+            self._params[n]["enabled"] = enabled
+            self._visible[n] = enabled
+        self._layer_list.set_all_visible(enabled)
+        if self._active is not None:
+            self._chk_enabled.blockSignals(True)
+            self._chk_enabled.setChecked(enabled)
+            self._chk_enabled.blockSignals(False)
+        self._refresh_preview()
+
     def _on_histogram_window(self, lo, hi):
         if self._loading or self._active is None:
             return
@@ -784,5 +835,6 @@ class ChannelWorkbench(QtWidgets.QWidget):
     def _set_controls_enabled(self, enabled):
         for w in (self._sp_min, self._sp_max, self._sl_bright, self._sl_contrast,
                   self._sl_gamma, self._btn_auto, self._btn_reset,
-                  self._chk_enabled, self._chk_remapped, self._chk_split):
+                  self._chk_enabled, self._chk_remapped, self._chk_split,
+                  self._btn_select_all, self._btn_clear_all):
             w.setEnabled(enabled)

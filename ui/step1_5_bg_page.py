@@ -35,6 +35,10 @@ from ..core.io_loader import OMETIFFLoader
 from .step0.search_ctrl import (
     BatchProcessWorker, WsiCorrectionWorker, _WsiCorrectionProgressDialog,
 )
+# v13.1 Phase 5f-a — Channel Conditioning / Remap now lives in Step1.5 (the
+# pre-segmentation conditioning stage), reusing the shared ChannelWorkbench.
+from .widgets.channel_workbench import ChannelWorkbench
+from ..utils.channel_remap_config import save_channel_remap_config
 
 class Step15BackgroundCorrectionPage(QWidget):
     go_back = pyqtSignal()
@@ -101,8 +105,14 @@ class Step15BackgroundCorrectionPage(QWidget):
         cl.addWidget(self._choice_status)
         root.addWidget(choice_box)
 
+        # Step1.5 now hosts two tabs: the existing Background Correction flow and
+        # the migrated Channel Conditioning / Remap workbench (Phase 5f-a).
+        self._s15_tabs = QtWidgets.QTabWidget()
+        self._s15_tabs.currentChanged.connect(self._on_s15_tab_changed)
+        root.addWidget(self._s15_tabs, stretch=1)
+
         split = QSplitter(Qt.Horizontal)
-        root.addWidget(split, stretch=1)
+        self._s15_tabs.addTab(split, 'Background Correction')
 
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -319,6 +329,10 @@ class Step15BackgroundCorrectionPage(QWidget):
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
 
+        # Channel Conditioning / Remap tab (Phase 5f-a) — pre-segmentation.
+        self._s15_tabs.addTab(self._build_channel_conditioning_tab(),
+                              'Channel Conditioning / Remap')
+
         nav = QHBoxLayout()
         self._btn_back = QPushButton('← Back to Step 1')
         self._btn_back.setStyleSheet(
@@ -368,6 +382,9 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._rebuild_patch_buttons()
         self._clear_preview()
         self._set_state('pre_choice')
+        # Keep the conditioning workbench's channel list/order in sync with the
+        # newly-loaded context (only re-feeds if the workbench is already in use).
+        self._maybe_refresh_conditioning()
 
     def _load_existing_config(self):
         path = os.path.join(self.output_dir, 'correction_config.json')
@@ -539,6 +556,8 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._update_patch_info()
         if self._bg_state == 'review_ready' and self.current_channel:
             self._show_current_channel()
+        # Channel Conditioning follows the current patch (Phase 5f-a Part C).
+        self._maybe_refresh_conditioning()
 
     def _update_patch_info(self):
         if not self.patches:
@@ -863,6 +882,153 @@ class Step15BackgroundCorrectionPage(QWidget):
 
     def _channel_has_cache(self, ch):
         return any(k[0] == ch for k in self._preview_cache)
+
+    # ── v13.1 Channel Conditioning / Remap (Phase 5f-a) ───────────────────
+    #  Pre-segmentation channel conditioning lives here in Step1.5 (alongside
+    #  background correction), NOT in Step3. It reuses the shared ChannelWorkbench
+    #  and Step1.5's own data path (self.loader + current patch + channel order).
+    #  Step3's ROI-acquisition context is deliberately not reused. Configs are
+    #  preview_only (step2_ready=false); Step2 still requires allow_preview_remap.
+
+    def _build_channel_conditioning_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 6, 6, 6)
+        note = QLabel(
+            "Step1.5 Channel Conditioning is pre-segmentation: adjust manual remap "
+            "(Min/Max/Brightness/Contrast/Gamma/Auto) on the current patch and save a "
+            "preview remap config for Step2. DAPI/nucleus is a reference layer only and "
+            "is never saved as a marker channel. Mask overlay is available only in Step3 "
+            "review/QC.")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            "color:#cdd;background:#202830;border:1px solid #2c3e50;"
+            "border-radius:4px;padding:4px;font-size:10px;")
+        lay.addWidget(note)
+
+        self._cond_workbench = ChannelWorkbench()
+        # The workbench is host-agnostic: it asks for data via refresh_requested
+        # and we feed it from Step1.5's own loader/patch (never Step3's context).
+        self._cond_workbench.refresh_requested.connect(self._sync_step15_to_workbench)
+        lay.addWidget(self._cond_workbench, stretch=1)
+
+        bar = QHBoxLayout()
+        btn_load = QPushButton('Load current patch channels')
+        btn_load.setToolTip("Pull the current Step1.5 patch's channels into the workbench.")
+        btn_load.clicked.connect(self._sync_step15_to_workbench)
+        bar.addWidget(btn_load)
+        btn_save = QPushButton('Save remap config (Step1.5)')
+        btn_save.setStyleSheet(
+            "QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}"
+            "QPushButton:hover{background:#377;}")
+        btn_save.clicked.connect(self._save_step15_remap_config)
+        bar.addWidget(btn_save)
+        bar.addStretch()
+        lay.addLayout(bar)
+        return w
+
+    def _on_s15_tab_changed(self, idx):
+        if not hasattr(self, "_s15_tabs"):
+            return
+        if self._s15_tabs.tabText(idx).startswith('Channel Conditioning') \
+                and hasattr(self, "_cond_workbench") \
+                and not self._cond_workbench.has_channel_data():
+            self._sync_step15_to_workbench()
+
+    def _maybe_refresh_conditioning(self):
+        """Re-feed the workbench from the current patch, only once it is in use."""
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            self._sync_step15_to_workbench()
+
+    def _read_step15_patch_channel(self, ch, normalize=False):
+        """Read one channel's current-patch array via Step1.5's own loader."""
+        if not self.loader or not self.patches:
+            return None
+        y0, y1, x0, x1 = self.patches[self.current_patch_idx]
+        arr = self.loader.read_region(ch, y0, y1, x0, x1, normalize=normalize)
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        return arr
+
+    def _sync_step15_to_workbench(self):
+        """Feed the workbench from Step1.5's loader + current patch + channel order.
+
+        Marker channels mirror self._channel_order (minus the locked nucleus/DAPI
+        channel). DAPI is supplied as a reference layer only — never a marker.
+        """
+        if not hasattr(self, "_cond_workbench"):
+            return
+        if not self.loader or not self.patches:
+            self._cond_workbench.clear_channel_images()
+            return
+
+        images, meta = {}, {}
+        for ch in self._channel_order:
+            if ch == self.nucleus_channel:
+                continue
+            try:
+                arr = self._read_step15_patch_channel(ch, normalize=False)
+                if arr is not None and arr.ndim == 2 and arr.size:
+                    images[ch] = arr
+                    meta[ch] = {"source": "step1_5_loader",
+                                "intensity_space": "raw_ome_native_float",
+                                "normalization": "none"}
+            except Exception as exc:
+                print(f"[Step1.5] conditioning: skip channel {ch}: {exc}")
+
+        source_policy = {
+            "source": "step1_5_loader",
+            "intensity_space": "raw_ome_native_float",
+            "normalization": "none",
+            "scope": "step1_5_pre_segmentation",
+            "preview_only": True,
+            "step2_ready": False,
+        }
+        self._cond_workbench.set_channel_images(
+            images,
+            context={"patch": self.current_patch_idx + 1, "step": "step1_5"},
+            source="manual", source_policy=source_policy, channel_metadata=meta)
+
+        # DAPI / nucleus channel: reference layer only (never a remap marker).
+        try:
+            dapi = self._read_step15_patch_channel(self.nucleus_channel, normalize=True)
+        except Exception as exc:
+            dapi = None
+            print(f"[Step1.5] conditioning: DAPI reference unavailable: {exc}")
+        self._cond_workbench.set_reference_layers(dapi=dapi)  # mask/fusion: post-seg only
+        print(f"[Step1.5] conditioning workbench synced: {len(images)} markers "
+              f"patch={self.current_patch_idx + 1}")
+
+    def _save_step15_remap_config(self):
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not wb.has_channel_data():
+            QMessageBox.information(
+                self, "Nothing to save",
+                "Load current patch channels and condition them first.")
+            return
+        cfg = wb.build_config()
+        # Provenance: this config was created in Step1.5 pre-segmentation. It stays
+        # preview_only / step2_ready=false (set via the workbench source_policy).
+        cfg["created_from_step"] = "step1_5_channel_conditioning"
+        out_dir = os.path.join(self.output_dir or OUTPUT_DIR, "channel_remap_configs")
+        os.makedirs(out_dir, exist_ok=True)
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default = os.path.join(out_dir, f"step1_5_channel_remap_{ts}.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Step1.5 remap config", default, "JSON (*.json)")
+        if not path:
+            return
+        try:
+            save_channel_remap_config(cfg, path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Saved",
+            f"Saved preview remap config (preview_only, step2_ready=false):\n{path}")
 
     def _show_current_channel(self):
         ch = self.current_channel

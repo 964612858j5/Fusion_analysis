@@ -677,3 +677,126 @@ def test_channel_order_preserved_not_alphabetical(workbench):
     assert workbench._names == ["CK19", "CD68", "CD3D", "CD163", "AFP"]
     cfg = workbench.build_config()
     assert list(cfg["channels"].keys()) == ["CK19", "CD68", "CD3D", "CD163", "AFP"]
+
+
+# ── Phase 5f-a: Channel Conditioning moved to Step1.5 ────────────────────────
+
+class _FakeLoader:
+    """Minimal OMETIFFLoader stand-in for Step1.5 conditioning tests."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def channel_names(self):
+        return list(self._names)
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1,
+                    correction_config=None, normalize=True):
+        rng = np.random.default_rng(abs(hash(ch)) % 10000)
+        a = rng.random((y1 - y0, x1 - x0)).astype(np.float32)
+        return a if normalize else (a * 1000.0).astype(np.float32)
+
+
+def _make_step15(app, tmp_path, names=("DAPI", "CD45", "CK19", "CD68")):
+    from block01.ui.step1_5_bg_page import Step15BackgroundCorrectionPage
+    page = Step15BackgroundCorrectionPage()
+    loader = _FakeLoader(names)
+    patches = [(0, 32, 0, 32), (0, 32, 32, 64)]
+    page.set_context(loader, str(tmp_path), patches, "DAPI")
+    return page
+
+
+def test_step15_exposes_channel_conditioning_tab(app, tmp_path):
+    page = _make_step15(app, tmp_path)
+    assert hasattr(page, "_cond_workbench")
+    titles = [page._s15_tabs.tabText(i) for i in range(page._s15_tabs.count())]
+    assert "Background Correction" in titles
+    assert any("Channel Conditioning" in t for t in titles)
+
+
+def test_step15_background_correction_still_present(app, tmp_path):
+    # Part F: existing background-correction widgets/methods are not removed.
+    page = _make_step15(app, tmp_path)
+    assert hasattr(page, "_tophat_slider") and hasattr(page, "_cucim_slider")
+    assert hasattr(page, "_show_current_channel")
+    assert hasattr(page, "_apply_current_channel_decision")
+
+
+def test_step15_workbench_mirrors_channel_order_excluding_dapi(app, tmp_path):
+    page = _make_step15(app, tmp_path, names=("DAPI", "CD45", "CK19", "CD68"))
+    page._sync_step15_to_workbench()
+    # markers follow Step1.5 channel order, DAPI excluded (reference only)
+    assert page._cond_workbench._names == ["CD45", "CK19", "CD68"]
+    avail = page._cond_workbench.reference_layer_availability()
+    assert avail["dapi"] is True and avail["mask"] is False and avail["fusion"] is False
+
+
+def test_step15_dapi_not_a_marker_in_saved_config(app, tmp_path):
+    page = _make_step15(app, tmp_path)
+    page._sync_step15_to_workbench()
+    cfg = page._cond_workbench.build_config()
+    assert "dapi" not in {c.lower() for c in cfg["channels"]}
+    assert set(cfg["channels"].keys()) == {"CD45", "CK19", "CD68"}
+
+
+def test_step15_saves_preview_config(app, tmp_path, monkeypatch):
+    from block01.utils.channel_remap_config import load_channel_remap_config
+    page = _make_step15(app, tmp_path)
+    page._sync_step15_to_workbench()
+    out = os.path.join(str(tmp_path), "channel_remap_configs", "cfg.json")
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QFileDialog.getSaveFileName",
+        lambda *a, **k: (out, "JSON (*.json)"))
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QMessageBox.information",
+        lambda *a, **k: None)
+    page._save_step15_remap_config()
+    assert os.path.isfile(out)
+    loaded = load_channel_remap_config(out)
+    assert loaded["created_from_step"] == "step1_5_channel_conditioning"
+    assert loaded["used_for"] == "segmentation_only"
+    sp = loaded["source_policy"]
+    assert sp["preview_only"] is True
+    assert sp["step2_ready"] is False
+    assert sp["scope"] == "step1_5_pre_segmentation"
+    assert "dapi" not in {c.lower() for c in loaded["channels"]}
+
+
+def test_step15_config_saved_under_channel_remap_configs_dir(app, tmp_path, monkeypatch):
+    page = _make_step15(app, tmp_path)
+    page._sync_step15_to_workbench()
+    captured = {}
+
+    def _fake_dialog(self, title, default, flt):
+        captured["default"] = default
+        return ("", "")  # user cancels -> nothing saved
+
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QFileDialog.getSaveFileName", _fake_dialog)
+    page._save_step15_remap_config()
+    assert os.path.join("channel_remap_configs") in captured["default"]
+    assert captured["default"].endswith(".json")
+
+
+def test_step15_workbench_follows_patch_switch(app, tmp_path):
+    page = _make_step15(app, tmp_path)
+    page._sync_step15_to_workbench()
+    assert page._cond_workbench._context.get("patch") == 1
+    page._select_patch(1)  # switch to second patch
+    assert page._cond_workbench._context.get("patch") == 2
+
+
+def test_step15_no_loader_clears_workbench(app, tmp_path):
+    from block01.ui.step1_5_bg_page import Step15BackgroundCorrectionPage
+    page = Step15BackgroundCorrectionPage()
+    page._sync_step15_to_workbench()  # no loader/patches -> graceful empty
+    assert page._cond_workbench.has_channel_data() is False
+
+
+def test_step3_workbench_tab_reframed_as_review(app):
+    from block01.ui.step3_page import Step3Page
+    page = Step3Page()
+    # Step3 keeps the workbench but it is now a review/QC surface.
+    assert hasattr(page, "_channel_workbench")
+    idx = getattr(page, "_cond_tab_index", -1)
+    assert idx >= 0

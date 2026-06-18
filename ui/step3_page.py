@@ -2255,8 +2255,12 @@ class Step3Page(QWidget):
         # the conditioning tab.
         self._channel_workbench.refresh_requested.connect(
             self._sync_step3_to_workbench)
+        # Phase 5f-a: creating remap configs now happens in Step1.5 (pre-Step2).
+        # Step3 keeps the workbench as a read/review surface, reframed accordingly.
+        # TODO(post-5f): make this tab read-only review-only once Step1.5 is the
+        # sole creation entry point.
         self._cond_tab_index = tabs.addTab(
-            self._channel_workbench, 'Channel Conditioning (v13.1)')
+            self._channel_workbench, 'Channel Remap Review / QC')
         tabs.currentChanged.connect(self._on_step3_tab_changed)
         self._tabs = tabs
         root.addWidget(tabs, stretch=1)

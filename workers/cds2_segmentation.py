@@ -30,6 +30,7 @@ from .lean_carve_segmentation import (
     _block_gi,
     _channel_keep,
     _finalize_block,
+    _align_remap_gate_to_reference,
 )
 from ..core.channel_remap import apply_channel_remap
 
@@ -85,6 +86,20 @@ def _make_cds2_carve(p):
             raw = get_block(name, sy0, sy0 + sh, sx0, sx0 + sw)
             if raw is None:
                 continue
+            # Phase 5d.1: when a manual remap gate is active the marker source can
+            # be on a slightly different grid than terr_mask. Align raw -> terr_mask
+            # (center-crop only) so cond, the gi gate AND the camp gi below all share
+            # the block geometry shape. Camp arbitration/thresholds are unchanged;
+            # only the input block shape is reconciled. Skipped entirely when remap
+            # is inactive/gi-only, so the legacy camp path is byte-for-byte unchanged.
+            if remap_params and gate_mode != "gi" and name in remap_params:
+                raw = _align_remap_gate_to_reference(
+                    raw, terr_mask, channel_name=name, context="cds2",
+                    gate_mode=gate_mode, block_coords=(sy0, sx0),
+                    extra_shapes={"terr_mask": terr_mask.shape,
+                                  "protect": protect.shape,
+                                  "outside": outside.shape,
+                                  "faces": faces.shape})
             # gi is ALWAYS computed: camp arbitration requires the native local-z
             # contrast map (doc 09 — manual remap must not replace _block_gi/camp).
             gi, uc = _block_gi(raw, terr_mask, gi_k, gi_bg_k, use_gpu)

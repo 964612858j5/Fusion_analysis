@@ -460,3 +460,106 @@ def test_step2_gui_status_label_reflects_selection(_step2):
     _step2._allow_preview_remap.setChecked(True)
     txt = _step2._remap_status_lbl.text()
     assert "config selected" in txt and "preview allowed" in txt and "gate=" in txt
+
+
+# ── Phase 5d.1: remap gate shape alignment hardening ─────────────────────────
+
+def _remap_params_for(name="PanCK"):
+    return {name: {"min": 300.0, "max": 8000.0, "brightness": 0.0,
+                   "contrast": 1.0, "gamma": 1.0}}
+
+
+def test_align_helper_same_shape_unchanged():
+    from block01.workers.lean_carve_segmentation import _align_remap_gate_to_reference
+    cond = np.arange(48 * 50, dtype=np.float32).reshape(48, 50)
+    ref = np.zeros((48, 50), dtype=bool)
+    out = _align_remap_gate_to_reference(cond, ref)
+    assert out is cond  # untouched, same object
+
+
+def test_align_helper_center_crops_larger_cond():
+    from block01.workers.lean_carve_segmentation import _align_remap_gate_to_reference
+    cond = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
+    ref = np.zeros((4, 6), dtype=bool)
+    out = _align_remap_gate_to_reference(cond, ref, channel_name="CD68")
+    assert out.shape == (4, 6)
+    # center crop: rows 2..6, cols 1..7 of the 8x8 source
+    np.testing.assert_array_equal(out, cond[2:6, 1:7])
+    # values are not altered, only cropped
+    assert out.dtype == cond.dtype
+
+
+def test_align_helper_raises_when_cond_smaller():
+    from block01.workers.lean_carve_segmentation import _align_remap_gate_to_reference
+    cond = np.zeros((10, 10), dtype=np.float32)
+    ref = np.zeros((12, 10), dtype=bool)
+    with pytest.raises(ValueError) as exc:
+        _align_remap_gate_to_reference(
+            cond, ref, channel_name="CD68", gate_mode="remap_and_gi",
+            block_coords=(0, 0), extra_shapes={"terr_mask": ref.shape})
+    msg = str(exc.value)
+    assert "CD68" in msg and "remap_and_gi" in msg
+    assert "(10, 10)" in msg and "(12, 10)" in msg  # cond + reference shapes
+
+
+def test_align_helper_raises_when_mixed_one_dim_smaller():
+    from block01.workers.lean_carve_segmentation import _align_remap_gate_to_reference
+    # larger in rows, smaller in cols -> cannot crop safely -> raise
+    cond = np.zeros((20, 8), dtype=np.float32)
+    ref = np.zeros((16, 10), dtype=bool)
+    with pytest.raises(ValueError):
+        _align_remap_gate_to_reference(cond, ref)
+
+
+def _oversized_loader(pad=24):
+    """Callable marker loader that returns blocks LARGER than requested, mimicking
+    a native/corrected source on a different pixel grid than the nuclei labels."""
+    nuclei, marker = _two_cells()  # 96x96
+    h, w = marker.shape
+    big = np.full((h + pad, w + pad), 200.0, dtype=np.float32)
+    big[pad // 2:pad // 2 + h, pad // 2:pad // 2 + w] = marker
+    def getter(name, y0, y1, x0, x1):
+        return big.copy()  # ignore coords -> oversized block every call
+    return nuclei, getter
+
+
+def test_lean_carve_remap_gate_aligns_oversized_block():
+    from block01.workers.lean_carve_segmentation import run_lean_carve_segmentation
+    nuclei, loader = _oversized_loader()
+    params = _base_params(_channel_remap_params=_remap_params_for("PanCK"),
+                          _remap_gate_mode="remap", _remap_gate_threshold=0.05)
+    # Without alignment this raised: operands could not be broadcast together.
+    res = run_lean_carve_segmentation(nuclei, loader, ["PanCK"], params)
+    assert int(np.count_nonzero(res["final_labels"])) > 0
+    assert set(np.unique(res["final_labels"])) >= {0, 1, 2}
+
+
+def test_lean_carve_remap_and_gi_aligns_oversized_block():
+    from block01.workers.lean_carve_segmentation import run_lean_carve_segmentation
+    nuclei, loader = _oversized_loader()
+    params = _base_params(_channel_remap_params=_remap_params_for("PanCK"),
+                          _remap_gate_mode="remap_and_gi", _remap_gate_threshold=0.05)
+    res = run_lean_carve_segmentation(nuclei, loader, ["PanCK"], params)
+    assert int(np.count_nonzero(res["final_labels"])) > 0
+
+
+def test_cds2_remap_gate_aligns_oversized_block():
+    from block01.workers.cds2_segmentation import run_cds2_segmentation
+    nuclei, loader = _oversized_loader()
+    params = _base_params(cytoplasm_engine="cds2",
+                          _channel_remap_params=_remap_params_for("PanCK"),
+                          _remap_gate_mode="remap", _remap_gate_threshold=0.05)
+    res = run_cds2_segmentation(nuclei, loader, ["PanCK"], params)
+    assert int(np.count_nonzero(res["final_labels"])) > 0
+
+
+def test_gi_mode_unchanged_with_remap_params_present():
+    # gate_mode="gi" -> remap is inactive; result must equal the no-remap baseline.
+    from block01.workers.lean_carve_segmentation import run_lean_carve_segmentation
+    nuclei, marker = _two_cells()
+    baseline = run_lean_carve_segmentation(nuclei, [marker], ["PanCK"], _base_params())
+    gi_mode = run_lean_carve_segmentation(
+        nuclei, [marker], ["PanCK"],
+        _base_params(_channel_remap_params=_remap_params_for("PanCK"),
+                     _remap_gate_mode="gi", _remap_gate_threshold=0.05))
+    assert np.array_equal(baseline["final_labels"], gi_mode["final_labels"])

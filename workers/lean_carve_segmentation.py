@@ -141,6 +141,63 @@ def _channel_keep(gi, terr_mask, outside, faces, protect, tau):
     return (terr_mask & ~(terr_mask & reached)) | (protect & terr_mask)
 
 
+# v13.1 Phase 5d.1 — remap gate shape alignment. The manual-remap marker source
+# (native/corrected, normalize=False) can be read on a slightly different pixel
+# grid than the nuclei-derived block geometry (terr_mask/gi/protect/faces). When
+# the gate source block is larger, center-crop it to the trusted geometry shape;
+# never resize, pad, or alter intensities. One log line per run keeps it quiet.
+_ALIGN_LOG_STATE = {"logged": False}
+
+
+def _center_crop_to(arr, th, tw):
+    """Center-crop a 2D array to (th, tw). Caller guarantees arr is >= target."""
+    h, w = arr.shape[:2]
+    y0 = (h - th) // 2
+    x0 = (w - tw) // 2
+    return arr[y0:y0 + th, x0:x0 + tw]
+
+
+def _align_remap_gate_to_reference(cond, reference, *, channel_name="", context="",
+                                   gate_mode="", block_coords=None,
+                                   extra_shapes=None):
+    """Align a remap gate source (`cond`) to the trusted geometry `reference`.
+
+    Direction is one-way: cond -> reference. The reference is the existing
+    lean_carve block geometry (terr_mask / gi), which the legacy gi gate already
+    runs against, so it is the trusted shape. Behavior:
+
+        cond.shape == reference.shape            -> return cond unchanged
+        cond >= reference in BOTH dims           -> center-crop cond, return it
+        cond smaller than reference in any dim   -> raise ValueError (diagnostic)
+
+    Never resize/interpolate, never pad, never change intensity values.
+    """
+    rh, rw = reference.shape[:2]
+    ch, cw = cond.shape[:2]
+    if (ch, cw) == (rh, rw):
+        return cond
+
+    diag = (f"channel={channel_name!r} context={context!r} gate_mode={gate_mode!r} "
+            f"block_coords={block_coords} raw/cond_shape={tuple(cond.shape)} "
+            f"reference_shape={tuple(reference.shape)}")
+    if extra_shapes:
+        diag += " " + " ".join(f"{k}_shape={tuple(v)}" for k, v in extra_shapes.items())
+
+    if ch >= rh and cw >= rw:
+        aligned = _center_crop_to(cond, rh, rw)
+        if not _ALIGN_LOG_STATE["logged"]:
+            _ALIGN_LOG_STATE["logged"] = True
+            print(f"[Step2-Remap] gate shape aligned channel={channel_name} "
+                  f"raw={tuple(cond.shape)} cond={tuple(cond.shape)} "
+                  f"reference={tuple(reference.shape)} aligned={tuple(aligned.shape)} "
+                  f"mode={gate_mode}")
+        return aligned
+
+    raise ValueError(
+        "remap gate source smaller than block geometry; cannot align by cropping "
+        "(refusing to pad/resize). " + diag)
+
+
 def _finalize_block(kept, terr, sub_nuclei, minimal, protect, separate_px,
                     y0, y1, x0, x1, sy0, sx0):
     """Connect-to-seed, inter-cell gap, nucleus reassert; return interior crop."""
@@ -198,6 +255,17 @@ def _carve_block(
             continue
         use_remap = bool(remap_params) and name in remap_params and gate_mode != "gi"
         if use_remap:
+            # Align the gate source block to the trusted block geometry shape
+            # (terr_mask) BEFORE remap/keep so cond — and, for remap_and_gi, gi —
+            # are spatially consistent with terr_mask/outside/faces/protect.
+            # Direction is cond -> reference only; geometry is never reshaped.
+            raw = _align_remap_gate_to_reference(
+                raw, terr_mask, channel_name=name, context="lean_carve",
+                gate_mode=gate_mode, block_coords=(sy0, sx0),
+                extra_shapes={"terr_mask": terr_mask.shape,
+                              "protect": protect.shape,
+                              "outside": outside.shape,
+                              "faces": faces.shape})
             cond = apply_channel_remap(raw, remap_params[name])
             keep = _channel_keep(cond, terr_mask, outside, faces, protect, gate_thr)
             if gate_mode == "remap_and_gi":
@@ -275,6 +343,7 @@ def _run_streaming(
     gi_bg_k = max(gi_k + 2, int(p.get("gi_background_kernel_size", 31) or 31))
     use_gpu = str(p.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
     remap_params, gate_mode, gate_thr = resolve_remap_gate(p)
+    _ALIGN_LOG_STATE["logged"] = False  # one gate-align log line per run
 
     if output_labels is None:
         out = np.zeros(nuclei.shape, dtype=np.uint32)

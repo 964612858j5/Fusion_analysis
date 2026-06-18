@@ -73,6 +73,11 @@ from .hq2_marker_segmentation import (
     run_hq2_segmentation,
     write_hq2_qc_table,
 )
+from .hq_source_resolver import (
+    resolve_hq_marker_source,
+    open_hq_channel_group,
+    channel_array_names as _resolver_channel_array_names,
+)
 from .constrained_donut_segmentation import (
     csd_metadata_fields,
     run_constrained_donut_segmentation,
@@ -1285,56 +1290,22 @@ class SegmentMergeWorker(QThread):
         return {str(name) for name in names if str(name or "").strip()}
 
     def _open_hq_channel_group(self, roi_name=None):
-        path = self._multichannel_source_path()
-        if not path or not os.path.exists(path):
-            raw_path = self._raw_channel_source_path()
-            if raw_path:
-                self._hq_resolved_source_path = raw_path
-                return {"kind": "raw_ome", "path": raw_path, "loader": OMETIFFLoader(raw_path)}
-            raise FileNotFoundError(
-                "Cellpose nuclei + HQ requires corrected_channels.zarr or raw OME channel source, but neither was found.\n"
-                f"Requested HQ source: {path or '(none)'}\n"
-                f"Resolved raw source: {raw_path or '(none)'}\n"
-                f"loaded param_file path: {self.param_file or '(none)'}"
-            )
-        self._hq_resolved_source_path = self._abs(path)
-        root = zarr.open(path, mode="r")
-        mode = str(root.attrs.get("mode", "")).strip().lower()
-        if mode == "roi_only":
-            groups = self._group_keys(root)
-            requested_roi_id = str(self.seg_config.get("roi_id") or self.roi_id or "")
-            requested_names = self._requested_roi_names(roi_name)
-            for group_name in groups:
-                group = root[group_name]
-                if requested_roi_id and str(group.attrs.get("roi_id") or "") == requested_roi_id:
-                    return group
-            for group_name in groups:
-                group = root[group_name]
-                group_names = {
-                    str(group_name),
-                    str(group.attrs.get("roi_name") or ""),
-                    str(group.attrs.get("display_name") or ""),
-                    str(group.attrs.get("roi_display_name") or ""),
-                }
-                if requested_names and requested_names & {name for name in group_names if name}:
-                    return group
-            raise ValueError(
-                "Could not match ROI group in corrected_channels.zarr for HQ segmentation.\n"
-                f"Found corrected_channels.zarr at: {path}\n"
-                f"Requested ROI id: {requested_roi_id or '(none)'}\n"
-                f"Requested ROI name(s): {sorted(requested_names) if requested_names else '(none)'}\n"
-                f"Available groups: {groups}\n"
-                f"Available channels per group: {json.dumps(self._available_groups_debug(root), indent=2, default=str)}"
-            )
-        return root
+        # Step A (initial corrected-vs-raw choice + ROI-group match) is defined
+        # once in hq_source_resolver.open_hq_channel_group. The worker keeps its
+        # own side effect: tracking the resolved source path. No missing-channel
+        # fallback here (that is Step B, only in _validate_hq_config).
+        group, _kind, source_path = open_hq_channel_group(
+            multichannel_source_path=self._multichannel_source_path(),
+            raw_channel_source_path=self._raw_channel_source_path(),
+            roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
+            requested_roi_names=self._requested_roi_names(roi_name),
+            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader)
+        self._hq_resolved_source_path = source_path
+        return group
 
     @staticmethod
     def _channel_array_names(group):
-        if isinstance(group, dict) and group.get("kind") == "raw_ome":
-            return group["loader"].channel_names()
-        if hasattr(group, "array_keys"):
-            return list(group.array_keys())
-        return [k for k in group.keys() if hasattr(group[k], "shape")]
+        return _resolver_channel_array_names(group)
 
     def _validate_hq_config(self, roi_name=None):
         mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source").strip()
@@ -1345,37 +1316,35 @@ class SegmentMergeWorker(QThread):
         requested = parse_hq_channels(self.seg_config.get("hq_channels") or [])
         fusion_weights = dict(self.seg_config.get("step1_fusion_weights") or self.seg_config.get("channel_weights") or {})
         channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in fusion_weights.items() if float(w or 0) > 0]
-        group = self._open_hq_channel_group(roi_name)
-        available = self._channel_array_names(group)
-        source_path = self._hq_resolved_source_path or self._multichannel_source_path() or self._raw_channel_source_path()
-        resolved, missing, warnings = resolve_hq_channels(channels, available)
-        if missing and not (isinstance(group, dict) and group.get("kind") == "raw_ome"):
-            raw_path = self._raw_channel_source_path()
-            if raw_path:
-                try:
-                    raw_loader = OMETIFFLoader(raw_path)
-                    raw_available = raw_loader.channel_names()
-                    raw_resolved, raw_missing, raw_warnings = resolve_hq_channels(channels, raw_available)
-                    if not raw_missing:
-                        print(
-                            "[Step2-HQ] corrected zarr missing requested channels; "
-                            f"falling back to raw OME channel source: {raw_path}"
-                        )
-                        group = {"kind": "raw_ome", "path": raw_path, "loader": raw_loader}
-                        available = raw_available
-                        source_path = self._abs(raw_path)
-                        self._hq_resolved_source_path = source_path
-                        resolved, missing, warnings = raw_resolved, raw_missing, raw_warnings
-                except Exception as exc:
-                    print(f"[Step2-HQ] failed to inspect raw OME fallback source {raw_path}: {exc}")
-        root_attrs = {}
-        if source_path and os.path.exists(source_path) and str(source_path).endswith(".zarr"):
-            try:
-                root_attrs = dict(zarr.open(source_path, mode="r").attrs)
-            except Exception:
-                root_attrs = {}
-        group_name = "raw_ome" if isinstance(group, dict) else (getattr(group, "name", "") or "")
-        group_attrs = {} if isinstance(group, dict) else dict(getattr(group, 'attrs', {}))
+        # Source DECISION (Step A initial choice + Step B corrected->raw whole-source
+        # fallback) is delegated to the shared pure resolver. The worker keeps every
+        # side effect: _hq_resolved_source_path tracking, the [Step2-HQ] debug prints,
+        # validate_hq_channels raises and seg_config mutation, all below — identical.
+        resolved_source = resolve_hq_marker_source(
+            requested_channels=channels,
+            multichannel_source_path=self._multichannel_source_path(),
+            raw_channel_source_path=self._raw_channel_source_path(),
+            roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
+            requested_roi_names=self._requested_roi_names(roi_name),
+            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader)
+        group = resolved_source.group
+        available = resolved_source.available_channels
+        source_path = resolved_source.source_path
+        resolved = resolved_source.resolved_channels
+        missing = resolved_source.missing_channels
+        warnings = resolved_source.warnings
+        self._hq_resolved_source_path = source_path
+        if resolved_source.fallback_error:
+            print(f"[Step2-HQ] failed to inspect raw OME fallback source "
+                  f"{self._raw_channel_source_path()}: {resolved_source.fallback_error}")
+        elif resolved_source.fell_back_to_raw:
+            print(
+                "[Step2-HQ] corrected zarr missing requested channels; "
+                f"falling back to raw OME channel source: {source_path}"
+            )
+        root_attrs = resolved_source.root_attrs
+        group_name = resolved_source.group_name
+        group_attrs = resolved_source.group_attrs
         context = (
             "HQ source debug:\n"
             f"  loaded param_file path: {self.param_file or '(none)'}\n"

@@ -800,3 +800,84 @@ def test_step3_workbench_tab_reframed_as_review(app):
     assert hasattr(page, "_channel_workbench")
     idx = getattr(page, "_cond_tab_index", -1)
     assert idx >= 0
+
+
+# ── Phase 5f-a.1: honest Step1.5 metadata + host-action cleanup ────────────
+
+def _step15_saved_config(app, tmp_path, monkeypatch):
+    """Save a Step1.5 conditioning config and return the loaded dict."""
+    from block01.utils.channel_remap_config import load_channel_remap_config
+    page = _make_step15(app, tmp_path)
+    page._sync_step15_to_workbench()
+    out = os.path.join(str(tmp_path), "channel_remap_configs", "cfg.json")
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QFileDialog.getSaveFileName",
+        lambda *a, **k: (out, "JSON (*.json)"))
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QMessageBox.information", lambda *a, **k: None)
+    page._save_step15_remap_config()
+    return load_channel_remap_config(out)
+
+
+def test_step15_source_policy_is_honest_unverified(app, tmp_path, monkeypatch):
+    cfg = _step15_saved_config(app, tmp_path, monkeypatch)
+    sp = cfg["source_policy"]
+    assert cfg["created_from_step"] == "step1_5_channel_conditioning"
+    assert sp["preview_only"] is True
+    assert sp["step2_ready"] is False
+    assert sp["calibration_source_matches_step2"] is False
+    assert sp["source_alignment_mode"] == "partial_or_preview_fallback"
+    assert sp["step2_pre_remap_source"] == "unknown"
+
+
+def test_step15_per_channel_metadata_is_honest(app, tmp_path, monkeypatch):
+    cfg = _step15_saved_config(app, tmp_path, monkeypatch)
+    assert cfg["channels"]
+    for name, params in cfg["channels"].items():
+        assert params["step2_compatible"] is False, name
+        assert params["calibration_source_matches_step2"] is False, name
+        assert params["step2_pre_remap_source"] == "unknown", name
+
+
+def test_step15_config_passes_basic_but_rejected_by_step2(app, tmp_path, monkeypatch):
+    from block01.utils.channel_remap_config import (
+        validate_channel_remap_config, validate_step2_remap_config)
+    cfg = _step15_saved_config(app, tmp_path, monkeypatch)
+    # Well-formed: the basic validator accepts it (not malformed JSON).
+    assert validate_channel_remap_config(cfg) == []
+    # Step2 runtime validation rejects it even with allow_preview_remap=True,
+    # and the rejection is about unverified source alignment, not structure.
+    errors, resolved = validate_step2_remap_config(cfg, allow_preview_remap=True)
+    assert errors and resolved == {}
+    blob = " ".join(errors).lower()
+    assert ("calibration_source_matches_step2" in blob
+            or "step2_pre_remap_source" in blob
+            or "source_alignment_mode" in blob)
+    assert "step2_compatible is false" in blob
+
+
+def test_step15_workbench_has_no_step3_button_text(app, tmp_path):
+    from PyQt5 import QtWidgets
+    page = _make_step15(app, tmp_path)
+    wb = page._cond_workbench
+    labels = [b.text() for b in wb.findChildren(QtWidgets.QPushButton)]
+    assert not any("Step3" in t for t in labels), labels
+    assert "Load current patch channels" in labels
+
+
+def test_step15_hides_generic_internal_save(app, tmp_path):
+    page = _make_step15(app, tmp_path)
+    wb = page._cond_workbench
+    # generic internal save hidden; Step1.5's own save button is the official path
+    assert wb._btn_save_internal.isHidden() is True
+
+
+def test_step3_workbench_keeps_default_host_actions(app):
+    from block01.ui.step3_page import Step3Page
+    from PyQt5 import QtWidgets
+    page = Step3Page()
+    wb = page._channel_workbench
+    labels = [b.text() for b in wb.findChildren(QtWidgets.QPushButton)]
+    assert "Load current Step3 ROI" in labels
+    assert "Save remap config…" in labels
+    assert wb._btn_save_internal.isHidden() is False

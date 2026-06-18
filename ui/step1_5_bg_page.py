@@ -909,6 +909,13 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._cond_workbench = ChannelWorkbench()
         # The workbench is host-agnostic: it asks for data via refresh_requested
         # and we feed it from Step1.5's own loader/patch (never Step3's context).
+        # Retune its generic actions so no button names Step3 here, and hide the
+        # generic internal save — Step1.5's "Save remap config (Step1.5)" below is
+        # the only official save path (it stamps the honest preview provenance).
+        self._cond_workbench.configure_host_actions(
+            refresh_label="Load current patch channels",
+            refresh_tooltip="Pull the current Step1.5 patch's channels into the workbench.",
+            show_internal_save=False)
         self._cond_workbench.refresh_requested.connect(self._sync_step15_to_workbench)
         lay.addWidget(self._cond_workbench, stretch=1)
 
@@ -972,12 +979,28 @@ class Step15BackgroundCorrectionPage(QWidget):
                 arr = self._read_step15_patch_channel(ch, normalize=False)
                 if arr is not None and arr.ndim == 2 and arr.size:
                     images[ch] = arr
-                    meta[ch] = {"source": "step1_5_loader",
-                                "intensity_space": "raw_ome_native_float",
-                                "normalization": "none"}
+                    # Honest per-channel provenance: calibrated from the Step1.5
+                    # patch, NOT proven to match the source Step2 will read.
+                    # step2_pre_remap_source="unknown" makes Step2 validation
+                    # self-reject structurally (it is in _NON_STEP2_INTENSITY_SPACES)
+                    # until 2.1c source-path/shape/intensity verification lands.
+                    meta[ch] = {
+                        "source": "step1_5_loader",
+                        "intensity_space": "raw_ome_native_float",
+                        "normalization": "none",
+                        "step2_compatible": False,
+                        "step2_pre_remap_source": "unknown",
+                        "calibration_source_matches_step2": False,
+                        "fallback_reason": "step1_5_preview_source_unverified",
+                    }
             except Exception as exc:
                 print(f"[Step1.5] conditioning: skip channel {ch}: {exc}")
 
+        # Honest top-level alignment policy. preview_only + step2_ready=false plus
+        # calibration_source_matches_step2=false and source_alignment_mode=
+        # partial_or_preview_fallback all force Step2 validation to reject this
+        # config even with allow_preview_remap=True. Promotion to Step2-ready is a
+        # later 2.1c phase (real source path / shape / intensity-space check).
         source_policy = {
             "source": "step1_5_loader",
             "intensity_space": "raw_ome_native_float",
@@ -985,6 +1008,14 @@ class Step15BackgroundCorrectionPage(QWidget):
             "scope": "step1_5_pre_segmentation",
             "preview_only": True,
             "step2_ready": False,
+            "step2_pre_remap_source": "unknown",
+            "calibration_source_matches_step2": False,
+            "source_alignment_mode": "partial_or_preview_fallback",
+            "alignment_note": (
+                "Step1.5 preview config calibrated from the current patch via "
+                "OMETIFFLoader. Source alignment with Step2 has not yet been "
+                "verified. This config must not be promoted to Step2-ready until "
+                "2.1c source path, shape, and intensity-space validation succeeds."),
         }
         self._cond_workbench.set_channel_images(
             images,

@@ -274,6 +274,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def _build_bottom_bar(self):
         bar = QtWidgets.QHBoxLayout()
+        # Host-refresh button. Default label/tooltip name Step3; a non-Step3 host
+        # (e.g. Step1.5) overrides them via configure_host_actions so the widget
+        # text never lies about where its data comes from.
         btn_step3 = QtWidgets.QPushButton("Load current Step3 ROI")
         btn_step3.setToolTip(
             "Pull the channels currently loaded in Step3's QC viewer "
@@ -282,6 +285,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             "QPushButton{background:#2c3e50;color:#cde;border-radius:3px;padding:4px;}"
             "QPushButton:hover{background:#34495e;}")
         btn_step3.clicked.connect(self.refresh_requested.emit)
+        self._btn_host_refresh = btn_step3
         bar.addWidget(btn_step3)
 
         btn_demo = QtWidgets.QPushButton("Load demo patch")
@@ -306,8 +310,33 @@ class ChannelWorkbench(QtWidgets.QWidget):
             "QPushButton:hover{background:#377;}"
         )
         btn_save.clicked.connect(self._on_save_config)
+        self._btn_save_internal = btn_save
         bar.addWidget(btn_save)
         return bar
+
+    def configure_host_actions(self, refresh_label=None, refresh_tooltip=None,
+                               show_internal_save=None):
+        """Adapt the generic bottom-bar actions to the hosting page.
+
+        The workbench is shared between Step3 (review/QC) and Step1.5
+        (pre-segmentation conditioning). The default button text names Step3;
+        a different host calls this so no label references the wrong stage and
+        so a host with its own save path can hide the generic internal save.
+
+        Parameters
+        ----------
+        refresh_label, refresh_tooltip : str, optional
+            Override the host-refresh button text / tooltip.
+        show_internal_save : bool, optional
+            When False, hide the generic "Save remap config…" button (the host
+            provides its own official save path).
+        """
+        if refresh_label is not None and hasattr(self, "_btn_host_refresh"):
+            self._btn_host_refresh.setText(str(refresh_label))
+        if refresh_tooltip is not None and hasattr(self, "_btn_host_refresh"):
+            self._btn_host_refresh.setToolTip(str(refresh_tooltip))
+        if show_internal_save is not None and hasattr(self, "_btn_save_internal"):
+            self._btn_save_internal.setVisible(bool(show_internal_save))
 
     # ── public API (host feeds data here) ─────────────────────────────
     def set_channel_images(self, channel_images, colors=None, context=None,

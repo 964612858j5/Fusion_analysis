@@ -28,6 +28,7 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_CSD,
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
+    is_hq2_csd_method,
     CELLPOSE_WHOLECELL_FUSION,
     MESMER_WHOLE_CELL,
     MESMER_NUCLEI,
@@ -77,6 +78,8 @@ from .hq_source_resolver import (
     resolve_hq_marker_source,
     open_hq_channel_group,
     channel_array_names as _resolver_channel_array_names,
+    SOURCE_MODE_CORRECTED_THEN_RAW,
+    SOURCE_MODE_RAW_ONLY,
 )
 from .constrained_donut_segmentation import (
     csd_metadata_fields,
@@ -148,6 +151,14 @@ class SegmentMergeWorker(QThread):
         self._last_region_meta = None
         self._current_region_bbox = None
         self._hq_resolved_source_path = ""
+        # 2.1c-b.1: HQ marker source policy, decided ONCE from the active algorithm
+        # (never from config-declared fields) and stored as the single source of
+        # truth every HQ2/CSD marker-open path must read. HQ2/CSD manual-remap
+        # defaults to raw_ome_only (corrected is never silently stacked in front of
+        # the manual remap); all other methods keep corrected_then_raw_fallback.
+        self._hq_source_mode = (
+            SOURCE_MODE_RAW_ONLY if is_hq2_csd_method(self.method)
+            else SOURCE_MODE_CORRECTED_THEN_RAW)
         self.write_tile_tiffs = self._config_bool("write_tile_tiffs", False)
         self.write_hq2_debug_layers = self._config_bool("write_hq2_debug_layers", False)
         self.write_hq2_debug_tiffs = self._config_bool("write_hq2_debug_tiffs", False)
@@ -1290,6 +1301,19 @@ class SegmentMergeWorker(QThread):
         return {str(name) for name in names if str(name or "").strip()}
 
     def _open_hq_channel_group(self, roi_name=None):
+        # HQ marker source policy is the single stored self._hq_source_mode. Under
+        # raw_ome_only (HQ2/CSD) resolve raw directly — corrected is never opened.
+        if self._hq_source_mode == SOURCE_MODE_RAW_ONLY:
+            res = resolve_hq_marker_source(
+                requested_channels=[],
+                multichannel_source_path="",  # corrected never touched under raw_ome_only
+                raw_channel_source_path=self._raw_channel_source_path(),
+                roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
+                requested_roi_names=self._requested_roi_names(roi_name),
+                param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader,
+                source_mode=SOURCE_MODE_RAW_ONLY)
+            self._hq_resolved_source_path = res.source_path
+            return res.group
         # Step A (initial corrected-vs-raw choice + ROI-group match) is defined
         # once in hq_source_resolver.open_hq_channel_group. The worker keeps its
         # own side effect: tracking the resolved source path. No missing-channel
@@ -1326,7 +1350,8 @@ class SegmentMergeWorker(QThread):
             raw_channel_source_path=self._raw_channel_source_path(),
             roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
             requested_roi_names=self._requested_roi_names(roi_name),
-            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader)
+            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader,
+            source_mode=self._hq_source_mode)
         group = resolved_source.group
         available = resolved_source.available_channels
         source_path = resolved_source.source_path
@@ -1934,7 +1959,7 @@ class SegmentMergeWorker(QThread):
                               shape=(full_h, full_w))
         dapi_mmap[:] = 0
 
-        is_hq2 = self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+        is_hq2 = is_hq2_csd_method(self.method)
         is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
         is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
@@ -2799,7 +2824,7 @@ class SegmentMergeWorker(QThread):
                                   shape=(full_h, full_w))
             dapi_mmap[:] = 0
 
-            is_hq2 = self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+            is_hq2 = is_hq2_csd_method(self.method)
             is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
             is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
             is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided

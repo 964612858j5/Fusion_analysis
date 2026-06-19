@@ -314,6 +314,18 @@ SEGMENTATION_METHODS = {
 }
 
 
+def is_hq2_csd_method(method):
+    """HQ2/CSD manual-remap algorithm family.
+
+    Single predicate (2.1c-b.1) for the method-in-set test used by the worker
+    (``self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)``). The HQ marker
+    source policy and Step1.5 remap-config validity are derived from this family,
+    never from any config-declared field. Lives here (light module) so both the
+    worker and promotion can reuse it without importing the heavy worker.
+    """
+    return method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+
+
 def available_segmentation_methods():
     return list(SEGMENTATION_METHODS.keys())
 

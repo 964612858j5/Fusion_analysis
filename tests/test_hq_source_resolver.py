@@ -21,6 +21,9 @@ from block01.workers.hq_source_resolver import (
     ResolvedHQSource,
     RAW_OME_INTENSITY_SPACE,
     UNKNOWN_INTENSITY_SPACE,
+    SOURCE_MODE_CORRECTED_THEN_RAW,
+    SOURCE_MODE_RAW_ONLY,
+    SOURCE_MODE_CORRECTED_ONLY,
 )
 
 
@@ -164,16 +167,23 @@ def test_no_source_at_all_raises_filenotfound(tmp_path):
 
 # ── worker-delegation behavior preservation ────────────────────────────────
 
-def _worker_shell(monkeypatch, corrected_path, raw_path, raw_channels, hq_channels):
+def _worker_shell(monkeypatch, corrected_path, raw_path, raw_channels, hq_channels,
+                  method="cellpose_nuclei_hq"):
     """A SegmentMergeWorker built via __new__ with only the attrs _validate_hq_config
-    touches, and OMETIFFLoader monkeypatched to the fake loader."""
+    touches, OMETIFFLoader monkeypatched to the fake loader, and _hq_source_mode set
+    from the method exactly as __init__ would. Default method is a non-HQ2/CSD HQ
+    method (corrected_then_raw_fallback) so the corrected-path delegation behaves as
+    in 2.1c-a; pass a CSD/HQ2 method to exercise raw_ome_only."""
     from block01.workers import segment_merge_worker as smw
+    from block01.workers.hq_source_resolver import (
+        SOURCE_MODE_RAW_ONLY as _RAW, SOURCE_MODE_CORRECTED_THEN_RAW as _CR)
     _FakeOMELoader.REGISTRY[raw_path] = list(raw_channels)
     monkeypatch.setattr(smw, "OMETIFFLoader", _FakeOMELoader)
     w = smw.SegmentMergeWorker.__new__(smw.SegmentMergeWorker)
     w.seg_config = {"hq_channels": list(hq_channels),
                     "hq_input_mode": "selected_channels_from_source"}
-    w.method = "cellpose_nuclei_csd"
+    w.method = method
+    w._hq_source_mode = _RAW if smw.is_hq2_csd_method(method) else _CR
     w.roi_id = ""
     w.roi_display_name = ""
     w.param_file = ""
@@ -209,3 +219,109 @@ def test_worker_delegates_negative_raises_as_before(tmp_path, monkeypatch):
     w = _worker_shell(monkeypatch, cp, raw, ["DAPI", "CD45"], ["CD45", "CK19"])  # raw lacks CK19
     with pytest.raises(ValueError):  # validate_hq_channels raises on missing CK19
         w._validate_hq_config()
+
+
+# ── 2.1c-b.1: three-valued source_mode ──────────────────────────────────────
+
+def test_default_mode_resolves_corrected_when_complete(tmp_path):
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    res = _resolve(["CD45", "CK19"], cp, "",
+                   source_mode=SOURCE_MODE_CORRECTED_THEN_RAW)
+    assert res.kind == "corrected_zarr"
+    assert res.source_mode == SOURCE_MODE_CORRECTED_THEN_RAW
+    assert res.source_selected_by == "corrected_primary"
+    assert res.fell_back_to_raw is False
+
+
+def test_default_mode_corrected_missing_falls_back_to_raw(tmp_path):
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45"])  # no CK19
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _resolve(["CD45", "CK19"], cp, raw, raw_channels=["DAPI", "CD45", "CK19"],
+                   source_mode=SOURCE_MODE_CORRECTED_THEN_RAW)
+    assert res.kind == "raw_ome"
+    assert res.fell_back_to_raw is True
+    assert res.source_selected_by == "fallback"
+
+
+def test_raw_only_resolves_raw_even_when_corrected_complete(tmp_path):
+    # corrected exists AND is channel-complete; raw_ome_only must STILL pick raw.
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _resolve(["CD45", "CK19"], cp, raw, raw_channels=["DAPI", "CD45", "CK19"],
+                   source_mode=SOURCE_MODE_RAW_ONLY)
+    assert res.kind == "raw_ome"
+    assert res.source_path == os.path.abspath(raw)
+    assert res.fell_back_to_raw is False           # policy, not fallback
+    assert res.source_selected_by == "policy"
+    assert res.source_mode == SOURCE_MODE_RAW_ONLY
+    assert res.intensity_space == RAW_OME_INTENSITY_SPACE
+
+
+def test_raw_only_raw_missing_reports_missing_no_corrected_fallback(tmp_path):
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _resolve(["CD45", "CK19"], cp, raw, raw_channels=["DAPI", "CD45"],  # raw lacks CK19
+                   source_mode=SOURCE_MODE_RAW_ONLY)
+    assert res.kind == "raw_ome"          # never corrected
+    assert res.missing_channels == ["CK19"]
+    assert res.fell_back_to_raw is False
+
+
+def test_corrected_only_mode_raises_not_implemented(tmp_path):
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45"])
+    with pytest.raises(NotImplementedError) as exc:
+        _resolve(["CD45"], cp, "", source_mode=SOURCE_MODE_CORRECTED_ONLY)
+    assert "corrected_zarr_only" in str(exc.value)
+
+
+def test_unknown_source_mode_raises(tmp_path):
+    with pytest.raises(ValueError):
+        _resolve(["CD45"], "", "", source_mode="bogus_mode")
+
+
+# ── 2.1c-b.1: worker stores source_mode by algorithm (single source of truth) ─
+
+def test_is_hq2_csd_method_predicate():
+    from block01.workers import segment_merge_worker as smw
+    from block01.utils.segmentation_config import (
+        CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD, CELLPOSE_NUCLEI_HQ,
+        CELLPOSE_NUCLEI_DAPI)
+    assert smw.is_hq2_csd_method(CELLPOSE_NUCLEI_HQ2) is True
+    assert smw.is_hq2_csd_method(CELLPOSE_NUCLEI_CSD) is True
+    assert smw.is_hq2_csd_method(CELLPOSE_NUCLEI_HQ) is False
+    assert smw.is_hq2_csd_method(CELLPOSE_NUCLEI_DAPI) is False
+    assert smw.is_hq2_csd_method("mesmer_whole_cell") is False
+
+
+def test_worker_hq2_csd_uses_raw_only_even_if_corrected_complete(tmp_path, monkeypatch):
+    # corrected exists AND complete; CSD method must STILL resolve raw OME.
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    raw = str(tmp_path / "raw.ome.tiff")
+    w = _worker_shell(monkeypatch, cp, raw, ["DAPI", "CD45", "CK19"], ["CD45", "CK19"],
+                      method="cellpose_nuclei_csd")
+    assert w._hq_source_mode == SOURCE_MODE_RAW_ONLY
+    channels, group = w._validate_hq_config()
+    assert isinstance(group, dict) and group.get("kind") == "raw_ome"
+    assert w._hq_resolved_source_path == os.path.abspath(raw)
+
+
+def test_worker_non_hq2csd_uses_corrected_then_raw(tmp_path, monkeypatch):
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    raw = str(tmp_path / "raw.ome.tiff")
+    w = _worker_shell(monkeypatch, cp, raw, ["DAPI", "CD45", "CK19"], ["CD45", "CK19"],
+                      method="cellpose_nuclei_hq")
+    assert w._hq_source_mode == SOURCE_MODE_CORRECTED_THEN_RAW
+    channels, group = w._validate_hq_config()
+    assert w._hq_resolved_source_path == os.path.abspath(cp)  # corrected, unchanged
+
+
+def test_worker_open_hq_group_raw_only_ignores_corrected(tmp_path, monkeypatch):
+    # _open_hq_channel_group (used by mesmer path) must also honor raw_ome_only:
+    # a CSD-mode worker must not open corrected even when complete.
+    cp = _make_corrected_zarr(tmp_path / "corrected.zarr", ["DAPI", "CD45", "CK19"])
+    raw = str(tmp_path / "raw.ome.tiff")
+    w = _worker_shell(monkeypatch, cp, raw, ["DAPI", "CD45", "CK19"], ["CD45", "CK19"],
+                      method="cellpose_nuclei_csd")
+    group = w._open_hq_channel_group()
+    assert isinstance(group, dict) and group.get("kind") == "raw_ome"
+    assert w._hq_resolved_source_path == os.path.abspath(raw)

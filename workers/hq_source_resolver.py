@@ -35,6 +35,16 @@ from .hq_marker_segmentation import resolve_hq_channels
 RAW_OME_INTENSITY_SPACE = "raw_ome_native_float"
 UNKNOWN_INTENSITY_SPACE = "unknown"
 
+# ── source_mode: a structural property of the active Step2 ALGORITHM ──────────
+# (2.1c-b.1) The caller decides this from the algorithm family, never from any
+# config-declared field. It is NOT something a config self-asserts.
+SOURCE_MODE_CORRECTED_THEN_RAW = "corrected_then_raw_fallback"  # DEFAULT (non-HQ2/CSD, legacy)
+SOURCE_MODE_RAW_ONLY = "raw_ome_only"                           # HQ2/CSD manual-remap default
+SOURCE_MODE_CORRECTED_ONLY = "corrected_zarr_only"             # RESERVED — raises if called
+_VALID_SOURCE_MODES = {
+    SOURCE_MODE_CORRECTED_THEN_RAW, SOURCE_MODE_RAW_ONLY, SOURCE_MODE_CORRECTED_ONLY,
+}
+
 
 # ── group / channel-name helpers (the single definitions; the worker delegates) ──
 
@@ -99,6 +109,8 @@ class ResolvedHQSource:
     root_attrs: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     fallback_error: str = ""        # non-empty if raw-fallback inspection raised (swallowed, as before)
+    source_mode: str = SOURCE_MODE_CORRECTED_THEN_RAW  # the policy this resolution ran under
+    source_selected_by: str = ""    # "policy" (raw_ome_only) | "fallback" | "corrected_primary" | "raw_primary"
     _channel_shapes: dict = field(default_factory=dict)
 
     def channel_shape(self, name):
@@ -178,26 +190,68 @@ def open_hq_channel_group(*, multichannel_source_path, raw_channel_source_path,
     return root, "corrected_zarr", source_path
 
 
+def _resolve_raw_ome_only(requested, raw_channel_source_path, param_file,
+                          abs_fn, loader_factory):
+    """raw_ome_only (HQ2/CSD policy): resolve raw OME directly, never touch corrected.
+
+    corrected_channels.zarr is NOT opened or inspected. If raw cannot satisfy the
+    requested channels, the missing channels are reported (worker raises as today);
+    there is NO fallback to corrected. fell_back_to_raw stays False — raw is chosen
+    by policy, recorded as source_selected_by="policy".
+    """
+    if not raw_channel_source_path:
+        raise FileNotFoundError(
+            "HQ2/CSD manual-remap requires a raw OME channel source (source_mode="
+            "raw_ome_only), but none was found.\n"
+            f"loaded param_file path: {param_file or '(none)'}")
+    loader = loader_factory(raw_channel_source_path)
+    group = {"kind": "raw_ome", "path": raw_channel_source_path, "loader": loader}
+    available = channel_array_names(group)
+    resolved, missing, warnings = resolve_hq_channels(requested, available)
+    out = ResolvedHQSource(
+        kind="raw_ome",
+        source_path=abs_fn(raw_channel_source_path),
+        intensity_space=RAW_OME_INTENSITY_SPACE,
+        available_channels=list(available),
+        resolved_channels=list(resolved),
+        missing_channels=list(missing),
+        fell_back_to_raw=False,
+        group=group,
+        group_name="raw_ome",
+        group_attrs={},
+        root_attrs={},
+        warnings=list(warnings),
+        fallback_error="",
+        source_mode=SOURCE_MODE_RAW_ONLY,
+        source_selected_by="policy",
+    )
+    for ch in resolved:
+        out._channel_shapes[ch] = _channel_shape(group, ch)
+    return out
+
+
 def resolve_hq_marker_source(*, requested_channels, multichannel_source_path,
                              raw_channel_source_path, roi_id, requested_roi_names,
-                             param_file="", abs_fn=None, loader_factory=None):
-    """Resolve the final HQ marker source (Step A initial choice + Step B fallback).
+                             param_file="", abs_fn=None, loader_factory=None,
+                             source_mode=SOURCE_MODE_CORRECTED_THEN_RAW):
+    """Resolve the final HQ marker source under the given ``source_mode``.
 
-    Pure decision function. Reproduces BOTH historical steps:
+    ``source_mode`` is a structural property of the active Step2 algorithm, decided
+    by the caller (never from a config-declared field):
 
-      A. corrected_channels.zarr present/matching -> corrected_zarr;
-         else raw OME present -> raw_ome; else raise FileNotFoundError.
-      B. corrected chosen but missing a requested channel AND raw OME resolves ALL
-         requested channels -> fall back the WHOLE source to raw OME
-         (fell_back_to_raw=True). If raw also misses a requested channel, do NOT
-         fall back: keep corrected and report ``missing_channels`` so the worker
-         raises exactly as before (failure is never swallowed).
+      - corrected_then_raw_fallback (DEFAULT): Step A initial corrected-vs-raw
+        choice + Step B corrected-missing-channel -> raw whole-source fallback.
+        Byte-for-byte the 2.1c-a behavior.
+      - raw_ome_only: resolve raw OME directly; corrected is never opened; no
+        fallback to corrected; fell_back_to_raw=False, source_selected_by="policy".
+      - corrected_zarr_only: RESERVED — raises NotImplementedError (no partial
+        implementation; no automatic caller selects it in this phase).
 
-    Parameters mirror the candidate paths the worker already discovered via
-    ``_multichannel_source_path`` / ``_raw_channel_source_path``; this resolver does
-    NOT re-implement path discovery. ``requested_channels`` is required: source
-    identity cannot be resolved without the requested HQ channel list.
+    ``requested_channels`` is required: source identity cannot be resolved without it.
     """
+    if source_mode not in _VALID_SOURCE_MODES:
+        raise ValueError(f"unknown source_mode {source_mode!r}; "
+                         f"valid: {sorted(_VALID_SOURCE_MODES)}")
     if requested_channels is None:
         raise ValueError(
             "resolve_hq_marker_source requires requested_channels; HQ source "
@@ -210,6 +264,17 @@ def resolve_hq_marker_source(*, requested_channels, multichannel_source_path,
 
     requested = [str(ch).strip() for ch in requested_channels if str(ch).strip()]
 
+    if source_mode == SOURCE_MODE_CORRECTED_ONLY:
+        raise NotImplementedError(
+            "source_mode='corrected_zarr_only' is reserved for a future explicit "
+            "HQ2/CSD mode in which Step1.5 calibrates on the SAME corrected source "
+            "Step2 reads. It is not implemented; no automatic path selects it.")
+
+    if source_mode == SOURCE_MODE_RAW_ONLY:
+        return _resolve_raw_ome_only(
+            requested, raw_channel_source_path, param_file, abs_fn, loader_factory)
+
+    # ── corrected_then_raw_fallback (default, legacy) ──
     # ── Step A ──
     group, kind, source_path = open_hq_channel_group(
         multichannel_source_path=multichannel_source_path,
@@ -247,6 +312,12 @@ def resolve_hq_marker_source(*, requested_channels, multichannel_source_path,
             root_attrs = {}
     group_name = "raw_ome" if isinstance(group, dict) else (getattr(group, "name", "") or "")
     group_attrs = {} if isinstance(group, dict) else dict(getattr(group, "attrs", {}))
+    if fell_back:
+        selected_by = "fallback"
+    elif kind == "raw_ome":
+        selected_by = "raw_primary"   # corrected absent -> raw chosen as initial source
+    else:
+        selected_by = "corrected_primary"
 
     out = ResolvedHQSource(
         kind=kind,
@@ -262,6 +333,8 @@ def resolve_hq_marker_source(*, requested_channels, multichannel_source_path,
         root_attrs=root_attrs,
         warnings=list(warnings),
         fallback_error=fallback_error,
+        source_mode=SOURCE_MODE_CORRECTED_THEN_RAW,
+        source_selected_by=selected_by,
     )
     for ch in resolved:
         out._channel_shapes[ch] = _channel_shape(group, ch)

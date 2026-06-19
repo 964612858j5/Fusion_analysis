@@ -16,9 +16,11 @@ import zarr
 from block01.utils.remap_promotion import (
     promote_step1_5_config_for_step2,
     PROMOTION_CREATED_FROM,
+    NON_HQ2_CSD_REFUSAL,
 )
 from block01.utils.channel_remap_config import validate_step2_remap_config
-from block01.workers.hq_source_resolver import resolve_hq_marker_source
+from block01.workers.hq_source_resolver import (
+    resolve_hq_marker_source, SOURCE_MODE_RAW_ONLY)
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -276,8 +278,8 @@ def test_cli_end_to_end_promotes(tmp_path, monkeypatch):
     _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
     _FakeOME.SHAPES[raw] = (16, 24)
     monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
-    seg = {"hq_channels": ["CD45", "CK19"], "raw_ome_path": raw,
-           "step2_input_shape": [16, 24]}
+    seg = {"method": "cellpose_nuclei_csd", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw, "step2_input_shape": [16, 24]}
     seg_path = tmp_path / "seg.json"
     seg_path.write_text(json.dumps(seg))
     prev_path = tmp_path / "step1_5_channel_remap_x.json"
@@ -299,7 +301,8 @@ def test_cli_end_to_end_refuses_without_geometry(tmp_path, monkeypatch):
     _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
     _FakeOME.SHAPES[raw] = (16, 24)
     monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
-    seg = {"hq_channels": ["CD45", "CK19"], "raw_ome_path": raw}  # no step2_input_shape
+    seg = {"method": "cellpose_nuclei_csd", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw}  # no step2_input_shape -> geometry refusal
     seg_path = tmp_path / "seg.json"
     seg_path.write_text(json.dumps(seg))
     prev_path = tmp_path / "prev.json"
@@ -308,3 +311,108 @@ def test_cli_end_to_end_refuses_without_geometry(tmp_path, monkeypatch):
                    "--out-dir", str(tmp_path)])
     assert rc == 2
     assert (tmp_path / "promotion_report.json").exists()
+
+
+# ── 2.1c-b.1: algorithm-derived source policy in promotion ───────────────────
+
+def _raw_only_resolved_with_complete_corrected(tmp_path, raw_path, channels,
+                                               shape=(16, 24)):
+    """Resolve under raw_ome_only WHILE a complete corrected_zarr also exists.
+
+    Proves the structural guarantee: a complete corrected_zarr does NOT divert an
+    HQ2/CSD (raw_ome_only) resolution away from raw OME.
+    """
+    import zarr
+    cp = str(tmp_path / "corrected.zarr")
+    root = zarr.open(cp, mode="w")
+    for name in channels:
+        root.create_dataset(name, data=np.zeros(shape, dtype=np.float32))
+    _FakeOME.REG[raw_path] = list(channels)
+    _FakeOME.SHAPES[raw_path] = shape
+    return resolve_hq_marker_source(
+        requested_channels=list(channels),
+        multichannel_source_path=cp,           # complete corrected present
+        raw_channel_source_path=raw_path,
+        roi_id="", requested_roi_names=set(),
+        abs_fn=os.path.abspath, loader_factory=_FakeOME,
+        source_mode=SOURCE_MODE_RAW_ONLY)
+
+
+def test_promotes_hq2_csd_even_with_complete_corrected(tmp_path):
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _raw_only_resolved_with_complete_corrected(tmp_path, raw, ["DAPI", "CD45", "CK19"])
+    assert res.kind == "raw_ome" and res.fell_back_to_raw is False  # raw by policy
+    preview = _preview(raw, [16, 24])
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, res, [16, 24], active_method="cellpose_nuclei_csd")
+    assert report["promoted"] is True and promoted is not None
+    sp = promoted["source_policy"]
+    assert sp["step2_ready_scope"] == "source_identity_only"
+    assert sp["representativeness_validated"] is False
+    errors, resolved = validate_step2_remap_config(promoted, allow_preview_remap=False)
+    assert errors == []
+    assert set(resolved) == {"CD45", "CK19"}
+
+
+def test_refuse_non_hq2csd_method(tmp_path):
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _raw_resolved(raw, ["CD45", "CK19"])
+    preview = _preview(raw, [16, 24])
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, res, [16, 24], active_method="cellpose_nuclei_dapi")
+    assert promoted is None
+    assert NON_HQ2_CSD_REFUSAL in report["failures"]
+
+
+def test_refuse_non_hq2csd_method_short_circuits_without_resolved(tmp_path):
+    # active_method gate fires before any source check; resolved_source may be None.
+    preview = _preview(str(tmp_path / "raw.ome.tiff"), [16, 24])
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, None, [16, 24], active_method="mesmer_whole_cell")
+    assert promoted is None
+    assert NON_HQ2_CSD_REFUSAL in report["failures"]
+
+
+def test_cli_end_to_end_refuses_non_hq2csd(tmp_path, monkeypatch):
+    import block01.core.io_loader as io_loader
+    from block01.scripts import promote_remap_config as cli
+    raw = str(tmp_path / "raw.ome.tiff")
+    _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
+    _FakeOME.SHAPES[raw] = (16, 24)
+    monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
+    seg = {"method": "cellpose_nuclei_dapi", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw, "step2_input_shape": [16, 24]}
+    seg_path = tmp_path / "seg.json"; seg_path.write_text(json.dumps(seg))
+    prev = tmp_path / "prev.json"; prev.write_text(json.dumps(_preview(raw, [16, 24])))
+    rc = cli.main(["--seg-params", str(seg_path), "--preview-config", str(prev),
+                   "--out-dir", str(tmp_path)])
+    assert rc == 2
+    report = json.loads((tmp_path / "promotion_report.json").read_text())
+    assert NON_HQ2_CSD_REFUSAL in report["failures"]
+
+
+def test_cli_end_to_end_promotes_hq2_csd(tmp_path, monkeypatch):
+    import block01.core.io_loader as io_loader
+    from block01.scripts import promote_remap_config as cli
+    raw = str(tmp_path / "raw.ome.tiff")
+    _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
+    _FakeOME.SHAPES[raw] = (16, 24)
+    monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
+    # complete corrected also present; CSD must still resolve raw and promote
+    import zarr
+    cp = str(tmp_path / "corrected.zarr")
+    root = zarr.open(cp, mode="w")
+    for n in ["DAPI", "CD45", "CK19"]:
+        root.create_dataset(n, data=np.zeros((16, 24), dtype=np.float32))
+    seg = {"method": "cellpose_nuclei_csd", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw, "multichannel_source_path": cp,
+           "step2_input_shape": [16, 24]}
+    seg_path = tmp_path / "seg.json"; seg_path.write_text(json.dumps(seg))
+    prev = tmp_path / "step1_5_x.json"; prev.write_text(json.dumps(_preview(raw, [16, 24])))
+    rc = cli.main(["--seg-params", str(seg_path), "--preview-config", str(prev),
+                   "--out-dir", str(tmp_path)])
+    assert rc == 0
+    out = tmp_path / "step1_5_x_step2ready.json"
+    assert out.exists()
+    promoted = json.loads(out.read_text())
+    assert promoted["source_policy"]["source_path"] == os.path.abspath(raw)

@@ -27,6 +27,25 @@ import os
 
 from ..workers.hq_marker_segmentation import parse_hq_channels
 from ..utils.remap_promotion import promote_step1_5_config_for_step2, _as_hw
+from ..utils.segmentation_config import is_hq2_csd_method
+
+
+def active_method_of(seg_config):
+    """Active Step2 algorithm id from the seg params."""
+    return str(seg_config.get("method") or "")
+
+
+def source_mode_for_seg(seg_config):
+    """HQ marker source_mode derived from the active algorithm (never a config field).
+
+    Mirrors the worker: HQ2/CSD -> raw_ome_only; everything else ->
+    corrected_then_raw_fallback. Imported lazily to avoid pulling the resolver at
+    module import (keeps the parser helpers cheaply importable in tests).
+    """
+    from ..workers.hq_source_resolver import (
+        SOURCE_MODE_RAW_ONLY, SOURCE_MODE_CORRECTED_THEN_RAW)
+    return (SOURCE_MODE_RAW_ONLY if is_hq2_csd_method(active_method_of(seg_config))
+            else SOURCE_MODE_CORRECTED_THEN_RAW)
 
 
 def requested_channels_from_seg(seg_config):
@@ -86,7 +105,8 @@ def build_resolved_source(seg_config):
         roi_id=str(seg_config.get("roi_id") or ""),
         requested_roi_names=_requested_roi_names(seg_config),
         param_file=str(seg_config.get("param_file") or ""),
-        abs_fn=os.path.abspath, loader_factory=OMETIFFLoader)
+        abs_fn=os.path.abspath, loader_factory=OMETIFFLoader,
+        source_mode=source_mode_for_seg(seg_config))
 
 
 def _load_json(path):
@@ -106,18 +126,26 @@ def main(argv=None):
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.preview_config))
     os.makedirs(out_dir, exist_ok=True)
 
-    # Resolve Step2's HQ source via the shared resolver; a resolution error
-    # (no source / unmatched ROI group) is itself a refusal.
-    try:
-        resolved = build_resolved_source(seg_config)
-    except Exception as exc:
-        report = {"promoted": False,
-                  "failures": [f"could not resolve Step2 HQ source: {exc}"]}
-        promoted = None
-        step2_shape = derive_step2_input_shape(seg_config)
+    method = active_method_of(seg_config)
+    step2_shape = derive_step2_input_shape(seg_config)
+
+    # Step1.5 remap configs are HQ2/CSD-only: refuse non-HQ2/CSD methods up front
+    # (no need to resolve any source for them).
+    if not is_hq2_csd_method(method):
+        promoted, report = promote_step1_5_config_for_step2(
+            preview, None, step2_shape, active_method=method)
     else:
-        step2_shape = derive_step2_input_shape(seg_config)
-        promoted, report = promote_step1_5_config_for_step2(preview, resolved, step2_shape)
+        # Resolve Step2's HQ source via the shared resolver under the algorithm-
+        # derived source_mode (raw_ome_only). A resolution error is itself a refusal.
+        try:
+            resolved = build_resolved_source(seg_config)
+        except Exception as exc:
+            report = {"promoted": False,
+                      "failures": [f"could not resolve Step2 HQ source: {exc}"]}
+            promoted = None
+        else:
+            promoted, report = promote_step1_5_config_for_step2(
+                preview, resolved, step2_shape, active_method=method)
 
     report["step2_input_shape_derived"] = step2_shape
 

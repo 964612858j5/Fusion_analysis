@@ -26,8 +26,11 @@ from .channel_remap_config import (
     validate_step2_remap_config,
     _NON_STEP2_INTENSITY_SPACES,
 )
+from .segmentation_config import is_hq2_csd_method
 
 PROMOTION_CREATED_FROM = "step2_1c_source_identity_promotion"
+NON_HQ2_CSD_REFUSAL = (
+    "Step1.5 Channel Conditioning configs are only valid for HQ2/CSD segmentation.")
 REPRESENTATIVENESS_NOTE = (
     "Step2-ready means only that source path, shape, and intensity-space identity "
     "match Step2's resolved HQ source. Patch-to-whole-ROI representativeness and "
@@ -60,7 +63,7 @@ def _as_hw(shape):
 
 
 def promote_step1_5_config_for_step2(preview_config, resolved_source,
-                                     step2_input_shape):
+                                     step2_input_shape, active_method=None):
     """Promote a Step1.5 preview config iff its calibration identity matches Step2.
 
     Parameters
@@ -68,12 +71,17 @@ def promote_step1_5_config_for_step2(preview_config, resolved_source,
     preview_config : dict
         A Step1.5 preview remap config (raw or normalized). Not mutated.
     resolved_source : ResolvedHQSource
-        Result of the 2.1c-a shared resolver run with the ACTIVE Step2 params.
+        Result of the 2.1c-a shared resolver run with the ACTIVE Step2 params,
+        resolved under the algorithm-derived source_mode (raw_ome_only for HQ2/CSD).
         The caller (CLI) builds this; this function does NOT resolve sources.
     step2_input_shape : sequence | None
         Step2's actual segmentation-input geometry, [H, W]. MUST come from a
         reliable active-Step2 source. If None/underivable, promotion REFUSES
         (the geometry guard is never skipped — unknown geometry => refuse).
+    active_method : str | None
+        Active Step2 algorithm. When provided and NOT HQ2/CSD-family, promotion
+        refuses: Step1.5 Channel Conditioning configs are only valid for HQ2/CSD.
+        (2.1c-b.1 — source policy is a structural property of the algorithm.)
 
     Returns
     -------
@@ -83,6 +91,12 @@ def promote_step1_5_config_for_step2(preview_config, resolved_source,
     """
     report = {"promoted": False, "failures": [], "channels_checked": [],
               "checks": {}}
+
+    # ── algorithm gate: Step1.5 remap configs are HQ2/CSD-only ──
+    if active_method is not None and not is_hq2_csd_method(active_method):
+        report["failures"].append(NON_HQ2_CSD_REFUSAL)
+        report["active_method"] = active_method
+        return None, report
 
     cfg = normalize_channel_remap_config(preview_config)
     sp = cfg.get("source_policy", {}) or {}

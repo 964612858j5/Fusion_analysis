@@ -1017,6 +1017,11 @@ class Step15BackgroundCorrectionPage(QWidget):
                 "verified. This config must not be promoted to Step2-ready until "
                 "2.1c source path, shape, and intensity-space validation succeeds."),
         }
+        # 2.1c-b Part A: record the calibration source IDENTITY so a later
+        # promotion step can verify it matches Step2's resolved HQ source. These
+        # are record-only: they do NOT flip preview_only/step2_ready/
+        # calibration_source_matches_step2 (those stay false until promotion).
+        source_policy.update(self._calibration_source_identity())
         self._cond_workbench.set_channel_images(
             images,
             context={"patch": self.current_patch_idx + 1, "step": "step1_5"},
@@ -1031,6 +1036,33 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._cond_workbench.set_reference_layers(dapi=dapi)  # mask/fusion: post-seg only
         print(f"[Step1.5] conditioning workbench synced: {len(images)} markers "
               f"patch={self.current_patch_idx + 1}")
+
+    def _calibration_source_identity(self):
+        """Identity of the source the Step1.5 workbench actually calibrated on.
+
+        Record-only (Part A). The full source geometry is the loader's whole-image
+        shape (the image the patch was cropped from), NOT the patch shape. If the
+        loader cannot provide path/shape, the value is null and the config simply
+        cannot be promoted later — never guessed from ROI defaults.
+        """
+        path = getattr(self.loader, "filepath", None)
+        path = os.path.abspath(path) if path else None
+        shp = getattr(self.loader, "shape", None)
+        source_shape = None
+        if shp and len(tuple(shp)) >= 2 and int(shp[0]) > 0 and int(shp[1]) > 0:
+            source_shape = [int(shp[0]), int(shp[1])]  # [H, W]
+        bbox = None
+        if self.patches and 0 <= self.current_patch_idx < len(self.patches):
+            y0, y1, x0, x1 = self.patches[self.current_patch_idx]
+            bbox = [int(y0), int(y1), int(x0), int(x1)]
+        return {
+            "calibration_source_path": path,
+            "calibration_source_kind": "raw_ome",
+            "calibration_source_shape": source_shape,
+            "calibration_intensity_space": "raw_ome_native_float",
+            "calibration_patch_bbox": bbox,
+            "calibration_patch_index": int(self.current_patch_idx),
+        }
 
     def _save_step15_remap_config(self):
         wb = getattr(self, "_cond_workbench", None)

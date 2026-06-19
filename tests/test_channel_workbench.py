@@ -684,8 +684,12 @@ def test_channel_order_preserved_not_alphabetical(workbench):
 class _FakeLoader:
     """Minimal OMETIFFLoader stand-in for Step1.5 conditioning tests."""
 
-    def __init__(self, names):
+    def __init__(self, names, filepath=None, shape=None):
         self._names = list(names)
+        if filepath is not None:
+            self.filepath = filepath
+        if shape is not None:
+            self.shape = shape
 
     def channel_names(self):
         return list(self._names)
@@ -697,10 +701,11 @@ class _FakeLoader:
         return a if normalize else (a * 1000.0).astype(np.float32)
 
 
-def _make_step15(app, tmp_path, names=("DAPI", "CD45", "CK19", "CD68")):
+def _make_step15(app, tmp_path, names=("DAPI", "CD45", "CK19", "CD68"),
+                 filepath=None, shape=None):
     from block01.ui.step1_5_bg_page import Step15BackgroundCorrectionPage
     page = Step15BackgroundCorrectionPage()
-    loader = _FakeLoader(names)
+    loader = _FakeLoader(names, filepath=filepath, shape=shape)
     patches = [(0, 32, 0, 32), (0, 32, 32, 64)]
     page.set_context(loader, str(tmp_path), patches, "DAPI")
     return page
@@ -881,3 +886,51 @@ def test_step3_workbench_keeps_default_host_actions(app):
     assert "Load current Step3 ROI" in labels
     assert "Save remap config…" in labels
     assert wb._btn_save_internal.isHidden() is False
+
+
+# ── Phase 2.1c-b Part A: Step1.5 records calibration source identity ─────────
+
+def _step15_saved_config_loader(app, tmp_path, monkeypatch, filepath, shape):
+    """Save a Step1.5 config from a loader with a known filepath/shape."""
+    from block01.utils.channel_remap_config import load_channel_remap_config
+    page = _make_step15(app, tmp_path, filepath=filepath, shape=shape)
+    page._sync_step15_to_workbench()
+    out = os.path.join(str(tmp_path), "channel_remap_configs", "cfg.json")
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QFileDialog.getSaveFileName",
+        lambda *a, **k: (out, "JSON (*.json)"))
+    monkeypatch.setattr(
+        "block01.ui.step1_5_bg_page.QMessageBox.information", lambda *a, **k: None)
+    page._save_step15_remap_config()
+    return load_channel_remap_config(out)
+
+
+def test_step15_records_calibration_identity(app, tmp_path, monkeypatch):
+    src = str(tmp_path / "raw.ome.tiff")
+    cfg = _step15_saved_config_loader(app, tmp_path, monkeypatch, src, (4148, 2786))
+    sp = cfg["source_policy"]
+    assert sp["calibration_source_path"] == os.path.abspath(src)
+    assert sp["calibration_source_kind"] == "raw_ome"
+    assert sp["calibration_source_shape"] == [4148, 2786]  # FULL source [H, W], not patch
+    assert sp["calibration_intensity_space"] == "raw_ome_native_float"
+    assert sp["calibration_patch_bbox"] == [0, 32, 0, 32]
+    assert sp["calibration_patch_index"] == 0
+
+
+def test_step15_calibration_does_not_flip_preview_or_ready(app, tmp_path, monkeypatch):
+    src = str(tmp_path / "raw.ome.tiff")
+    cfg = _step15_saved_config_loader(app, tmp_path, monkeypatch, src, (4148, 2786))
+    sp = cfg["source_policy"]
+    assert sp["preview_only"] is True
+    assert sp["step2_ready"] is False
+    assert sp["calibration_source_matches_step2"] is False
+
+
+def test_step15_calibration_shape_null_when_loader_cannot_provide(app, tmp_path, monkeypatch):
+    # loader without filepath/shape -> identity recorded as null, stays preview-only
+    cfg = _step15_saved_config(app, tmp_path, monkeypatch)
+    sp = cfg["source_policy"]
+    assert sp["calibration_source_shape"] is None
+    assert sp["calibration_source_path"] is None
+    assert sp["preview_only"] is True
+    assert sp["step2_ready"] is False

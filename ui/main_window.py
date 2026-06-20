@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
 
         step_bar = QHBoxLayout()
         step_bar.setContentsMargins(8, 4, 8, 4)
-        self._step0_lbl = QLabel("● Step 0: Setup")
+        self._step0_lbl = QLabel("● Step 0: Setup & Preprocessing")
         self._step0_lbl.setStyleSheet(
             "font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
             "background:#1a2a3a;border-radius:4px;"
@@ -204,45 +204,11 @@ class MainWindow(QMainWindow):
         step_bar.addWidget(QLabel("  →  "))
         step_bar.addWidget(self._step4_lbl)
         step_bar.addStretch()
-        self._btn_skip = QPushButton("Skip → Step 2")
-        self._btn_skip.setStyleSheet(
-            "QPushButton{background:#2a2a2a;color:#bbbbbb;font-size:10px;"
-            "border:1px solid #444;border-radius:3px;padding:3px 10px;}"
-            "QPushButton:hover{background:#3a3a3a;color:#dddddd;border-color:#555;}"
-        )
-        self._btn_skip.clicked.connect(self._skip_to_step2)
-        step_bar.addWidget(self._btn_skip)
-
-        self._btn_skip3 = QPushButton("Skip → Step 3")
-        self._btn_skip3.setStyleSheet(
-            "QPushButton{background:#2a2a2a;color:#bbbbbb;font-size:10px;"
-            "border:1px solid #444;border-radius:3px;padding:3px 10px;}"
-            "QPushButton:hover{background:#3a3a3a;color:#dddddd;border-color:#555;}"
-        )
-        self._btn_skip3.clicked.connect(self._skip_to_step3)
-        step_bar.addWidget(self._btn_skip3)
-
-        self._btn_skip4 = QPushButton("Skip → Step 4")
-        self._btn_skip4.setStyleSheet(
-            "QPushButton{background:#2a2a2a;color:#bbbbbb;font-size:10px;"
-            "border:1px solid #444;border-radius:3px;padding:3px 10px;}"
-            "QPushButton:hover{background:#3a3a3a;color:#dddddd;border-color:#555;}"
-        )
-        self._btn_skip4.clicked.connect(self._skip_to_step4)
-        step_bar.addWidget(self._btn_skip4)
-
-        # Step 1.5 — pre-segmentation Background Correction + Channel Conditioning.
-        self._btn_step1_5 = QPushButton("Step 1.5: Background / Conditioning")
-        self._btn_step1_5.setToolTip(
-            "Open Step 1.5 — Background Correction and Channel Conditioning / Remap "
-            "(adjust Min/Max/Brightness/Contrast/Gamma and save a preview remap config).")
-        self._btn_step1_5.setStyleSheet(
-            "QPushButton{background:#2a2a2a;color:#bbbbbb;font-size:10px;"
-            "border:1px solid #444;border-radius:3px;padding:3px 10px;}"
-            "QPushButton:hover{background:#3a3a3a;color:#dddddd;border-color:#555;}"
-        )
-        self._btn_step1_5.clicked.connect(self._go_to_step1_5)
-        step_bar.addWidget(self._btn_step1_5)
+        # v14.1: top-nav Skip → Step2/3/4 buttons and the Step 1.5 workflow entry
+        # were removed. Direct navigation is still available via the step labels
+        # above. The Step15BackgroundCorrectionPage widget and its set_context
+        # injection path remain intact internally (stack index 5, reached only
+        # programmatically) for the v14.1b migration into Step0.
 
         self._btn_next = QPushButton("Next")
         self._btn_next.setEnabled(False)

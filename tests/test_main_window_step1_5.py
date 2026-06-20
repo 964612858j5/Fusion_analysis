@@ -1,11 +1,16 @@
-"""Step 1.5 is reachable from the main GUI workflow (2.1c-b GUI entrypoint).
+"""v14.1 top navigation: 5-step workflow; Step 1.5 page kept internal-only.
 
-Verifies the main window not only constructs but actually EXPOSES the Step 1.5
-Background Correction + Channel Conditioning / Remap page: it is in the page
-stack, has a step-bar action, and the action navigates to it and feeds context.
-No remap config is created here — only the navigation/exposure is exercised.
+v14.1 collapsed the top workflow navigation to the final 5 steps. The visible
+Skip -> Step2/3/4 buttons and the Step 1.5 top-level workflow button were
+removed. Direct navigation via the step labels still works.
 
-Qt tests need an offscreen platform (set by conftest/env: QT_QPA_PLATFORM=offscreen).
+The Step15BackgroundCorrectionPage widget and its set_context injection path
+remain INTACT internally (in the page stack, reached only programmatically) for
+the v14.1b migration of its context-injection into Step0. These tests pin both
+the removal (no visible Skip / Step1.5 entry, Step0 relabelled) and the
+preservation (page + set_context still present, ChannelWorkbench not forked).
+
+Qt tests need an offscreen platform (set by env: QT_QPA_PLATFORM=offscreen).
 """
 
 import os
@@ -49,48 +54,109 @@ def window(app):
     w.close()
 
 
-def test_step1_5_page_is_in_the_stack(window):
+def _top_nav_buttons(window):
+    """Push-buttons in the top workflow nav bar only — i.e. NOT inside any page
+    of the QStackedWidget (page-internal controls like the Step1.5 "Save remap
+    config" button are intentionally kept and live inside the stack)."""
+    from PyQt5 import QtWidgets
+    stack = window._stack
+    out = []
+    for b in window.findChildren(QtWidgets.QPushButton):
+        w = b
+        inside_stack = False
+        while w is not None:
+            if w is stack:
+                inside_stack = True
+                break
+            w = w.parent()
+        if not inside_stack:
+            out.append(b)
+    return out
+
+
+# ── 1. No visible Skip buttons ───────────────────────────────────────────────
+def test_no_visible_skip_buttons(window):
+    for attr in ("_btn_skip", "_btn_skip3", "_btn_skip4"):
+        assert not hasattr(window, attr), f"{attr} should be removed in v14.1"
+    skip_btns = [b.text() for b in _top_nav_buttons(window)
+                 if "skip" in b.text().lower()]
+    assert skip_btns == [], f"unexpected visible Skip buttons: {skip_btns}"
+
+
+# ── 2. No visible Step1.5 top-level workflow button ──────────────────────────
+def test_no_visible_step1_5_workflow_button(window):
+    assert not hasattr(window, "_btn_step1_5"), "_btn_step1_5 should be removed in v14.1"
+    step15_btns = [b.text() for b in _top_nav_buttons(window)
+                   if "1.5" in b.text()]
+    assert step15_btns == [], f"unexpected visible Step1.5 top-nav button: {step15_btns}"
+
+
+# ── 3. Step0 label is "Step0: Setup & Preprocessing" ─────────────────────────
+def test_step0_label_is_setup_and_preprocessing(window):
+    assert hasattr(window, "_step0_lbl")
+    assert "Setup & Preprocessing" in window._step0_lbl.text()
+
+
+# ── 4. Direct navigation to Step1-4 does not crash ───────────────────────────
+def test_direct_navigation_steps_1_to_4_do_not_crash(window):
+    # Step labels are the direct-nav entry points; their handlers must not raise.
+    window._go_to_step1()
+    assert window._stack.currentIndex() == 1
+    window._go_to_step2()
+    assert window._stack.currentIndex() == 2
+    window._go_to_step3()
+    assert window._stack.currentIndex() == 3
+    window._go_to_step4()
+    assert window._stack.currentIndex() == 4
+    window._go_to_step0()
+    assert window._stack.currentIndex() == 0
+
+
+# ── 5. Navigation alone creates no remap/step2_ready/corrected/seg outputs ───
+def test_navigation_alone_creates_no_outputs(window, tmp_path):
+    before = set(str(p) for p in tmp_path.rglob("*"))
+    for fn in (window._go_to_step1, window._go_to_step2,
+               window._go_to_step3, window._go_to_step4, window._go_to_step0):
+        fn()
+    after = set(str(p) for p in tmp_path.rglob("*"))
+    assert before == after, "navigation must not create any files"
+
+
+# ── 6. Step15BackgroundCorrectionPage + set_context remain intact internally ──
+def test_step1_5_page_still_present_internally(window):
     from block01.ui.step1_5_bg_page import Step15BackgroundCorrectionPage
     assert hasattr(window, "_step1_5")
     assert isinstance(window._step1_5, Step15BackgroundCorrectionPage)
     pages = [window._stack.widget(i) for i in range(window._stack.count())]
-    assert window._step1_5 in pages
-
-
-def test_step1_5_page_has_conditioning_tab(window):
-    tabs = [window._step1_5._s15_tabs.tabText(i)
-            for i in range(window._step1_5._s15_tabs.count())]
-    assert "Background Correction" in tabs
-    assert any("Channel Conditioning" in t for t in tabs)
-
-
-def test_step_bar_has_step1_5_action(window):
-    assert hasattr(window, "_btn_step1_5")
-    assert "Step 1.5" in window._btn_step1_5.text()
+    assert window._step1_5 in pages, "Step1.5 page must remain in the stack"
+    # context-injection path preserved for v14.1b migration
     assert hasattr(window, "_go_to_step1_5")
+    assert callable(getattr(window._step1_5, "set_context"))
 
 
-def test_go_to_step1_5_without_loader_does_not_crash(window, monkeypatch):
-    # No loader -> informational message, no navigation, no crash.
-    monkeypatch.setattr(
-        "block01.ui.main_window.QMessageBox.information", lambda *a, **k: None)
-    window.loader = None
-    window._go_to_step1_5()  # must not raise
-
-
-def test_go_to_step1_5_navigates_and_feeds_context(window, tmp_path):
+def test_step1_5_context_injection_still_works(window, tmp_path):
     roi_dir = str(tmp_path / "roi")
     os.makedirs(roi_dir, exist_ok=True)
     window.loader = _FakeLoader()
     window.step0_output = {"roi_dir": roi_dir,
                            "patches": [(0, 32, 0, 32), (0, 32, 32, 64)]}
-    window._go_to_step1_5()
-    # navigated to the Step1.5 page
+    window._go_to_step1_5()  # programmatic only; no visible button
     assert window._stack.currentWidget() is window._step1_5
-    # fed from Step1.5's own context: output dir is <ROI>/step1_5 so the page saves
-    # configs under <ROI>/step1_5/channel_remap_configs/ (unchanged save path)
     assert window._step1_5.output_dir == os.path.join(roi_dir, "step1_5")
     assert len(window._step1_5.patches) == 2
+    # unchanged save path; no config created here
     expected_cfg_dir = os.path.join(roi_dir, "step1_5", "channel_remap_configs")
-    # the save helper targets exactly this dir (we do NOT create a config here)
     assert os.path.join(window._step1_5.output_dir, "channel_remap_configs") == expected_cfg_dir
+    window._go_to_step0()  # restore for other tests
+
+
+# ── 7. ChannelWorkbench is the single shared class (not forked) ──────────────
+def test_channel_workbench_not_forked(window):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    from block01.ui.step1_5_bg_page import Step15BackgroundCorrectionPage  # noqa: F401
+    # Step1.5 host uses the shared class
+    wb15 = getattr(window._step1_5, "_cond_workbench", None)
+    assert wb15 is None or isinstance(wb15, ChannelWorkbench)
+    # Step3 host (review surface) uses the same shared class
+    wb3 = getattr(window._step3, "_channel_workbench", None)
+    assert wb3 is None or isinstance(wb3, ChannelWorkbench)

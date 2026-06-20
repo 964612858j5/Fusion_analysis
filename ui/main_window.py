@@ -231,6 +231,19 @@ class MainWindow(QMainWindow):
         self._btn_skip4.clicked.connect(self._skip_to_step4)
         step_bar.addWidget(self._btn_skip4)
 
+        # Step 1.5 — pre-segmentation Background Correction + Channel Conditioning.
+        self._btn_step1_5 = QPushButton("Step 1.5: Background / Conditioning")
+        self._btn_step1_5.setToolTip(
+            "Open Step 1.5 — Background Correction and Channel Conditioning / Remap "
+            "(adjust Min/Max/Brightness/Contrast/Gamma and save a preview remap config).")
+        self._btn_step1_5.setStyleSheet(
+            "QPushButton{background:#2a2a2a;color:#bbbbbb;font-size:10px;"
+            "border:1px solid #444;border-radius:3px;padding:3px 10px;}"
+            "QPushButton:hover{background:#3a3a3a;color:#dddddd;border-color:#555;}"
+        )
+        self._btn_step1_5.clicked.connect(self._go_to_step1_5)
+        step_bar.addWidget(self._btn_step1_5)
+
         self._btn_next = QPushButton("Next")
         self._btn_next.setEnabled(False)
         self._btn_next.clicked.connect(self._go_next_step)
@@ -552,6 +565,12 @@ class MainWindow(QMainWindow):
         self._step4 = Step4Page()
         self._step4.go_back.connect(self._go_to_step3)
         self._stack.addWidget(self._step4)
+
+        # Step 1.5 — Background Correction + Channel Conditioning / Remap.
+        # Appended LAST so the existing index-based navigation (0..4) is unchanged;
+        # reached by widget (setCurrentWidget), not a hardcoded index.
+        self._step1_5 = Step15BackgroundCorrectionPage()
+        self._stack.addWidget(self._step1_5)
 
         self._stack.setCurrentIndex(0)
         self._set_step_active(0)
@@ -1523,6 +1542,29 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
         self._log_step1_layout("enter Step1")
+
+    def _go_to_step1_5(self):
+        """Open Step 1.5 (Background Correction + Channel Conditioning / Remap).
+
+        Feeds the page from the current ROI/patch context (loader, step1_5 dir,
+        patches, nucleus channel). Saves remap configs under
+        <ROI>/step1_5/channel_remap_configs/. Does NOT auto-create any config.
+        """
+        if self.loader is None:
+            QMessageBox.information(
+                self, "Step 1.5",
+                "Load a Step0/Step1 ROI first — the image loader is not initialized yet.")
+            return
+        ctx = self.step0_output or {}
+        roi_dir = ctx.get("roi_dir", "")
+        step1_5_dir = (os.path.join(roi_dir, "step1_5") if roi_dir
+                       else (ctx.get("output_dir") or OUTPUT_DIR))
+        patches = list(ctx.get("patches") or self._all_patches or [])
+        nucleus_channel = ""
+        if hasattr(self, "config") and getattr(self.config, "nuc_combo", None) is not None:
+            nucleus_channel = self.config.nuc_combo.currentText() or ""
+        self._step1_5.set_context(self.loader, step1_5_dir, patches, nucleus_channel)
+        self._stack.setCurrentWidget(self._step1_5)
 
     def _go_to_step3(self, output_dir=None):
         if self._current_step == 1:

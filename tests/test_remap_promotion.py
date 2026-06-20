@@ -416,3 +416,178 @@ def test_cli_end_to_end_promotes_hq2_csd(tmp_path, monkeypatch):
     assert out.exists()
     promoted = json.loads(out.read_text())
     assert promoted["source_policy"]["source_path"] == os.path.abspath(raw)
+
+
+# ── 2.1c-b.2: structural step2_input_shape derivation ───────────────────────
+
+def _write_mask_zarr(path, shape=(19480, 21804)):
+    import zarr
+    zarr.open(str(path), mode="w", shape=shape, dtype="uint32", chunks=(1024, 1024))
+    return str(path)
+
+
+def test_geometry_from_explicit_step2_input_shape():
+    from block01.scripts.promote_remap_config import derive_step2_geometry, DERIV_EXPLICIT_SHAPE
+    geo = derive_step2_geometry({"step2_input_shape": [19480, 21804]})
+    assert geo["shape"] == [19480, 21804]
+    assert geo["method"] == DERIV_EXPLICIT_SHAPE
+    assert geo["warning"] == ""
+
+
+def test_geometry_from_explicit_nuclei_mask_path(tmp_path):
+    from block01.scripts.promote_remap_config import derive_step2_geometry, DERIV_NUCLEI_PATH
+    nz = _write_mask_zarr(tmp_path / "global_nuclei_mask_Full WSI.zarr", (640, 480))
+    geo = derive_step2_geometry({}, run_metadata={"nuclei_mask_path": nz})
+    assert geo["shape"] == [640, 480]          # [H, W] as-is
+    assert geo["method"] == DERIV_NUCLEI_PATH
+    assert geo["path"] == os.path.abspath(nz)
+
+
+def test_geometry_from_explicit_global_mask_path(tmp_path):
+    from block01.scripts.promote_remap_config import derive_step2_geometry, DERIV_GLOBAL_PATH
+    gz = _write_mask_zarr(tmp_path / "global_mask_Full WSI.zarr", (700, 500))
+    geo = derive_step2_geometry({}, run_metadata={"global_mask_path": gz})
+    assert geo["shape"] == [700, 500]
+    assert geo["method"] == DERIV_GLOBAL_PATH
+
+
+def test_geometry_fallback_scan_nuclei(tmp_path):
+    from block01.scripts.promote_remap_config import (
+        derive_step2_geometry, DERIV_SCAN_NUCLEI, FALLBACK_SCAN_WARNING)
+    _write_mask_zarr(tmp_path / "global_nuclei_mask_Full WSI.zarr", (321, 654))
+    geo = derive_step2_geometry({}, run_dir=str(tmp_path))
+    assert geo["shape"] == [321, 654]
+    assert geo["method"] == DERIV_SCAN_NUCLEI
+    assert geo["warning"] == FALLBACK_SCAN_WARNING
+
+
+def test_geometry_fallback_scan_global_when_no_nuclei(tmp_path):
+    from block01.scripts.promote_remap_config import derive_step2_geometry, DERIV_SCAN_GLOBAL
+    _write_mask_zarr(tmp_path / "global_mask_Full WSI.zarr", (222, 333))
+    geo = derive_step2_geometry({}, run_dir=str(tmp_path))
+    assert geo["shape"] == [222, 333]
+    assert geo["method"] == DERIV_SCAN_GLOBAL
+    assert geo["warning"]  # fallback warning present
+
+
+def test_geometry_unknown_when_nothing(tmp_path):
+    from block01.scripts.promote_remap_config import derive_step2_geometry, DERIV_UNKNOWN
+    geo = derive_step2_geometry({}, run_dir=str(tmp_path))  # empty dir
+    assert geo["shape"] is None
+    assert geo["method"] == DERIV_UNKNOWN
+
+
+def test_unknown_geometry_still_refuses_promotion(tmp_path):
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _raw_resolved(raw, ["CD45", "CK19"])
+    preview = _preview(raw, [16, 24])
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, res, None, active_method="cellpose_nuclei_csd")
+    assert promoted is None
+    assert any("step2_input_shape is unknown" in f for f in report["failures"])
+
+
+def test_roi_crop_vs_full_marker_shape_mismatch_refuses(tmp_path):
+    # Full marker source (16,24) but Step2 nuclei mask is an ROI crop (32,40):
+    # different coordinate systems -> must refuse, never coerced.
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _raw_resolved(raw, ["CD45", "CK19"], shape=(16, 24))
+    preview = _preview(raw, [16, 24])
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, res, [32, 40], active_method="cellpose_nuclei_csd")
+    assert promoted is None
+    assert any("geometry guard" in f for f in report["failures"])
+
+
+def test_transposed_geometry_is_real_mismatch_not_coerced(tmp_path):
+    raw = str(tmp_path / "raw.ome.tiff")
+    res = _raw_resolved(raw, ["CD45", "CK19"], shape=(16, 24))
+    preview = _preview(raw, [16, 24])
+    # step2 input [24,16] is the transpose of marker (16,24): must NOT be made equal
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, res, [24, 16], active_method="cellpose_nuclei_csd")
+    assert promoted is None
+    assert any("geometry guard" in f for f in report["failures"])
+
+
+def test_cli_records_derivation_method_and_warning(tmp_path, monkeypatch):
+    import block01.core.io_loader as io_loader
+    from block01.scripts import promote_remap_config as cli
+    raw = str(tmp_path / "raw.ome.tiff")
+    _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
+    _FakeOME.SHAPES[raw] = (16, 24)
+    monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
+    # no explicit shape; fallback scan finds the nuclei mask zarr in the run dir
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_mask_zarr(run_dir / "global_nuclei_mask_Full WSI.zarr", (16, 24))
+    seg = {"method": "cellpose_nuclei_csd", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw}
+    (run_dir / "run_segmentation_params.json").write_text(json.dumps(seg))
+    prev = run_dir / "step1_5_x.json"
+    prev.write_text(json.dumps(_preview(raw, [16, 24])))
+    rc = cli.main(["--seg-params", str(run_dir / "run_segmentation_params.json"),
+                   "--preview-config", str(prev), "--out-dir", str(run_dir)])
+    assert rc == 0
+    promoted = json.loads((run_dir / "step1_5_x_step2ready.json").read_text())
+    assert promoted["source_policy"]["step2_input_shape"] == [16, 24]
+
+
+def test_cli_fallback_warning_in_report_on_refusal(tmp_path, monkeypatch):
+    import block01.core.io_loader as io_loader
+    from block01.scripts import promote_remap_config as cli
+    from block01.scripts.promote_remap_config import (
+        DERIV_SCAN_NUCLEI, FALLBACK_SCAN_WARNING)
+    raw = str(tmp_path / "raw.ome.tiff")
+    _FakeOME.REG[raw] = ["DAPI", "CD45", "CK19"]
+    _FakeOME.SHAPES[raw] = (16, 24)
+    monkeypatch.setattr(io_loader, "OMETIFFLoader", _FakeOME)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    # nuclei mask is an ROI crop (32,40) -> geometry guard refuses; fallback warned
+    _write_mask_zarr(run_dir / "global_nuclei_mask_Full WSI.zarr", (32, 40))
+    seg = {"method": "cellpose_nuclei_csd", "hq_channels": ["CD45", "CK19"],
+           "raw_ome_path": raw}
+    (run_dir / "run_segmentation_params.json").write_text(json.dumps(seg))
+    prev = run_dir / "prev.json"
+    prev.write_text(json.dumps(_preview(raw, [16, 24])))
+    rc = cli.main(["--seg-params", str(run_dir / "run_segmentation_params.json"),
+                   "--preview-config", str(prev), "--out-dir", str(run_dir)])
+    assert rc == 2
+    report = json.loads((run_dir / "promotion_report.json").read_text())
+    assert report["geometry_derivation"]["method"] == DERIV_SCAN_NUCLEI
+    assert FALLBACK_SCAN_WARNING in report.get("warnings", [])
+    assert any("geometry guard" in f for f in report["failures"])
+
+
+# ── 2.1c-b.2: Step2 writes geometry into run_metadata.json ──────────────────
+
+def test_worker_run_metadata_records_geometry(tmp_path, monkeypatch):
+    from block01.workers import segment_merge_worker as smw
+    w = smw.SegmentMergeWorker.__new__(smw.SegmentMergeWorker)
+    w.result_id = "seg_test"
+    w.parameter_source = "manual"
+    w.param_file = ""
+    w.created_at = "now"
+    w.zarr_path = ""
+    w.output_dir = str(tmp_path)
+    w.rois = []
+    w._step2_geometry = {}
+    w._name_method = lambda: "cellpose_nuclei_csd"
+    nz = str(tmp_path / "global_nuclei_mask_Full WSI.zarr")
+    gz = str(tmp_path / "global_mask_Full WSI.zarr")
+    w._record_step2_geometry(19480, 21804, nz, gz)
+    path = w._write_run_metadata({"some": "summary"})
+    meta = json.loads(open(path).read_text() if hasattr(open(path), "read_text") else open(path).read())
+    assert meta["step2_input_shape"] == [19480, 21804]
+    assert meta["nuclei_mask_path"] == os.path.abspath(nz)
+    assert meta["global_mask_path"] == os.path.abspath(gz)
+
+
+def test_worker_record_geometry_first_roi_wins(tmp_path):
+    from block01.workers import segment_merge_worker as smw
+    w = smw.SegmentMergeWorker.__new__(smw.SegmentMergeWorker)
+    w._step2_geometry = {}
+    w._record_step2_geometry(100, 200, "", "")
+    w._record_step2_geometry(300, 400, "", "")  # second ROI must not overwrite
+    assert w._step2_geometry["step2_input_shape"] == [100, 200]

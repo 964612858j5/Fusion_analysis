@@ -163,6 +163,10 @@ class SegmentMergeWorker(QThread):
         self.write_hq2_debug_layers = self._config_bool("write_hq2_debug_layers", False)
         self.write_hq2_debug_tiffs = self._config_bool("write_hq2_debug_tiffs", False)
         self._hq2_tile_metadata = []
+        # 2.1c-b.2: this run's actual segmentation-input geometry (nuclei mask zarr
+        # [H,W]) + mask zarr paths, recorded into run_metadata.json for remap
+        # promotion. First ROI wins; never mutates old runs.
+        self._step2_geometry = {}
         self.step2_profiler = Step2Profiler(
             enabled=self._step2_profiling_enabled(),
             output_dir=self.output_dir,
@@ -339,6 +343,24 @@ class SegmentMergeWorker(QThread):
             json.dump(self.seg_config, f, indent=2)
         return path
 
+    def _record_step2_geometry(self, full_h, full_w, nuclei_zarr_path="",
+                               global_mask_zarr_path=""):
+        """Record this run's actual segmentation-input geometry for promotion.
+
+        step2_input_shape is the nuclei-mask zarr geometry [H, W] (the real
+        segmentation input), NOT a tile/display/patch shape. First ROI's geometry
+        is authoritative for the run-level metadata. Absolute zarr paths so the
+        promotion CLI can read geometry structurally instead of guessing.
+        """
+        if self._step2_geometry:
+            return  # first ROI wins
+        geo = {"step2_input_shape": [int(full_h), int(full_w)]}
+        if nuclei_zarr_path:
+            geo["nuclei_mask_path"] = self._abs(nuclei_zarr_path)
+        if global_mask_zarr_path:
+            geo["global_mask_path"] = self._abs(global_mask_zarr_path)
+        self._step2_geometry = geo
+
     def _write_run_metadata(self, summary_meta):
         meta = {
             "run_id": self.result_id,
@@ -351,6 +373,10 @@ class SegmentMergeWorker(QThread):
             "roi_mode": bool(self.rois),
             "n_rois": len(self.rois or []),
         }
+        # 2.1c-b.2: run-level segmentation-input geometry (authoritative; do not let
+        # summary_meta override it below).
+        if self._step2_geometry:
+            meta.update(self._step2_geometry)
         meta.update({k: v for k, v in (summary_meta or {}).items() if k not in meta})
         path = os.path.join(self.output_dir, "run_metadata.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -2471,6 +2497,8 @@ class SegmentMergeWorker(QThread):
                     write_hq_qc_table(qc_table_path, hq_qc_rows)
             del nuclei_mmap_ro
 
+        self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
+
         hq2_paths = {}
         if is_hq2:
             hq2_paths = self._write_hq2_layer_outputs(
@@ -3340,6 +3368,8 @@ class SegmentMergeWorker(QThread):
                     with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
                         write_hq_qc_table(qc_table_path, hq_qc_rows)
                 del nuclei_mmap_ro
+
+            self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
 
             hq2_paths = {}
             if is_hq2:

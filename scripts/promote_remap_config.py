@@ -62,30 +62,98 @@ def _requested_roi_names(seg_config):
     return {str(n) for n in names if str(n or "").strip()}
 
 
-def derive_step2_input_shape(seg_config):
-    """Step2 segmentation-input geometry [H, W] from a reliable active source.
+# Geometry-derivation method labels (recorded in the promotion report).
+DERIV_EXPLICIT_SHAPE = "explicit_step2_input_shape"
+DERIV_NUCLEI_PATH = "explicit_nuclei_mask_path"
+DERIV_GLOBAL_PATH = "explicit_global_mask_path"
+DERIV_SCAN_NUCLEI = "fallback_scan_global_nuclei_mask"
+DERIV_SCAN_GLOBAL = "fallback_scan_global_mask"
+DERIV_UNKNOWN = "unknown"
+FALLBACK_SCAN_WARNING = (
+    "step2_input_shape was derived by fallback run-directory scan; recommend "
+    "writing explicit geometry provenance in future runs.")
 
-    Order: explicit step2_input_shape -> a nuclei-mask zarr's geometry. If none is
-    available, returns None and promotion REFUSES (the geometry guard is never
-    skipped — unknown geometry defaults to refuse).
+
+def _zarr_shape_hw(path):
+    """[H, W] of a zarr array at path, or None. Never crops/transposes — reads
+    the array's real shape and takes its last two dims as-is."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import zarr
+        arr = zarr.open(path, mode="r")
+        return _as_hw(getattr(arr, "shape", None))
+    except Exception:
+        return None
+
+
+def _scan_run_dir_shape(run_dir, pattern):
+    """Newest zarr matching pattern under run_dir -> [H, W], or (None, '')."""
+    import glob
+    matches = sorted(glob.glob(os.path.join(run_dir, pattern)),
+                     key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+                     reverse=True)
+    for p in matches:
+        hw = _zarr_shape_hw(p)
+        if hw is not None:
+            return hw, os.path.abspath(p)
+    return None, ""
+
+
+def derive_step2_geometry(seg_config, run_metadata=None, provenance=None, run_dir=None):
+    """Resolve this run's Step2 segmentation-input geometry [H, W], structurally.
+
+    Priority (structured provenance over filename guessing):
+      1. explicit step2_input_shape (seg params / run_metadata / provenance)
+      2. explicit nuclei mask zarr path -> its geometry
+      3. explicit global mask zarr path -> its geometry
+      4. fallback scan run dir for global_nuclei_mask*.zarr
+      5. fallback scan run dir for global_mask*.zarr
+      6. unknown -> caller REFUSES (geometry guard never skipped)
+
+    Shapes are read as-is in [H, W]; nothing is cropped/resized/transposed to force
+    a match. Returns {"shape", "method", "path", "warning"}.
     """
-    explicit = _as_hw(seg_config.get("step2_input_shape"))
-    if explicit is not None:
-        return explicit
-    for key in ("nuclei_mask_path", "global_nuclei_mask", "nuclei_input_path",
-                "nuclei_labels_path"):
-        path = seg_config.get(key)
-        if path and os.path.exists(path):
-            try:
-                import zarr
-                arr = zarr.open(path, mode="r")
-                shp = getattr(arr, "shape", None)
-                hw = _as_hw(shp)
-                if hw is not None:
-                    return hw
-            except Exception:
-                continue
-    return None
+    sources = [d for d in (seg_config, run_metadata, provenance) if isinstance(d, dict)]
+
+    for d in sources:                                   # 1
+        hw = _as_hw(d.get("step2_input_shape"))
+        if hw is not None:
+            return {"shape": hw, "method": DERIV_EXPLICIT_SHAPE, "path": "", "warning": ""}
+
+    for d in sources:                                   # 2
+        for key in ("nuclei_mask_path", "global_nuclei_mask_path", "global_nuclei_mask"):
+            p = d.get(key)
+            hw = _zarr_shape_hw(p)
+            if hw is not None:
+                return {"shape": hw, "method": DERIV_NUCLEI_PATH,
+                        "path": os.path.abspath(p), "warning": ""}
+
+    for d in sources:                                   # 3
+        for key in ("global_mask_path", "mask_path"):
+            p = d.get(key)
+            hw = _zarr_shape_hw(p)
+            if hw is not None:
+                return {"shape": hw, "method": DERIV_GLOBAL_PATH,
+                        "path": os.path.abspath(p), "warning": ""}
+
+    if run_dir and os.path.isdir(run_dir):              # 4, 5
+        hw, path = _scan_run_dir_shape(run_dir, "global_nuclei_mask*.zarr")
+        if hw is not None:
+            return {"shape": hw, "method": DERIV_SCAN_NUCLEI, "path": path,
+                    "warning": FALLBACK_SCAN_WARNING}
+        hw, path = _scan_run_dir_shape(run_dir, "global_mask*.zarr")
+        if hw is not None:
+            return {"shape": hw, "method": DERIV_SCAN_GLOBAL, "path": path,
+                    "warning": FALLBACK_SCAN_WARNING}
+
+    return {"shape": None, "method": DERIV_UNKNOWN, "path": "", "warning": ""}
+
+
+def derive_step2_input_shape(seg_config, run_metadata=None, provenance=None,
+                             run_dir=None):
+    """Back-compat wrapper: returns only the [H, W] shape (or None)."""
+    return derive_step2_geometry(seg_config, run_metadata, provenance, run_dir)["shape"]
 
 
 def build_resolved_source(seg_config):
@@ -114,6 +182,13 @@ def _load_json(path):
         return json.load(f)
 
 
+def _load_json_safe(path):
+    try:
+        return _load_json(path)
+    except Exception:
+        return {}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Promote a Step1.5 preview remap config to Step2-ready (2.1c-b).")
     ap.add_argument("--seg-params", required=True, help="active Step2 segmentation params JSON")
@@ -126,8 +201,16 @@ def main(argv=None):
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.preview_config))
     os.makedirs(out_dir, exist_ok=True)
 
+    # Geometry is derived structurally from run-level provenance in the Step2 run
+    # folder (run_metadata.json / channel_remap_provenance.json), with a fallback
+    # scan of the run dir. The run folder is where the seg params live.
+    run_dir = os.path.dirname(os.path.abspath(args.seg_params))
+    run_metadata = _load_json_safe(os.path.join(run_dir, "run_metadata.json"))
+    provenance = _load_json_safe(os.path.join(run_dir, "channel_remap_provenance.json"))
+    geo = derive_step2_geometry(seg_config, run_metadata, provenance, run_dir)
+    step2_shape = geo["shape"]
+
     method = active_method_of(seg_config)
-    step2_shape = derive_step2_input_shape(seg_config)
 
     # Step1.5 remap configs are HQ2/CSD-only: refuse non-HQ2/CSD methods up front
     # (no need to resolve any source for them).
@@ -148,6 +231,15 @@ def main(argv=None):
                 preview, resolved, step2_shape, active_method=method)
 
     report["step2_input_shape_derived"] = step2_shape
+    report["geometry_derivation"] = {
+        "method": geo["method"], "path": geo["path"], "warning": geo["warning"]}
+    if geo["warning"]:
+        report.setdefault("warnings", []).append(geo["warning"])
+
+    print(f"[promote] step2_input_shape={step2_shape} "
+          f"(derived: {geo['method']}{', ' + geo['path'] if geo['path'] else ''})")
+    if geo["warning"]:
+        print(f"[promote] WARNING: {geo['warning']}")
 
     if promoted is not None:
         base = os.path.splitext(os.path.basename(args.preview_config))[0]

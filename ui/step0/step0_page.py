@@ -61,6 +61,7 @@ from ...utils.roi_project import (
 # — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
 # resolver / Step2-runtime import is introduced here.
 from ..widgets.channel_workbench import ChannelWorkbench
+from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     CREATED_FROM_STEP0_CONDITIONING,
@@ -81,6 +82,7 @@ class Step0Page(QWidget):
         self.rois = []
         self.current_patch_idx = 0
         self.current_channel = None
+        self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
         self._preview_worker = None
         self._preview_req_id = 0
         self._preview_debounce = QTimer(self)
@@ -203,6 +205,18 @@ class Step0Page(QWidget):
         self._load_status = QLabel("No project loaded.")
         self._load_status.setStyleSheet("color:#aaa;font-size:11px;")
         fb.addWidget(self._load_status)
+
+        fb.addStretch()
+        # v14.2a: toggle the floating Tissue Preview / ROI Navigator popup.
+        self._btn_tissue_nav = QPushButton("🗺 Tissue Navigator")
+        self._btn_tissue_nav.setToolTip(
+            "Show/hide the floating Tissue Preview / ROI Navigator popup.")
+        self._btn_tissue_nav.setStyleSheet(
+            "QPushButton{font-size:10px;color:#8cf;border:1px solid #8cf;"
+            "border-radius:3px;padding:2px 8px;}"
+            "QPushButton:hover{background:#1a2a4a;}")
+        self._btn_tissue_nav.clicked.connect(self.toggle_tissue_navigator)
+        fb.addWidget(self._btn_tissue_nav)
 
         outer.addWidget(file_bar)   # Section A 固定高度，不拉伸
 
@@ -1050,6 +1064,33 @@ class Step0Page(QWidget):
         QMessageBox.information(
             self, "Saved",
             f"Saved preview remap config (preview_only, step2_ready=false):\n{path}")
+
+    # ── v14.2a Tissue Preview / ROI Navigator popup ──────────────────────────
+    #  Step0 owns one floating TissueNavigatorPopup. Creation/show/hide is
+    #  side-effect free (no files/configs/outputs). Without loaded data the popup
+    #  shows a missing-context hint instead of crashing.
+    def _ensure_tissue_navigator(self):
+        if self._tissue_navigator_popup is None:
+            self._tissue_navigator_popup = TissueNavigatorPopup(
+                loader=self.loader, nuc_ch=self.nucleus_channel, parent=self)
+            # Feed whatever ROI/patch context Step0 already has (no file IO).
+            self._tissue_navigator_popup.set_overview_context(
+                loader=self.loader, nuc_ch=self.nucleus_channel,
+                rois=list(self.rois or []), patches=list(self.patches or []))
+        return self._tissue_navigator_popup
+
+    def show_tissue_navigator(self):
+        popup = self._ensure_tissue_navigator()
+        popup.show()
+        popup.raise_()
+
+    def toggle_tissue_navigator(self):
+        popup = self._ensure_tissue_navigator()
+        if popup.isVisible():
+            popup.hide()
+        else:
+            popup.show()
+            popup.raise_()
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -171,10 +171,8 @@ def test_no_tissue_navigator_in_viewer_module():
             assert "tissue_navigator" not in stripped.lower(), stripped
             assert "TissueNavigator" not in stripped, stripped
     assert "TissueNavigatorPopup(" not in src   # no construction
-    # the module also does not exist yet as a sibling widget
-    import os
-    here = os.path.dirname(inspect.getfile(mod))
-    assert not os.path.exists(os.path.join(here, "tissue_navigator_popup.py"))
+    # (the popup module may exist as a sibling from v14.2a, but the viewer must
+    # not depend on it — covered by the import/construction checks above.)
 
 
 # ── 11. No promotion / resolver / Step2 runtime imports in the viewer ────────

@@ -22,6 +22,24 @@ AUTO_ALGORITHM = "qupath_percentile"
 USED_FOR = "segmentation_only"
 DEFAULT_AUTO_SATURATION = 0.1
 
+# Registered provenance values for a preview remap config's `created_from_step`
+# — the GUI surface that authored it. Enumerated (not ad-hoc free strings) so
+# v14.5 promotion can recognize each producer explicitly. This is a pure-data
+# constant layer: it must never import promotion / resolver / Step2 runtime.
+#   step1_5_channel_conditioning — legacy Step1.5 page (kept internal in v14)
+#   step0_channel_conditioning   — v14 Step0 Setup & Preprocessing workbench
+CREATED_FROM_STEP1_5_CONDITIONING = "step1_5_channel_conditioning"
+CREATED_FROM_STEP0_CONDITIONING = "step0_channel_conditioning"
+CREATED_FROM_STEPS = frozenset({
+    CREATED_FROM_STEP1_5_CONDITIONING,
+    CREATED_FROM_STEP0_CONDITIONING,
+})
+
+
+def is_registered_created_from_step(value):
+    """True if `value` is a known/enumerated preview-config provenance string."""
+    return value in CREATED_FROM_STEPS
+
 # Source / intensity provenance. Min/Max parameters are meaningless without
 # knowing what intensity space they live in (normalized display vs raw vs
 # corrected-native float). Every config records this. Conservative defaults

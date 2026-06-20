@@ -56,6 +56,15 @@ from ...utils.roi_project import (
     mark_roi_step,
     roi_shape_from_bbox,
 )
+# v14.1b: Step0 hosts the shared ChannelWorkbench as its Channel Conditioning /
+# Remap tab (the third host alongside Step1.5 creator + Step3 reviewer). GUI-only
+# — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
+# resolver / Step2-runtime import is introduced here.
+from ..widgets.channel_workbench import ChannelWorkbench
+from ...utils.channel_remap_config import (
+    save_channel_remap_config,
+    CREATED_FROM_STEP0_CONDITIONING,
+)
 
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
@@ -202,7 +211,18 @@ class Step0Page(QWidget):
         main_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
         main_split.setChildrenCollapsible(False)
         self._main_split = main_split   # 保存引用，showEvent里固定比例
-        outer.addWidget(main_split, stretch=1)   # 占用所有剩余高度
+
+        # v14.1b: Step0 main workarea = two tabs.
+        #   Tab 1 "Background Correction"        — the existing Step0 correction UI
+        #   Tab 2 "Channel Conditioning / Remap" — the migrated Step1.5 conditioning
+        #                                          surface, reusing ChannelWorkbench.
+        self._step0_tabs = QtWidgets.QTabWidget()
+        self._step0_tabs.addTab(main_split, "Background Correction")
+        self._cond_tab = self._build_step0_conditioning_tab()
+        self._cond_tab_index = self._step0_tabs.addTab(
+            self._cond_tab, "Channel Conditioning / Remap")
+        self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
+        outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
 
         # ── Section B（左 25%）— ROI & Patch Definition ───────────────
         sec_b = QWidget()
@@ -810,6 +830,226 @@ class Step0Page(QWidget):
         outer.addLayout(nav)
 
         self._refresh_slider_labels()
+
+    # ── v14.1b Channel Conditioning / Remap (migrated from Step1.5) ───────────
+    #  Step0 is the v14 host for pre-segmentation channel conditioning. It reuses
+    #  the shared ChannelWorkbench and Step0's OWN context (self.loader + current
+    #  patch + self._channel_order + self.nucleus_channel) — the same context
+    #  pieces the old Step1.5 page received via set_context. Configs stay
+    #  preview_only (step2_ready=false); promotion to Step2-ready is a v14.5 phase.
+
+    def _build_step0_conditioning_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 6, 6, 6)
+        note = QLabel(
+            "Step0 Channel Conditioning is pre-segmentation: adjust manual remap "
+            "(Min/Max/Brightness/Contrast/Gamma/Auto) on the current patch and save a "
+            "preview remap config. DAPI/nucleus is a reference layer only and is never "
+            "saved as a marker channel. Configs are preview_only (step2_ready=false); "
+            "Step2-ready promotion is a later phase.")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            "color:#cdd;background:#202830;border:1px solid #2c3e50;"
+            "border-radius:4px;padding:4px;font-size:10px;")
+        lay.addWidget(note)
+
+        self._cond_workbench = ChannelWorkbench()
+        # Host-agnostic: it asks for data via refresh_requested and we feed it from
+        # Step0's own loader/patch. Hide the generic internal save — Step0's
+        # "Save remap config (Step0)" below is the only official save path (it
+        # stamps the honest preview provenance + registered created_from_step).
+        self._cond_workbench.configure_host_actions(
+            refresh_label="Load current patch channels",
+            refresh_tooltip="Pull the current Step0 patch's channels into the workbench.",
+            show_internal_save=False)
+        self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
+        lay.addWidget(self._cond_workbench, stretch=1)
+
+        bar = QHBoxLayout()
+        btn_load = QPushButton('Load current patch channels')
+        btn_load.setToolTip("Pull the current Step0 patch's channels into the workbench.")
+        btn_load.clicked.connect(self._sync_step0_to_workbench)
+        bar.addWidget(btn_load)
+        btn_save = QPushButton('Save remap config (Step0)')
+        btn_save.setStyleSheet(
+            "QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}"
+            "QPushButton:hover{background:#377;}")
+        btn_save.clicked.connect(self._save_step0_remap_config)
+        bar.addWidget(btn_save)
+        bar.addStretch()
+        lay.addLayout(bar)
+        return w
+
+    def _on_step0_tab_changed(self, idx):
+        if not hasattr(self, "_step0_tabs"):
+            return
+        if self._step0_tabs.tabText(idx).startswith('Channel Conditioning') \
+                and hasattr(self, "_cond_workbench") \
+                and not self._cond_workbench.has_channel_data():
+            self._sync_step0_to_workbench()
+
+    def _maybe_refresh_conditioning(self):
+        """Re-feed the workbench from the current patch, only once it is in use."""
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            self._sync_step0_to_workbench()
+
+    def _read_cond_patch_channel(self, ch, normalize=False):
+        """Read one channel's current-patch array via Step0's own loader."""
+        if not self.loader or not self.patches:
+            return None
+        y0, y1, x0, x1 = self.patches[self.current_patch_idx]
+        arr = self.loader.read_region(ch, y0, y1, x0, x1, normalize=normalize)
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        return arr
+
+    def _sync_step0_to_workbench(self):
+        """Feed the workbench from Step0's loader + current patch + channel order.
+
+        Marker channels mirror self._channel_order (minus the nucleus/DAPI
+        channel). DAPI is supplied as a reference layer only — never a marker.
+        Mirrors the old Step1.5 _sync_step15_to_workbench exactly; only the host
+        (Step0) and provenance labels differ.
+        """
+        if not hasattr(self, "_cond_workbench"):
+            return
+        if not self.loader or not self.patches:
+            self._cond_workbench.clear_channel_images()
+            return
+
+        images, meta = {}, {}
+        for ch in self._channel_order:
+            if ch == self.nucleus_channel:
+                continue
+            try:
+                arr = self._read_cond_patch_channel(ch, normalize=False)
+                if arr is not None and arr.ndim == 2 and arr.size:
+                    images[ch] = arr
+                    # Honest per-channel provenance: calibrated from the Step0
+                    # patch, NOT proven to match the source Step2 will read.
+                    meta[ch] = {
+                        "source": "step0_loader",
+                        "intensity_space": "raw_ome_native_float",
+                        "normalization": "none",
+                        "step2_compatible": False,
+                        "step2_pre_remap_source": "unknown",
+                        "calibration_source_matches_step2": False,
+                        "fallback_reason": "step0_preview_source_unverified",
+                    }
+            except Exception as exc:
+                print(f"[Step0] conditioning: skip channel {ch}: {exc}")
+
+        # Honest top-level alignment policy: preview_only + step2_ready=false plus
+        # calibration_source_matches_step2=false and source_alignment_mode=
+        # partial_or_preview_fallback all force Step2 validation to reject this
+        # config even with allow_preview_remap=True. Promotion to Step2-ready is a
+        # later v14.5 phase (real source path / shape / intensity-space check).
+        source_policy = {
+            "source": "step0_loader",
+            "intensity_space": "raw_ome_native_float",
+            "normalization": "none",
+            "scope": "step0_pre_segmentation",
+            "preview_only": True,
+            "step2_ready": False,
+            "step2_pre_remap_source": "unknown",
+            "calibration_source_matches_step2": False,
+            "source_alignment_mode": "partial_or_preview_fallback",
+            "alignment_note": (
+                "Step0 preview config calibrated from the current patch via "
+                "OMETIFFLoader. Source alignment with Step2 has not yet been "
+                "verified. This config must not be promoted to Step2-ready until "
+                "v14.5 source path, shape, and intensity-space validation succeeds."),
+        }
+        source_policy.update(self._calibration_source_identity())
+        self._cond_workbench.set_channel_images(
+            images,
+            context={"patch": self.current_patch_idx + 1, "step": "step0"},
+            source="manual", source_policy=source_policy, channel_metadata=meta)
+
+        # DAPI / nucleus channel: reference layer only (never a remap marker).
+        try:
+            dapi = self._read_cond_patch_channel(self.nucleus_channel, normalize=True)
+        except Exception as exc:
+            dapi = None
+            print(f"[Step0] conditioning: DAPI reference unavailable: {exc}")
+        self._cond_workbench.set_reference_layers(dapi=dapi)  # mask/fusion: post-seg only
+        print(f"[Step0] conditioning workbench synced: {len(images)} markers "
+              f"patch={self.current_patch_idx + 1}")
+
+    def _calibration_source_identity(self):
+        """Identity of the source the Step0 workbench actually calibrated on.
+
+        Record-only. The full source geometry is the loader's whole-image shape
+        (the image the patch was cropped from), NOT the patch shape. If the loader
+        cannot provide path/shape, the value is null and the config simply cannot
+        be promoted later — never guessed from ROI defaults.
+        """
+        path = getattr(self.loader, "filepath", None)
+        path = os.path.abspath(path) if path else None
+        shp = getattr(self.loader, "shape", None)
+        source_shape = None
+        if shp and len(tuple(shp)) >= 2 and int(shp[0]) > 0 and int(shp[1]) > 0:
+            source_shape = [int(shp[0]), int(shp[1])]  # [H, W]
+        bbox = None
+        if self.patches and 0 <= self.current_patch_idx < len(self.patches):
+            y0, y1, x0, x1 = self.patches[self.current_patch_idx]
+            bbox = [int(y0), int(y1), int(x0), int(x1)]
+        return {
+            "calibration_source_path": path,
+            "calibration_source_kind": "raw_ome",
+            "calibration_source_shape": source_shape,
+            "calibration_intensity_space": "raw_ome_native_float",
+            "calibration_patch_bbox": bbox,
+            "calibration_patch_index": int(self.current_patch_idx),
+        }
+
+    def _step0_conditioning_out_dir(self):
+        """Legacy-compatible physical storage dir for preview remap configs.
+
+        v14 keeps the legacy <ROI>/step1_5/channel_remap_configs/ path for now
+        (no path migration in v14.1b). output_dir is the ROI/output dir Step0
+        loaded into; we append step1_5/channel_remap_configs to stay byte-compatible
+        with configs the old Step1.5 page wrote.
+        """
+        base = self.output_dir or OUTPUT_DIR
+        return os.path.join(base, "step1_5", "channel_remap_configs")
+
+    def _save_step0_remap_config(self):
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not wb.has_channel_data():
+            QMessageBox.information(
+                self, "Nothing to save",
+                "Load current patch channels and condition them first.")
+            return
+        cfg = wb.build_config()
+        # Provenance: created in the v14 Step0 Setup & Preprocessing workbench.
+        # created_from_step is a REGISTERED constant (utils.channel_remap_config),
+        # not an ad-hoc string, so v14.5 promotion can recognize Step0 configs.
+        # Stays preview_only / step2_ready=false (set via the workbench source_policy).
+        out_dir = self._step0_conditioning_out_dir()
+        cfg["created_from_step"] = CREATED_FROM_STEP0_CONDITIONING
+        cfg["ui_context"] = "Step0: Setup & Preprocessing / Channel Conditioning"
+        # Physical path is still the legacy step1_5 location; record it honestly.
+        cfg["legacy_storage_path"] = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default = os.path.join(out_dir, f"step0_channel_remap_{ts}.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Step0 remap config", default, "JSON (*.json)")
+        if not path:
+            return
+        try:
+            save_channel_remap_config(cfg, path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Saved",
+            f"Saved preview remap config (preview_only, step2_ready=false):\n{path}")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2157,6 +2397,9 @@ class Step0Page(QWidget):
         self._update_patch_info()
         if self.current_channel and self._has_any_cache(self.current_channel):
             self._show_channel_from_cache(self.current_channel)
+        # Keep the conditioning workbench in sync with the active patch (no-op
+        # until the workbench is actually in use).
+        self._maybe_refresh_conditioning()
 
     # ══ Params dirty tracking ════════════════════════════════════════
 

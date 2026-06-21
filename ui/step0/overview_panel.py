@@ -1071,6 +1071,12 @@ class OverviewPanel(QWidget):
         self._roi_artists   = []
         self._patch_artists = []
 
+        # v14.2c current-view rectangle overlay (NOT an ROI; never stored in
+        # _rois). A single non-interactive outline showing the main viewer's
+        # current viewport, in full-image pixels.
+        self._current_view_item = None
+        self._current_view_full = None   # (y0, y1, x0, x1) full-image px, or None
+
         self._setup_ui()
         if not lazy:
             self._load_overview()
@@ -1718,6 +1724,44 @@ class OverviewPanel(QWidget):
 
     def get_rois(self):
         return list(self._rois)
+
+    # ── v14.2c current-view rectangle overlay (not an ROI) ───────────────────
+    def set_current_view_rect(self, full_rect):
+        """Draw the main viewer's current viewport as a non-interactive outline.
+
+        full_rect : (y0, y1, x0, x1) in FULL-IMAGE pixels (same convention as
+        patch coords), or None to clear. Converted to overview display coords by
+        dividing by self.ds — the same full-image->overview transform the patch/
+        ROI artists use (cx = x/ds, cy = y/ds). This overlay is purely visual:
+        it is never added to self._rois and does not interfere with ROI editing.
+        """
+        self.clear_current_view_rect()
+        if full_rect is None:
+            return
+        y0, y1, x0, x1 = (float(v) for v in full_rect)
+        ds = float(self.ds or 1)
+        xs = [x0 / ds, x1 / ds, x1 / ds, x0 / ds, x0 / ds]
+        ys = [y0 / ds, y0 / ds, y1 / ds, y1 / ds, y0 / ds]
+        item = pg.PlotDataItem(
+            xs, ys, pen=pg.mkPen("#19e0e0", width=2, style=Qt.DashLine))
+        item.setZValue(50)            # above ROI/patch artists
+        item.setAcceptedMouseButtons(Qt.NoButton)   # never grabs ROI-edit clicks
+        self.vb.addItem(item)
+        self._current_view_item = item
+        self._current_view_full = (y0, y1, x0, x1)
+
+    def clear_current_view_rect(self):
+        if self._current_view_item is not None:
+            try:
+                self.vb.removeItem(self._current_view_item)
+            except Exception:
+                pass
+            self._current_view_item = None
+        self._current_view_full = None
+
+    def current_view_rect(self):
+        """Return the stored current-view rect (y0,y1,x0,x1) full-image px, or None."""
+        return self._current_view_full
 
     def set_rois_and_patches(self, rois, patches, full_wsi_mode=False):
         """Replace ROI/patch model and redraw using the Step0 patch machinery."""

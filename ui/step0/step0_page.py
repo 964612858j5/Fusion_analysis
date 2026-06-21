@@ -891,6 +891,10 @@ class Step0Page(QWidget):
             refresh_tooltip="Pull the current Step0 patch's channels into the workbench.",
             show_internal_save=False)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
+        # v14.2c: when the viewer's viewport settles (debounced), update the
+        # Tissue Navigator current-view rectangle.
+        self._cond_workbench.viewer.viewport_changed.connect(
+            self._update_tissue_view_rect)
         lay.addWidget(self._cond_workbench, stretch=1)
 
         bar = QHBoxLayout()
@@ -1151,6 +1155,7 @@ class Step0Page(QWidget):
         popup = self._ensure_tissue_navigator()
         popup.show()
         popup.raise_()
+        self._update_tissue_view_rect()
 
     def toggle_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()
@@ -1159,6 +1164,54 @@ class Step0Page(QWidget):
         else:
             popup.show()
             popup.raise_()
+            self._update_tissue_view_rect()
+
+    # ── v14.2c viewer → Tissue Navigator current-view rectangle sync ──────────
+    def _map_viewport_to_full(self, vp):
+        """Map a viewer image-local viewport rect to FULL-IMAGE pixels.
+
+        AUDITED mapping (Case A): the viewer displays the raw current-patch crop
+        with geometry preserved (intensity-only display pipeline), so the viewer's
+        image-local pixels are PATCH-LOCAL. Add the current patch origin to get
+        full-image pixels. Patch convention is (y0, y1, x0, x1).
+
+        Returns (y0, y1, x0, x1) full-image px, or None when no mapping is valid
+        (no viewport, wrong coordinate_space, or no current patch — full-WSI mode
+        has no patch crop to anchor the rect, so it returns None).
+        """
+        if not vp:
+            return None
+        if vp.get("coordinate_space") != "image_local_pixels":
+            return None
+        if not self.patches or not (0 <= self.current_patch_idx < len(self.patches)):
+            return None
+        y0p, y1p, x0p, x1p = (int(v) for v in self.patches[self.current_patch_idx])
+        fx0 = x0p + float(vp["x0"]); fx1 = x0p + float(vp["x1"])
+        fy0 = y0p + float(vp["y0"]); fy1 = y0p + float(vp["y1"])
+        return (fy0, fy1, fx0, fx1)
+
+    def _update_tissue_view_rect(self):
+        """Refresh the popup's current-view rectangle from the active viewer.
+
+        Clears the rectangle when: no popup, split view (mixed geometry), no
+        viewer image yet, or no current patch. Never creates ROIs/files."""
+        popup = self._tissue_navigator_popup
+        if popup is None:
+            return
+        wb = getattr(self, "_cond_workbench", None)
+        # Split view mixes raw|remapped per column → mapping ambiguous → clear.
+        if wb is None or wb.is_split_view():
+            popup.clear_viewport_rect()
+            popup.overview.clear_current_view_rect()
+            return
+        vp = wb.viewer_viewport_rect()
+        full = self._map_viewport_to_full(vp)
+        if full is None:
+            popup.clear_viewport_rect()
+            popup.overview.clear_current_view_rect()
+            return
+        popup.set_viewport_rect(vp)                    # store image-local (validated)
+        popup.overview.set_current_view_rect(full)     # draw in overview coords
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2516,6 +2569,8 @@ class Step0Page(QWidget):
         # Keep the conditioning workbench in sync with the active patch (no-op
         # until the workbench is actually in use).
         self._maybe_refresh_conditioning()
+        # v14.2c: current patch changed → remap the Tissue Navigator view rect.
+        self._update_tissue_view_rect()
 
     # ══ Params dirty tracking ════════════════════════════════════════
 

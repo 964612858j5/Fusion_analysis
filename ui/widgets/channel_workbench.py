@@ -442,6 +442,20 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """True if real channel data is currently loaded."""
         return bool(self._names)
 
+    # ── v14.2c viewport-sync accessors (public viewer API only) ──────────────
+    @property
+    def viewer(self):
+        """The hosted HighQualityImageViewer (for viewport_changed / public API)."""
+        return self._canvas
+
+    def viewer_viewport_rect(self):
+        """Current image-local viewport rect from the viewer, or None."""
+        return self._canvas.get_viewport_rect()
+
+    def is_split_view(self):
+        """True when the viewer is in raw|remapped split mode (geometry mixed)."""
+        return self._canvas.is_split_view()
+
     def set_reference_layers(self, dapi=None, mask=None, fusion=None,
                              context=None):
         """Set optional viewer reference layers (visualization only).

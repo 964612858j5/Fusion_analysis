@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
+from PyQt5.QtCore import pyqtSignal
 
 from ...utils.mask_renderer import extract_mask_boundaries
 
@@ -123,6 +124,10 @@ class HighQualityImageViewer(QtWidgets.QWidget):
     Reusable napari-quality viewer core. pyqtgraph ImageItem backend; preserves
     zoom/pan across display-parameter changes."""
 
+    # Debounced — fires after pan/zoom settles, not on every ViewBox range tick.
+    # Consumers (Step0 viewport sync) read get_viewport_rect() when it fires.
+    viewport_changed = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._split = False
@@ -155,6 +160,14 @@ class HighQualityImageViewer(QtWidgets.QWidget):
         self._vb.addItem(self._img_item)
         lay.addWidget(self._glw, stretch=1)
 
+        # sigRangeChanged fires at high frequency during pan/zoom; debounce it so
+        # viewport_changed (and any sync redraw) runs once the gesture settles.
+        self._vp_timer = QtCore.QTimer(self)
+        self._vp_timer.setSingleShot(True)
+        self._vp_timer.setInterval(60)   # ms
+        self._vp_timer.timeout.connect(self.viewport_changed.emit)
+        self._vb.sigRangeChanged.connect(lambda *_: self._vp_timer.start())
+
         self._status = QtWidgets.QLabel("No image loaded")
         self._status.setStyleSheet("color:#888;font-size:10px;")
         lay.addWidget(self._status)
@@ -178,6 +191,12 @@ class HighQualityImageViewer(QtWidgets.QWidget):
     def request_fit(self):
         """Ask for one fit-to-view on the next refresh (new patch / first load)."""
         self._need_fit = True
+
+    def is_split_view(self):
+        """True when raw|remapped split view is active. Split view mixes raw and
+        remapped per column, so callers that map the viewport rect to image space
+        should clear/skip the rect while this is True (see v14.2c sync)."""
+        return bool(self._split)
 
     # ── viewport API (v14.3, image-local pixel coordinates) ───────────
     def get_viewport_rect(self):

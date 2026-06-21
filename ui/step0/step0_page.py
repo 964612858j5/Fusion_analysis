@@ -36,6 +36,10 @@ from ...config import (
 from ...core.bg_correction import (
     CUCIM_AVAILABLE, CUCIM_IMPORT_ERROR,
     _load_correction_config,
+    stamp_corrected_zarr_provenance,
+    corrected_zarr_report,
+    CORRECTED_ZARR_OUTPUT_KIND,
+    CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
 )
 from ...core.io_loader import OMETIFFLoader
 from ...core.fusion_engine import FusionEngine
@@ -836,6 +840,14 @@ class Step0Page(QWidget):
         self._btn_start_bg.clicked.connect(self._on_start_bg_correction)
         run_row.addWidget(self._btn_start_bg)
         cl.addLayout(run_row)
+
+        # v14.4: explicit corrected-output status (distinct from the per-patch
+        # run status above). Honestly reflects whether the last Save & Continue
+        # wrote a VALID non-empty corrected_channels.zarr.
+        self._bg_corrected_status = QLabel(
+            "corrected_channels.zarr: not written yet.")
+        self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
+        cl.addWidget(self._bg_corrected_status)
 
         main_split.addWidget(sec_c)
 
@@ -3025,6 +3037,31 @@ class Step0Page(QWidget):
             group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
             group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
 
+    def _refresh_bg_corrected_status(self, report):
+        """Update the corrected-output status label from a corrected_zarr_report.
+
+        Empty/invalid output is flagged as NOT a valid corrected output — a
+        directory existing is never reported as success."""
+        if not hasattr(self, "_bg_corrected_status"):
+            return
+        if not report or not report.get("exists"):
+            self._bg_corrected_status.setText(
+                "corrected_channels.zarr: not written.")
+            self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
+        elif report.get("non_empty"):
+            n = report["n_channel_arrays"]
+            self._bg_corrected_status.setText(
+                f"✓ corrected_channels.zarr written — {n} channel "
+                f"array{'s' if n != 1 else ''}.")
+            self._bg_corrected_status.setStyleSheet(
+                "color:#6bffa0;font-size:11px;font-weight:bold;")
+        else:
+            self._bg_corrected_status.setText(
+                "⚠ corrected_channels.zarr is EMPTY (no tophat/cuCIM channels "
+                "assigned) — not a valid corrected output.")
+            self._bg_corrected_status.setStyleSheet(
+                "color:#e5c07b;font-size:11px;font-weight:bold;")
+
     def _write_step0_handoff(self, config, zarr_path):
         step0_dir = os.path.dirname(zarr_path) if zarr_path else (
             self._roi_context["step_dirs"]["step0"] if self._roi_context else self.output_dir
@@ -3068,6 +3105,8 @@ class Step0Page(QWidget):
                 root.attrs["roi_dir"] = os.path.abspath(roi_dir) if roi_dir else ""
                 root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
                 root.attrs["created_by"] = "Step0"
+                # v14.4: honest preprocessing provenance (NOT step2_ready).
+                stamp_corrected_zarr_provenance(root)
                 for roi in rois:
                     name = str(roi.get("name") or "")
                     group = root[name] if name and name in root else None
@@ -3086,8 +3125,17 @@ class Step0Page(QWidget):
             except Exception as e:
                 print(f"[Step0] failed to update corrected zarr attrs: {e}")
 
+        # v14.4: validate the corrected output (a directory existing is NOT proof
+        # of a valid corrected zarr) and report it honestly to the UI + manifest.
+        corrected_report = corrected_zarr_report(corrected_path)
+        self._refresh_bg_corrected_status(corrected_report)
+
         manifest = {
             "version": "v6_roi_handoff_1",
+            "created_from_step": CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
+            "output_kind": CORRECTED_ZARR_OUTPUT_KIND,
+            "corrected_zarr_valid": bool(corrected_report["non_empty"]),
+            "corrected_zarr_n_channel_arrays": int(corrected_report["n_channel_arrays"]),
             "roi_id": roi_id,
             "display_name": rois[0]["name"] if rois else "",
             "analysis_region_type": analysis_region_type,

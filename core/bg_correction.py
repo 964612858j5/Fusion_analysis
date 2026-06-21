@@ -259,3 +259,72 @@ def _apply_background_method_tiled(arr, method, radius=None, sigma=None,
             corr = _apply_cucim_or_cpu(tile, sigma=param, prefer_gpu=prefer_gpu)
         out[y0:y1, x0:x1] = corr[cy0:cy1, cx0:cx1]
     return out
+
+
+# ── v14.4 corrected_channels.zarr provenance + validity ──────────────────────
+# Provenance for the Step0 Background Correction output. Local constants in the
+# background-correction layer (the corrected zarr is a different output kind than
+# the channel-remap configs, which have their own registry). This is a
+# preprocessing output only — it is NEVER marked step2_ready and never touches
+# HQ2/CSD source policy / promotion / resolver.
+CREATED_FROM_STEP0_BACKGROUND_CORRECTION = "step0_background_correction"
+CORRECTED_ZARR_OUTPUT_KIND = "corrected_channels_zarr"
+CORRECTED_ZARR_USED_FOR = "background_corrected_marker_images"
+
+
+def stamp_corrected_zarr_provenance(group):
+    """Stamp honest preprocessing provenance onto a corrected_channels.zarr root.
+
+    `group` is an open writable zarr group. Never sets step2_ready and never
+    records anything source-aware — this is a plain preprocessing output."""
+    group.attrs["created_from_step"] = CREATED_FROM_STEP0_BACKGROUND_CORRECTION
+    group.attrs["output_kind"] = CORRECTED_ZARR_OUTPUT_KIND
+    group.attrs["used_for"] = CORRECTED_ZARR_USED_FOR
+
+
+def corrected_zarr_report(path):
+    """Inspect a corrected_channels.zarr and report whether it is a VALID,
+    non-empty corrected output (vs a directory-only / empty group with zero
+    channel arrays).
+
+    A directory existing is NOT proof of a valid output. A valid corrected
+    output must contain at least one channel array with a non-zero shape. The
+    worker nests arrays as root[<roi_group>][<channel>]; this walks groups
+    recursively and also accepts arrays directly under root.
+
+    Returns a plain dict:
+        exists           : bool — the zarr group could be opened
+        n_channel_arrays : int  — number of non-empty channel arrays found
+        channel_arrays   : list[str] — "<group>/<channel>" paths
+        shapes           : dict[str, list[int]]
+        non_empty        : bool — n_channel_arrays > 0
+    """
+    import zarr
+
+    rep = {"exists": False, "n_channel_arrays": 0, "channel_arrays": [],
+           "shapes": {}, "non_empty": False}
+    if not path or not os.path.exists(path):
+        return rep
+    try:
+        root = zarr.open_group(path, mode="r")
+    except Exception:
+        return rep
+    rep["exists"] = True
+
+    found = []
+
+    def _collect(grp, prefix):
+        for key in grp.array_keys():
+            arr = grp[key]
+            shp = [int(s) for s in (arr.shape or [])]
+            if shp and all(s > 0 for s in shp):
+                found.append((f"{prefix}{key}", shp))
+        for gkey in grp.group_keys():
+            _collect(grp[gkey], f"{prefix}{gkey}/")
+
+    _collect(root, "")
+    rep["channel_arrays"] = [name for name, _ in found]
+    rep["shapes"] = {name: shp for name, shp in found}
+    rep["n_channel_arrays"] = len(found)
+    rep["non_empty"] = len(found) > 0
+    return rep

@@ -185,37 +185,94 @@ def camp_source_policy_of(config):
         or DEFAULT_CAMP_SOURCE_POLICY
 
 
-# ── source-aware detection (used by the Step2 validation guard) ──────────────
-# A config is "source-aware" if it carries ANY of these v14.5 primitives. Such a
-# config must NOT be runtime-authoritative (step2_ready) until v14.5c/v14.5d.
-_PER_CHANNEL_SOURCE_AWARE_KEYS = (
-    "source_request", "calibration_source_identity",
-    "actual_source_kind", "actual_source_path",
-)
+# ── source-aware field registry (single source of truth) ─────────────────────
+# A config is "source-aware" if it carries ANY of these v14.5 marker keys
+# ANYWHERE in its structure (top-level, source_policy, per-channel params, or a
+# nested per-channel metadata dict/list). Such a config must NOT be
+# runtime-authoritative (step2_ready) until the v14.5c/v14.5d resolver + Step2
+# runtime exist — see the hard-reject guard in
+# utils/channel_remap_config.validate_step2_remap_config.
+#
+# Each marker key name is defined ONCE as a SOURCE_AWARE_KEY_* constant; the
+# registry is built from those constants. A meta-test
+# (test_source_identity_schema) asserts every SOURCE_AWARE_KEY_* constant is in
+# the registry, so a new marker cannot be defined without being registered.
+#
+# Two kinds of marker:
+#   PRESENCE    — mere presence of the key marks the config source-aware.
+#   CONDITIONAL — source-aware only for a NON-default value (camp_source_policy:
+#                 the safe default raw_gi_only is NOT itself source-aware).
+SOURCE_AWARE_KEY_SOURCE_REQUEST = "source_request"
+SOURCE_AWARE_KEY_CALIBRATION_SOURCE_IDENTITY = "calibration_source_identity"
+SOURCE_AWARE_KEY_ACTUAL_SOURCE_KIND = "actual_source_kind"
+SOURCE_AWARE_KEY_ACTUAL_SOURCE_PATH = "actual_source_path"
+SOURCE_AWARE_KEY_SOURCE_MIXTURE_MODE = "source_mixture_mode"
+SOURCE_AWARE_KEY_CAMP_SOURCE_POLICY = "camp_source_policy"
+
+SOURCE_AWARE_PRESENCE_KEYS = frozenset({
+    SOURCE_AWARE_KEY_SOURCE_REQUEST,
+    SOURCE_AWARE_KEY_CALIBRATION_SOURCE_IDENTITY,
+    SOURCE_AWARE_KEY_ACTUAL_SOURCE_KIND,
+    SOURCE_AWARE_KEY_ACTUAL_SOURCE_PATH,
+    SOURCE_AWARE_KEY_SOURCE_MIXTURE_MODE,
+})
+SOURCE_AWARE_CONDITIONAL_KEYS = frozenset({
+    SOURCE_AWARE_KEY_CAMP_SOURCE_POLICY,
+})
+# Every source-aware marker key name. Single source of truth.
+SOURCE_AWARE_FIELD_REGISTRY = SOURCE_AWARE_PRESENCE_KEYS | SOURCE_AWARE_CONDITIONAL_KEYS
+
+
+def _key_is_source_aware(key, value):
+    """True if a single (key, value) pair is a source-aware marker trigger."""
+    if key in SOURCE_AWARE_PRESENCE_KEYS:
+        return True
+    if key == SOURCE_AWARE_KEY_CAMP_SOURCE_POLICY:
+        return value is not None and value != DEFAULT_CAMP_SOURCE_POLICY
+    return False
+
+
+def _scan_source_aware(obj):
+    """Recursively scan a dict/list tree for any source-aware marker key.
+
+    Identifies marker KEYS only; it does not validate nested values (that is the
+    job of the SourceRequest / CalibrationSourceIdentity validators). Configs are
+    JSON-shaped (no cycles), so plain recursion is safe.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if _key_is_source_aware(k, v):
+                return True
+            if _scan_source_aware(v):
+                return True
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            if _scan_source_aware(item):
+                return True
+    return False
+
+
+def source_aware_trigger_value(marker):
+    """A sample value that makes `marker` trigger source-awareness (test helper).
+
+    Presence markers trigger on any value; the conditional camp_source_policy
+    triggers only on a non-default value.
+    """
+    if marker == SOURCE_AWARE_KEY_CAMP_SOURCE_POLICY:
+        return CAMP_SOURCE_POLICY_SELECTED_SOURCE
+    return {"_source_aware_marker": True}
 
 
 def config_is_source_aware(config):
-    """True if the config carries any source-aware v14.5 primitive.
+    """True if the config carries any registered source-aware marker key.
 
-    Triggers: top-level source_mixture_mode; a non-default camp_source_policy;
-    any per-channel source_request / calibration_source_identity / actual_source_*;
-    a source_policy.source_mixture_mode. (A plain camp_source_policy=raw_gi_only is
-    NOT by itself source-aware — it is the safe default.)
+    Scans the WHOLE config tree recursively: top-level, source_policy, per-channel
+    params, and nested per-channel metadata dicts/lists. A plain
+    camp_source_policy=raw_gi_only (the safe default) is NOT source-aware. Old
+    non-source-aware fields (step2_compatible, calibration_source_matches_step2,
+    intensity_space, step2_pre_remap_source, and promotion's source_kind/
+    source_path) are NOT registered markers and never trip this gate.
     """
     if not isinstance(config, dict):
         return False
-    if config.get("source_mixture_mode") in SOURCE_MIXTURE_MODES:
-        return True
-    csp = config.get("camp_source_policy")
-    if csp is not None and csp != DEFAULT_CAMP_SOURCE_POLICY:
-        return True
-    sp = config.get("source_policy")
-    if isinstance(sp, dict) and sp.get("source_mixture_mode") in SOURCE_MIXTURE_MODES:
-        return True
-    channels = config.get("channels")
-    if isinstance(channels, dict):
-        for params in channels.values():
-            if isinstance(params, dict) and any(
-                    k in params for k in _PER_CHANNEL_SOURCE_AWARE_KEYS):
-                return True
-    return False
+    return _scan_source_aware(config)

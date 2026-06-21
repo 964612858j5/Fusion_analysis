@@ -133,3 +133,85 @@ def test_plain_step2_ready_still_passes():
     errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
     assert errs == []          # baseline still valid
     assert "CD68" in resolved
+
+
+# ── v14.5a.1 hardening: central registry + recursive scan + registry tests ───
+
+def _place_marker(cfg, marker, value, location):
+    """Insert a source-aware marker at the given config location."""
+    if location == "top_level":
+        cfg[marker] = value
+    elif location == "source_policy":
+        cfg["source_policy"][marker] = value
+    elif location == "channel_immediate":
+        cfg["channels"]["CD68"][marker] = value
+    elif location == "channel_nested":
+        cfg["channels"]["CD68"]["metadata"] = {marker: value}
+    elif location == "channel_deep_nested":
+        cfg["channels"]["CD68"]["a"] = {"b": {marker: value}}
+    else:
+        raise AssertionError(location)
+    return cfg
+
+
+_LOCATIONS = ["top_level", "source_policy", "channel_immediate",
+              "channel_nested", "channel_deep_nested"]
+
+
+# 1. Registry contains exactly the current source-aware markers.
+def test_registry_contains_all_current_markers():
+    assert si.SOURCE_AWARE_FIELD_REGISTRY == {
+        "source_request", "calibration_source_identity",
+        "actual_source_kind", "actual_source_path",
+        "source_mixture_mode", "camp_source_policy",
+    }
+
+
+# 2-5. Detection at every location (parameterized over registry x location).
+@pytest.mark.parametrize("marker", sorted(si.SOURCE_AWARE_FIELD_REGISTRY))
+@pytest.mark.parametrize("location", _LOCATIONS)
+def test_config_is_source_aware_detects_marker_at_location(marker, location):
+    cfg = _ready_config()
+    _place_marker(cfg, marker, si.source_aware_trigger_value(marker), location)
+    assert si.config_is_source_aware(cfg) is True
+
+
+# 6-7. Every registered marker at every location HARD-rejects step2_ready=true.
+@pytest.mark.parametrize("marker", sorted(si.SOURCE_AWARE_FIELD_REGISTRY))
+@pytest.mark.parametrize("location", _LOCATIONS)
+def test_every_marker_hard_rejects_step2_ready(marker, location):
+    cfg = _ready_config()                         # step2_ready=true baseline
+    _place_marker(cfg, marker, si.source_aware_trigger_value(marker), location)
+    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
+    assert any("source-aware" in e for e in errs), (marker, location)
+    assert resolved == {}                         # not runnable
+
+
+# 9. Old promoted / non-source-aware config fields are NOT source-aware.
+def test_old_promoted_fields_not_source_aware():
+    cfg = _ready_config()
+    # mimic promotion output: source_kind/source_path (NOT actual_source_*),
+    # a calibration_source audit block, and native per-channel provenance.
+    cfg["source_policy"].update(source_kind="raw_ome", source_path="/x",
+                                source_shape=[16, 16])
+    cfg["calibration_source"] = {
+        "source_kind": "raw_ome", "source_path": "/x", "source_shape": [16, 16],
+        "intensity_space": "raw_ome_native_float"}
+    assert si.config_is_source_aware(cfg) is False
+    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
+    assert not any("source-aware" in e for e in errs)
+    assert "CD68" in resolved
+
+
+# 10. Registration-enforcement meta-test (Approach B): every SOURCE_AWARE_KEY_*
+#     constant must appear in the central registry, so a developer cannot define
+#     a new source-aware marker constant without registering it.
+def test_every_source_aware_key_constant_is_registered():
+    key_consts = {n: getattr(si, n) for n in dir(si)
+                  if n.startswith("SOURCE_AWARE_KEY_")}
+    assert key_consts, "expected SOURCE_AWARE_KEY_* marker constants"
+    for name, value in key_consts.items():
+        assert value in si.SOURCE_AWARE_FIELD_REGISTRY, (
+            f"{name}={value!r} is defined but NOT in SOURCE_AWARE_FIELD_REGISTRY")
+    # the registry has no extra unmapped names either
+    assert set(key_consts.values()) == set(si.SOURCE_AWARE_FIELD_REGISTRY)

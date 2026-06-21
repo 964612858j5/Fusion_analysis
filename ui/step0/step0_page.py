@@ -71,6 +71,16 @@ from ...utils.channel_remap_config import (
     save_channel_remap_config,
     CREATED_FROM_STEP0_CONDITIONING,
 )
+# v14.5b: source-aware preview-config primitives (schema + preview-time identity
+# reader). Pure/Qt-free; NOT the Step2 resolver or promotion.
+from ...utils.source_identity import (
+    REQUESTED_SOURCE_RAW_OME,
+    DEFAULT_CAMP_SOURCE_POLICY,
+)
+from ...utils.calibration_source import (
+    resolve_channel_calibration,
+    source_mixture_mode_from_identities,
+)
 
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
@@ -92,6 +102,12 @@ class Step0Page(QWidget):
         # model; panel _rois/_patches are render caches derived from it.
         self._roi_model = RoiContextModel()
         self._roi_sync_guard = False  # re-entrancy guard for cross-panel render
+        # v14.5b: per-channel SourceRequest for Channel Conditioning. Default all
+        # channels to raw OME; corrected is opt-in per channel. Visible per-channel
+        # selector UI is deferred — this map is the internal/test-hook entry point
+        # (see set_channel_source_request). CalibrationSourceIdentity is never read
+        # from this map; it is derived from the actual opened pixel source at save.
+        self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
         self._preview_worker = None
         self._preview_req_id = 0
@@ -1060,6 +1076,66 @@ class Step0Page(QWidget):
         base = self.output_dir or OUTPUT_DIR
         return os.path.join(base, "step1_5", "channel_remap_configs")
 
+    def set_channel_source_request(self, channel_name, requested_source):
+        """Set a channel's SourceRequest (raw_ome | corrected_zarr). Default raw.
+
+        Internal/test-hook entry point — the visible per-channel selector UI is
+        deferred. Records intent only; the actual source identity is derived from
+        pixels at save time."""
+        self._channel_source_requests[str(channel_name)] = str(requested_source)
+
+    def _corrected_zarr_path(self):
+        """Corrected zarr path the loader currently knows about, or None."""
+        return getattr(self.loader, "_corrected_zarr_path", None)
+
+    def _apply_source_aware_identity(self, cfg):
+        """v14.5b: stamp per-channel SourceRequest + CalibrationSourceIdentity and
+        a top-level source_mixture_mode + camp_source_policy into a PREVIEW config.
+
+        SourceRequest = what was asked for (per-channel map, default raw_ome).
+        CalibrationSourceIdentity = derived from the ACTUAL opened pixel source
+        (Strategy B fallback recorded honestly). source_mixture_mode is derived
+        from the actual identities, never from the requests. Never sets step2_ready.
+        """
+        channels = cfg.get("channels") or {}
+        if not channels:
+            return cfg
+        patch_bbox = None
+        if self.patches and 0 <= self.current_patch_idx < len(self.patches):
+            y0, y1, x0, x1 = self.patches[self.current_patch_idx]
+            patch_bbox = [int(y0), int(y1), int(x0), int(x1)]
+        raw_path = getattr(self.loader, "filepath", None)
+        ch_map = getattr(self.loader, "ch_map", {}) or {}
+        corrected_zarr = self._corrected_zarr_path()
+
+        def _read_raw(ch):
+            return self._read_cond_patch_channel(ch, normalize=False)
+
+        identities = []
+        for ch in channels:
+            requested = self._channel_source_requests.get(ch, REQUESTED_SOURCE_RAW_OME)
+            user_selected = ch in self._channel_source_requests
+            try:
+                req, csi = resolve_channel_calibration(
+                    ch, requested,
+                    read_raw=_read_raw, raw_path=raw_path,
+                    channel_index=ch_map.get(ch), patch_bbox=patch_bbox,
+                    corrected_zarr_path=corrected_zarr, roi_name=None,
+                    user_selected=user_selected)
+            except Exception as exc:
+                print(f"[Step0] source-aware identity skip {ch}: {exc}")
+                continue
+            channels[ch]["source_request"] = req
+            channels[ch]["calibration_source_identity"] = csi
+            identities.append(csi)
+
+        mode = source_mixture_mode_from_identities(identities)
+        if mode is not None:
+            cfg["source_mixture_mode"] = mode
+        # Default safe camp policy (corrected nonlinear -> never silently in camp/Gi).
+        cfg.setdefault("camp_source_policy", DEFAULT_CAMP_SOURCE_POLICY)
+        return cfg
+
     def _save_step0_remap_config(self):
         wb = getattr(self, "_cond_workbench", None)
         if wb is None or not wb.has_channel_data():
@@ -1068,6 +1144,9 @@ class Step0Page(QWidget):
                 "Load current patch channels and condition them first.")
             return
         cfg = wb.build_config()
+        # v14.5b: stamp per-channel source-aware identity (preview only). Stays
+        # preview_only / step2_ready=false; never promoted here.
+        self._apply_source_aware_identity(cfg)
         # Provenance: created in the v14 Step0 Setup & Preprocessing workbench.
         # created_from_step is a REGISTERED constant (utils.channel_remap_config),
         # not an ad-hoc string, so v14.5 promotion can recognize Step0 configs.

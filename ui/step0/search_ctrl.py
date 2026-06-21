@@ -37,6 +37,7 @@ from ...core.bg_correction import (
     _apply_cucim_or_cpu,
     _compute_bg_metrics,
     _tile_slices,
+    stamp_corrected_channel_identity,
 )
 from ...core.io_loader import OMETIFFLoader
 from ...utils.segmentation_config import (
@@ -2027,6 +2028,18 @@ class WsiCorrectionWorker(QThread):
                         chunks=(min(1024, roi_h), min(1024, roi_w)),
                         dtype=np.float32,
                         overwrite=True,
+                    )
+                    # v14.5a: per-channel source identity (metadata only — never
+                    # touches array data/shape). channel_index from the loader's
+                    # channel map; None if unavailable (name/key/shape/dtype still
+                    # recorded).
+                    stamp_corrected_channel_identity(
+                        ds,
+                        channel_name=ch_name,
+                        channel_index=self.loader.ch_map.get(ch_name),
+                        correction_method=method,
+                        roi_name=info["roi_name"],
+                        roi_bbox_fullres=info["bbox"],
                     )
 
                     for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):

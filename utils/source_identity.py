@@ -1,0 +1,221 @@
+"""
+block01/utils/source_identity.py — v14.5a source-aware schema primitives.
+
+Pure-Python, dependency-light schema/validation layer for FUTURE source-aware
+Channel Conditioning. v14.5a adds these primitives ONLY — nothing here changes
+runtime behavior. There is no resolver, promotion, Step2, or camp/Gi code in this
+module, and it is not consumed by any runtime path yet.
+
+Two distinct concepts (never conflate them):
+
+  SourceRequest             — what the GUI/config ASKS for (raw_ome | corrected_zarr).
+                              A request, NOT proof of the actual pixel source.
+  CalibrationSourceIdentity — what was ACTUALLY resolved from the pixels that the
+                              viewer/backend read. Authoritative identity.
+
+Plus:
+  source_mixture_mode  — homogeneous_raw | homogeneous_corrected | mixed_raw_corrected
+  camp_source_policy   — raw_gi_only (DEFAULT) | selected_source
+
+camp_source_policy defaults to raw_gi_only because background correction is a
+NONLINEAR transform (white-tophat + clip) and local-z (Gi*) statistics are not
+comparable across raw vs corrected channels; corrected channels must not silently
+enter camp/Gi. Wiring this into Step2 is a later phase (v14.5d).
+"""
+
+from __future__ import annotations
+
+# ── SourceRequest values ─────────────────────────────────────────────────────
+REQUESTED_SOURCE_RAW_OME = "raw_ome"
+REQUESTED_SOURCE_CORRECTED_ZARR = "corrected_zarr"
+REQUESTED_SOURCES = frozenset({REQUESTED_SOURCE_RAW_OME, REQUESTED_SOURCE_CORRECTED_ZARR})
+
+# ── actual (resolved) source kinds ───────────────────────────────────────────
+ACTUAL_SOURCE_RAW_OME = "raw_ome"
+ACTUAL_SOURCE_CORRECTED_ZARR = "corrected_zarr"
+ACTUAL_SOURCE_KINDS = frozenset({ACTUAL_SOURCE_RAW_OME, ACTUAL_SOURCE_CORRECTED_ZARR})
+
+# Intensity-space label for a background-corrected marker array (the corrected
+# zarr per-channel identity). Distinct from raw_ome_native_float.
+CORRECTED_INTENSITY_SPACE = "background_corrected_marker_image"
+RAW_OME_INTENSITY_SPACE = "raw_ome_native_float"
+
+# ── source mixture modes ─────────────────────────────────────────────────────
+SOURCE_MIXTURE_HOMOGENEOUS_RAW = "homogeneous_raw"
+SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED = "homogeneous_corrected"
+SOURCE_MIXTURE_MIXED = "mixed_raw_corrected"
+SOURCE_MIXTURE_MODES = frozenset({
+    SOURCE_MIXTURE_HOMOGENEOUS_RAW,
+    SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED,
+    SOURCE_MIXTURE_MIXED,
+})
+
+# ── camp source policy ───────────────────────────────────────────────────────
+CAMP_SOURCE_POLICY_RAW_GI_ONLY = "raw_gi_only"
+CAMP_SOURCE_POLICY_SELECTED_SOURCE = "selected_source"
+CAMP_SOURCE_POLICIES = frozenset({
+    CAMP_SOURCE_POLICY_RAW_GI_ONLY,
+    CAMP_SOURCE_POLICY_SELECTED_SOURCE,
+})
+DEFAULT_CAMP_SOURCE_POLICY = CAMP_SOURCE_POLICY_RAW_GI_ONLY
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+def _is_hw(shape):
+    """True if `shape` is a 2-element [H, W] of positive ints."""
+    try:
+        if len(shape) != 2:
+            return False
+        return all(int(v) > 0 for v in shape)
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_source_request(req):
+    """Validate a SourceRequest dict. Returns list[str] of errors (empty == ok).
+
+    Shape: {requested_source: raw_ome|corrected_zarr, channel_name: str,
+            reason: str|None}. A request, never authoritative source identity.
+    """
+    errors = []
+    if not isinstance(req, dict):
+        return ["source_request must be a dict"]
+    rs = req.get("requested_source")
+    if rs not in REQUESTED_SOURCES:
+        errors.append(
+            f"requested_source must be one of {sorted(REQUESTED_SOURCES)}, got {rs!r}")
+    name = req.get("channel_name")
+    if not isinstance(name, str) or not name.strip():
+        errors.append("source_request.channel_name must be a non-empty string")
+    if "reason" in req and req["reason"] is not None \
+            and not isinstance(req["reason"], str):
+        errors.append("source_request.reason must be a string or None")
+    return errors
+
+
+def make_source_request(channel_name, requested_source, reason=None):
+    """Build a SourceRequest dict (no validation side effects)."""
+    return {
+        "requested_source": requested_source,
+        "channel_name": str(channel_name),
+        "reason": reason,
+    }
+
+
+# Required keys for an authoritative CalibrationSourceIdentity.
+_CSI_REQUIRED = ("actual_source_kind", "channel_name", "source_shape", "dtype",
+                 "intensity_space")
+
+
+def validate_calibration_source_identity(csi):
+    """Validate a CalibrationSourceIdentity dict. Returns list[str] of errors.
+
+    Required: actual_source_kind, channel_name, source_shape ([H,W]), dtype,
+    intensity_space. Optional: actual_source_path, channel_index (int|None),
+    channel_key, roi_id, roi_name, roi_bbox_fullres.
+    """
+    errors = []
+    if not isinstance(csi, dict):
+        return ["calibration_source_identity must be a dict"]
+    for key in _CSI_REQUIRED:
+        if key not in csi:
+            errors.append(f"calibration_source_identity missing required '{key}'")
+    if "actual_source_kind" in csi and csi["actual_source_kind"] not in ACTUAL_SOURCE_KINDS:
+        errors.append(
+            f"actual_source_kind must be one of {sorted(ACTUAL_SOURCE_KINDS)}, "
+            f"got {csi.get('actual_source_kind')!r}")
+    if "channel_name" in csi and (
+            not isinstance(csi["channel_name"], str) or not csi["channel_name"].strip()):
+        errors.append("calibration_source_identity.channel_name must be a non-empty string")
+    if "source_shape" in csi and not _is_hw(csi["source_shape"]):
+        errors.append("calibration_source_identity.source_shape must be [H, W] positive ints")
+    if "dtype" in csi and not isinstance(csi["dtype"], str):
+        errors.append("calibration_source_identity.dtype must be a string")
+    if "intensity_space" in csi and not isinstance(csi["intensity_space"], str):
+        errors.append("calibration_source_identity.intensity_space must be a string")
+    ci = csi.get("channel_index", None)
+    if ci is not None and not isinstance(ci, int):
+        errors.append("calibration_source_identity.channel_index must be int or None")
+    return errors
+
+
+def make_calibration_source_identity(actual_source_kind, channel_name, source_shape,
+                                     dtype, intensity_space, actual_source_path=None,
+                                     channel_index=None, channel_key=None,
+                                     roi_id=None, roi_name=None, roi_bbox_fullres=None):
+    """Build a CalibrationSourceIdentity dict from actually-resolved pixel facts."""
+    return {
+        "actual_source_kind": actual_source_kind,
+        "actual_source_path": actual_source_path,
+        "channel_name": str(channel_name),
+        "channel_index": channel_index,
+        "channel_key": channel_key,
+        "source_shape": [int(source_shape[0]), int(source_shape[1])],
+        "dtype": str(dtype),
+        "intensity_space": intensity_space,
+        "roi_id": roi_id,
+        "roi_name": roi_name,
+        "roi_bbox_fullres": list(roi_bbox_fullres) if roi_bbox_fullres else None,
+    }
+
+
+def validate_source_mixture_mode(mode):
+    """Returns list[str] of errors (empty == ok)."""
+    if mode in SOURCE_MIXTURE_MODES:
+        return []
+    return [f"source_mixture_mode must be one of {sorted(SOURCE_MIXTURE_MODES)}, got {mode!r}"]
+
+
+def validate_camp_source_policy(policy):
+    """Returns list[str] of errors (empty == ok)."""
+    if policy in CAMP_SOURCE_POLICIES:
+        return []
+    return [f"camp_source_policy must be one of {sorted(CAMP_SOURCE_POLICIES)}, got {policy!r}"]
+
+
+def camp_source_policy_of(config):
+    """Return a config's camp_source_policy, defaulting to raw_gi_only when absent.
+
+    Reading only — does not mutate the config. The default is deliberately the
+    comparability-safe policy (corrected channels never silently enter camp/Gi).
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_CAMP_SOURCE_POLICY
+    return config.get("camp_source_policy", DEFAULT_CAMP_SOURCE_POLICY) \
+        or DEFAULT_CAMP_SOURCE_POLICY
+
+
+# ── source-aware detection (used by the Step2 validation guard) ──────────────
+# A config is "source-aware" if it carries ANY of these v14.5 primitives. Such a
+# config must NOT be runtime-authoritative (step2_ready) until v14.5c/v14.5d.
+_PER_CHANNEL_SOURCE_AWARE_KEYS = (
+    "source_request", "calibration_source_identity",
+    "actual_source_kind", "actual_source_path",
+)
+
+
+def config_is_source_aware(config):
+    """True if the config carries any source-aware v14.5 primitive.
+
+    Triggers: top-level source_mixture_mode; a non-default camp_source_policy;
+    any per-channel source_request / calibration_source_identity / actual_source_*;
+    a source_policy.source_mixture_mode. (A plain camp_source_policy=raw_gi_only is
+    NOT by itself source-aware — it is the safe default.)
+    """
+    if not isinstance(config, dict):
+        return False
+    if config.get("source_mixture_mode") in SOURCE_MIXTURE_MODES:
+        return True
+    csp = config.get("camp_source_policy")
+    if csp is not None and csp != DEFAULT_CAMP_SOURCE_POLICY:
+        return True
+    sp = config.get("source_policy")
+    if isinstance(sp, dict) and sp.get("source_mixture_mode") in SOURCE_MIXTURE_MODES:
+        return True
+    channels = config.get("channels")
+    if isinstance(channels, dict):
+        for params in channels.values():
+            if isinstance(params, dict) and any(
+                    k in params for k in _PER_CHANNEL_SOURCE_AWARE_KEYS):
+                return True
+    return False

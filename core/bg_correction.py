@@ -282,6 +282,40 @@ def stamp_corrected_zarr_provenance(group):
     group.attrs["used_for"] = CORRECTED_ZARR_USED_FOR
 
 
+# v14.5a: per-channel identity for a corrected zarr ARRAY (metadata only — the
+# array bytes/shape are never touched). Makes each corrected channel array
+# self-describing so a future (v14.5c) per-channel resolver can re-resolve and
+# cross-validate a corrected channel's source identity. The intensity space of a
+# background-corrected marker array (distinct from raw_ome_native_float).
+CORRECTED_CHANNEL_INTENSITY_SPACE = "background_corrected_marker_image"
+
+
+def stamp_corrected_channel_identity(ds, channel_name, channel_index=None,
+                                     correction_method="unknown", roi_name=None,
+                                     roi_bbox_fullres=None):
+    """Stamp per-channel source identity onto a corrected channel zarr array.
+
+    `ds` is an open writable zarr ARRAY (already created with its data). This
+    only writes ds.attrs — it never recreates the array or changes its data or
+    shape. `channel_index` may be None when it cannot be reliably derived; the
+    stable channel_name / channel_key / shape / dtype are always recorded.
+    Never marks the array step2_ready.
+    """
+    ds.attrs["source_kind"] = "corrected_zarr"
+    ds.attrs["channel_name"] = str(channel_name)
+    ds.attrs["channel_key"] = str(channel_name)
+    ds.attrs["channel_index"] = (int(channel_index)
+                                 if channel_index is not None else None)
+    ds.attrs["intensity_space"] = CORRECTED_CHANNEL_INTENSITY_SPACE
+    ds.attrs["correction_method"] = str(correction_method or "unknown")
+    ds.attrs["dtype"] = str(ds.dtype)
+    ds.attrs["source_shape"] = [int(ds.shape[0]), int(ds.shape[1])]
+    if roi_name is not None:
+        ds.attrs["roi_name"] = str(roi_name)
+    if roi_bbox_fullres is not None:
+        ds.attrs["roi_bbox_fullres"] = [int(v) for v in roi_bbox_fullres]
+
+
 def corrected_zarr_report(path):
     """Inspect a corrected_channels.zarr and report whether it is a VALID,
     non-empty corrected output (vs a directory-only / empty group with zero

@@ -16,6 +16,11 @@ from __future__ import annotations
 import json
 import os
 
+# v14.5a: source-aware schema primitives (pure-Python, no runtime coupling). Used
+# only by the Step2 validation guard below to hard-reject a source-aware config
+# that claims step2_ready before runtime support exists.
+from .source_identity import config_is_source_aware
+
 CONFIG_VERSION = "v13.1"
 CONFIG_MODE = "manual_remap"
 AUTO_ALGORITHM = "qupath_percentile"
@@ -378,6 +383,16 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
         errors.append(
             "config is preview_only/step2_ready=false; pass allow_preview_remap="
             "true to run it experimentally")
+
+    # v14.5a hard guard: source-aware fields are schema-only until the v14.5c/d
+    # resolver + Step2 runtime exist. A source-aware config that claims
+    # step2_ready would otherwise be run with the new fields SILENTLY IGNORED
+    # (old single-source behavior). Reject it — hard failure, never a warning.
+    if config_is_source_aware(cfg) and bool(sp.get("step2_ready", False)):
+        errors.append(
+            "source-aware remap config with step2_ready=true is not supported "
+            "until v14.5c/v14.5d runtime lands; Step2 would silently ignore the "
+            "source-aware fields. Refusing.")
 
     channels = cfg.get("channels", {}) or {}
     if not channels:

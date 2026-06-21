@@ -62,6 +62,7 @@ from ...utils.roi_project import (
 # resolver / Step2-runtime import is introduced here.
 from ..widgets.channel_workbench import ChannelWorkbench
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
+from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     CREATED_FROM_STEP0_CONDITIONING,
@@ -82,6 +83,11 @@ class Step0Page(QWidget):
         self.rois = []
         self.current_patch_idx = 0
         self.current_channel = None
+        # v14.2b: single authoritative ROI/context model. Both the Step0 overview
+        # and the TissueNavigatorPopup overview are views/editors over this one
+        # model; panel _rois/_patches are render caches derived from it.
+        self._roi_model = RoiContextModel()
+        self._roi_sync_guard = False  # re-entrancy guard for cross-panel render
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
         self._preview_worker = None
         self._preview_req_id = 0
@@ -328,6 +334,13 @@ class Step0Page(QWidget):
         self.overview.full_wsi_mode = False
         self.overview.patches_changed.connect(self._on_patches_changed)
         self.overview.rois_changed.connect(self._on_rois_changed)
+        # v14.2b: also adopt Step0-overview edits into the single ROI model and
+        # mirror them to the popup overview (kept as a separate slot so existing
+        # Step0-local UI handlers above stay unchanged).
+        self.overview.patches_changed.connect(
+            lambda *_: self._reconcile_roi_edit(self.overview))
+        self.overview.rois_changed.connect(
+            lambda *_: self._reconcile_roi_edit(self.overview))
         self._wrap_overview_patch_limit()
         bl.addWidget(self.overview, stretch=3)   # overview 占大部分高度
 
@@ -1073,11 +1086,66 @@ class Step0Page(QWidget):
         if self._tissue_navigator_popup is None:
             self._tissue_navigator_popup = TissueNavigatorPopup(
                 loader=self.loader, nuc_ch=self.nucleus_channel, parent=self)
-            # Feed whatever ROI/patch context Step0 already has (no file IO).
-            self._tissue_navigator_popup.set_overview_context(
-                loader=self.loader, nuc_ch=self.nucleus_channel,
-                rois=list(self.rois or []), patches=list(self.patches or []))
+            popup = self._tissue_navigator_popup
+            # Feed the popup overview from the SINGLE model (no file IO).
+            self._feed_popup_from_model()
+            # Adopt popup-overview edits into the same model and mirror them back
+            # to the Step0 overview. The popup overview is a view/editor over the
+            # one model — never an independent ROI store.
+            popup.overview.patches_changed.connect(
+                lambda *_: self._reconcile_roi_edit(popup.overview))
+            popup.overview.rois_changed.connect(
+                lambda *_: self._reconcile_roi_edit(popup.overview))
         return self._tissue_navigator_popup
+
+    # ── v14.2b single-model ROI bridge ───────────────────────────────────────
+    def _registered_roi_overviews(self):
+        """Every OverviewPanel that is a view/editor over the single ROI model."""
+        panels = [self.overview]
+        if self._tissue_navigator_popup is not None:
+            panels.append(self._tissue_navigator_popup.overview)
+        return panels
+
+    def _feed_popup_from_model(self):
+        """Render the popup overview from the single model (loader/nuc/rois/patches)."""
+        popup = self._tissue_navigator_popup
+        if popup is None:
+            return
+        m = self._roi_model
+        popup.set_overview_context(
+            loader=m.loader, nuc_ch=m.nucleus_channel,
+            rois=list(m.rois), patches=list(m.patches),
+            full_wsi_mode=m.full_wsi_mode)
+
+    def _reconcile_roi_edit(self, source_panel):
+        """Single-model write-back: adopt the edited panel's authoritative state
+        into the ONE model, then re-render every OTHER overview from the model.
+
+        Correctness comes from one source of truth + re-render after every edit,
+        not from pushing state between two panel stores."""
+        if self._roi_sync_guard:
+            return
+        self._roi_sync_guard = True
+        try:
+            self._roi_model.adopt(
+                rois=source_panel.get_rois(),
+                patches=source_panel._patch_coords(),
+                full_wsi_mode=getattr(source_panel, "full_wsi_mode", False),
+            )
+            for panel in self._registered_roi_overviews():
+                if panel is source_panel:
+                    continue
+                panel.set_rois_and_patches(
+                    list(self._roi_model.rois), list(self._roi_model.patches),
+                    self._roi_model.full_wsi_mode)
+            if self._tissue_navigator_popup is not None:
+                self._tissue_navigator_popup._refresh_bar_text()
+            # Refresh Step0's own ROI widgets when the edit came from elsewhere
+            # (the Step0 overview's own signal already refreshed them).
+            if source_panel is not self.overview:
+                self._on_patches_changed(list(self._roi_model.patches))
+        finally:
+            self._roi_sync_guard = False
 
     def show_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()
@@ -1308,6 +1376,13 @@ class Step0Page(QWidget):
         self.overview._load_overview()
         self._on_rois_changed([])
         self._on_patches_changed([])
+
+        # v14.2b: keep the single ROI model in lockstep with this reset and the
+        # newly-loaded loader/nucleus; re-feed the popup overview if it exists.
+        self._roi_model.adopt(
+            rois=[], patches=[], full_wsi_mode=False,
+            loader=self.loader, nucleus_channel=self.nucleus_channel)
+        self._feed_popup_from_model()
 
         self._load_existing_config()
         self._rebuild_channel_list()

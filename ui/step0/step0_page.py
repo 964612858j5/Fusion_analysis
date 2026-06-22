@@ -76,10 +76,12 @@ from ...utils.channel_remap_config import (
 from ...utils.source_identity import (
     REQUESTED_SOURCE_RAW_OME,
     DEFAULT_CAMP_SOURCE_POLICY,
+    validate_calibration_source_identity,
 )
 from ...utils.calibration_source import (
     resolve_channel_calibration,
     source_mixture_mode_from_identities,
+    SourceAwareIdentityError,
 )
 
 class Step0Page(QWidget):
@@ -1096,6 +1098,12 @@ class Step0Page(QWidget):
         CalibrationSourceIdentity = derived from the ACTUAL opened pixel source
         (Strategy B fallback recorded honestly). source_mixture_mode is derived
         from the actual identities, never from the requests. Never sets step2_ready.
+
+        v14.5b.1 Strategy A — NO partial source-aware config: if ANY conditioned
+        channel fails identity resolution (e.g. neither corrected nor raw can be
+        read, or the resolved identity is invalid), raise SourceAwareIdentityError
+        and stamp NOTHING. source_mixture_mode is computed only after every channel
+        resolved successfully — never from a partial subset.
         """
         channels = cfg.get("channels") or {}
         if not channels:
@@ -1111,7 +1119,8 @@ class Step0Page(QWidget):
         def _read_raw(ch):
             return self._read_cond_patch_channel(ch, normalize=False)
 
-        identities = []
+        # Resolve ALL channels first; only commit to cfg if every one succeeds.
+        resolved = []
         for ch in channels:
             requested = self._channel_source_requests.get(ch, REQUESTED_SOURCE_RAW_OME)
             user_selected = ch in self._channel_source_requests
@@ -1122,13 +1131,25 @@ class Step0Page(QWidget):
                     channel_index=ch_map.get(ch), patch_bbox=patch_bbox,
                     corrected_zarr_path=corrected_zarr, roi_name=None,
                     user_selected=user_selected)
+            except SourceAwareIdentityError:
+                raise
             except Exception as exc:
-                print(f"[Step0] source-aware identity skip {ch}: {exc}")
-                continue
+                # Whole-save failure: do not silently skip the channel.
+                raise SourceAwareIdentityError(
+                    channel=ch, requested_source=requested, cause=exc)
+            errs = validate_calibration_source_identity(csi)
+            if errs:
+                raise SourceAwareIdentityError(
+                    channel=ch, requested_source=requested,
+                    message="invalid calibration_source_identity: " + "; ".join(errs))
+            resolved.append((ch, req, csi))
+
+        # All channels succeeded — commit identities and derive mixture mode.
+        identities = []
+        for ch, req, csi in resolved:
             channels[ch]["source_request"] = req
             channels[ch]["calibration_source_identity"] = csi
             identities.append(csi)
-
         mode = source_mixture_mode_from_identities(identities)
         if mode is not None:
             cfg["source_mixture_mode"] = mode
@@ -1146,7 +1167,17 @@ class Step0Page(QWidget):
         cfg = wb.build_config()
         # v14.5b: stamp per-channel source-aware identity (preview only). Stays
         # preview_only / step2_ready=false; never promoted here.
-        self._apply_source_aware_identity(cfg)
+        # v14.5b.1 Strategy A: if any channel's identity cannot be resolved, abort
+        # the WHOLE save — no path chosen, no dir created, no partial config.
+        try:
+            self._apply_source_aware_identity(cfg)
+        except SourceAwareIdentityError as exc:
+            QMessageBox.warning(
+                self, "Source identity failed",
+                f"Cannot save source-aware preview config: channel "
+                f"'{exc.channel}' source identity could not be resolved "
+                f"(requested {exc.requested_source}).\n{exc.message}")
+            return
         # Provenance: created in the v14 Step0 Setup & Preprocessing workbench.
         # created_from_step is a REGISTERED constant (utils.channel_remap_config),
         # not an ad-hoc string, so v14.5 promotion can recognize Step0 configs.

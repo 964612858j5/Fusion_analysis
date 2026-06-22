@@ -47,6 +47,24 @@ REASON_DEFAULT_RAW = "default_raw"
 REASON_CORRECTED_FALLBACK = "corrected_unavailable_fallback"
 
 
+class SourceAwareIdentityError(Exception):
+    """A conditioned channel's source identity could not be resolved.
+
+    v14.5b.1 Strategy A: a single channel's failure aborts the WHOLE source-aware
+    preview save — no partial config is written. Carries the failed channel name,
+    its requested source, and a message so the UI can surface exactly what failed.
+    """
+
+    def __init__(self, channel, requested_source=None, cause=None, message=None):
+        self.channel = channel
+        self.requested_source = requested_source
+        self.cause = cause
+        self.message = message or (str(cause) if cause is not None else "")
+        super().__init__(
+            f"source identity failed for channel {channel!r} "
+            f"(requested {requested_source!r}): {self.message}")
+
+
 def open_corrected_channel_array(corrected_zarr_path, channel_name, roi_name=None):
     """Open the ACTUAL corrected channel array object, or None if unavailable.
 

@@ -157,3 +157,110 @@ def test_no_corrected_zarr_defaults_raw(app):
     csi = cfg["channels"]["CD68"]["calibration_source_identity"]
     assert csi["actual_source_kind"] == "raw_ome"
     assert cfg["channels"]["CD68"]["source_request"]["reason"] == "corrected_unavailable_fallback"
+
+
+# 6. Successful config: every conditioned channel carries both fields.
+def test_success_every_channel_has_both_fields(app, tmp_path):
+    s = _step0(app, _corrected_zarr(tmp_path, channels=("CD68",)))
+    s.set_channel_source_request("CD68", "corrected_zarr")     # CK19 default raw
+    cfg = _cfg(("CD68", "CK19"))
+    s._apply_source_aware_identity(cfg)
+    for ch in ("CD68", "CK19"):
+        assert "source_request" in cfg["channels"][ch]
+        assert "calibration_source_identity" in cfg["channels"][ch]
+
+
+# ── v14.5b.1 Strategy A: whole-save failure, no partial config ───────────────
+
+class _BadLoader(_FakeLoader):
+    """Raw read raises for `bad_channel` -> that channel's identity unresolvable."""
+    def __init__(self, bad_channel, corrected_path=None):
+        super().__init__(corrected_path)
+        self._bad = bad_channel
+
+    def read_region(self, ch, y0, y1, x0, x1, normalize=False):
+        if ch == self._bad:
+            raise RuntimeError("disk read failed")
+        return np.ones((y1 - y0, x1 - x0), dtype=np.float32)
+
+
+def _step0_bad(app, bad_channel):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.loader = _BadLoader(bad_channel)
+    s.patches = [(0, 64, 0, 64)]
+    s.current_patch_idx = 0
+    return s
+
+
+# 1+2. Identity failure raises and produces NO partial config (nothing stamped).
+def test_identity_failure_raises_and_no_partial(app):
+    from block01.utils.calibration_source import SourceAwareIdentityError
+    s = _step0_bad(app, "CK19")
+    cfg = _cfg(("CD68", "CK19"))
+    with pytest.raises(SourceAwareIdentityError) as ei:
+        s._apply_source_aware_identity(cfg)
+    assert ei.value.channel == "CK19"
+    # NO partial: not even the would-succeed CD68 is stamped
+    for ch in ("CD68", "CK19"):
+        assert "source_request" not in cfg["channels"][ch]
+        assert "calibration_source_identity" not in cfg["channels"][ch]
+    # 4. mixture mode NOT computed from the partial subset
+    assert "source_mixture_mode" not in cfg
+
+
+# 3. Failed channel name is surfaced in the error.
+def test_identity_failure_surfaces_channel_name(app):
+    from block01.utils.calibration_source import SourceAwareIdentityError
+    s = _step0_bad(app, "CD68")
+    with pytest.raises(SourceAwareIdentityError) as ei:
+        s._apply_source_aware_identity(_cfg(("CD68", "CK19")))
+    assert "CD68" in str(ei.value)
+    assert ei.value.channel == "CD68"
+    assert "disk read failed" in ei.value.message
+
+
+# 1. _save_step0_remap_config writes NO file when identity fails.
+def test_save_writes_no_file_on_identity_failure(app, tmp_path, monkeypatch):
+    from block01.ui.step0 import step0_page as sp
+    from block01.utils.calibration_source import SourceAwareIdentityError
+
+    s = sp.Step0Page()
+
+    # stub workbench: has data, returns a minimal config
+    class _WB:
+        def has_channel_data(self):
+            return True
+
+        def build_config(self):
+            return {"channels": {"CD68": {"min": 0.0, "max": 1.0}},
+                    "source_policy": {"preview_only": True, "step2_ready": False}}
+
+    s._cond_workbench = _WB()
+    s.output_dir = str(tmp_path)
+    # force identity resolution to fail
+    monkeypatch.setattr(
+        sp.Step0Page, "_apply_source_aware_identity",
+        lambda self, cfg: (_ for _ in ()).throw(
+            SourceAwareIdentityError(channel="CK19", requested_source="corrected_zarr")))
+    # spy the file dialog + the warning
+    dialog_calls = []
+    monkeypatch.setattr(
+        sp.QFileDialog, "getSaveFileName",
+        lambda *a, **k: dialog_calls.append(a) or (str(tmp_path / "should_not_exist.json"), ""))
+    warnings = []
+    monkeypatch.setattr(sp.QMessageBox, "warning",
+                        lambda *a, **k: warnings.append(a))
+    monkeypatch.setattr(sp.QMessageBox, "information", lambda *a, **k: None)
+
+    s._save_step0_remap_config()
+
+    # aborted BEFORE the file dialog -> no path chosen, no file written
+    assert dialog_calls == []
+    assert not (tmp_path / "should_not_exist.json").exists()
+    # no config files anywhere under output_dir
+    import os
+    written = [f for _, _, fs in os.walk(str(tmp_path)) for f in fs if f.endswith(".json")]
+    assert written == []
+    # warning surfaced the failed channel
+    assert warnings and any("CK19" in str(arg) for arg in warnings[0])

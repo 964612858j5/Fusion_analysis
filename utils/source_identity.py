@@ -60,6 +60,40 @@ CAMP_SOURCE_POLICIES = frozenset({
 DEFAULT_CAMP_SOURCE_POLICY = CAMP_SOURCE_POLICY_RAW_GI_ONLY
 
 
+# ── shared kind/fallback decision (v14.5c.2 Q2 primitive) ────────────────────
+# ONE truth table, two tolerances via allow_corrected_to_raw_fallback. The
+# preview reader (utils/calibration_source.py, allow=True / Strategy B) and the
+# promotion-side per-channel resolver (workers/hq_source_resolver.py, allow=False)
+# both express THIS rule. Pure-data; no pixel reads (callers determine
+# availability). Returns one of the RESOLUTION_* outcomes below.
+RESOLUTION_USE_RAW = "raw_ome"
+RESOLUTION_USE_CORRECTED = "corrected_zarr"
+RESOLUTION_FAIL = "fail"
+
+
+def decide_source_resolution(requested_source, *, corrected_available,
+                             raw_available, allow_corrected_to_raw_fallback):
+    """Decide which actual source to use for a channel (or fail).
+
+    requested_source : raw_ome | corrected_zarr (a SourceRequest)
+    corrected_available / raw_available : whether the caller could open that source
+        for this channel (the caller does the pixel-level availability check).
+    allow_corrected_to_raw_fallback : True (preview/Strategy B) tolerates a
+        corrected-unavailable -> raw fallback; False (promotion) does NOT.
+
+    Returns RESOLUTION_USE_RAW | RESOLUTION_USE_CORRECTED | RESOLUTION_FAIL.
+    """
+    if requested_source == REQUESTED_SOURCE_RAW_OME:
+        return RESOLUTION_USE_RAW if raw_available else RESOLUTION_FAIL
+    if requested_source == REQUESTED_SOURCE_CORRECTED_ZARR:
+        if corrected_available:
+            return RESOLUTION_USE_CORRECTED
+        if allow_corrected_to_raw_fallback and raw_available:
+            return RESOLUTION_USE_RAW
+        return RESOLUTION_FAIL
+    return RESOLUTION_FAIL
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 def _is_hw(shape):
     """True if `shape` is a 2-element [H, W] of positive ints."""

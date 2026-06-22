@@ -429,3 +429,187 @@ class PerChannelResolvedSource:
                 "per-channel source map is not homogeneous; differing "
                 f"(kind, source_path, group_name) identities: {detail}")
         return next(iter(self.per_channel.values()))
+
+
+# ── v14.5c.2 per-channel source RESOLVER (resolver only — no promotion) ──────
+# resolve_per_channel_marker_sources resolves EACH channel's REQUESTED source
+# from pixels, reusing the existing single-source machinery (open_hq_channel_group
+# for corrected, the raw_ome_only path for raw) without changing its behavior. It
+# does NOT read a config's recorded identity, does NOT do the recorded↔resolved↔
+# runtime 3-way, does NOT apply the geometry guard vs step2_input_shape, and does
+# NOT emit step2_ready — all of that is v14.5c.3 promotion.
+#
+# INDEPENDENCE: this resolver does its OWN pixel reads. It does NOT import or call
+# the preview reader (utils/calibration_source.py), so recorded↔resolved stays a
+# genuine cross-check in 5c.3. It shares only the schema constants + the Q2
+# kind/fallback decision helper from utils/source_identity.
+from ..utils.source_identity import (  # noqa: E402  (additive, end-of-module)
+    decide_source_resolution,
+    RESOLUTION_USE_RAW,
+    RESOLUTION_USE_CORRECTED,
+    REQUESTED_SOURCE_CORRECTED_ZARR,
+)
+
+
+class PerChannelResolutionError(Exception):
+    """A requested per-channel source could not be resolved from pixels.
+
+    Mechanism A (no partial): raised as soon as ANY requested source cannot be
+    resolved — e.g. a channel that requested corrected_zarr whose corrected source
+    cannot be opened while allow_corrected_to_raw_fallback=False (NO silent raw
+    substitution). 5c.3 treats this raise as a promotion refusal.
+    """
+
+    def __init__(self, channel, requested_source, reason=""):
+        self.channel = channel
+        self.requested_source = requested_source
+        self.reason = reason
+        super().__init__(
+            f"could not resolve source for channel {channel!r} "
+            f"(requested {requested_source!r}): {reason}")
+
+
+def _root_attrs_for(source_path):
+    if source_path and os.path.exists(source_path) and str(source_path).endswith(".zarr"):
+        try:
+            return dict(zarr.open(source_path, mode="r").attrs)
+        except Exception:
+            return {}
+    return {}
+
+
+def _build_corrected_resolved(channel, group, source_path, root_attrs, available):
+    """Build a corrected_zarr ResolvedHQSource for ONE channel from an already-open
+    corrected group. Geometry (resolved_source_shape) is the opened array's real
+    shape via the shared _channel_shape; never an attr/request value."""
+    group_name = "raw_ome" if isinstance(group, dict) else (getattr(group, "name", "") or "")
+    out = ResolvedHQSource(
+        kind="corrected_zarr",
+        source_path=source_path,
+        intensity_space=_intensity_space_for("corrected_zarr", source_path, root_attrs),
+        available_channels=list(available),
+        resolved_channels=[channel],
+        missing_channels=[],
+        fell_back_to_raw=False,
+        group=group,
+        group_name=group_name,
+        group_attrs=({} if isinstance(group, dict) else dict(getattr(group, "attrs", {}))),
+        root_attrs=dict(root_attrs),
+        warnings=[],
+        fallback_error="",
+        source_mode=SOURCE_MODE_CORRECTED_THEN_RAW,
+        source_selected_by="corrected_primary",
+    )
+    out._channel_shapes[channel] = _channel_shape(group, channel)
+    return out
+
+
+def _build_raw_resolved(channel, raw_loader, raw_source_path, available, abs_fn):
+    """Build a raw_ome ResolvedHQSource for ONE channel from an already-open raw
+    loader. resolved_source_shape is the loader's real shape via _channel_shape."""
+    group = {"kind": "raw_ome", "path": raw_source_path, "loader": raw_loader}
+    out = ResolvedHQSource(
+        kind="raw_ome",
+        source_path=abs_fn(raw_source_path),
+        intensity_space=RAW_OME_INTENSITY_SPACE,
+        available_channels=list(available),
+        resolved_channels=[channel],
+        missing_channels=[],
+        fell_back_to_raw=False,
+        group=group,
+        group_name="raw_ome",
+        group_attrs={},
+        root_attrs={},
+        warnings=[],
+        fallback_error="",
+        source_mode=SOURCE_MODE_RAW_ONLY,
+        source_selected_by="policy",
+    )
+    out._channel_shapes[channel] = _channel_shape(group, channel)
+    return out
+
+
+def resolve_per_channel_marker_sources(per_channel_requests, *,
+                                       raw_channel_source_path="",
+                                       corrected_zarr_path="",
+                                       roi_id="", requested_roi_names=None,
+                                       param_file="", abs_fn=None, loader_factory=None,
+                                       allow_corrected_to_raw_fallback=False):
+    """Resolve EACH channel's REQUESTED source from pixels into a
+    PerChannelResolvedSource. Resolver only — no recorded-identity read, no 3-way,
+    no geometry guard, no step2_ready.
+
+    per_channel_requests : {channel -> "raw_ome" | "corrected_zarr"}  (SourceRequest)
+    Returns a PerChannelResolvedSource iff EVERY channel resolved (mechanism A).
+    A channel requesting corrected_zarr that cannot be opened with
+    allow_corrected_to_raw_fallback=False raises PerChannelResolutionError — never
+    a silent raw substitution.
+    """
+    if not per_channel_requests:
+        raise ValueError(
+            "resolve_per_channel_marker_sources requires a non-empty "
+            "per_channel_requests map")
+    if abs_fn is None:
+        abs_fn = os.path.abspath
+    if loader_factory is None:  # pragma: no cover - caller injects OMETIFFLoader
+        from ..core.io_loader import OMETIFFLoader
+        loader_factory = OMETIFFLoader
+
+    # ── open each source AT MOST ONCE (availability + reuse) ──
+    corr_group = None
+    corr_source_path = ""
+    corr_available = set()
+    corr_root_attrs = {}
+    needs_corrected = any(
+        str(r) == REQUESTED_SOURCE_CORRECTED_ZARR for r in per_channel_requests.values())
+    if needs_corrected and corrected_zarr_path:
+        try:
+            g, kind, sp = open_hq_channel_group(
+                multichannel_source_path=corrected_zarr_path,
+                raw_channel_source_path="",   # no raw fallback at the corrected open
+                roi_id=roi_id, requested_roi_names=requested_roi_names,
+                param_file=param_file, abs_fn=abs_fn, loader_factory=loader_factory)
+            if kind == "corrected_zarr":
+                corr_group, corr_source_path = g, sp
+                corr_available = set(channel_array_names(g))
+                corr_root_attrs = _root_attrs_for(sp)
+        except (FileNotFoundError, ValueError):
+            corr_group = None   # corrected unavailable / ROI group unmatched
+
+    raw_loader = None
+    raw_available = set()
+    if raw_channel_source_path:
+        try:
+            raw_loader = loader_factory(raw_channel_source_path)
+            raw_available = set(raw_loader.channel_names())
+        except Exception:
+            raw_loader = None
+
+    per_channel = {}
+    for ch, requested in per_channel_requests.items():
+        ch = str(ch)
+        requested = str(requested)
+        corrected_ok = corr_group is not None and ch in corr_available
+        raw_ok = raw_loader is not None and ch in raw_available
+        decision = decide_source_resolution(
+            requested, corrected_available=corrected_ok, raw_available=raw_ok,
+            allow_corrected_to_raw_fallback=allow_corrected_to_raw_fallback)
+        if decision == RESOLUTION_USE_CORRECTED:
+            per_channel[ch] = _build_corrected_resolved(
+                ch, corr_group, corr_source_path, corr_root_attrs, corr_available)
+        elif decision == RESOLUTION_USE_RAW:
+            per_channel[ch] = _build_raw_resolved(
+                ch, raw_loader, raw_channel_source_path, raw_available, abs_fn)
+        else:
+            reason = (
+                f"requested corrected_zarr but corrected source unavailable for "
+                f"this channel (corrected_open={corr_group is not None}, "
+                f"channel_in_corrected={corrected_ok}, "
+                f"allow_corrected_to_raw_fallback={allow_corrected_to_raw_fallback})"
+                if requested == REQUESTED_SOURCE_CORRECTED_ZARR
+                else f"requested {requested} but that source is unavailable "
+                     f"(raw_available={raw_ok})")
+            raise PerChannelResolutionError(
+                channel=ch, requested_source=requested, reason=reason)
+
+    return PerChannelResolvedSource(per_channel)

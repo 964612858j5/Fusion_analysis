@@ -339,3 +339,93 @@ def resolve_hq_marker_source(*, requested_channels, multichannel_source_path,
     for ch in resolved:
         out._channel_shapes[ch] = _channel_shape(group, ch)
     return out
+
+
+# ── v14.5c.1 per-channel source-map container (PURE STRUCTURE) ───────────────
+# Additive only: ResolvedHQSource and resolve_hq_marker_source above are
+# UNCHANGED. This container wraps a {channel -> ResolvedHQSource} map for the
+# future source-aware path (5c.2 resolution, 5c.3 promotion). It performs NO
+# resolution, NO promotion, NO pixel reads. The single-source path is the
+# unchanged legacy code; this is a parallel structure entered only when a config
+# is source-aware. source_mixture_mode reuses the v14.5a vocabulary.
+from ..utils.source_identity import (  # noqa: E402  (additive, end-of-module)
+    SOURCE_MIXTURE_HOMOGENEOUS_RAW,
+    SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED,
+    SOURCE_MIXTURE_MIXED,
+)
+
+
+class NotHomogeneousError(ValueError):
+    """homogeneous_single() called on a heterogeneous per-channel source map.
+
+    Subclasses ValueError so callers may catch either. Raised when channels
+    resolved to differing source identities (kind / source_path / group_name)."""
+
+
+def _source_mixture_mode_from_kinds(kinds):
+    """Derive source_mixture_mode from a set of ResolvedHQSource.kind values."""
+    ks = set(kinds)
+    if ks == {"raw_ome"}:
+        return SOURCE_MIXTURE_HOMOGENEOUS_RAW
+    if ks == {"corrected_zarr"}:
+        return SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED
+    return SOURCE_MIXTURE_MIXED
+
+
+class PerChannelResolvedSource:
+    """A {channel -> ResolvedHQSource} map + a derived source_mixture_mode.
+
+    Pure container (v14.5c.1). Each channel carries its OWN ResolvedHQSource; the
+    per-channel ResolvedHQSource already exposes its geometry via channel_shape,
+    so this container surfaces NO geometry field. When 5c.2/5c.3 add geometry
+    they must use the unambiguous names ``resolved_source_shape`` (pixels the
+    resolver read) and ``calibration_window_shape`` (v14.5b patch-scale) — never
+    a bare ``source_shape``.
+
+    Attributes
+    ----------
+    per_channel : dict[str, ResolvedHQSource]
+    source_mixture_mode : str   # DERIVED from per-channel kinds, never a request
+    """
+
+    def __init__(self, per_channel):
+        if not per_channel:
+            raise ValueError(
+                "PerChannelResolvedSource requires at least one channel; an empty "
+                "per-channel source map has no defined source_mixture_mode")
+        self.per_channel = dict(per_channel)
+        self.source_mixture_mode = _source_mixture_mode_from_kinds(
+            str(src.kind) for src in self.per_channel.values())
+
+    @staticmethod
+    def _identity(src):
+        """Source identity tuple: (kind, source_path, group_name). Two corrected
+        channels from different ROI groups in the same zarr differ by group_name
+        and are therefore NOT the same identity."""
+        return (str(getattr(src, "kind", "")),
+                str(getattr(src, "source_path", "")),
+                str(getattr(src, "group_name", "")))
+
+    def is_homogeneous(self):
+        """True iff every channel resolved to the SAME identity (kind AND
+        source_path AND group_name) — not merely the same mixture mode."""
+        return len({self._identity(s) for s in self.per_channel.values()}) == 1
+
+    def homogeneous_single(self):
+        """Return the ONE shared ResolvedHQSource iff the map is identity-
+        homogeneous; otherwise raise NotHomogeneousError.
+
+        Homogeneity is identity-based (kind, source_path, group_name all equal),
+        NOT mixture_mode-based: two channels both corrected_zarr but from
+        different corrected sources / ROI groups are heterogeneous and raise.
+        """
+        groups = {}
+        for ch, src in self.per_channel.items():
+            groups.setdefault(self._identity(src), []).append(ch)
+        if len(groups) != 1:
+            detail = "; ".join(
+                f"{ident} -> {sorted(chs)}" for ident, chs in sorted(groups.items()))
+            raise NotHomogeneousError(
+                "per-channel source map is not homogeneous; differing "
+                f"(kind, source_path, group_name) identities: {detail}")
+        return next(iter(self.per_channel.values()))

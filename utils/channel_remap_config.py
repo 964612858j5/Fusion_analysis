@@ -19,7 +19,12 @@ import os
 # v14.5a: source-aware schema primitives (pure-Python, no runtime coupling). Used
 # only by the Step2 validation guard below to hard-reject a source-aware config
 # that claims step2_ready before runtime support exists.
-from .source_identity import config_is_source_aware
+from .source_identity import config_is_source_aware, SOURCE_MIXTURE_MODES
+
+# v14.5c.3: the ONLY source_alignment_mode a per-channel source-aware promotion
+# emits. mixed_raw_corrected is a source_mixture_mode value, NEVER an alignment
+# mode — the two axes are distinct.
+SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE = "per_channel_native"
 
 CONFIG_VERSION = "v13.1"
 CONFIG_MODE = "manual_remap"
@@ -503,3 +508,47 @@ def validate_remap_covers_selected_channels(resolved_params, selected_channels,
             + ", ".join(missing)
         ]
     return []
+
+
+def validate_source_aware_promoted_candidate(config):
+    """Validate a v14.5c.3 source-aware promoted CANDIDATE. Returns list[str] of
+    errors (empty == a well-formed candidate).
+
+    A candidate is the output of per-channel source-aware promotion: it passed the
+    recorded↔resolved↔runtime 3-way + geometry guard, but is NOT yet runtime-
+    executable (Step2 per-channel runtime is v14.5d), so step2_ready MUST be false.
+    This is validator ACCEPTANCE of the candidate state — it does NOT make the
+    config runtime-executable and does NOT relax the v14.5a.1 step2_ready guard.
+    source_alignment_mode must be 'per_channel_native' ONLY; a mixture value
+    (mixed_raw_corrected etc.) is never a valid alignment mode.
+    """
+    errors = []
+    if not isinstance(config, dict):
+        return ["config must be a dict"]
+    cfg = normalize_channel_remap_config(config)
+    sp = cfg.get("source_policy", {}) or {}
+    if not bool(config.get("created_by_source_aware_promotion", False)):
+        errors.append(
+            "not a source-aware promoted candidate "
+            "(created_by_source_aware_promotion != true)")
+    if not bool(config.get("source_aware_promotion_ready", False)):
+        errors.append("source_aware_promotion_ready != true")
+    align = sp.get("source_alignment_mode")
+    if align in SOURCE_MIXTURE_MODES:
+        errors.append(
+            f"source_alignment_mode must not be a source_mixture_mode value "
+            f"({align!r}); the alignment and mixture axes are distinct")
+    elif align != SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE:
+        errors.append(
+            f"source_alignment_mode must be '{SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE}' "
+            f"for a per-channel candidate, got {align!r}")
+    mixture = config.get("source_mixture_mode")
+    if mixture not in SOURCE_MIXTURE_MODES:
+        errors.append(
+            f"source_mixture_mode must be one of {sorted(SOURCE_MIXTURE_MODES)}, "
+            f"got {mixture!r}")
+    if bool(sp.get("step2_ready", False)):
+        errors.append(
+            "a source-aware promoted candidate must have step2_ready=false "
+            "(per-channel Step2 runtime is v14.5d)")
+    return errors

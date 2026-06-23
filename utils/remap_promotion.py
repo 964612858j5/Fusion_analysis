@@ -245,3 +245,279 @@ def promote_step1_5_config_for_step2(preview_config, resolved_source,
     report["source_path"] = res_path
     report["source_kind"] = res_kind
     return promoted, report
+
+
+# ── v14.5c.3 source-aware per-channel promotion (PARALLEL path; no runtime) ──
+# Entered only for config_is_source_aware(config). Reads the config's per-channel
+# recorded calibration_source_identity (v14.5b), gets an INDEPENDENT per-channel
+# resolution from the 5c.2 resolver, and cross-validates per channel on TWO
+# separate axes:
+#   IDENTITY (recorded ↔ resolved): kind, source_path, intensity_space,
+#       channel_index, corrected ROI/group. The recorded patch source_shape is a
+#       calibration WINDOW (e.g. [64,64]) and is NEVER a geometry gate (Q3 trap).
+#   GEOMETRY (resolved ↔ runtime): resolved channel_shape == step2_input_shape,
+#       per channel and all equal.
+# No-partial: any channel failing identity/geometry, or unknown geometry, refuses
+# the WHOLE promotion. Output is a source-aware promoted CANDIDATE with
+# step2_ready=FALSE (runtime is v14.5d); this path NEVER emits step2_ready=true.
+# Independent: imports the 5c.2 resolver, NOT utils/calibration_source.
+from .source_identity import (
+    config_is_source_aware,
+    RAW_OME_INTENSITY_SPACE,
+    DEFAULT_CAMP_SOURCE_POLICY,
+    REQUESTED_SOURCE_RAW_OME,
+    REQUESTED_SOURCE_CORRECTED_ZARR,
+)
+
+SOURCE_AWARE_PROMOTION_CREATED_BY = "step0_source_aware_per_channel_promotion"
+SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE = "per_channel_native"
+
+
+def _recorded_channel_identity(params):
+    """Recorded per-channel identity from the config (v14.5b). None if absent.
+
+    source_shape (patch window) is intentionally NOT returned for the geometry
+    gate — only identity fields are compared on the identity axis."""
+    csi = params.get("calibration_source_identity")
+    if not isinstance(csi, dict):
+        return None
+    return {
+        "kind": csi.get("actual_source_kind"),
+        "source_path": csi.get("actual_source_path"),
+        "intensity_space": csi.get("intensity_space"),
+        "channel_index": csi.get("channel_index"),
+        "roi_name": csi.get("roi_name"),
+    }
+
+
+def _resolved_channel_identity(resolved_src, channel):
+    """Identity extracted INDEPENDENTLY from the 5c.2 resolved source object.
+
+    For corrected, reads the per-array v14.5a attrs (intensity_space/channel_index)
+    the same place recorded did, so the identity compare is apples-to-apples; for
+    raw, the loader's ch_map index + the native intensity space."""
+    kind = str(getattr(resolved_src, "kind", ""))
+    source_path = str(getattr(resolved_src, "source_path", ""))
+    group = getattr(resolved_src, "group", None)
+    group_attrs = dict(getattr(resolved_src, "group_attrs", {}) or {})
+    intensity_space = None
+    channel_index = None
+    roi_name = None
+    if kind == "raw_ome":
+        intensity_space = RAW_OME_INTENSITY_SPACE
+        loader = group.get("loader") if isinstance(group, dict) else None
+        cmap = getattr(loader, "ch_map", None)
+        if isinstance(cmap, dict):
+            channel_index = cmap.get(channel)
+    elif kind == "corrected_zarr":
+        roi_name = group_attrs.get("roi_name")
+        try:
+            arr_attrs = dict(group[channel].attrs)
+        except Exception:
+            arr_attrs = {}
+        intensity_space = arr_attrs.get("intensity_space")
+        channel_index = arr_attrs.get("channel_index")
+    return {
+        "kind": kind,
+        "source_path": source_path,
+        "intensity_space": intensity_space,
+        "channel_index": channel_index,
+        "roi_name": roi_name,
+        "group_name": str(getattr(resolved_src, "group_name", "")),
+    }
+
+
+def promote_source_aware_config_for_step2(preview_config, per_channel_resolved,
+                                          step2_input_shape, active_method=None):
+    """Source-aware per-channel promotion. Returns (candidate | None, report).
+
+    preview_config        : a v14.5b source-aware preview config (per-channel
+                            calibration_source_identity).
+    per_channel_resolved  : a PerChannelResolvedSource from the 5c.2 resolver
+                            (built by the caller with allow_corrected_to_raw_
+                            fallback=False), or None to signal resolution failed.
+    step2_input_shape     : runtime geometry [H,W] (None => refuse).
+    The candidate is NOT step2_ready (runtime is v14.5d).
+    """
+    report = {"promoted": False, "failures": [], "channels_checked": [],
+              "checks": {}, "source_aware": True}
+
+    if active_method is not None and not is_hq2_csd_method(active_method):
+        report["failures"].append(NON_HQ2_CSD_REFUSAL)
+        report["active_method"] = active_method
+        return None, report
+
+    cfg = normalize_channel_remap_config(preview_config)
+    if not config_is_source_aware(cfg):
+        report["failures"].append(
+            "config is not source-aware; use single-source promotion")
+        return None, report
+
+    channels = cfg.get("channels", {}) or {}
+    if not channels:
+        report["failures"].append("config has no marker channels")
+        return None, report
+    if per_channel_resolved is None:
+        report["failures"].append(
+            "per-channel resolution failed (no PerChannelResolvedSource); refusing")
+        return None, report
+
+    step2_hw = _as_hw(step2_input_shape)
+    if step2_hw is None:
+        report["failures"].append(
+            "step2_input_shape is unknown/underivable; refusing (the geometry "
+            "guard is never skipped — unknown geometry defaults to refuse)")
+
+    per_channel = getattr(per_channel_resolved, "per_channel", {}) or {}
+    corrected_group_names = set()
+
+    for ch, params in channels.items():
+        report["channels_checked"].append(ch)
+        recorded = _recorded_channel_identity(params)
+        if recorded is None:
+            report["failures"].append(
+                f"channel '{ch}': missing recorded calibration_source_identity "
+                "(no-partial: every conditioned channel must carry identity)")
+            continue
+        if ch not in per_channel:
+            report["failures"].append(
+                f"channel '{ch}': missing from per-channel resolved source "
+                "(resolution incomplete); refusing")
+            continue
+        resolved_src = per_channel[ch]
+        resolved = _resolved_channel_identity(resolved_src, ch)
+
+        # ── IDENTITY axis (recorded ↔ resolved) ── (NO patch source_shape gate) ──
+        if recorded["kind"] != resolved["kind"]:
+            report["failures"].append(
+                f"channel '{ch}': recorded kind '{recorded['kind']}' != "
+                f"resolved kind '{resolved['kind']}'")
+        if _canon(recorded["source_path"]) != _canon(resolved["source_path"]):
+            report["failures"].append(
+                f"channel '{ch}': recorded source_path != resolved source_path "
+                f"({_canon(recorded['source_path'])} vs {_canon(resolved['source_path'])})")
+        ri, vi = recorded.get("intensity_space"), resolved.get("intensity_space")
+        if ri and vi and str(ri) != str(vi):
+            report["failures"].append(
+                f"channel '{ch}': recorded intensity_space '{ri}' != resolved '{vi}'")
+        rci, vci = recorded.get("channel_index"), resolved.get("channel_index")
+        if rci is not None and vci is not None and int(rci) != int(vci):
+            report["failures"].append(
+                f"channel '{ch}': recorded channel_index {rci} != resolved {vci}")
+        if resolved["kind"] == "corrected_zarr":
+            rrn, vrn = recorded.get("roi_name"), resolved.get("roi_name")
+            if rrn and vrn and str(rrn) != str(vrn):
+                report["failures"].append(
+                    f"channel '{ch}': recorded roi_name '{rrn}' != resolved "
+                    f"corrected group roi_name '{vrn}'")
+            corrected_group_names.add(resolved.get("group_name"))
+
+        # ── GEOMETRY axis (resolved channel_shape ↔ step2_input_shape) ──
+        res_shape = _as_hw(resolved_src.channel_shape(ch))
+        report["checks"].setdefault("resolved_channel_shape", {})[ch] = res_shape
+        if res_shape is None:
+            report["failures"].append(
+                f"channel '{ch}': could not read resolved channel geometry; refusing")
+        elif step2_hw is not None and res_shape != step2_hw:
+            report["failures"].append(
+                f"channel '{ch}': geometry guard — resolved channel_shape "
+                f"{res_shape} != step2_input_shape {step2_hw}")
+
+    # ── corrected channels must share ONE ROI group (no mixed coordinate frame) ──
+    corrected_group_names.discard(None)
+    corrected_group_names.discard("")
+    if len(corrected_group_names) > 1:
+        report["failures"].append(
+            "corrected channels resolve to different ROI groups "
+            f"{sorted(corrected_group_names)}; refusing (mixed coordinate frames)")
+
+    report["checks"]["step2_input_shape"] = step2_hw
+
+    if report["failures"]:
+        return None, report
+
+    # ── SUCCESS: build the source-aware promoted CANDIDATE (step2_ready=FALSE) ──
+    promoted = copy.deepcopy(cfg)
+    mixture = getattr(per_channel_resolved, "source_mixture_mode", None)
+    sp = dict(promoted.get("source_policy", {}) or {})
+    sp.update({
+        "preview_only": False,
+        "step2_ready": False,                              # runtime is v14.5d
+        "source_alignment_mode": SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE,  # ALWAYS
+        "calibration_source_matches_step2": True,
+        "scope": "step0_source_aware_per_channel",
+    })
+    promoted["source_policy"] = sp
+    promoted["source_mixture_mode"] = mixture              # SEPARATE axis
+    promoted["created_by_source_aware_promotion"] = True
+    promoted["source_aware_promotion_ready"] = True
+    promoted["runtime_supported"] = False
+    promoted["created_by"] = SOURCE_AWARE_PROMOTION_CREATED_BY
+    promoted.setdefault("camp_source_policy", DEFAULT_CAMP_SOURCE_POLICY)
+
+    for ch, params in promoted["channels"].items():
+        resolved = _resolved_channel_identity(per_channel[ch], ch)
+        params["step2_compatible"] = True
+        params["calibration_source_matches_step2"] = True
+        if resolved.get("intensity_space"):
+            params["intensity_space"] = resolved["intensity_space"]
+            params["step2_pre_remap_source"] = resolved["intensity_space"]
+        params["resolved_source_kind"] = resolved["kind"]
+        params["resolved_source_path"] = resolved["source_path"]
+        params["resolved_group_name"] = resolved.get("group_name")
+        params["resolved_source_shape"] = _as_hw(per_channel[ch].channel_shape(ch))
+
+    report["promoted"] = True
+    report["source_alignment_mode"] = SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE
+    report["source_mixture_mode"] = mixture
+    return promoted, report
+
+
+def promote_source_aware_from_sources(preview_config, *, step2_input_shape,
+                                      raw_channel_source_path="",
+                                      corrected_zarr_path="", roi_id="",
+                                      requested_roi_names=None, abs_fn=None,
+                                      loader_factory=None, active_method=None):
+    """CLI/caller entry: derive per-channel requests from RECORDED kinds, run the
+    INDEPENDENT 5c.2 resolver (allow_corrected_to_raw_fallback=False), then
+    cross-validate. A PerChannelResolutionError (recorded=corrected but corrected
+    unresolvable at promotion) is a whole-promotion refusal — NO raw substitution.
+    """
+    from ..workers.hq_source_resolver import (
+        resolve_per_channel_marker_sources, PerChannelResolutionError)
+
+    report = {"promoted": False, "failures": [], "source_aware": True}
+    cfg = normalize_channel_remap_config(preview_config)
+    channels = cfg.get("channels", {}) or {}
+    if not channels:
+        report["failures"].append("config has no marker channels")
+        return None, report
+
+    requests = {}
+    for ch, params in channels.items():
+        csi = params.get("calibration_source_identity")
+        kind = csi.get("actual_source_kind") if isinstance(csi, dict) else None
+        if kind == "corrected_zarr":
+            requests[ch] = REQUESTED_SOURCE_CORRECTED_ZARR
+        elif kind == "raw_ome":
+            requests[ch] = REQUESTED_SOURCE_RAW_OME
+        else:
+            report["failures"].append(
+                f"channel '{ch}': missing recorded calibration_source_identity")
+    if report["failures"]:
+        return None, report
+
+    try:
+        per_channel_resolved = resolve_per_channel_marker_sources(
+            requests, raw_channel_source_path=raw_channel_source_path,
+            corrected_zarr_path=corrected_zarr_path, roi_id=roi_id,
+            requested_roi_names=requested_roi_names, abs_fn=abs_fn,
+            loader_factory=loader_factory, allow_corrected_to_raw_fallback=False)
+    except PerChannelResolutionError as exc:
+        report["failures"].append(
+            f"channel '{exc.channel}': recorded source could not be independently "
+            f"re-resolved (requested {exc.requested_source}): {exc.reason}")
+        return None, report
+
+    return promote_source_aware_config_for_step2(
+        cfg, per_channel_resolved, step2_input_shape, active_method=active_method)

@@ -26,8 +26,10 @@ import json
 import os
 
 from ..workers.hq_marker_segmentation import parse_hq_channels
-from ..utils.remap_promotion import promote_step1_5_config_for_step2, _as_hw
+from ..utils.remap_promotion import (
+    promote_step1_5_config_for_step2, promote_source_aware_from_sources, _as_hw)
 from ..utils.segmentation_config import is_hq2_csd_method
+from ..utils.source_identity import config_is_source_aware
 
 
 def active_method_of(seg_config):
@@ -212,9 +214,25 @@ def main(argv=None):
 
     method = active_method_of(seg_config)
 
+    # v14.5c.3: a source-aware preview config takes the PARALLEL per-channel
+    # promotion path (recorded↔resolved↔runtime 3-way + geometry guard). It emits
+    # a CANDIDATE (step2_ready=false; runtime is v14.5d), never a step2_ready
+    # config. The single-source path below is unchanged.
+    if config_is_source_aware(preview):
+        from ..core.io_loader import OMETIFFLoader
+        promoted, report = promote_source_aware_from_sources(
+            preview, step2_input_shape=step2_shape,
+            raw_channel_source_path=(seg_config.get("raw_channel_source_path")
+                                     or seg_config.get("raw_ome_path") or ""),
+            corrected_zarr_path=(seg_config.get("multichannel_source_path")
+                                 or seg_config.get("corrected_channels_zarr") or ""),
+            roi_id=str(seg_config.get("roi_id") or ""),
+            requested_roi_names=_requested_roi_names(seg_config),
+            abs_fn=os.path.abspath, loader_factory=OMETIFFLoader,
+            active_method=method)
     # Step1.5 remap configs are HQ2/CSD-only: refuse non-HQ2/CSD methods up front
     # (no need to resolve any source for them).
-    if not is_hq2_csd_method(method):
+    elif not is_hq2_csd_method(method):
         promoted, report = promote_step1_5_config_for_step2(
             preview, None, step2_shape, active_method=method)
     else:
@@ -243,7 +261,12 @@ def main(argv=None):
 
     if promoted is not None:
         base = os.path.splitext(os.path.basename(args.preview_config))[0]
-        out_path = os.path.join(out_dir, f"{base}_step2ready.json")
+        # Source-aware promotions emit a CANDIDATE (step2_ready=false; runtime is
+        # v14.5d); single-source promotions emit a step2-ready config.
+        suffix = ("source_aware_candidate"
+                  if promoted.get("created_by_source_aware_promotion")
+                  else "step2ready")
+        out_path = os.path.join(out_dir, f"{base}_{suffix}.json")
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(promoted, f, indent=2, sort_keys=False)
         print(f"[promote] PROMOTED -> {out_path}")

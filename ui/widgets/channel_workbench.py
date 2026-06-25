@@ -186,7 +186,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         form.setLabelAlignment(Qt.AlignRight)
 
         self._sp_min = QtWidgets.QDoubleSpinBox()
-        self._sp_min.setRange(-1e9, 1e9)
+        # Intensity Min is never negative. Bound the widget at 0 structurally so
+        # the user cannot enter/spin below 0 AND every setValue() path (load /
+        # histogram drag / auto-minmax) is clamped to >= 0 by the spinbox itself.
+        self._sp_min.setRange(0.0, 1e9)
         self._sp_min.setDecimals(1)
         self._sp_min.valueChanged.connect(self._on_minmax_changed)
         form.addRow("Min", self._sp_min)
@@ -731,6 +734,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         lo, hi = compute_qupath_auto_minmax(
             self._raw[self._active], saturation=self._auto_saturation,
             exclude_zero=False)
+        lo = max(0.0, float(lo))   # Min is never negative (matches the widget bound)
         if hi <= lo:
             hi = lo + 1.0
         self._loading = True

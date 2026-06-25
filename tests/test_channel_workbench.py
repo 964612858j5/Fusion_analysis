@@ -934,3 +934,52 @@ def test_step15_calibration_shape_null_when_loader_cannot_provide(app, tmp_path,
     assert sp["calibration_source_path"] is None
     assert sp["preview_only"] is True
     assert sp["step2_ready"] is False
+
+
+# ── step0-fix-min-nonneg: intensity Min can never be negative (structural) ───
+def test_min_widget_is_structurally_non_negative(workbench):
+    # 1. the Min input is bounded at 0 (cannot represent a negative).
+    assert workbench._sp_min.minimum() == 0.0
+    # Max bound is unchanged (Max may still be whatever it is).
+    assert workbench._sp_max.minimum() == -1e9
+
+
+def test_min_setvalue_below_zero_is_clamped_not_stored_negative(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    # 2. setting Min below 0 (widget API) is clamped at the INPUT, not post-hoc.
+    workbench._sp_min.setValue(-50.0)
+    assert workbench._sp_min.value() == 0.0
+    assert workbench._params[workbench._active]["min"] >= 0.0
+    # a normal positive value is unaffected
+    workbench._sp_min.setValue(123.4)
+    assert workbench._sp_min.value() == 123.4
+
+
+def test_auto_minmax_never_sets_negative_min(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    # 2 (programmatic setter): auto-minmax respects >= 0.
+    workbench._on_auto()
+    assert workbench._sp_min.value() >= 0.0
+
+
+def test_saved_config_has_no_negative_channel_min(workbench, tmp_path):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._sp_min.setValue(-9999.0)   # try to force a negative
+    cfg = workbench.build_config()
+    for name, params in cfg["channels"].items():
+        assert params.get("min") is None or params["min"] >= 0.0
+    # round-trips through the on-disk schema without a negative Min
+    path = str(tmp_path / "cfg.json")
+    save_channel_remap_config(cfg, path)
+
+
+def test_max_and_gamma_unchanged(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    # Max still accepts its full range (including negative / large).
+    workbench._sp_max.setValue(4000.0)
+    assert workbench._sp_max.value() == 4000.0
+    workbench._sp_max.setValue(-7.0)
+    assert workbench._sp_max.value() == -7.0
+    # Gamma slider range unchanged.
+    assert workbench._sl_gamma.minimum() == 10
+    assert workbench._sl_gamma.maximum() == 300

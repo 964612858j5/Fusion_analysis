@@ -876,7 +876,11 @@ class Step0Page(QWidget):
         # ══ 底部导航 ═══════════════════════════════════════════════════
         nav = QHBoxLayout()
         nav.addStretch()
-        self._btn_continue = QPushButton("Save & Continue → Step 1")
+        # (#9) Save-only: writes the Step0 outputs + Step0->Step1 handoff but does
+        # NOT auto-jump to Step1 (navigation is via the step names). The handler
+        # (_save_and_continue) is unchanged; only the auto-jump was removed in
+        # main_window._on_step0_complete.
+        self._btn_continue = QPushButton("Save Step0")
         self._btn_continue.setStyleSheet(
             "QPushButton{background:#2a5;color:white;border-radius:4px;"
             "padding:8px 22px;font-size:13px;font-weight:bold;}"

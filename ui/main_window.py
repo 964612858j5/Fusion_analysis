@@ -210,10 +210,14 @@ class MainWindow(QMainWindow):
         # injection path remain intact internally (stack index 5, reached only
         # programmatically) for the v14.1b migration into Step0.
 
+        # (#11) The redundant "Next" button was removed — navigation is entirely
+        # via clicking the step names in the top nav. The button object is kept
+        # (NOT added to the bar, NOT connected) only so the shared
+        # _update_next_button() state-updater and its many call sites stay
+        # working unchanged; it is never shown or clickable.
         self._btn_next = QPushButton("Next")
         self._btn_next.setEnabled(False)
-        self._btn_next.clicked.connect(self._go_next_step)
-        step_bar.addWidget(self._btn_next)
+        self._btn_next.setVisible(False)
         self._update_next_button()
         outer_lay.addLayout(step_bar)
 
@@ -657,9 +661,12 @@ class MainWindow(QMainWindow):
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         self._step4._ome_edit.setText(OME_TIFF_FILE)
         self._step4._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
-        self._stack.setCurrentIndex(1)
-        self._set_step_active(1)
-        self._log_step1_layout("after Step0 complete enter Step1")
+        # (#9) SAVE-ONLY: all Step0 outputs are written and the Step0->Step1
+        # handoff state above is set, but we no longer AUTO-JUMP to Step1 (that
+        # could skip Channel Conditioning). The user stays in Step0 and navigates
+        # via the step names. (Removed: setCurrentIndex(1) + _set_step_active(1).)
+        self._update_next_button()
+        self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
 
     def _load_step0_roi_result(self, _checked=False, auto=False):
         global OME_TIFF_FILE, OUTPUT_DIR
@@ -1595,18 +1602,8 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(4)
         self._set_step_active(4)
 
-    def _go_next_step(self):
-        self.is_sequential_flow = True
-        if not self._btn_next.isEnabled():
-            return
-        if self._current_step == 0:
-            self._go_to_step1()
-        elif self._current_step == 1:
-            self._go_to_step2()
-        elif self._current_step == 2:
-            self._go_to_step3(getattr(self._step2, "_last_output_dir", None))
-        elif self._current_step == 3:
-            self._go_to_step4()
+    # (#11) _go_next_step removed — the "Next" button it served is gone; step
+    # navigation is via the top-nav step names (_go_to_stepN).
 
     def _skip_to_step2(self):
         self.is_sequential_flow = False

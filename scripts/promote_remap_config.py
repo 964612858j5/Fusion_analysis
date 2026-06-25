@@ -271,6 +271,13 @@ def main(argv=None):
             json.dump(promoted, f, indent=2, sort_keys=False)
         print(f"[promote] PROMOTED -> {out_path}")
         print(f"[promote] source: {report.get('source_kind')} {report.get('source_path')}")
+        # Symmetric trace with the refuse path: also persist the full report on
+        # success (it already carries checks/resolved_channel_shape/step2_input_shape)
+        # so the smoke can read the C1 Q3 shapes without re-running.
+        report_path = os.path.join(out_dir, "promotion_report.json")
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, sort_keys=False)
+        print(f"[promote] report -> {report_path}")
         return 0
 
     report_path = os.path.join(out_dir, "promotion_report.json")

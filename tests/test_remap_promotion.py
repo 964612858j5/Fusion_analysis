@@ -291,7 +291,13 @@ def test_cli_end_to_end_promotes(tmp_path, monkeypatch):
     assert out.exists()
     promoted = json.loads(out.read_text())
     assert promoted["source_policy"]["step2_ready"] is True
-    assert not (tmp_path / "promotion_report.json").exists()
+    # v14.5c.3a: success also persists the full report (symmetric with refuse),
+    # and that report carries the geometry checks (locks the new contract).
+    report_path = tmp_path / "promotion_report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text())
+    assert report["checks"]["step2_input_shape"] == [16, 24]
+    assert report["checks"]["resolved_source_shape"] == [16, 24]
 
 
 def test_cli_end_to_end_refuses_without_geometry(tmp_path, monkeypatch):

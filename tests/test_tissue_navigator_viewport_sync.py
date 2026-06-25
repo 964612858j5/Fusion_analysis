@@ -120,8 +120,10 @@ def test_split_view_clears_rect(app):
     s.toggle_tissue_navigator()
     pop = s._tissue_navigator_popup
     pop.overview.set_current_view_rect((0, 50, 0, 50))
-    # enable split on the conditioning viewer
-    s._cond_workbench._chk_split.setChecked(True)
+    # enable split on the conditioning viewer. The "Split raw|remapped" UI toggle
+    # was removed (step0-conditioning-declutter #5); split is now driven only on
+    # the canvas, but is_split_view() + the v14.2c clear-on-split sync still work.
+    s._cond_workbench._canvas.set_split(True)
     assert s._cond_workbench.is_split_view() is True
     s._update_tissue_view_rect()
     assert pop.overview.current_view_rect() is None

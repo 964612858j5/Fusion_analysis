@@ -639,32 +639,21 @@ def test_dapi_reference_not_a_marker_channel(workbench):
     assert set(cfg["channels"].keys()) == {"CD45", "CK19"}
 
 
-def test_select_all_markers_enables_all(workbench):
-    # B2/B4: Clear then Select all flips every marker's enabled flag.
+# (#2 declutter) the Select all / Clear all marker buttons + handler were removed.
+def test_select_clear_all_markers_buttons_removed(workbench):
+    assert not hasattr(workbench, "_btn_select_all")
+    assert not hasattr(workbench, "_btn_clear_all")
+    assert not hasattr(workbench, "_set_all_markers_enabled")
+
+
+def test_individual_channel_toggle_still_works(workbench):
+    # channels remain individually toggleable via the per-channel Enabled control.
     workbench.set_channel_images(_real_like_channels(), source="step3")
-    workbench._set_all_markers_enabled(False)
-    cfg = workbench.build_config()
-    assert all(c["enabled"] is False for c in cfg["channels"].values())
-    workbench._set_all_markers_enabled(True)
-    cfg = workbench.build_config()
-    assert all(c["enabled"] is True for c in cfg["channels"].values())
-
-
-def test_clear_all_markers_disables_all(workbench):
-    workbench.set_channel_images(_real_like_channels(), source="step3")
-    workbench._set_all_markers_enabled(True)
-    workbench._set_all_markers_enabled(False)
-    cfg = workbench.build_config()
-    assert all(c["enabled"] is False for c in cfg["channels"].values())
-    # disabled markers are still saved (with enabled=false), not dropped, so
-    # Step2 channel-coverage validation can still resolve them.
-    assert set(cfg["channels"].keys()) == set(workbench._names)
-
-
-def test_select_all_no_data_no_crash(workbench):
-    # No channels loaded -> bulk control is a safe no-op.
-    workbench._set_all_markers_enabled(True)
-    assert workbench.has_channel_data() is False
+    active = workbench._active
+    workbench._chk_enabled.setChecked(False)
+    assert workbench.build_config()["channels"][active]["enabled"] is False
+    workbench._chk_enabled.setChecked(True)
+    assert workbench.build_config()["channels"][active]["enabled"] is True
 
 
 def test_channel_order_preserved_not_alphabetical(workbench):
@@ -1022,3 +1011,23 @@ def test_histogram_max_handle_unchanged_accepts_negative(workbench):
     assert h._max_line.value() == -7.0
     h._max_line.setValue(5000.0)
     assert h._max_line.value() == 5000.0
+
+
+# ── step0-conditioning-declutter #5: Show-remapped / Split toggles removed ───
+def test_show_remapped_and_split_toggles_removed(workbench):
+    assert not hasattr(workbench, "_chk_remapped")
+    assert not hasattr(workbench, "_chk_split")
+
+
+def test_viewer_shows_conditioned_channel_not_blank(workbench):
+    # fixed default after removing "Show remapped": always show the conditioned
+    # (remapped) channel — the viewer is never blank once a channel is active.
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    assert workbench._active is not None
+    assert workbench._canvas._img_item.image is not None
+
+
+def test_is_split_view_kept_and_false_after_toggle_removed(workbench):
+    # is_split_view() stays for v14.2c viewport sync; no UI path enters split now.
+    assert hasattr(workbench, "is_split_view")
+    assert workbench.is_split_view() is False

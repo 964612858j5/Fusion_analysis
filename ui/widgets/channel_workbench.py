@@ -116,19 +116,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._layer_list.visibility_changed.connect(self._on_visibility_changed)
         left_l.addWidget(self._layer_list, stretch=1)
 
-        # Select all / Clear all marker remap channels (B2). These toggle the
-        # marker channels only; reference layers (DAPI/mask/fusion) have their
-        # own controls and are NOT affected.
-        marker_bar = QtWidgets.QHBoxLayout()
-        self._btn_select_all = QtWidgets.QPushButton("Select all markers")
-        self._btn_select_all.setToolTip("Enable all marker remap channels.")
-        self._btn_select_all.clicked.connect(lambda: self._set_all_markers_enabled(True))
-        self._btn_clear_all = QtWidgets.QPushButton("Clear all markers")
-        self._btn_clear_all.setToolTip("Disable all marker remap channels.")
-        self._btn_clear_all.clicked.connect(lambda: self._set_all_markers_enabled(False))
-        marker_bar.addWidget(self._btn_select_all)
-        marker_bar.addWidget(self._btn_clear_all)
-        left_l.addLayout(marker_bar)
+        # (#2 declutter) "Select all markers" / "Clear all markers" buttons
+        # removed to save space — channels stay individually toggleable via the
+        # layer list. A single all-toggle is deferred to the #4 checkbox redesign.
         split.addWidget(left)
 
         # Center — viewer
@@ -138,13 +128,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._canvas = ChannelViewerCanvas()
         cl.addWidget(self._canvas, stretch=1)
         view_bar = QtWidgets.QHBoxLayout()
-        self._chk_remapped = QtWidgets.QCheckBox("Show remapped")
-        self._chk_remapped.setChecked(True)
-        self._chk_remapped.toggled.connect(lambda _v: self._refresh_preview())
-        self._chk_split = QtWidgets.QCheckBox("Split raw | remapped")
-        self._chk_split.toggled.connect(self._canvas.set_split)
-        view_bar.addWidget(self._chk_remapped)
-        view_bar.addWidget(self._chk_split)
+        # (#5 declutter) "Show remapped" + "Split raw|remapped" toggles removed —
+        # the viewer always shows the conditioned (remapped) channel, which is the
+        # whole point of this tab. is_split_view() is kept for the v14.2c viewport
+        # sync; no UI path enters split now, so it always reports False.
         btn_fit = QtWidgets.QPushButton("Fit view")
         btn_fit.setToolTip("Reset zoom/pan to fit the whole patch.")
         btn_fit.clicked.connect(self._on_fit_view)
@@ -694,27 +681,6 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return
         self._collect_params_from_controls()
 
-    def _set_all_markers_enabled(self, enabled):
-        """Enable/disable every marker remap channel at once (B2).
-
-        Sets each channel's `enabled` param (the flag saved into
-        channel_remap_config["channels"][name]["enabled"]) and mirrors it into
-        the layer-list visibility so the bulk action is visible. Reference
-        layers are untouched. No-op when no channel data is loaded.
-        """
-        if not self._names:
-            return
-        enabled = bool(enabled)
-        for n in self._names:
-            self._params[n]["enabled"] = enabled
-            self._visible[n] = enabled
-        self._layer_list.set_all_visible(enabled)
-        if self._active is not None:
-            self._chk_enabled.blockSignals(True)
-            self._chk_enabled.setChecked(enabled)
-            self._chk_enabled.blockSignals(False)
-        self._refresh_preview()
-
     def _on_histogram_window(self, lo, hi):
         if self._loading or self._active is None:
             return
@@ -776,10 +742,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return
         raw = self._raw[self._active]
         remapped = apply_channel_remap(raw, self._params[self._active])
-        show_remapped = self._chk_remapped.isChecked()
+        # Fixed default (#5): always show the conditioned (remapped) channel — the
+        # tab's purpose. raw is still supplied as the fallback the canvas shows when
+        # no remap is active, so the viewer is never blank.
         self._canvas.set_images(
             raw=self._normalize_raw(raw),
-            remapped=remapped if show_remapped else None,
+            remapped=remapped,
         )
 
     @staticmethod
@@ -882,6 +850,5 @@ class ChannelWorkbench(QtWidgets.QWidget):
     def _set_controls_enabled(self, enabled):
         for w in (self._sp_min, self._sp_max, self._sl_bright, self._sl_contrast,
                   self._sl_gamma, self._btn_auto, self._btn_reset,
-                  self._chk_enabled, self._chk_remapped, self._chk_split,
-                  self._btn_select_all, self._btn_clear_all):
+                  self._chk_enabled):
             w.setEnabled(enabled)

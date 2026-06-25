@@ -168,3 +168,78 @@ def test_no_forbidden_imports_in_popup_module():
                       "promote_remap_config", "validate_step2_remap_config",
                       "segment_merge_worker"):
         assert forbidden not in src, forbidden
+
+
+# ── step0-fix-tissue-navigator: thumbnail load + window min/max + drop toolbar min ─
+class _FakeLoader:
+    def __init__(self, shape=(2000, 2200)):
+        self.shape = shape
+        self.ch_map = {"DAPI": 0}
+
+    def channel_names(self):
+        return ["DAPI"]
+
+
+# A: set_overview_context triggers the SAME OverviewPanel load path, once per loader.
+def test_set_overview_context_triggers_thumbnail_load(app, monkeypatch):
+    import block01.ui.step0.overview_panel as ovp
+    calls = {"n": 0}
+    monkeypatch.setattr(ovp.OverviewPanel, "_load_overview",
+                        lambda self: calls.__setitem__("n", calls["n"] + 1))
+    p = _mk(app)
+    ld = _FakeLoader()
+    p.set_overview_context(loader=ld, nuc_ch="DAPI")
+    assert calls["n"] == 1                          # load triggered
+    p.set_overview_context(rois=[], patches=[])     # ROI reconcile, same loader
+    assert calls["n"] == 1                          # NOT reloaded on every edit
+
+
+def test_no_loader_does_not_trigger_load(app, monkeypatch):
+    import block01.ui.step0.overview_panel as ovp
+    calls = {"n": 0}
+    monkeypatch.setattr(ovp.OverviewPanel, "_load_overview",
+                        lambda self: calls.__setitem__("n", calls["n"] + 1))
+    p = _mk(app)
+    p.set_overview_context(rois=[], patches=[])     # no loader
+    assert calls["n"] == 0
+
+
+# A: completion clears the "Loading..." state and sets the thumbnail image.
+def test_overview_completion_clears_loading(app):
+    import numpy as np
+    from block01.ui.widgets.tissue_navigator_popup import TissueNavigatorPopup
+    p = TissueNavigatorPopup(loader=_FakeLoader(), nuc_ch="DAPI")
+    ov = p.overview
+    assert "Loading" in ov.status.text()            # starts in loading state
+    ov.full_h, ov.full_w = 2000, 2200
+    ov._t0 = 0
+    ov._on_overview_loaded(np.ones((50, 55), dtype=np.float32))
+    assert ov.img_item.image is not None            # thumbnail set
+    assert "Loading" not in ov.status.text()         # loading cleared
+
+
+# B: native window controls — windowType is a real Window (not Tool) with min/max/close.
+def test_window_has_native_min_max_close(app):
+    from PyQt5.QtCore import Qt
+    p = _mk(app)
+    assert p.windowType() == Qt.Window               # NOT Qt.Tool (no min/max on X11)
+    f = int(p.windowFlags())
+    assert f & int(Qt.WindowMinimizeButtonHint)
+    assert f & int(Qt.WindowMaximizeButtonHint)
+    assert f & int(Qt.WindowCloseButtonHint)
+
+
+# C: redundant toolbar minimize button removed; header content (label) kept.
+def test_toolbar_minimize_button_removed(app):
+    from PyQt5 import QtWidgets
+    p = _mk(app)
+    assert not hasattr(p, "_btn_min")
+    # no push-buttons left in the header bar
+    assert p._bar.findChildren(QtWidgets.QPushButton) == []
+    # the real header content remains
+    assert "Tissue Preview" in p._bar_label.text()
+    # collapse-to-bar API still callable (no _btn_min crash)
+    p.minimize_to_bar()
+    assert p.is_minimized() is True
+    p.restore_from_bar()
+    assert p.is_minimized() is False

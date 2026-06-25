@@ -47,8 +47,17 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
     """
 
     def __init__(self, loader=None, nuc_ch="", parent=None):
-        # Top-level tool window: the window manager already gives it drag + resize.
-        super().__init__(parent, Qt.Tool | Qt.WindowStaysOnTopHint)
+        # Top-level window with a NATIVE title bar that includes minimize /
+        # maximize / close. (Qt.Tool suppresses min/max on X11 — that was the
+        # #1a defect; Qt.Window + the explicit button hints restores them.)
+        super().__init__(
+            parent,
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowStaysOnTopHint,
+        )
         self.setWindowTitle("Tissue Preview / ROI Navigator")
         self.setMinimumWidth(280)
         self.resize(360, 420)
@@ -56,12 +65,17 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._minimized = False
         self._restore_size = self.size()
         self._viewport_rect = None   # stored canonical image-local rect or None
+        self._overview_loaded_for = None   # loader the thumbnail was loaded for
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(3)
 
-        # ── header / minimize bar ─────────────────────────────────────────
+        # ── header status bar (status text only) ──────────────────────────
+        # The toolbar minimize button was removed (#1b): the window's native
+        # title bar already provides minimize (restored in #1a). The collapse-
+        # to-bar API (minimize_to_bar/restore_from_bar/toggle_minimized) remains
+        # callable; it just no longer has a duplicate toolbar button.
         self._bar = QtWidgets.QWidget()
         bar_lay = QtWidgets.QHBoxLayout(self._bar)
         bar_lay.setContentsMargins(4, 2, 4, 2)
@@ -69,11 +83,6 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._bar_label = QtWidgets.QLabel("Tissue Preview")
         self._bar_label.setStyleSheet("color:#cdd;font-size:10px;")
         bar_lay.addWidget(self._bar_label, stretch=1)
-        self._btn_min = QtWidgets.QPushButton("▁")
-        self._btn_min.setToolTip("Minimize to bar / restore")
-        self._btn_min.setFixedWidth(28)
-        self._btn_min.clicked.connect(self.toggle_minimized)
-        bar_lay.addWidget(self._btn_min)
         outer.addWidget(self._bar)
 
         # ── body: reused OverviewPanel (ROI draw/edit/delete, Full-WSI/ROI) ──
@@ -114,8 +123,24 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         if rois is not None or patches is not None:
             self._overview.set_rois_and_patches(
                 list(rois or []), list(patches or []), bool(full_wsi_mode))
+        # #7 fix: the popup's OverviewPanel is created lazy=True, so its tissue
+        # thumbnail never loads on its own. Trigger the SAME load path the Step0
+        # overview uses (OverviewPanel._load_overview), once per loader — not on
+        # every ROI reconcile — so "Loading..." clears to the real thumbnail.
+        self._ensure_overview_thumbnail_loaded()
         self._refresh_bar_text()
         self._update_empty_state()
+
+    def _ensure_overview_thumbnail_loaded(self):
+        """Load the tissue thumbnail once for the current loader (reuses the Step0
+        OverviewPanel load path; no forked loader). No-op without a usable loader."""
+        loader = getattr(self._overview, "loader", None)
+        if loader is None or getattr(self._overview, "full_h", 0) == 0:
+            return
+        if loader is self._overview_loaded_for:
+            return                      # already loaded for this loader
+        self._overview_loaded_for = loader
+        self._overview._load_overview()
 
     def roi_count(self):
         try:
@@ -141,7 +166,6 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._minimized = True
         self._overview.setVisible(False)
         self._empty_hint.setVisible(False)
-        self._btn_min.setText("▢")
         self._refresh_bar_text()
         self.setFixedHeight(self._bar.sizeHint().height() + 12)
 
@@ -154,7 +178,6 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self.setMaximumHeight(16777215)   # Qt QWIDGETSIZE_MAX
         self._overview.setVisible(True)
         self._update_empty_state()
-        self._btn_min.setText("▁")
         self.resize(self._restore_size)
         self._refresh_bar_text()
 

@@ -55,6 +55,12 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
 
         self._min_line = pg.InfiniteLine(
             angle=90, movable=True, pen=pg.mkPen("#f0a030", width=2))
+        # Intensity Min is never negative: bound the Min handle's lower drag limit
+        # at x=0 (intensity-zero on this axis). pyqtgraph clamps BOTH the drag and
+        # setValue() to this bound, so the handle physically stops at 0 — it cannot
+        # slide into the negative region (the spinbox clamp from ca4e7d9 only fixed
+        # the OTHER input path). Max is NOT lower-bounded.
+        self._min_line.setBounds([0, None])
         self._max_line = pg.InfiniteLine(
             angle=90, movable=True, pen=pg.mkPen("#e06060", width=2))
         self._plot.addItem(self._min_line)

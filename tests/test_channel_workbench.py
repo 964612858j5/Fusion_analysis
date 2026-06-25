@@ -983,3 +983,42 @@ def test_max_and_gamma_unchanged(workbench):
     # Gamma slider range unchanged.
     assert workbench._sl_gamma.minimum() == 10
     assert workbench._sl_gamma.maximum() == 300
+
+
+# ── step0-fix-histogram-min-nonneg: histogram Min handle cannot drag below 0 ──
+def test_histogram_min_handle_lower_bound_is_zero(workbench):
+    # 2. the Min handle (pyqtgraph InfiniteLine) has a structural lower bound of 0;
+    #    the Max handle is NOT lower-bounded.
+    assert workbench._histogram._min_line.maxRange[0] == 0
+    assert workbench._histogram._max_line.maxRange[0] is None
+
+
+def test_histogram_min_handle_stops_at_zero_on_negative_drag(workbench):
+    h = workbench._histogram
+    # 1. simulate dragging the Min handle toward negative x: the HANDLE itself
+    #    stops at 0 (position clamped), not just the value snapping back.
+    h._min_line.setValue(-50.0)
+    assert h._min_line.value() == 0.0          # handle position bounded at 0
+    assert h.window()[0] == 0.0                # reported Min is 0
+    # 3. a normal positive drag still works.
+    h._min_line.setValue(123.4)
+    assert h._min_line.value() == 123.4
+
+
+def test_histogram_min_drag_negative_yields_nonneg_saved_config(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    h = workbench._histogram
+    h._min_line.setValue(-99.0)                # drag handle into negative -> 0
+    workbench._on_histogram_window(*h.window())  # push through the workbench path
+    cfg = workbench.build_config()
+    for name, params in cfg["channels"].items():
+        assert params.get("min") is None or params["min"] >= 0.0
+
+
+def test_histogram_max_handle_unchanged_accepts_negative(workbench):
+    h = workbench._histogram
+    # 5. Max handle behavior unchanged: still lower-unbounded.
+    h._max_line.setValue(-7.0)
+    assert h._max_line.value() == -7.0
+    h._max_line.setValue(5000.0)
+    assert h._max_line.value() == 5000.0

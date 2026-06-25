@@ -433,7 +433,16 @@ class Step0Page(QWidget):
         self._patch_warning.setVisible(False)
         bl.addWidget(self._patch_warning)
 
-        main_split.addWidget(sec_b)
+        # (#10) Section B "ROI & Patch" — the tissue preview + ROI/patch drawing
+        # (self.overview) — is the SAME component the Tissue Navigator was derived
+        # from. It is NO LONGER rendered inside the Background Correction tab; it
+        # lives in the Tissue Navigator popup, whose OverviewPanel is a view over
+        # the SAME RoiContextModel (v14.2b). sec_b's widgets (self.overview,
+        # _roi_list, _patch_list, region combo) are KEPT as the Step0-side model
+        # views the v14.2b bridge reconciles — just not shown in the BG layout.
+        # main_split therefore holds only Section C (correction + Preview Patch).
+        self._roi_patch_section = sec_b   # keep a ref so the orphan isn't GC'd
+        sec_b.setVisible(False)
 
         # ── Section C（右 75%）— Background Correction ────────────────
         sec_c = QWidget()
@@ -868,10 +877,8 @@ class Step0Page(QWidget):
         cl.addWidget(self._bg_corrected_status)
 
         main_split.addWidget(sec_c)
-
-        # 主分栏比例：B=25%, C=75%
-        main_split.setStretchFactor(0, 1)
-        main_split.setStretchFactor(1, 3)
+        # (#10) Section C is now the sole child of the BG splitter (Section B was
+        # relocated to the Tissue Navigator); it fills the tab. No B:C ratio.
 
         # ══ 底部导航 ═══════════════════════════════════════════════════
         nav = QHBoxLayout()
@@ -1350,6 +1357,10 @@ class Step0Page(QWidget):
     def _fix_split_ratio(self):
         """强制维持 B:C = 1:3 的分栏比例，不受内容影响。"""
         if not hasattr(self, '_main_split'):
+            return
+        # (#10) Section B was relocated to the Tissue Navigator; with a single
+        # child (Section C) there is no B:C ratio to fix — let it fill the tab.
+        if self._main_split.count() < 2:
             return
         total = self._main_split.width()
         if total < 10:

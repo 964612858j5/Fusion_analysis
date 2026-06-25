@@ -100,3 +100,64 @@ def test_corrected_status_flags_empty_vs_valid(app):
         {"exists": True, "non_empty": True, "n_channel_arrays": 2})
     txt = s._bg_corrected_status.text().lower()
     assert "written" in txt and "2 channel" in txt
+
+
+# ── step0-move-roi-patch-to-navigator (#10): Section B relocated ─────────────
+def _under(container, target):
+    if container is target:
+        return True
+    return target in container.findChildren(type(target))
+
+
+def test_roi_patch_section_not_in_background_correction(app):
+    from block01.ui.step0.step0_page import Step0Page
+    from block01.ui.step0.overview_panel import OverviewPanel
+    s = Step0Page()
+    ms = s._main_split
+    # the BG splitter now holds only Section C (correction + Preview Patch).
+    kids = [ms.widget(i) for i in range(ms.count())]
+    # Section B's overview is NOT rendered in the BG area...
+    assert not any(_under(k, s.overview) for k in kids)
+    # ...it lives in the (hidden) relocated section, kept as a model view.
+    assert s._roi_patch_section not in kids
+    assert _under(s._roi_patch_section, s.overview)
+
+
+def test_tissue_navigator_hosts_roi_patch(app):
+    from block01.ui.step0.step0_page import Step0Page
+    from block01.ui.step0.overview_panel import OverviewPanel
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    assert isinstance(pop.overview, OverviewPanel)        # navigator hosts ROI/patch
+    # both overviews are views over the single RoiContextModel (v14.2b)
+    assert set(s._registered_roi_overviews()) == {s.overview, pop.overview}
+
+
+def test_preview_patch_still_in_background_correction(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # "Preview Patch" box (per-patch BG-correction view) is UNCHANGED + still in BG.
+    boxes = [b for b in s.findChildren(QtWidgets.QGroupBox)
+             if (b.title() or "") == "Preview Patch"]
+    assert boxes, "Preview Patch box missing"
+    # it is under the BG splitter (Section C), not the relocated Section B
+    ms = s._main_split
+    kids = [ms.widget(i) for i in range(ms.count())]
+    assert any(_under(k, boxes[0]) for k in kids)
+    # its per-patch switching widget is still present
+    assert hasattr(s, "_patch_info")
+
+
+def test_roi_edit_in_navigator_reaches_step0_view_via_model(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # draw a ROI on the navigator overview -> single model -> step0 overview mirrors
+    pop.overview._rois.append(
+        {"name": "RN", "polygon_display": [(0, 0), (1, 0), (1, 1)], "patch_indices": []})
+    pop.overview.rois_changed.emit(list(pop.overview._rois))
+    assert [r["name"] for r in s._roi_model.rois] == ["RN"]
+    assert [r["name"] for r in s.overview.get_rois()] == ["RN"]

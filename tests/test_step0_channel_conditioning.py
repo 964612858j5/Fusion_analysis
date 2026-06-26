@@ -96,9 +96,10 @@ def test_step0_conditioning_loads_patch_channels(page, tmp_path):
     assert page._cond_workbench.has_channel_data()
     cfg = page._cond_workbench.build_config()
     chans = set(cfg.get("channels", {}))
-    # markers present, DAPI excluded (reference layer only)
+    # markers + DAPI present (#6: DAPI is now a normal conditionable channel,
+    # no longer a reference-only layer).
     assert "CD68" in chans and "CK19" in chans
-    assert "DAPI" not in chans
+    assert "DAPI" in chans
 
 
 # ── 5. Save writes ONLY a preview-only config with registered provenance ─────
@@ -170,17 +171,16 @@ def _fresh_page_with_counting_loader(app):
     return p, ld
 
 
-def test_patch_switch_reads_only_active_plus_dapi(app):
+def test_patch_switch_reads_only_active_channel(app):
     p, ld = _fresh_page_with_counting_loader(app)
     p._sync_step0_to_workbench()          # workbench now "in use"
     ld.calls.clear()
     # simulate a patch switch's conditioning refresh
     p.current_patch_idx = 1
     p._maybe_refresh_conditioning()
-    # at most 2 reads: the active marker + DAPI reference — NOT all 27
-    assert len(ld.calls) <= 2, ld.calls
-    assert "DAPI" in ld.calls
-    assert len([c for c in ld.calls if c != "DAPI"]) == 1
+    # ONLY the active channel is read (#6: DAPI is a normal lazy channel now, no
+    # separate reference read) — NOT all 28. Single read, not the whole panel.
+    assert len(ld.calls) == 1, ld.calls
 
 
 def test_unloaded_channel_lazy_loads_on_switch(app):
@@ -209,8 +209,10 @@ def test_build_config_covers_all_channels_incl_unloaded(app):
     p, ld = _fresh_page_with_counting_loader(app)
     p._sync_step0_to_workbench()
     cfg = p._cond_workbench.build_config()
-    # all 27 markers present (DAPI excluded as reference), even those never read
-    assert len(cfg["channels"]) == 27
+    # all 27 markers + DAPI present (#6: DAPI is a normal channel), even those
+    # never read.
+    assert len(cfg["channels"]) == 28
+    assert "DAPI" in cfg["channels"]
     for i in range(27):
         params = cfg["channels"][f"M{i}"]
         for key in ("min", "max", "gamma", "brightness", "contrast", "enabled"):
@@ -246,3 +248,95 @@ def test_patch_switch_highlight_only_new_button_checked(app):
             if w.isChecked():
                 checked.append(w.text())
     assert checked == ["P2"]                       # only the new patch button
+
+
+# ── step0-channel-list-cleanup (#6 list filter / DAPI normal, #8 no Enabled) ──
+class _MixedLoader(_FakeLoader):
+    """Loader exposing markers + DAPI + non-conditioning product channels."""
+
+    def __init__(self):
+        super().__init__(
+            names=("DAPI", "CD68", "CK19", "cell_mask", "wholecell_fusion"),
+            shape=(48, 48))
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1,
+                    correction_config=None, normalize=True):
+        return np.random.rand(y1 - y0, x1 - x0).astype(np.float32)
+
+
+def _page_with_mixed(app):
+    from block01.ui.step0.step0_page import Step0Page
+    p = Step0Page()
+    p.loader = _MixedLoader()
+    p.output_dir = "/tmp"
+    p.patches = [(0, 24, 0, 24)]
+    p.current_patch_idx = 0
+    p.nucleus_channel = "DAPI"
+    p._channel_order = ["DAPI", "CD68", "CK19", "cell_mask", "wholecell_fusion"]
+    return p
+
+
+def test_channel_list_markers_and_dapi_only(app):
+    p = _page_with_mixed(app)
+    p._sync_step0_to_workbench()
+    names = set(p._cond_workbench._names)
+    assert names == {"DAPI", "CD68", "CK19"}      # markers + DAPI
+    assert "cell_mask" not in names               # mask filtered (#6)
+    assert "wholecell_fusion" not in names         # fusion filtered (#6)
+
+
+def test_dapi_is_conditionable_in_build_config(app):
+    p = _page_with_mixed(app)
+    p._sync_step0_to_workbench()
+    wb = p._cond_workbench
+    wb._on_active_changed("DAPI")                 # select DAPI -> lazy load
+    wb._params["DAPI"]["min"] = 10.0
+    wb._params["DAPI"]["max"] = 250.0
+    wb._params["DAPI"]["gamma"] = 1.8
+    cfg = wb.build_config()
+    assert "DAPI" in cfg["channels"]
+    dp = cfg["channels"]["DAPI"]
+    assert dp["min"] == 10.0 and dp["max"] == 250.0 and dp["gamma"] == 1.8
+
+
+def test_dapi_default_color_blue(app):
+    p = _page_with_mixed(app)
+    p._sync_step0_to_workbench()
+    assert p._cond_workbench._colors.get("DAPI") == "#3366ff"
+
+
+def test_no_enabled_checkbox_in_step0_workbench(app):
+    p = _page_with_mixed(app)
+    assert not hasattr(p._cond_workbench, "_chk_enabled")
+
+
+def test_build_config_all_enabled_true(app):
+    p = _page_with_mixed(app)
+    p._sync_step0_to_workbench()
+    cfg = p._cond_workbench.build_config()
+    assert all(c["enabled"] is True for c in cfg["channels"].values())
+
+
+def test_reference_module_off_for_step0(app):
+    p = _page_with_mixed(app)
+    wb = p._cond_workbench
+    # no reference UI (ref bar turned off for Step0)
+    assert wb._ref_chk == {}
+    assert wb._ref_op == {}
+    # reference availability is empty / unused (no DAPI-as-reference overlay)
+    assert not any(wb.reference_layer_availability().values())
+    # set_reference_layers is a no-op (does not crash, registers nothing)
+    wb.set_reference_layers(dapi=np.ones((24, 24), np.float32))
+    assert not any(wb.reference_layer_availability().values())
+
+
+def test_dapi_lazy_loads_like_a_marker(app):
+    p, ld = _fresh_page_with_counting_loader(app)   # nucleus=DAPI, 27 M + DAPI
+    p._sync_step0_to_workbench()
+    wb = p._cond_workbench
+    assert "DAPI" in wb._names                        # normal channel in the list
+    if wb._raw.get("DAPI") is None:                   # DAPI not the eager active
+        ld.calls.clear()
+        wb._on_active_changed("DAPI")
+        assert ld.calls == ["DAPI"]                   # lazy-loaded on demand
+        assert wb._raw.get("DAPI") is not None

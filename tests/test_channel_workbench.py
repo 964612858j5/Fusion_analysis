@@ -1031,3 +1031,23 @@ def test_is_split_view_kept_and_false_after_toggle_removed(workbench):
     # is_split_view() stays for v14.2c viewport sync; no UI path enters split now.
     assert hasattr(workbench, "is_split_view")
     assert workbench.is_split_view() is False
+
+
+# ── step0-channel-list-cleanup: host-optional reference bar + Enabled checkbox ─
+def test_workbench_defaults_keep_reference_and_enabled(app):
+    """Default construction (Step1.5 / Step3) keeps both surfaces."""
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench()
+    assert hasattr(wb, "_chk_enabled")
+    assert set(wb._ref_chk.keys()) == {"dapi", "mask", "fusion"}
+
+
+def test_workbench_flags_off_remove_reference_and_enabled(app):
+    """Step0 construction turns both off: no Enabled checkbox, no reference UI."""
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False)
+    assert not hasattr(wb, "_chk_enabled")
+    assert wb._ref_chk == {} and wb._ref_op == {}
+    # set_reference_layers is a harmless no-op (no overlay path)
+    wb.set_reference_layers(dapi=np.ones((16, 16), np.float32))
+    assert not any(wb.reference_layer_availability().values())

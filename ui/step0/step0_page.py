@@ -84,6 +84,19 @@ from ...utils.calibration_source import (
     SourceAwareIdentityError,
 )
 
+# (#6) Channel Conditioning keeps marker channels + DAPI only. Mask / fusion
+# product channels are non-conditioning and excluded structurally — by known
+# non-marker keyword in the channel name, NOT by a hardcoded marker whitelist —
+# so any present/future product layer is dropped while every real marker stays.
+_NON_MARKER_CHANNEL_KEYWORDS = ("mask", "fusion")
+
+
+def _is_non_marker_channel(name):
+    """True if a channel name denotes a non-conditioning product (mask/fusion)."""
+    low = str(name).lower()
+    return any(kw in low for kw in _NON_MARKER_CHANNEL_KEYWORDS)
+
+
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
 
@@ -911,7 +924,12 @@ class Step0Page(QWidget):
             "border-radius:4px;padding:4px;font-size:10px;")
         lay.addWidget(note)
 
-        self._cond_workbench = ChannelWorkbench()
+        # (#6/#8) Step0 conditioning: DAPI is a normal channel (no reference
+        # overlay) and fusion participation is Step1's call (no per-channel
+        # Enabled checkbox). Both shared-widget surfaces are turned off here;
+        # Step1.5 / Step3 keep them.
+        self._cond_workbench = ChannelWorkbench(
+            show_reference_bar=False, show_enabled_checkbox=False)
         # Host-agnostic: it asks for data via refresh_requested and we feed it from
         # Step0's own loader/patch. Hide the generic internal save — Step0's
         # "Save remap config (Step0)" below is the only official save path (it
@@ -999,17 +1017,26 @@ class Step0Page(QWidget):
         # pixel provider the first time the user selects them. Per-patch this
         # rebuild resets _raw, so a stale channel is re-read against the new
         # patch the next time it is activated.
-        markers = [ch for ch in self._channel_order if ch != self.nucleus_channel]
-        if not markers:
+        # (#6) Conditioning list = marker channels + DAPI ONLY. DAPI (the nucleus
+        # channel) is now a NORMAL conditionable channel — kept in the list, gets
+        # Min/Max/Gamma + a default blue swatch, and enters build_config like any
+        # marker. Mask / fusion product channels are non-conditioning and are
+        # filtered out structurally (by known non-marker keyword, not a marker
+        # whitelist) so they never leak into the list.
+        channels = [ch for ch in self._channel_order if not _is_non_marker_channel(ch)]
+        if not channels:
             self._cond_workbench.clear_channel_images()
             return
         # Preserve the workbench's current selection across patch switches; only
         # that channel's pixels are loaded eagerly.
         active = self._cond_workbench.active_channel()
-        if active not in markers:
-            active = markers[0]
+        if active not in channels:
+            active = channels[0]
+        # DAPI is traditionally blue in fluorescence — give the nucleus channel a
+        # fixed blue swatch; other channels fall back to the workbench palette.
+        colors = {self.nucleus_channel: "#3366ff"}
         images, meta = {}, {}
-        for ch in markers:
+        for ch in channels:
             arr = None
             if ch == active:
                 try:
@@ -1057,17 +1084,11 @@ class Step0Page(QWidget):
             images,
             context={"patch": self.current_patch_idx + 1, "step": "step0"},
             source="manual", source_policy=source_policy, channel_metadata=meta,
-            active=active)
-
-        # DAPI / nucleus channel: reference layer only (never a remap marker).
-        try:
-            dapi = self._read_cond_patch_channel(self.nucleus_channel, normalize=True)
-        except Exception as exc:
-            dapi = None
-            print(f"[Step0] conditioning: DAPI reference unavailable: {exc}")
-        self._cond_workbench.set_reference_layers(dapi=dapi)  # mask/fusion: post-seg only
-        print(f"[Step0] conditioning workbench synced: {len(images)} markers "
-              f"patch={self.current_patch_idx + 1}")
+            colors=colors, active=active)
+        # No separate DAPI reference read: DAPI is a normal channel in `images`
+        # above and is lazy-loaded on demand like any other (#2-new).
+        print(f"[Step0] conditioning workbench synced: {len(images)} channels "
+              f"(markers + DAPI) patch={self.current_patch_idx + 1}")
 
     def _calibration_source_identity(self):
         """Identity of the source the Step0 workbench actually calibrated on.

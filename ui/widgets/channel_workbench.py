@@ -61,8 +61,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     refresh_requested = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_reference_bar=True,
+                 show_enabled_checkbox=True):
         super().__init__(parent)
+        # Host-optional surfaces. Step0 conditioning (#6/#8) turns BOTH off: DAPI
+        # is a normal conditionable channel there (no reference overlay) and
+        # fusion participation is decided by Step1, not a per-channel checkbox.
+        # Step1.5 / Step3 keep them on (reference layers + fusion-enable).
+        self._show_reference_bar = bool(show_reference_bar)
+        self._show_enabled_checkbox = bool(show_enabled_checkbox)
         # ── model ─────────────────────────────────────────────────────
         self._names = []                 # list[str], display order
         self._raw = {}                   # name -> np.ndarray (preview patch)
@@ -142,7 +149,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         view_bar.addWidget(btn_fit)
         view_bar.addStretch()
         cl.addLayout(view_bar)
-        cl.addLayout(self._build_reference_bar())
+        if self._show_reference_bar:
+            cl.addLayout(self._build_reference_bar())
+        else:
+            # No reference overlay surface (Step0): keep the attrs so callers and
+            # status code can probe them without AttributeError.
+            self._ref_chk = {}
+            self._ref_op = {}
         split.addWidget(center)
 
         # Right — active channel inspector
@@ -211,10 +224,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         btn_row.addWidget(self._btn_reset)
         lay.addLayout(btn_row)
 
-        self._chk_enabled = QtWidgets.QCheckBox("Enabled (used for fusion)")
-        self._chk_enabled.setChecked(True)
-        self._chk_enabled.toggled.connect(self._on_enabled_changed)
-        lay.addWidget(self._chk_enabled)
+        if self._show_enabled_checkbox:
+            self._chk_enabled = QtWidgets.QCheckBox("Enabled (used for fusion)")
+            self._chk_enabled.setChecked(True)
+            self._chk_enabled.toggled.connect(self._on_enabled_changed)
+            lay.addWidget(self._chk_enabled)
 
         lay.addStretch()
         return box
@@ -493,6 +507,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         Each control is enabled only when its layer is present and is left OFF
         by default so the active marker stays primary.
         """
+        if not self._show_reference_bar:
+            return                      # host opted out (Step0): no reference UI
         if context:
             self._context.update(context)
         self._canvas.set_reference_layers(dapi=dapi, mask=mask, fusion=fusion)
@@ -521,6 +537,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def clear_reference_layers(self):
         """Drop all reference layers and disable their controls."""
+        if not self._show_reference_bar:
+            return
         self._canvas.clear_reference_layers()
         self._ref_available = {"dapi": False, "mask": False, "fusion": False}
         for key in self._ref_chk:
@@ -596,8 +614,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         def _tick(name):
             return "✓" if self._ref_available.get(name) else "—"
-        ref_note = (f"   Reference layers: DAPI {_tick('dapi')} · "
-                    f"Mask {_tick('mask')} · Fusion {_tick('fusion')}")
+        ref_note = ""
+        if self._show_reference_bar:
+            ref_note = (f"   Reference layers: DAPI {_tick('dapi')} · "
+                        f"Mask {_tick('mask')} · Fusion {_tick('fusion')}")
 
         self._status_lbl.setText(
             f"Source: {src}{ctx}   Scope: {scope}   {intensity_note}   "
@@ -699,7 +719,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._sl_bright.setValue(int(round(p["brightness"] * 100)))
             self._sl_contrast.setValue(int(round(p["contrast"] * 100)))
             self._sl_gamma.setValue(int(round(p["gamma"] * 100)))
-            self._chk_enabled.setChecked(bool(p["enabled"]))
+            if hasattr(self, "_chk_enabled"):
+                self._chk_enabled.setChecked(bool(p["enabled"]))
             self._lbl_bright.setText(f"{p['brightness']:.2f}")
             self._lbl_contrast.setText(f"{p['contrast']:.2f}")
             self._lbl_gamma.setText(f"{p['gamma']:.2f}")
@@ -720,7 +741,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         p["brightness"] = self._sl_bright.value() / 100.0
         p["contrast"] = self._sl_contrast.value() / 100.0
         p["gamma"] = self._sl_gamma.value() / 100.0
-        p["enabled"] = self._chk_enabled.isChecked()
+        if hasattr(self, "_chk_enabled"):
+            p["enabled"] = self._chk_enabled.isChecked()
+        # else: no fusion-enable surface (Step0) -> keep params' default
+        # enabled=True; Step1 decides fusion participation downstream.
 
     def _on_minmax_changed(self, _v=None):
         if self._loading or self._active is None:
@@ -911,7 +935,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     # ── helpers ───────────────────────────────────────────────────────
     def _set_controls_enabled(self, enabled):
-        for w in (self._sp_min, self._sp_max, self._sl_bright, self._sl_contrast,
-                  self._sl_gamma, self._btn_auto, self._btn_reset,
-                  self._chk_enabled):
+        widgets = [self._sp_min, self._sp_max, self._sl_bright, self._sl_contrast,
+                   self._sl_gamma, self._btn_auto, self._btn_reset]
+        if hasattr(self, "_chk_enabled"):
+            widgets.append(self._chk_enabled)
+        for w in widgets:
             w.setEnabled(enabled)

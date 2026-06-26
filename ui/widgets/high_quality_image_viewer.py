@@ -133,6 +133,7 @@ class HighQualityImageViewer(QtWidgets.QWidget):
         self._split = False
         self._raw = None
         self._remapped = None
+        self._composite = None      # pre-composited HxWx3 multi-channel overlay
 
         # View-fit guard: only fit-to-view on first load / new patch / shape
         # change — never on display-parameter changes (Min/Max/gamma/opacity/
@@ -184,8 +185,26 @@ class HighQualityImageViewer(QtWidgets.QWidget):
         time; it must NOT refit the view. Fit happens only on shape change or
         an explicit request_fit() (new patch / first load).
         """
+        self._composite = None     # single-channel path supersedes any composite
         self._raw = None if raw is None else _to_display(raw)
         self._remapped = None if remapped is None else _to_display(remapped)
+        self._refresh()
+
+    def set_composite(self, rgb):
+        """Display a pre-composited multi-channel RGB overlay (HxWx3, [0,1]).
+
+        Used by the QuPath-style multi-channel host (Step0 conditioning): the
+        caller blends all visible channels and hands the finished RGB here. Pass
+        None to clear (no visible channels -> black/empty). Like set_images this
+        does NOT refit the view (only request_fit / shape change does).
+        """
+        if rgb is None:
+            self._composite = None
+            self.clear()
+            return
+        self._composite = _to_display(rgb)
+        self._raw = None
+        self._remapped = None
         self._refresh()
 
     def request_fit(self):
@@ -304,6 +323,7 @@ class HighQualityImageViewer(QtWidgets.QWidget):
     def clear(self):
         self._raw = None
         self._remapped = None
+        self._composite = None
         self._img_item.clear()
         self._prev_shape = None
         self._need_fit = True
@@ -317,6 +337,17 @@ class HighQualityImageViewer(QtWidgets.QWidget):
 
     # ── rendering ─────────────────────────────────────────────────────
     def _refresh(self):
+        # Multi-channel composite path: caller already blended visible channels.
+        if self._composite is not None:
+            rgb = self._composite
+            if rgb.ndim == 2:
+                rgb = np.stack([rgb] * 3, axis=-1)
+            rgb = np.clip(rgb, 0.0, 1.0).astype(np.float32)
+            self._img_item.setImage(rgb, levels=(0.0, 1.0))
+            self._status.setText("Multi-channel overlay")
+            self._maybe_fit(rgb.shape[:2])
+            return
+
         primary = self._remapped if self._remapped is not None else self._raw
         if primary is None:
             self.clear()

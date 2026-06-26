@@ -1051,3 +1051,154 @@ def test_workbench_flags_off_remove_reference_and_enabled(app):
     # set_reference_layers is a harmless no-op (no overlay path)
     wb.set_reference_layers(dapi=np.ones((16, 16), np.float32))
     assert not any(wb.reference_layer_availability().values())
+
+
+# ── step0-qupath-multichannel-overlay: workbench interaction ─────────────────
+def _mc_workbench(app, names=("DAPI", "CD68", "CK19"), visible=("DAPI",)):
+    """A multichannel-overlay workbench preloaded with small channel images."""
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False,
+                          multichannel_overlay=True)
+    rng = np.random.default_rng(0)
+    imgs = {n: rng.random((16, 16)).astype(np.float32) for n in names}
+    colors = {"DAPI": "#3366ff"}
+    wb.set_channel_images(imgs, colors=colors, active="DAPI",
+                          visible=list(visible))
+    return wb
+
+
+def test_overlay_default_state_dapi_only(app):
+    wb = _mc_workbench(app)
+    assert wb.visible_channels() == ["DAPI"]      # only DAPI checked
+    assert wb.active_channel() == "DAPI"
+    assert wb._colors["DAPI"] == "#3366ff"        # blue
+    comp = wb._canvas._composite
+    assert comp is not None and comp.shape == (16, 16, 3)
+    # blue-dominant (DAPI tinted blue)
+    assert comp[..., 2].mean() >= comp[..., 0].mean()
+    assert comp[..., 2].mean() >= comp[..., 1].mean()
+
+
+def test_overlay_click_row_checks_and_activates(app):
+    wb = _mc_workbench(app)
+    before = wb._canvas._composite.copy()
+    wb._on_active_changed("CD68")                 # click an unchecked row
+    assert "CD68" in wb.visible_channels()        # auto-checked
+    assert wb.active_channel() == "CD68"          # and active
+    assert not np.allclose(before, wb._canvas._composite)  # overlay changed
+
+
+def test_overlay_checkbox_toggle_on_activates(app):
+    wb = _mc_workbench(app)
+    wb._on_visibility_changed("CK19", True)
+    assert "CK19" in wb.visible_channels()
+    assert wb.active_channel() == "CK19"
+
+
+def test_overlay_uncheck_migrates_active(app):
+    wb = _mc_workbench(app)
+    wb._on_visibility_changed("CD68", True)       # DAPI + CD68 visible, active CD68
+    wb._on_visibility_changed("CK19", True)       # + CK19, active CK19
+    wb._on_visibility_changed("CK19", False)      # uncheck active CK19
+    assert "CK19" not in wb.visible_channels()
+    assert wb.active_channel() in ("DAPI", "CD68")  # migrated to a checked one
+
+
+def test_overlay_uncheck_last_clears_view(app):
+    wb = _mc_workbench(app)                        # only DAPI visible/active
+    wb._on_visibility_changed("DAPI", False)
+    assert wb.visible_channels() == []
+    assert wb.active_channel() is None
+    assert wb._canvas._composite is None          # viewer empty/black
+
+
+def test_overlay_multichannel_composite_changes(app):
+    wb = _mc_workbench(app)
+    wb._on_visibility_changed("CD68", True)
+    wb._on_visibility_changed("CK19", True)
+    three = wb._canvas._composite.copy()
+    assert three.shape == (16, 16, 3)
+    assert float(three.min()) >= 0.0 and float(three.max()) <= 1.0
+    wb._on_visibility_changed("CK19", False)      # remove one -> composite differs
+    assert not np.allclose(three, wb._canvas._composite)
+
+
+def test_overlay_color_change_updates_composite(app, monkeypatch):
+    from PyQt5.QtGui import QColor
+    from PyQt5 import QtWidgets
+    wb = _mc_workbench(app)
+    before = wb._canvas._composite.copy()
+    monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                        staticmethod(lambda *a, **k: QColor("#ff0000")))
+    wb._on_color_clicked("DAPI")                  # swatch click -> dialog
+    assert wb._colors["DAPI"] == "#ff0000"
+    assert not np.allclose(before, wb._canvas._composite)
+
+
+def test_overlay_minmax_change_updates_composite(app):
+    wb = _mc_workbench(app)                        # active DAPI
+    before = wb._canvas._composite.copy()
+    wb._sp_min.setValue(0.1)
+    wb._sp_max.setValue(0.4)
+    wb._on_minmax_changed()
+    assert not np.allclose(before, wb._canvas._composite)
+
+
+def test_overlay_lazy_load_on_check(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False,
+                          multichannel_overlay=True)
+    calls = []
+    pool = {n: np.random.rand(8, 8).astype(np.float32)
+            for n in ("DAPI", "CD68")}
+
+    def provider(name):
+        calls.append(name)
+        return pool[name]
+
+    wb.set_pixel_provider(provider)
+    # DAPI eager (real array), CD68 lazy (None placeholder)
+    wb.set_channel_images({"DAPI": pool["DAPI"], "CD68": None},
+                          colors={"DAPI": "#3366ff"}, active="DAPI",
+                          visible=["DAPI"])
+    calls.clear()
+    wb._on_visibility_changed("CD68", True)       # check unloaded channel
+    assert "CD68" in calls                        # lazy load fired
+    assert wb._raw.get("CD68") is not None
+
+
+def test_overlay_swatch_color_clicked_signal(app, monkeypatch):
+    """The color swatch is clickable: the row emits color_clicked(name)."""
+    from PyQt5 import QtWidgets
+    from PyQt5.QtGui import QColor
+    # the workbench is already wired to open a real QColorDialog on this signal;
+    # stub it (invalid color = "cancelled") so the click stays non-modal.
+    monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                        staticmethod(lambda *a, **k: QColor()))
+    wb = _mc_workbench(app)
+    got = []
+    wb._layer_list.color_clicked.connect(got.append)
+    wb._layer_list._rows["DAPI"]._on_swatch_clicked(None)
+    assert got == ["DAPI"]
+
+
+def test_overlay_build_config_unchanged(app):
+    wb = _mc_workbench(app)
+    cfg = wb.build_config()
+    # all channels present with full params regardless of visibility/overlay
+    assert set(cfg["channels"]) == {"DAPI", "CD68", "CK19"}
+    for c in cfg["channels"].values():
+        for key in ("min", "max", "gamma", "brightness", "contrast", "enabled"):
+            assert key in c
+
+
+def test_single_channel_hosts_unaffected_by_overlay(app):
+    """Default (Step3/Step1.5) workbench keeps single-channel set_images path."""
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench()
+    assert wb._multichannel_overlay is False
+    rng = np.random.default_rng(1)
+    wb.set_channel_images({"A": rng.random((8, 8)).astype(np.float32),
+                           "B": rng.random((8, 8)).astype(np.float32)})
+    # single-channel path: composite stays None, uses raw/remapped
+    assert wb._canvas._composite is None

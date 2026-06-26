@@ -929,7 +929,8 @@ class Step0Page(QWidget):
         # Enabled checkbox). Both shared-widget surfaces are turned off here;
         # Step1.5 / Step3 keep them.
         self._cond_workbench = ChannelWorkbench(
-            show_reference_bar=False, show_enabled_checkbox=False)
+            show_reference_bar=False, show_enabled_checkbox=False,
+            multichannel_overlay=True)
         # Host-agnostic: it asks for data via refresh_requested and we feed it from
         # Step0's own loader/patch. Hide the generic internal save — Step0's
         # "Save remap config (Step0)" below is the only official save path (it
@@ -1027,9 +1028,21 @@ class Step0Page(QWidget):
         if not channels:
             self._cond_workbench.clear_channel_images()
             return
-        # Preserve the workbench's current selection across patch switches; only
-        # that channel's pixels are loaded eagerly.
-        active = self._cond_workbench.active_channel()
+        # Preserve the workbench's current selection (active + which channels are
+        # checked/visible) across patch switches. On the FIRST load the overlay
+        # opens with ONLY DAPI checked + active (QuPath default state).
+        if self._cond_workbench.has_channel_data():
+            visible = [c for c in self._cond_workbench.visible_channels()
+                       if c in channels] or [self.nucleus_channel]
+            active = self._cond_workbench.active_channel()
+            if active not in channels:
+                active = visible[0]
+        else:
+            visible = [self.nucleus_channel]
+            active = self.nucleus_channel
+        # The eager (pre-loaded) channel is the active one; other visible channels
+        # are lazy-loaded by the overlay recomposite. Make sure `active` is one we
+        # actually read eagerly below.
         if active not in channels:
             active = channels[0]
         # DAPI is traditionally blue in fluorescence — give the nucleus channel a
@@ -1084,7 +1097,7 @@ class Step0Page(QWidget):
             images,
             context={"patch": self.current_patch_idx + 1, "step": "step0"},
             source="manual", source_policy=source_policy, channel_metadata=meta,
-            colors=colors, active=active)
+            colors=colors, active=active, visible=visible)
         # No separate DAPI reference read: DAPI is a normal channel in `images`
         # above and is lazy-loaded on demand like any other (#2-new).
         print(f"[Step0] conditioning workbench synced: {len(images)} channels "

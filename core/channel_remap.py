@@ -279,6 +279,45 @@ def apply_channel_remap_config(channel_images, config):
     return {"remapped": remapped, "fused": fused}
 
 
+def compose_multichannel_overlay(channels, colors, params):
+    """Additively blend several remapped channels into one RGB overlay.
+
+    QuPath-style multi-channel fluorescence display: each visible channel is
+    remapped to a [0,1] grayscale (its Min/Max/gamma/brightness/contrast window),
+    tinted by its pseudocolor, and the tinted channels are summed per pixel and
+    clipped to [0,1]. Display-only — never used to write saved config data.
+
+    Parameters
+    ----------
+    channels : dict[str, ndarray]
+        name -> 2D channel array. ONLY the channels to show (already visible).
+    colors : dict[str, tuple]
+        name -> (R, G, B) floats in [0, 1].
+    params : dict[str, dict]
+        name -> per-channel remap params (min/max/gamma/brightness/contrast).
+
+    Returns
+    -------
+    float32 HxWx3 array in [0, 1], or None if `channels` is empty / all unusable.
+    """
+    items = [(n, a) for n, a in (channels or {}).items()
+             if a is not None and np.asarray(a).ndim == 2 and np.asarray(a).size]
+    if not items:
+        return None
+    h, w = np.asarray(items[0][1]).shape[:2]
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    for name, arr in items:
+        arr = np.asarray(arr)
+        if arr.shape[:2] != (h, w):
+            continue                       # shape mismatch -> skip (no crash)
+        gray = apply_channel_remap(arr, (params or {}).get(name))
+        gray = np.asarray(gray, dtype=np.float32)
+        color = colors.get(name, (1.0, 1.0, 1.0)) if colors else (1.0, 1.0, 1.0)
+        color = np.asarray(color, dtype=np.float32).reshape(1, 1, 3)
+        rgb += gray[:, :, None] * color
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
 # ── Reference-sketch aliases (forward-compat with the spec's API names) ──────
 def remap_channel(image, params=None):
     """Alias of apply_channel_remap (spec sketch name)."""

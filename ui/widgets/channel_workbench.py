@@ -26,8 +26,13 @@ import os
 import numpy as np
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor
 
-from ...core.channel_remap import apply_channel_remap, compute_qupath_auto_minmax
+from ...core.channel_remap import (
+    apply_channel_remap,
+    compose_multichannel_overlay,
+    compute_qupath_auto_minmax,
+)
 from ...utils.channel_remap_config import (
     DEFAULT_AUTO_SATURATION,
     default_channel_remap_config,
@@ -42,11 +47,20 @@ from .channel_histogram_panel import ChannelHistogramPanel
 from .channel_layer_list import ChannelLayerList
 from .channel_viewer_canvas import ChannelViewerCanvas
 
-# Distinct swatch colors cycled across channels (display only).
+# Standard fluorescence pseudocolors cycled across channels (display only).
+# DAPI is forced to blue by the host (Step0) via the colors argument.
 _PALETTE = [
-    "#4f9dde", "#e0556a", "#5fce7e", "#e0a83a", "#a06fde",
-    "#3ec7c0", "#d76fb0", "#9ec24a", "#e07b3a", "#6f8ce0",
+    "#00ff00", "#ff0000", "#00ffff", "#ff00ff", "#ffff00",
+    "#ffffff", "#ff8800", "#88ff00", "#0088ff", "#ff0088",
 ]
+
+
+def _hex_to_rgb01(color):
+    """Hex / #rrggbb string -> (r, g, b) floats in [0, 1]. Robust to bad input."""
+    c = QColor(color)
+    if not c.isValid():
+        return (1.0, 1.0, 1.0)
+    return (c.redF(), c.greenF(), c.blueF())
 
 
 class ChannelWorkbench(QtWidgets.QWidget):
@@ -62,7 +76,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
     refresh_requested = pyqtSignal()
 
     def __init__(self, parent=None, *, show_reference_bar=True,
-                 show_enabled_checkbox=True):
+                 show_enabled_checkbox=True, multichannel_overlay=False):
         super().__init__(parent)
         # Host-optional surfaces. Step0 conditioning (#6/#8) turns BOTH off: DAPI
         # is a normal conditionable channel there (no reference overlay) and
@@ -70,6 +84,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # Step1.5 / Step3 keep them on (reference layers + fusion-enable).
         self._show_reference_bar = bool(show_reference_bar)
         self._show_enabled_checkbox = bool(show_enabled_checkbox)
+        # QuPath-style multi-channel overlay (Step0): checkbox = display, additive
+        # pseudocolor blend of all visible channels. Off (single-channel display)
+        # for Step1.5 / Step3, which keep the click-to-show one-channel viewer.
+        self._multichannel_overlay = bool(multichannel_overlay)
         # ── model ─────────────────────────────────────────────────────
         self._names = []                 # list[str], display order
         self._raw = {}                   # name -> np.ndarray (preview patch)
@@ -125,6 +143,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._layer_list = ChannelLayerList()
         self._layer_list.active_changed.connect(self._on_active_changed)
         self._layer_list.visibility_changed.connect(self._on_visibility_changed)
+        self._layer_list.color_clicked.connect(self._on_color_clicked)
         left_l.addWidget(self._layer_list, stretch=1)
 
         # (#2 declutter) "Select all markers" / "Clear all markers" buttons
@@ -360,9 +379,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """The currently active channel name, or None."""
         return self._active
 
+    def visible_channels(self):
+        """List of channel names currently checked/visible (list order)."""
+        return [n for n in self._names if self._visible.get(n)]
+
     def set_channel_images(self, channel_images, colors=None, context=None,
                            source="manual", source_policy=None,
-                           channel_metadata=None, active=None):
+                           channel_metadata=None, active=None, visible=None):
         """Load a set of named channel preview patches.
 
         Parameters
@@ -440,8 +463,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 params["min"], params["max"] = 0.0, 1.0
             self._params[n] = normalize_channel_remap_params(params)
             self._colors[n] = (colors or {}).get(n, _PALETTE[i % len(_PALETTE)])
-            self._visible[n] = True
+            # Default visibility: if the host gave an explicit `visible` set, only
+            # those are shown (Step0 overlay loads with just DAPI checked);
+            # otherwise every channel is visible (single-channel hosts).
+            self._visible[n] = (n in set(visible)) if visible is not None else True
 
+        # Build the list with signals blocked: set_channels auto-selects row 0,
+        # which would otherwise fire active_changed for the WRONG channel and (in
+        # multichannel mode) auto-check it. We pick the real active explicitly.
+        self._layer_list.blockSignals(True)
         self._refresh_layer_list()
         self._set_controls_enabled(True)
         self._active = None
@@ -453,6 +483,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             active = next((n for n in self._names if self._raw[n] is not None),
                           self._names[0])
         self._layer_list.set_active(active)
+        self._layer_list.blockSignals(False)
         self._on_active_changed(active)
         self._update_status(skipped=skipped)
 
@@ -702,12 +733,44 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return
         self._ensure_loaded(name)               # lazy fetch if stale/None
         self._active = name
+        # QuPath interaction: selecting a row also makes it visible (checked).
+        if self._multichannel_overlay and not self._visible.get(name, False):
+            self._visible[name] = True
+            self._layer_list.set_row_checked(name, True)
         self._load_params_into_controls(name)
         self._refresh_preview()
 
     def _on_visibility_changed(self, name, visible):
         self._visible[name] = bool(visible)
-        # visibility is display-only for the prototype; preview shows active ch.
+        if not self._multichannel_overlay:
+            return                              # single-channel hosts: display-only
+        if visible:
+            # Checking a channel makes it the active (inspected) channel.
+            self._ensure_loaded(name)
+            self._active = name
+            self._layer_list.set_active(name)
+            self._load_params_into_controls(name)
+        elif self._active == name:
+            # Unchecking the active channel: hand active to the next still-visible
+            # channel in list order, or None if nothing remains checked.
+            nxt = next((n for n in self._names if self._visible.get(n)), None)
+            self._active = nxt
+            if nxt is not None:
+                self._layer_list.set_active(nxt)
+                self._load_params_into_controls(nxt)
+        self._refresh_preview()
+
+    def _on_color_clicked(self, name):
+        if name not in self._colors:
+            return
+        chosen = QtWidgets.QColorDialog.getColor(
+            QColor(self._colors[name]), self, f"Color for {name}")
+        if not chosen.isValid():
+            return                              # user cancelled
+        hexc = chosen.name()
+        self._colors[name] = hexc
+        self._layer_list.set_channel_color(name, hexc)
+        self._refresh_preview()
 
     def _load_params_into_controls(self, name):
         self._loading = True
@@ -823,7 +886,30 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._refresh_preview()
 
     # ── preview ───────────────────────────────────────────────────────
+    def _recomposite_overlay(self):
+        """QuPath-style display: additively blend all VISIBLE channels.
+
+        Each visible channel is lazy-loaded if needed, remapped to grayscale
+        (its Min/Max/gamma window), tinted by its pseudocolor, and summed. The
+        finished RGB is handed to the viewer. No visible channels -> black/empty.
+        """
+        channels, colors = {}, {}
+        for n in self._names:
+            if not self._visible.get(n):
+                continue
+            self._ensure_loaded(n)              # check-but-unloaded -> load now
+            arr = self._raw.get(n)
+            if arr is None:
+                continue
+            channels[n] = arr
+            colors[n] = _hex_to_rgb01(self._colors.get(n, "#ffffff"))
+        rgb = compose_multichannel_overlay(channels, colors, self._params)
+        self._canvas.set_composite(rgb)         # None -> viewer clears (black)
+
     def _refresh_preview(self):
+        if self._multichannel_overlay:
+            self._recomposite_overlay()
+            return
         if self._active is None or self._raw.get(self._active) is None:
             self._canvas.clear()
             return

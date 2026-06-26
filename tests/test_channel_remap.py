@@ -7,6 +7,7 @@ import pytest
 from block01.core.channel_remap import (
     apply_channel_remap,
     apply_channel_remap_config,
+    compose_multichannel_overlay,
     compute_qupath_auto_minmax,
     fuse_channels,
 )
@@ -410,3 +411,42 @@ def test_validate_allows_step2_ready_when_not_preview_only():
     cfg["channels"]["A"].update({"min": 0.0, "max": 100.0})
     cfg["source_policy"].update({"step2_ready": True, "preview_only": False})
     assert validate_channel_remap_config(cfg) == []
+
+
+# ── step0-qupath-multichannel-overlay: additive compositing ──────────────────
+def test_compose_overlay_empty_is_none():
+    assert compose_multichannel_overlay({}, {}, {}) is None
+    assert compose_multichannel_overlay({"A": None}, {"A": (1, 0, 0)}, {}) is None
+
+
+def test_compose_overlay_shape_and_range():
+    a = np.ones((8, 10), np.float32)
+    b = np.ones((8, 10), np.float32)
+    params = {"A": {"min": 0.0, "max": 1.0}, "B": {"min": 0.0, "max": 1.0}}
+    rgb = compose_multichannel_overlay(
+        {"A": a, "B": b}, {"A": (1.0, 0.0, 0.0), "B": (0.0, 1.0, 0.0)}, params)
+    assert rgb.shape == (8, 10, 3)
+    assert rgb.dtype == np.float32
+    assert float(rgb.min()) >= 0.0 and float(rgb.max()) <= 1.0
+
+
+def test_compose_overlay_additive():
+    # A full-on red + B full-on green -> yellow (R and G both lit, B dark).
+    a = np.ones((4, 4), np.float32)
+    b = np.ones((4, 4), np.float32)
+    params = {"A": {"min": 0.0, "max": 1.0}, "B": {"min": 0.0, "max": 1.0}}
+    rgb = compose_multichannel_overlay(
+        {"A": a, "B": b}, {"A": (1.0, 0.0, 0.0), "B": (0.0, 1.0, 0.0)}, params)
+    assert np.allclose(rgb[..., 0], 1.0)   # red from A
+    assert np.allclose(rgb[..., 1], 1.0)   # green from B
+    assert np.allclose(rgb[..., 2], 0.0)   # no blue
+
+
+def test_compose_overlay_honors_minmax_window():
+    arr = np.full((4, 4), 0.5, np.float32)
+    # window [0,1] -> mid gray ~0.5 in red; window [0,0.5] -> saturates to 1.0
+    lo = compose_multichannel_overlay(
+        {"A": arr}, {"A": (1.0, 0.0, 0.0)}, {"A": {"min": 0.0, "max": 1.0}})
+    hi = compose_multichannel_overlay(
+        {"A": arr}, {"A": (1.0, 0.0, 0.0)}, {"A": {"min": 0.0, "max": 0.5}})
+    assert float(hi[..., 0].mean()) > float(lo[..., 0].mean())

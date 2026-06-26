@@ -25,6 +25,7 @@ class _ChannelRow(QtWidgets.QWidget):
     """Compact single-channel row widget. Fixed, never needs horizontal scroll."""
 
     visibility_toggled = pyqtSignal(str, bool)
+    color_clicked = pyqtSignal(str)
 
     def __init__(self, name, color="#888888", visible=True, mini_value=1.0,
                  mini_label="w", parent=None):
@@ -41,8 +42,12 @@ class _ChannelRow(QtWidgets.QWidget):
         self._chk.toggled.connect(self._on_toggle)
         lay.addWidget(self._chk)
 
+        # Clickable pseudocolor swatch -> opens a color picker (handled upstream).
         self._swatch = QtWidgets.QLabel()
         self._swatch.setFixedSize(14, 14)
+        self._swatch.setCursor(QtCore.Qt.PointingHandCursor)
+        self._swatch.setToolTip("Click to change channel color")
+        self._swatch.mousePressEvent = self._on_swatch_clicked
         self._set_swatch_color(color)
         lay.addWidget(self._swatch)
 
@@ -68,6 +73,9 @@ class _ChannelRow(QtWidgets.QWidget):
     def _on_toggle(self, checked):
         self.visibility_toggled.emit(self._name, bool(checked))
 
+    def _on_swatch_clicked(self, _event):
+        self.color_clicked.emit(self._name)
+
     def set_visible_checked(self, checked):
         self._chk.blockSignals(True)
         self._chk.setChecked(bool(checked))
@@ -91,6 +99,7 @@ class ChannelLayerList(QtWidgets.QWidget):
 
     active_changed = pyqtSignal(str)
     visibility_changed = pyqtSignal(str, bool)
+    color_clicked = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,6 +148,7 @@ class ChannelLayerList(QtWidgets.QWidget):
                 mini_label=ch.get("mini_label", "w"),
             )
             row.visibility_toggled.connect(self.visibility_changed.emit)
+            row.color_clicked.connect(self.color_clicked.emit)
             item = QtWidgets.QListWidgetItem()
             item.setSizeHint(row.sizeHint())
             item.setData(Qt.UserRole, name)
@@ -164,6 +174,18 @@ class ChannelLayerList(QtWidgets.QWidget):
         row = self._rows.get(name)
         if row:
             row.set_mini(value, label)
+
+    def set_row_checked(self, name, checked):
+        """Set a single row's visibility checkbox without emitting its signal."""
+        row = self._rows.get(name)
+        if row:
+            row.set_visible_checked(bool(checked))
+
+    def set_channel_color(self, name, color):
+        """Update a single row's color swatch."""
+        row = self._rows.get(name)
+        if row:
+            row.set_color(color)
 
     def set_all_visible(self, checked):
         """Set every row's visibility checkbox without emitting per-row signals.

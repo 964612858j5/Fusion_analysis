@@ -340,3 +340,30 @@ def test_dapi_lazy_loads_like_a_marker(app):
         wb._on_active_changed("DAPI")
         assert ld.calls == ["DAPI"]                   # lazy-loaded on demand
         assert wb._raw.get("DAPI") is not None
+
+
+# ── step0-conditioning-cleanup-and-all-toggle: Step0-host integration ────────
+def test_step0_conditioning_tab_has_no_load_buttons(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # no visible "Load ..." button remains in the conditioning tab (the page-level
+    # btn_load was removed; the workbench load buttons are hidden for Step0).
+    load_btns = [b for b in s._cond_tab.findChildren(QtWidgets.QPushButton)
+                 if "Load" in b.text() and not b.isHidden()]
+    assert load_btns == []
+
+
+def test_step0_workbench_load_buttons_hidden(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    wb = s._cond_workbench
+    assert wb._btn_host_refresh.isHidden()
+    assert wb._btn_demo.isHidden()
+    assert wb._btn_file.isHidden()
+
+
+def test_step0_workbench_has_all_toggle(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    assert hasattr(s._cond_workbench, "_chk_all")

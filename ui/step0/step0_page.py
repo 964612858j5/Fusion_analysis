@@ -944,10 +944,10 @@ class Step0Page(QWidget):
         # Step0's own loader/patch. Hide the generic internal save — Step0's
         # "Save remap config (Step0)" below is the only official save path (it
         # stamps the honest preview provenance + registered created_from_step).
+        # (#2-cleanup) Hide the manual data-load buttons: Step0 auto-syncs the
+        # current patch (+ lazy-load), so host-refresh / demo / file are redundant.
         self._cond_workbench.configure_host_actions(
-            refresh_label="Load current patch channels",
-            refresh_tooltip="Pull the current Step0 patch's channels into the workbench.",
-            show_internal_save=False)
+            show_internal_save=False, show_load_buttons=False)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
         # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
         # workbench fetches the rest on-demand (when the user selects them) via
@@ -961,10 +961,9 @@ class Step0Page(QWidget):
         lay.addWidget(self._cond_workbench, stretch=1)
 
         bar = QHBoxLayout()
-        btn_load = QPushButton('Load current patch channels')
-        btn_load.setToolTip("Pull the current Step0 patch's channels into the workbench.")
-        btn_load.clicked.connect(self._sync_step0_to_workbench)
-        bar.addWidget(btn_load)
+        # (#2-cleanup) The redundant "Load current patch channels" button was
+        # removed; data auto-syncs from Step0's current patch (_sync_step0_to_
+        # workbench via refresh_requested + on patch load) with lazy-load.
         # (#5b) The Channel Conditioning tab's Save. Same handler / same written
         # preview remap config as before — only the label + styling are formalized
         # to match the BG tab's "Save" (one tab, one Save).

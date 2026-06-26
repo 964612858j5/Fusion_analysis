@@ -140,6 +140,17 @@ class ChannelWorkbench(QtWidgets.QWidget):
         left_l = QtWidgets.QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
         left_l.setSpacing(4)
+        # (#3 all-toggle) A single "All" checkbox above the list — multichannel
+        # overlay only (Step0). Checks/unchecks every channel at once; reflects
+        # all / partial / none via a tristate. Single-channel hosts don't need it.
+        if self._multichannel_overlay:
+            self._chk_all = QtWidgets.QCheckBox("All")
+            self._chk_all.setTristate(True)
+            self._chk_all.setToolTip(
+                "Show all channels / hide all channels in the overlay.")
+            self._chk_all.clicked.connect(self._on_all_toggled)
+            left_l.addWidget(self._chk_all)
+
         self._layer_list = ChannelLayerList()
         self._layer_list.active_changed.connect(self._on_active_changed)
         self._layer_list.visibility_changed.connect(self._on_visibility_changed)
@@ -147,8 +158,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         left_l.addWidget(self._layer_list, stretch=1)
 
         # (#2 declutter) "Select all markers" / "Clear all markers" buttons
-        # removed to save space — channels stay individually toggleable via the
-        # layer list. A single all-toggle is deferred to the #4 checkbox redesign.
+        # were removed; the single "All" checkbox above replaces them.
         split.addWidget(left)
 
         # Center — viewer
@@ -317,10 +327,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         btn_demo = QtWidgets.QPushButton("Load demo patch")
         btn_demo.clicked.connect(self._load_demo)
+        self._btn_demo = btn_demo
         bar.addWidget(btn_demo)
 
         btn_file = QtWidgets.QPushButton("Load preview image…")
         btn_file.clicked.connect(self._load_from_file)
+        self._btn_file = btn_file
         bar.addWidget(btn_file)
 
         self._info_lbl = QtWidgets.QLabel("No preview loaded")
@@ -342,7 +354,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         return bar
 
     def configure_host_actions(self, refresh_label=None, refresh_tooltip=None,
-                               show_internal_save=None):
+                               show_internal_save=None, show_load_buttons=None):
         """Adapt the generic bottom-bar actions to the hosting page.
 
         The workbench is shared between Step3 (review/QC) and Step1.5
@@ -357,6 +369,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         show_internal_save : bool, optional
             When False, hide the generic "Save remap config…" button (the host
             provides its own official save path).
+        show_load_buttons : bool, optional
+            When False, hide the manual data-load buttons (host-refresh, demo,
+            file). Step0 auto-syncs its current patch (+ lazy-load) so these are
+            redundant there; Step3 / Step1.5 keep them.
         """
         if refresh_label is not None and hasattr(self, "_btn_host_refresh"):
             self._btn_host_refresh.setText(str(refresh_label))
@@ -364,6 +380,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._btn_host_refresh.setToolTip(str(refresh_tooltip))
         if show_internal_save is not None and hasattr(self, "_btn_save_internal"):
             self._btn_save_internal.setVisible(bool(show_internal_save))
+        if show_load_buttons is not None:
+            for attr in ("_btn_host_refresh", "_btn_demo", "_btn_file"):
+                btn = getattr(self, attr, None)
+                if btn is not None:
+                    btn.setVisible(bool(show_load_buttons))
 
     # ── public API (host feeds data here) ─────────────────────────────
     def set_pixel_provider(self, fn):
@@ -485,6 +506,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._layer_list.set_active(active)
         self._layer_list.blockSignals(False)
         self._on_active_changed(active)
+        self._sync_all_checkbox()
         self._update_status(skipped=skipped)
 
     def clear_channel_images(self):
@@ -737,6 +759,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if self._multichannel_overlay and not self._visible.get(name, False):
             self._visible[name] = True
             self._layer_list.set_row_checked(name, True)
+            self._sync_all_checkbox()
         self._load_params_into_controls(name)
         self._refresh_preview()
 
@@ -758,7 +781,42 @@ class ChannelWorkbench(QtWidgets.QWidget):
             if nxt is not None:
                 self._layer_list.set_active(nxt)
                 self._load_params_into_controls(nxt)
+        self._sync_all_checkbox()
         self._refresh_preview()
+
+    def _on_all_toggled(self, checked):
+        """All checkbox clicked: show or hide every channel at once, recomposite
+        once. From a partial state a click checks all (Qt tristate behavior)."""
+        vis = bool(checked)
+        for n in self._names:
+            self._visible[n] = vis
+        self._layer_list.set_all_visible(vis)   # batch, no per-row signals
+        if vis:
+            # keep the current inspector target; pick one if there was none
+            if self._active is None and self._names:
+                self._active = self._names[0]
+                self._ensure_loaded(self._active)
+                self._load_params_into_controls(self._active)
+        else:
+            self._active = None                 # unchecking All clears the overlay
+        self._sync_all_checkbox()
+        self._refresh_preview()
+
+    def _sync_all_checkbox(self):
+        """Reflect the per-row visibility in the All checkbox: all -> Checked,
+        none -> Unchecked, mixed -> PartiallyChecked. Programmatic only."""
+        if not getattr(self, "_chk_all", None):
+            return
+        states = [bool(self._visible.get(n)) for n in self._names]
+        if states and all(states):
+            state = Qt.Checked
+        elif any(states):
+            state = Qt.PartiallyChecked
+        else:
+            state = Qt.Unchecked
+        self._chk_all.blockSignals(True)
+        self._chk_all.setCheckState(state)
+        self._chk_all.blockSignals(False)
 
     def _on_color_clicked(self, name):
         if name not in self._colors:

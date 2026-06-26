@@ -1202,3 +1202,74 @@ def test_single_channel_hosts_unaffected_by_overlay(app):
                            "B": rng.random((8, 8)).astype(np.float32)})
     # single-channel path: composite stays None, uses raw/remapped
     assert wb._canvas._composite is None
+
+
+# ── step0-conditioning-cleanup-and-all-toggle (#2 load btns / #3 All) ────────
+def test_load_buttons_hidden_when_show_load_buttons_false(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(multichannel_overlay=True)
+    wb.configure_host_actions(show_load_buttons=False)
+    assert wb._btn_host_refresh.isHidden()        # "Load current ... channels"
+    assert wb._btn_demo.isHidden()                # "Load demo patch"
+    assert wb._btn_file.isHidden()                # "Load preview image…"
+
+
+def test_load_buttons_present_by_default(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench()                        # Step3 / Step1.5 default host
+    assert not wb._btn_host_refresh.isHidden()
+    assert not wb._btn_demo.isHidden()
+    assert not wb._btn_file.isHidden()
+
+
+def test_all_toggle_exists_only_in_multichannel(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    assert hasattr(ChannelWorkbench(multichannel_overlay=True), "_chk_all")
+    assert not hasattr(ChannelWorkbench(), "_chk_all")
+
+
+def test_all_toggle_default_partial_with_dapi_only(app):
+    from PyQt5.QtCore import Qt
+    wb = _mc_workbench(app)                         # only DAPI visible
+    assert wb._chk_all.checkState() == Qt.PartiallyChecked
+
+
+def test_all_toggle_check_shows_all(app):
+    from PyQt5.QtCore import Qt
+    wb = _mc_workbench(app, names=("DAPI", "CD68", "CK19"))
+    wb._on_all_toggled(True)
+    assert wb.visible_channels() == ["DAPI", "CD68", "CK19"]
+    assert wb._chk_all.checkState() == Qt.Checked
+    assert wb._canvas._composite is not None       # overlay shows everything
+
+
+def test_all_toggle_uncheck_clears(app):
+    from PyQt5.QtCore import Qt
+    wb = _mc_workbench(app)
+    wb._on_all_toggled(True)
+    wb._on_all_toggled(False)
+    assert wb.visible_channels() == []
+    assert wb._chk_all.checkState() == Qt.Unchecked
+    assert wb._canvas._composite is None           # empty/black
+
+
+def test_all_toggle_reflects_individual_toggles(app):
+    from PyQt5.QtCore import Qt
+    wb = _mc_workbench(app, names=("DAPI", "CD68", "CK19"))
+    for n in ("DAPI", "CD68", "CK19"):
+        wb._on_visibility_changed(n, True)
+    assert wb._chk_all.checkState() == Qt.Checked   # all checked
+    wb._on_visibility_changed("CD68", False)
+    assert wb._chk_all.checkState() == Qt.PartiallyChecked  # mixed
+    for n in ("DAPI", "CK19"):
+        wb._on_visibility_changed(n, False)
+    assert wb._chk_all.checkState() == Qt.Unchecked  # none
+
+
+def test_all_toggle_does_not_change_build_config(app):
+    wb = _mc_workbench(app, names=("DAPI", "CD68", "CK19"))
+    before = wb.build_config()
+    wb._on_all_toggled(True)
+    wb._on_all_toggled(False)
+    after = wb.build_config()
+    assert set(before["channels"]) == set(after["channels"]) == {"DAPI", "CD68", "CK19"}

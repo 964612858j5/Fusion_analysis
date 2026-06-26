@@ -1388,9 +1388,15 @@ class Step0Page(QWidget):
 
     @staticmethod
     def _box_style(color):
+        # Reserve vertical room for the title (margin-top) AND explicitly position
+        # the title sub-control in that margin so it sits ABOVE the border/body —
+        # without the ::title rule + enough margin, the first body child rides up
+        # and occludes the title (the styled-QGroupBox "eats its title" bug).
         return (
-            f"QGroupBox{{border:1px solid {color};border-radius:5px;margin-top:4px;"
+            f"QGroupBox{{border:1px solid {color};border-radius:5px;margin-top:16px;"
             f"font-weight:bold;color:{color};font-size:11px;}}"
+            f"QGroupBox::title{{subcontrol-origin:margin;subcontrol-position:top left;"
+            f"left:8px;padding:0 4px;}}"
         )
 
     @staticmethod

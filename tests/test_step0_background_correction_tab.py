@@ -209,3 +209,30 @@ def test_auto_open_no_loader_no_popup(app):
     s._navigator_auto_opened = False
     s._auto_open_tissue_navigator()
     assert s._tissue_navigator_popup is None           # no empty popup
+
+
+# ── step0-fix-title-occlusion (#3): _box_style reserves room for the title ────
+def test_box_style_title_not_occluded_by_body(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+
+    gb = QtWidgets.QGroupBox("Quantitative Metrics")
+    gb.setStyleSheet(Step0Page._box_style("#56b6c2"))
+    v = QtWidgets.QVBoxLayout(gb)
+    v.setContentsMargins(0, 0, 0, 0)        # worst case: body hugs the frame top
+    child = QtWidgets.QLabel("Original  -> SNR: --")
+    v.addWidget(child)
+    gb.resize(220, 120)
+    gb.ensurePolished()
+    gb.show()
+    app.processEvents()
+
+    # the body content area (and the first child) must start BELOW the title band
+    # (title font ~11px + padding ≈ 14-17px), i.e. not riding up over the title.
+    assert gb.contentsRect().top() >= 14, gb.contentsRect().top()
+    assert child.geometry().top() >= 14, child.geometry().top()
+    # the style carries the ::title sub-control rule (the structural fix)
+    style = Step0Page._box_style("#56b6c2")
+    assert "QGroupBox::title" in style
+    assert "subcontrol-origin:margin" in style
+    assert "margin-top:16px" in style

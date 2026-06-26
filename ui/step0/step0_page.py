@@ -317,15 +317,10 @@ class Step0Page(QWidget):
         self._btn_use_full_wsi.clicked.connect(lambda: self._analysis_region_combo.setCurrentIndex(1))
         region_row.addWidget(self._btn_use_full_wsi)
         rs_lay.addLayout(region_row)
-
-        self._analysis_region_msg = QLabel("")
-        self._analysis_region_msg.setWordWrap(True)
-        self._analysis_region_msg.setStyleSheet(
-            "color:#ffb86c;font-size:10px;background:#241f12;"
-            "border:1px solid #5c4a18;border-radius:3px;padding:3px;"
-        )
-        self._analysis_region_msg.setVisible(False)
-        rs_lay.addWidget(self._analysis_region_msg)
+        # (navigator-layout) The "Full WSI mode: the entire image will be
+        # processed." banner was removed as redundant clutter — the region
+        # dropdown already conveys the mode (and the overview status line echoes
+        # it). _on_analysis_region_changed no longer references a message label.
 
         # ROI/Patch drawing toolbar + ROI/Patch lists. Like the region selector,
         # these are built here but NOT added to the hidden sec_b: they belong with
@@ -402,6 +397,15 @@ class Step0Page(QWidget):
         self._wrap_overview_patch_limit()
         bl.addWidget(self.overview, stretch=3)   # overview 占大部分高度
 
+        # (navigator-layout) ROI/Patch LISTS live in their own container, hosted
+        # BELOW the overview in the popup (overview 3/5, ROI list 1/5, Patch list
+        # 1/5). The mode-switch toolbar (_roi_patch_toolbar) stays above the
+        # overview. Both are handed to the popup; sec_b stays hidden.
+        self._roi_patch_lists = QWidget()
+        ll_lay = QVBoxLayout(self._roi_patch_lists)
+        ll_lay.setContentsMargins(0, 0, 0, 0)
+        ll_lay.setSpacing(4)
+
         # ROI 列表区（标题行 + Del按钮 + 列表）
         roi_hdr = QHBoxLayout()
         roi_hdr.setSpacing(4)
@@ -420,7 +424,7 @@ class Step0Page(QWidget):
         )
         self._btn_del_roi.clicked.connect(self._delete_selected_rois)
         roi_hdr.addWidget(self._btn_del_roi)
-        tb_lay.addLayout(roi_hdr)
+        ll_lay.addLayout(roi_hdr)
 
         self._roi_list = QtWidgets.QListWidget()
         self._roi_list.setSelectionMode(
@@ -429,9 +433,8 @@ class Step0Page(QWidget):
             "QListWidget{background:#111;border:1px solid #333;border-radius:3px;font-size:10px;}"
             "QListWidget::item:selected{background:#1f3a2a;}"
         )
-        self._roi_list.setMaximumHeight(80)
         self._roi_list.itemSelectionChanged.connect(self._on_roi_selection_changed)
-        tb_lay.addWidget(self._roi_list)
+        ll_lay.addWidget(self._roi_list, stretch=1)   # ROI list ~1/5 of popup
 
         # Patch 列表区（标题行 + Del按钮 + 列表）
         patch_hdr = QHBoxLayout()
@@ -451,7 +454,7 @@ class Step0Page(QWidget):
         )
         self._btn_del_patch.clicked.connect(self._delete_selected_patches)
         patch_hdr.addWidget(self._btn_del_patch)
-        tb_lay.addLayout(patch_hdr)
+        ll_lay.addLayout(patch_hdr)
 
         self._patch_list = QtWidgets.QListWidget()
         self._patch_list.setSelectionMode(
@@ -460,14 +463,13 @@ class Step0Page(QWidget):
             "QListWidget{background:#111;border:1px solid #333;border-radius:3px;font-size:10px;}"
             "QListWidget::item:selected{background:#2b1f2f;}"
         )
-        self._patch_list.setMaximumHeight(80)
         self._patch_list.itemSelectionChanged.connect(self._on_patch_selection_changed)
-        tb_lay.addWidget(self._patch_list)
+        ll_lay.addWidget(self._patch_list, stretch=1)   # Patch list ~1/5 of popup
 
         self._patch_warning = QLabel("")
         self._patch_warning.setStyleSheet("color:#ffb86c;font-size:10px;font-weight:bold;")
         self._patch_warning.setVisible(False)
-        tb_lay.addWidget(self._patch_warning)
+        ll_lay.addWidget(self._patch_warning)
 
         # (#10) Section B "ROI & Patch" — the tissue preview + ROI/patch drawing
         # (self.overview) — is the SAME component the Tissue Navigator was derived
@@ -1304,6 +1306,9 @@ class Step0Page(QWidget):
             # switches + ROI/patch lists) in the popup, with the overview it draws
             # on. _set_draw_mode targets the popup overview via _drawing_overview.
             popup.set_roi_toolbar(self._roi_patch_toolbar)
+            # (navigator-layout) ROI/Patch lists below the overview (3/5 overview,
+            # 1/5 each list). Mode buttons stay above via set_roi_toolbar.
+            popup.set_roi_lists(self._roi_patch_lists)
             # Feed the popup overview from the SINGLE model (no file IO).
             self._feed_popup_from_model()
             # Adopt popup-overview edits into the same model and mirror them back
@@ -1719,19 +1724,12 @@ class Step0Page(QWidget):
             self._set_draw_mode("patch")
             if self.overview:
                 self.overview.full_wsi_mode = True
-            self._analysis_region_msg.setText(
-                "Full WSI mode: the entire image will be processed. "
-                "Draw preview patches anywhere in the image for Step1 tuning."
-            )
-            self._analysis_region_msg.setVisible(True)
-            if self.overview:
                 self.overview.status.setText(
                     "Full WSI mode: drag patch rectangles anywhere. ROI drawing is disabled."
                 )
         else:
             if self.overview:
                 self.overview.full_wsi_mode = False
-            self._analysis_region_msg.setVisible(False)
             if self.overview:
                 self.overview.status.setText("ROI mode: draw ROI vertices or patch rectangles inside a ROI.")
 

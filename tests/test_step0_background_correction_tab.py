@@ -417,3 +417,65 @@ def test_region_selector_and_toolbar_both_hosted(app):
     from block01.ui.step0.overview_panel import OverviewPanel
     assert isinstance(pop.overview, OverviewPanel)
     assert _under(pop, pop.overview)
+
+
+# ── step0-navigator-layout-refinements: overview on top, lists below ─────────
+def test_navigator_overview_above_lists_with_proportions(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    outer = pop._outer
+    i_region = outer.indexOf(s._region_selector)
+    i_modebar = outer.indexOf(s._roi_patch_toolbar)
+    i_over = outer.indexOf(pop._overview)
+    i_lists = outer.indexOf(s._roi_patch_lists)
+    # controls above the overview, lists below it
+    assert i_region < i_over and i_modebar < i_over
+    assert i_lists > i_over
+    # overview is the dominant element (3) vs lists (2): 3/5 vs 2/5
+    assert outer.stretch(i_over) == 3
+    assert outer.stretch(i_lists) == 2
+    # inside the lists container: ROI list 1/5, Patch list 1/5, ROI above Patch
+    ll = s._roi_patch_lists.layout()
+    def _li(w):
+        return next(k for k in range(ll.count())
+                    if ll.itemAt(k).widget() is w)
+    assert ll.stretch(_li(s._roi_list)) == 1
+    assert ll.stretch(_li(s._patch_list)) == 1
+    assert _li(s._roi_list) < _li(s._patch_list)
+
+
+def test_navigator_no_full_wsi_message(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # the redundant "Full WSI mode" banner label is gone entirely
+    assert not hasattr(s, "_analysis_region_msg")
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # switching to Full WSI does not surface any such banner (and does not crash)
+    s._analysis_region_combo.setCurrentIndex(1)
+    labels = [l.text() for l in pop.findChildren(QtWidgets.QLabel)]
+    assert not any("entire image will be processed" in t for t in labels)
+    assert s._analysis_region_mode == "full_wsi"
+
+
+def test_navigator_lists_uncapped_for_proportional_growth(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # the old 80px max-height caps were removed so stretch governs the 1/5 share
+    assert s._roi_list.maximumHeight() > 1000
+    assert s._patch_list.maximumHeight() > 1000
+
+
+def test_navigator_drawing_and_controls_intact_after_reorder(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # mode switch still drives the popup overview; lists still hosted + functional
+    s._set_draw_mode("roi")
+    assert pop.overview._mode == "roi"
+    assert _under(pop, s._roi_list) and _under(pop, s._patch_list)
+    assert _under(pop, s._btn_mode_roi) and _under(pop, s._btn_mode_patch)

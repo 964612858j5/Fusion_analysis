@@ -91,12 +91,15 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         # region selector -> draw toolbar -> overview.
         self._region_selector = None
         self._roi_toolbar = None
+        self._roi_lists = None
         self._outer = outer
 
         # ── body: reused OverviewPanel (ROI draw/edit/delete, Full-WSI/ROI) ──
         # lazy=True so an empty/missing-context popup never triggers a load.
         self._overview = OverviewPanel(loader, nuc_ch, lazy=True)
-        outer.addWidget(self._overview, stretch=1)
+        # Overview is the dominant element (~3/5); the host's ROI/Patch lists,
+        # added below via set_roi_lists, take ~2/5 (1/5 each).
+        outer.addWidget(self._overview, stretch=3)
 
         # ── empty / missing-context hint ──────────────────────────────────
         self._empty_hint = QtWidgets.QLabel(
@@ -138,6 +141,19 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
             if i >= 0:
                 idx = i + 1                  # right after the region selector
         self._outer.insertWidget(idx, widget)
+        widget.setVisible(True)
+
+    def set_roi_lists(self, widget):
+        """Host the ROI/Patch lists BELOW the overview (overview 3/5, lists 2/5).
+
+        The host owns the widget + its handlers; Qt reparents on insertion. The
+        lists go directly under the overview, above the empty-context hint."""
+        if widget is None:
+            return
+        self._roi_lists = widget
+        idx = self._outer.indexOf(self._overview)
+        idx = (idx + 1) if idx >= 0 else self._outer.count()
+        self._outer.insertWidget(idx, widget, 2)     # ~2/5 (1/5 per list inside)
         widget.setVisible(True)
 
     # ── reused overview / ROI adapter (no forked ROI logic) ──────────────

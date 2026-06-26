@@ -1273,3 +1273,85 @@ def test_all_toggle_does_not_change_build_config(app):
     wb._on_all_toggled(False)
     after = wb.build_config()
     assert set(before["channels"]) == set(after["channels"]) == {"DAPI", "CD68", "CK19"}
+
+
+# ── step0-all-toggle-perf: progressive overlay loading ───────────────────────
+def _mc_lazy_workbench(app, n=28):
+    """Multichannel workbench with a counting provider; only DAPI pre-loaded,
+    the rest are lazy placeholders (None)."""
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False,
+                          multichannel_overlay=True)
+    names = ["DAPI"] + [f"M{i}" for i in range(n - 1)]
+    pool = {nm: np.random.rand(12, 12).astype(np.float32) for nm in names}
+    calls = []
+
+    def provider(name):
+        calls.append(name)
+        return pool[name]
+
+    wb.set_pixel_provider(provider)
+    imgs = {nm: (pool[nm] if nm == "DAPI" else None) for nm in names}
+    wb.set_channel_images(imgs, colors={"DAPI": "#3366ff"}, active="DAPI",
+                          visible=["DAPI"])
+    calls.clear()
+    return wb, names, calls
+
+
+def _loaded_count(wb):
+    return sum(1 for n in wb._names if wb._raw.get(n) is not None)
+
+
+def test_all_toggle_does_not_block_load_all(app):
+    wb, names, calls = _mc_lazy_workbench(app, n=28)
+    wb._on_all_toggled(True)
+    # immediately after: NO synchronous mass-load — only the already-loaded DAPI
+    assert calls == []                              # no read_region in the call stack
+    assert _loaded_count(wb) < 28                   # not all 28 loaded synchronously
+    assert wb._progressive_timer is not None        # progressive loader scheduled
+    assert wb._canvas._composite is not None        # shows what's loaded now
+
+
+def test_progressive_ticks_load_all(app):
+    wb, names, calls = _mc_lazy_workbench(app, n=28)
+    wb._on_all_toggled(True)
+    for _ in range(60):                             # advance the timer manually
+        if wb._progressive_timer is None:
+            break
+        wb._on_progressive_tick()
+    assert _loaded_count(wb) == 28                  # every visible channel loaded
+    assert wb._progressive_timer is None            # timer stopped when done
+    # each tick reads exactly one channel -> 27 lazy reads total
+    assert len(calls) == 27
+
+
+def test_uncheck_all_stops_progressive_timer(app):
+    wb, names, calls = _mc_lazy_workbench(app, n=28)
+    wb._on_all_toggled(True)
+    assert wb._progressive_timer is not None
+    wb._on_progressive_tick()                       # load one
+    wb._on_all_toggled(False)                       # user unchecks mid-load
+    assert wb._progressive_timer is None            # timer stopped
+    loaded_after = _loaded_count(wb)
+    # ticking again does nothing (no visible channels pending)
+    wb._on_progressive_tick()
+    assert _loaded_count(wb) == loaded_after
+
+
+def test_single_channel_click_is_instant(app):
+    wb, names, calls = _mc_lazy_workbench(app, n=28)
+    # click one lazy channel: exactly one read, no progressive timer
+    wb._on_active_changed("M5")
+    assert calls == ["M5"]
+    assert wb._progressive_timer is None
+
+
+def test_progressive_load_build_config_unchanged(app):
+    wb, names, calls = _mc_lazy_workbench(app, n=6)
+    before = set(wb.build_config()["channels"])
+    wb._on_all_toggled(True)
+    for _ in range(20):
+        if wb._progressive_timer is None:
+            break
+        wb._on_progressive_tick()
+    assert set(wb.build_config()["channels"]) == before == set(names)

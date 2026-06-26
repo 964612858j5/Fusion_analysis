@@ -976,8 +976,9 @@ class Step0Page(QWidget):
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}")
         btn_save.clicked.connect(self._save_step0_remap_config)
-        bar.addWidget(btn_save)
+        # Right-align Save to match the BG tab's save_row (stretch -> button).
         bar.addStretch()
+        bar.addWidget(btn_save)
         lay.addLayout(bar)
         return w
 

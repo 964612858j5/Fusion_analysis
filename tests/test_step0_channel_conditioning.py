@@ -367,3 +367,35 @@ def test_step0_workbench_has_all_toggle(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     assert hasattr(s._cond_workbench, "_chk_all")
+
+
+# ── step0-all-toggle-perf-and-save-position: Save right-aligned ──────────────
+def _find_layout_with_widget(layout, widget):
+    """Recursively find the QLayout directly containing `widget`."""
+    from PyQt5 import QtWidgets
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        if item.widget() is widget:
+            return layout
+        child = item.layout()
+        if child is not None:
+            found = _find_layout_with_widget(child, widget)
+            if found is not None:
+                return found
+    return None
+
+
+def test_conditioning_save_is_right_aligned(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    save = next(b for b in s._cond_tab.findChildren(QtWidgets.QPushButton)
+                if b.text() == "Save")
+    bar = _find_layout_with_widget(s._cond_tab.layout(), save)
+    assert bar is not None
+    # Save is the last item, and a stretch/spacer precedes it (right-aligned,
+    # matching the BG tab's save_row order).
+    save_idx = next(i for i in range(bar.count())
+                    if bar.itemAt(i).widget() is save)
+    assert save_idx == bar.count() - 1
+    assert any(bar.itemAt(i).spacerItem() is not None for i in range(save_idx))

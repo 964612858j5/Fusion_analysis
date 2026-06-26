@@ -25,7 +25,7 @@ import os
 
 import numpy as np
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 
 from ...core.channel_remap import (
@@ -106,6 +106,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # were not pre-loaded (passed as None to set_channel_images) are read
         # on-demand the first time they become active. fn(name) -> 2D array|None.
         self._pixel_provider = None
+        # Progressive overlay loading: when many channels become visible at once
+        # (e.g. the All toggle), the composite shows already-loaded channels
+        # immediately and this timer reads the rest one-per-tick so the UI never
+        # blocks on ~28 synchronous reads.
+        self._progressive_timer = None
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -511,6 +516,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def clear_channel_images(self):
         """Drop all channel data and show the friendly empty state."""
+        self._stop_progressive_load()           # no stale loads for dropped names
         self._names = []
         self._raw = {}
         self._params = {}
@@ -944,25 +950,69 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._refresh_preview()
 
     # ── preview ───────────────────────────────────────────────────────
-    def _recomposite_overlay(self):
-        """QuPath-style display: additively blend all VISIBLE channels.
+    def _composite_loaded_now(self):
+        """Blend the VISIBLE channels that are ALREADY loaded and show them.
 
-        Each visible channel is lazy-loaded if needed, remapped to grayscale
-        (its Min/Max/gamma window), tinted by its pseudocolor, and summed. The
-        finished RGB is handed to the viewer. No visible channels -> black/empty.
+        Does NO IO: channels whose pixels are not yet loaded (_raw[n] is None)
+        are skipped here and filled in progressively by _on_progressive_tick.
         """
         channels, colors = {}, {}
         for n in self._names:
             if not self._visible.get(n):
                 continue
-            self._ensure_loaded(n)              # check-but-unloaded -> load now
             arr = self._raw.get(n)
             if arr is None:
-                continue
+                continue                        # unloaded -> progressive timer
             channels[n] = arr
             colors[n] = _hex_to_rgb01(self._colors.get(n, "#ffffff"))
         rgb = compose_multichannel_overlay(channels, colors, self._params)
         self._canvas.set_composite(rgb)         # None -> viewer clears (black)
+
+    def _pending_progressive_channels(self):
+        """Visible channels still needing a lazy read (only if a provider exists)."""
+        if self._pixel_provider is None:
+            return []
+        return [n for n in self._names
+                if self._visible.get(n) and self._raw.get(n) is None]
+
+    def _stop_progressive_load(self):
+        if self._progressive_timer is not None:
+            self._progressive_timer.stop()
+            self._progressive_timer = None
+
+    def _schedule_progressive_load(self):
+        """(Re)start the one-channel-per-tick loader if visible channels remain
+        unloaded. Stops any stale timer first (guards concurrent recomposites)."""
+        self._stop_progressive_load()
+        if not self._pending_progressive_channels():
+            return
+        timer = QTimer(self)
+        timer.setInterval(40)                   # ~one read_region per tick
+        timer.timeout.connect(self._on_progressive_tick)
+        self._progressive_timer = timer
+        timer.start()
+
+    def _on_progressive_tick(self):
+        # Recheck visibility every tick: a channel unchecked since scheduling is
+        # skipped (stale-load guard).
+        pending = self._pending_progressive_channels()
+        if not pending:
+            self._stop_progressive_load()
+            return
+        self._ensure_loaded(pending[0])         # exactly one read this tick
+        self._composite_loaded_now()            # show with the newly loaded one
+        if not self._pending_progressive_channels():
+            self._stop_progressive_load()
+
+    def _recomposite_overlay(self):
+        """QuPath-style display: additively blend all VISIBLE channels.
+
+        Shows already-loaded channels immediately (no blocking IO) and, if any
+        visible channels are still unloaded, loads them progressively via a
+        QTimer (one read per tick) so the overlay builds up without freezing.
+        """
+        self._composite_loaded_now()
+        self._schedule_progressive_load()
 
     def _refresh_preview(self):
         if self._multichannel_overlay:

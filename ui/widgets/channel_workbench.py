@@ -77,6 +77,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._source_policy = default_source_policy()  # intensity provenance
         self._channel_meta = {}          # name -> per-channel source metadata
         self._ref_available = {"dapi": False, "mask": False, "fusion": False}
+        # Lazy-load: the host may register a provider so channels whose pixels
+        # were not pre-loaded (passed as None to set_channel_images) are read
+        # on-demand the first time they become active. fn(name) -> 2D array|None.
+        self._pixel_provider = None
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -329,9 +333,22 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._btn_save_internal.setVisible(bool(show_internal_save))
 
     # ── public API (host feeds data here) ─────────────────────────────
+    def set_pixel_provider(self, fn):
+        """Register a lazy pixel provider. fn(name) -> 2D array (or None).
+
+        Used by hosts that pre-load only the active channel on patch switch and
+        rely on the workbench to fetch the rest on-demand when the user selects
+        them. The provider must read the host's CURRENT patch/ROI.
+        """
+        self._pixel_provider = fn
+
+    def active_channel(self):
+        """The currently active channel name, or None."""
+        return self._active
+
     def set_channel_images(self, channel_images, colors=None, context=None,
                            source="manual", source_policy=None,
-                           channel_metadata=None):
+                           channel_metadata=None, active=None):
         """Load a set of named channel preview patches.
 
         Parameters
@@ -366,17 +383,24 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._source_policy = normalize_source_policy(source_policy)
         self._channel_meta = dict(channel_metadata or {})
 
-        # Normalize + validate: keep only real 2D arrays.
+        # Normalize + validate. A value of None marks a LAZY channel: its name
+        # is kept (so the layer list + build_config still cover it) but its
+        # pixels are fetched on-demand via the pixel provider when first active.
         clean = {}
         skipped = []
         for name, img in (channel_images or {}).items():
+            if img is None:
+                clean[str(name)] = None      # lazy placeholder
+                continue
             arr = self._coerce_2d(img)
             if arr is None:
                 skipped.append(str(name))
                 continue
             clean[str(name)] = arr
 
-        if not clean:
+        if not any(v is not None for v in clean.values()):
+            # No real pixels at all (every channel lazy / skipped): nothing to
+            # display from yet. Clear rather than show a half-built UI.
             self.clear_channel_images()
             if skipped:
                 self._status_lbl.setText(
@@ -392,11 +416,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         for i, n in enumerate(self._names):
             params = default_channel_remap_params()
             arr = self._raw[n]
-            finite = arr[np.isfinite(arr)] if arr.size else arr
-            if finite.size:
+            finite = arr[np.isfinite(arr)] if (arr is not None and arr.size) else None
+            if finite is not None and finite.size:
                 params["min"] = float(finite.min())
                 params["max"] = float(max(finite.max(), finite.min() + 1.0))
             else:
+                # Lazy / empty channel: provisional range, re-seeded from real
+                # pixels by _ensure_loaded when the channel is first activated.
                 params["min"], params["max"] = 0.0, 1.0
             self._params[n] = normalize_channel_remap_params(params)
             self._colors[n] = (colors or {}).get(n, _PALETTE[i % len(_PALETTE)])
@@ -407,8 +433,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._active = None
         # New patch -> fit the view once on the first preview below.
         self._canvas.request_fit()
-        self._layer_list.set_active(self._names[0])
-        self._on_active_changed(self._names[0])
+        # Activate the requested channel (the one whose pixels were pre-loaded);
+        # fall back to a channel that actually has pixels, else the first name.
+        if active not in self._names:
+            active = next((n for n in self._names if self._raw[n] is not None),
+                          self._names[0])
+        self._layer_list.set_active(active)
+        self._on_active_changed(active)
         self._update_status(skipped=skipped)
 
     def clear_channel_images(self):
@@ -528,7 +559,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 "Step3 first (or use 'Load demo patch').")
             self._info_lbl.setText("No preview loaded")
             return
-        shape = self._raw[self._names[0]].shape
+        _shape_src = next((self._raw[n] for n in self._names
+                           if self._raw.get(n) is not None), None)
+        shape = _shape_src.shape if _shape_src is not None else (0, 0)
         labels = {
             "step3": "Step3 current ROI",
             "demo": "demo data",
@@ -618,9 +651,36 @@ class ChannelWorkbench(QtWidgets.QWidget):
             })
         self._layer_list.set_channels(rows)
 
+    def _ensure_loaded(self, name):
+        """Lazily fetch a channel's pixels via the provider if not yet loaded.
+
+        On first activation of a lazy channel (pixels were None), read its
+        current-patch array once and (re)seed its Min/Max from the real data.
+        A single synchronous read is fast; no async needed.
+        """
+        if self._raw.get(name) is not None:
+            return                              # cache hit for this patch
+        if self._pixel_provider is None:
+            return
+        try:
+            arr = self._coerce_2d(self._pixel_provider(name))
+        except Exception as exc:                # provider failure is non-fatal
+            print(f"[ChannelWorkbench] lazy load failed for {name}: {exc}")
+            arr = None
+        if arr is None:
+            return
+        self._raw[name] = arr
+        params = dict(self._params.get(name, default_channel_remap_params()))
+        finite = arr[np.isfinite(arr)] if arr.size else None
+        if finite is not None and finite.size:
+            params["min"] = float(finite.min())
+            params["max"] = float(max(finite.max(), finite.min() + 1.0))
+        self._params[name] = normalize_channel_remap_params(params)
+
     def _on_active_changed(self, name):
         if name not in self._params:
             return
+        self._ensure_loaded(name)               # lazy fetch if stale/None
         self._active = name
         self._load_params_into_controls(name)
         self._refresh_preview()
@@ -643,7 +703,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._lbl_bright.setText(f"{p['brightness']:.2f}")
             self._lbl_contrast.setText(f"{p['contrast']:.2f}")
             self._lbl_gamma.setText(f"{p['gamma']:.2f}")
-            self._histogram.set_data(self._raw[name], p["min"], p["max"])
+            hist_src = self._raw.get(name)
+            if hist_src is None:
+                hist_src = np.zeros((1, 1), np.float32)
+            self._histogram.set_data(hist_src, p["min"], p["max"])
         finally:
             self._loading = False
 
@@ -737,7 +800,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     # ── preview ───────────────────────────────────────────────────────
     def _refresh_preview(self):
-        if self._active is None:
+        if self._active is None or self._raw.get(self._active) is None:
             self._canvas.clear()
             return
         raw = self._raw[self._active]

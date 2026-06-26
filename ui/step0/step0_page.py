@@ -921,6 +921,11 @@ class Step0Page(QWidget):
             refresh_tooltip="Pull the current Step0 patch's channels into the workbench.",
             show_internal_save=False)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
+        # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
+        # workbench fetches the rest on-demand (when the user selects them) via
+        # this provider, which always reads the CURRENT patch.
+        self._cond_workbench.set_pixel_provider(
+            lambda name: self._read_cond_patch_channel(name, normalize=False))
         # v14.2c: when the viewer's viewport settles (debounced), update the
         # Tissue Navigator current-view rectangle.
         self._cond_workbench.viewer.viewport_changed.connect(
@@ -988,27 +993,43 @@ class Step0Page(QWidget):
             self._cond_workbench.clear_channel_images()
             return
 
+        # Lazy-load (#2 perf): read ONLY the active marker channel here (one
+        # read_region) instead of looping over all ~27. The other channels are
+        # passed as None placeholders and fetched on-demand by the workbench's
+        # pixel provider the first time the user selects them. Per-patch this
+        # rebuild resets _raw, so a stale channel is re-read against the new
+        # patch the next time it is activated.
+        markers = [ch for ch in self._channel_order if ch != self.nucleus_channel]
+        if not markers:
+            self._cond_workbench.clear_channel_images()
+            return
+        # Preserve the workbench's current selection across patch switches; only
+        # that channel's pixels are loaded eagerly.
+        active = self._cond_workbench.active_channel()
+        if active not in markers:
+            active = markers[0]
         images, meta = {}, {}
-        for ch in self._channel_order:
-            if ch == self.nucleus_channel:
-                continue
-            try:
-                arr = self._read_cond_patch_channel(ch, normalize=False)
-                if arr is not None and arr.ndim == 2 and arr.size:
-                    images[ch] = arr
-                    # Honest per-channel provenance: calibrated from the Step0
-                    # patch, NOT proven to match the source Step2 will read.
-                    meta[ch] = {
-                        "source": "step0_loader",
-                        "intensity_space": "raw_ome_native_float",
-                        "normalization": "none",
-                        "step2_compatible": False,
-                        "step2_pre_remap_source": "unknown",
-                        "calibration_source_matches_step2": False,
-                        "fallback_reason": "step0_preview_source_unverified",
-                    }
-            except Exception as exc:
-                print(f"[Step0] conditioning: skip channel {ch}: {exc}")
+        for ch in markers:
+            arr = None
+            if ch == active:
+                try:
+                    a = self._read_cond_patch_channel(ch, normalize=False)
+                    if a is not None and a.ndim == 2 and a.size:
+                        arr = a
+                except Exception as exc:
+                    print(f"[Step0] conditioning: skip channel {ch}: {exc}")
+            images[ch] = arr            # None => lazy (read on demand)
+            # Honest per-channel provenance, independent of pixel data: calibrated
+            # from the Step0 patch, NOT proven to match the source Step2 will read.
+            meta[ch] = {
+                "source": "step0_loader",
+                "intensity_space": "raw_ome_native_float",
+                "normalization": "none",
+                "step2_compatible": False,
+                "step2_pre_remap_source": "unknown",
+                "calibration_source_matches_step2": False,
+                "fallback_reason": "step0_preview_source_unverified",
+            }
 
         # Honest top-level alignment policy: preview_only + step2_ready=false plus
         # calibration_source_matches_step2=false and source_alignment_mode=
@@ -1035,7 +1056,8 @@ class Step0Page(QWidget):
         self._cond_workbench.set_channel_images(
             images,
             context={"patch": self.current_patch_idx + 1, "step": "step0"},
-            source="manual", source_policy=source_policy, channel_metadata=meta)
+            source="manual", source_policy=source_policy, channel_metadata=meta,
+            active=active)
 
         # DAPI / nucleus channel: reference layer only (never a remap marker).
         try:
@@ -2416,6 +2438,14 @@ class Step0Page(QWidget):
             if isinstance(widget, QPushButton):
                 widget.setChecked(widget.text() == f"P{self.current_patch_idx+1}")
 
+    def _repaint_patch_buttons(self):
+        """Force an immediate synchronous repaint of the patch buttons so the
+        check-state change is visible before any blocking IO runs."""
+        for i in range(self._patch_buttons_row.count()):
+            widget = self._patch_buttons_row.itemAt(i).widget()
+            if isinstance(widget, QPushButton):
+                widget.repaint()
+
     def _select_patch(self, idx):
         self.current_patch_idx = idx
         self._patch_selected_idx = idx
@@ -2724,6 +2754,10 @@ class Step0Page(QWidget):
         if self._patch_list.count() > idx:
             self._patch_list.setCurrentRow(idx)
         self._sync_patch_buttons()
+        # Highlight fix: paint the un-highlight of the old button + highlight of
+        # the new one NOW, before any IO below. Otherwise the queued repaint is
+        # starved by the synchronous work and both buttons look highlighted.
+        self._repaint_patch_buttons()
         self._update_patch_info()
         if self.current_channel and self._has_any_cache(self.current_channel):
             self._show_channel_from_cache(self.current_channel)

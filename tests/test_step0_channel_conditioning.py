@@ -140,3 +140,109 @@ def test_channel_workbench_not_forked(page):
     assert isinstance(page._cond_workbench, ChannelWorkbench)
     # no Step0-only subclass/copy was introduced
     assert type(page._cond_workbench) is ChannelWorkbench
+
+
+# ── step0-fix-patch-switch-perf: lazy-load (read only active channel) ─────────
+class _CountingLoader(_FakeLoader):
+    """Fake loader that records every read_region call (channel name)."""
+
+    def __init__(self, n_markers=27, shape=(48, 48)):
+        names = [f"M{i}" for i in range(n_markers)] + ["DAPI"]
+        super().__init__(names=tuple(names), shape=shape)
+        self.calls = []
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1,
+                    correction_config=None, normalize=True):
+        self.calls.append(ch)
+        return np.random.rand(y1 - y0, x1 - x0).astype(np.float32)
+
+
+def _fresh_page_with_counting_loader(app):
+    from block01.ui.step0.step0_page import Step0Page
+    p = Step0Page()
+    ld = _CountingLoader()
+    p.loader = ld
+    p.output_dir = "/tmp"
+    p.patches = [(0, 24, 0, 24), (24, 48, 24, 48)]
+    p.current_patch_idx = 0
+    p.nucleus_channel = "DAPI"
+    p._channel_order = [f"M{i}" for i in range(27)] + ["DAPI"]
+    return p, ld
+
+
+def test_patch_switch_reads_only_active_plus_dapi(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._sync_step0_to_workbench()          # workbench now "in use"
+    ld.calls.clear()
+    # simulate a patch switch's conditioning refresh
+    p.current_patch_idx = 1
+    p._maybe_refresh_conditioning()
+    # at most 2 reads: the active marker + DAPI reference — NOT all 27
+    assert len(ld.calls) <= 2, ld.calls
+    assert "DAPI" in ld.calls
+    assert len([c for c in ld.calls if c != "DAPI"]) == 1
+
+
+def test_unloaded_channel_lazy_loads_on_switch(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._sync_step0_to_workbench()
+    wb = p._cond_workbench
+    target = next(n for n in wb._names if wb._raw.get(n) is None)
+    ld.calls.clear()
+    wb._on_active_changed(target)         # user selects a not-yet-loaded channel
+    assert ld.calls == [target]           # one lazy read fired
+    assert wb._raw.get(target) is not None  # data now available
+
+
+def test_loaded_channel_switch_is_cache_hit(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._sync_step0_to_workbench()
+    wb = p._cond_workbench
+    target = next(n for n in wb._names if wb._raw.get(n) is None)
+    wb._on_active_changed(target)         # load it once
+    ld.calls.clear()
+    wb._on_active_changed(target)         # re-select -> no new read
+    assert ld.calls == []
+
+
+def test_build_config_covers_all_channels_incl_unloaded(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._sync_step0_to_workbench()
+    cfg = p._cond_workbench.build_config()
+    # all 27 markers present (DAPI excluded as reference), even those never read
+    assert len(cfg["channels"]) == 27
+    for i in range(27):
+        params = cfg["channels"][f"M{i}"]
+        for key in ("min", "max", "gamma", "brightness", "contrast", "enabled"):
+            assert key in params
+
+
+def test_bg_preview_display_unaffected_by_lazy_load(app, monkeypatch):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._rebuild_patch_buttons()
+    p._sync_step0_to_workbench()
+    # BG triple-preview path is cache-driven: spy it, drive a patch switch, and
+    # confirm it still fires without adding read_region calls.
+    called = []
+    monkeypatch.setattr(p, "_show_channel_from_cache",
+                        lambda ch: called.append(ch))
+    monkeypatch.setattr(p, "_has_any_cache", lambda ch: True)
+    p.current_channel = "M0"
+    ld.calls.clear()
+    p._select_patch(1)
+    assert called == ["M0"]                       # BG cache display still invoked
+    assert len(ld.calls) <= 2                      # BG display adds no reads (cache)
+
+
+def test_patch_switch_highlight_only_new_button_checked(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._rebuild_patch_buttons()
+    p._select_patch(1)
+    from PyQt5 import QtWidgets
+    checked = []
+    for i in range(p._patch_buttons_row.count()):
+        w = p._patch_buttons_row.itemAt(i).widget()
+        if isinstance(w, QtWidgets.QPushButton):
+            if w.isChecked():
+                checked.append(w.text())
+    assert checked == ["P2"]                       # only the new patch button

@@ -85,10 +85,12 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         bar_lay.addWidget(self._bar_label, stretch=1)
         outer.addWidget(self._bar)
 
-        # Slot for the host's analysis-region selector (ROI vs Full WSI). The host
-        # builds + owns the selector and its handler; the popup just hosts it at
-        # the top so it's the first thing the user sees (see set_region_selector).
+        # Slots for host-owned controls (built + wired by Step0): the analysis-
+        # region selector (ROI vs Full WSI) and the ROI/patch drawing toolbar.
+        # The popup just hosts them above the overview so the flow reads top-down:
+        # region selector -> draw toolbar -> overview.
         self._region_selector = None
+        self._roi_toolbar = None
         self._outer = outer
 
         # ── body: reused OverviewPanel (ROI draw/edit/delete, Full-WSI/ROI) ──
@@ -120,6 +122,22 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._region_selector = widget
         # index 1 = right after the header bar (index 0), before the overview.
         self._outer.insertWidget(1, widget)
+        widget.setVisible(True)
+
+    def set_roi_toolbar(self, widget):
+        """Host the ROI/patch drawing toolbar (mode switches + ROI/patch lists)
+        just below the region selector and above the overview, so the user can
+        enter ROI/patch draw mode on the overview. The host owns the widget and
+        its handlers; Qt reparents on insertion (signals preserved)."""
+        if widget is None:
+            return
+        self._roi_toolbar = widget
+        idx = 1
+        if self._region_selector is not None:
+            i = self._outer.indexOf(self._region_selector)
+            if i >= 0:
+                idx = i + 1                  # right after the region selector
+        self._outer.insertWidget(idx, widget)
         widget.setVisible(True)
 
     # ── reused overview / ROI adapter (no forked ROI logic) ──────────────

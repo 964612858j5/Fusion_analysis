@@ -361,3 +361,59 @@ def test_navigator_still_hosts_overview_after_relocation(app):
     # the ROI/patch overview is undisturbed by adding the region selector
     assert isinstance(pop.overview, OverviewPanel)
     assert _under(pop, pop.overview)
+
+
+# ── step0-restore-roi-patch-toolbar: drawing toolbar -> navigator popup ──────
+def test_roi_patch_toolbar_in_navigator_popup(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # toolbar container + its mode/rename buttons + ROI/patch lists live in popup
+    assert _under(pop, s._roi_patch_toolbar)
+    assert _under(pop, s._btn_mode_roi)
+    assert _under(pop, s._btn_mode_patch)
+    assert _under(pop, s._btn_rename_roi)
+    assert _under(pop, s._roi_list)
+    assert _under(pop, s._patch_list)
+    assert s._roi_patch_toolbar.isVisible()
+
+
+def test_roi_patch_toolbar_not_in_background_correction(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # toolbar is not shown in the BG tab; sec_b (model views) stays hidden
+    assert not s._roi_patch_section.isVisible()
+    assert not _under(s._roi_patch_section, s._btn_mode_roi)
+    ms = s._main_split
+    kids = [ms.widget(i) for i in range(ms.count())]
+    assert not any(_under(k, s._btn_mode_roi) for k in kids)
+
+
+def test_mode_switch_drives_popup_overview(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # the toolbar drives the VISIBLE popup overview's draw mode
+    assert s._drawing_overview() is pop.overview
+    s._set_draw_mode("roi")
+    assert pop.overview._mode == "roi"
+    assert s._btn_mode_roi.isChecked() and not s._btn_mode_patch.isChecked()
+    s._set_draw_mode("patch")
+    assert pop.overview._mode == "patch"
+    assert s._btn_mode_patch.isChecked() and not s._btn_mode_roi.isChecked()
+
+
+def test_region_selector_and_toolbar_both_hosted(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # the earlier region-selector relocation (eab9e39) still holds alongside this
+    assert _under(pop, s._analysis_region_combo)
+    assert _under(pop, s._roi_patch_toolbar)
+    # the popup still hosts the overview (drawing surface) undisturbed
+    from block01.ui.step0.overview_panel import OverviewPanel
+    assert isinstance(pop.overview, OverviewPanel)
+    assert _under(pop, pop.overview)

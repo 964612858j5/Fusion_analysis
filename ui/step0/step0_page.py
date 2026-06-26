@@ -327,6 +327,17 @@ class Step0Page(QWidget):
         self._analysis_region_msg.setVisible(False)
         rs_lay.addWidget(self._analysis_region_msg)
 
+        # ROI/Patch drawing toolbar + ROI/Patch lists. Like the region selector,
+        # these are built here but NOT added to the hidden sec_b: they belong with
+        # the ROI drawing surface, which now lives in the Tissue Navigator popup.
+        # Wrapped in a container handed to the popup via set_roi_toolbar. Handlers
+        # stay on self.overview; the v14.2b bridge mirrors edits to the popup
+        # overview. _set_draw_mode is routed to the visible (popup) overview.
+        self._roi_patch_toolbar = QWidget()
+        tb_lay = QVBoxLayout(self._roi_patch_toolbar)
+        tb_lay.setContentsMargins(0, 0, 0, 0)
+        tb_lay.setSpacing(4)
+
         # ROI/Patch 统一工具栏：模式切换 + 一键删除 + 重命名
         _ts = (
             "QPushButton{{color:{c};border:1px solid {c};border-radius:3px;"
@@ -371,7 +382,7 @@ class Step0Page(QWidget):
         self._btn_mode_patch.clicked.connect(lambda: self._set_draw_mode("patch"))
         self._btn_delete_sel.clicked.connect(self._delete_selected_item)
         self._btn_rename_roi.clicked.connect(self._rename_selected_roi)
-        bl.addLayout(tool_row)
+        tb_lay.addLayout(tool_row)
 
         # Overview（DAPI thumbnail + patch 绘制）
         _dummy_loader = type("_DummyLoader", (), {
@@ -409,7 +420,7 @@ class Step0Page(QWidget):
         )
         self._btn_del_roi.clicked.connect(self._delete_selected_rois)
         roi_hdr.addWidget(self._btn_del_roi)
-        bl.addLayout(roi_hdr)
+        tb_lay.addLayout(roi_hdr)
 
         self._roi_list = QtWidgets.QListWidget()
         self._roi_list.setSelectionMode(
@@ -420,7 +431,7 @@ class Step0Page(QWidget):
         )
         self._roi_list.setMaximumHeight(80)
         self._roi_list.itemSelectionChanged.connect(self._on_roi_selection_changed)
-        bl.addWidget(self._roi_list)
+        tb_lay.addWidget(self._roi_list)
 
         # Patch 列表区（标题行 + Del按钮 + 列表）
         patch_hdr = QHBoxLayout()
@@ -440,7 +451,7 @@ class Step0Page(QWidget):
         )
         self._btn_del_patch.clicked.connect(self._delete_selected_patches)
         patch_hdr.addWidget(self._btn_del_patch)
-        bl.addLayout(patch_hdr)
+        tb_lay.addLayout(patch_hdr)
 
         self._patch_list = QtWidgets.QListWidget()
         self._patch_list.setSelectionMode(
@@ -451,12 +462,12 @@ class Step0Page(QWidget):
         )
         self._patch_list.setMaximumHeight(80)
         self._patch_list.itemSelectionChanged.connect(self._on_patch_selection_changed)
-        bl.addWidget(self._patch_list)
+        tb_lay.addWidget(self._patch_list)
 
         self._patch_warning = QLabel("")
         self._patch_warning.setStyleSheet("color:#ffb86c;font-size:10px;font-weight:bold;")
         self._patch_warning.setVisible(False)
-        bl.addWidget(self._patch_warning)
+        tb_lay.addWidget(self._patch_warning)
 
         # (#10) Section B "ROI & Patch" — the tissue preview + ROI/patch drawing
         # (self.overview) — is the SAME component the Tissue Navigator was derived
@@ -1289,6 +1300,10 @@ class Step0Page(QWidget):
             # Full WSI) in the popup, alongside the ROI drawing it controls. The
             # widget + handler are owned by Step0; reparenting preserves signals.
             popup.set_region_selector(self._region_selector)
+            # restore-roi-patch-toolbar: host the ROI/patch drawing toolbar (mode
+            # switches + ROI/patch lists) in the popup, with the overview it draws
+            # on. _set_draw_mode targets the popup overview via _drawing_overview.
+            popup.set_roi_toolbar(self._roi_patch_toolbar)
             # Feed the popup overview from the SINGLE model (no file IO).
             self._feed_popup_from_model()
             # Adopt popup-overview edits into the same model and mirror them back
@@ -1826,25 +1841,33 @@ class Step0Page(QWidget):
                 if self._has_any_cache(self.current_channel):
                     self._show_channel_from_cache(self.current_channel)
 
+    def _drawing_overview(self):
+        """The overview the toolbar should drive: the Tissue Navigator popup's
+        (the one the user actually sees/draws on) when it exists, else the Step0
+        model-view overview. Edits mirror across both via the v14.2b bridge."""
+        pop = getattr(self, "_tissue_navigator_popup", None)
+        return pop.overview if pop is not None else self.overview
+
     def _set_draw_mode(self, mode):
         """切换绘制模式，同步按钮状态"""
         self._btn_mode_roi.setChecked(mode == "roi")
         self._btn_mode_patch.setChecked(mode == "patch")
+        ov = self._drawing_overview()
         if mode == "roi":
             # 自动生成下一个不重名的默认ROI名，写入输入框，不弹对话框
-            existing = {r["name"] for r in self.overview._rois}
-            n = len(self.overview._rois) + 1
+            existing = {r["name"] for r in ov._rois}
+            n = len(ov._rois) + 1
             next_name = f"ROI_{n}"
             while next_name in existing:
                 n += 1
                 next_name = f"ROI_{n}"
-            self.overview._roi_name_edit.setText(next_name)
-            self.overview._set_mode("roi")
-            self.overview.status.setText(
+            ov._roi_name_edit.setText(next_name)
+            ov._set_mode("roi")
+            ov.status.setText(
                 "Draw ROI vertices on the overview, then press Enter or right-click to close.")
         else:
-            self.overview._set_mode("patch")
-            self.overview.status.setText("Drag to draw a patch rectangle inside a ROI.")
+            ov._set_mode("patch")
+            ov.status.setText("Drag to draw a patch rectangle inside a ROI.")
 
     def _delete_selected_item(self):
         """优先删除选中patch，其次删除选中ROI（兼容旧工具栏调用）"""

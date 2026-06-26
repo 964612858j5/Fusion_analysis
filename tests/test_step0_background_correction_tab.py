@@ -300,3 +300,64 @@ def test_tab2_save_renamed(app):
     labels = [b.text() for b in s._cond_tab.findChildren(QtWidgets.QPushButton)]
     assert "Save" in labels                 # formalized Tab2 Save
     assert "Save remap config (Step0)" not in labels
+
+
+# ── step0-restore-region-selector: analysis-region selector -> popup ─────────
+def test_region_selector_in_navigator_popup(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # the combo (+ button + msg + its container) live inside the popup now
+    assert _under(pop, s._analysis_region_combo)
+    assert _under(pop, s._btn_use_full_wsi)
+    assert _under(pop, s._region_selector)
+    assert s._region_selector.isVisible()
+
+
+def test_region_selector_not_in_background_correction(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # before the navigator exists, the selector is not shown in the BG tab and
+    # sec_b (which used to host it) stays hidden as a model-only view.
+    assert not s._roi_patch_section.isVisible()
+    assert not _under(s._roi_patch_section, s._analysis_region_combo)
+    # and it is NOT under the BG splitter (Section C)
+    ms = s._main_split
+    kids = [ms.widget(i) for i in range(ms.count())]
+    assert not any(_under(k, s._analysis_region_combo) for k in kids)
+
+
+def test_region_selector_handler_still_fires(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    # changing the combo still drives the region-mode handler (signal preserved
+    # across reparenting into the popup)
+    s._analysis_region_combo.setCurrentIndex(1)     # Full WSI
+    assert s._analysis_region_mode == "full_wsi"
+    assert s._is_full_wsi_mode() is True
+    s._analysis_region_combo.setCurrentIndex(0)     # ROI
+    assert s._analysis_region_mode == "roi"
+    assert s._is_full_wsi_mode() is False
+
+
+def test_use_full_wsi_button_still_works_from_popup(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    s._analysis_region_combo.setCurrentIndex(0)
+    s._btn_use_full_wsi.click()                     # button -> combo index 1
+    assert s._analysis_region_combo.currentIndex() == 1
+    assert s._is_full_wsi_mode() is True
+
+
+def test_navigator_still_hosts_overview_after_relocation(app):
+    from block01.ui.step0.step0_page import Step0Page
+    from block01.ui.step0.overview_panel import OverviewPanel
+    s = Step0Page()
+    s.toggle_tissue_navigator()
+    pop = s._tissue_navigator_popup
+    # the ROI/patch overview is undisturbed by adding the region selector
+    assert isinstance(pop.overview, OverviewPanel)
+    assert _under(pop, pop.overview)

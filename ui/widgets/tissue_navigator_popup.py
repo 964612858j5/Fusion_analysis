@@ -85,6 +85,12 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         bar_lay.addWidget(self._bar_label, stretch=1)
         outer.addWidget(self._bar)
 
+        # Slot for the host's analysis-region selector (ROI vs Full WSI). The host
+        # builds + owns the selector and its handler; the popup just hosts it at
+        # the top so it's the first thing the user sees (see set_region_selector).
+        self._region_selector = None
+        self._outer = outer
+
         # ── body: reused OverviewPanel (ROI draw/edit/delete, Full-WSI/ROI) ──
         # lazy=True so an empty/missing-context popup never triggers a load.
         self._overview = OverviewPanel(loader, nuc_ch, lazy=True)
@@ -100,6 +106,21 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
 
         self._refresh_bar_text()
         self._update_empty_state()
+
+    def set_region_selector(self, widget):
+        """Host the analysis-region selector (ROI vs Full WSI) at the top.
+
+        The host (Step0) owns the widget and all its signal connections; this
+        only reparents it into the popup (just under the header bar, above the
+        overview) so it is visible and is the first control the user sees. Qt
+        reparents the widget on insertion; its signals are preserved.
+        """
+        if widget is None:
+            return
+        self._region_selector = widget
+        # index 1 = right after the header bar (index 0), before the overview.
+        self._outer.insertWidget(1, widget)
+        widget.setVisible(True)
 
     # ── reused overview / ROI adapter (no forked ROI logic) ──────────────
     @property

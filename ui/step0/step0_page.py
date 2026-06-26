@@ -297,6 +297,15 @@ class Step0Page(QWidget):
         )
         bl.addWidget(b_title)
 
+        # Analysis-region selector (ROI vs Full WSI). Built here but NOT added to
+        # sec_b: sec_b is hidden (#10 relocation), and choosing ROI-vs-full-WSI is
+        # logically tied to ROI drawing, which now lives in the Tissue Navigator
+        # popup. The selector is wrapped in its own container and handed to the
+        # popup in _ensure_tissue_navigator. Its handler/signals are unchanged.
+        self._region_selector = QWidget()
+        rs_lay = QVBoxLayout(self._region_selector)
+        rs_lay.setContentsMargins(0, 0, 0, 0)
+        rs_lay.setSpacing(4)
         region_row = QHBoxLayout()
         region_row.addWidget(QLabel("Analysis region:"))
         self._analysis_region_combo = QComboBox()
@@ -307,7 +316,7 @@ class Step0Page(QWidget):
         self._btn_use_full_wsi.setToolTip("Switch to Full WSI mode. ROI drawing is not required.")
         self._btn_use_full_wsi.clicked.connect(lambda: self._analysis_region_combo.setCurrentIndex(1))
         region_row.addWidget(self._btn_use_full_wsi)
-        bl.addLayout(region_row)
+        rs_lay.addLayout(region_row)
 
         self._analysis_region_msg = QLabel("")
         self._analysis_region_msg.setWordWrap(True)
@@ -316,7 +325,7 @@ class Step0Page(QWidget):
             "border:1px solid #5c4a18;border-radius:3px;padding:3px;"
         )
         self._analysis_region_msg.setVisible(False)
-        bl.addWidget(self._analysis_region_msg)
+        rs_lay.addWidget(self._analysis_region_msg)
 
         # ROI/Patch 统一工具栏：模式切换 + 一键删除 + 重命名
         _ts = (
@@ -1276,6 +1285,10 @@ class Step0Page(QWidget):
             self._tissue_navigator_popup = TissueNavigatorPopup(
                 loader=self.loader, nuc_ch=self.nucleus_channel, parent=self)
             popup = self._tissue_navigator_popup
+            # restore-region-selector: host the analysis-region selector (ROI vs
+            # Full WSI) in the popup, alongside the ROI drawing it controls. The
+            # widget + handler are owned by Step0; reparenting preserves signals.
+            popup.set_region_selector(self._region_selector)
             # Feed the popup overview from the SINGLE model (no file IO).
             self._feed_popup_from_model()
             # Adopt popup-overview edits into the same model and mirror them back

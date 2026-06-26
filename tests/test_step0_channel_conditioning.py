@@ -399,3 +399,77 @@ def test_conditioning_save_is_right_aligned(app):
                     if bar.itemAt(i).widget() is save)
     assert save_idx == bar.count() - 1
     assert any(bar.itemAt(i).spacerItem() is not None for i in range(save_idx))
+
+
+# ── step0-fix-patch-switching: patch selector + change propagation ───────────
+def _page_with_patches(app, n=3):
+    from block01.ui.step0.step0_page import Step0Page
+    p = Step0Page()
+    p.loader = _FakeLoader()
+    p.nucleus_channel = "DAPI"
+    p._channel_order = ["DAPI", "CD68", "CK19"]
+    p.patches = [(i * 30, i * 30 + 30, 0, 30) for i in range(n)]
+    p.current_patch_idx = 0
+    p._rebuild_patch_buttons()
+    return p
+
+
+def _row_buttons(row):
+    from PyQt5 import QtWidgets
+    return [row.itemAt(i).widget() for i in range(row.count())
+            if isinstance(row.itemAt(i).widget(), QtWidgets.QPushButton)]
+
+
+def test_conditioning_tab_has_patch_selector(app):
+    p = _page_with_patches(app, n=3)
+    # the conditioning tab mirrors the BG tab's P1/P2/P3 buttons
+    assert hasattr(p, "_cond_patch_buttons_row")
+    assert len(_row_buttons(p._cond_patch_buttons_row)) == 3
+    assert len(_row_buttons(p._patch_buttons_row)) == 3
+
+
+def test_conditioning_patch_button_switches_and_refreshes(app):
+    p = _page_with_patches(app, n=3)
+    p._sync_step0_to_workbench()                 # engage conditioning
+    calls = []
+    orig = p._sync_step0_to_workbench
+    p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx) or orig()
+    # click P3 in the conditioning row
+    btn = next(b for b in _row_buttons(p._cond_patch_buttons_row) if b.text() == "P3")
+    btn.click()
+    assert p.current_patch_idx == 2
+    assert calls == [2]                          # conditioning re-synced for P3
+
+
+def test_new_patches_rebuild_buttons_and_refresh_conditioning(app):
+    p = _page_with_patches(app, n=3)
+    p._sync_step0_to_workbench()                 # engage conditioning
+    calls = []
+    p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx)
+    p._on_patches_changed([(0, 40, 0, 40), (40, 80, 40, 80)])
+    assert len(_row_buttons(p._patch_buttons_row)) == 2
+    assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
+    assert calls != []                           # conditioning refreshed
+
+
+def test_delete_all_then_recreate_refreshes_conditioning(app):
+    p = _page_with_patches(app, n=3)
+    p._sync_step0_to_workbench()                 # engage -> sticky in-use flag
+    assert p._conditioning_in_use is True
+    p._on_patches_changed([])                    # delete all (clears workbench)
+    assert p._cond_workbench.has_channel_data() is False
+    assert p._conditioning_in_use is True        # flag survives the clear
+    calls = []
+    p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx)
+    p._on_patches_changed([(0, 30, 0, 30), (30, 60, 30, 60)])   # recreate
+    assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
+    assert calls != []                           # re-populated despite prior clear
+
+
+def test_patch_switch_still_lazy_loads_active_only(app):
+    p, ld = _fresh_page_with_counting_loader(app)
+    p._sync_step0_to_workbench()
+    ld.calls.clear()
+    p._select_patch(1)                           # uses live _select_patch chain
+    # only the active channel is read on patch switch (lazy-load preserved)
+    assert len(ld.calls) == 1, ld.calls

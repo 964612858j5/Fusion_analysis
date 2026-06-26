@@ -946,6 +946,21 @@ class Step0Page(QWidget):
             "border-radius:4px;padding:4px;font-size:10px;")
         lay.addWidget(note)
 
+        # Preview-patch selector for the conditioning view. The BG tab's P1/P2/…
+        # buttons are not visible from this tab, so mirror them here. Both rows are
+        # rebuilt by _rebuild_patch_buttons and drive the same _select_patch (which
+        # refreshes the conditioning data for the chosen patch).
+        patch_sel_row = QHBoxLayout()
+        patch_sel_row.setSpacing(4)
+        psl = QLabel("Preview Patch:")
+        psl.setStyleSheet("color:#98c379;font-size:10px;font-weight:bold;")
+        patch_sel_row.addWidget(psl)
+        self._cond_patch_buttons_row = QHBoxLayout()
+        self._cond_patch_buttons_row.setSpacing(4)
+        patch_sel_row.addLayout(self._cond_patch_buttons_row)
+        patch_sel_row.addStretch()
+        lay.addLayout(patch_sel_row)
+
         # (#6/#8) Step0 conditioning: DAPI is a normal channel (no reference
         # overlay) and fusion participation is Step1's call (no per-channel
         # Enabled checkbox). Both shared-widget surfaces are turned off here;
@@ -1004,9 +1019,14 @@ class Step0Page(QWidget):
             self._sync_step0_to_workbench()
 
     def _maybe_refresh_conditioning(self):
-        """Re-feed the workbench from the current patch, only once it is in use."""
+        """Re-feed the workbench from the current patch, once conditioning is in
+        use. Uses a sticky _conditioning_in_use flag rather than has_channel_data
+        so that deleting all patches (which clears the workbench) and creating
+        new ones still re-populates the conditioning view."""
         wb = getattr(self, "_cond_workbench", None)
-        if wb is not None and wb.has_channel_data():
+        if wb is None:
+            return
+        if getattr(self, "_conditioning_in_use", False) or wb.has_channel_data():
             self._sync_step0_to_workbench()
 
     def _read_cond_patch_channel(self, ch, normalize=False):
@@ -1030,6 +1050,9 @@ class Step0Page(QWidget):
         """
         if not hasattr(self, "_cond_workbench"):
             return
+        # Conditioning is engaged: keep refreshing it on patch changes even after
+        # a clear (delete-all). Sticky flag read by _maybe_refresh_conditioning.
+        self._conditioning_in_use = True
         if not self.loader or not self.patches:
             self._cond_workbench.clear_channel_images()
             return
@@ -1785,6 +1808,10 @@ class Step0Page(QWidget):
             self.current_patch_idx = 0
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             self._preview_status.setText("Select a channel and patch ROI to preview background correction.")
+        # Patches changed (drawn/deleted in the navigator) -> refresh the
+        # conditioning view for the new current patch (defect B). _maybe_refresh
+        # is a no-op until conditioning has been engaged.
+        self._maybe_refresh_conditioning()
 
     def _rebuild_patch_list(self):
         sel = self._patch_selected_idx
@@ -2474,45 +2501,59 @@ class Step0Page(QWidget):
         if ch == self.current_channel:
             self._update_decision_ui()
 
+    def _all_patch_rows(self):
+        """Every patch-button row to keep in sync: the BG tab's Preview Patch row
+        and (when built) the Channel Conditioning tab's mirror row."""
+        rows = []
+        for attr in ("_patch_buttons_row", "_cond_patch_buttons_row"):
+            row = getattr(self, attr, None)
+            if row is not None:
+                rows.append(row)
+        return rows
+
     def _rebuild_patch_buttons(self):
-        while self._patch_buttons_row.count():
-            item = self._patch_buttons_row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        for row in self._all_patch_rows():
+            while row.count():
+                item = row.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
         if not self.patches:
             self.current_patch_idx = 0
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             return
         self.current_patch_idx = min(self.current_patch_idx, len(self.patches) - 1)
-        for i in range(len(self.patches)):
-            btn = QPushButton(f"P{i+1}")
-            btn.setCheckable(True)
-            btn.setFixedSize(44, 22)
-            color = PATCH_COLORS[i % len(PATCH_COLORS)]
-            btn.setStyleSheet(
-                f"QPushButton{{color:{color};border:1px solid {color};border-radius:3px;background:#1a1a1a;font-size:10px;font-weight:bold;}}"
-                f"QPushButton:checked{{background:{color};color:#111;}}"
-            )
-            btn.clicked.connect(lambda _checked, idx=i: self._select_patch(idx))
-            btn.setChecked(i == self.current_patch_idx)
-            self._patch_buttons_row.addWidget(btn)
-        self._patch_buttons_row.addStretch()
+        for row in self._all_patch_rows():
+            for i in range(len(self.patches)):
+                btn = QPushButton(f"P{i+1}")
+                btn.setCheckable(True)
+                btn.setFixedSize(44, 22)
+                color = PATCH_COLORS[i % len(PATCH_COLORS)]
+                btn.setStyleSheet(
+                    f"QPushButton{{color:{color};border:1px solid {color};border-radius:3px;background:#1a1a1a;font-size:10px;font-weight:bold;}}"
+                    f"QPushButton:checked{{background:{color};color:#111;}}"
+                )
+                btn.clicked.connect(lambda _checked, idx=i: self._select_patch(idx))
+                btn.setChecked(i == self.current_patch_idx)
+                row.addWidget(btn)
+            row.addStretch()
         self._update_patch_info()
 
     def _sync_patch_buttons(self):
-        for i in range(self._patch_buttons_row.count()):
-            widget = self._patch_buttons_row.itemAt(i).widget()
-            if isinstance(widget, QPushButton):
-                widget.setChecked(widget.text() == f"P{self.current_patch_idx+1}")
+        for row in self._all_patch_rows():
+            for i in range(row.count()):
+                widget = row.itemAt(i).widget()
+                if isinstance(widget, QPushButton):
+                    widget.setChecked(widget.text() == f"P{self.current_patch_idx+1}")
 
     def _repaint_patch_buttons(self):
         """Force an immediate synchronous repaint of the patch buttons so the
         check-state change is visible before any blocking IO runs."""
-        for i in range(self._patch_buttons_row.count()):
-            widget = self._patch_buttons_row.itemAt(i).widget()
-            if isinstance(widget, QPushButton):
-                widget.repaint()
+        for row in self._all_patch_rows():
+            for i in range(row.count()):
+                widget = row.itemAt(i).widget()
+                if isinstance(widget, QPushButton):
+                    widget.repaint()
 
     def _select_patch(self, idx):
         self.current_patch_idx = idx

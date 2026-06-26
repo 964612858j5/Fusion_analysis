@@ -111,6 +111,9 @@ class Step0Page(QWidget):
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
+        # Per-load guard for auto-opening the Tissue Navigator on data load:
+        # re-armed at the start of each load, fired once at load-completion.
+        self._navigator_auto_opened = False
         self._preview_worker = None
         self._preview_req_id = 0
         self._preview_debounce = QTimer(self)
@@ -1290,6 +1293,20 @@ class Step0Page(QWidget):
         popup.raise_()
         self._update_tissue_view_rect()
 
+    def _auto_open_tissue_navigator(self):
+        """Auto-open the Tissue Navigator ONCE after a successful Step0 data load.
+
+        ROI/patch drawing now lives in the navigator (#10), so opening it on load
+        lets the user start drawing immediately. Reuses the existing open path
+        (show_tissue_navigator); fires once per load via _navigator_auto_opened
+        (re-armed at the start of each load). No-op without a usable loader — so a
+        failed/empty load never pops an empty navigator, and a mere ROI/overview
+        refresh (which does not re-arm) never re-pops it."""
+        if self.loader is None or self._navigator_auto_opened:
+            return
+        self._navigator_auto_opened = True
+        self.show_tissue_navigator()
+
     def toggle_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()
         if popup.isVisible():
@@ -1479,6 +1496,9 @@ class Step0Page(QWidget):
     def _reload_from_paths(self):
         global OME_TIFF_FILE, OUTPUT_DIR
 
+        # Re-arm the per-load auto-open guard: each genuine load may open the
+        # navigator once; ROI/overview refreshes (other code paths) do not re-arm.
+        self._navigator_auto_opened = False
         ome = self._ome_path_edit.text().strip()
         outd = self._out_path_edit.text().strip()
         panel_csv = self._panel_csv_edit.text().strip()
@@ -1580,6 +1600,11 @@ class Step0Page(QWidget):
         self._load_status.setText(
             f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"
         )
+
+        # Auto-open the Tissue Navigator once on a successful load (ROI/patch
+        # drawing lives there since #10). Reuses the existing open path; guarded
+        # to fire once per load.
+        self._auto_open_tissue_navigator()
 
     def _wrap_overview_patch_limit(self):
         original = self.overview._add_patch

@@ -161,3 +161,51 @@ def test_roi_edit_in_navigator_reaches_step0_view_via_model(app):
     pop.overview.rois_changed.emit(list(pop.overview._rois))
     assert [r["name"] for r in s._roi_model.rois] == ["RN"]
     assert [r["name"] for r in s.overview.get_rois()] == ["RN"]
+
+
+# ── step0-autoopen-navigator: navigator auto-opens once on data load ─────────
+class _FakeLoader:
+    def __init__(self):
+        self.shape = (1000, 1200)
+        self.ch_map = {"DAPI": 0, "CD68": 1}
+        self.filepath = "/x.ome.tif"
+
+    def channel_names(self):
+        return ["DAPI", "CD68"]
+
+
+def test_navigator_auto_opens_on_load(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    assert s._tissue_navigator_popup is None          # not before load
+    s.loader = _FakeLoader()
+    s._navigator_auto_opened = False                  # re-armed at load start
+    s._auto_open_tissue_navigator()                   # load-completion call
+    assert s._tissue_navigator_popup is not None
+    assert s._tissue_navigator_popup.isVisible()      # opened via the existing path
+    assert s._navigator_auto_opened is True
+
+
+def test_auto_open_fires_once_refresh_does_not_repop(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.loader = _FakeLoader()
+    s._navigator_auto_opened = False
+    s._auto_open_tissue_navigator()
+    s._tissue_navigator_popup.hide()                  # user closes it
+    # a refresh (does NOT re-arm) must not re-pop the navigator
+    s._auto_open_tissue_navigator()
+    assert s._tissue_navigator_popup.isVisible() is False
+    # a NEW load re-arms -> opens again
+    s._navigator_auto_opened = False
+    s._auto_open_tissue_navigator()
+    assert s._tissue_navigator_popup.isVisible() is True
+
+
+def test_auto_open_no_loader_no_popup(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    s.loader = None
+    s._navigator_auto_opened = False
+    s._auto_open_tissue_navigator()
+    assert s._tissue_navigator_popup is None           # no empty popup

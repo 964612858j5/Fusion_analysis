@@ -610,7 +610,9 @@ class Step0Page(QWidget):
         self._patch_info.setWordWrap(True)
         self._patch_info.setStyleSheet("color:#888;font-size:10px;")
         pl2.addWidget(self._patch_info)
-        cll.addWidget(patch_box)
+        # (#4) patch_box (Preview Patch) is NOT added to c_left — it moves to
+        # c_right's bottom_row (next to the shrunk Quantitative Metrics). c_left's
+        # Channels panel (stretch=2) absorbs the freed vertical space.
 
         c_split.addWidget(c_left)
 
@@ -807,7 +809,12 @@ class Step0Page(QWidget):
                 "color:#ddd;font-size:11px;background:#111;padding:3px;border-radius:3px;"
             )
             metl.addWidget(lbl)
+        # (#4) Metrics shrinks from 1/2 to 1/3 of bottom_row: it shares the row
+        # equally with the relocated Preview Patch and the Decision panel.
         bottom_row.addWidget(metrics_box, stretch=1)
+        # (#4) Preview Patch relocated here (was in c_left) — into the space freed
+        # by shrinking Metrics. Its P-buttons + _patch_info + wiring are intact.
+        bottom_row.addWidget(patch_box, stretch=1)
 
         decision_box = QGroupBox("Per-Channel Decision")
         decision_box.setStyleSheet(self._box_style("#e06c75"))
@@ -845,60 +852,39 @@ class Step0Page(QWidget):
         c_split.setStretchFactor(0, 1)
         c_split.setStretchFactor(1, 2)
 
-        # Run BG correction 行 + Save & Continue（Section C 底部）
-        run_row = QHBoxLayout()
-        self._bg_start_status = QLabel("Configure channels above, then click ▶ Run.")
-        self._bg_start_status.setStyleSheet("color:#aaa;font-size:11px;")
-        run_row.addWidget(self._bg_start_status, stretch=1)
-        self._bg_pbar = QProgressBar()
-        self._bg_pbar.setRange(0, 100)
-        self._bg_pbar.setValue(0)
-        self._bg_pbar.setVisible(False)
-        self._bg_pbar.setFixedSize(160, 14)
-        self._bg_pbar.setStyleSheet(
-            "QProgressBar{border:1px solid #4a9;border-radius:3px;background:#111;}"
-            "QProgressBar::chunk{background:#4a9;border-radius:2px;}"
-        )
-        run_row.addWidget(self._bg_pbar)
-        self._btn_start_bg = QPushButton("▶ Run BG correction on all assigned channels")
-        self._btn_start_bg.setStyleSheet(
-            "QPushButton{background:#1a5c2a;color:#6bffa0;border:1px solid #4a9;"
-            "border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#2a7c3a;}"
-            "QPushButton:disabled{background:#222;color:#555;border-color:#333;}"
-        )
-        self._btn_start_bg.clicked.connect(self._on_start_bg_correction)
-        run_row.addWidget(self._btn_start_bg)
-        cl.addLayout(run_row)
-
-        # v14.4: explicit corrected-output status (distinct from the per-patch
-        # run status above). Honestly reflects whether the last Save & Continue
-        # wrote a VALID non-empty corrected_channels.zarr.
-        self._bg_corrected_status = QLabel(
-            "corrected_channels.zarr: not written yet.")
-        self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
-        cl.addWidget(self._bg_corrected_status)
-
-        main_split.addWidget(sec_c)
-        # (#10) Section C is now the sole child of the BG splitter (Section B was
-        # relocated to the Tissue Navigator); it fills the tab. No B:C ratio.
-
-        # ══ 底部导航 ═══════════════════════════════════════════════════
-        nav = QHBoxLayout()
-        nav.addStretch()
-        # (#9) Save-only: writes the Step0 outputs + Step0->Step1 handoff but does
-        # NOT auto-jump to Step1 (navigation is via the step names). The handler
-        # (_save_and_continue) is unchanged; only the auto-jump was removed in
-        # main_window._on_step0_complete.
-        self._btn_continue = QPushButton("Save Step0")
+        # (#5) ONE BG-tab Save button — replaces BOTH the old "Run BG correction"
+        # preview-batch button AND the page-level "Save Step0" footer. The handler
+        # _save_and_continue already does the FULL pipeline: run WsiCorrectionWorker
+        # on assigned channels -> write corrected_channels.zarr -> write
+        # correction/roi/patch configs + step0_roi_result.json -> emit
+        # step0_complete (Step0->Step1 handoff). The per-patch preview-batch button
+        # was dropped (its preview duty is not part of the save pipeline).
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        self._btn_continue = QPushButton("Save")
+        self._btn_continue.setToolTip(
+            "Run background correction on assigned channels, write "
+            "corrected_channels.zarr + the Step0->Step1 handoff, and mark Step0 "
+            "complete. Navigate via the step names.")
         self._btn_continue.setStyleSheet(
             "QPushButton{background:#2a5;color:white;border-radius:4px;"
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}"
         )
         self._btn_continue.clicked.connect(self._save_and_continue)
-        nav.addWidget(self._btn_continue)
-        outer.addLayout(nav)
+        save_row.addWidget(self._btn_continue)
+        cl.addLayout(save_row)
+
+        # v14.4: explicit corrected-output status — honest about whether the last
+        # Save wrote a VALID non-empty corrected_channels.zarr.
+        self._bg_corrected_status = QLabel(
+            "corrected_channels.zarr: not written yet.")
+        self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
+        cl.addWidget(self._bg_corrected_status)
+
+        main_split.addWidget(sec_c)
+        # (#10) Section C is the sole child of the BG splitter (Section B relocated
+        # to the Tissue Navigator). No page-level Save footer anymore (#5).
 
         self._refresh_slider_labels()
 
@@ -946,10 +932,17 @@ class Step0Page(QWidget):
         btn_load.setToolTip("Pull the current Step0 patch's channels into the workbench.")
         btn_load.clicked.connect(self._sync_step0_to_workbench)
         bar.addWidget(btn_load)
-        btn_save = QPushButton('Save remap config (Step0)')
+        # (#5b) The Channel Conditioning tab's Save. Same handler / same written
+        # preview remap config as before — only the label + styling are formalized
+        # to match the BG tab's "Save" (one tab, one Save).
+        btn_save = QPushButton('Save')
+        btn_save.setToolTip(
+            "Save the per-channel preview remap config (preview_only; "
+            "step2_ready=false) for this tab.")
         btn_save.setStyleSheet(
-            "QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}"
-            "QPushButton:hover{background:#377;}")
+            "QPushButton{background:#2a5;color:white;border-radius:4px;"
+            "padding:8px 22px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#3b6;}")
         btn_save.clicked.connect(self._save_step0_remap_config)
         bar.addWidget(btn_save)
         bar.addStretch()
@@ -1567,9 +1560,9 @@ class Step0Page(QWidget):
         self.current_channel = None
         self._preview_req_id = 0
         self._channel_decisions.clear()
-        self._bg_pbar.setVisible(False)
-        self._bg_pbar.setValue(0)
-        self._bg_start_status.setText("Configure channels above, then click ▶ Run.")
+        # (#5) the BG run-progress widgets (_bg_pbar/_bg_start_status) were removed
+        # with the standalone "Run BG correction" button; Save uses its own
+        # progress dialog.
         self._patch_warning.setVisible(False)
 
         self.overview.loader = self.loader
@@ -2858,122 +2851,10 @@ class Step0Page(QWidget):
                 worker.stop()
         self._bg_workers = []
 
-    def _on_start_bg_correction(self):
-        n_tophat = sum(
-            1 for ch in self._channel_order
-            if ch != self.nucleus_channel and self._channel_decisions.get(ch) == "tophat"
-        )
-        n_cucim = sum(
-            1 for ch in self._channel_order
-            if ch != self.nucleus_channel and self._channel_decisions.get(ch) == "cucim"
-        )
-        n_all = len([ch for ch in self._channel_order if ch != self.nucleus_channel])
-        n_orig = n_all - n_tophat - n_cucim
-
-        os.makedirs(self.output_dir, exist_ok=True)
-        config = self._build_config()
-        out_path = os.path.join(self.output_dir, "correction_config.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-
-        channels_to_run = [
-            ch for ch in self._channel_order
-            if ch != self.nucleus_channel and self._channel_decisions.get(ch, "original") in ("tophat", "cucim")
-        ]
-
-        self._bg_n_tophat = n_tophat
-        self._bg_n_cucim = n_cucim
-        self._bg_n_orig = n_orig
-        self._bg_workers = []
-
-        if not channels_to_run or not self.patches:
-            self._finish_bg_start(n_run=0)
-            return
-
-        self._bg_queue = list(channels_to_run)
-        self._bg_queue_idx = 0
-        self._bg_n_total = len(channels_to_run)
-        self._btn_start_bg.setEnabled(False)
-        self._btn_start_bg.setText("Running…")
-        self._bg_pbar.setVisible(True)
-        self._bg_pbar.setValue(0)
-        self._bg_start_status.setStyleSheet("color:#aaa;font-size:11px;")
-        self._bg_run_next()
-
-    def _bg_run_next(self):
-        if self._bg_queue_idx >= len(self._bg_queue):
-            self._finish_bg_start(n_run=self._bg_n_total)
-            return
-
-        ch = self._bg_queue[self._bg_queue_idx]
-        roi = self.patches[self.current_patch_idx]
-        pct = int(100 * self._bg_queue_idx / max(1, self._bg_n_total))
-        method = self._channel_decisions.get(ch, "original")
-        self._bg_pbar.setValue(pct)
-        self._bg_start_status.setText(f"▶ Channel {self._bg_queue_idx + 1} / {self._bg_n_total}: {ch} [{method}]")
-        self._preview_status.setText(f"[BG Run] Processing channel {self._bg_queue_idx + 1}/{self._bg_n_total}: {ch} ({method})")
-        self._preview_status.setStyleSheet("color:#e5c07b;font-size:11px;font-weight:bold;")
-
-        if ch in self._channel_rows:
-            self._channel_list.blockSignals(True)
-            self._channel_list.setCurrentItem(self._channel_rows[ch]["item"])
-            self._channel_list.blockSignals(False)
-            self.current_channel = ch
-
-        self._preview_req_id += 1
-        req_id = self._preview_req_id
-        worker = BackgroundPreviewWorker(
-            req_id, self.loader, ch, roi,
-            self._tophat_slider.value(), self._cucim_slider.value(),
-            nucleus_channel=self.nucleus_channel,
-        )
-
-        def on_done(rid, payload, expected=req_id, ch_name=ch):
-            if rid != expected:
-                return
-            self._last_payload = payload
-            self._refresh_preview_display()
-            self._metrics_original.setText(self._metric_text("Original", payload["original_metrics"]))
-            self._metrics_tophat.setText(self._metric_text("TopHat",    payload["tophat_metrics"]))
-            self._metrics_cucim.setText(self._metric_text("cucim",      payload["cucim_metrics"]))
-            self._preview_status.setText(
-                f'[BG Run] Done: {ch_name} (SNR {payload["original_metrics"]["snr"]:.1f} → {payload["tophat_metrics"]["snr"]:.1f})'
-            )
-            self._bg_queue_idx += 1
-            self._bg_run_next()
-
-        def on_err(rid, _msg, expected=req_id):
-            if rid == expected:
-                self._bg_queue_idx += 1
-                self._bg_run_next()
-
-        worker.finished.connect(on_done)
-        worker.error.connect(on_err)
-        self._bg_workers.append(worker)
-        worker.start()
-
-    def _finish_bg_start(self, n_run):
-        self._bg_pbar.setValue(100)
-        parts = []
-        if self._bg_n_tophat:
-            parts.append(f"{self._bg_n_tophat} TopHat")
-        if self._bg_n_cucim:
-            parts.append(f"{self._bg_n_cucim} cucim")
-        if self._bg_n_orig:
-            parts.append(f"{self._bg_n_orig} original")
-        summary = ", ".join(parts) if parts else "all original"
-        if n_run > 0:
-            nav_text = f"✓ {summary} — {n_run} channel(s) verified on patch"
-            prev_text = f"[BG Run complete] {summary}"
-        else:
-            nav_text = f"✓ Config saved — {summary} (draw a patch ROI first to preview)"
-            prev_text = "BG correction configured. Draw a patch ROI and re-run to preview."
-        self._bg_start_status.setText(nav_text)
-        self._bg_start_status.setStyleSheet("color:#6bffa0;font-size:11px;font-weight:bold;")
-        self._preview_status.setText(prev_text)
-        self._preview_status.setStyleSheet("color:#6bffa0;font-size:11px;")
-        self._btn_start_bg.setText("▶ Run BG correction on all assigned channels")
-        self._btn_start_bg.setEnabled(True)
+    # (#5) The standalone "Run BG correction" preview-batch handlers
+    # (_on_start_bg_correction / _bg_run_next / _finish_bg_start) were removed
+    # with that button; the BG-tab Save (_save_and_continue) is the single
+    # entry that runs correction + writes outputs + the handoff.
 
     def _save_and_continue(self):
         if self.loader is None:

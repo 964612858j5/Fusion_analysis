@@ -45,7 +45,10 @@ def test_bg_tab_has_no_remap_controls_as_primary(app):
     # Background-correction controls exist
     assert hasattr(s, "_tophat_slider")
     assert hasattr(s, "_cucim_slider")
-    assert hasattr(s, "_btn_start_bg")
+    # (#5) the standalone "Run BG correction" button was merged into the BG-tab
+    # Save (_btn_continue); the separate _btn_start_bg no longer exists.
+    assert hasattr(s, "_btn_continue")
+    assert not hasattr(s, "_btn_start_bg")
     # Channel-conditioning (remap) controls are NOT Step0Page attrs — they live
     # inside the shared ChannelWorkbench (gamma/brightness/contrast/save remap).
     for forbidden in ("_gamma_slider", "_brightness_slider", "_contrast_slider"):
@@ -236,3 +239,64 @@ def test_box_style_title_not_occluded_by_body(app):
     assert "QGroupBox::title" in style
     assert "subcontrol-origin:margin" in style
     assert "margin-top:16px" in style
+
+
+# ── step0-layout-and-save-restructure (#4 layout + #5 one-tab-one-Save) ───────
+def _gb(s):
+    from PyQt5 import QtWidgets
+    return {b.title(): b for b in s.findChildren(QtWidgets.QGroupBox)}
+
+
+def test_one_bg_tab_save_button_no_run_no_page_save(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    # standalone "Run BG correction" gone; one merged Save remains
+    assert not hasattr(s, "_btn_start_bg")
+    assert not hasattr(s, "_on_start_bg_correction")
+    assert hasattr(s, "_btn_continue")
+    assert s._btn_continue.text() == "Save"
+    # the BG Save lives inside the BG tab (under main_split), not a page footer
+    w, in_tab = s._btn_continue, False
+    p = w.parent()
+    while p is not None:
+        if p is s._main_split:
+            in_tab = True
+            break
+        p = p.parent()
+    assert in_tab
+    # it is wired to the full save/handoff pipeline
+    assert s._btn_continue.receivers(s._btn_continue.clicked) >= 1
+
+
+def test_save_button_runs_full_pipeline_handler(app):
+    # the merged Save handler IS _save_and_continue (which runs WsiCorrectionWorker
+    # + writes configs/step0_roi_result + emits step0_complete). Proven by the
+    # outputs + no-autojump suites; here assert the wiring + signal presence.
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    assert hasattr(s, "_save_and_continue")
+    assert hasattr(s, "step0_complete")     # the Step0->Step1 handoff signal
+
+
+def test_preview_patch_relocated_to_c_right(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    g = _gb(s)
+    pp, met, dec = g["Preview Patch"], g["Quantitative Metrics"], g["Per-Channel Decision"]
+    ch, mp, proc = g["Channels"], g["Method Parameters"], g["Process"]
+    # Preview Patch now shares the bottom_row container with Metrics + Decision...
+    assert pp.parentWidget() is met.parentWidget() is dec.parentWidget()
+    # ...and is NO LONGER in c_left with Channels/Method/Process
+    assert ch.parentWidget() is mp.parentWidget() is proc.parentWidget()
+    assert pp.parentWidget() is not ch.parentWidget()
+    # P-button row + info still wired (relocation kept the widgets)
+    assert hasattr(s, "_patch_buttons_row") and hasattr(s, "_patch_info")
+
+
+def test_tab2_save_renamed(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    labels = [b.text() for b in s._cond_tab.findChildren(QtWidgets.QPushButton)]
+    assert "Save" in labels                 # formalized Tab2 Save
+    assert "Save remap config (Step0)" not in labels

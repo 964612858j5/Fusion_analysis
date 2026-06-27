@@ -473,3 +473,129 @@ def test_patch_switch_still_lazy_loads_active_only(app):
     p._select_patch(1)                           # uses live _select_patch chain
     # only the active channel is read on patch switch (lazy-load preserved)
     assert len(ld.calls) == 1, ld.calls
+
+
+# ── step0-preload-architecture: background preload + BG hot-swap ─────────────
+class _CorrLoader(_FakeLoader):
+    """Loader that records reads and returns CORRECTED pixels (×9 for CD68)
+    once set_corrected_zarr_store has been called."""
+
+    def __init__(self):
+        super().__init__(names=("DAPI", "CD68", "CK19"), shape=(120, 120))
+        self.calls = []
+        self._corr = False
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1,
+                    correction_config=None, normalize=True):
+        self.calls.append(ch)
+        base = np.ones((y1 - y0, x1 - x0), np.float32)
+        return base * (9.0 if (self._corr and ch == "CD68") else 1.0)
+
+    def set_corrected_zarr_store(self, path, decisions):
+        self._corr = True
+
+
+def _page_for_preload(app):
+    from block01.ui.step0.step0_page import Step0Page
+    p = Step0Page()
+    p.loader = _CorrLoader()
+    p.nucleus_channel = "DAPI"
+    p._channel_order = ["DAPI", "CD68", "CK19"]
+    p.patches = [(0, 30, 0, 30), (30, 60, 30, 60), (60, 90, 60, 90)]
+    p.current_patch_idx = 0
+    return p
+
+
+def _warm_cache_sync(p):
+    """Fill the preload cache deterministically by running the worker in-thread."""
+    from block01.ui.step0.step0_page import PreloadWorker
+    p._preload_gen += 1
+    w = PreloadWorker(p.loader, p.patches, p._conditioning_channels(),
+                      p._preload_gen)
+    w.channel_loaded.connect(p._on_preload_channel)
+    w.finished_gen.connect(p._on_preload_finished)
+    p._preload_worker = w
+    w.run()                                  # synchronous -> direct signals
+
+
+def test_preload_worker_emits_all_tiles(app):
+    from block01.ui.step0.step0_page import PreloadWorker
+    ld = _CorrLoader()
+    patches = [(0, 20, 0, 20), (20, 40, 20, 40), (40, 60, 40, 60)]
+    loaded, fin = [], []
+    w = PreloadWorker(ld, patches, ["DAPI", "CD68", "CK19"], 1)
+    w.channel_loaded.connect(lambda g, p, n, a: loaded.append((p, n)))
+    w.finished_gen.connect(lambda g: fin.append(g))
+    w.run()
+    assert len(loaded) == 9                  # 3 patches × 3 channels
+    assert fin == [1]
+    assert {p for p, _ in loaded} == {0, 1, 2}
+
+
+def test_preload_trigger_cancels_and_restarts(app):
+    p = _page_for_preload(app)
+    p._on_patches_changed(list(p.patches))   # starts preload #1
+    w1 = p._preload_worker
+    gen1 = p._preload_gen
+    p._on_patches_changed([(0, 10, 0, 10)])  # patches change -> cancel + restart
+    assert w1._cancelled is True             # old worker cancelled
+    assert p._preload_gen == gen1 + 1        # new generation
+    # let any live threads finish so teardown is clean
+    for w in (w1, p._preload_worker):
+        if w is not None:
+            w.wait(2000)
+
+
+def test_preload_cache_hit_zero_io(app):
+    p = _page_for_preload(app)
+    _warm_cache_sync(p)
+    p.loader.calls.clear()
+    arr = p._provide_channel_pixels("CD68")  # warm -> no read_region
+    assert arr is not None
+    assert p.loader.calls == []
+
+
+def test_sync_warm_passes_all_real_arrays(app):
+    p = _page_for_preload(app)
+    _warm_cache_sync(p)
+    p._sync_step0_to_workbench()
+    wb = p._cond_workbench
+    # every channel is a real array (no None lazy placeholders) when cache warm
+    assert all(wb._raw.get(n) is not None for n in wb._names)
+    # All toggle is then instant: no progressive timer needed
+    wb._on_all_toggled(True)
+    assert wb._progressive_timer is None
+
+
+def test_bg_hotswap_updates_corrected_only(app):
+    p = _page_for_preload(app)
+    _warm_cache_sync(p)
+    before_cd68 = float(p._preload_cache[0]["CD68"].mean())
+    before_dapi = float(p._preload_cache[0]["DAPI"].mean())
+    p._on_wsi_finished({}, "/tmp/corr.zarr", {"CD68": "tophat", "DAPI": "original"})
+    after_cd68 = float(p._preload_cache[0]["CD68"].mean())
+    assert after_cd68 != before_cd68         # corrected channel hot-swapped
+    assert float(p._preload_cache[0]["DAPI"].mean()) == before_dapi  # untouched
+
+
+def test_preload_cold_cache_falls_back_to_read(app):
+    p = _page_for_preload(app)
+    p._preload_cache = {}
+    p.loader.calls.clear()
+    p._provide_channel_pixels("CK19")
+    assert p.loader.calls == ["CK19"]        # lazy-load fallback fired
+
+
+def test_stale_preload_signals_ignored(app):
+    p = _page_for_preload(app)
+    p._preload_gen = 5
+    p._on_preload_channel(4, 0, "CD68", np.ones((4, 4), np.float32))  # stale gen
+    assert 0 not in p._preload_cache         # cancelled worker's write dropped
+
+
+def test_preload_build_config_unchanged(app):
+    p = _page_for_preload(app)
+    _warm_cache_sync(p)
+    p._sync_step0_to_workbench()
+    cfg = p._cond_workbench.build_config()
+    assert set(cfg["channels"]) == {"DAPI", "CD68", "CK19"}

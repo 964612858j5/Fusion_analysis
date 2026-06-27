@@ -97,6 +97,55 @@ def _is_non_marker_channel(name):
     return any(kw in low for kw in _NON_MARKER_CHANNEL_KEYWORDS)
 
 
+class PreloadWorker(QThread):
+    """Background reader: loads every (patch × channel) tile into the host's
+    conditioning preload cache so patch-switch / All-toggle are zero-IO.
+
+    Emits one channel_loaded(gen, patch_idx, name, array) per tile and
+    finished_gen(gen) at the end. Cancellable between reads. `gen` lets the host
+    discard a stale (cancelled) worker's late signals after patches change.
+    Arrays cross threads via the signal payload (queued, thread-safe) — the
+    worker never writes the host cache directly.
+    """
+
+    channel_loaded = pyqtSignal(int, int, str, object)   # gen, patch_idx, name, arr
+    finished_gen = pyqtSignal(int)                        # gen
+
+    def __init__(self, loader, patches, channels, gen, parent=None):
+        super().__init__(parent)
+        self._loader = loader
+        self._patches = list(patches)
+        self._channels = list(channels)
+        self._gen = int(gen)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        for pidx, bbox in enumerate(self._patches):
+            if self._cancelled:
+                return
+            try:
+                y0, y1, x0, x1 = bbox
+            except Exception:
+                continue
+            for ch in self._channels:
+                if self._cancelled:
+                    return
+                try:
+                    arr = self._loader.read_region(ch, y0, y1, x0, x1,
+                                                   normalize=False)
+                    arr = np.asarray(arr, dtype=np.float32)
+                    if arr.ndim == 3 and arr.shape[2] == 1:
+                        arr = arr[:, :, 0]
+                except Exception:
+                    continue                 # a bad read never kills the preload
+                self.channel_loaded.emit(self._gen, pidx, ch, arr)
+        if not self._cancelled:
+            self.finished_gen.emit(self._gen)
+
+
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
 
@@ -112,6 +161,12 @@ class Step0Page(QWidget):
         self.rois = []
         self.current_patch_idx = 0
         self.current_channel = None
+        # Conditioning preload: background QThread caches ALL patches × ALL
+        # channels so patch-switch / All-toggle are zero-IO. _preload_gen tags the
+        # active worker so a cancelled (stale) worker's late signals are ignored.
+        self._preload_cache = {}      # {patch_idx: {channel_name: 2D float32}}
+        self._preload_worker = None
+        self._preload_gen = 0
         # v14.2b: single authoritative ROI/context model. Both the Step0 overview
         # and the TissueNavigatorPopup overview are views/editors over this one
         # model; panel _rois/_patches are render caches derived from it.
@@ -980,8 +1035,7 @@ class Step0Page(QWidget):
         # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
         # workbench fetches the rest on-demand (when the user selects them) via
         # this provider, which always reads the CURRENT patch.
-        self._cond_workbench.set_pixel_provider(
-            lambda name: self._read_cond_patch_channel(name, normalize=False))
+        self._cond_workbench.set_pixel_provider(self._provide_channel_pixels)
         # v14.2c: when the viewer's viewport settles (debounced), update the
         # Tissue Navigator current-view rectangle.
         self._cond_workbench.viewer.viewport_changed.connect(
@@ -1040,6 +1094,55 @@ class Step0Page(QWidget):
             arr = arr[:, :, 0]
         return arr
 
+    # ── conditioning preload cache ───────────────────────────────────────────
+    def _conditioning_channels(self):
+        """Marker channels + DAPI (the set the conditioning workbench shows)."""
+        return [ch for ch in self._channel_order if not _is_non_marker_channel(ch)]
+
+    def _provide_channel_pixels(self, name):
+        """Pixel provider for the workbench: serve from the preload cache (zero
+        IO) when warm, else fall back to a single live read for the current
+        patch (lazy-load). Always reads the CURRENT patch."""
+        cached = self._preload_cache.get(self.current_patch_idx, {}).get(name)
+        if cached is not None:
+            return cached
+        return self._read_cond_patch_channel(name, normalize=False)
+
+    def _cancel_preload(self):
+        w = getattr(self, "_preload_worker", None)
+        if w is not None:
+            w.cancel()                       # flag; stale signals ignored by gen
+            self._preload_worker = None
+
+    def _start_preload(self):
+        """(Re)start the background preload of all patches × channels. Cancels any
+        running preload and invalidates the cache first (patches changed)."""
+        self._cancel_preload()
+        self._preload_cache = {}
+        if not self.loader or not self.patches:
+            return
+        channels = self._conditioning_channels()
+        if not channels:
+            return
+        self._preload_gen += 1
+        gen = self._preload_gen
+        worker = PreloadWorker(self.loader, list(self.patches), channels, gen,
+                               parent=self)
+        worker.channel_loaded.connect(self._on_preload_channel)
+        worker.finished_gen.connect(self._on_preload_finished)
+        self._preload_worker = worker
+        worker.start()
+
+    def _on_preload_channel(self, gen, patch_idx, name, arr):
+        if gen != self._preload_gen:
+            return                           # stale worker (patches changed)
+        self._preload_cache.setdefault(patch_idx, {})[name] = arr
+
+    def _on_preload_finished(self, gen):
+        if gen != self._preload_gen:
+            return
+        self._preload_worker = None
+
     def _sync_step0_to_workbench(self):
         """Feed the workbench from Step0's loader + current patch + channel order.
 
@@ -1093,10 +1196,14 @@ class Step0Page(QWidget):
         # DAPI is traditionally blue in fluorescence — give the nucleus channel a
         # fixed blue swatch; other channels fall back to the workbench palette.
         colors = {self.nucleus_channel: "#3366ff"}
+        # Preload integration: serve every channel from the warm cache (zero IO →
+        # All-toggle / patch-switch instant). Cold channels stay None (lazy); only
+        # the active one is read eagerly so first paint is never blank.
+        patch_cache = self._preload_cache.get(self.current_patch_idx, {})
         images, meta = {}, {}
         for ch in channels:
-            arr = None
-            if ch == active:
+            arr = patch_cache.get(ch)       # warm: real array (no IO)
+            if arr is None and ch == active:
                 try:
                     a = self._read_cond_patch_channel(ch, normalize=False)
                     if a is not None and a.ndim == 2 and a.size:
@@ -1808,9 +1915,12 @@ class Step0Page(QWidget):
             self.current_patch_idx = 0
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             self._preview_status.setText("Select a channel and patch ROI to preview background correction.")
-        # Patches changed (drawn/deleted in the navigator) -> refresh the
-        # conditioning view for the new current patch (defect B). _maybe_refresh
-        # is a no-op until conditioning has been engaged.
+        # Patches changed (drawn/deleted in the navigator) -> (re)start the
+        # background preload of all patches × channels (cancels any running one,
+        # invalidates the cache), then refresh the conditioning view for the new
+        # current patch (defect B). _maybe_refresh is a no-op until conditioning
+        # has been engaged.
+        self._start_preload()
         self._maybe_refresh_conditioning()
 
     def _rebuild_patch_list(self):
@@ -3081,7 +3191,42 @@ class Step0Page(QWidget):
             self._wsi_dialog.allow_close()
             self._wsi_dialog.accept()
         self.loader.set_corrected_zarr_store(zarr_path, decisions)
+        # Hot-swap: corrected channels now read corrected pixels from the loader;
+        # replace their preload-cache entries so the conditioning overlay shows
+        # the corrected data (and refresh if conditioning is engaged).
+        self._hotswap_corrected(decisions)
         self._emit_complete(config, zarr_path, decisions)
+
+    def _hotswap_corrected(self, decisions):
+        """Re-read the corrected channels (per patch) into the preload cache.
+
+        After set_corrected_zarr_store, loader.read_region returns CORRECTED
+        pixels for the corrected channels; uncorrected channels are untouched.
+        Synchronous (few channels × few patches)."""
+        if not decisions or not self.loader or not self.patches:
+            return
+        corrected = [ch for ch, m in decisions.items()
+                     if str(m).lower() not in ("", "original", "none")]
+        if not corrected:
+            return
+        for pidx, bbox in enumerate(self.patches):
+            try:
+                y0, y1, x0, x1 = bbox
+            except Exception:
+                continue
+            pc = self._preload_cache.setdefault(pidx, {})
+            for ch in corrected:
+                try:
+                    arr = self.loader.read_region(ch, y0, y1, x0, x1,
+                                                  normalize=False)
+                    arr = np.asarray(arr, dtype=np.float32)
+                    if arr.ndim == 3 and arr.shape[2] == 1:
+                        arr = arr[:, :, 0]
+                    pc[ch] = arr
+                except Exception:
+                    continue
+        # Drop the workbench's stale raw for corrected channels + repaint.
+        self._maybe_refresh_conditioning()
 
     def _on_wsi_canceled(self, zarr_path):
         if os.path.exists(zarr_path):

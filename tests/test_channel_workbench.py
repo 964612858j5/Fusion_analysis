@@ -1486,7 +1486,9 @@ def test_explicit_fit_view_button_refits(app):
     assert wb._canvas._need_fit is False       # consumed by the refit it triggers
 
 
-def test_different_shape_switch_refits(app):
+def test_composite_different_shape_switch_preserves_zoom(app):
+    # (step0-fix #4) The MULTI-CHANNEL composite path no longer refits on a patch
+    # SHAPE change — the user's zoom persists across different-size patches.
     wb = _mc_wb(app)
     wb.set_channel_images(_patch_imgs(0, 1000.0, shape=(20, 20)),
                           active="DAPI", visible=["DAPI"])
@@ -1496,9 +1498,22 @@ def test_different_shape_switch_refits(app):
     wb.set_channel_images(_patch_imgs(1, 1000.0, shape=(40, 40)),
                           active="DAPI", visible=["DAPI"])
     after = vb.viewRange()
-    # shape changed -> refit (range differs)
+    assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])
+    assert wb._canvas._prev_shape == (40, 40)     # shape still tracked
+
+
+def test_single_channel_shape_change_still_fits(app):
+    # backward compat: the single-channel (set_images) path KEEPS shape-change fit
+    # for Step3 / Step1.5.
+    from block01.ui.widgets.high_quality_image_viewer import HighQualityImageViewer
+    v = HighQualityImageViewer()
+    v.resize(120, 120)
+    v.set_images(remapped=np.ones((20, 20), np.float32))   # first load -> fit
+    v._vb.setRange(xRange=(1, 5), yRange=(1, 5), padding=0)
+    before = v._vb.viewRange()
+    v.set_images(remapped=np.ones((40, 40), np.float32))   # shape change -> refit
+    after = v._vb.viewRange()
     assert not (np.allclose(before[0], after[0]) and np.allclose(before[1], after[1]))
-    assert wb._canvas._prev_shape == (40, 40)
 
 
 # ── step0-channel-search: QuPath-style channel filter (display-only) ─────────

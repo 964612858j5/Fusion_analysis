@@ -345,6 +345,13 @@ class HighQualityImageViewer(QtWidgets.QWidget):
             rgb = np.clip(rgb, 0.0, 1.0).astype(np.float32)
             self._img_item.setImage(rgb, levels=(0.0, 1.0))
             self._status.setText("Multi-channel overlay")
+            # (#4) Composite (multi-channel overlay) path: fit ONLY on an explicit
+            # request (first load / Fit view), never on a patch SHAPE change.
+            # Patches have different sizes; the user's zoom is deliberate and must
+            # persist across patch switches. Pre-set _prev_shape so _maybe_fit's
+            # shape-change branch never triggers here (single-channel path keeps
+            # shape-fit for Step3/Step1.5).
+            self._prev_shape = tuple(int(v) for v in rgb.shape[:2])
             self._maybe_fit(rgb.shape[:2])
             return
 

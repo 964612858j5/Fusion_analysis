@@ -303,3 +303,123 @@ def test_step0_all_skipped_emits_handoff_without_worker(app, tmp_path, monkeypat
     assert emitted["zp"].endswith("corrected_channels.zarr")
     assert emitted["dec"] == {"CD68": "tophat", "Ki67": "tophat"}
     assert p.loader._store[1] == {"CD68": "tophat", "Ki67": "tophat"}
+
+
+# ── step0-fix-incremental-save-and-zoom (#1 reuse roi_context, #4 zoom) ───────
+def _step0_for_context(tmp_path, monkeypatch):
+    """Step0 wired so _save_and_continue runs without the modal worker: all
+    channels 'original' -> the empty-corrected branch (no WsiCorrectionWorker).
+    create_* are stubbed to count calls + return a context under tmp_path."""
+    import block01.ui.step0.step0_page as sp
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _L:
+        shape = (80, 100)
+        filepath = "/t.ome.tif"
+        ch_map = {"CD68": 0}
+        def channel_names(self):
+            return ["CD68"]
+        def set_correction_config(self, c):
+            pass
+        def set_corrected_zarr_store(self, p, d):
+            pass
+
+    p = Step0Page()
+    p.loader = _L()
+    p.output_dir = str(tmp_path)
+    p.ome_path = "/t.ome.tif"
+    p.patches = [(0, 20, 0, 20)]
+    p._channel_order = ["CD68"]
+    p._channel_decisions = {"CD68": "original"}        # -> corrected empty, no worker
+
+    calls = {"full": 0, "roi": 0}
+
+    def _ctx(kind, sub):
+        d = str(tmp_path / sub)
+        os.makedirs(os.path.join(d, "step0"), exist_ok=True)
+        return {"roi_id": sub, "roi_dir": d,
+                "step_dirs": {"step0": os.path.join(d, "step0")}}
+
+    def _mk_full(out, shape, ome):
+        calls["full"] += 1
+        return _ctx("full", f"full_{calls['full']}")
+
+    def _mk_roi(out, roi, ome):
+        calls["roi"] += 1
+        return _ctx("roi", f"roi_{calls['roi']}")
+
+    monkeypatch.setattr(sp, "create_full_wsi_context", _mk_full)
+    monkeypatch.setattr(sp, "create_roi_context", _mk_roi)
+    monkeypatch.setattr(Step0Page, "_emit_complete",
+                        lambda self, *a, **k: None)
+    monkeypatch.setattr(Step0Page, "_ensure_empty_corrected_zarr",
+                        lambda self, *a, **k: None)
+    return p, calls
+
+
+def test_roi_context_reused_for_same_full_wsi_region(app, tmp_path, monkeypatch):
+    p, calls = _step0_for_context(tmp_path, monkeypatch)
+    p._analysis_region_mode = "full_wsi"
+    p._save_and_continue()
+    ctx1 = p._roi_context
+    p._save_and_continue()                  # same region -> reuse, no new context
+    assert calls["full"] == 1               # create called once only
+    assert p._roi_context is ctx1           # same context object
+    assert p._roi_context["step_dirs"]["step0"] == ctx1["step_dirs"]["step0"]
+
+
+def test_roi_context_fresh_when_mode_changes(app, tmp_path, monkeypatch):
+    p, calls = _step0_for_context(tmp_path, monkeypatch)
+    p._analysis_region_mode = "full_wsi"
+    p._save_and_continue()
+    # mode switch -> different signature -> fresh context
+    p._analysis_region_mode = "roi"
+    p.rois = [{"name": "R", "bbox_fullres": [0, 40, 0, 50],
+               "polygon_fullres": None}]
+
+    class _OV:
+        def get_rois(self):
+            return [{"name": "R", "bbox_fullres": [0, 40, 0, 50],
+                     "polygon_fullres": None}]
+    p.overview = _OV()
+    p._save_and_continue()
+    assert calls["full"] == 1 and calls["roi"] == 1   # one each (not reused)
+
+
+def test_roi_context_fresh_when_bbox_changes(app, tmp_path, monkeypatch):
+    p, calls = _step0_for_context(tmp_path, monkeypatch)
+    p._analysis_region_mode = "roi"
+
+    bbox = [[0, 40, 0, 50]]
+
+    class _OV:
+        def get_rois(self):
+            return [{"name": "R", "bbox_fullres": list(bbox[0]),
+                     "polygon_fullres": None}]
+    p.overview = _OV()
+    p._save_and_continue()                  # roi #1
+    p._save_and_continue()                  # same bbox -> reuse
+    assert calls["roi"] == 1
+    bbox[0] = [0, 60, 0, 70]                 # user redrew the ROI
+    p._save_and_continue()                  # bbox changed -> fresh context
+    assert calls["roi"] == 2
+
+
+def test_composite_zoom_preserved_across_different_shape_patches(app):
+    import numpy as np
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    wb = ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False,
+                          multichannel_overlay=True)
+    rng = np.random.default_rng(0)
+    def imgs(shape):
+        return {n: rng.random(shape).astype(np.float32) for n in ("DAPI", "CD68")}
+    wb.set_channel_images(imgs((20, 20)), colors={"DAPI": "#3366ff"},
+                          active="DAPI", visible=["DAPI"])
+    vb = wb._canvas._vb
+    vb.setRange(xRange=(2, 8), yRange=(3, 9), padding=0)
+    before = vb.viewRange()
+    wb.set_channel_images(imgs((40, 50)), colors={"DAPI": "#3366ff"},  # DIFFERENT shape
+                          active="DAPI", visible=["DAPI"])
+    after = vb.viewRange()
+    assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])
+    assert wb._canvas._prev_shape == (40, 50)

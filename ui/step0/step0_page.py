@@ -196,6 +196,7 @@ class Step0Page(QWidget):
         self._loaded_config = None
         self._roi_selected_idx = -1
         self._roi_context = None
+        self._roi_context_sig = None     # (#1) analysis-region identity for reuse
         self._project_output_dir = OUTPUT_DIR
         self._analysis_region_mode = "roi"
         self._patch_selected_idx = -1
@@ -1877,6 +1878,17 @@ class Step0Page(QWidget):
             "patch_indices": list(range(len(self.overview._patches if self.overview else []))),
         }
 
+    def _roi_context_signature(self, rois):
+        """Identity of the current analysis region, used to decide whether the
+        existing roi_context can be reused across Saves (#1). Full-WSI is keyed by
+        the image shape; ROI mode by the first ROI's full-res bbox. A change here
+        (mode switch or a redrawn ROI) forces a fresh roi_context."""
+        if self._is_full_wsi_mode():
+            shp = tuple(int(v) for v in (self.loader.shape if self.loader else (0, 0)))
+            return ("full_wsi", shp)
+        bbox = tuple(int(v) for v in ((rois[0].get("bbox_fullres") if rois else None) or []))
+        return ("roi", bbox)
+
     def _reindex_roi_patch_links(self):
         for roi in self.overview._rois:
             roi["patch_indices"] = []
@@ -3121,12 +3133,6 @@ class Step0Page(QWidget):
         if self._is_full_wsi_mode():
             rois = [self._full_wsi_roi()]
             self.rois = rois
-            self._project_output_dir = self.output_dir
-            self._roi_context = create_full_wsi_context(
-                self._project_output_dir,
-                self.loader.shape,
-                self.ome_path,
-            )
             print("[Step0] analysis_region_type=full_wsi")
         else:
             rois = list(self.overview.get_rois() if self.overview else self.rois)
@@ -3134,12 +3140,31 @@ class Step0Page(QWidget):
                 QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first, or choose Full WSI mode.")
                 return
             self.rois = rois
-            self._project_output_dir = self.output_dir
-            self._roi_context = create_roi_context(self._project_output_dir, rois[0], self.ome_path)
             print("[Step0] analysis_region_type=roi")
         if not rois:
             QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
             return
+
+        # (#1) REUSE the existing roi_context (-> same step0_dir / zarr_path)
+        # when the analysis region is unchanged since the last Save. Otherwise
+        # create_full_wsi_context / create_roi_context mint a fresh timestamped
+        # roi_id every Save -> a new empty dir -> read_corrected_zarr_state never
+        # finds the prior zarr -> incremental save can never fire. Create a fresh
+        # context only on the first Save or when the mode / ROI bbox changes.
+        self._project_output_dir = self.output_dir
+        sig = self._roi_context_signature(rois)
+        if (getattr(self, "_roi_context", None) is not None
+                and getattr(self, "_roi_context_sig", None) == sig):
+            print(f"[Step0] reusing roi_context roi_id={self._roi_context['roi_id']} "
+                  f"(analysis region unchanged)")
+        else:
+            if self._is_full_wsi_mode():
+                self._roi_context = create_full_wsi_context(
+                    self._project_output_dir, self.loader.shape, self.ome_path)
+            else:
+                self._roi_context = create_roi_context(
+                    self._project_output_dir, rois[0], self.ome_path)
+            self._roi_context_sig = sig
         step0_dir = self._roi_context["step_dirs"]["step0"]
         os.makedirs(step0_dir, exist_ok=True)
         print("[Step0] writing ROI-specific outputs")

@@ -1004,10 +1004,16 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._layer_list.update_mini(self._active, p["weight"], "w")
         self._refresh_preview()
 
-    def _on_fit_view(self):
-        """Explicit user-triggered fit-to-view."""
+    def fit_view(self):
+        """Public: fit the viewer to the current image (request a fit + repaint).
+        Used by the explicit Fit button and by hosts that manage per-patch
+        viewport state (Step0)."""
         self._canvas.request_fit()
         self._refresh_preview()
+
+    def _on_fit_view(self):
+        """Explicit user-triggered fit-to-view."""
+        self.fit_view()
 
     # ── preview ───────────────────────────────────────────────────────
     def _composite_loaded_now(self):

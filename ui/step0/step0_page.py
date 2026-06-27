@@ -168,6 +168,9 @@ class Step0Page(QWidget):
         self._preload_cache = {}      # {patch_idx: {channel_name: 2D float32}}
         self._preload_worker = None
         self._preload_gen = 0
+        # (#4) Patch-LOCAL conditioning viewport (zoom/pan), keyed by patch bbox.
+        # Remap params stay channel-global; only the viewer view is per patch.
+        self._conditioning_patch_viewports = {}
         # v14.2b: single authoritative ROI/context model. Both the Step0 overview
         # and the TissueNavigatorPopup overview are views/editors over this one
         # model; panel _rois/_patches are render caches derived from it.
@@ -2981,6 +2984,10 @@ class Step0Page(QWidget):
     # ══ 切换patch时直接从缓存取 ═══════════════════════════════════════
 
     def _select_patch(self, idx):
+        # (#4 patch-local viewport) Save the LEAVING patch's conditioning zoom/pan
+        # before switching, so returning restores it. Must read it while that
+        # patch is still displayed (before current_patch_idx changes).
+        self._save_conditioning_viewport(self.current_patch_idx)
         self.current_patch_idx = idx
         self._patch_selected_idx = idx
         if self._patch_list.count() > idx:
@@ -2996,8 +3003,47 @@ class Step0Page(QWidget):
         # Keep the conditioning workbench in sync with the active patch (no-op
         # until the workbench is actually in use).
         self._maybe_refresh_conditioning()
+        # (#4) Viewport is patch-LOCAL: restore the entered patch's saved zoom/pan,
+        # or fit-to-view if it was never visited (never inherit the prior patch's
+        # zoom). Remap params (Min/Max/Gamma) stay channel-global, untouched here.
+        self._restore_or_fit_conditioning_viewport()
         # v14.2c: current patch changed → remap the Tissue Navigator view rect.
         self._update_tissue_view_rect()
+
+    # ── conditioning patch-local viewport (zoom/pan) ─────────────────────────
+    def _conditioning_patch_key(self, idx):
+        """Stable per-patch key (the patch bbox) for the viewport cache; None if
+        the index is out of range."""
+        if idx is None or not (0 <= idx < len(self.patches)):
+            return None
+        return tuple(int(v) for v in self.patches[idx])
+
+    def _save_conditioning_viewport(self, idx):
+        """Remember the conditioning viewer's current zoom/pan for patch `idx`."""
+        if not getattr(self, "_conditioning_in_use", False):
+            return
+        wb = getattr(self, "_cond_workbench", None)
+        key = self._conditioning_patch_key(idx)
+        if wb is None or key is None or not wb.has_channel_data():
+            return
+        rect = wb.viewer.get_viewport_rect()
+        if rect is not None:
+            self._conditioning_patch_viewports[key] = rect
+
+    def _restore_or_fit_conditioning_viewport(self):
+        """Restore the current patch's saved zoom/pan, or fit-to-view if it has
+        none (a never-visited patch must not inherit the previous patch's zoom)."""
+        if not getattr(self, "_conditioning_in_use", False):
+            return
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not wb.has_channel_data():
+            return
+        rect = self._conditioning_patch_viewports.get(
+            self._conditioning_patch_key(self.current_patch_idx))
+        if rect is not None:
+            wb.viewer.set_view_region(rect)
+        else:
+            wb.fit_view()
 
     # ══ Params dirty tracking ════════════════════════════════════════
 

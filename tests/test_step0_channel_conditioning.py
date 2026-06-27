@@ -599,3 +599,95 @@ def test_preload_build_config_unchanged(app):
     p._sync_step0_to_workbench()
     cfg = p._cond_workbench.build_config()
     assert set(cfg["channels"]) == {"DAPI", "CD68", "CK19"}
+
+
+# ── step0-conditioning-patch-local-viewport-state (#4) ───────────────────────
+def _page_two_patches(app, bbox0=(0, 50, 0, 50), bbox1=(0, 80, 0, 90)):
+    from block01.ui.step0.step0_page import Step0Page
+    import numpy as np
+
+    class _L:
+        filepath = "/x.ome.tif"
+        shape = (400, 400)
+        ch_map = {"DAPI": 0, "CD68": 1}
+        def channel_names(self):
+            return ["DAPI", "CD68"]
+        def read_region(self, ch, y0, y1, x0, x1, normalize=False):
+            return np.random.rand(y1 - y0, x1 - x0).astype(np.float32)
+
+    p = Step0Page()
+    p.loader = _L()
+    p.nucleus_channel = "DAPI"
+    p._channel_order = ["DAPI", "CD68"]
+    p.patches = [bbox0, bbox1]
+    p.current_patch_idx = 0
+    p._rebuild_patch_buttons()
+    p._sync_step0_to_workbench()          # engage conditioning, paint P0 (fit)
+    return p
+
+
+def _rng(p):
+    return p._cond_workbench.viewer._vb.viewRange()
+
+
+def test_unvisited_patch_does_not_inherit_zoom(app):
+    p = _page_two_patches(app)
+    vb = p._cond_workbench.viewer._vb
+    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)      # zoom P0
+    p0_zoom = vb.viewRange()
+    p._select_patch(1)                                         # P1 never visited
+    p1 = vb.viewRange()
+    # P1 must NOT inherit P0's zoom (it fits to its own image instead)
+    assert not (np.allclose(p0_zoom[0], p1[0]) and np.allclose(p0_zoom[1], p1[1]))
+
+
+def test_revisited_patch_restores_its_viewport(app):
+    p = _page_two_patches(app)
+    vb = p._cond_workbench.viewer._vb
+    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)
+    p0_zoom = vb.viewRange()
+    p._select_patch(1)
+    p._select_patch(0)                                        # return to P0
+    p0_restored = vb.viewRange()
+    assert np.allclose(p0_zoom[0], p0_restored[0]) and np.allclose(p0_zoom[1], p0_restored[1])
+
+
+def test_patches_keep_independent_viewports(app):
+    p = _page_two_patches(app)
+    vb = p._cond_workbench.viewer._vb
+    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)
+    p0z = vb.viewRange()
+    p._select_patch(1)
+    vb.setRange(xRange=(20, 30), yRange=(21, 31), padding=0)   # zoom P1
+    p1z = vb.viewRange()
+    p._select_patch(0)
+    assert np.allclose(_rng(p)[0], p0z[0]) and np.allclose(_rng(p)[1], p0z[1])
+    p._select_patch(1)
+    assert np.allclose(_rng(p)[0], p1z[0]) and np.allclose(_rng(p)[1], p1z[1])
+
+
+def test_remap_params_stay_channel_global_across_patches(app):
+    p = _page_two_patches(app)
+    wb = p._cond_workbench
+    wb._on_active_changed("DAPI")
+    wb._sp_min.setValue(33.0)
+    wb._sp_max.setValue(222.0)
+    wb._on_minmax_changed()
+    p._select_patch(1)
+    p._select_patch(0)
+    # viewport is patch-local but Min/Max are channel-global -> persist
+    assert wb._params["DAPI"]["min"] == 33.0
+    assert wb._params["DAPI"]["max"] == 222.0
+
+
+def test_display_param_change_does_not_reset_current_patch_zoom(app):
+    p = _page_two_patches(app)
+    wb = p._cond_workbench
+    vb = wb.viewer._vb
+    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)
+    before = vb.viewRange()
+    wb._on_active_changed("DAPI")
+    wb._sp_min.setValue(40.0)
+    wb._on_minmax_changed()                # same-patch display change -> no refit
+    after = vb.viewRange()
+    assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])

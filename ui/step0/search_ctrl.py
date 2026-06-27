@@ -1878,12 +1878,14 @@ class BackgroundPreviewWorker(QThread):
 def read_corrected_zarr_state(zarr_path):
     """Inspect an existing corrected_channels.zarr for incremental save.
 
-    Returns (methods, roi_bboxes):
-      methods    : {channel_name: correction_method} for channels present in
-                   EVERY ROI group with a single consistent method (the v14.5a
-                   per-channel correction_method attr). A channel present in only
-                   some groups, or with mixed methods, is omitted (treated as
-                   needing reprocessing).
+    Returns (signatures, roi_bboxes):
+      signatures : {channel_name: (method, param_value)} for channels present in
+                   EVERY ROI group with a single consistent (method, param) — the
+                   v14.5a correction_method attr plus the additive
+                   correction_param_value (None when an older zarr did not stamp
+                   it; a None param compares unequal to the current int param, so
+                   such a channel is safely reprocessed). A channel present in
+                   only some groups, or with a mixed signature, is omitted.
       roi_bboxes : sorted list of each ROI group's bbox_fullres tuple — the ROI
                    signature used to decide whether the cached zarr still matches
                    the current ROI set.
@@ -1907,19 +1909,22 @@ def read_corrected_zarr_state(zarr_path):
             roi_bboxes.append(tuple(int(v) for v in bbox))
         gm = {}
         for ch in grp.array_keys():
-            m = grp[ch].attrs.get("correction_method")
-            if m:
-                gm[str(ch)] = str(m)
+            a = grp[ch].attrs
+            m = a.get("correction_method")
+            if not m:
+                continue
+            pv = a.get("correction_param_value")
+            gm[str(ch)] = (str(m), None if pv is None else int(pv))
         per_group.append(gm)
     common = set(per_group[0])
     for gm in per_group[1:]:
         common &= set(gm)
-    methods = {}
+    signatures = {}
     for ch in common:
-        ms = {gm[ch] for gm in per_group}
-        if len(ms) == 1:
-            methods[ch] = next(iter(ms))
-    return methods, sorted(roi_bboxes)
+        sigs = {gm[ch] for gm in per_group}
+        if len(sigs) == 1:
+            signatures[ch] = next(iter(sigs))
+    return signatures, sorted(roi_bboxes)
 
 
 class WsiCorrectionWorker(QThread):
@@ -2116,6 +2121,9 @@ class WsiCorrectionWorker(QThread):
                         correction_method=method,
                         roi_name=info["roi_name"],
                         roi_bbox_fullres=info["bbox"],
+                        correction_param_name=(
+                            "tophat_radius" if method == "tophat" else "cucim_sigma"),
+                        correction_param_value=int(param),
                     )
 
                     for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):

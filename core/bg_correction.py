@@ -292,7 +292,9 @@ CORRECTED_CHANNEL_INTENSITY_SPACE = "background_corrected_marker_image"
 
 def stamp_corrected_channel_identity(ds, channel_name, channel_index=None,
                                      correction_method="unknown", roi_name=None,
-                                     roi_bbox_fullres=None):
+                                     roi_bbox_fullres=None,
+                                     correction_param_name=None,
+                                     correction_param_value=None):
     """Stamp per-channel source identity onto a corrected channel zarr array.
 
     `ds` is an open writable zarr ARRAY (already created with its data). This
@@ -300,6 +302,11 @@ def stamp_corrected_channel_identity(ds, channel_name, channel_index=None,
     shape. `channel_index` may be None when it cannot be reliably derived; the
     stable channel_name / channel_key / shape / dtype are always recorded.
     Never marks the array step2_ready.
+
+    `correction_param_name` / `correction_param_value` record the method-specific
+    parameter (tophat -> tophat_radius, cucim -> cucim_sigma) so an incremental
+    Save can detect a PARAMETER change, not just a method-name change. These are
+    ADDITIVE fields — existing v14.5a attrs are unchanged.
     """
     ds.attrs["source_kind"] = "corrected_zarr"
     ds.attrs["channel_name"] = str(channel_name)
@@ -314,6 +321,10 @@ def stamp_corrected_channel_identity(ds, channel_name, channel_index=None,
         ds.attrs["roi_name"] = str(roi_name)
     if roi_bbox_fullres is not None:
         ds.attrs["roi_bbox_fullres"] = [int(v) for v in roi_bbox_fullres]
+    if correction_param_name is not None:
+        ds.attrs["correction_param_name"] = str(correction_param_name)
+    if correction_param_value is not None:
+        ds.attrs["correction_param_value"] = int(correction_param_value)
 
 
 def corrected_zarr_report(path):

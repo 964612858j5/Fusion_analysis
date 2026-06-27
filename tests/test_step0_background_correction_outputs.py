@@ -180,8 +180,9 @@ def test_read_corrected_zarr_state_methods_and_bbox(app, tmp_path):
     rois = [{"name": "ROI_1", "bbox_fullres": [0, 80, 0, 100]}]
     _run_worker(str(tmp_path), {"CD68": "tophat", "CK19": "cucim"}, rois)
     zp = str(tmp_path / "corrected_channels.zarr")
-    methods, bboxes = read_corrected_zarr_state(zp)
-    assert methods == {"CD68": "tophat", "CK19": "cucim"}
+    sigs, bboxes = read_corrected_zarr_state(zp)
+    # signature = (method, method-specific param); _run_worker uses radius 15 / sigma 50
+    assert sigs == {"CD68": ("tophat", 15), "CK19": ("cucim", 50)}
     assert bboxes == [(0, 80, 0, 100)]
 
 
@@ -202,8 +203,8 @@ def test_incremental_adds_new_keeps_old(app, tmp_path):
     zp = out["path"]
     arrays = sorted(corrected_zarr_report(zp)["channel_arrays"])
     assert arrays == ["ROI_1/CD68", "ROI_1/Ki67"]      # old retained + new added
-    methods, _ = read_corrected_zarr_state(zp)
-    assert methods == {"CD68": "tophat", "Ki67": "tophat"}
+    sigs, _ = read_corrected_zarr_state(zp)
+    assert sigs == {"CD68": ("tophat", 15), "Ki67": ("tophat", 15)}
     # emitted decisions describe the FULL merged zarr (loader routes all)
     assert set(out["dec"]) == {"CD68", "Ki67"}
 
@@ -216,9 +217,9 @@ def test_incremental_method_change_reprocesses_only_that_channel(app, tmp_path):
     _run_worker(str(tmp_path),
                 {"CD68": "cucim", "Ki67": "tophat"}, rois,
                 process_channels={"CD68"}, incremental=True)
-    methods, _ = read_corrected_zarr_state(str(tmp_path / "corrected_channels.zarr"))
-    assert methods["CD68"] == "cucim"          # changed
-    assert methods["Ki67"] == "tophat"         # untouched
+    sigs, _ = read_corrected_zarr_state(str(tmp_path / "corrected_channels.zarr"))
+    assert sigs["CD68"] == ("cucim", 50)       # method changed -> reprocessed
+    assert sigs["Ki67"] == ("tophat", 15)      # untouched
 
 
 def test_incremental_no_channels_emits_merged_state(app, tmp_path):
@@ -284,10 +285,11 @@ def test_step0_all_skipped_emits_handoff_without_worker(app, tmp_path, monkeypat
     p._analysis_region_mode = "full_wsi"          # bbox = [0, 80, 0, 100]
     p._channel_order = ["CD68", "Ki67"]
     p._channel_decisions = {"CD68": "tophat", "Ki67": "tophat"}
+    p._tophat_slider.setValue(15)                 # deterministic tophat_radius
 
-    # the corrected zarr already holds both channels with the SAME methods
+    # the corrected zarr already holds both channels with the SAME (method, param)
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
-                        lambda zp: ({"CD68": "tophat", "Ki67": "tophat"},
+                        lambda zp: ({"CD68": ("tophat", 15), "Ki67": ("tophat", 15)},
                                     [(0, 80, 0, 100)]))
     # a worker must NOT be constructed in the all-skip path
     def _boom(*a, **k):
@@ -423,3 +425,167 @@ def test_composite_zoom_preserved_across_different_shape_patches(app):
     after = vb.viewRange()
     assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])
     assert wb._canvas._prev_shape == (40, 50)
+
+
+# ── step0-bg incremental dirty-set: method + param signature dispatch ─────────
+def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
+    """Drive _save_and_continue past the dirty-set decision, capturing the
+    WsiCorrectionWorker's process_channels (or None if no worker started).
+    existing_sigs is what read_corrected_zarr_state returns for the zarr."""
+    import block01.ui.step0.step0_page as sp
+    from block01.ui.step0.step0_page import Step0Page
+    from PyQt5 import QtCore
+
+    class _L:
+        shape = (80, 100)
+        filepath = "/t.ome.tif"
+        ch_map = {"CD68": 0, "CK19": 1, "Ki67": 2}
+        def channel_names(self):
+            return list(self.ch_map.keys())
+        def set_correction_config(self, c):
+            pass
+        def set_corrected_zarr_store(self, p, d):
+            pass
+
+    cap = {"process": None, "started": False}
+
+    class _FakeWorker(QtCore.QObject):
+        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
+        finished = QtCore.pyqtSignal(str, dict)
+        canceled = QtCore.pyqtSignal(str)
+        error = QtCore.pyqtSignal(str)
+        def __init__(self, loader, out, cfg, rois=None, parent=None,
+                     process_channels=None, incremental=False):
+            super().__init__(parent)
+            cap["process"] = process_channels
+            cap["incremental"] = incremental
+        def start(self):
+            cap["started"] = True
+        def stop_after_current_channel(self):
+            pass
+
+    class _FakeDialog(QtCore.QObject):
+        cancel_requested = QtCore.pyqtSignal()
+        def __init__(self, parent=None):
+            super().__init__(parent)
+        def exec_(self):
+            return 0
+        def allow_close(self):
+            pass
+        def accept(self):
+            pass
+        def set_progress(self, *a, **k):
+            pass
+
+    p = Step0Page()
+    p.loader = _L()
+    p.output_dir = str(tmp_path)
+    p.ome_path = "/t.ome.tif"
+    p.patches = [(0, 20, 0, 20)]
+    p._analysis_region_mode = "full_wsi"
+    p._channel_order = ["CD68", "CK19", "Ki67"]
+    p._channel_decisions = {"CD68": "tophat", "Ki67": "tophat"}
+    p._tophat_slider.setValue(15)
+    p._cucim_slider.setValue(50)
+
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda zp: (existing_sigs, [(0, 80, 0, 100)]))
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _FakeWorker)
+    monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _FakeDialog)
+    monkeypatch.setattr(Step0Page, "_emit_complete", lambda self, *a, **k: None)
+    monkeypatch.setattr(Step0Page, "_ensure_empty_corrected_zarr",
+                        lambda self, *a, **k: None)
+    p._save_and_continue()
+    return cap, p
+
+
+def test_dispatch_new_channel_only(app, tmp_path, monkeypatch):
+    # CD68 already saved (tophat,15); Ki67 is newly assigned -> only Ki67
+    cap, _ = _step0_dispatch_capture(
+        tmp_path, monkeypatch, {"CD68": ("tophat", 15)})
+    assert cap["started"] is True
+    assert cap["process"] == {"Ki67"}
+
+
+def test_dispatch_param_change_reprocesses_channel(app, tmp_path, monkeypatch):
+    # both saved as tophat, but CD68 was saved with radius 9 (param changed -> 15)
+    cap, _ = _step0_dispatch_capture(
+        tmp_path, monkeypatch,
+        {"CD68": ("tophat", 9), "Ki67": ("tophat", 15)})
+    assert cap["started"] is True
+    assert cap["process"] == {"CD68"}        # only the param-changed channel
+
+
+def test_dispatch_method_change_reprocesses_channel(app, tmp_path, monkeypatch):
+    # CD68 saved cucim; now assigned tophat -> method changed -> reprocess CD68
+    cap, _ = _step0_dispatch_capture(
+        tmp_path, monkeypatch,
+        {"CD68": ("cucim", 50), "Ki67": ("tophat", 15)})
+    assert cap["process"] == {"CD68"}
+
+
+def test_dispatch_all_unchanged_starts_no_worker(app, tmp_path, monkeypatch):
+    cap, _ = _step0_dispatch_capture(
+        tmp_path, monkeypatch,
+        {"CD68": ("tophat", 15), "Ki67": ("tophat", 15)})
+    assert cap["started"] is False           # nothing to process -> no dialog/worker
+    assert cap["process"] is None
+
+
+def test_dispatch_empty_zarr_reprocesses_all(app, tmp_path, monkeypatch):
+    # no existing corrected state (missing/empty zarr, or ROI signature mismatch
+    # clears existing_sigs) -> every assigned channel is processed.
+    cap, _ = _step0_dispatch_capture(tmp_path, monkeypatch, {})
+    assert cap["started"] is True
+    assert cap["process"] == {"CD68", "Ki67"}
+
+
+def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
+    import block01.ui.step0.step0_page as sp
+    from block01.ui.step0.step0_page import Step0Page
+    from PyQt5 import QtCore
+
+    class _L:
+        shape = (80, 100); filepath = "/t.ome.tif"
+        ch_map = {"CD68": 0, "Ki67": 1}
+        def channel_names(self): return list(self.ch_map.keys())
+        def set_correction_config(self, c): pass
+        def set_corrected_zarr_store(self, p, d): pass
+
+    cap = {"process": None}
+
+    class _FW(QtCore.QObject):
+        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
+        finished = QtCore.pyqtSignal(str, dict)
+        canceled = QtCore.pyqtSignal(str)
+        error = QtCore.pyqtSignal(str)
+        def __init__(self, *a, process_channels=None, incremental=False, **k):
+            super().__init__()
+            cap["process"] = process_channels
+            cap["incremental"] = incremental
+        def start(self): pass
+        def stop_after_current_channel(self): pass
+
+    class _FD(QtCore.QObject):
+        cancel_requested = QtCore.pyqtSignal()
+        def exec_(self): return 0
+        def allow_close(self): pass
+        def accept(self): pass
+        def set_progress(self, *a, **k): pass
+
+    p = Step0Page()
+    p.loader = _L(); p.output_dir = str(tmp_path); p.ome_path = "/t.ome.tif"
+    p.patches = [(0, 20, 0, 20)]; p._analysis_region_mode = "full_wsi"
+    p._channel_order = ["CD68", "Ki67"]
+    p._channel_decisions = {"CD68": "tophat", "Ki67": "tophat"}
+    p._tophat_slider.setValue(15)
+    # zarr has both channels but a DIFFERENT ROI bbox -> signature mismatch
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda zp: ({"CD68": ("tophat", 15), "Ki67": ("tophat", 15)},
+                                    [(0, 999, 0, 999)]))
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _FW)
+    monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _FD)
+    monkeypatch.setattr(Step0Page, "_emit_complete", lambda self, *a, **k: None)
+    p._save_and_continue()
+    assert cap["process"] == {"CD68", "Ki67"}    # ROI changed -> no unsafe skip
+    assert cap["incremental"] is False           # not incremental on ROI mismatch

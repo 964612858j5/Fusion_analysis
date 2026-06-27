@@ -3191,21 +3191,29 @@ class Step0Page(QWidget):
             return
 
         # Incremental save: skip channels already in the corrected zarr with the
-        # same method, when the ROI set is unchanged. Process only new/changed
-        # channels; merge into (not overwrite) the existing zarr.
-        existing_methods, existing_bboxes = read_corrected_zarr_state(zarr_path)
+        # same (method, method-specific parameter), when the ROI set is unchanged.
+        # Process only new/changed channels; merge into (not overwrite) the zarr.
+        mp = config.get("method_params") or {}
+        def _cur_sig(method):
+            pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
+            pdefault = (TOPHAT_RADIUS_DEFAULT if method == "tophat"
+                        else CUCIM_SIGMA_DEFAULT)
+            return (method, int(mp.get(pname, pdefault)))
+        current_sigs = {ch: _cur_sig(m) for ch, m in corrected.items()}
+
+        existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)
         current_bboxes = sorted(
             tuple(int(v) for v in (r.get("bbox_fullres") or []))
             for r in rois if len(r.get("bbox_fullres") or []) == 4)
-        rois_match = bool(existing_methods) and existing_bboxes == current_bboxes
+        rois_match = bool(existing_sigs) and existing_bboxes == current_bboxes
         if not rois_match:
-            existing_methods = {}        # no zarr / ROI set changed -> reprocess all
+            existing_sigs = {}           # no zarr / ROI set changed -> reprocess all
         to_process = {ch: m for ch, m in corrected.items()
-                      if existing_methods.get(ch) != m}
+                      if existing_sigs.get(ch) != current_sigs[ch]}
         for ch, m in corrected.items():
             if ch not in to_process:
                 print(f"[Step0] incremental save: skipping channel={ch} "
-                      f"(already corrected with {m})")
+                      f"(already corrected with {current_sigs[ch]})")
 
         if not to_process:
             # Everything already saved with the same method -> no reprocessing.

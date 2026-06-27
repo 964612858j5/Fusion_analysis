@@ -1875,19 +1875,73 @@ class BackgroundPreviewWorker(QThread):
                 self.error.emit(self.request_id, traceback.format_exc())
 
 
+def read_corrected_zarr_state(zarr_path):
+    """Inspect an existing corrected_channels.zarr for incremental save.
+
+    Returns (methods, roi_bboxes):
+      methods    : {channel_name: correction_method} for channels present in
+                   EVERY ROI group with a single consistent method (the v14.5a
+                   per-channel correction_method attr). A channel present in only
+                   some groups, or with mixed methods, is omitted (treated as
+                   needing reprocessing).
+      roi_bboxes : sorted list of each ROI group's bbox_fullres tuple — the ROI
+                   signature used to decide whether the cached zarr still matches
+                   the current ROI set.
+    Missing / unreadable zarr -> ({}, []).
+    """
+    if not zarr_path or not os.path.isdir(zarr_path):
+        return {}, []
+    try:
+        root = zarr.open_group(zarr_path, mode="r")
+    except Exception:
+        return {}, []
+    groups = list(root.group_keys())
+    if not groups:
+        return {}, []
+    roi_bboxes = []
+    per_group = []
+    for g in groups:
+        grp = root[g]
+        bbox = list(grp.attrs.get("bbox_fullres") or [])
+        if len(bbox) == 4:
+            roi_bboxes.append(tuple(int(v) for v in bbox))
+        gm = {}
+        for ch in grp.array_keys():
+            m = grp[ch].attrs.get("correction_method")
+            if m:
+                gm[str(ch)] = str(m)
+        per_group.append(gm)
+    common = set(per_group[0])
+    for gm in per_group[1:]:
+        common &= set(gm)
+    methods = {}
+    for ch in common:
+        ms = {gm[ch] for gm in per_group}
+        if len(ms) == 1:
+            methods[ch] = next(iter(ms))
+    return methods, sorted(roi_bboxes)
+
+
 class WsiCorrectionWorker(QThread):
     progress = pyqtSignal(int, int, int, int, str, str, int)
     finished = pyqtSignal(str, dict)
     canceled = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, loader, output_dir, correction_config, rois=None, parent=None):
+    def __init__(self, loader, output_dir, correction_config, rois=None, parent=None,
+                 process_channels=None, incremental=False):
         super().__init__(parent)
         self.loader = loader
         self.output_dir = output_dir
         self.correction_config = _normalize_correction_config(correction_config) or {}
         self.rois = list(rois or [])
         self._cancel_requested = False
+        # Incremental save: process only `process_channels` (None = all assigned);
+        # when `incremental`, merge into the existing zarr (keep already-corrected
+        # channels + ROI groups) instead of wiping and rewriting it.
+        self._process_channels = (None if process_channels is None
+                                  else set(process_channels))
+        self._incremental = bool(incremental)
 
     def stop_after_current_channel(self):
         self._cancel_requested = True
@@ -1923,6 +1977,22 @@ class WsiCorrectionWorker(QThread):
 
             decisions = dict((self.correction_config.get("channel_decisions") or {}))
             params = dict((self.correction_config.get("method_params") or {}))
+            # All channels desired-corrected (the merged end-state of the zarr).
+            desired = {
+                ch: method for ch, method in decisions.items()
+                if method in {"tophat", "cucim"} and ch in self.loader.ch_map
+            }
+            # Incremental: process only the requested subset (new/changed); the
+            # rest are already in the zarr with the same method and are skipped.
+            if self._process_channels is None:
+                process = dict(desired)
+            else:
+                process = {ch: m for ch, m in desired.items()
+                           if ch in self._process_channels}
+            for ch in desired:
+                if ch not in process:
+                    print(f"[WsiCorrectionWorker] skipping channel={ch} "
+                          f"(already corrected with {desired[ch]})")
             channels = [
                 (
                     ch,
@@ -1934,27 +2004,34 @@ class WsiCorrectionWorker(QThread):
                         )
                     ),
                 )
-                for ch, method in decisions.items()
-                if method in {"tophat", "cucim"} and ch in self.loader.ch_map
+                for ch, method in process.items()
             ]
             zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")
 
-            if os.path.exists(zarr_path):
+            incremental = self._incremental and os.path.isdir(zarr_path)
+            if not incremental and os.path.exists(zarr_path):
                 shutil.rmtree(zarr_path, ignore_errors=True)
 
             if not channels:
-                self.finished.emit("", {})
+                # Nothing to (re)compute. In incremental mode the zarr already
+                # holds every desired channel -> report the merged state; in fresh
+                # mode there is genuinely nothing.
+                self.finished.emit(zarr_path if incremental else "",
+                                   dict(desired) if incremental else {})
                 return
 
             os.makedirs(self.output_dir, exist_ok=True)
-            root = zarr.open_group(zarr_path, mode="w")
+            root = zarr.open_group(zarr_path, mode="a" if incremental else "w")
             root.attrs["mode"] = "roi_only"
             root.attrs["source_ome"] = os.path.abspath(getattr(self.loader, "filepath", "") or "")
             root.attrs["output_dir"] = os.path.abspath(self.output_dir)
             root.attrs["created_by"] = "Step0"
             root.attrs["roi_names"] = [str(r.get("name") or f"ROI_{i}") for i, r in enumerate(rois, start=1)]
             root.attrs["correction_config"] = self.correction_config
-            corrected_decisions = {}
+            # Seed with the channels we are KEEPING (already in the zarr, same
+            # method) so the emitted decisions describe the full merged zarr.
+            corrected_decisions = {ch: m for ch, m in desired.items()
+                                   if ch not in process}
             full_h, full_w = self.loader.shape
             roi_infos = []
             used_group_names = set()
@@ -1999,7 +2076,12 @@ class WsiCorrectionWorker(QThread):
             progress_idx = 0
 
             for info in roi_infos:
-                group = root.create_group(info["group_name"], overwrite=True)
+                # Incremental: reuse the existing group (keep its already-corrected
+                # channel datasets); fresh: create/overwrite a clean group.
+                if incremental and info["group_name"] in root:
+                    group = root[info["group_name"]]
+                else:
+                    group = root.create_group(info["group_name"], overwrite=True)
                 group.attrs["roi_name"] = info["roi_name"]
                 group.attrs["bbox_fullres"] = info["bbox"]
                 group.attrs["shape"] = [int(roi_h), int(roi_w)]
@@ -2070,7 +2152,11 @@ class WsiCorrectionWorker(QThread):
                     corrected_decisions[ch_name] = method
                     completed_units += len(tiles)
                     if self._cancel_requested:
-                        shutil.rmtree(zarr_path, ignore_errors=True)
+                        # Fresh save: drop the whole partial zarr. Incremental:
+                        # keep the prior (already-corrected) data intact — only the
+                        # in-progress channel is partial; do not delete everything.
+                        if not incremental:
+                            shutil.rmtree(zarr_path, ignore_errors=True)
                         self.canceled.emit(zarr_path)
                         return
 

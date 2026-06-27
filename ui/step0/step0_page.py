@@ -53,6 +53,7 @@ from .search_ctrl import (
     SearchCtrlPanel, BatchProcessWorker,
     WsiCorrectionWorker, BackgroundPreviewWorker,
     _WsiCorrectionProgressDialog,
+    read_corrected_zarr_state,
 )
 from ...utils.roi_project import (
     create_roi_context,
@@ -3164,11 +3165,38 @@ class Step0Page(QWidget):
             self._emit_complete(config, zarr_path, {})
             return
 
+        # Incremental save: skip channels already in the corrected zarr with the
+        # same method, when the ROI set is unchanged. Process only new/changed
+        # channels; merge into (not overwrite) the existing zarr.
+        existing_methods, existing_bboxes = read_corrected_zarr_state(zarr_path)
+        current_bboxes = sorted(
+            tuple(int(v) for v in (r.get("bbox_fullres") or []))
+            for r in rois if len(r.get("bbox_fullres") or []) == 4)
+        rois_match = bool(existing_methods) and existing_bboxes == current_bboxes
+        if not rois_match:
+            existing_methods = {}        # no zarr / ROI set changed -> reprocess all
+        to_process = {ch: m for ch, m in corrected.items()
+                      if existing_methods.get(ch) != m}
+        for ch, m in corrected.items():
+            if ch not in to_process:
+                print(f"[Step0] incremental save: skipping channel={ch} "
+                      f"(already corrected with {m})")
+
+        if not to_process:
+            # Everything already saved with the same method -> no reprocessing.
+            # The zarr already holds every channel; just (re)wire the handoff.
+            self.loader.set_corrected_zarr_store(zarr_path, corrected)
+            self._emit_complete(config, zarr_path, corrected)
+            return
+
+        # Hot-swap after the worker should touch ONLY the channels we reprocess.
+        self._incremental_processed = set(to_process)
         self._btn_continue.setEnabled(False)
         self._btn_load.setEnabled(False)
         self._wsi_dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_worker = WsiCorrectionWorker(
-            self.loader, step0_dir, config, rois=rois, parent=self
+            self.loader, step0_dir, config, rois=rois, parent=self,
+            process_channels=set(to_process), incremental=rois_match,
         )
         self._wsi_worker.progress.connect(self._on_wsi_progress)
         self._wsi_worker.finished.connect(lambda path, decisions: self._on_wsi_finished(config, path, decisions))
@@ -3193,20 +3221,27 @@ class Step0Page(QWidget):
         self.loader.set_corrected_zarr_store(zarr_path, decisions)
         # Hot-swap: corrected channels now read corrected pixels from the loader;
         # replace their preload-cache entries so the conditioning overlay shows
-        # the corrected data (and refresh if conditioning is engaged).
-        self._hotswap_corrected(decisions)
+        # the corrected data (and refresh if conditioning is engaged). On an
+        # incremental save only the channels actually REprocessed this run need a
+        # re-read — skipped channels were already corrected in the cache.
+        only = getattr(self, "_incremental_processed", None)
+        self._incremental_processed = None
+        self._hotswap_corrected(decisions, only=only)
         self._emit_complete(config, zarr_path, decisions)
 
-    def _hotswap_corrected(self, decisions):
+    def _hotswap_corrected(self, decisions, only=None):
         """Re-read the corrected channels (per patch) into the preload cache.
 
         After set_corrected_zarr_store, loader.read_region returns CORRECTED
         pixels for the corrected channels; uncorrected channels are untouched.
+        `only` (a set) restricts the re-read to the channels reprocessed this run
+        (incremental save); None re-reads all corrected channels.
         Synchronous (few channels × few patches)."""
         if not decisions or not self.loader or not self.patches:
             return
         corrected = [ch for ch, m in decisions.items()
-                     if str(m).lower() not in ("", "original", "none")]
+                     if str(m).lower() not in ("", "original", "none")
+                     and (only is None or ch in only)]
         if not corrected:
             return
         for pidx, bbox in enumerate(self.patches):

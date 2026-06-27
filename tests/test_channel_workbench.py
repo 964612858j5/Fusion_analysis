@@ -1499,3 +1499,91 @@ def test_different_shape_switch_refits(app):
     # shape changed -> refit (range differs)
     assert not (np.allclose(before[0], after[0]) and np.allclose(before[1], after[1]))
     assert wb._canvas._prev_shape == (40, 40)
+
+
+# ── step0-channel-search: QuPath-style channel filter (display-only) ─────────
+def _search_wb(app, names=("DAPI", "CD68", "CD45", "CK19", "PanCK")):
+    wb = _mc_wb(app)
+    rng = np.random.default_rng(0)
+    imgs = {n: rng.random((16, 16)).astype(np.float32) for n in names}
+    wb.set_channel_images(imgs, colors={"DAPI": "#3366ff"}, active="DAPI",
+                          visible=list(names))
+    return wb, list(names)
+
+
+def _visible_rows(wb):
+    ll = wb._layer_list
+    from PyQt5.QtCore import Qt
+    return [str(ll._list.item(i).data(Qt.UserRole))
+            for i in range(ll._list.count()) if not ll._list.item(i).isHidden()]
+
+
+def test_search_box_exists_only_in_multichannel(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    assert hasattr(ChannelWorkbench(multichannel_overlay=True), "_search")
+    assert not hasattr(ChannelWorkbench(), "_search")
+
+
+def test_search_filters_by_substring_case_insensitive(app):
+    wb, names = _search_wb(app)
+    wb._search.setText("cd")                 # lowercase -> matches CD68, CD45
+    assert sorted(_visible_rows(wb)) == ["CD45", "CD68"]
+    wb._search.setText("CK")                 # CK19, PanCK both contain "CK"
+    assert sorted(_visible_rows(wb)) == ["CK19", "PanCK"]
+
+
+def test_search_clear_shows_all(app):
+    wb, names = _search_wb(app)
+    wb._search.setText("cd")
+    wb._search.setText("")
+    assert sorted(_visible_rows(wb)) == sorted(names)
+
+
+def test_search_is_display_only_model_untouched(app):
+    wb, names = _search_wb(app)
+    wb._search.setText("zzz")                # nothing matches -> all rows hidden
+    assert _visible_rows(wb) == []
+    # model + composite untouched
+    assert wb._names == names
+    assert all(wb._visible.values())
+    assert wb._canvas._composite is not None  # overlay still rendered
+
+
+def test_filtered_out_checked_channel_stays_in_composite(app):
+    wb, names = _search_wb(app)
+    # CD68 is checked/visible; filter it OUT of the list
+    assert wb._visible["CD68"] is True
+    wb._search.setText("DAPI")               # CD68 row hidden
+    assert "CD68" not in _visible_rows(wb)
+    # but the overlay still composites CD68 (visible in model)
+    wb._recomposite_overlay()
+    assert wb._visible["CD68"] is True
+    assert wb._canvas._composite is not None
+
+
+def test_all_toggle_affects_filtered_out_channels(app):
+    wb, names = _search_wb(app)
+    wb._search.setText("DAPI")               # only DAPI row shown
+    wb._on_all_toggled(False)                # All toggles EVERY channel
+    assert not any(wb._visible.values())     # incl the filtered-out ones
+    wb._on_all_toggled(True)
+    assert all(wb._visible.values())
+
+
+def test_search_build_config_unchanged(app):
+    wb, names = _search_wb(app)
+    before = set(wb.build_config()["channels"])
+    wb._search.setText("cd")
+    wb._search.setText("")
+    assert set(wb.build_config()["channels"]) == before == set(names)
+
+
+def test_search_filter_persists_across_patch_switch(app):
+    wb, names = _search_wb(app)
+    wb._search.setText("cd")
+    # patch switch rebuilds the list; the filter should re-apply
+    rng = np.random.default_rng(1)
+    imgs = {n: rng.random((16, 16)).astype(np.float32) for n in names}
+    wb.set_channel_images(imgs, colors={"DAPI": "#3366ff"}, active="DAPI",
+                          visible=list(names))
+    assert sorted(_visible_rows(wb)) == ["CD45", "CD68"]

@@ -170,6 +170,18 @@ class ChannelLayerList(QtWidgets.QWidget):
         item = self._list.currentItem()
         return item.data(Qt.UserRole) if item else None
 
+    def filter_rows(self, text):
+        """Show only rows whose channel name contains `text` (case-insensitive).
+
+        Display-only: rows are hidden via QListWidgetItem.setHidden — the model
+        (names/colors/visibility) is untouched. Empty text shows every row.
+        """
+        needle = (text or "").strip().lower()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            name = str(item.data(Qt.UserRole) or "").lower()
+            item.setHidden(needle not in name)
+
     def update_mini(self, name, value, label="w"):
         row = self._rows.get(name)
         if row:

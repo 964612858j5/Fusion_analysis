@@ -150,16 +150,29 @@ class ChannelWorkbench(QtWidgets.QWidget):
         left_l = QtWidgets.QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
         left_l.setSpacing(4)
-        # (#3 all-toggle) A single "All" checkbox above the list — multichannel
-        # overlay only (Step0). Checks/unchecks every channel at once; reflects
-        # all / partial / none via a tristate. Single-channel hosts don't need it.
+        # (#3 all-toggle + channel-search) Above the list, multichannel overlay
+        # only (Step0): an "All" tristate checkbox (check/uncheck every channel)
+        # and a QuPath-style search box that filters which channel ROWS are shown
+        # (display-only — never touches the model or the overlay). Single-channel
+        # hosts don't need either.
         if self._multichannel_overlay:
+            all_row = QtWidgets.QHBoxLayout()
+            all_row.setSpacing(6)
             self._chk_all = QtWidgets.QCheckBox("All")
             self._chk_all.setTristate(True)
             self._chk_all.setToolTip(
                 "Show all channels / hide all channels in the overlay.")
             self._chk_all.clicked.connect(self._on_all_toggled)
-            left_l.addWidget(self._chk_all)
+            all_row.addWidget(self._chk_all)
+            self._search = QtWidgets.QLineEdit()
+            self._search.setPlaceholderText("Search channels…")
+            self._search.setClearButtonEnabled(True)
+            self._search.setToolTip(
+                "Filter the channel list by name (case-insensitive). Does not "
+                "change which channels are shown in the overlay.")
+            self._search.textChanged.connect(self._on_channel_filter)
+            all_row.addWidget(self._search, stretch=1)
+            left_l.addLayout(all_row)
 
         self._layer_list = ChannelLayerList()
         self._layer_list.active_changed.connect(self._on_active_changed)
@@ -756,6 +769,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 "mini_label": "w",
             })
         self._layer_list.set_channels(rows)
+        self._apply_channel_filter()        # keep the search filter across rebuilds
 
     def _ensure_loaded(self, name):
         """Lazily fetch a channel's pixels via the provider if not yet loaded.
@@ -852,6 +866,19 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._chk_all.blockSignals(True)
         self._chk_all.setCheckState(state)
         self._chk_all.blockSignals(False)
+
+    # ── channel search filter (display-only) ──────────────────────────
+    def _on_channel_filter(self, text):
+        """Filter which channel ROWS are shown by name substring. Display-only:
+        the model + the overlay (visible channels) are untouched."""
+        self._layer_list.filter_rows(text)
+
+    def _apply_channel_filter(self):
+        """Re-apply the active search filter (e.g. after the list is rebuilt on a
+        patch switch) so the filter persists across patch switches."""
+        search = getattr(self, "_search", None)
+        if search is not None:
+            self._layer_list.filter_rows(search.text())
 
     def _on_color_clicked(self, name):
         if name not in self._colors:

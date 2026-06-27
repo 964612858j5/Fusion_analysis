@@ -1355,3 +1355,147 @@ def test_progressive_load_build_config_unchanged(app):
             break
         wb._on_progressive_tick()
     assert set(wb.build_config()["channels"]) == before == set(names)
+
+
+# ── step0-persist-params-and-zoom (#2 global params, #4 zoom across switches) ─
+def _mc_wb(app):
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    return ChannelWorkbench(show_reference_bar=False, show_enabled_checkbox=False,
+                            multichannel_overlay=True)
+
+
+def _patch_imgs(seed, scale, names=("DAPI", "CD68", "CK19"), shape=(20, 20)):
+    rng = np.random.default_rng(seed)
+    return {n: (rng.random(shape).astype(np.float32) * scale) for n in names}
+
+
+def test_adjusted_params_persist_across_patch_switch(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), colors={"DAPI": "#3366ff"},
+                          active="DAPI", visible=["DAPI", "CD68", "CK19"])
+    wb._on_active_changed("DAPI")
+    wb._sp_min.setValue(111.0)
+    wb._sp_max.setValue(222.0)
+    wb._on_minmax_changed()
+    assert wb._user_adjusted.get("DAPI") is True
+    # switch patch (same channel names, very different pixels)
+    wb.set_channel_images(_patch_imgs(1, 50000.0), colors={"DAPI": "#3366ff"},
+                          active="DAPI", visible=["DAPI", "CD68", "CK19"])
+    assert wb._params["DAPI"]["min"] == 111.0
+    assert wb._params["DAPI"]["max"] == 222.0
+    # switch back -> still sticks
+    wb.set_channel_images(_patch_imgs(0, 1000.0), colors={"DAPI": "#3366ff"},
+                          active="DAPI", visible=["DAPI"])
+    assert wb._params["DAPI"]["min"] == 111.0
+
+
+def test_unadjusted_channel_reseeds_each_patch(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI",
+                          visible=["DAPI", "CD68", "CK19"])
+    ck19_before = wb._params["CK19"]["min"]
+    wb.set_channel_images(_patch_imgs(1, 50000.0), active="DAPI",
+                          visible=["DAPI", "CD68", "CK19"])
+    # never adjusted -> re-seeded from the new patch's pixels (min changes)
+    assert wb._params["CK19"]["min"] != ck19_before
+
+
+def test_auto_sets_adjusted_flag_and_sticks(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI",
+                          visible=["DAPI", "CD68", "CK19"])
+    wb._on_active_changed("CK19")
+    wb._on_auto()
+    assert wb._user_adjusted.get("CK19") is True
+    auto_min = wb._params["CK19"]["min"]
+    wb.set_channel_images(_patch_imgs(1, 50000.0), active="DAPI",
+                          visible=["DAPI", "CD68", "CK19"])
+    assert wb._params["CK19"]["min"] == auto_min   # Auto value persists
+
+
+def test_new_dataset_clears_adjusted_flags(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI", visible=["DAPI"])
+    wb._on_active_changed("DAPI")
+    wb._sp_min.setValue(5.0)
+    wb._on_minmax_changed()
+    assert wb._user_adjusted != {}
+    # a different channel set = new dataset -> flags drop
+    wb.set_channel_images({"AAA": np.ones((8, 8), np.float32),
+                           "BBB": np.ones((8, 8), np.float32)}, active="AAA")
+    assert wb._user_adjusted == {}
+
+
+def test_build_config_reflects_user_params_after_switch(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI", visible=["DAPI"])
+    wb._on_active_changed("DAPI")
+    wb._sp_min.setValue(33.0)
+    wb._sp_max.setValue(44.0)
+    wb._on_minmax_changed()
+    wb.set_channel_images(_patch_imgs(1, 9999.0), active="DAPI", visible=["DAPI"])
+    ch = wb.build_config()["channels"]["DAPI"]
+    assert ch["min"] == 33.0 and ch["max"] == 44.0
+
+
+def test_lazy_load_keeps_adjusted_params(app):
+    # a channel adjusted then re-supplied as a lazy placeholder must NOT be
+    # re-seeded by _ensure_loaded when its pixels arrive.
+    wb = _mc_wb(app)
+    pool = _patch_imgs(0, 1000.0)
+    wb.set_pixel_provider(lambda n: pool[n])
+    wb.set_channel_images(pool, active="DAPI", visible=["DAPI", "CD68", "CK19"])
+    wb._on_active_changed("CD68")
+    wb._sp_min.setValue(7.0)
+    wb._sp_max.setValue(77.0)
+    wb._on_minmax_changed()
+    # patch switch: CD68 comes in lazy (None) but adjusted -> params kept
+    imgs = {"DAPI": pool["DAPI"], "CD68": None, "CK19": None}
+    wb.set_channel_images(imgs, active="DAPI", visible=["DAPI", "CD68", "CK19"])
+    assert wb._params["CD68"]["min"] == 7.0 and wb._params["CD68"]["max"] == 77.0
+    wb._ensure_loaded("CD68")                 # pixels arrive -> must NOT re-seed
+    assert wb._params["CD68"]["min"] == 7.0 and wb._params["CD68"]["max"] == 77.0
+
+
+def test_zoom_preserved_across_same_shape_switch(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI", visible=["DAPI"])
+    vb = wb._canvas._vb
+    vb.setRange(xRange=(2, 8), yRange=(3, 9), padding=0)
+    before = vb.viewRange()
+    wb.set_channel_images(_patch_imgs(1, 1000.0), active="DAPI", visible=["DAPI"])
+    after = vb.viewRange()
+    assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])
+
+
+def test_first_load_fits_view(app):
+    wb = _mc_wb(app)
+    # request_fit is issued on first load -> _need_fit set before the paint
+    assert wb._canvas._need_fit is True        # fresh viewer wants a fit
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI", visible=["DAPI"])
+    # after first paint the fit consumed the flag (viewer fitted once)
+    assert wb._canvas._need_fit is False
+    assert wb._canvas._prev_shape == (20, 20)
+
+
+def test_explicit_fit_view_button_refits(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0), active="DAPI", visible=["DAPI"])
+    wb._canvas._need_fit = False
+    wb._on_fit_view()                          # explicit "Fit view"
+    assert wb._canvas._need_fit is False       # consumed by the refit it triggers
+
+
+def test_different_shape_switch_refits(app):
+    wb = _mc_wb(app)
+    wb.set_channel_images(_patch_imgs(0, 1000.0, shape=(20, 20)),
+                          active="DAPI", visible=["DAPI"])
+    vb = wb._canvas._vb
+    vb.setRange(xRange=(2, 8), yRange=(3, 9), padding=0)
+    before = vb.viewRange()
+    wb.set_channel_images(_patch_imgs(1, 1000.0, shape=(40, 40)),
+                          active="DAPI", visible=["DAPI"])
+    after = vb.viewRange()
+    # shape changed -> refit (range differs)
+    assert not (np.allclose(before[0], after[0]) and np.allclose(before[1], after[1]))
+    assert wb._canvas._prev_shape == (40, 40)

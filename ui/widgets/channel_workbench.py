@@ -92,6 +92,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._names = []                 # list[str], display order
         self._raw = {}                   # name -> np.ndarray (preview patch)
         self._params = {}                # name -> normalized params dict
+        # (#2) Min/Max/Gamma are GLOBAL per channel (QuPath-style): once the user
+        # adjusts a channel, its params stick across patch switches instead of
+        # being re-seeded from each new patch's pixels. Only channels never
+        # adjusted get auto-seeded. Cleared on a new dataset (different names).
+        self._user_adjusted = {}         # name -> bool (user changed its params)
         self._colors = {}                # name -> hex
         self._visible = {}               # name -> bool
         self._active = None              # active channel name
@@ -471,22 +476,40 @@ class ChannelWorkbench(QtWidgets.QWidget):
                     f"(skipped: {', '.join(skipped)}).")
             return
 
-        self._names = list(clean.keys())
+        new_names = list(clean.keys())
+        # (#4) First load when there was no image before. Same-name reloads are
+        # patch switches: do NOT refit (preserve zoom/pan). A genuine shape change
+        # is still refitted by the viewer's _maybe_fit (shape != prev_shape).
+        prior_empty = not self._names
+        # (#2) A different channel set = a new dataset -> drop the sticky
+        # user-adjusted flags. The SAME names (a patch switch) keep them so the
+        # user's Min/Max/Gamma persist; only their per-channel params are reused.
+        is_new_dataset = set(new_names) != set(self._names)
+        old_params = self._params
+        if is_new_dataset:
+            self._user_adjusted = {}
+
+        self._names = new_names
         self._raw = clean
         self._params = {}
         self._colors = {}
         self._visible = {}
         for i, n in enumerate(self._names):
-            params = default_channel_remap_params()
-            arr = self._raw[n]
-            finite = arr[np.isfinite(arr)] if (arr is not None and arr.size) else None
-            if finite is not None and finite.size:
-                params["min"] = float(finite.min())
-                params["max"] = float(max(finite.max(), finite.min() + 1.0))
+            if (not is_new_dataset) and self._user_adjusted.get(n) and n in old_params:
+                # User adjusted this channel earlier -> keep its params verbatim
+                # across the patch switch (global, not re-seeded from new pixels).
+                params = dict(old_params[n])
             else:
-                # Lazy / empty channel: provisional range, re-seeded from real
-                # pixels by _ensure_loaded when the channel is first activated.
-                params["min"], params["max"] = 0.0, 1.0
+                params = default_channel_remap_params()
+                arr = self._raw[n]
+                finite = arr[np.isfinite(arr)] if (arr is not None and arr.size) else None
+                if finite is not None and finite.size:
+                    params["min"] = float(finite.min())
+                    params["max"] = float(max(finite.max(), finite.min() + 1.0))
+                else:
+                    # Lazy / empty channel: provisional range, re-seeded from real
+                    # pixels by _ensure_loaded when the channel is first activated.
+                    params["min"], params["max"] = 0.0, 1.0
             self._params[n] = normalize_channel_remap_params(params)
             self._colors[n] = (colors or {}).get(n, _PALETTE[i % len(_PALETTE)])
             # Default visibility: if the host gave an explicit `visible` set, only
@@ -501,8 +524,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._refresh_layer_list()
         self._set_controls_enabled(True)
         self._active = None
-        # New patch -> fit the view once on the first preview below.
-        self._canvas.request_fit()
+        # (#4) Fit-to-view only on the FIRST load. Patch switches keep the user's
+        # zoom/pan; a different patch SHAPE is still refitted by the viewer's
+        # _maybe_fit (shape != prev_shape), so we needn't request it here.
+        if prior_empty:
+            self._canvas.request_fit()
         # Activate the requested channel (the one whose pixels were pre-loaded);
         # fall back to a channel that actually has pixels, else the first name.
         if active not in self._names:
@@ -520,6 +546,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._names = []
         self._raw = {}
         self._params = {}
+        self._user_adjusted = {}
         self._colors = {}
         self._visible = {}
         self._active = None
@@ -749,6 +776,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if arr is None:
             return
         self._raw[name] = arr
+        if self._user_adjusted.get(name):
+            return                              # (#2) keep user params; no re-seed
         params = dict(self._params.get(name, default_channel_remap_params()))
         finite = arr[np.isfinite(arr)] if arr.size else None
         if finite is not None and finite.size:
@@ -868,6 +897,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
         p["brightness"] = self._sl_bright.value() / 100.0
         p["contrast"] = self._sl_contrast.value() / 100.0
         p["gamma"] = self._sl_gamma.value() / 100.0
+        # (#2) Any control edit marks this channel user-adjusted -> its params
+        # now stick across patch switches (also covers Auto, which calls here).
+        self._user_adjusted[self._active] = True
         if hasattr(self, "_chk_enabled"):
             p["enabled"] = self._chk_enabled.isChecked()
         # else: no fusion-enable surface (Step0) -> keep params' default
@@ -940,6 +972,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         else:
             p["min"], p["max"] = 0.0, 1.0
         self._params[self._active] = normalize_channel_remap_params(p)
+        self._user_adjusted[self._active] = True   # (#2) reset is a deliberate edit
         self._load_params_into_controls(self._active)
         self._layer_list.update_mini(self._active, p["weight"], "w")
         self._refresh_preview()

@@ -1714,24 +1714,18 @@ class BatchProcessWorker(QThread):
                     orig_norm = OMETIFFLoader._norm(raw)
 
                     tophat_norm = cucim_norm = None
-                    print(f"[DEBUG _compute_one] p_idx={p_idx} _method={_method!r}")
                     if _method in ("tophat", "both"):
                         th = _apply_tophat_gpu_or_cpu(raw, self.tophat_radius)
                         tophat_norm = OMETIFFLoader._norm(th)
                         tophat_raw  = th
-                        print(f"[DEBUG] tophat done, norm shape={tophat_norm.shape}")
                     else:
                         tophat_raw = None
                     if _method in ("cucim", "both"):
-                        print(f"[DEBUG] starting cucim...")
                         cu = _apply_cucim_or_cpu(raw, self.cucim_sigma, prefer_gpu=CUCIM_AVAILABLE)
                         cucim_norm = OMETIFFLoader._norm(cu)
                         cucim_raw  = cu
-                        print(f"[DEBUG] cucim done, norm shape={cucim_norm.shape}")
                     else:
                         cucim_raw = None
-                        print(f"[DEBUG] cucim skipped")
-                    print(f"[DEBUG] payload cucim_norm is None: {cucim_norm is None}")
 
                     def _mk_rgb(mono, nuc):
                         if mono is None:

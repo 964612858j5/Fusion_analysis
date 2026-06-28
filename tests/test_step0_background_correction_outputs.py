@@ -589,3 +589,111 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     p._save_and_continue()
     assert cap["process"] == {"CD68", "Ki67"}    # ROI changed -> no unsafe skip
     assert cap["incremental"] is False           # not incremental on ROI mismatch
+
+
+# ── step0-save-correctness: method-change overwrites the corrected channel ────
+class _OneChLoader:
+    def __init__(self, ch):
+        self.ch_map = {ch: 0}
+        self.shape = (200, 200)
+        self.filepath = "/tmp/fake.ome.tif"
+
+    def _read_roi_zarr(self, idx, y0, y1, x0, x1):
+        return (np.random.rand(y1 - y0, x1 - x0) * 1000).astype(np.float32)
+
+
+def _run_one(tmp_dir, ch, method, param, process_channels=None, incremental=False):
+    from block01.ui.step0.search_ctrl import WsiCorrectionWorker
+    cfg = {"channel_decisions": {ch: method},
+           "method_params": {"tophat_radius": param if method == "tophat" else 15,
+                             "cucim_sigma": param if method == "cucim" else 50}}
+    rois = [{"name": "R", "bbox_fullres": [0, 80, 0, 100]}]
+    w = WsiCorrectionWorker(_OneChLoader(ch), tmp_dir, cfg, rois=rois,
+                            process_channels=process_channels, incremental=incremental)
+    out = {}
+    w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
+    w.error.connect(lambda m: out.update(err=m))
+    w.run()
+    return out
+
+
+def _ch_attrs(tmp_dir, ch):
+    g = zarr.open_group(os.path.join(tmp_dir, "corrected_channels.zarr"), mode="r")
+    a = g["R"][ch].attrs
+    return (a.get("correction_method"), a.get("correction_param_name"),
+            a.get("correction_param_value"))
+
+
+def test_method_change_cucim_to_tophat_overwrites_channel(app, tmp_path):
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    d = str(tmp_path)
+    _run_one(d, "CD11b", "cucim", 2)
+    assert _ch_attrs(d, "CD11b") == ("cucim", "cucim_sigma", 2)
+    zp = os.path.join(d, "corrected_channels.zarr")
+    before = zarr.open_group(zp, mode="r")["R"]["CD11b"][:].copy()
+
+    # change to tophat radius 80, incremental
+    out = _run_one(d, "CD11b", "tophat", 80,
+                   process_channels={"CD11b"}, incremental=True)
+    # attrs now say tophat / tophat_radius / 80 — no stale cucim metadata
+    assert _ch_attrs(d, "CD11b") == ("tophat", "tophat_radius", 80)
+    # the corrected ARRAY was rewritten (different pixels)
+    after = zarr.open_group(zp, mode="r")["R"]["CD11b"][:]
+    assert not np.array_equal(before, after)
+    # the read signature + merged decisions reflect tophat
+    sigs, _ = read_corrected_zarr_state(zp)
+    assert sigs["CD11b"] == ("tophat", 80)
+    assert out["dec"]["CD11b"] == "tophat"
+
+
+def test_method_change_tophat_to_cucim_overwrites_channel(app, tmp_path):
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    d = str(tmp_path)
+    _run_one(d, "CD11b", "tophat", 50)
+    assert _ch_attrs(d, "CD11b") == ("tophat", "tophat_radius", 50)
+    _run_one(d, "CD11b", "cucim", 3, process_channels={"CD11b"}, incremental=True)
+    assert _ch_attrs(d, "CD11b") == ("cucim", "cucim_sigma", 3)
+    sigs, _ = read_corrected_zarr_state(
+        os.path.join(d, "corrected_channels.zarr"))
+    assert sigs["CD11b"] == ("cucim", 3)
+
+
+def test_same_method_param_change_overwrites_channel(app, tmp_path):
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    d = str(tmp_path)
+    _run_one(d, "CD11b", "tophat", 50)
+    _run_one(d, "CD11b", "tophat", 80, process_channels={"CD11b"}, incremental=True)
+    sigs, _ = read_corrected_zarr_state(
+        os.path.join(d, "corrected_channels.zarr"))
+    assert sigs["CD11b"] == ("tophat", 80)     # param updated 50 -> 80
+
+
+def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _L:
+        ch_map = {"CD11b": 0}
+        shape = (60, 60)
+        filepath = "/t.ome.tif"
+        def __init__(self):
+            self.store = None
+            self.method = "tophat"   # loader returns "tophat-corrected" pixels (9.0)
+        def set_corrected_zarr_store(self, path, decisions):
+            self.store = (path, decisions)
+        def read_region(self, ch, y0, y1, x0, x1, normalize=False):
+            return np.full((y1 - y0, x1 - x0), 9.0, np.float32)
+
+    p = Step0Page()
+    p.loader = _L()
+    p.patches = [(0, 20, 0, 20)]
+    p.current_patch_idx = 0
+    # cache holds the OLD cucim pixels
+    p._preload_cache = {0: {"CD11b": np.zeros((20, 20), np.float32)}}
+    p._incremental_processed = {"CD11b"}
+    p._wsi_dialog = None
+    # finish: merged decisions say tophat now
+    p._on_wsi_finished({}, "/x/corrected_channels.zarr", {"CD11b": "tophat"})
+    # downstream corrected-zarr store points at the updated (tophat) decisions
+    assert p.loader.store == ("/x/corrected_channels.zarr", {"CD11b": "tophat"})
+    # in-memory cache hot-swapped to the new (tophat) pixels
+    assert float(p._preload_cache[0]["CD11b"].mean()) == 9.0

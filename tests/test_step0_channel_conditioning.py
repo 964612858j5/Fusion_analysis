@@ -102,22 +102,27 @@ def test_step0_conditioning_loads_patch_channels(page, tmp_path):
     assert "DAPI" in chans
 
 
-# ── 5. Save writes ONLY a preview-only config with registered provenance ─────
+# ── 5. Save AUTO-writes a preview-only config to the canonical path (no dialog) ─
 def test_step0_save_writes_preview_only_registered_config(page, tmp_path, monkeypatch):
     from block01.utils import channel_remap_config as crc
     _inject_context(page, tmp_path)
     page._sync_step0_to_workbench()
 
-    out_path = str(tmp_path / "out_step0_remap.json")
+    # normal Save must NOT open a file dialog
+    def _boom(*a, **k):
+        raise AssertionError("normal Save opened a QFileDialog")
     monkeypatch.setattr(
-        "block01.ui.step0.step0_page.QFileDialog.getSaveFileName",
-        lambda *a, **k: (out_path, "JSON (*.json)"))
+        "block01.ui.step0.step0_page.QFileDialog.getSaveFileName", _boom)
     monkeypatch.setattr(
         "block01.ui.step0.step0_page.QMessageBox.information",
         lambda *a, **k: None)
 
     page._save_step0_remap_config()
+    # auto-saved to the canonical Step0 remap-config path for this run/ROI
+    out_path = page._step0_conditioning_config_path()
     assert os.path.isfile(out_path)
+    assert out_path.endswith(
+        os.path.join("step1_5", "channel_remap_configs", "step0_channel_remap.json"))
 
     saved = crc.load_channel_remap_config(out_path)
     sp = saved["source_policy"]
@@ -131,6 +136,23 @@ def test_step0_save_writes_preview_only_registered_config(page, tmp_path, monkey
     assert "legacy_storage_path" in saved
     assert saved["legacy_storage_path"].endswith(
         os.path.join("step1_5", "channel_remap_configs"))
+
+
+def test_step0_save_is_auto_and_idempotent_path(page, tmp_path, monkeypatch):
+    # re-saving overwrites the SAME canonical file (no timestamped proliferation)
+    _inject_context(page, tmp_path)
+    page._sync_step0_to_workbench()
+    monkeypatch.setattr(
+        "block01.ui.step0.step0_page.QFileDialog.getSaveFileName",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dialog opened")))
+    monkeypatch.setattr(
+        "block01.ui.step0.step0_page.QMessageBox.information",
+        lambda *a, **k: None)
+    page._save_step0_remap_config()
+    page._save_step0_remap_config()
+    cfg_dir = page._step0_conditioning_out_dir()
+    jsons = [f for f in os.listdir(cfg_dir) if f.endswith(".json")]
+    assert jsons == ["step0_channel_remap.json"]   # single stable file
 
 
 # ── 7. ChannelWorkbench is the single shared class (not forked) ──────────────

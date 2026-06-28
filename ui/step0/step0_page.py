@@ -1408,21 +1408,26 @@ class Step0Page(QWidget):
         # Physical path is still the legacy step1_5 location; record it honestly.
         cfg["legacy_storage_path"] = out_dir
         os.makedirs(out_dir, exist_ok=True)
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default = os.path.join(out_dir, f"step0_channel_remap_{ts}.json")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Step0 remap config", default, "JSON (*.json)")
-        if not path:
-            return
+        # Normal Save AUTO-writes to the canonical Step0 remap-config path for the
+        # current run/ROI (stable filename so a later Save overwrites it). No file
+        # dialog — picking a location is reserved for an explicit Save As/Export.
+        path = self._step0_conditioning_config_path()
         try:
             save_channel_remap_config(cfg, path)
         except ValueError as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
             return
+        print(f"[Step0] saved channel remap config -> {path}")
         QMessageBox.information(
             self, "Saved",
             f"Saved preview remap config (preview_only, step2_ready=false):\n{path}")
+
+    def _step0_conditioning_config_path(self):
+        """Canonical Step0 remap-config file for the current run/ROI. Stable name
+        so the normal Save overwrites it on every save (no per-save timestamped
+        files, no user-chosen location)."""
+        return os.path.join(self._step0_conditioning_out_dir(),
+                            "step0_channel_remap.json")
 
     # ── v14.2a Tissue Preview / ROI Navigator popup ──────────────────────────
     #  Step0 owns one floating TissueNavigatorPopup. Creation/show/hide is

@@ -71,14 +71,72 @@ def test_save_keeps_preview_only_and_camp_default(app, tmp_path):
     assert cfg["camp_source_policy"] == "raw_gi_only"
 
 
-# 2. Default (no request set) -> raw for all.
-def test_default_all_raw(app, tmp_path):
-    s = _step0(app, _corrected_zarr(tmp_path))
+# 2. Auto-source: a channel WITH corrected data defaults to corrected_zarr; one
+#    WITHOUT stays raw_ome. Here CD68 has corrected data, CK19 does not -> mixed.
+def test_auto_source_defaults_corrected_when_available(app, tmp_path):
+    s = _step0(app, _corrected_zarr(tmp_path, channels=("CD68",)))   # CK19 absent
+    cfg = _cfg()
+    s._apply_source_aware_identity(cfg)
+    cd68 = cfg["channels"]["CD68"]
+    ck19 = cfg["channels"]["CK19"]
+    assert cd68["source_request"]["requested_source"] == "corrected_zarr"
+    assert cd68["calibration_source_identity"]["actual_source_kind"] == "corrected_zarr"
+    assert cd68["calibration_source_identity"]["intensity_space"] == "background_corrected_marker_image"
+    assert ck19["source_request"]["requested_source"] == "raw_ome"
+    assert ck19["calibration_source_identity"]["actual_source_kind"] == "raw_ome"
+    assert cfg["source_mixture_mode"] == "mixed_raw_corrected"
+
+
+# 2b. Before BG correction (no corrected zarr at all) -> every channel raw.
+def test_auto_source_all_raw_without_corrected(app):
+    s = _step0(app, corrected_path=None)
     cfg = _cfg()
     s._apply_source_aware_identity(cfg)
     for ch in ("CD68", "CK19"):
         assert cfg["channels"][ch]["source_request"]["requested_source"] == "raw_ome"
         assert cfg["channels"][ch]["calibration_source_identity"]["actual_source_kind"] == "raw_ome"
+    assert cfg["source_mixture_mode"] == "homogeneous_raw"
+
+
+# 2c. All conditioned channels have corrected data -> homogeneous_corrected.
+def test_auto_source_all_corrected(app, tmp_path):
+    s = _step0(app, _corrected_zarr(tmp_path, channels=("CD68", "CK19")))
+    cfg = _cfg()
+    s._apply_source_aware_identity(cfg)          # no explicit requests
+    for ch in ("CD68", "CK19"):
+        assert cfg["channels"][ch]["source_request"]["requested_source"] == "corrected_zarr"
+        assert cfg["channels"][ch]["calibration_source_identity"]["actual_source_kind"] == "corrected_zarr"
+    assert cfg["source_mixture_mode"] == "homogeneous_corrected"
+
+
+# 2d. Manual raw override of a corrected channel WINS over the auto default, and a
+#     later re-apply (a subsequent sync/save) does NOT erase the override.
+def test_manual_raw_override_wins_over_auto_corrected(app, tmp_path):
+    s = _step0(app, _corrected_zarr(tmp_path, channels=("CD68", "CK19")))
+    s.set_channel_source_request("CD68", "raw_ome")   # user dislikes corrected CD68
+    cfg = _cfg()
+    s._apply_source_aware_identity(cfg)
+    cd68 = cfg["channels"]["CD68"]
+    assert cd68["source_request"]["requested_source"] == "raw_ome"
+    assert cd68["calibration_source_identity"]["actual_source_kind"] == "raw_ome"
+    # CK19 (no override) still auto-defaults to corrected
+    assert cfg["channels"]["CK19"]["calibration_source_identity"]["actual_source_kind"] == "corrected_zarr"
+    assert cfg["source_mixture_mode"] == "mixed_raw_corrected"
+    # a later save re-applies identity from scratch -> override still honored
+    cfg2 = _cfg()
+    s._apply_source_aware_identity(cfg2)
+    assert cfg2["channels"]["CD68"]["calibration_source_identity"]["actual_source_kind"] == "raw_ome"
+
+
+# 2e. No fake corrected: corrected zarr exists but a channel's array is absent ->
+#     that channel auto-defaults to raw (never a corrected identity it lacks).
+def test_auto_source_no_fake_corrected_when_array_absent(app, tmp_path):
+    s = _step0(app, _corrected_zarr(tmp_path, channels=("CD68",)))   # only CD68
+    cfg = _cfg(("CK19",))
+    s._apply_source_aware_identity(cfg)
+    ck19 = cfg["channels"]["CK19"]
+    assert ck19["source_request"]["requested_source"] == "raw_ome"
+    assert ck19["calibration_source_identity"]["actual_source_kind"] == "raw_ome"
     assert cfg["source_mixture_mode"] == "homogeneous_raw"
 
 

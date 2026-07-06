@@ -76,12 +76,14 @@ from ...utils.channel_remap_config import (
 # reader). Pure/Qt-free; NOT the Step2 resolver or promotion.
 from ...utils.source_identity import (
     REQUESTED_SOURCE_RAW_OME,
+    REQUESTED_SOURCE_CORRECTED_ZARR,
     DEFAULT_CAMP_SOURCE_POLICY,
     validate_calibration_source_identity,
 )
 from ...utils.calibration_source import (
     resolve_channel_calibration,
     source_mixture_mode_from_identities,
+    open_corrected_channel_array,
     SourceAwareIdentityError,
 )
 
@@ -1288,13 +1290,20 @@ class Step0Page(QWidget):
         }
 
     def _step0_conditioning_out_dir(self):
-        """Legacy-compatible physical storage dir for preview remap configs.
+        """Physical storage dir for the Step0 preview remap config.
 
-        v14 keeps the legacy <ROI>/step1_5/channel_remap_configs/ path for now
-        (no path migration in v14.1b). output_dir is the ROI/output dir Step0
-        loaded into; we append step1_5/channel_remap_configs to stay byte-compatible
-        with configs the old Step1.5 page wrote.
+        Unified with the ROI's Step0 outputs: when a Step0 ROI context exists,
+        write the remap config next to corrected_channels.zarr at
+        <roi_dir>/step0/ (self._roi_context["step_dirs"]["step0"]). Only when no
+        ROI context has been created yet (a bare preview before any Step0
+        Save-and-continue) does it fall back to the legacy
+        <output_dir>/step1_5/channel_remap_configs/ location.
         """
+        ctx = getattr(self, "_roi_context", None)
+        if ctx:
+            step0_dir = (ctx.get("step_dirs") or {}).get("step0")
+            if step0_dir:
+                return step0_dir
         base = self.output_dir or OUTPUT_DIR
         return os.path.join(base, "step1_5", "channel_remap_configs")
 
@@ -1309,6 +1318,24 @@ class Step0Page(QWidget):
     def _corrected_zarr_path(self):
         """Corrected zarr path the loader currently knows about, or None."""
         return getattr(self.loader, "_corrected_zarr_path", None)
+
+    def _corrected_available_channels(self, channel_names):
+        """Channels that have REAL corrected pixel arrays in corrected_channels.zarr.
+
+        Grounded in actual array availability, not a stale UI decision: a channel
+        counts only if the resolver's own opener can open its corrected array
+        (roi_name=None -> scans every ROI group). Uses open_corrected_channel_array
+        so availability == resolvability (a channel that would fall back to raw at
+        resolve time is NOT reported available -> never defaults to fake corrected).
+        """
+        corrected_zarr = self._corrected_zarr_path()
+        if not corrected_zarr:
+            return set()
+        avail = set()
+        for ch in channel_names:
+            if open_corrected_channel_array(corrected_zarr, ch, None) is not None:
+                avail.add(ch)
+        return avail
 
     def _apply_source_aware_identity(self, cfg):
         """v14.5b: stamp per-channel SourceRequest + CalibrationSourceIdentity and
@@ -1339,11 +1366,28 @@ class Step0Page(QWidget):
         def _read_raw(ch):
             return self._read_cond_patch_channel(ch, normalize=False)
 
+        # Auto-source default: a channel with REAL corrected data defaults to
+        # corrected_zarr; one without stays raw_ome. Availability is grounded in
+        # the actual corrected arrays on disk (not a stale UI decision), so a
+        # channel is never defaulted to a corrected source that does not exist.
+        corrected_available = self._corrected_available_channels(list(channels.keys()))
+
         # Resolve ALL channels first; only commit to cfg if every one succeeds.
         resolved = []
         for ch in channels:
-            requested = self._channel_source_requests.get(ch, REQUESTED_SOURCE_RAW_OME)
-            user_selected = ch in self._channel_source_requests
+            # Precedence: an EXPLICIT user source choice always wins (manual raw
+            # override of a corrected channel survives every later save/sync).
+            # Only when the user has NOT chosen does auto-detection pick the
+            # default: corrected_zarr iff real corrected data exists, else raw_ome.
+            if ch in self._channel_source_requests:
+                requested = self._channel_source_requests[ch]
+                user_selected = True
+            elif ch in corrected_available:
+                requested = REQUESTED_SOURCE_CORRECTED_ZARR
+                user_selected = False
+            else:
+                requested = REQUESTED_SOURCE_RAW_OME
+                user_selected = False
             try:
                 req, csi = resolve_channel_calibration(
                     ch, requested,
@@ -1405,8 +1449,11 @@ class Step0Page(QWidget):
         out_dir = self._step0_conditioning_out_dir()
         cfg["created_from_step"] = CREATED_FROM_STEP0_CONDITIONING
         cfg["ui_context"] = "Step0: Setup & Preprocessing / Channel Conditioning"
-        # Physical path is still the legacy step1_5 location; record it honestly.
-        cfg["legacy_storage_path"] = out_dir
+        # Record the actual physical storage dir honestly. With a ROI context this
+        # is the unified <roi_dir>/step0/ location (next to corrected_channels.zarr);
+        # without one it is the legacy step1_5/channel_remap_configs fallback.
+        cfg["storage_dir"] = out_dir
+        cfg["legacy_storage_path"] = out_dir      # kept for schema back-compat
         os.makedirs(out_dir, exist_ok=True)
         # Normal Save AUTO-writes to the canonical Step0 remap-config path for the
         # current run/ROI (stable filename so a later Save overwrites it). No file

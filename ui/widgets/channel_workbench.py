@@ -499,6 +499,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # user's Min/Max/Gamma persist; only their per-channel params are reused.
         is_new_dataset = set(new_names) != set(self._names)
         old_params = self._params
+        # (scroll/colors) A patch switch keeps the SAME channel set. Preserve the
+        # user's swatch colors (like _user_adjusted keeps params) and the list
+        # scroll offset; a new dataset resets both.
+        old_colors = self._colors
         if is_new_dataset:
             self._user_adjusted = {}
 
@@ -524,12 +528,21 @@ class ChannelWorkbench(QtWidgets.QWidget):
                     # pixels by _ensure_loaded when the channel is first activated.
                     params["min"], params["max"] = 0.0, 1.0
             self._params[n] = normalize_channel_remap_params(params)
-            self._colors[n] = (colors or {}).get(n, _PALETTE[i % len(_PALETTE)])
+            if (not is_new_dataset) and n in old_colors:
+                # (colors) Patch switch: keep the user's swatch color (host DAPI
+                # blue or a color-picker override), not the palette default.
+                self._colors[n] = old_colors[n]
+            else:
+                self._colors[n] = (colors or {}).get(n, _PALETTE[i % len(_PALETTE)])
             # Default visibility: if the host gave an explicit `visible` set, only
             # those are shown (Step0 overlay loads with just DAPI checked);
             # otherwise every channel is visible (single-channel hosts).
             self._visible[n] = (n in set(visible)) if visible is not None else True
 
+        # (scroll) On a patch switch the channel set is unchanged; preserve the
+        # list scroll offset across the rebuild (set_channels clears + resets to
+        # row 0). A new dataset starts at the top.
+        scroll_pos = self._layer_list.scroll_value() if not is_new_dataset else 0
         # Build the list with signals blocked: set_channels auto-selects row 0,
         # which would otherwise fire active_changed for the WRONG channel and (in
         # multichannel mode) auto-check it. We pick the real active explicitly.
@@ -548,6 +561,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
             active = next((n for n in self._names if self._raw[n] is not None),
                           self._names[0])
         self._layer_list.set_active(active)
+        # (scroll) Restore AFTER set_active (setCurrentItem auto-scrolls the
+        # active row into view, which would otherwise clobber the saved offset).
+        if not is_new_dataset:
+            self._layer_list.set_scroll_value(scroll_pos)
         self._layer_list.blockSignals(False)
         self._on_active_changed(active)
         self._sync_all_checkbox()

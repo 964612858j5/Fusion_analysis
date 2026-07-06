@@ -1602,3 +1602,89 @@ def test_search_filter_persists_across_patch_switch(app):
     wb.set_channel_images(imgs, colors={"DAPI": "#3366ff"}, active="DAPI",
                           visible=list(names))
     assert sorted(_visible_rows(wb)) == ["CD45", "CD68"]
+
+
+# ── scroll + color persistence across patch switches ──────────────────
+
+def _many_channels(n=28, seed=0):
+    return {
+        f"CH{i:02d}": (np.random.default_rng(seed + i).random((32, 32))
+                       * 1000).astype(np.float32)
+        for i in range(n)
+    }
+
+
+def test_scroll_preserved_across_patch_switch(workbench, app):
+    workbench.resize(320, 220)
+    workbench.show()
+    app.processEvents()
+    workbench.set_channel_images(_many_channels(), source="step3")
+    app.processEvents()
+    sb = workbench._layer_list._list.verticalScrollBar()
+    assert sb.maximum() > 0                    # list actually scrolls here
+    sb.setValue(sb.maximum())
+    saved = workbench._layer_list.scroll_value()
+    assert saved > 0
+    # patch switch: SAME channel names, fresh pixels
+    workbench.set_channel_images(_many_channels(seed=50), source="step3")
+    app.processEvents()
+    assert workbench._layer_list.scroll_value() == saved
+
+
+def test_scroll_reset_on_new_dataset(workbench, app):
+    workbench.resize(320, 220)
+    workbench.show()
+    app.processEvents()
+    workbench.set_channel_images(_many_channels(), source="step3")
+    app.processEvents()
+    sb = workbench._layer_list._list.verticalScrollBar()
+    sb.setValue(sb.maximum())
+    assert workbench._layer_list.scroll_value() > 0
+    # different channel names -> new dataset: scroll resets to top
+    other = {f"XX{i:02d}": v for i, v in enumerate(_many_channels().values())}
+    workbench.set_channel_images(other, source="step3")
+    app.processEvents()
+    assert workbench._layer_list.scroll_value() == 0
+
+
+def test_user_color_preserved_across_patch_switch(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._colors["CD45"] = "#ff0000"      # user picks red via color dialog
+    workbench._layer_list.set_channel_color("CD45", "#ff0000")
+    # patch switch: same names -> keep the user's color
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    assert workbench._colors["CD45"] == "#ff0000"
+
+
+def test_colors_reset_on_new_dataset(workbench):
+    from block01.ui.widgets.channel_workbench import _PALETTE
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._colors["CD45"] = "#ff0000"
+    # different channel names -> palette defaults, old color not carried over
+    other = {
+        "A": (np.random.default_rng(1).random((16, 16)) * 100).astype(np.float32),
+        "B": (np.random.default_rng(2).random((16, 16)) * 100).astype(np.float32),
+        "C": (np.random.default_rng(3).random((16, 16)) * 100).astype(np.float32),
+    }
+    workbench.set_channel_images(other, source="step3")
+    assert "CD45" not in workbench._colors
+    assert workbench._colors["A"] == _PALETTE[0]
+
+
+def test_host_dapi_color_persists_across_patch_switch(workbench):
+    workbench.set_channel_images(_real_like_channels(),
+                                 colors={"DAPI": "#3366ff"}, source="step3")
+    assert workbench._colors["DAPI"] == "#3366ff"   # host color on first load
+    # patch switch without re-passing colors -> DAPI blue still sticks
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    assert workbench._colors["DAPI"] == "#3366ff"
+
+
+def test_build_config_unaffected_by_color_persistence(workbench):
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    workbench._colors["CD45"] = "#ff0000"
+    workbench.set_channel_images(_real_like_channels(), source="step3")
+    cfg = workbench.build_config()
+    assert set(cfg["channels"].keys()) == {"DAPI", "CD45", "PanCK"}
+    assert cfg["used_for"] == "segmentation_only"
+    assert validate_channel_remap_config(cfg) == []

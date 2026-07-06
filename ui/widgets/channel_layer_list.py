@@ -170,6 +170,14 @@ class ChannelLayerList(QtWidgets.QWidget):
         item = self._list.currentItem()
         return item.data(Qt.UserRole) if item else None
 
+    def scroll_value(self):
+        """Current vertical scroll offset (save before a rebuild)."""
+        return self._list.verticalScrollBar().value()
+
+    def set_scroll_value(self, value):
+        """Restore a saved vertical scroll offset after a rebuild."""
+        self._list.verticalScrollBar().setValue(int(value))
+
     def filter_rows(self, text):
         """Show only rows whose channel name contains `text` (case-insensitive).
 

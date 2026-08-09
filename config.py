@@ -48,7 +48,11 @@ DEFAULT_ROI_NAMES = ["ROI_1", "ROI_2", "ROI_3", "ROI_4",
                      "ROI_5", "ROI_6", "ROI_7", "ROI_8"]
 
 BG_CORR_MAX_TILE      = 4096
-TOPHAT_RADIUS_DEFAULT = 35
+TOPHAT_RADIUS_DEFAULT = 15   # was 35: on sparse near-zero-background channels a
+                             # large disk collapses the morphological opening to 0,
+                             # degenerating white-tophat into the identity (raw-0=raw,
+                             # no visible change). 15 stays inside TOPHAT_RADIUS_RANGE
+                             # and actually subtracts local background.
 CUCIM_SIGMA_DEFAULT   = 50
 TOPHAT_RADIUS_RANGE   = (10, 150)
 CUCIM_SIGMA_RANGE     = (20, 200)

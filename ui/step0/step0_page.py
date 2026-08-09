@@ -347,7 +347,7 @@ class Step0Page(QWidget):
         self._step0_tabs.addTab(main_split, "Background Correction")
         self._cond_tab = self._build_step0_conditioning_tab()
         self._cond_tab_index = self._step0_tabs.addTab(
-            self._cond_tab, "Channel Conditioning / Remap")
+            self._cond_tab, "Channel Remap")
         self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
 
@@ -1076,19 +1076,11 @@ class Step0Page(QWidget):
 
     def _build_step0_conditioning_tab(self):
         w = QWidget()
+        # Match the Background Correction tab's darker background (#1c1c1c) instead
+        # of the default gray.
+        w.setStyleSheet("background:#1c1c1c;")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(6, 6, 6, 6)
-        note = QLabel(
-            "Step0 Channel Conditioning is pre-segmentation: adjust manual remap "
-            "(Min/Max/Brightness/Contrast/Gamma/Auto) on the current patch and save a "
-            "preview remap config. DAPI/nucleus is a reference layer only and is never "
-            "saved as a marker channel. Configs are preview_only (step2_ready=false); "
-            "Step2-ready promotion is a later phase.")
-        note.setWordWrap(True)
-        note.setStyleSheet(
-            "color:#cdd;background:#202830;border:1px solid #2c3e50;"
-            "border-radius:4px;padding:4px;font-size:10px;")
-        lay.addWidget(note)
 
         # Preview-patch selector for the conditioning view. The BG tab's P1/P2/…
         # buttons are not visible from this tab, so mirror them here. Both rows are
@@ -1111,7 +1103,9 @@ class Step0Page(QWidget):
         # Step1.5 / Step3 keep them.
         self._cond_workbench = ChannelWorkbench(
             show_reference_bar=False, show_enabled_checkbox=False,
-            multichannel_overlay=True)
+            multichannel_overlay=True, show_banner=False)
+        # Match the Background Correction tab's darker background.
+        self._cond_workbench.setStyleSheet("background:#1c1c1c;")
         # Host-agnostic: it asks for data via refresh_requested and we feed it from
         # Step0's own loader/patch. Hide the generic internal save — Step0's
         # "Save remap config (Step0)" below is the only official save path (it

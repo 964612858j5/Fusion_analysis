@@ -32,10 +32,10 @@ def test_step0_has_background_correction_tab(app):
     s = Step0Page()
     tabs = [s._step0_tabs.tabText(i) for i in range(s._step0_tabs.count())]
     assert "Background Correction" in tabs
-    assert any("Channel Conditioning" in t for t in tabs)
+    assert any("Channel Remap" in t for t in tabs)
     # they are distinct tab indices
     assert tabs.index("Background Correction") != next(
-        i for i, t in enumerate(tabs) if "Channel Conditioning" in t)
+        i for i, t in enumerate(tabs) if "Channel Remap" in t)
 
 
 # ── 3. BG tab has tophat/cuCIM controls, not remap controls ──────────────────
@@ -283,11 +283,15 @@ def test_preview_patch_relocated_to_c_right(app):
     s = Step0Page()
     g = _gb(s)
     pp, met, dec = g["Preview Patch"], g["Quantitative Metrics"], g["Per-Channel Decision"]
-    ch, mp, proc = g["Channels"], g["Method Parameters"], g["Process"]
+    # The former standalone "Process" box is now folded into "Method Parameters"
+    # (run button + Stop + progress + status live there).
+    ch, mp = g["Channels"], g["Method Parameters"]
+    assert "Process" not in g                      # no separate Process box anymore
+    assert _under(mp, s._btn_process)              # run controls under Method Parameters
     # Preview Patch now shares the bottom_row container with Metrics + Decision...
     assert pp.parentWidget() is met.parentWidget() is dec.parentWidget()
-    # ...and is NO LONGER in c_left with Channels/Method/Process
-    assert ch.parentWidget() is mp.parentWidget() is proc.parentWidget()
+    # ...and is NO LONGER in c_left with Channels/Method Parameters
+    assert ch.parentWidget() is mp.parentWidget()
     assert pp.parentWidget() is not ch.parentWidget()
     # P-button row + info still wired (relocation kept the widgets)
     assert hasattr(s, "_patch_buttons_row") and hasattr(s, "_patch_info")

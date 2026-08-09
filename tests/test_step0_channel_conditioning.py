@@ -88,7 +88,7 @@ def test_step0_has_two_main_tabs(page):
     assert hasattr(page, "_step0_tabs")
     tabs = [page._step0_tabs.tabText(i) for i in range(page._step0_tabs.count())]
     assert "Background Correction" in tabs
-    assert any("Channel Conditioning" in t for t in tabs)
+    assert any("Channel Remap" in t for t in tabs)
 
 
 # ── 2. Conditioning tab hosts the shared ChannelWorkbench class ──────────────

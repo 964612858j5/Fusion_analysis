@@ -76,8 +76,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
     refresh_requested = pyqtSignal()
 
     def __init__(self, parent=None, *, show_reference_bar=True,
-                 show_enabled_checkbox=True, multichannel_overlay=False):
+                 show_enabled_checkbox=True, multichannel_overlay=False,
+                 show_banner=True):
         super().__init__(parent)
+        # The "v13.1 prototype" banner is host-optional: Step0 hides it (the tab
+        # is self-explanatory); Step1.5 / Step3 keep it.
+        self._show_banner = bool(show_banner)
         # Host-optional surfaces. Step0 conditioning (#6/#8) turns BOTH off: DAPI
         # is a normal conditionable channel there (no reference overlay) and
         # fusion participation is decided by Step1, not a per-channel checkbox.
@@ -127,16 +131,17 @@ class ChannelWorkbench(QtWidgets.QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
-        banner = QtWidgets.QLabel(
-            "Channel Conditioning (v13.1 prototype) — manual remap is for "
-            "segmentation only; h5ad expression stays raw/bio-corrected."
-        )
-        banner.setWordWrap(True)
-        banner.setStyleSheet(
-            "color:#cdd;background:#202830;border:1px solid #2c3e50;"
-            "border-radius:4px;padding:4px;font-size:10px;"
-        )
-        root.addWidget(banner)
+        if self._show_banner:
+            banner = QtWidgets.QLabel(
+                "Channel Conditioning (v13.1 prototype) — manual remap is for "
+                "segmentation only; h5ad expression stays raw/bio-corrected."
+            )
+            banner.setWordWrap(True)
+            banner.setStyleSheet(
+                "color:#cdd;background:#202830;border:1px solid #2c3e50;"
+                "border-radius:4px;padding:4px;font-size:10px;"
+            )
+            root.addWidget(banner)
 
         self._status_lbl = QtWidgets.QLabel()
         self._status_lbl.setWordWrap(True)

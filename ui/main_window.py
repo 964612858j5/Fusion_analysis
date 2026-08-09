@@ -1471,7 +1471,13 @@ class MainWindow(QMainWindow):
             self._step3._stop_loaders()
         if self._current_step == 1:
             self._stop_all_loaders()
-        if self.is_sequential_flow and self.step1_output:
+        # Auto-sync Step2 Input Data from the finished Step1 whenever a Step1
+        # result exists. NOT gated on is_sequential_flow: that flag is never set
+        # True (the sequential "Next" button was removed), so gating here left the
+        # handoff permanently dead — fused.zarr AND Segmentation Index never
+        # populated for ANY segmentation method. Fill the two Input Data fields
+        # only when still empty so a manual override / re-entry is never clobbered.
+        if self.step1_output:
             step2_dir = self.step1_output.get("step2_dir") or (self.step0_output or {}).get("step2_dir")
             if step2_dir:
                 os.makedirs(step2_dir, exist_ok=True)
@@ -1479,13 +1485,14 @@ class MainWindow(QMainWindow):
                 step2_dir or self.step1_output.get("output_dir", OUTPUT_DIR)
             )
             zarr_path = self.step1_output.get("zarr_path")
-            if zarr_path:
+            if zarr_path and not self._step2._zarr_edit.text().strip():
                 self._step2.set_zarr_path(zarr_path)
             self._step2._fusion_config_path = self.step1_output.get("fusion_config_path")
             cfg_path = self.step1_output.get("fusion_config_path")
             out_dir = self.step1_output.get("output_dir", OUTPUT_DIR)
             try:
-                if hasattr(self._step2, "load_step1_active_params"):
+                if hasattr(self._step2, "load_step1_active_params") \
+                        and not self._step2._seg_params_edit.text().strip():
                     self._step2.load_step1_active_params(out_dir)
             except Exception:
                 print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
@@ -1494,7 +1501,7 @@ class MainWindow(QMainWindow):
                     (self._step2._zarr_info.text() or "") +
                     f"\nConfig: {os.path.basename(cfg_path)}"
                 )
-            rois = self.step0_output.get("rois") or self.step1_output.get("roi_info")
+            rois = (self.step0_output or {}).get("rois") or self.step1_output.get("roi_info")
             if rois:
                 self._step2.set_rois(rois)
             if hasattr(self._step2, "set_roi_context"):

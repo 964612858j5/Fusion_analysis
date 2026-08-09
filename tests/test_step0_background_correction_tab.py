@@ -98,7 +98,8 @@ def test_corrected_status_flags_empty_vs_valid(app):
     s = Step0Page()
     s._refresh_bg_corrected_status(
         {"exists": True, "non_empty": False, "n_channel_arrays": 0})
-    assert "empty" in s._bg_corrected_status.text().lower()
+    # 'no channels assigned' is a valid choice, not an error (neutral message).
+    assert "no channels assigned" in s._bg_corrected_status.text().lower()
     s._refresh_bg_corrected_status(
         {"exists": True, "non_empty": True, "n_channel_arrays": 2})
     txt = s._bg_corrected_status.text().lower()

@@ -77,11 +77,16 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def __init__(self, parent=None, *, show_reference_bar=True,
                  show_enabled_checkbox=True, multichannel_overlay=False,
-                 show_banner=True):
+                 show_banner=True, step0_intensity_panel=False):
         super().__init__(parent)
         # The "v13.1 prototype" banner is host-optional: Step0 hides it (the tab
         # is self-explanatory); Step1.5 / Step3 keep it.
         self._show_banner = bool(show_banner)
+        # Step0 QuPath-style intensity panel: title "Intensity" (purple accent),
+        # no Brightness/Contrast, Min/Max as draggable sliders synced with the
+        # histogram, wider Channels / narrower inspector, bordered Channels panel.
+        # Off elsewhere (Step1.5/Step3 keep the classic "Active Channel" panel).
+        self._step0_intensity_panel = bool(step0_intensity_panel)
         # Host-optional surfaces. Step0 conditioning (#6/#8) turns BOTH off: DAPI
         # is a normal conditionable channel there (no reference overlay) and
         # fusion participation is decided by Step1, not a per-channel checkbox.
@@ -152,8 +157,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         # Left — channel layer list + marker bulk controls
         left = QtWidgets.QWidget()
+        if self._step0_intensity_panel:
+            # Bordered "Channels" panel (blue #61afef, matching its header),
+            # object-scoped so the border does not cascade onto child widgets.
+            left.setObjectName("channels_panel")
+            left.setStyleSheet(
+                "#channels_panel{border:1px solid #61afef;border-radius:5px;}")
         left_l = QtWidgets.QVBoxLayout(left)
-        left_l.setContentsMargins(0, 0, 0, 0)
+        _m = 4 if self._step0_intensity_panel else 0
+        left_l.setContentsMargins(_m, _m, _m, _m)
         left_l.setSpacing(4)
         # (#3 all-toggle + channel-search) Above the list, multichannel overlay
         # only (Step0): an "All" tristate checkbox (check/uncheck every channel)
@@ -218,19 +230,29 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # Right — active channel inspector
         split.addWidget(self._build_inspector())
 
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 5)
-        split.setStretchFactor(2, 3)
+        if self._step0_intensity_panel:
+            # Channels 2× wider (2->4); inspector -2/5 (3->1.8, use 20/25/9 to
+            # keep it exact without float stretch factors).
+            split.setStretchFactor(0, 20)
+            split.setStretchFactor(1, 25)
+            split.setStretchFactor(2, 9)
+        else:
+            split.setStretchFactor(0, 2)
+            split.setStretchFactor(1, 5)
+            split.setStretchFactor(2, 3)
         root.addWidget(split, stretch=1)
 
         # Bottom — preview load / save config
         root.addLayout(self._build_bottom_bar())
 
     def _build_inspector(self):
-        box = QtWidgets.QGroupBox("Active Channel")
+        step0 = self._step0_intensity_panel
+        title = "Intensity" if step0 else "Active Channel"
+        accent = "#c678dd" if step0 else "#61afef"   # step0: BG Patch-Preview purple
+        box = QtWidgets.QGroupBox(title)
         box.setStyleSheet(
-            "QGroupBox{border:1px solid #61afef;border-radius:5px;"
-            "margin-top:6px;font-weight:bold;color:#61afef;font-size:11px;}"
+            f"QGroupBox{{border:1px solid {accent};border-radius:5px;"
+            f"margin-top:6px;font-weight:bold;color:{accent};font-size:11px;}}"
         )
         lay = QtWidgets.QVBoxLayout(box)
         lay.setSpacing(6)
@@ -246,25 +268,46 @@ class ChannelWorkbench(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
 
+        # Min/Max spinboxes are the authoritative value holders (params + tests).
+        # Min is never negative (bounded at 0 so every setValue path is clamped).
         self._sp_min = QtWidgets.QDoubleSpinBox()
-        # Intensity Min is never negative. Bound the widget at 0 structurally so
-        # the user cannot enter/spin below 0 AND every setValue() path (load /
-        # histogram drag / auto-minmax) is clamped to >= 0 by the spinbox itself.
         self._sp_min.setRange(0.0, 1e9)
         self._sp_min.setDecimals(1)
         self._sp_min.valueChanged.connect(self._on_minmax_changed)
-        form.addRow("Min", self._sp_min)
-
         self._sp_max = QtWidgets.QDoubleSpinBox()
         self._sp_max.setRange(-1e9, 1e9)
         self._sp_max.setDecimals(1)
         self._sp_max.valueChanged.connect(self._on_minmax_changed)
-        form.addRow("Max", self._sp_max)
 
-        self._sl_bright, self._lbl_bright = self._slider_row(
-            -100, 100, 0, form, "Brightness")
-        self._sl_contrast, self._lbl_contrast = self._slider_row(
-            0, 300, 100, form, "Contrast")
+        if step0:
+            # QuPath layout: Min/Max as draggable sliders (like Gamma), two-way
+            # synced with the histogram window; spinboxes kept as hidden model.
+            self._sl_min, self._lbl_min = self._minmax_slider_row(
+                form, "Min", self._on_min_slider)
+            self._sl_max, self._lbl_max = self._minmax_slider_row(
+                form, "Max", self._on_max_slider)
+            self._sp_min.setVisible(False)
+            self._sp_max.setVisible(False)
+        else:
+            form.addRow("Min", self._sp_min)
+            form.addRow("Max", self._sp_max)
+
+        if step0:
+            # No Brightness/Contrast controls in the QuPath intensity panel; keep
+            # hidden default holders so params/build_config stay unchanged.
+            self._sl_bright = QtWidgets.QSlider(Qt.Horizontal)
+            self._sl_bright.setRange(-100, 100)
+            self._sl_bright.setValue(0)
+            self._lbl_bright = QtWidgets.QLabel("0.00")
+            self._sl_contrast = QtWidgets.QSlider(Qt.Horizontal)
+            self._sl_contrast.setRange(0, 300)
+            self._sl_contrast.setValue(100)
+            self._lbl_contrast = QtWidgets.QLabel("1.00")
+        else:
+            self._sl_bright, self._lbl_bright = self._slider_row(
+                -100, 100, 0, form, "Brightness")
+            self._sl_contrast, self._lbl_contrast = self._slider_row(
+                0, 300, 100, form, "Contrast")
         self._sl_gamma, self._lbl_gamma = self._slider_row(
             10, 300, 100, form, "Gamma")
         lay.addLayout(form)
@@ -305,6 +348,63 @@ class ChannelWorkbench(QtWidgets.QWidget):
         container.setLayout(row)
         form.addRow(label, container)
         return sl, val_lbl
+
+    def _minmax_slider_row(self, form, label, handler):
+        """A Min/Max slider row (QuPath step0 panel). Integer slider (intensity
+        units) + numeric label; range is set per-channel in
+        _load_params_into_controls. Two-way synced with _sp_min/_sp_max + the
+        histogram via `handler`."""
+        row = QtWidgets.QHBoxLayout()
+        sl = QtWidgets.QSlider(Qt.Horizontal)
+        sl.setRange(0, 255)                 # provisional; reset from data on load
+        sl.setValue(0)
+        val_lbl = QtWidgets.QLabel("0")
+        val_lbl.setFixedWidth(48)
+        val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        sl.valueChanged.connect(handler)
+        row.addWidget(sl, stretch=1)
+        row.addWidget(val_lbl)
+        container = QtWidgets.QWidget()
+        container.setLayout(row)
+        form.addRow(label, container)
+        return sl, val_lbl
+
+    def _on_min_slider(self, v):
+        if self._loading or self._active is None:
+            return
+        self._lbl_min.setText(str(int(v)))
+        # Drive the authoritative spinbox -> _on_minmax_changed updates the
+        # histogram window, preview, params, and re-syncs the sliders.
+        self._sp_min.setValue(float(v))
+
+    def _on_max_slider(self, v):
+        if self._loading or self._active is None:
+            return
+        self._lbl_max.setText(str(int(v)))
+        self._sp_max.setValue(float(v))
+
+    def _sync_minmax_sliders(self):
+        """Push the current Min/Max spinbox values onto the sliders + labels
+        (step0 panel only). Guarded so it never re-triggers the slider handlers;
+        preserves the caller's _loading state."""
+        if not hasattr(self, "_sl_min"):
+            return
+        prev = self._loading
+        self._loading = True
+        try:
+            lo = int(round(self._sp_min.value()))
+            hi = int(round(self._sp_max.value()))
+            # widen the range if the window exceeds it (never clip the value)
+            if lo < self._sl_min.minimum() or hi > self._sl_min.maximum():
+                top = max(self._sl_min.maximum(), hi, lo, 1)
+                self._sl_min.setRange(0, top)
+                self._sl_max.setRange(0, top)
+            self._sl_min.setValue(max(self._sl_min.minimum(), min(lo, self._sl_min.maximum())))
+            self._sl_max.setValue(max(self._sl_max.minimum(), min(hi, self._sl_max.maximum())))
+            self._lbl_min.setText(str(lo))
+            self._lbl_max.setText(str(hi))
+        finally:
+            self._loading = prev
 
     def _build_reference_bar(self):
         """Reference-layer controls (visualization only): show toggles + opacity.
@@ -933,6 +1033,14 @@ class ChannelWorkbench(QtWidgets.QWidget):
             if hist_src is None:
                 hist_src = np.zeros((1, 1), np.float32)
             self._histogram.set_data(hist_src, p["min"], p["max"])
+            # step0 Min/Max sliders: range from this channel's data, then sync.
+            if hasattr(self, "_sl_min"):
+                finite = hist_src[np.isfinite(hist_src)] if hist_src.size else hist_src
+                dmax = float(finite.max()) if finite.size else 0.0
+                top = max(1, int(dmax) + 1, int(p["max"]) + 1)
+                self._sl_min.setRange(0, top)
+                self._sl_max.setRange(0, top)
+                self._sync_minmax_sliders()
         finally:
             self._loading = False
 
@@ -960,6 +1068,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._params[self._active]["auto"] = False  # manual override
         self._collect_params_from_controls()
         self._histogram.set_window(self._sp_min.value(), self._sp_max.value())
+        self._sync_minmax_sliders()
         self._refresh_preview()
 
     def _on_slider_changed(self, _v=None):
@@ -987,6 +1096,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._loading = False
         self._params[self._active]["auto"] = False
         self._collect_params_from_controls()
+        self._sync_minmax_sliders()
         self._refresh_preview()
 
     def _on_auto(self):
@@ -1007,6 +1117,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._loading = False
         self._params[self._active]["auto"] = True
         self._collect_params_from_controls()
+        self._sync_minmax_sliders()
         self._refresh_preview()
 
     def _on_reset(self):

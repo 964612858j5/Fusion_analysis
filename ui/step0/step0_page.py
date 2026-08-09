@@ -1103,7 +1103,8 @@ class Step0Page(QWidget):
         # Step1.5 / Step3 keep them.
         self._cond_workbench = ChannelWorkbench(
             show_reference_bar=False, show_enabled_checkbox=False,
-            multichannel_overlay=True, show_banner=False)
+            multichannel_overlay=True, show_banner=False,
+            step0_intensity_panel=True)
         # Match the Background Correction tab's darker background.
         self._cond_workbench.setStyleSheet("background:#1c1c1c;")
         # Host-agnostic: it asks for data via refresh_requested and we feed it from

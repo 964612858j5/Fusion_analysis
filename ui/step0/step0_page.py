@@ -970,7 +970,9 @@ class Step0Page(QWidget):
                 "border-radius:3px;padding:1px 4px;font-size:11px;}"
                 "QSpinBox:disabled{color:#555;border-color:#2a2a2a;}"
             )
-            sb.valueChanged.connect(self._on_dec_param_changed)
+            sb.setKeyboardTracking(False)   # valueChanged once per committed edit
+            sb.valueChanged.connect(self._on_dec_param_changed)   # persist only
+            sb.lineEdit().returnPressed.connect(self._on_dec_param_entered)  # Enter -> run
         _rl = QLabel("radius:"); _rl.setStyleSheet("color:#ddd;font-size:11px;")
         _sl = QLabel("sigma:");  _sl.setStyleSheet("color:#ddd;font-size:11px;")
         param_row.addWidget(_rl); param_row.addWidget(self._dec_radius)
@@ -2723,11 +2725,14 @@ class Step0Page(QWidget):
         self._refresh_preview_display(keep_zoom=True)
 
     def _resolve_channel_params(self, ch):
-        """(tophat_radius, cucim_sigma) for a channel: its per-channel override if
-        set, else the global Method Parameters values."""
+        """(tophat_radius, cucim_sigma) for a channel — its OWN per-channel value.
+
+        Fully isolated from the global Method Parameters: an untuned channel falls
+        back to the module defaults (NOT the live global sliders), so the global
+        box can never bleed into / overwrite a channel's per-channel params."""
         cp = self._channel_params.get(ch) or {}
-        tr = int(cp.get("tophat_radius", self._tophat_slider.value()))
-        cs = int(cp.get("cucim_sigma", self._cucim_slider.value()))
+        tr = int(cp.get("tophat_radius", TOPHAT_RADIUS_DEFAULT))
+        cs = int(cp.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))
         return tr, cs
 
     def _current_dec_method(self):
@@ -2747,15 +2752,34 @@ class Step0Page(QWidget):
 
     def _on_dec_method_toggled(self, checked):
         # QRadioButton.toggled fires for both the off and on button; act on 'on'.
+        # No compute here — the preview already renders TopHat & cucim; the radio
+        # only records which one is this channel's decision (committed on Apply/
+        # Process). NEVER auto-recompute.
         if not checked or getattr(self, "_loading_decision", False):
             return
         self._sync_dec_param_enabled()
-        self._queue_preview()                 # live preview reflects the new method
 
     def _on_dec_param_changed(self, _val=None):
+        # Persist the typed value into the ISOLATED per-channel store immediately
+        # (so it survives patch/channel switches and is never overwritten by the
+        # global box). Do NOT compute — Enter or the Process button triggers the
+        # run. This is the fix for the auto-recompute + global-sync bug.
         if getattr(self, "_loading_decision", False):
             return
-        self._queue_preview()                 # live preview with the new per-channel param
+        ch = self.current_channel
+        if not ch or ch == self.nucleus_channel:
+            return
+        self._channel_params[ch] = {
+            "tophat_radius": int(self._dec_radius.value()),
+            "cucim_sigma": int(self._dec_sigma.value()),
+        }
+
+    def _on_dec_param_entered(self):
+        """Enter pressed in a per-channel param box -> process this channel's
+        ALL patches with its params (same as the Process button)."""
+        if getattr(self, "_loading_decision", False):
+            return
+        self._process_current_channel()
 
     def _update_decision_ui(self):
         ch = self.current_channel
@@ -2779,19 +2803,17 @@ class Step0Page(QWidget):
                 self._dec_cu.setChecked(True)
             else:
                 self._dec_orig.setChecked(True)
-            # load this channel's params (override or global default) into the inputs
+            # Load THIS channel's own params into the inputs (isolated: override
+            # if set, else module default — never the global box's values).
             tr, cs = self._resolve_channel_params(ch)
             self._dec_radius.setValue(tr)
             self._dec_sigma.setValue(cs)
             self._sync_dec_param_enabled()
-            has_override = ch in self._channel_params
             if decision != "original":
-                self._decision_status.setText(
-                    f"Saved: {ch} {decision}  (r={tr}, σ={cs}"
-                    + ("" if has_override else ", global") + ")")
+                self._decision_status.setText(f"Saved: {ch} {decision}  (r={tr}, σ={cs})")
             else:
                 self._decision_status.setText(
-                    f"No correction for {ch}. Pick a method + params, then Apply/Process.")
+                    f"{ch}: set radius/sigma, pick a method, press Enter or Process.")
         finally:
             self._loading_decision = False
 
@@ -3368,14 +3390,14 @@ class Step0Page(QWidget):
             f"σ={self._dec_sigma.value()})")
 
     def _process_current_channel(self):
-        """Process ONE channel across all patches with its Per-Channel params."""
+        """Recompute ONE channel across all patches with its Per-Channel params.
+
+        Computes BOTH TopHat and cucim (method='both') so the user can compare the
+        two results in the preview and THEN pick the final one via the radio. The
+        radio is the final-result selector, NOT a prerequisite for recomputing
+        (radius drives TopHat, sigma drives cucim — both are always available)."""
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
-            return
-        method = self._current_dec_method()
-        if method == "original":
-            QMessageBox.information(self, "No method",
-                                    "Pick TopHat or cucim for this channel first.")
             return
         if not self.patches:
             QMessageBox.information(self, "No patches",
@@ -3384,8 +3406,11 @@ class Step0Page(QWidget):
         if self._batch_worker is not None and self._batch_worker.isRunning():
             QMessageBox.information(self, "Busy", "A process run is already in progress.")
             return
-        # commit this channel's choice, then run just it (fresh cache)
-        self._apply_current_channel_decision()
+        # persist this channel's current params, then recompute just it (fresh cache)
+        self._channel_params[ch] = {
+            "tophat_radius": int(self._dec_radius.value()),
+            "cucim_sigma": int(self._dec_sigma.value()),
+        }
         self._preview_cache = {k: v for k, v in self._preview_cache.items() if k[0] != ch}
         self._computed_channels.discard(ch)
         params = {ch: dict(self._channel_params.get(ch) or {})}
@@ -3395,7 +3420,7 @@ class Step0Page(QWidget):
         self._btn_stop_process.setEnabled(True)
         self._process_completed = False
         self._batch_worker = BatchProcessWorker(
-            self.loader, self.patches, {ch: method}, self.nucleus_channel,
+            self.loader, self.patches, {ch: "both"}, self.nucleus_channel,
             self._tophat_slider.value(), self._cucim_slider.value(),
             channel_params=params, max_gpu_workers=4,
         )

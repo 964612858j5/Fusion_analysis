@@ -54,5 +54,6 @@ TOPHAT_RADIUS_DEFAULT = 15   # was 35: on sparse near-zero-background channels a
                              # no visible change). 15 stays inside TOPHAT_RADIUS_RANGE
                              # and actually subtracts local background.
 CUCIM_SIGMA_DEFAULT   = 50
-TOPHAT_RADIUS_RANGE   = (10, 150)
-CUCIM_SIGMA_RANGE     = (20, 200)
+TOPHAT_RADIUS_RANGE   = (1, 150)   # min was 10 — too high: effective radius on
+                                   # sparse/low-background channels is ~2–10.
+CUCIM_SIGMA_RANGE     = (1, 200)   # min was 20 — allow small sigma too.

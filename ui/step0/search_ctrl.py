@@ -1636,7 +1636,8 @@ class BatchProcessWorker(QThread):
     canceled           = pyqtSignal()
 
     def __init__(self, loader, patches, methods, nucleus_channel,
-                 tophat_radius, cucim_sigma, max_gpu_workers=4, parent=None):
+                 tophat_radius, cucim_sigma, channel_params=None,
+                 max_gpu_workers=4, parent=None):
         super().__init__(parent)
         self.loader           = loader
         self.patches          = list(patches)
@@ -1644,6 +1645,9 @@ class BatchProcessWorker(QThread):
         self.nucleus_channel  = nucleus_channel
         self.tophat_radius    = int(tophat_radius)
         self.cucim_sigma      = int(cucim_sigma)
+        # Optional per-channel param overrides {ch: {"tophat_radius", "cucim_sigma"}}.
+        # A channel absent here falls back to the global tophat_radius/cucim_sigma.
+        self.channel_params   = dict(channel_params or {})
         self.max_gpu_workers  = max_gpu_workers
         self._stop            = False
 
@@ -1701,9 +1705,14 @@ class BatchProcessWorker(QThread):
                 if self._stop:
                     self.canceled.emit(); return
 
+                # Per-channel param override (falls back to the global values).
+                _cp = self.channel_params.get(ch) or {}
+                _tr = int(_cp.get("tophat_radius", self.tophat_radius))
+                _cs = int(_cp.get("cucim_sigma", self.cucim_sigma))
+
                 # GPU计算（并行，max_gpu_workers个同时跑）
                 # 用默认参数固定捕获method和raws，防止闭包引用变化
-                def _compute_one(p_idx, _method=method, _raws=raws):
+                def _compute_one(p_idx, _method=method, _raws=raws, _tr=_tr, _cs=_cs):
                     if self._stop:
                         return p_idx, None
                     raw = _raws.get(p_idx)
@@ -1715,13 +1724,13 @@ class BatchProcessWorker(QThread):
 
                     tophat_norm = cucim_norm = None
                     if _method in ("tophat", "both"):
-                        th = _apply_tophat_gpu_or_cpu(raw, self.tophat_radius)
+                        th = _apply_tophat_gpu_or_cpu(raw, _tr)
                         tophat_norm = OMETIFFLoader._norm(th)
                         tophat_raw  = th
                     else:
                         tophat_raw = None
                     if _method in ("cucim", "both"):
-                        cu = _apply_cucim_or_cpu(raw, self.cucim_sigma, prefer_gpu=CUCIM_AVAILABLE)
+                        cu = _apply_cucim_or_cpu(raw, _cs, prefer_gpu=CUCIM_AVAILABLE)
                         cucim_norm = OMETIFFLoader._norm(cu)
                         cucim_raw  = cu
                     else:
@@ -1982,6 +1991,15 @@ class WsiCorrectionWorker(QThread):
 
             decisions = dict((self.correction_config.get("channel_decisions") or {}))
             params = dict((self.correction_config.get("method_params") or {}))
+            # Per-channel param overrides {ch:{tophat_radius,cucim_sigma}}; a channel
+            # absent falls back to the global method_params.
+            ch_params = dict((self.correction_config.get("channel_params") or {}))
+
+            def _param_for(ch, method):
+                pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
+                pdefault = TOPHAT_RADIUS_DEFAULT if method == "tophat" else CUCIM_SIGMA_DEFAULT
+                cp = ch_params.get(ch) or {}
+                return int(cp.get(pname, params.get(pname, pdefault)))
             # All channels desired-corrected (the merged end-state of the zarr).
             desired = {
                 ch: method for ch, method in decisions.items()
@@ -1999,16 +2017,7 @@ class WsiCorrectionWorker(QThread):
                     print(f"[WsiCorrectionWorker] skipping channel={ch} "
                           f"(already corrected with {desired[ch]})")
             channels = [
-                (
-                    ch,
-                    method,
-                    int(
-                        params.get(
-                            "tophat_radius" if method == "tophat" else "cucim_sigma",
-                            TOPHAT_RADIUS_DEFAULT if method == "tophat" else CUCIM_SIGMA_DEFAULT,
-                        )
-                    ),
-                )
+                (ch, method, _param_for(ch, method))
                 for ch, method in process.items()
             ]
             zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")

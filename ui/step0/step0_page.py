@@ -223,6 +223,13 @@ class Step0Page(QWidget):
         self._channel_colors: dict = {}
         # 通道方法选择：key=channel_name → "tophat"|"cucim"|"both"
         self._channel_methods: dict = {}
+        # Per-channel param overrides: {ch: {"tophat_radius": int, "cucim_sigma": int}}.
+        # Absent -> the channel uses the global Method Parameters values. Lets each
+        # channel be re-tuned independently (Per-Channel Decision box).
+        self._channel_params: dict = {}
+        # Guard: True while _update_decision_ui programmatically loads the Decision
+        # widgets (so their signals don't fire preview/dirty during a load).
+        self._loading_decision: bool = False
         # 批量处理worker
         self._batch_worker: BatchProcessWorker = None
         # 计算完成的通道集合
@@ -610,28 +617,54 @@ class Step0Page(QWidget):
         cll.addWidget(ch_box, stretch=2)
 
         # ── Method Parameters ─────────────────────────────────────────
+        # Compact: one numeric INPUT box per method (no sliders, no separate
+        # value/hint labels) — hints live in tooltips. Halves the vertical space.
         method_box = QGroupBox("Method Parameters")
         method_box.setStyleSheet(self._box_style("#e5c07b"))
         ml = QVBoxLayout(method_box)
-        self._tophat_value = QLabel()
-        self._tophat_slider = QSlider(Qt.Horizontal)
-        self._tophat_slider.setRange(*TOPHAT_RADIUS_RANGE)
-        self._tophat_slider.setValue(TOPHAT_RADIUS_DEFAULT)
-        self._tophat_slider.valueChanged.connect(self._on_slider_changed)
-        self._cucim_value = QLabel()
-        self._cucim_slider = QSlider(Qt.Horizontal)
-        self._cucim_slider.setRange(*CUCIM_SIGMA_RANGE)
-        self._cucim_slider.setValue(CUCIM_SIGMA_DEFAULT)
-        self._cucim_slider.valueChanged.connect(self._on_slider_changed)
-        for lbl in (self._tophat_value, self._cucim_value):
+        ml.setContentsMargins(6, 4, 6, 4)
+        ml.setSpacing(3)
+
+        def _param_input(rng, default, tip):
+            sb = QtWidgets.QSpinBox()
+            sb.setRange(int(rng[0]), int(rng[1]))
+            sb.setValue(int(default))
+            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)  # pure input box
+            sb.setAlignment(Qt.AlignRight)
+            sb.setFixedWidth(72)
+            sb.setToolTip(tip)
+            sb.setStyleSheet(
+                "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
+                "border-radius:3px;padding:1px 5px;font-size:11px;}"
+            )
+            return sb
+
+        def _param_row(text, widget, tip):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(text)
+            lbl.setToolTip(tip)
             lbl.setStyleSheet("color:#ddd;font-size:11px;")
-        ml.addWidget(self._tophat_value)
-        ml.addWidget(self._tophat_slider)
-        ml.addWidget(self._hint_label("~0.5–1.5× cell diameter"))
-        ml.addSpacing(4)
-        ml.addWidget(self._cucim_value)
-        ml.addWidget(self._cucim_slider)
-        ml.addWidget(self._hint_label("Large sigma → broad background"))
+            row.addWidget(lbl)
+            row.addStretch()
+            row.addWidget(widget)
+            ml.addLayout(row)
+
+        # Names kept as *_slider for API/back-compat (QSpinBox is a drop-in:
+        # value()/setValue()/valueChanged/blockSignals all match QSlider).
+        self._tophat_slider = _param_input(
+            TOPHAT_RADIUS_RANGE, TOPHAT_RADIUS_DEFAULT,
+            "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
+        self._tophat_slider.valueChanged.connect(self._on_slider_changed)
+        self._cucim_slider = _param_input(
+            CUCIM_SIGMA_RANGE, CUCIM_SIGMA_DEFAULT,
+            "cucim Gaussian sigma (px) — larger sigma estimates broader background")
+        self._cucim_slider.valueChanged.connect(self._on_slider_changed)
+        _param_row("TopHat radius:", self._tophat_slider,
+                   "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
+        _param_row("cucim sigma:", self._cucim_slider,
+                   "cucim Gaussian sigma (px) — larger sigma estimates broader background")
+
         self._cucim_warn = QLabel(
             "cucim not available — CPU fallback."
             + (f" ({CUCIM_IMPORT_ERROR})" if CUCIM_IMPORT_ERROR else "")
@@ -643,13 +676,14 @@ class Step0Page(QWidget):
             "border:1px solid #704b1f;border-radius:3px;padding:4px;"
         )
         ml.addWidget(self._cucim_warn)
-        cll.addWidget(method_box)
 
-        # ── Process 按钮 + 进度 ───────────────────────────────────────
-        proc_box = QGroupBox("Process")
-        proc_box.setStyleSheet(self._box_style("#98c379"))
-        prl = QVBoxLayout(proc_box)
-        prl.setSpacing(4)
+        # Run controls folded INTO Method Parameters (the params ARE the run's
+        # inputs). Process = first run; becomes Re-process only after a completed
+        # run when params change (see _on_slider_changed / _on_batch_all_done).
+        _sep = QFrame()
+        _sep.setFrameShape(QFrame.HLine)
+        _sep.setStyleSheet("color:#333;")
+        ml.addWidget(_sep)
 
         proc_btn_row = QHBoxLayout()
         self._btn_process = QPushButton("▶ Process")
@@ -672,7 +706,7 @@ class Step0Page(QWidget):
 
         proc_btn_row.addWidget(self._btn_process, stretch=1)
         proc_btn_row.addWidget(self._btn_stop_process)
-        prl.addLayout(proc_btn_row)
+        ml.addLayout(proc_btn_row)
 
         self._proc_pbar = QProgressBar()
         self._proc_pbar.setRange(0, 100)
@@ -683,14 +717,14 @@ class Step0Page(QWidget):
             "QProgressBar{border:1px solid #4a9;border-radius:3px;background:#111;}"
             "QProgressBar::chunk{background:#4a9;border-radius:2px;}"
         )
-        prl.addWidget(self._proc_pbar)
+        ml.addWidget(self._proc_pbar)
 
         self._proc_status = QLabel("Select channels and click Process.")
         self._proc_status.setWordWrap(True)
         self._proc_status.setStyleSheet("color:#aaa;font-size:10px;")
-        prl.addWidget(self._proc_status)
+        ml.addWidget(self._proc_status)
 
-        cll.addWidget(proc_box)
+        cll.addWidget(method_box)
 
         # ── Preview Patch 选择 ────────────────────────────────────────
         patch_box = QGroupBox("Preview Patch")
@@ -912,18 +946,65 @@ class Step0Page(QWidget):
         decision_box = QGroupBox("Per-Channel Decision")
         decision_box.setStyleSheet(self._box_style("#e06c75"))
         dl = QVBoxLayout(decision_box)
+        dl.setContentsMargins(6, 4, 6, 4)
+        dl.setSpacing(3)
+
+        # Per-channel params (override the global Method Parameters for THIS
+        # channel). Only the field matching the chosen method is enabled.
+        param_row = QHBoxLayout()
+        param_row.setContentsMargins(0, 0, 0, 0)
+        self._dec_radius = QtWidgets.QSpinBox()
+        self._dec_radius.setRange(int(TOPHAT_RADIUS_RANGE[0]), int(TOPHAT_RADIUS_RANGE[1]))
+        self._dec_radius.setValue(TOPHAT_RADIUS_DEFAULT)
+        self._dec_sigma = QtWidgets.QSpinBox()
+        self._dec_sigma.setRange(int(CUCIM_SIGMA_RANGE[0]), int(CUCIM_SIGMA_RANGE[1]))
+        self._dec_sigma.setValue(CUCIM_SIGMA_DEFAULT)
+        for sb, tip in ((self._dec_radius, "TopHat disk radius (px) for this channel"),
+                        (self._dec_sigma, "cucim Gaussian sigma (px) for this channel")):
+            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            sb.setAlignment(Qt.AlignRight)
+            sb.setFixedWidth(56)
+            sb.setToolTip(tip)
+            sb.setStyleSheet(
+                "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
+                "border-radius:3px;padding:1px 4px;font-size:11px;}"
+                "QSpinBox:disabled{color:#555;border-color:#2a2a2a;}"
+            )
+            sb.valueChanged.connect(self._on_dec_param_changed)
+        _rl = QLabel("radius:"); _rl.setStyleSheet("color:#ddd;font-size:11px;")
+        _sl = QLabel("sigma:");  _sl.setStyleSheet("color:#ddd;font-size:11px;")
+        param_row.addWidget(_rl); param_row.addWidget(self._dec_radius)
+        param_row.addSpacing(8)
+        param_row.addWidget(_sl); param_row.addWidget(self._dec_sigma)
+        param_row.addStretch()
+        dl.addLayout(param_row)
+
         self._decision_group = QButtonGroup(self)
-        self._dec_top  = QRadioButton("Use TopHat result")
-        self._dec_cu   = QRadioButton("Use cucim result")
-        self._dec_orig = QRadioButton("Keep original")
+        self._dec_top  = QRadioButton("TopHat")
+        self._dec_cu   = QRadioButton("cucim")
+        self._dec_orig = QRadioButton("Original")
         self._dec_orig.setChecked(True)
         rb_row = QHBoxLayout()
         for rb in (self._dec_top, self._dec_cu, self._dec_orig):
             self._decision_group.addButton(rb)
             rb.setStyleSheet("font-size:11px;")
+            rb.toggled.connect(self._on_dec_method_toggled)
             rb_row.addWidget(rb)
         dl.addLayout(rb_row)
-        self._apply_btn = QPushButton("Apply to this channel")
+
+        btn_row = QHBoxLayout()
+        self._dec_process_btn = QPushButton("Process")
+        self._dec_process_btn.setToolTip(
+            "Run this channel's params over ALL its patches now (incremental).")
+        self._dec_process_btn.setStyleSheet(
+            "QPushButton{background:#1a5c2a;color:#6bffa0;border-radius:4px;"
+            "padding:5px 10px;font-weight:bold;}"
+            "QPushButton:hover{background:#2a7c3a;}"
+            "QPushButton:disabled{background:#333;color:#555;}"
+        )
+        self._dec_process_btn.clicked.connect(self._process_current_channel)
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setToolTip("Save this channel's method + params (no run).")
         self._apply_btn.setStyleSheet(
             "QPushButton{background:#255;color:white;border-radius:4px;"
             "padding:5px 12px;font-weight:bold;}"
@@ -931,7 +1012,10 @@ class Step0Page(QWidget):
             "QPushButton:disabled{background:#333;color:#555;}"
         )
         self._apply_btn.clicked.connect(self._apply_current_channel_decision)
-        dl.addWidget(self._apply_btn)
+        btn_row.addWidget(self._dec_process_btn, stretch=1)
+        btn_row.addWidget(self._apply_btn, stretch=1)
+        dl.addLayout(btn_row)
+
         self._decision_status = QLabel("No decision saved yet.")
         self._decision_status.setWordWrap(True)
         self._decision_status.setStyleSheet("color:#aaa;font-size:10px;")
@@ -1832,6 +1916,13 @@ class Step0Page(QWidget):
         self.current_channel = None
         self._preview_req_id = 0
         self._channel_decisions.clear()
+        # New image/ROI loaded -> no BG run yet: button back to "▶ Process", clear
+        # stale results/dirty so a param change won't read as "Re-process" (Topic 1).
+        self._computed_channels = set()
+        self._preview_cache = {}
+        self._process_completed = False
+        if hasattr(self, "_btn_process"):
+            self._reset_process_button()
         # (#5) the BG run-progress widgets (_bg_pbar/_bg_start_status) were removed
         # with the standalone "Run BG correction" button; Save uses its own
         # progress dialog.
@@ -2214,6 +2305,18 @@ class Step0Page(QWidget):
         self._loaded_config = _load_correction_config(path)
         raw_decisions = dict((self._loaded_config or {}).get("channel_decisions") or {})
         self._channel_decisions = {k: ("original" if v == "both" else v) for k, v in raw_decisions.items()}
+        # Restore per-channel param overrides (int-normalized); channels absent
+        # fall back to the global method_params.
+        self._channel_params = {}
+        for ch, cp in ((self._loaded_config or {}).get("channel_params") or {}).items():
+            cp = cp or {}
+            try:
+                self._channel_params[str(ch)] = {
+                    "tophat_radius": int(cp["tophat_radius"]),
+                    "cucim_sigma": int(cp["cucim_sigma"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
         params = (self._loaded_config or {}).get("method_params") or {}
         self._tophat_slider.blockSignals(True)
         self._tophat_slider.setValue(int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)))
@@ -2619,29 +2722,78 @@ class Step0Page(QWidget):
         """调整显示对比度时刷新预览，不触发重算。"""
         self._refresh_preview_display(keep_zoom=True)
 
+    def _resolve_channel_params(self, ch):
+        """(tophat_radius, cucim_sigma) for a channel: its per-channel override if
+        set, else the global Method Parameters values."""
+        cp = self._channel_params.get(ch) or {}
+        tr = int(cp.get("tophat_radius", self._tophat_slider.value()))
+        cs = int(cp.get("cucim_sigma", self._cucim_slider.value()))
+        return tr, cs
+
+    def _current_dec_method(self):
+        if self._dec_top.isChecked():
+            return "tophat"
+        if self._dec_cu.isChecked():
+            return "cucim"
+        return "original"
+
+    def _sync_dec_param_enabled(self):
+        # Both inputs editable whenever a real channel is selected — the user sets
+        # params freely; the method radio only picks WHICH one is used at Process.
+        ch = self.current_channel
+        ok = bool(ch and ch != self.nucleus_channel and ch in self._channel_rows)
+        self._dec_radius.setEnabled(ok)
+        self._dec_sigma.setEnabled(ok)
+
+    def _on_dec_method_toggled(self, checked):
+        # QRadioButton.toggled fires for both the off and on button; act on 'on'.
+        if not checked or getattr(self, "_loading_decision", False):
+            return
+        self._sync_dec_param_enabled()
+        self._queue_preview()                 # live preview reflects the new method
+
+    def _on_dec_param_changed(self, _val=None):
+        if getattr(self, "_loading_decision", False):
+            return
+        self._queue_preview()                 # live preview with the new per-channel param
+
     def _update_decision_ui(self):
         ch = self.current_channel
         enabled = bool(ch and ch != self.nucleus_channel and ch in self._channel_rows)
-        self._apply_btn.setEnabled(enabled)
-        if not enabled:
-            self._decision_status.setText("The locked nucleus channel is always excluded from correction.")
-            self._dec_orig.setChecked(True)
-            return
-        decision = self._channel_decisions.get(ch, "original")
-        if decision == "both":
-            decision = "original"
-        if decision == "tophat":
-            self._dec_top.setChecked(True)
-        elif decision == "cucim":
-            self._dec_cu.setChecked(True)
-        else:
-            self._dec_orig.setChecked(True)
-        if decision != "original":
-            self._decision_status.setText(f"Saved decision for {ch}: {decision}")
-        else:
-            self._decision_status.setText(
-                f"No correction assigned for {ch}. Select a method and click Apply."
-            )
+        self._loading_decision = True
+        try:
+            self._apply_btn.setEnabled(enabled)
+            self._dec_process_btn.setEnabled(enabled and bool(self.patches))
+            self._dec_radius.setEnabled(enabled)
+            self._dec_sigma.setEnabled(enabled)
+            if not enabled:
+                self._decision_status.setText("The locked nucleus channel is always excluded from correction.")
+                self._dec_orig.setChecked(True)
+                return
+            decision = self._channel_decisions.get(ch, "original")
+            if decision == "both":
+                decision = "original"
+            if decision == "tophat":
+                self._dec_top.setChecked(True)
+            elif decision == "cucim":
+                self._dec_cu.setChecked(True)
+            else:
+                self._dec_orig.setChecked(True)
+            # load this channel's params (override or global default) into the inputs
+            tr, cs = self._resolve_channel_params(ch)
+            self._dec_radius.setValue(tr)
+            self._dec_sigma.setValue(cs)
+            self._sync_dec_param_enabled()
+            has_override = ch in self._channel_params
+            if decision != "original":
+                self._decision_status.setText(
+                    f"Saved: {ch} {decision}  (r={tr}, σ={cs}"
+                    + ("" if has_override else ", global") + ")")
+            else:
+                self._decision_status.setText(
+                    f"No correction for {ch}. Pick a method + params, then Apply/Process.")
+        finally:
+            self._loading_decision = False
 
     def _refresh_channel_row(self, ch):
         row = self._channel_rows.get(ch)
@@ -2882,6 +3034,7 @@ class Step0Page(QWidget):
             self.nucleus_channel,
             self._tophat_slider.value(),
             self._cucim_slider.value(),
+            channel_params=self._channel_params,   # each channel uses its own params
             max_gpu_workers=4,
         )
         self._batch_worker.channel_patch_done.connect(self._on_batch_patch_done)
@@ -2929,14 +3082,27 @@ class Step0Page(QWidget):
         """一个通道的所有patches全部计算完成。"""
         self._set_channel_done(ch)
 
+    def _reset_process_button(self):
+        """Return the run button to the idle '▶ Process' look + clear the dirty flag.
+        A subsequent param change (after a completed run) flips it to Re-process."""
+        self._params_dirty = False
+        self._btn_process.setText("▶ Process")
+        self._btn_process.setStyleSheet(
+            "QPushButton{background:#1a5c2a;color:#6bffa0;border:1px solid #4a9;"
+            "border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;}"
+            "QPushButton:hover{background:#2a7c3a;}"
+            "QPushButton:disabled{background:#222;color:#555;border-color:#333;}"
+        )
+
     def _on_batch_all_done(self):
         self._proc_pbar.setValue(100)
         self._proc_status.setText("✓ All done. Click a channel to view results.")
         self._proc_status.setStyleSheet("color:#6bffa0;font-size:10px;font-weight:bold;")
         self._btn_process.setEnabled(True)
-        self._btn_process.setText("↺ Re-process")
         self._btn_stop_process.setEnabled(False)
         self._process_completed = True   # 解锁按需计算
+        # Not auto "Re-process": only a param change after this flips it (Topic 1).
+        self._reset_process_button()
 
     def _on_batch_canceled(self):
         self._proc_status.setText("Stopped.")
@@ -3097,6 +3263,11 @@ class Step0Page(QWidget):
 
     def _on_slider_changed(self):
         self._refresh_slider_labels()
+        # Only a param change AFTER a completed run (with data loaded) means the
+        # existing result is stale -> "Re-process". Before any run (or no data),
+        # the button stays "▶ Process" (this is the initial run, not a re-run).
+        if not (self._process_completed and self.loader and self.patches):
+            return
         if not self._params_dirty:
             self._params_dirty = True
             self._btn_process.setText("↺ Re-process (params changed)")
@@ -3107,10 +3278,10 @@ class Step0Page(QWidget):
             )
 
     def _refresh_slider_labels(self):
-        self._tophat_value.setText(f"disk_radius: {self._tophat_slider.value()}")
-        self._tophat_value.setStyleSheet("color:#ddd;font-size:11px;")
-        self._cucim_value.setText(f"sigma: {self._cucim_slider.value()}")
-        self._cucim_value.setStyleSheet("color:#ddd;font-size:11px;")
+        # No-op: the QSpinBox input boxes display their own value now (the old
+        # separate value labels were removed when sliders became input boxes).
+        # Kept as a stable hook for its existing callers.
+        pass
 
     def _queue_preview(self):
         self._preview_debounce.start(150)
@@ -3129,13 +3300,17 @@ class Step0Page(QWidget):
         self._preview_status.setText(
             f"Computing preview for {self.current_channel} on P{self.current_patch_idx+1}…"
         )
+        # Preview uses the Per-Channel Decision box's LIVE values (the current
+        # channel's tuning), falling back to the global defaults it was seeded with.
+        _pv_r = self._dec_radius.value() if hasattr(self, "_dec_radius") else self._tophat_slider.value()
+        _pv_s = self._dec_sigma.value() if hasattr(self, "_dec_sigma") else self._cucim_slider.value()
         self._preview_worker = BackgroundPreviewWorker(
             req_id,
             self.loader,
             self.current_channel,
             roi,
-            self._tophat_slider.value(),
-            self._cucim_slider.value(),
+            _pv_r,
+            _pv_s,
             nucleus_channel=self.nucleus_channel,
         )
         self._preview_worker.finished.connect(self._on_preview_ready)
@@ -3180,15 +3355,57 @@ class Step0Page(QWidget):
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
             return
-        if self._dec_top.isChecked():
-            decision = "tophat"
-        elif self._dec_cu.isChecked():
-            decision = "cucim"
-        else:
-            decision = "original"
+        decision = self._current_dec_method()
         self._channel_decisions[ch] = decision
+        # persist this channel's own params (override of the global defaults)
+        self._channel_params[ch] = {
+            "tophat_radius": int(self._dec_radius.value()),
+            "cucim_sigma": int(self._dec_sigma.value()),
+        }
         self._refresh_channel_row(ch)
-        self._decision_status.setText(f"Saved decision for {ch}: {decision}")
+        self._decision_status.setText(
+            f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
+            f"σ={self._dec_sigma.value()})")
+
+    def _process_current_channel(self):
+        """Process ONE channel across all patches with its Per-Channel params."""
+        ch = self.current_channel
+        if not ch or ch == self.nucleus_channel:
+            return
+        method = self._current_dec_method()
+        if method == "original":
+            QMessageBox.information(self, "No method",
+                                    "Pick TopHat or cucim for this channel first.")
+            return
+        if not self.patches:
+            QMessageBox.information(self, "No patches",
+                                    "Draw at least one patch in the navigator first.")
+            return
+        if self._batch_worker is not None and self._batch_worker.isRunning():
+            QMessageBox.information(self, "Busy", "A process run is already in progress.")
+            return
+        # commit this channel's choice, then run just it (fresh cache)
+        self._apply_current_channel_decision()
+        self._preview_cache = {k: v for k, v in self._preview_cache.items() if k[0] != ch}
+        self._computed_channels.discard(ch)
+        params = {ch: dict(self._channel_params.get(ch) or {})}
+        self._set_channel_computing(ch)
+        self._proc_pbar.setVisible(True)
+        self._proc_pbar.setValue(0)
+        self._btn_stop_process.setEnabled(True)
+        self._process_completed = False
+        self._batch_worker = BatchProcessWorker(
+            self.loader, self.patches, {ch: method}, self.nucleus_channel,
+            self._tophat_slider.value(), self._cucim_slider.value(),
+            channel_params=params, max_gpu_workers=4,
+        )
+        self._batch_worker.channel_patch_done.connect(self._on_batch_patch_done)
+        self._batch_worker.channel_done.connect(self._on_batch_channel_done)
+        self._batch_worker.all_done.connect(self._on_batch_all_done)
+        self._batch_worker.progress.connect(self._on_batch_progress)
+        self._batch_worker.error_signal.connect(self._on_batch_error)
+        self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._batch_worker.start()
 
     def _build_config(self):
         decisions = {}
@@ -3197,12 +3414,23 @@ class Step0Page(QWidget):
                 continue
             d = self._channel_decisions.get(ch, "original")
             decisions[ch] = "original" if d == "both" else d
+        # Per-channel param overrides (only channels the user tuned individually);
+        # channels absent here use method_params. Kept minimal + int-normalized.
+        channel_params = {}
+        for ch in decisions:
+            cp = self._channel_params.get(ch)
+            if cp:
+                channel_params[ch] = {
+                    "tophat_radius": int(cp.get("tophat_radius", self._tophat_slider.value())),
+                    "cucim_sigma": int(cp.get("cucim_sigma", self._cucim_slider.value())),
+                }
         return {
             "method_params": {
                 "tophat_radius": int(self._tophat_slider.value()),
                 "cucim_sigma": int(self._cucim_slider.value()),
             },
             "channel_decisions": decisions,
+            "channel_params": channel_params,
         }
 
     def _stop_bg_workers(self):
@@ -3288,12 +3516,14 @@ class Step0Page(QWidget):
         # same (method, method-specific parameter), when the ROI set is unchanged.
         # Process only new/changed channels; merge into (not overwrite) the zarr.
         mp = config.get("method_params") or {}
-        def _cur_sig(method):
+        cp_all = config.get("channel_params") or {}
+        def _cur_sig(ch, method):
             pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
             pdefault = (TOPHAT_RADIUS_DEFAULT if method == "tophat"
                         else CUCIM_SIGMA_DEFAULT)
-            return (method, int(mp.get(pname, pdefault)))
-        current_sigs = {ch: _cur_sig(m) for ch, m in corrected.items()}
+            cp = cp_all.get(ch) or {}
+            return (method, int(cp.get(pname, mp.get(pname, pdefault))))
+        current_sigs = {ch: _cur_sig(ch, m) for ch, m in corrected.items()}
 
         existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)
         current_bboxes = sorted(
@@ -3421,12 +3651,20 @@ class Step0Page(QWidget):
             if m not in {"tophat", "cucim", "original"}:
                 m = "original"
             decisions[str(ch)] = m
+        channel_params = {}
+        for ch, cp in (cfg.get("channel_params") or {}).items():
+            cp = cp or {}
+            channel_params[str(ch)] = {
+                "tophat_radius": int(cp.get("tophat_radius", params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT))),
+                "cucim_sigma": int(cp.get("cucim_sigma", params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))),
+            }
         return {
             "method_params": {
                 "tophat_radius": int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)),
                 "cucim_sigma": int(params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT)),
             },
             "channel_decisions": decisions,
+            "channel_params": channel_params,
         }
 
     @staticmethod

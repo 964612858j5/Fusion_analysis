@@ -1150,7 +1150,10 @@ class Step0Page(QWidget):
     def _on_step0_tab_changed(self, idx):
         if not hasattr(self, "_step0_tabs"):
             return
-        if self._step0_tabs.tabText(idx).startswith('Channel Conditioning') \
+        # Key on the tab INDEX, not its title (title was renamed to "Channel
+        # Remap"). Entering the remap tab always (re)feeds the workbench from the
+        # current patch so it works even when NO background correction was run.
+        if idx == getattr(self, "_cond_tab_index", -1) \
                 and hasattr(self, "_cond_workbench") \
                 and not self._cond_workbench.has_channel_data():
             self._sync_step0_to_workbench()
@@ -3526,9 +3529,19 @@ class Step0Page(QWidget):
         zarr_path = os.path.join(step0_dir, "corrected_channels.zarr")
 
         if not corrected:
+            # No channel assigned TopHat/cuCIM -> nothing to background-correct.
+            # This is a VALID choice (not an error): record the "no correction"
+            # decision + handoff so downstream still works, and tell the user
+            # plainly there is nothing to save + where to go next.
             self._ensure_empty_corrected_zarr(zarr_path, rois)
             self.loader.set_corrected_zarr_store(None, {})
             self._emit_complete(config, zarr_path, {})
+            QMessageBox.information(
+                self, "No background correction",
+                "No channel is assigned TopHat or cuCIM, so there is no "
+                "background correction to save.\n\n"
+                "That's fine — click OK, then use the Channel Remap tab to "
+                "adjust channels manually, or continue to Step1.")
             return
 
         # Incremental save: skip channels already in the corrected zarr with the
@@ -3800,11 +3813,11 @@ class Step0Page(QWidget):
             self._bg_corrected_status.setStyleSheet(
                 "color:#6bffa0;font-size:11px;font-weight:bold;")
         else:
+            # No channels assigned -> a valid "no correction" choice, not an error.
             self._bg_corrected_status.setText(
-                "⚠ corrected_channels.zarr is EMPTY (no tophat/cuCIM channels "
-                "assigned) — not a valid corrected output.")
-            self._bg_corrected_status.setStyleSheet(
-                "color:#e5c07b;font-size:11px;font-weight:bold;")
+                "No background correction applied (no channels assigned). "
+                "Use Channel Remap or continue to Step1.")
+            self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
 
     def _write_step0_handoff(self, config, zarr_path):
         step0_dir = os.path.dirname(zarr_path) if zarr_path else (

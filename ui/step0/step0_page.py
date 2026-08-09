@@ -551,14 +551,10 @@ class Step0Page(QWidget):
         cl.setContentsMargins(4, 4, 4, 4)
         cl.setSpacing(4)
 
-        c_title = QLabel("C — Background Correction")
-        c_title.setAlignment(Qt.AlignCenter)
-        c_title.setStyleSheet(
-            "font-size:11px;font-weight:bold;color:#c678dd;"
-            "border:1px solid #c678dd;border-radius:3px;padding:2px;"
-        )
-        cl.addWidget(c_title)
-
+        # (redundant "C — Background Correction" title removed: the tab is already
+        # named "Background Correction"; the freed vertical space goes entirely to
+        # c_split below — Channels/params/patch on the left, the Original|Tophat|
+        # cucim Patch Preview on the right.)
         # Section C 内部：左（通道列表+参数+patch选择） / 右（三联预览+metrics+决策）
         c_split = QSplitter(Qt.Horizontal)
         c_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")

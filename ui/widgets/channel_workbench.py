@@ -151,20 +151,25 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._status_lbl = QtWidgets.QLabel()
         self._status_lbl.setWordWrap(True)
         self._status_lbl.setStyleSheet("color:#9fd; font-size:10px; padding:1px 2px;")
+        # Step0's Channel Remap hides this provenance line ("Source: manual …")
+        # as clutter; the label object stays (text still set) so other code is safe.
+        self._status_lbl.setVisible(not self._step0_intensity_panel)
         root.addWidget(self._status_lbl)
 
         split = QtWidgets.QSplitter(Qt.Horizontal)
 
-        # Left — channel layer list + marker bulk controls
-        left = QtWidgets.QWidget()
+        # Left — channel layer list + marker bulk controls. Step0 wraps it in a
+        # titled "Channels" group box (blue #61afef border + title, drawn in the
+        # border gap so it is never covered); the list's own header is hidden.
         if self._step0_intensity_panel:
-            # Bordered "Channels" panel (blue #61afef, matching its header),
-            # object-scoped so the border does not cascade onto child widgets.
-            left.setObjectName("channels_panel")
+            left = QtWidgets.QGroupBox("Channels")
             left.setStyleSheet(
-                "#channels_panel{border:1px solid #61afef;border-radius:5px;}")
+                "QGroupBox{border:1px solid #61afef;border-radius:5px;"
+                "margin-top:6px;font-weight:bold;color:#61afef;font-size:11px;}")
+        else:
+            left = QtWidgets.QWidget()
         left_l = QtWidgets.QVBoxLayout(left)
-        _m = 4 if self._step0_intensity_panel else 0
+        _m = 6 if self._step0_intensity_panel else 0
         left_l.setContentsMargins(_m, _m, _m, _m)
         left_l.setSpacing(4)
         # (#3 all-toggle + channel-search) Above the list, multichannel overlay
@@ -191,7 +196,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
             all_row.addWidget(self._search, stretch=1)
             left_l.addLayout(all_row)
 
-        self._layer_list = ChannelLayerList()
+        self._layer_list = ChannelLayerList(
+            show_header=not self._step0_intensity_panel)
         self._layer_list.active_changed.connect(self._on_active_changed)
         self._layer_list.visibility_changed.connect(self._on_visibility_changed)
         self._layer_list.color_clicked.connect(self._on_color_clicked)
@@ -231,11 +237,20 @@ class ChannelWorkbench(QtWidgets.QWidget):
         split.addWidget(self._build_inspector())
 
         if self._step0_intensity_panel:
-            # Channels 2× wider (2->4); inspector -2/5 (3->1.8, use 20/25/9 to
-            # keep it exact without float stretch factors).
-            split.setStretchFactor(0, 20)
-            split.setStretchFactor(1, 25)
-            split.setStretchFactor(2, 9)
+            # Channels wide; inspector the SAME width as Channels. Let the
+            # histogram shrink so its min size doesn't force the inspector wide,
+            # then pin equal INITIAL sizes (setSizes; stretch only governs the
+            # EXTRA space on resize — initial sizes otherwise follow sizeHint,
+            # which is why the inspector rendered wide).
+            self._histogram.setMinimumWidth(0)
+            self._histogram._plot.setMinimumWidth(0)
+            # Channels == Intensity, each HALF their previous width; the image
+            # (middle) takes the freed space. Stretch mirrors the size ratio so
+            # the proportions hold on resize.
+            split.setStretchFactor(0, 15)
+            split.setStretchFactor(1, 70)
+            split.setStretchFactor(2, 15)
+            split.setSizes([150, 700, 150])
         else:
             split.setStretchFactor(0, 2)
             split.setStretchFactor(1, 5)
@@ -280,14 +295,14 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._sp_max.valueChanged.connect(self._on_minmax_changed)
 
         if step0:
-            # QuPath layout: Min/Max as draggable sliders (like Gamma), two-way
-            # synced with the histogram window; spinboxes kept as hidden model.
+            # QuPath layout: Min/Max as draggable sliders + editable spinboxes,
+            # two-way synced with the histogram window.
+            self._sp_min.setFixedWidth(72)
+            self._sp_max.setFixedWidth(72)
             self._sl_min, self._lbl_min = self._minmax_slider_row(
-                form, "Min", self._on_min_slider)
+                form, "Min", self._on_min_slider, spin=self._sp_min)
             self._sl_max, self._lbl_max = self._minmax_slider_row(
-                form, "Max", self._on_max_slider)
-            self._sp_min.setVisible(False)
-            self._sp_max.setVisible(False)
+                form, "Max", self._on_max_slider, spin=self._sp_max)
         else:
             form.addRow("Min", self._sp_min)
             form.addRow("Max", self._sp_max)
@@ -308,8 +323,31 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 -100, 100, 0, form, "Brightness")
             self._sl_contrast, self._lbl_contrast = self._slider_row(
                 0, 300, 100, form, "Contrast")
-        self._sl_gamma, self._lbl_gamma = self._slider_row(
-            10, 300, 100, form, "Gamma")
+        if step0:
+            # Gamma: slider + editable spinbox (0.10–3.00), two-way synced.
+            grow = QtWidgets.QHBoxLayout()
+            grow.setContentsMargins(0, 0, 0, 0)
+            self._sl_gamma = QtWidgets.QSlider(Qt.Horizontal)
+            self._sl_gamma.setRange(10, 300)
+            self._sl_gamma.setValue(100)
+            self._sl_gamma.valueChanged.connect(self._on_slider_changed)
+            self._lbl_gamma = QtWidgets.QLabel("1.00")   # hidden handler target
+            self._lbl_gamma.setVisible(False)
+            self._sp_gamma = QtWidgets.QDoubleSpinBox()
+            self._sp_gamma.setRange(0.10, 3.00)
+            self._sp_gamma.setDecimals(2)
+            self._sp_gamma.setSingleStep(0.05)
+            self._sp_gamma.setValue(1.0)
+            self._sp_gamma.setFixedWidth(72)
+            self._sp_gamma.valueChanged.connect(self._on_gamma_spin)
+            grow.addWidget(self._sl_gamma, stretch=1)
+            grow.addWidget(self._sp_gamma)
+            gc = QtWidgets.QWidget()
+            gc.setLayout(grow)
+            form.addRow("Gamma", gc)
+        else:
+            self._sl_gamma, self._lbl_gamma = self._slider_row(
+                10, 300, 100, form, "Gamma")
         lay.addLayout(form)
 
         btn_row = QtWidgets.QHBoxLayout()
@@ -349,21 +387,28 @@ class ChannelWorkbench(QtWidgets.QWidget):
         form.addRow(label, container)
         return sl, val_lbl
 
-    def _minmax_slider_row(self, form, label, handler):
-        """A Min/Max slider row (QuPath step0 panel). Integer slider (intensity
-        units) + numeric label; range is set per-channel in
-        _load_params_into_controls. Two-way synced with _sp_min/_sp_max + the
-        histogram via `handler`."""
+    def _minmax_slider_row(self, form, label, handler, spin=None):
+        """A Min/Max row (QuPath step0 panel): draggable slider + an editable
+        numeric spinbox (when `spin` is given), both two-way synced with the
+        histogram window. Slider range is set per-channel in
+        _load_params_into_controls. Returns (slider, value_label); when a spinbox
+        is used the label is kept (hidden) only for handler compatibility."""
         row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         sl = QtWidgets.QSlider(Qt.Horizontal)
         sl.setRange(0, 255)                 # provisional; reset from data on load
         sl.setValue(0)
+        sl.valueChanged.connect(handler)
+        row.addWidget(sl, stretch=1)
         val_lbl = QtWidgets.QLabel("0")
         val_lbl.setFixedWidth(48)
         val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        sl.valueChanged.connect(handler)
-        row.addWidget(sl, stretch=1)
-        row.addWidget(val_lbl)
+        if spin is not None:
+            spin.setVisible(True)           # editable numeric input
+            row.addWidget(spin)
+            val_lbl.setVisible(False)       # kept as a handler target, not shown
+        else:
+            row.addWidget(val_lbl)
         container = QtWidgets.QWidget()
         container.setLayout(row)
         form.addRow(label, container)
@@ -1024,6 +1069,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._sl_bright.setValue(int(round(p["brightness"] * 100)))
             self._sl_contrast.setValue(int(round(p["contrast"] * 100)))
             self._sl_gamma.setValue(int(round(p["gamma"] * 100)))
+            if hasattr(self, "_sp_gamma"):
+                self._sp_gamma.setValue(float(p["gamma"]))
             if hasattr(self, "_chk_enabled"):
                 self._chk_enabled.setChecked(bool(p["enabled"]))
             self._lbl_bright.setText(f"{p['brightness']:.2f}")
@@ -1077,6 +1124,26 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._lbl_bright.setText(f"{self._sl_bright.value() / 100.0:.2f}")
         self._lbl_contrast.setText(f"{self._sl_contrast.value() / 100.0:.2f}")
         self._lbl_gamma.setText(f"{self._sl_gamma.value() / 100.0:.2f}")
+        if hasattr(self, "_sp_gamma"):          # mirror gamma slider -> spinbox
+            prev = self._loading
+            self._loading = True
+            try:
+                self._sp_gamma.setValue(self._sl_gamma.value() / 100.0)
+            finally:
+                self._loading = prev
+        self._collect_params_from_controls()
+        self._refresh_preview()
+
+    def _on_gamma_spin(self, v):
+        """Editable Gamma spinbox -> slider (which drives collect + preview)."""
+        if self._loading or self._active is None:
+            return
+        self._loading = True
+        try:
+            self._sl_gamma.setValue(int(round(float(v) * 100)))
+            self._lbl_gamma.setText(f"{float(v):.2f}")
+        finally:
+            self._loading = False
         self._collect_params_from_controls()
         self._refresh_preview()
 

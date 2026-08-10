@@ -101,7 +101,7 @@ class ChannelLayerList(QtWidgets.QWidget):
     visibility_changed = pyqtSignal(str, bool)
     color_clicked = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_header=True):
         super().__init__(parent)
         self._rows = {}  # name -> _ChannelRow
 
@@ -109,11 +109,14 @@ class ChannelLayerList(QtWidgets.QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
 
-        hdr = QtWidgets.QLabel("Channels")
-        hdr.setStyleSheet(
-            "color:#61afef;font-weight:bold;font-size:11px;padding:2px;"
-        )
-        lay.addWidget(hdr)
+        # The internal "Channels" header is optional: hosts that wrap this list in
+        # a titled group box (Step0) hide it to avoid a duplicate title.
+        if show_header:
+            hdr = QtWidgets.QLabel("Channels")
+            hdr.setStyleSheet(
+                "color:#61afef;font-weight:bold;font-size:11px;padding:2px;"
+            )
+            lay.addWidget(hdr)
 
         self._list = QtWidgets.QListWidget()
         # The whole point: vertical only, never horizontal.

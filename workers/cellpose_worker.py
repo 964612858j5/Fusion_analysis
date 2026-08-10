@@ -69,13 +69,18 @@ class PreviewLoaderThread(QThread):
     progress = pyqtSignal(int, int, int, str) # (patch_idx, done, total, ch_name)
     error    = pyqtSignal(int, str)           # (patch_idx, msg)
 
-    def __init__(self, patch_idx, loader, channels, y0, y1, x0, x1, downsample):
+    def __init__(self, patch_idx, loader, channels, y0, y1, x0, x1, downsample,
+                 normalize=True):
         super().__init__()
         self.patch_idx  = patch_idx
         self.loader     = loader
         self.channels   = channels
         self.y0, self.y1, self.x0, self.x1 = y0, y1, x0, x1
         self.downsample = downsample
+        # Default True keeps every existing caller unchanged; Step1 passes False
+        # so the fusion preview caches RAW/corrected native intensities (needed
+        # for the manual remap, whose Min/Max are in raw units).
+        self.normalize  = normalize
         self._stop      = False
 
     def stop(self):
@@ -95,6 +100,7 @@ class PreviewLoaderThread(QThread):
                         self.y0, self.y1,
                         self.x0, self.x1,
                         downsample=self.downsample,
+                        normalize=self.normalize,
                     )
             if not self._stop:
                 self.done.emit(self.patch_idx, cache)
@@ -372,13 +378,15 @@ def _range_text(arr):
     return f"{float(np.nanmin(arr)):.4f},{float(np.nanmax(arr)):.4f}"
 
 
-def _preview_rgb_from_fusion_or_dapi(fusion, loader, roi, groups, group_weights, nuc_ch, nuc_w, dapi_f32, method):
+def _preview_rgb_from_fusion_or_dapi(fusion, loader, roi, groups, group_weights, nuc_ch, nuc_w, dapi_f32, method,
+                                     channel_remap_params=None):
     y0, y1, x0, x1 = roi
     dapi_rgb = _dapi_f32_to_rgb(dapi_f32)
     try:
         fused_preview = fusion.fuse_fullres(
             loader, y0, y1, x0, x1,
             groups, group_weights, nuc_ch, nuc_w,
+            channel_remap_params=channel_remap_params,
         )
         rgb = _fusion_uint16_to_rgb(fused_preview)
         if int(rgb.max()) > 0:
@@ -414,6 +422,9 @@ def run_cellpose_process(args, result_queue, stop_flag):
         group_weights = args["group_weights"]
         nuc_ch = args["nuc_ch"]
         nuc_w = args["nuc_w"]
+        # Step0 manual remap {ch: params}: applied to the patch fusion so the trial
+        # segmentation uses the SAME conditioned channels as the fusion panel.
+        channel_remap_params = args.get("channel_remap_params") or {}
         output_dir = args.get("output_dir") or os.getcwd()
         preview_result_dir = os.path.join(output_dir, "patch_preview_results")
         os.makedirs(preview_result_dir, exist_ok=True)
@@ -487,6 +498,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 fused = fusion.fuse_fullres(
                     loader, y0, y1, x0, x1,
                     groups, group_weights, nuc_ch, nuc_w,
+                    channel_remap_params=channel_remap_params,
                 )
                 print(f"[Step1-preview] loaded_shape={fused.shape}")
                 print("[Step1-preview] full_image_load=False")
@@ -523,6 +535,7 @@ def run_cellpose_process(args, result_queue, stop_flag):
                 rgb_raw, preview_background = _preview_rgb_from_fusion_or_dapi(
                     fusion, loader, (y0, y1, x0, x1),
                     groups, group_weights, nuc_ch, nuc_w, dapi_f32, method,
+                    channel_remap_params=channel_remap_params,
                 )
 
             try:

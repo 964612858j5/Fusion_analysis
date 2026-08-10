@@ -128,6 +128,7 @@ def run_mesmer_patch_preview(args, result_queue, stop_flag):
         group_weights = args.get("group_weights") or {}
         nuc_ch = args.get("nuc_ch") or "DAPI"
         nuc_w = args.get("nuc_w", 1.0)
+        channel_remap_params = args.get("channel_remap_params") or {}
         output_dir = args.get("output_dir") or os.getcwd()
         preview_result_dir = os.path.join(output_dir, "patch_preview_results")
         os.makedirs(preview_result_dir, exist_ok=True)
@@ -170,7 +171,8 @@ def run_mesmer_patch_preview(args, result_queue, stop_flag):
                 fusion_img = None
                 input_mode = params.get("input_mode", "selected_channels")
                 if str(input_mode).lower() in {"dapi + weighted fusion", "weighted_fusion", "step1_weighted_fusion"}:
-                    fused = fusion.fuse_fullres(loader, y0, y1, x0, x1, groups, group_weights, nuc_ch, nuc_w)
+                    fused = fusion.fuse_fullres(loader, y0, y1, x0, x1, groups, group_weights, nuc_ch, nuc_w,
+                                                channel_remap_params=channel_remap_params)
                     fusion_img = np.asarray(fused[:, :, 0])
                     if not membrane_channels:
                         membrane_channels = [ch for ch, w in (params.get("step1_fusion_weights") or {}).items() if float(w or 0) > 0]

@@ -1544,6 +1544,9 @@ class Step0Page(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
             return
+        # Remember the exact path just written so Step1 fusion can pick up the
+        # manual remap regardless of any later ROI-context change.
+        self._last_saved_remap_path = path
         print(f"[Step0] saved channel remap config -> {path}")
         QMessageBox.information(
             self, "Saved",

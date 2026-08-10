@@ -30,6 +30,7 @@ from ..config import (
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
 from ..core.fusion_engine import FusionEngine
+from ..core.channel_remap import apply_channel_remap
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -2186,7 +2187,7 @@ class MainWindow(QMainWindow):
         print(f"[Step1] channels loaded for patch: {needed}")
         t = PreviewLoaderThread(idx, self.loader, needed,
                                 y0, y1, x0, x1,
-                                downsample=1)
+                                downsample=1, normalize=False)
         t.done.connect(self._on_patch_loaded)
         t.progress.connect(self._on_patch_progress)
         t.error.connect(self._on_patch_error)
@@ -2358,6 +2359,14 @@ class MainWindow(QMainWindow):
         nuc_ch, nuc_w = self.config.get_nucleus()
         shape = next(iter(cache.values())).shape
 
+        # Reflect the manual Channel Remap (Step0) in the on-screen preview too,
+        # mirroring the disk FullFusionWorker: conditioned channels use
+        # apply_channel_remap (Min/Max/Gamma); others use the percentile norm.
+        remap = self._load_step0_remap_params()[0]
+
+        def _cn(ch):
+            return self._preview_channel_signal(ch, cache[ch], remap)
+
         # FIX: initial weights
         # FIX: intensity normalization
         cyto = np.zeros(shape, dtype=np.float32)
@@ -2370,17 +2379,17 @@ class MainWindow(QMainWindow):
                 w = float(np.clip(w, 0.0, 1.0))
                 if w <= 0 or ch not in cache:
                     continue
-                group_signal += self.fusion._normalize_intensity(cache[ch]) * w
+                group_signal += _cn(ch) * w
             group_signal *= gw
             np.maximum(cyto, np.clip(group_signal, 0.0, 1.0), out=cyto)
 
         nuc = np.zeros(shape, dtype=np.float32)
         if nuc_ch and nuc_ch in cache and nuc_w > 0:
-            nuc = self.fusion._normalize_intensity(cache[nuc_ch]) * float(np.clip(nuc_w, 0.0, 1.0))
+            nuc = _cn(nuc_ch) * float(np.clip(nuc_w, 0.0, 1.0))
             np.clip(nuc, 0.0, 1.0, out=nuc)
 
         if float(cyto.max()) <= 0.0 and float(nuc.max()) <= 0.0 and nuc_ch and nuc_ch in cache:
-            nuc = self.fusion._normalize_intensity(cache[nuc_ch])
+            nuc = _cn(nuc_ch)
             self.prev_status.setText("All marker weights are 0. Showing nucleus channel fallback.")
 
         if cyto is None and nuc is None:
@@ -2560,6 +2569,7 @@ class MainWindow(QMainWindow):
             "nuc_w": nuc_w,
             "corrected_zarr_path": self._corrected_zarr_path,
             "corrected_decisions": self._corrected_decisions,
+            "channel_remap_params": self._load_step0_remap_params()[0],
             "output_dir": (self.step0_output or {}).get("output_dir") or OUTPUT_DIR,
         }
         first_method = ""
@@ -3220,7 +3230,79 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to write dapi_input_meta.json:\n{traceback.format_exc()}")
 
+    def _preview_channel_signal(self, ch, arr, remap):
+        """One channel's [0,1] signal for the Step1 fusion PREVIEW.
+
+        `arr` is RAW/corrected native intensity (Step1 loads with normalize=False).
+        A channel with a Step0 manual remap uses apply_channel_remap (Min/Max/Gamma
+        in raw units — same as the disk FullFusionWorker); others use the EXACT
+        loader percentile norm (OMETIFFLoader._norm: 1–99.5, exclude-0,
+        <100-nonzero→0) that the old normalize=True cache used, so their appearance
+        is unchanged. Fixes the all-black preview from feeding normalized [0,1]
+        data to a raw-unit remap window."""
+        p = remap.get(ch) if remap else None
+        if p:
+            return apply_channel_remap(arr, p).astype(np.float32)
+        return self.loader._norm(arr)
+
     # ── Save ────────────────────────────────────────────────────────
+
+    def _load_step0_remap_params(self):
+        """Load the Step0 Channel Remap config (if any) as {channel: params}.
+
+        Looks in the ROI step0 dir first (canonical <roi>/step0/
+        step0_channel_remap.json), then the legacy step1_5/channel_remap_configs
+        location. Returns ({}, "") when none is found."""
+        try:
+            from ..utils.channel_remap_config import load_channel_remap_config
+        except Exception:
+            return {}, ""
+        cands = []
+        st0 = getattr(self, "_step0", None)
+        # 1) The EXACT path Step0's last Channel Remap Save wrote to (remembered on
+        #    save — immune to any later ROI-context change).
+        last = getattr(st0, "_last_saved_remap_path", "") if st0 is not None else ""
+        if last:
+            cands.append(last)
+        # 2) Re-resolve the canonical Step0 remap path (same logic as the save).
+        if st0 is not None and hasattr(st0, "_step0_conditioning_config_path"):
+            try:
+                cands.append(st0._step0_conditioning_config_path())
+            except Exception:
+                pass
+        # 2) ROI step0 dir from the handoff.
+        s0 = self.step0_output or {}
+        if s0.get("step0_dir"):
+            cands.append(os.path.join(s0["step0_dir"], "step0_channel_remap.json"))
+        # 3) Legacy step1_5 location.
+        out = s0.get("output_dir") or s0.get("project_output_dir") or OUTPUT_DIR
+        cands.append(os.path.join(out, "step1_5", "channel_remap_configs",
+                                  "step0_channel_remap.json"))
+        seen = set()
+        for p in cands:
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            if os.path.exists(p):
+                # mtime cache: the preview calls this on every redraw; avoid
+                # re-reading the JSON unless the file changed.
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    mt = None
+                cached = getattr(self, "_remap_cache", None)
+                if cached and cached[0] == p and cached[1] == mt:
+                    return cached[2], p
+                try:
+                    cfg = load_channel_remap_config(p)
+                    chans = cfg.get("channels") or {}
+                    if chans:
+                        params = {str(n): dict(pr) for n, pr in chans.items()}
+                        self._remap_cache = (p, mt, params)
+                        return params, p
+                except Exception as exc:
+                    print(f"[Step1] remap config load failed {p}: {exc}")
+        return {}, ""
 
     def _save(self):
         current_method = self.search._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
@@ -3248,11 +3330,19 @@ class MainWindow(QMainWindow):
 
         # ── Write fusion_config.json ──────────────────────────────────
         fcfg = self.config.get_full_config()
+        # Apply the user's manual Channel Remap (Step0) to the fused output so the
+        # fusion reflects their per-channel Min/Max/Gamma adjustments. Corrected
+        # channels already flow through the loader's corrected store.
+        remap_params, remap_src = self._load_step0_remap_params()
+        if remap_params:
+            print(f"[Step1] fusion applies manual remap from {remap_src} "
+                  f"({len(remap_params)} channels)")
         fcfg.update({
             "ome_tiff":   OME_TIFF_FILE,
             "output_dir": OUTPUT_DIR,
             "norm_low":   NORM_LOW,
             "norm_high":  NORM_HIGH,
+            "channel_remap_params": remap_params,
             "saved_at":   time.strftime("%Y-%m-%d %H:%M:%S"),
         })
         fp1 = os.path.join(OUTPUT_DIR, "fusion_config.json")

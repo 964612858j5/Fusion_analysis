@@ -31,6 +31,7 @@ from ...config import (
 )
 from ...workers.cellpose_worker import OverviewLoaderThread
 from ...core.fusion_engine import FusionEngine
+from ...core.channel_remap import apply_channel_remap
 
 class TileSelectDialog(QDialog):
     """
@@ -268,6 +269,11 @@ class FullFusionWorker(QThread):
         self.preview_ds  = preview_ds
         self.rois        = rois   # list of ROI dicts, or None (full WSI)
         self._stop       = False
+        # Per-channel manual remap params from Step0 Channel Remap ({ch: {min,
+        # max,gamma,...}}). When present for a channel, its intensities are
+        # conditioned with apply_channel_remap instead of the plain percentile
+        # window — so the fused output reflects the user's manual adjustments.
+        self._remap_params = dict(fusion_cfg.get("channel_remap_params") or {})
 
     def stop(self):
         self._stop = True
@@ -295,6 +301,16 @@ class FullFusionWorker(QThread):
             return np.zeros_like(arr)
         return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
+    def _channel_norm(self, ch, arr, low, high):
+        """Normalize one channel to [0,1] for fusion. When the user manually
+        conditioned this channel in Step0 Channel Remap, apply that remap
+        (Min/Max/Gamma) so the fused output reflects it; otherwise use the plain
+        percentile window."""
+        params = self._remap_params.get(ch)
+        if params:
+            return apply_channel_remap(arr, params).astype(np.float32)
+        return self._norm(arr, low, high)
+
     def _fuse_tile(self, raw_cache, groups, group_weights,
                    nucleus_ch, nucleus_w, norm_low, norm_high):
         """Fuse a pre-loaded channel cache into (H,W,2) uint16."""
@@ -307,7 +323,7 @@ class FullFusionWorker(QThread):
             accum = np.zeros(shape, dtype=np.float32)
             for ch, w in ch_weights.items():
                 if ch in raw_cache and w > 0:
-                    norm  = self._norm(raw_cache[ch], norm_low, norm_high)
+                    norm  = self._channel_norm(ch, raw_cache[ch], norm_low, norm_high)
                     accum += norm * float(w)
             mx = accum.max()
             if mx > 0:
@@ -321,7 +337,7 @@ class FullFusionWorker(QThread):
         # ── nucleus ───────────────────────────────────────────────────
         nucleus = np.zeros(shape, dtype=np.float32)
         if nucleus_ch and nucleus_ch in raw_cache:
-            nucleus = self._norm(raw_cache[nucleus_ch], norm_low, norm_high)
+            nucleus = self._channel_norm(nucleus_ch, raw_cache[nucleus_ch], norm_low, norm_high)
             nucleus *= float(nucleus_w)
             mx = nucleus.max()
             if mx > 0:

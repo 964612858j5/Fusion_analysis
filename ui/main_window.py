@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QMessageBox, QProgressBar,
     QApplication, QSplitter, QCheckBox, QDialog, QSizePolicy,
+    QProgressDialog,
 )
 
 from ..config import (
@@ -650,7 +651,7 @@ class MainWindow(QMainWindow):
             self.config.nuc_combo.clear()
             self.config.nuc_combo.addItems(self.loader.channel_names())
             self.config.nuc_combo.setCurrentIndex(-1)
-            self.config.nuc_row.spin.setValue(0.0)
+            self.config.nuc_row.spin.setValue(1.0)   # DAPI/nucleus default weight = 1
             self.config.load_panel(
                 self.step0_output.get("panel_groups") or {},
                 self.step0_output.get("panel_nucleus"),
@@ -846,7 +847,7 @@ class MainWindow(QMainWindow):
             idx = self.config.nuc_combo.findText(nucleus_channel)
             if idx >= 0:
                 self.config.nuc_combo.setCurrentIndex(idx)
-            self.config.nuc_row.spin.setValue(0.0)
+            self.config.nuc_row.spin.setValue(1.0)   # DAPI/nucleus default weight = 1
             self._zero_marker_weights()
             print(f"[Step1] nucleus_channel={nucleus_channel}")
             print(f"[Step1] panel_groups source={source}")
@@ -2809,8 +2810,13 @@ class MainWindow(QMainWindow):
         pct = int(done / total * 100) if total > 0 else 0
         self._fusion_pbar.setValue(pct)
         self._fusion_lbl.setText(msg)
+        d = getattr(self, "_fusion_dialog", None)
+        if d is not None:
+            d.setValue(pct)
+            d.setLabelText(msg)
 
     def _on_fusion_done(self, zarr_path):
+        self._close_fusion_dialog()
         self._fusion_pbar.setValue(100)
         method = CELLPOSE_WHOLECELL_FUSION
         if self._p2_params:
@@ -2870,6 +2876,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_fusion_error(self, msg):
+        self._close_fusion_dialog()
         self._fusion_lbl.setText(f"✗  Fusion error — see terminal for details")
         self._unlock_ui()
         QMessageBox.critical(self, "Fusion Error", msg)
@@ -3411,7 +3418,26 @@ class MainWindow(QMainWindow):
         self._fusion_lbl.setText(
             f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
         )
+        # Modal progress popup so the user never mistakes a long fusion for a
+        # freeze. Cancel maps to the worker's cooperative stop.
+        self._fusion_dialog = QProgressDialog(
+            f"Generating {job_name}…\nThis can take a while for large images.",
+            "Cancel", 0, 100, self)
+        self._fusion_dialog.setWindowTitle("Step1 — Fusion")
+        self._fusion_dialog.setWindowModality(Qt.WindowModal)
+        self._fusion_dialog.setMinimumDuration(0)
+        self._fusion_dialog.setAutoClose(False)
+        self._fusion_dialog.setAutoReset(False)
+        self._fusion_dialog.canceled.connect(self._fusion_worker.stop)
+        self._fusion_dialog.setValue(0)
+        self._fusion_dialog.show()
         self._fusion_worker.start()
+
+    def _close_fusion_dialog(self):
+        d = getattr(self, "_fusion_dialog", None)
+        if d is not None:
+            d.close()
+            self._fusion_dialog = None
 
 
 

@@ -111,13 +111,24 @@ and enable together, gated by one feature switch.
   INJECTED `read_block`, so per-channel source selection (raw vs corrected) is verifiable
   without worker/GPU state. `require_homogeneous_source` refuses `mixed_raw_corrected`.
   Not wired into any live path.
-- **B2-wiring (with B3, GPU-verify):** in `segment_merge_worker`, extract a
-  `read_block(group, ch, y0,y1,x0,x1)` primitive from the existing `_read_hq_marker_channels`
-  branch logic (raw_ome via channel-store `read_raw_ome`/`read_region` normalize=False; zarr
-  via `read_zarr_channel`), build `{ch: resolved_source_kind}` from the projected config,
-  call `resolve_per_channel_marker_sources`, then `read_per_channel_marker_blocks` with that
-  primitive — each marker from ITS source instead of the single `_hq_resolved_source_path`.
-  Full-image only, so the raw region offset is 0 and per-channel frames coincide.
+- **B2-wiring — two worker stages** (per the review constraint: never re-resolve at
+  construction, where ROI/geometry/active source are not ready):
+  - **Construction stage (B3b-1, DONE):** `_accept_source_aware_runtime_descriptor` in
+    `_resolve_channel_remap` — detect a runtime descriptor
+    (`created_by_source_aware_promotion` + `runtime_supported`), **hard-reject when the flag
+    is off** (no single-source fallback), validate the descriptor SHAPE
+    (`validate_source_aware_runtime_config`), and stash it in
+    `self._pending_source_aware_runtime`. No source resolve, no ROI check here.
+  - **Prep stage (B3b-2, next; GPU):** `_prepare_source_aware_runtime` at the HQ
+    marker-source preparation point (active source / ROI / input geometry known):
+    worker-side full-image gate → `resolve_per_channel_marker_sources` from
+    `_raw_channel_source_path()`/`_multichannel_source_path()` (never trust the config's
+    handles) → `require_homogeneous_source` → cross-check kind/path/group/shape vs the
+    descriptor → store opened handles on `self._source_aware_per_channel`. Any failure
+    raises before output (all-or-nothing).
+  - **Read (B2-core, B3c):** per tile, `read_per_channel_marker_blocks` reuses the stored
+    handles via a channel-store-backed `read_block` (raw_ome/zarr dispatch, normalize=False).
+    Full-image only, so the raw region offset is 0 and per-channel frames coincide.
 - Per-channel intensity space is safe: the candidate verified recorded == resolved
   intensity_space per channel, so raw-unit `apply_channel_remap` acts on the matching
   native source.

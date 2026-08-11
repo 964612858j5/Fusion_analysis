@@ -129,6 +129,11 @@ class SegmentMergeWorker(QThread):
         # no config -> unchanged v13 behavior. Raises on a rejected config.
         self._manual_remap_enabled = False
         self._remap_provenance = {}
+        # v14.5d: a source-aware RUNTIME remap descriptor is only validated+stashed at
+        # construction; its per-channel source re-resolve + full-image gate + cross-check
+        # run later at the HQ marker-source preparation stage (context not ready here).
+        self._pending_source_aware_runtime = None
+        self._source_aware_per_channel = None
         self._resolve_channel_remap()
         self.recovery_npy_dir = recovery_npy_dir
         self.rois             = rois
@@ -268,6 +273,19 @@ class SegmentMergeWorker(QThread):
             raise FileNotFoundError(f"channel remap config not found: {path}")
         with open(path, "r", encoding="utf-8") as f:
             raw_cfg = json.load(f)
+
+        # v14.5d: ANY config carrying a source-aware promotion/runtime marker takes the
+        # per-channel descriptor path, NOT the single-source validation below — so a
+        # malformed runtime config or a bare candidate can never fall back to the legacy
+        # validator. The runtime context (ROI/geometry/active marker source) is not ready
+        # this early, so here we only flag-gate, gate the method/input-mode, validate the
+        # descriptor SHAPE + selected-marker coverage, and stash it; source re-resolve +
+        # full-image gate + kind/path/group/shape cross-check run later in the HQ
+        # marker-source preparation stage.
+        if raw_cfg.get("created_by_source_aware_promotion") or raw_cfg.get("runtime_supported"):
+            self._accept_source_aware_runtime_descriptor(raw_cfg)
+            return
+
         errors, resolved = validate_step2_remap_config(raw_cfg, allow_preview_remap=allow)
         if errors:
             raise ValueError(
@@ -308,6 +326,69 @@ class SegmentMergeWorker(QThread):
             self._write_remap_provenance(cfg)
         except Exception as exc:  # provenance is best-effort, never fail the run
             print(f"[Step2] remap provenance write failed: {exc}")
+
+    def _accept_source_aware_runtime_descriptor(self, raw_cfg):
+        """v14.5d B3b (construction stage): flag-gate + validate + stash a source-aware
+        runtime remap DESCRIPTOR. Does NOT resolve sources or read pixels — the runtime
+        context (ROI / input geometry / active marker source) is not ready this early.
+        Source re-resolve, full-image gate, and kind/path/group/shape cross-check run
+        later in the HQ marker-source preparation stage (_prepare_source_aware_runtime).
+
+        Flag OFF -> HARD REJECT before segmentation starts (contract: never fall back to
+        a single-source read of a runtime config).
+        """
+        from ..utils.segmentation_config import (
+            step2_source_aware_runtime_enabled, is_hq2_csd_method)
+        from ..utils.channel_remap_config import (
+            validate_source_aware_runtime_config,
+            validate_remap_covers_selected_channels)
+
+        if not step2_source_aware_runtime_enabled():
+            raise ValueError(
+                "source-aware runtime remap config present but "
+                "ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME is off; refusing before "
+                "segmentation (no fallback to single-source read).")
+
+        # Method + input-mode gate: only HQ2/CSD selected_channels_from_source reaches
+        # the per-channel marker-prep branch. Any other method/mode would stash the
+        # descriptor and then run the legacy un-remapped path — reject up front.
+        method = self.seg_config.get("method")
+        if not is_hq2_csd_method(method):
+            raise ValueError(
+                "source-aware runtime remap is HQ2/CSD only "
+                f"(method={method!r}); refusing.")
+        hq_mode = str(self.seg_config.get("hq_input_mode") or "")
+        if hq_mode == "step1_weighted_fusion":
+            raise ValueError(
+                "source-aware runtime remap is not supported with "
+                "hq_input_mode='step1_weighted_fusion'; refusing.")
+        if hq_mode != "selected_channels_from_source":
+            raise ValueError(
+                "source-aware runtime remap requires "
+                f"hq_input_mode='selected_channels_from_source'; got {hq_mode!r}.")
+
+        errs = validate_source_aware_runtime_config(raw_cfg)
+        if errs:
+            raise ValueError(
+                "source-aware runtime remap config invalid:\n  " + "\n  ".join(errs))
+
+        # Coverage: every SELECTED Step2 marker must be present in the runtime config
+        # (a manual config covering only some markers must not silently under-remap).
+        cov = validate_remap_covers_selected_channels(
+            raw_cfg.get("channels") or {}, self.seg_config.get("hq_channels") or [],
+            hq_mode)
+        if cov:
+            raise ValueError(
+                "source-aware runtime config does not cover the selected markers:\n  "
+                + "\n  ".join(cov))
+
+        self._pending_source_aware_runtime = raw_cfg
+        self._manual_remap_enabled = True
+        print(
+            "[Step2] source-aware runtime remap descriptor accepted "
+            f"({len(raw_cfg.get('channels') or {})} markers, "
+            f"mixture={raw_cfg.get('source_mixture_mode')}); per-channel source "
+            "re-resolve deferred to marker-source preparation.")
 
     def _write_remap_provenance(self, cfg):
         """Copy the used remap config + provenance into the run output dir."""

@@ -101,6 +101,13 @@ def test_projection_does_not_mutate_input():
     assert saved == before
 
 
+def test_projection_dedups_repeated_selection_preserving_order():
+    saved = _saved(PanCK="corrected_zarr", CD45="corrected_zarr")
+    proj, rep = project_marker_only_config(saved, ["CD45", "PanCK", "CD45"])
+    assert rep["marker_channels"] == ["CD45", "PanCK"]   # deduped, order kept
+    assert set(proj["channels"]) == {"CD45", "PanCK"}
+
+
 def test_projection_accepts_semicolon_string():
     saved = _saved(PanCK="corrected_zarr", CD45="corrected_zarr")
     proj, _rep = project_marker_only_config(saved, "PanCK;CD45")

@@ -91,7 +91,14 @@ def project_marker_only_config(saved_config, selected_channels):
               "intended_source_mixture_mode": None}
     saved_channels = (saved_config or {}).get("channels", {}) or {}
     selected = _coerce_channel_list(selected_channels)
-    non_ref = [c for c in selected if not _is_reference_channel_name(c)]
+    # Order-preserving dedup: a channel selected twice must not inflate the marker
+    # count (status display) or be resolved twice.
+    seen, non_ref = set(), []
+    for c in selected:
+        if _is_reference_channel_name(c) or c in seen:
+            continue
+        seen.add(c)
+        non_ref.append(c)
     if not non_ref:
         report["failures"].append(
             "no non-reference marker channels selected (only reference layers "

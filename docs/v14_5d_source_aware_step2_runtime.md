@@ -1,9 +1,11 @@
 # v14.5d — Source-aware Step2 runtime + Step0 remap auto-apply (design, for review)
 
-Status: **DRAFT rev2 for review** (not implemented, not committed). 2026-08-11.
-Rev2 incorporates the ChatGPT review (DAPI must stay in the Step0 save; promote
-only selected markers; B1 not shippable alone; ROI → v14.5e; explicit applied/
-not-applied surfacing).
+Status: **rev3** — Workstream A implemented (project_marker_only_config, 62a4d17);
+B1/B2/B3 still design-only. rev2 incorporated the first ChatGPT review (DAPI stays
+in the Step0 save; promote only selected markers; B1 not shippable alone; ROI →
+v14.5e; explicit applied/not-applied surfacing). rev3 added the two projection
+invariants (coverage / mixture recompute), the B3 input-mode gate, and the
+ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME flag.
 
 ## 1. Goal
 

@@ -535,6 +535,47 @@ def test_promote_step0_remap_refusal_attaches_nothing(_step2, tmp_path, monkeypa
     assert "channel_remap_config_path" not in seg
 
 
+def test_promotion_refuses_realistic_source_aware_dapi_config():
+    """The success test above MOCKS promotion. This proves the REAL promotion
+    refuses a config shaped like Step0's actual save (source-aware: per-channel
+    calibration_source_identity, + a DAPI reference channel) EVEN WHEN path/shape/
+    intensity-space/geometry all match. So with today's Step0 output, HQ2/CSD
+    auto-apply stably SKIPS — it is NOT achieved until the v14.5d source-aware
+    Step2 runtime lands and DAPI is excluded from the marker set."""
+    import types
+    from block01.utils.remap_promotion import promote_step1_5_config_for_step2
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    from block01.utils.source_identity import config_is_source_aware
+    shape = [512, 512]
+    resolved = types.SimpleNamespace(
+        intensity_space="raw_ome_native_float", kind="raw_ome",
+        source_path="/x/raw.ome.tiff", available_channels=["DAPI", "PanCK"],
+        channel_shape=lambda name: tuple(shape))
+
+    def _ch():
+        return {"min": 100.0, "max": 5000.0, "brightness": 0.0, "contrast": 1.0,
+                "gamma": 1.0, "intensity_space": "raw_ome_native_float",
+                "step2_compatible": True, "calibration_source_matches_step2": True,
+                "step2_pre_remap_source": "raw_ome_native_float",
+                # per-channel calibration_source_identity => source-aware config
+                "calibration_source_identity": {"channel_name": "x"}}
+    preview = {
+        "used_for": "segmentation_only",
+        "channels": {"DAPI": _ch(), "PanCK": _ch()},  # DAPI reference present
+        "source_policy": {
+            "calibration_source_path": "/x/raw.ome.tiff",
+            "calibration_source_shape": shape,
+            "calibration_intensity_space": "raw_ome_native_float",
+            "calibration_source_kind": "raw_ome"},
+    }
+    assert config_is_source_aware(preview)  # like the real 29-channel Step0 save
+    promoted, report = promote_step1_5_config_for_step2(
+        preview, resolved, shape, active_method=CELLPOSE_NUCLEI_HQ2)
+    assert promoted is None
+    fails = " ".join(report.get("failures", []))
+    assert "DAPI" in fails or "source-aware" in fails
+
+
 def test_promote_step0_remap_uncovered_channel_attaches_nothing(_step2, tmp_path, monkeypatch):
     # promotion succeeded but the promoted config does not cover a selected marker
     # -> refuse (no silent mixed remap/legacy gate)

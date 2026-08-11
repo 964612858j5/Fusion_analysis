@@ -1933,18 +1933,26 @@ class Step2Page(QWidget):
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
         # Auto-apply the Step0 manual channel remap (no UI): a saved remap is
-        # treated as consent. Marker methods (HQ/HQ2/CSD) read raw markers, so the
-        # remap config is applied to them here; whole-cell/DAPI already get it via
-        # the Step1 fused input, so the config is not attached for them.
-        # NOT attached for the step1_weighted_fusion input mode: there the segmenter
-        # consumes the Step1 fused signal (which already carries the remap), and the
-        # per-marker remap config is explicitly rejected by validation for it.
+        # treated as consent. Methods that read raw source channels (HQ/HQ2/CSD
+        # markers, Mesmer nuclear+membrane) get the remap config applied to them
+        # here; whole-cell/DAPI already get it via the Step1 fused input, so the
+        # config is not attached for them.
+        # NOT attached for step1_weighted_fusion input: there the segmenter
+        # consumes the Step1 fused signal (which already carries the remap), and
+        # the per-marker remap config is explicitly rejected by validation for it.
+        _mode = ""
+        _remap_method = False
         if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            _mode = ""
+            _remap_method = True
             if method == CELLPOSE_NUCLEI_HQ and hasattr(self, "_hq_input_mode"):
                 _mode = self._hq_input_mode.currentData() or ""
             elif method == CELLPOSE_NUCLEI_HQ2 and hasattr(self, "_hq2_input_mode"):
                 _mode = self._hq2_input_mode.currentData() or ""
+        elif method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            _remap_method = True
+            if hasattr(self, "_mesmer_input_mode"):
+                _mode = self._mesmer_input_mode.currentData() or ""
+        if _remap_method:
             remap_path = "" if _mode == "step1_weighted_fusion" else self._auto_remap_config_path()
             if remap_path:
                 data["channel_remap_config_path"] = remap_path

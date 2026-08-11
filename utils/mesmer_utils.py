@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from ..core.channel_remap import apply_channel_remap
+
 
 MESMER_WHOLE_CELL = "mesmer_whole_cell"
 MESMER_NUCLEI = "mesmer_nuclei"
@@ -210,14 +212,25 @@ def build_mesmer_input(
     percentile_high=99.8,
     input_mode="selected_channels",
     fusion_image=None,
+    channel_remap_params=None,
 ):
     membrane_channels = parse_channel_list(membrane_channels)
     weights = dict(weights or {})
+    remap = channel_remap_params or {}
     print(f"[Mesmer] nuclear channel={nuclear_channel}")
     print(f"[Mesmer] membrane channels={membrane_channels}")
 
-    nuclear = _read_channel(channel_source, nuclear_channel, bbox=bbox)
-    nuclear = normalize_percentile(nuclear, percentile_low, percentile_high) if normalize else np.asarray(nuclear, dtype=np.float32)
+    def _condition(arr, ch):
+        # A channel with a Step0 manual remap is conditioned in raw units with
+        # apply_channel_remap; otherwise the normal percentile path is used.
+        p = remap.get(ch)
+        if p:
+            return apply_channel_remap(arr, p).astype(np.float32)
+        if normalize:
+            return normalize_percentile(arr, percentile_low, percentile_high)
+        return np.asarray(arr, dtype=np.float32)
+
+    nuclear = _condition(_read_channel(channel_source, nuclear_channel, bbox=bbox), nuclear_channel)
 
     second = None
     mode = str(input_mode or "selected_channels").lower()
@@ -229,8 +242,7 @@ def build_mesmer_input(
             second = normalize_percentile(second, percentile_low, percentile_high)
     else:
         for ch in membrane_channels:
-            arr = _read_channel(channel_source, ch, bbox=bbox)
-            arr = normalize_percentile(arr, percentile_low, percentile_high) if normalize else np.asarray(arr, dtype=np.float32)
+            arr = _condition(_read_channel(channel_source, ch, bbox=bbox), ch)
             arr = arr * float(weights.get(ch, 1.0))
             second = arr if second is None else np.maximum(second, arr)
         if second is None:

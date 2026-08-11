@@ -485,6 +485,30 @@ def test_step2_weighted_fusion_mode_does_not_attach_remap(_step2, tmp_path):
     assert "channel_remap_config_path" not in cfg
 
 
+def test_step2_mesmer_selected_channels_auto_applies_remap(_step2, tmp_path):
+    # Mesmer selected-channels reads raw nuclear+membrane -> attach the config so
+    # build_mesmer_input conditions them with the Step0 remap.
+    from block01.utils.segmentation_config import MESMER_WHOLE_CELL
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _set_method(_step2, MESMER_WHOLE_CELL)
+    idx = _step2._mesmer_input_mode.findData("selected_channels")
+    _step2._mesmer_input_mode.setCurrentIndex(idx)
+    cfg = _step2.get_seg_config()
+    assert cfg["channel_remap_config_path"].endswith("step0_channel_remap.json")
+    assert cfg["allow_preview_remap"] is True
+
+
+def test_step2_mesmer_weighted_fusion_does_not_attach_remap(_step2, tmp_path):
+    # DAPI + Fusion channel -> remap arrives via the fused signal; don't attach.
+    from block01.utils.segmentation_config import MESMER_WHOLE_CELL
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _set_method(_step2, MESMER_WHOLE_CELL)
+    idx = _step2._mesmer_input_mode.findData("step1_weighted_fusion")
+    _step2._mesmer_input_mode.setCurrentIndex(idx)
+    cfg = _step2.get_seg_config()
+    assert "channel_remap_config_path" not in cfg
+
+
 # ── Phase 5d.1: remap gate shape alignment hardening ─────────────────────────
 
 def _remap_params_for(name="PanCK"):

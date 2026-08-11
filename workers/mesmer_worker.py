@@ -67,6 +67,7 @@ def run_mesmer_on_channel_source(channel_source, params, app=None, logger=None):
         percentile_low=float(params.get("percentile_low", params.get("normalization_percentile_low", 1.0))),
         percentile_high=float(params.get("percentile_high", params.get("normalization_percentile_high", 99.8))),
         input_mode=params.get("input_mode", "selected_channels"),
+        channel_remap_params=params.get("channel_remap_params") or params.get("_channel_remap_params") or {},
     )
     return run_mesmer_on_batch(batch, params, app=app, status=status)
 
@@ -187,6 +188,7 @@ def run_mesmer_patch_preview(args, result_queue, stop_flag):
                     percentile_high=float(params.get("percentile_high", 99.8)),
                     input_mode=input_mode,
                     fusion_image=fusion_img,
+                    channel_remap_params=channel_remap_params,
                 )
                 mask, pred_runtime = run_mesmer_prediction(
                     batch,

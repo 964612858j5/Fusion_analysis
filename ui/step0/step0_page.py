@@ -1550,7 +1550,7 @@ class Step0Page(QWidget):
         print(f"[Step0] saved channel remap config -> {path}")
         QMessageBox.information(
             self, "Saved",
-            f"Saved preview remap config (preview_only, step2_ready=false):\n{path}")
+            f"Saved channel remap:\n{path}")
 
     def _step0_conditioning_config_path(self):
         """Canonical Step0 remap-config file for the current run/ROI. Stable name

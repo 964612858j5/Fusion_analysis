@@ -105,6 +105,16 @@ class Step2Page(QWidget):
         print(f"[Step2] roi_id={self._roi_id}")
         print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
 
+    def _auto_remap_config_path(self):
+        """Path of the Step0 Channel Remap config for this ROI, or '' if none.
+        Marker segmentation (HQ/HQ2/CSD) auto-applies it (see get_seg_config)."""
+        rd = getattr(self, "_roi_dir", "") or ""
+        if rd:
+            p = os.path.join(rd, "step0", "step0_channel_remap.json")
+            if os.path.exists(p):
+                return p
+        return ""
+
     def _sync_output_dir_from_zarr_path(self, zarr_path):
         """Use the ROI step2 directory when the input zarr comes from ROI step1."""
         path = os.path.abspath(zarr_path or "")
@@ -240,8 +250,9 @@ class Step2Page(QWidget):
         inl.addWidget(self._zarr_info)
         rl.addWidget(inp_box)
 
-        # ── Manual channel remap (v13.1 experimental) ──────────────────
-        rl.addWidget(self._build_remap_box())
+        # Manual channel remap box removed: the Step0 saved remap is applied
+        # automatically — whole-cell/DAPI via the Step1 fused input, marker
+        # methods (HQ/HQ2/CSD) via _auto_remap_config_path() in get_seg_config.
 
         # Tile grid
         tile_box = QGroupBox('Tile Grid (for segmentation)')
@@ -971,9 +982,13 @@ class Step2Page(QWidget):
 
     @staticmethod
     def _box_style(color):
+        # margin-top + positioned ::title so the title sits in the border gap and
+        # is never occluded by the first body widget (styled-QGroupBox title bug).
         return (
             f'QGroupBox{{border:1px solid {color};border-radius:5px;'
-            f'margin-top:4px;font-weight:bold;color:{color};font-size:11px;}}'
+            f'margin-top:16px;font-weight:bold;color:{color};font-size:11px;}}'
+            f'QGroupBox::title{{subcontrol-origin:margin;subcontrol-position:'
+            f'top left;left:8px;padding:0 4px;}}'
         )
 
     # ── zarr loading ──────────────────────────────────────────────────
@@ -1917,16 +1932,24 @@ class Step2Page(QWidget):
         })
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
-        # v13.1 Phase 5b/5c.1 — optional manual channel remap (experimental).
-        # No path -> remap keys are omitted entirely so Step2 runs exactly as v13
-        # (the backend keeps manual_remap_enabled=False / its own gate default).
-        remap_path = self._remap_config_edit.text().strip() if hasattr(self, "_remap_config_edit") else ""
-        if remap_path:
-            data["channel_remap_config_path"] = remap_path
-            data["allow_preview_remap"] = bool(
-                hasattr(self, "_allow_preview_remap") and self._allow_preview_remap.isChecked())
-            if hasattr(self, "_remap_gate_mode"):
-                data["remap_gate_mode"] = self._remap_gate_mode.currentData() or "remap"
+        # Auto-apply the Step0 manual channel remap (no UI): a saved remap is
+        # treated as consent. Marker methods (HQ/HQ2/CSD) read raw markers, so the
+        # remap config is applied to them here; whole-cell/DAPI already get it via
+        # the Step1 fused input, so the config is not attached for them.
+        # NOT attached for the step1_weighted_fusion input mode: there the segmenter
+        # consumes the Step1 fused signal (which already carries the remap), and the
+        # per-marker remap config is explicitly rejected by validation for it.
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
+            _mode = ""
+            if method == CELLPOSE_NUCLEI_HQ and hasattr(self, "_hq_input_mode"):
+                _mode = self._hq_input_mode.currentData() or ""
+            elif method == CELLPOSE_NUCLEI_HQ2 and hasattr(self, "_hq2_input_mode"):
+                _mode = self._hq2_input_mode.currentData() or ""
+            remap_path = "" if _mode == "step1_weighted_fusion" else self._auto_remap_config_path()
+            if remap_path:
+                data["channel_remap_config_path"] = remap_path
+                data["allow_preview_remap"] = True
+                data["remap_gate_mode"] = "remap_and_gi"
         cfg = normalize_segmentation_config(data)
         if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[HQ2-UI] collected params={cfg.get('params')}")

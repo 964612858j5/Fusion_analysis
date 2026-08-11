@@ -416,50 +416,73 @@ def test_step2_gui_no_remap_path_leaves_keys_absent(_step2):
     assert "remap_gate_mode" not in cfg
 
 
-def test_step2_gui_writes_remap_config_path(_step2):
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    cfg = _step2.get_seg_config()
-    assert cfg["channel_remap_config_path"] == "/tmp/remap.json"
+# The manual remap box was removed: the Step0 saved remap now auto-applies —
+# whole-cell/DAPI via the Step1 fused input, marker methods (HQ/HQ2/CSD) via the
+# ROI's step0_channel_remap.json in get_seg_config.
+
+def _set_method(page, method):
+    idx = page._method_combo.findData(method)
+    assert idx >= 0, method
+    page._method_combo.setCurrentIndex(idx)
 
 
-def test_step2_gui_writes_allow_preview_boolean(_step2):
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    _step2._allow_preview_remap.setChecked(True)
+def _roi_with_remap(tmp_path):
+    from block01.utils.channel_remap_config import save_channel_remap_config
+    step0 = tmp_path / "rois" / "r1" / "step0"
+    step0.mkdir(parents=True)
+    save_channel_remap_config(
+        {"channels": {"PanCK": {"min": 0.0, "max": 200.0, "gamma": 1.0}},
+         "source_policy": {"preview_only": True, "step2_ready": False},
+         "used_for": "segmentation_only"},
+        str(step0 / "step0_channel_remap.json"))
+    return str(tmp_path / "rois" / "r1")
+
+
+def test_step2_no_box_widgets(_step2):
+    # the manual-remap box is gone
+    from PyQt5 import QtWidgets
+    assert not hasattr(_step2, "_remap_config_edit")
+    titles = [b.title() for b in _step2.findChildren(QtWidgets.QGroupBox)]
+    assert not any("Manual channel remap" in t for t in titles)
+
+
+def test_step2_marker_method_auto_applies_step0_remap(_step2, tmp_path):
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
     cfg = _step2.get_seg_config()
+    assert cfg["channel_remap_config_path"].endswith("step0_channel_remap.json")
     assert cfg["allow_preview_remap"] is True
-    _step2._allow_preview_remap.setChecked(False)
-    cfg = _step2.get_seg_config()
-    assert cfg["allow_preview_remap"] is False
-
-
-def test_step2_gui_writes_remap_gate_mode(_step2):
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    idx = _step2._remap_gate_mode.findData("gi")
-    _step2._remap_gate_mode.setCurrentIndex(idx)
-    cfg = _step2.get_seg_config()
-    assert cfg["remap_gate_mode"] == "gi"
-
-
-def test_step2_gui_default_gate_mode_is_remap_and_gi(_step2):
-    # HCC recommendation surfaces as the GUI default once a config is selected.
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    cfg = _step2.get_seg_config()
     assert cfg["remap_gate_mode"] == "remap_and_gi"
 
 
-def test_step2_gui_clear_disables_remap(_step2):
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    _step2._clear_remap_config()
+def test_step2_wholecell_does_not_attach_remap(_step2, tmp_path):
+    # whole-cell gets the remap via the Step1 fused input, not the Step2 config
+    from block01.utils.segmentation_config import CELLPOSE_WHOLECELL_FUSION
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _set_method(_step2, CELLPOSE_WHOLECELL_FUSION)
     cfg = _step2.get_seg_config()
     assert "channel_remap_config_path" not in cfg
-    assert _step2._remap_status_lbl.text() == "Remap: off"
 
 
-def test_step2_gui_status_label_reflects_selection(_step2):
-    _step2._remap_config_edit.setText("/tmp/remap.json")
-    _step2._allow_preview_remap.setChecked(True)
-    txt = _step2._remap_status_lbl.text()
-    assert "config selected" in txt and "preview allowed" in txt and "gate=" in txt
+def test_step2_marker_method_no_config_leaves_keys_absent(_step2, tmp_path):
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=str(tmp_path))  # no step0 remap file
+    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
+    cfg = _step2.get_seg_config()
+    assert "channel_remap_config_path" not in cfg
+
+
+def test_step2_weighted_fusion_mode_does_not_attach_remap(_step2, tmp_path):
+    # In step1_weighted_fusion the remap arrives via the fused signal; attaching
+    # the per-marker config would be rejected by validation. Guard against it.
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
+    idx = _step2._hq2_input_mode.findData("step1_weighted_fusion")
+    _step2._hq2_input_mode.setCurrentIndex(idx)
+    cfg = _step2.get_seg_config()
+    assert "channel_remap_config_path" not in cfg
 
 
 # ── Phase 5d.1: remap gate shape alignment hardening ─────────────────────────

@@ -165,7 +165,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
             left = QtWidgets.QGroupBox("Channels")
             left.setStyleSheet(
                 "QGroupBox{border:1px solid #61afef;border-radius:5px;"
-                "margin-top:6px;font-weight:bold;color:#61afef;font-size:11px;}")
+                "margin-top:16px;font-weight:bold;color:#61afef;font-size:11px;}"
+                "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:"
+                "top left;left:8px;padding:0 4px;}")
         else:
             left = QtWidgets.QWidget()
         left_l = QtWidgets.QVBoxLayout(left)
@@ -267,7 +269,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
         box = QtWidgets.QGroupBox(title)
         box.setStyleSheet(
             f"QGroupBox{{border:1px solid {accent};border-radius:5px;"
-            f"margin-top:6px;font-weight:bold;color:{accent};font-size:11px;}}"
+            f"margin-top:16px;font-weight:bold;color:{accent};font-size:11px;}}"
+            f"QGroupBox::title{{subcontrol-origin:margin;subcontrol-position:"
+            f"top left;left:8px;padding:0 4px;}}"
         )
         lay = QtWidgets.QVBoxLayout(box)
         lay.setSpacing(6)

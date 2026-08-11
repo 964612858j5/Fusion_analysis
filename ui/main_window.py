@@ -1551,6 +1551,11 @@ class MainWindow(QMainWindow):
     def _go_to_step3(self, output_dir=None):
         if self._current_step == 1:
             self._stop_all_loaders()
+        # Breadcrumb navigation passes no output_dir; fall back to the completed
+        # Step2 result so Step3 Input auto-syncs even when the user clicked OK on
+        # the finish dialog (no auto-advance) and then clicked the Step3 tab.
+        if not output_dir:
+            output_dir = (self.step2_output or {}).get("output_dir")
         if output_dir:
             self._on_step2_complete(output_dir)
             self._step3.set_channel_context(
@@ -1558,10 +1563,8 @@ class MainWindow(QMainWindow):
                 corrected_zarr_path=self._corrected_zarr_path,
                 rois=self._rois,
             )
-            if self.is_sequential_flow:
-                self._step3.set_output_dir(output_dir)
-                self.step3_output = dict(self.step2_output)
             self._step3.set_output_dir(output_dir)
+            self.step3_output = dict(self.step2_output)
         self._stack.setCurrentIndex(3)
         self._set_step_active(3)
 

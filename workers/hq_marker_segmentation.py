@@ -13,6 +13,8 @@ from collections import defaultdict
 
 import numpy as np
 
+from ..core.channel_remap import apply_channel_remap
+
 
 CONSENSUS_MODES = ("adaptive_best_channel", "weighted_vote", "majority_vote")
 
@@ -227,8 +229,14 @@ def segment_nuclei_hq(
     consensus_mode="adaptive_best_channel",
     channel_weights=None,
     min_signal_threshold=0.08,
+    channel_remap_params=None,
 ):
-    """Create final whole-cell labels from fixed nuclei and marker channels."""
+    """Create final whole-cell labels from fixed nuclei and marker channels.
+
+    channel_remap_params : {ch: {min,max,gamma,...}} optional
+        Step0 manual remap. A channel with a remap is conditioned with
+        apply_channel_remap (raw units) instead of the plain percentile norm, so
+        HQ segmentation reflects the user's adjustment (parity with HQ2/CSD)."""
     if consensus_mode not in CONSENSUS_MODES:
         raise ValueError(f"Unknown consensus mode: {consensus_mode}")
     nuclei = np.asarray(nuclei_labels, dtype=np.uint32)
@@ -244,8 +252,13 @@ def segment_nuclei_hq(
     candidate_by_name = {}
     support_by_name = {}
     pos_by_name = {}
+    remap = channel_remap_params or {}
     for ch, arr in zip(channel_names, marker_channels):
-        norm = percentile_normalize(arr, normalization_low, normalization_high)
+        p = remap.get(ch)
+        if p:
+            norm = apply_channel_remap(arr, p).astype(np.float32)
+        else:
+            norm = percentile_normalize(arr, normalization_low, normalization_high)
         cand = _seeded_watershed(norm, nuclei, max_cell_radius, min_signal_threshold)
         score, _mean, pos_frac = _label_stats(cand, norm, n_labels, min_signal_threshold)
         norm_by_name[ch] = norm

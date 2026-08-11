@@ -1781,6 +1781,7 @@ class SegmentMergeWorker(QThread):
                         consensus_mode=self.seg_config.get("consensus_mode", "adaptive_best_channel"),
                         channel_weights=self.seg_config.get("channel_weights") or {},
                         min_signal_threshold=self.seg_config.get("min_signal_threshold", 0.08),
+                        channel_remap_params=self.seg_config.get("_channel_remap_params") or {},
                     )
                 return {
                     "mask": final_mask.astype(np.uint32, copy=False),

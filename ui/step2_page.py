@@ -1932,37 +1932,88 @@ class Step2Page(QWidget):
         })
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
-        # Auto-apply the Step0 manual channel remap (no UI): a saved remap is
-        # treated as consent. Methods that read raw source channels (HQ/HQ2/CSD
-        # markers, Mesmer nuclear+membrane) get the remap config applied to them
-        # here; whole-cell/DAPI already get it via the Step1 fused input, so the
-        # config is not attached for them.
-        # NOT attached for step1_weighted_fusion input: there the segmenter
-        # consumes the Step1 fused signal (which already carries the remap), and
-        # the per-marker remap config is explicitly rejected by validation for it.
-        _mode = ""
-        _remap_method = False
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            _remap_method = True
-            if method == CELLPOSE_NUCLEI_HQ and hasattr(self, "_hq_input_mode"):
-                _mode = self._hq_input_mode.currentData() or ""
-            elif method == CELLPOSE_NUCLEI_HQ2 and hasattr(self, "_hq2_input_mode"):
-                _mode = self._hq2_input_mode.currentData() or ""
-        elif method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            _remap_method = True
-            if hasattr(self, "_mesmer_input_mode"):
-                _mode = self._mesmer_input_mode.currentData() or ""
-        if _remap_method:
-            remap_path = "" if _mode == "step1_weighted_fusion" else self._auto_remap_config_path()
-            if remap_path:
-                data["channel_remap_config_path"] = remap_path
-                data["allow_preview_remap"] = True
-                data["remap_gate_mode"] = "remap_and_gi"
+        # The Step0 manual channel remap reaches Step2 via source-alignment
+        # PROMOTION at launch (_promote_step0_remap in _run), NEVER by attaching the
+        # raw Step0 preview config here. That preview config is Step2-incompatible by
+        # design (step0_page marks calibration alignment unverified) and the worker's
+        # validator would reject it — attaching it here was a crash regression.
+        # Promotion is HQ2/CSD-only: only those read raw_ome markers that match
+        # Step0's raw_ome calibration; plain HQ / Mesmer read corrected markers when
+        # a Step0 corrected zarr exists, so a raw-calibrated remap cannot be applied
+        # to them safely (needs the v14.5d source-aware runtime).
         cfg = normalize_segmentation_config(data)
         if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             print(f"[HQ2-UI] collected params={cfg.get('params')}")
             print(f"[HQ2-UI] worker config keys={sorted(cfg.keys())}")
         return cfg
+
+    def _promote_step0_remap(self, seg_config):
+        """Auto-apply the Step0 manual remap to Step2 via source-alignment promotion.
+
+        HQ2/CSD only: only those read raw_ome markers that match Step0's raw_ome
+        calibration. promote_step1_5_config_for_step2 SELF-VALIDATES — it returns a
+        step2_ready config only when the Step0 calibration identity (path / shape /
+        intensity-space) matches Step2's resolved raw_ome source and geometry. On
+        any mismatch it refuses and we attach nothing, so the worker runs without a
+        remap and NEVER receives the Step2-incompatible preview config (which it
+        would reject). Mutates seg_config in place; never raises.
+
+        Fires only for a full-image run: the guard needs the segmentation-input
+        geometry to equal the resolved full raw_ome source shape. An ROI crop is a
+        different grid and needs a separate geometry contract (not yet wired), so we
+        skip it (safe — no remap, no crash).
+        """
+        from ..utils.segmentation_config import is_hq2_csd_method
+        if not is_hq2_csd_method(seg_config.get("method")):
+            return
+        preview_path = self._auto_remap_config_path()
+        if not preview_path:
+            return
+        if self._rois:
+            print("[Step2] Step0 remap auto-apply skipped: ROI-cropped run "
+                  "(full-image source-geometry contract required)")
+            return
+        if self._full_h <= 0 or self._full_w <= 0:
+            return
+        try:
+            from ..utils.remap_promotion import promote_step1_5_config_for_step2
+            from ..scripts.promote_remap_config import build_resolved_source
+            from ..utils.channel_remap_config import (
+                validate_remap_covers_selected_channels)
+            with open(preview_path, "r", encoding="utf-8") as f:
+                preview = json.load(f)
+            resolved = build_resolved_source(seg_config)
+            promoted, report = promote_step1_5_config_for_step2(
+                preview, resolved, [int(self._full_h), int(self._full_w)],
+                active_method=seg_config.get("method"))
+        except Exception as exc:
+            print(f"[Step2] Step0 remap auto-apply skipped (promotion error): {exc}")
+            return
+        if promoted is None:
+            print("[Step2] Step0 remap NOT applied — source-alignment promotion refused:")
+            for fail in (report or {}).get("failures", []):
+                print(f"[Step2]   - {fail}")
+            return
+        cov = validate_remap_covers_selected_channels(
+            promoted.get("channels") or {}, seg_config.get("hq_channels") or [],
+            seg_config.get("hq_input_mode"))
+        if cov:
+            print(f"[Step2] Step0 remap NOT applied — selected channels not covered: {cov}")
+            return
+        out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, "channel_remap_config.step2ready.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(promoted, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            print(f"[Step2] Step0 remap auto-apply skipped (write error): {exc}")
+            return
+        seg_config["channel_remap_config_path"] = out_path
+        seg_config["allow_preview_remap"] = False
+        seg_config["remap_gate_mode"] = "remap_and_gi"
+        print(f"[Step2] Step0 remap auto-applied (promoted step2_ready) -> {out_path}")
+        print(f"[Step2]   source: {report.get('source_kind')} {report.get('source_path')}")
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
@@ -2159,6 +2210,8 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
+        # Auto-apply the Step0 manual remap (HQ2/CSD) via source-alignment promotion.
+        self._promote_step0_remap(seg_config)
         if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             channels = seg_config.get("hq_channels") or []
             try:

@@ -446,67 +446,114 @@ def test_step2_no_box_widgets(_step2):
     assert not any("Manual channel remap" in t for t in titles)
 
 
-def test_step2_marker_method_auto_applies_step0_remap(_step2, tmp_path):
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+# get_seg_config must NEVER attach the Step0 preview config: it is Step2-
+# incompatible by design and the worker's validator rejects it (a crash). The
+# Step0 remap reaches Step2 ONLY via source-alignment promotion at launch
+# (_promote_step0_remap), which self-validates and attaches a step2_ready config
+# or nothing.
+
+def test_step2_get_seg_config_never_attaches_preview_remap(_step2, tmp_path):
+    from block01.utils.segmentation_config import (
+        CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD,
+        MESMER_WHOLE_CELL, CELLPOSE_WHOLECELL_FUSION)
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
-    cfg = _step2.get_seg_config()
-    assert cfg["channel_remap_config_path"].endswith("step0_channel_remap.json")
-    assert cfg["allow_preview_remap"] is True
-    assert cfg["remap_gate_mode"] == "remap_and_gi"
+    for m in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD,
+              MESMER_WHOLE_CELL, CELLPOSE_WHOLECELL_FUSION):
+        _set_method(_step2, m)
+        cfg = _step2.get_seg_config()
+        assert "channel_remap_config_path" not in cfg, m
 
 
-def test_step2_wholecell_does_not_attach_remap(_step2, tmp_path):
-    # whole-cell gets the remap via the Step1 fused input, not the Step2 config
-    from block01.utils.segmentation_config import CELLPOSE_WHOLECELL_FUSION
+def test_promote_step0_remap_non_hq2csd_is_noop(_step2, tmp_path):
+    # only HQ2/CSD read raw_ome markers that match Step0's raw calibration
+    from block01.utils.segmentation_config import MESMER_WHOLE_CELL
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    _set_method(_step2, CELLPOSE_WHOLECELL_FUSION)
-    cfg = _step2.get_seg_config()
-    assert "channel_remap_config_path" not in cfg
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = {"method": MESMER_WHOLE_CELL}
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
 
 
-def test_step2_marker_method_no_config_leaves_keys_absent(_step2, tmp_path):
+def test_promote_step0_remap_no_preview_config_is_noop(_step2, tmp_path):
     from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
     _step2.set_roi_context(roi_id="r1", roi_dir=str(tmp_path))  # no step0 remap file
-    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
-    cfg = _step2.get_seg_config()
-    assert "channel_remap_config_path" not in cfg
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
 
 
-def test_step2_weighted_fusion_mode_does_not_attach_remap(_step2, tmp_path):
-    # In step1_weighted_fusion the remap arrives via the fused signal; attaching
-    # the per-marker config would be rejected by validation. Guard against it.
+def test_promote_step0_remap_roi_run_skipped(_step2, tmp_path):
+    # an ROI crop is a different grid than the full raw_ome source; skip (no crash)
     from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    _set_method(_step2, CELLPOSE_NUCLEI_HQ2)
-    idx = _step2._hq2_input_mode.findData("step1_weighted_fusion")
-    _step2._hq2_input_mode.setCurrentIndex(idx)
-    cfg = _step2.get_seg_config()
-    assert "channel_remap_config_path" not in cfg
+    _step2._rois = [{"name": "r1", "bbox_fullres": [0, 100, 0, 100]}]
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
 
 
-def test_step2_mesmer_selected_channels_auto_applies_remap(_step2, tmp_path):
-    # Mesmer selected-channels reads raw nuclear+membrane -> attach the config so
-    # build_mesmer_input conditions them with the Step0 remap.
-    from block01.utils.segmentation_config import MESMER_WHOLE_CELL
-    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    _set_method(_step2, MESMER_WHOLE_CELL)
-    idx = _step2._mesmer_input_mode.findData("selected_channels")
-    _step2._mesmer_input_mode.setCurrentIndex(idx)
-    cfg = _step2.get_seg_config()
-    assert cfg["channel_remap_config_path"].endswith("step0_channel_remap.json")
-    assert cfg["allow_preview_remap"] is True
+def test_promote_step0_remap_attaches_promoted_on_success(_step2, tmp_path, monkeypatch):
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
+                           step2_dir=str(tmp_path / "step2"))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    promoted = {"channels": {"PanCK": {"min": 0.0, "max": 200.0}},
+                "source_policy": {"step2_ready": True, "preview_only": False},
+                "used_for": "segmentation_only"}
+    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
+                        lambda cfg: object())
+    monkeypatch.setattr(
+        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
+        lambda *a, **k: (promoted, {"promoted": True, "source_kind": "raw_ome",
+                                    "source_path": "/x/raw.ome.tiff"}))
+    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    _step2._promote_step0_remap(seg)
+    assert seg["channel_remap_config_path"].endswith("channel_remap_config.step2ready.json")
+    assert seg["allow_preview_remap"] is False
+    assert seg["remap_gate_mode"] == "remap_and_gi"
+    assert os.path.exists(seg["channel_remap_config_path"])
 
 
-def test_step2_mesmer_weighted_fusion_does_not_attach_remap(_step2, tmp_path):
-    # DAPI + Fusion channel -> remap arrives via the fused signal; don't attach.
-    from block01.utils.segmentation_config import MESMER_WHOLE_CELL
-    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    _set_method(_step2, MESMER_WHOLE_CELL)
-    idx = _step2._mesmer_input_mode.findData("step1_weighted_fusion")
-    _step2._mesmer_input_mode.setCurrentIndex(idx)
-    cfg = _step2.get_seg_config()
-    assert "channel_remap_config_path" not in cfg
+def test_promote_step0_remap_refusal_attaches_nothing(_step2, tmp_path, monkeypatch):
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
+                           step2_dir=str(tmp_path / "step2"))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
+                        lambda cfg: object())
+    monkeypatch.setattr(
+        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
+        lambda *a, **k: (None, {"promoted": False, "failures": ["source mismatch"]}))
+    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
+
+
+def test_promote_step0_remap_uncovered_channel_attaches_nothing(_step2, tmp_path, monkeypatch):
+    # promotion succeeded but the promoted config does not cover a selected marker
+    # -> refuse (no silent mixed remap/legacy gate)
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
+                           step2_dir=str(tmp_path / "step2"))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    promoted = {"channels": {"PanCK": {"min": 0.0, "max": 200.0}},
+                "source_policy": {"step2_ready": True, "preview_only": False},
+                "used_for": "segmentation_only"}
+    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
+                        lambda cfg: object())
+    monkeypatch.setattr(
+        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
+        lambda *a, **k: (promoted, {"promoted": True}))
+    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK", "CD45"]}  # CD45 uncovered
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
 
 
 # ── Phase 5d.1: remap gate shape alignment hardening ─────────────────────────

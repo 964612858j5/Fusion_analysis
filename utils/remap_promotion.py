@@ -62,6 +62,76 @@ def _as_hw(shape):
         return None
 
 
+def project_marker_only_config(saved_config, selected_channels):
+    """Project a full Step0 remap config down to the SELECTED marker channels.
+
+    v14.5d Workstream A. The saved Step0 config carries every channel (incl the DAPI
+    reference layer, which Step1 remap + the DAPI-input-zarr cache depend on — it is
+    NEVER stripped at save). Step2 marker promotion must run on a marker-only view:
+    the selected HQ2/CSD marker channels minus reference layers (DAPI/mask/fusion).
+
+    Two invariants:
+      1. Coverage (no silent drop): every selected non-reference marker MUST be present
+         in the saved config. `selected_non_reference − saved_channels ≠ ∅` → refuse with
+         an explicit 'uncovered-marker' reason (an intersection would silently drop it).
+      2. Mixture recompute: the projection drops any full-config top-level
+         source_mixture_mode (a 29-channel 'mixed' value must not leak onto a homogeneous
+         selected subset). `intended_source_mixture_mode` is derived here from the
+         selected markers' recorded actual_source_kind (advisory); the AUTHORITATIVE
+         mixture is recomputed by the 5c.2 resolver over the same selected set.
+
+    Returns (projected_config | None, report). Pure — no file/pixel reads.
+    """
+    from .channel_remap_config import _coerce_channel_list, _is_reference_channel_name
+    from .source_identity import (
+        SOURCE_MIXTURE_HOMOGENEOUS_RAW, SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED,
+        SOURCE_MIXTURE_MIXED)
+
+    report = {"projected": False, "failures": [], "marker_channels": [],
+              "intended_source_mixture_mode": None}
+    saved_channels = (saved_config or {}).get("channels", {}) or {}
+    selected = _coerce_channel_list(selected_channels)
+    non_ref = [c for c in selected if not _is_reference_channel_name(c)]
+    if not non_ref:
+        report["failures"].append(
+            "no non-reference marker channels selected (only reference layers "
+            "DAPI/mask/fusion, or empty selection)")
+        return None, report
+    uncovered = [c for c in non_ref if c not in saved_channels]
+    if uncovered:
+        report["failures"].append(
+            "uncovered-marker: selected marker(s) not in the saved Step0 remap config: "
+            + ", ".join(uncovered))
+        return None, report
+
+    marker_channels = non_ref
+    projected = copy.deepcopy(saved_config)
+    projected["channels"] = {c: copy.deepcopy(saved_channels[c]) for c in marker_channels}
+    # Invariant 2: drop any stale full-config mixture; recomputed per selected marker.
+    projected.pop("source_mixture_mode", None)
+    sp = projected.get("source_policy")
+    if isinstance(sp, dict):
+        sp.pop("source_mixture_mode", None)
+
+    kinds = set()
+    for c in marker_channels:
+        csi = (saved_channels[c] or {}).get("calibration_source_identity")
+        kinds.add(csi.get("actual_source_kind") if isinstance(csi, dict) else None)
+    if not kinds or None in kinds:
+        intended = None            # a marker lacks recorded identity — promotion refuses
+    elif kinds == {"raw_ome"}:
+        intended = SOURCE_MIXTURE_HOMOGENEOUS_RAW
+    elif kinds == {"corrected_zarr"}:
+        intended = SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED
+    else:
+        intended = SOURCE_MIXTURE_MIXED
+
+    report["projected"] = True
+    report["marker_channels"] = list(marker_channels)
+    report["intended_source_mixture_mode"] = intended
+    return projected, report
+
+
 def promote_step1_5_config_for_step2(preview_config, resolved_source,
                                      step2_input_shape, active_method=None):
     """Promote a Step1.5 preview config iff its calibration identity matches Step2.

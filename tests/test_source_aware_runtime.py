@@ -9,7 +9,12 @@ together behind ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME (default off)."""
 import copy
 
 import block01.utils.remap_promotion as rp
-from block01.utils.channel_remap_config import validate_source_aware_runtime_config
+from block01.utils.channel_remap_config import (
+    validate_source_aware_runtime_config, validate_step2_remap_config)
+from block01.utils.segmentation_config import (
+    step2_source_aware_runtime_enabled, STEP2_SOURCE_AWARE_RUNTIME_ENV)
+
+_SOURCE_AWARE_GUARD = "source-aware remap config with step2_ready"
 
 
 def _runtime_config(mixture="homogeneous_corrected", with_resolved=True,
@@ -88,6 +93,37 @@ def test_runtime_validator_rejects_unknown_kind():
     cfg["channels"]["CK19"]["resolved_source_kind"] = "somewhere"
     errs = validate_source_aware_runtime_config(cfg)
     assert any("raw_ome|corrected_zarr" in e for e in errs)
+
+
+# ── feature flag (default off) ───────────────────────────────────────────────
+
+def test_flag_default_off_and_env_toggle(monkeypatch):
+    monkeypatch.delenv(STEP2_SOURCE_AWARE_RUNTIME_ENV, raising=False)
+    assert step2_source_aware_runtime_enabled() is False
+    monkeypatch.setenv(STEP2_SOURCE_AWARE_RUNTIME_ENV, "1")
+    assert step2_source_aware_runtime_enabled() is True
+    monkeypatch.setenv(STEP2_SOURCE_AWARE_RUNTIME_ENV, "off")
+    assert step2_source_aware_runtime_enabled() is False
+
+
+# ── explicit allow_source_aware_runtime param on validate_step2_remap_config ─
+
+def test_validate_step2_still_rejects_runtime_config_by_default():
+    # default (no explicit flag) MUST keep the hard source-aware guard
+    errs, _ = validate_step2_remap_config(_runtime_config())
+    assert any(_SOURCE_AWARE_GUARD in e for e in errs)
+
+
+def test_validate_step2_lifts_guard_only_with_explicit_flag_and_valid_runtime():
+    cfg = _runtime_config()                       # well-formed runtime config
+    errs, _ = validate_step2_remap_config(cfg, allow_source_aware_runtime=True)
+    assert not any(_SOURCE_AWARE_GUARD in e for e in errs)   # guard lifted
+
+
+def test_validate_step2_keeps_guard_for_malformed_runtime_even_with_flag():
+    cfg = _runtime_config(runtime_supported=False)   # not a valid runtime config
+    errs, _ = validate_step2_remap_config(cfg, allow_source_aware_runtime=True)
+    assert any(_SOURCE_AWARE_GUARD in e for e in errs)       # not lifted
 
 
 # ── promote_candidate_to_runtime ─────────────────────────────────────────────

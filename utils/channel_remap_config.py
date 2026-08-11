@@ -338,7 +338,8 @@ def _is_reference_channel_name(name):
     return any(frag in n for frag in _REFERENCE_NAME_FRAGMENTS)
 
 
-def validate_step2_remap_config(config, allow_preview_remap=False):
+def validate_step2_remap_config(config, allow_preview_remap=False,
+                                allow_source_aware_runtime=False):
     """Validate a remap config for Step2 *runtime* use (Phase 5b).
 
     Stricter than validate_channel_remap_config: enforces source alignment so the
@@ -395,11 +396,21 @@ def validate_step2_remap_config(config, allow_preview_remap=False):
     # resolver + Step2 runtime exist. A source-aware config that claims
     # step2_ready would otherwise be run with the new fields SILENTLY IGNORED
     # (old single-source behavior). Reject it — hard failure, never a warning.
+    #
+    # v14.5d: the guard is lifted ONLY via the explicit allow_source_aware_runtime
+    # flag AND only for a WELL-FORMED runtime config (validate_source_aware_runtime_
+    # config passes). The caller passes allow_source_aware_runtime=True solely from
+    # inside the worker's per-channel branch (flag on) — never globally. A config
+    # that merely "looks like" a runtime config is not enough: it must validate.
     if config_is_source_aware(cfg) and bool(sp.get("step2_ready", False)):
-        errors.append(
-            "source-aware remap config with step2_ready=true is not supported "
-            "until v14.5c/v14.5d runtime lands; Step2 would silently ignore the "
-            "source-aware fields. Refusing.")
+        runtime_ok = (allow_source_aware_runtime
+                      and not validate_source_aware_runtime_config(config))
+        if not runtime_ok:
+            errors.append(
+                "source-aware remap config with step2_ready=true is not supported "
+                "without the v14.5d per-channel runtime "
+                "(allow_source_aware_runtime + a valid runtime config); Step2 would "
+                "otherwise silently ignore the source-aware fields. Refusing.")
 
     channels = cfg.get("channels", {}) or {}
     if not channels:

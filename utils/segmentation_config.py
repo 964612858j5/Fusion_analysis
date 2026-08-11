@@ -326,6 +326,21 @@ def is_hq2_csd_method(method):
     return method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
 
 
+STEP2_SOURCE_AWARE_RUNTIME_ENV = "ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME"
+
+
+def step2_source_aware_runtime_enabled():
+    """v14.5d feature flag (default OFF). Gates the per-channel source-aware Step2
+    remap runtime end to end: the launch orchestration must not attach a runtime
+    config, and the worker must hard-reject any runtime config, while this is False.
+    Read from the environment on every call so an internal release can toggle it
+    without a code change; flip the default only after raw + corrected GPU
+    acceptance."""
+    import os
+    return str(os.environ.get(STEP2_SOURCE_AWARE_RUNTIME_ENV, "")).strip().lower() \
+        in {"1", "true", "yes", "on"}
+
+
 def available_segmentation_methods():
     return list(SEGMENTATION_METHODS.keys())
 

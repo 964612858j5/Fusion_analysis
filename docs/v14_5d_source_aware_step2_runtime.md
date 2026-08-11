@@ -104,12 +104,20 @@ the worker is still single-source, so a step2_ready runtime config would be misu
 old single-source path (values remapped, source not switched per channel). All three land
 and enable together, gated by one feature switch.
 
-**B2. Per-channel marker reads** (sensitive runtime; GPU-verify) — build first:
-- In `segment_merge_worker`, when the runtime remap config is source-aware: build
-  `{ch: resolved_source_kind}` from the projected config, call
-  `resolve_per_channel_marker_sources`, open each channel's handle (corrected_zarr group
-  vs raw_ome loader), read each marker from ITS source instead of the single
-  `_hq_resolved_source_path`.
+**B2. Per-channel marker reads** (split into a testable core + a wiring step):
+- **B2-core (DONE, offscreen-tested):** `read_per_channel_marker_blocks(per_channel_resolved,
+  channels, bbox, read_block)` + `require_homogeneous_source(...)` in
+  `workers/hq_source_resolver.py`. A pure dispatch over `PerChannelResolvedSource` with an
+  INJECTED `read_block`, so per-channel source selection (raw vs corrected) is verifiable
+  without worker/GPU state. `require_homogeneous_source` refuses `mixed_raw_corrected`.
+  Not wired into any live path.
+- **B2-wiring (with B3, GPU-verify):** in `segment_merge_worker`, extract a
+  `read_block(group, ch, y0,y1,x0,x1)` primitive from the existing `_read_hq_marker_channels`
+  branch logic (raw_ome via channel-store `read_raw_ome`/`read_region` normalize=False; zarr
+  via `read_zarr_channel`), build `{ch: resolved_source_kind}` from the projected config,
+  call `resolve_per_channel_marker_sources`, then `read_per_channel_marker_blocks` with that
+  primitive — each marker from ITS source instead of the single `_hq_resolved_source_path`.
+  Full-image only, so the raw region offset is 0 and per-channel frames coincide.
 - Per-channel intensity space is safe: the candidate verified recorded == resolved
   intensity_space per channel, so raw-unit `apply_channel_remap` acts on the matching
   native source.

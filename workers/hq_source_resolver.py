@@ -448,6 +448,8 @@ from ..utils.source_identity import (  # noqa: E402  (additive, end-of-module)
     RESOLUTION_USE_RAW,
     RESOLUTION_USE_CORRECTED,
     REQUESTED_SOURCE_CORRECTED_ZARR,
+    SOURCE_MIXTURE_HOMOGENEOUS_RAW,
+    SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED,
 )
 
 
@@ -613,3 +615,63 @@ def resolve_per_channel_marker_sources(per_channel_requests, *,
                 channel=ch, requested_source=requested, reason=reason)
 
     return PerChannelResolvedSource(per_channel)
+
+
+# ── v14.5d B2 core: read each marker from its OWN resolved source ─────────────
+# Pure dispatch over a PerChannelResolvedSource. The actual pixel read is INJECTED
+# (`read_block`) so this core is unit-testable offscreen with fake groups; the
+# Step2 worker supplies a channel-store-backed read_block at B3 wiring time. This
+# is NOT wired into any live path yet (B1/B2/B3 land together behind
+# ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME).
+
+def require_homogeneous_source(per_channel_resolved):
+    """v14.5d supports a homogeneous marker source only (all raw OR all corrected).
+
+    ALLOWLIST: only homogeneous_raw / homogeneous_corrected pass. Everything else —
+    mixed_raw_corrected, None, "", or any unknown value — raises ValueError, so a
+    malformed/tampered runtime config can never slip past the homogeneous constraint
+    by carrying an absent/garbage mixture. Mixed frames also carry the ROI coordinate
+    hazard (raw full-image coords vs corrected ROI-group local coords), refused
+    outright in v14.5d. Returns the validated mode."""
+    mode = getattr(per_channel_resolved, "source_mixture_mode", None)
+    if mode not in (SOURCE_MIXTURE_HOMOGENEOUS_RAW, SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED):
+        raise ValueError(
+            "v14.5d requires a homogeneous marker source (homogeneous_raw or "
+            f"homogeneous_corrected); got {mode!r}")
+    return mode
+
+
+def read_per_channel_marker_blocks(per_channel_resolved, channels, bbox, read_block):
+    """Read each marker channel from its OWN resolved source (v14.5d B2 core).
+
+    per_channel_resolved : PerChannelResolvedSource (5c.2) — .per_channel[ch] is a
+                           ResolvedHQSource whose .group is the live handle
+                           (raw_ome dict {kind,loader} or an open corrected zarr
+                           group).
+    channels             : ordered marker names; every one MUST be resolved.
+    bbox                 : (y0, y1, x0, x1).
+    read_block           : injected callable (group, channel, y0, y1, x0, x1)
+                           -> 2D ndarray. The worker passes its channel-store-backed
+                           reader (raw_ome vs zarr dispatch, normalize=False); tests
+                           pass a fake. Keeping the read primitive injected means
+                           this dispatch core needs no worker/GPU state to verify.
+
+    Returns {channel: ndarray} in `channels` order. Raises KeyError for an
+    unresolved channel (no-partial: the caller must have a complete resolution)."""
+    y0, y1, x0, x1 = (int(v) for v in bbox)
+    per = getattr(per_channel_resolved, "per_channel", {}) or {}
+    # Order-preserving dedup: a channel listed twice must not be read twice.
+    seen, ordered = set(), []
+    for ch in channels:
+        if ch in seen:
+            continue
+        seen.add(ch)
+        ordered.append(ch)
+    out = {}
+    for ch in ordered:
+        if ch not in per:
+            raise KeyError(
+                f"channel '{ch}' not in per-channel resolved source "
+                "(resolution incomplete — no-partial)")
+        out[ch] = read_block(per[ch].group, ch, y0, y1, x0, x1)
+    return out

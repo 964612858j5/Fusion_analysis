@@ -2942,7 +2942,22 @@ class MainWindow(QMainWindow):
             "pixel_size": (self.step0_output or {}).get("pixel_size"),
             "code_version": "block01_step1_v8_dapi_meta",
         }
+        # Fingerprint the DAPI channel's Step0 manual remap so that changing (or
+        # clearing) the remap invalidates the reused DAPI input zarr — otherwise a
+        # stale, un-remapped DAPI input is served. Key is added ONLY when the DAPI
+        # channel actually carries a remap, so legacy metas (and no-remap runs,
+        # which never had the key) still compare equal and are not needlessly
+        # regenerated.
+        dapi_ch = meta.get("dapi_channel")
+        dapi_remap = (self._load_step0_remap_params()[0] or {}).get(dapi_ch) if dapi_ch else None
+        if dapi_remap:
+            meta["channel_remap_hash"] = self._remap_params_hash({dapi_ch: dapi_remap})
         return meta
+
+    @staticmethod
+    def _remap_params_hash(params):
+        payload = json.dumps(params, sort_keys=True, default=str)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _dapi_meta_compare_view(meta):
@@ -2950,7 +2965,7 @@ class MainWindow(QMainWindow):
             "source_path", "raw_ome_path", "roi_id", "roi_bbox", "regions",
             "dapi_channel", "shape", "dtype", "resolution",
             "normalization_source", "background_correction_source", "pixel_size",
-            "code_version",
+            "code_version", "channel_remap_hash",
         )
         return {k: meta.get(k) for k in keys}
 

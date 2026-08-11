@@ -19,7 +19,9 @@ import os
 # v14.5a: source-aware schema primitives (pure-Python, no runtime coupling). Used
 # only by the Step2 validation guard below to hard-reject a source-aware config
 # that claims step2_ready before runtime support exists.
-from .source_identity import config_is_source_aware, SOURCE_MIXTURE_MODES
+from .source_identity import (
+    config_is_source_aware, SOURCE_MIXTURE_MODES,
+    SOURCE_MIXTURE_HOMOGENEOUS_RAW, SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED)
 
 # v14.5c.3: the ONLY source_alignment_mode a per-channel source-aware promotion
 # emits. mixed_raw_corrected is a source_mixture_mode value, NEVER an alignment
@@ -551,4 +553,72 @@ def validate_source_aware_promoted_candidate(config):
         errors.append(
             "a source-aware promoted candidate must have step2_ready=false "
             "(per-channel Step2 runtime is v14.5d)")
+    return errors
+
+
+def validate_source_aware_runtime_config(config):
+    """Validate a v14.5d source-aware RUNTIME config (step2_ready=true, executable).
+
+    The runtime analogue of validate_source_aware_promoted_candidate. A runtime config
+    is what promote_candidate_to_runtime emits: a re-verified candidate stamped
+    runtime_supported=true + step2_ready=true, homogeneous source only, every marker
+    carrying its resolved per-channel source (resolved_source_kind / resolved_source_path).
+    Returns list[str] errors (empty == a well-formed runtime config).
+
+    This validator does NOT relax validate_step2_remap_config's source-aware guard: a
+    runtime config is consumed ONLY by the flag-gated v14.5d per-channel Step2 path
+    (ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME). It must never reach the single-source
+    worker path, which would ignore the per-channel sources.
+    """
+    errors = []
+    if not isinstance(config, dict):
+        return ["config must be a dict"]
+    cfg = normalize_channel_remap_config(config)
+    sp = cfg.get("source_policy", {}) or {}
+    if not bool(config.get("created_by_source_aware_promotion", False)):
+        errors.append(
+            "not a source-aware promotion (created_by_source_aware_promotion != true)")
+    if not bool(config.get("source_aware_promotion_ready", False)):
+        errors.append("source_aware_promotion_ready != true (not a completed candidate)")
+    if not bool(config.get("runtime_supported", False)):
+        errors.append("runtime_supported != true (candidate not promoted to runtime)")
+    if not bool(sp.get("step2_ready", False)):
+        errors.append("source-aware runtime config must have step2_ready=true")
+    align = sp.get("source_alignment_mode")
+    if align != SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE:
+        errors.append(
+            f"source_alignment_mode must be '{SOURCE_ALIGNMENT_PER_CHANNEL_NATIVE}', "
+            f"got {align!r}")
+    mixture = config.get("source_mixture_mode")
+    if mixture not in (SOURCE_MIXTURE_HOMOGENEOUS_RAW, SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED):
+        errors.append(
+            "source_mixture_mode must be homogeneous (homogeneous_raw or "
+            f"homogeneous_corrected) for v14.5d, got {mixture!r}")
+    # Every marker's resolved kind must be a known source AND consistent with the
+    # homogeneous top-level mixture (no corrected marker under a raw mixture, etc.).
+    expected_kind = {SOURCE_MIXTURE_HOMOGENEOUS_RAW: "raw_ome",
+                     SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED: "corrected_zarr"}.get(mixture)
+    # Read channels from the RAW config so per-channel resolved_source_* custom keys
+    # are not lost to normalization.
+    channels = config.get("channels", {}) or {}
+    if not channels:
+        errors.append("config has no marker channels")
+    for name, params in channels.items():
+        params = params or {}
+        if _is_reference_channel_name(name):
+            errors.append(
+                f"channel '{name}' is a reference layer; not a marker channel")
+        kind = params.get("resolved_source_kind")
+        if kind not in ("raw_ome", "corrected_zarr"):
+            errors.append(
+                f"channel '{name}': resolved_source_kind must be raw_ome|corrected_zarr, "
+                f"got {kind!r}")
+        elif expected_kind and kind != expected_kind:
+            errors.append(
+                f"channel '{name}': resolved_source_kind '{kind}' is inconsistent with "
+                f"source_mixture_mode '{mixture}' (expected {expected_kind})")
+        if not params.get("resolved_source_path"):
+            errors.append(f"channel '{name}': missing resolved_source_path")
+        if not bool(params.get("step2_compatible", False)):
+            errors.append(f"channel '{name}': step2_compatible is false")
     return errors

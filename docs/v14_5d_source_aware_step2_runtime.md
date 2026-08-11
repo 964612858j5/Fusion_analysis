@@ -125,13 +125,19 @@ and enable together, gated by one feature switch.
   homogeneous_corrected}`. `mixed_raw_corrected` → refuse (follow-up).
 
 **B1. Runtime acceptance + guard relaxation** (pure validation; gated):
-- `promote_candidate_to_runtime(candidate, per_channel_resolved, step2_input_shape)`:
-  re-verify the 3-way at launch, stamp `runtime_supported=true` + `step2_ready=true`
-  (runtime form is launch-only; the persisted artifact stays the candidate).
-- Relax `channel_remap_config.py:396` to allow `source_aware + step2_ready=true` **iff**
-  `runtime_supported==true` AND every channel has `resolved_source_kind/path` AND
-  `source_alignment_mode==per_channel_native`. Keep the hard reject otherwise (preserves
-  the anti-silent-ignore invariant). Add `validate_source_aware_runtime_config`.
+- **DONE (offscreen-tested, not wired):** `promote_candidate_to_runtime(candidate,
+  per_channel_resolved, step2_input_shape)` in `remap_promotion.py` — homogeneous guard →
+  re-verify the 3-way (delegates to `promote_source_aware_config_for_step2`) → stamp
+  `runtime_supported=true` + `step2_ready=true` → re-validate. The persisted artifact stays
+  the candidate; the runtime form is launch-only. `validate_source_aware_runtime_config` in
+  `channel_remap_config.py` gates the runtime shape (runtime_supported, step2_ready,
+  per_channel_native, homogeneous mixture, per-channel resolved_source_kind/path, no
+  reference channel).
+- **DEFERRED to B3 (with the flag):** relaxing the live guard
+  `channel_remap_config.py:400` (`validate_step2_remap_config` still hard-rejects
+  `source_aware + step2_ready=true`). The relaxation lands only when the worker can actually
+  do per-channel reads — otherwise a runtime config would be misread by the single-source
+  path. B1's functions have NO live callers today.
 
 **B3. Launch wiring** (replace the single-source `_promote_step0_remap`):
 - **Input-mode gate:** accept only `selected_channels_from_source` HQ2/CSD input mode.

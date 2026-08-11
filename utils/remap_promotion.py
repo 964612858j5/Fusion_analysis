@@ -598,3 +598,67 @@ def promote_source_aware_from_sources(preview_config, *, step2_input_shape,
 
     return promote_source_aware_config_for_step2(
         cfg, per_channel_resolved, step2_input_shape, active_method=active_method)
+
+
+def promote_candidate_to_runtime(candidate, per_channel_resolved, step2_input_shape,
+                                 active_method=None):
+    """Re-verify a source-aware CANDIDATE at LAUNCH and stamp it runtime-executable.
+
+    v14.5d Workstream B1. Returns (runtime_config | None, report). The persisted
+    artifact stays the CANDIDATE (step2_ready=false); the runtime form is LAUNCH-ONLY
+    and must be consumed only by the flag-gated per-channel Step2 path
+    (ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME) — never by the single-source worker,
+    which would ignore the per-channel sources. Homogeneous source only (v14.5d).
+
+    Re-runs the full recorded↔resolved↔runtime verification against a FRESH per-channel
+    resolution (via promote_source_aware_config_for_step2), then stamps
+    runtime_supported=true + step2_ready=true and re-validates the runtime shape with
+    validate_source_aware_runtime_config. Any failure → (None, report).
+
+    NOT wired into any live path yet — B1 (this) + B2-wiring + B3 (launch) land
+    together behind the feature flag.
+    """
+    from ..workers.hq_source_resolver import require_homogeneous_source
+    from .channel_remap_config import (
+        validate_source_aware_runtime_config,
+        validate_source_aware_promoted_candidate)
+
+    # Boundary: runtime may be entered ONLY from a COMPLETED candidate
+    # (created_by_source_aware_promotion + source_aware_promotion_ready +
+    # step2_ready=false + runtime_supported=false). A bare source-aware preview or an
+    # already-step2_ready config must NOT be upgradable here.
+    cand_errors = validate_source_aware_promoted_candidate(candidate)
+    if cand_errors:
+        return None, {"promoted": False,
+                      "failures": [f"input is not a valid source-aware candidate: {e}"
+                                   for e in cand_errors]}
+    if bool(candidate.get("runtime_supported", False)):
+        return None, {"promoted": False,
+                      "failures": ["input already runtime_supported; not a fresh candidate"]}
+
+    try:
+        require_homogeneous_source(per_channel_resolved)
+    except ValueError as exc:
+        return None, {"promoted": False, "failures": [str(exc)]}
+
+    reverified, report = promote_source_aware_config_for_step2(
+        candidate, per_channel_resolved, step2_input_shape, active_method=active_method)
+    if reverified is None:
+        return None, report
+
+    runtime = copy.deepcopy(reverified)
+    sp = dict(runtime.get("source_policy", {}) or {})
+    sp["step2_ready"] = True
+    sp["scope"] = "step2_source_aware_runtime"
+    runtime["source_policy"] = sp
+    runtime["runtime_supported"] = True
+    runtime["created_from_step"] = "step2_1d_source_aware_runtime"
+
+    errors = validate_source_aware_runtime_config(runtime)
+    if errors:
+        report["promoted"] = False
+        report["failures"].extend(
+            f"runtime config failed validation: {e}" for e in errors)
+        return None, report
+    report["runtime_supported"] = True
+    return runtime, report

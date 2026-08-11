@@ -50,6 +50,28 @@ def test_mesmer_partial_remap_membrane_only(monkeypatch):
     assert calls == [FULL]  # DAPI falls back to percentile; only PanCK remapped
 
 
+class _FakeLoader:
+    """OMETIFFLoader-like source: records the normalize flag read_region gets."""
+    def __init__(self):
+        self.calls = []
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1, normalize=True):
+        self.calls.append((ch, normalize))
+        return (np.arange((y1 - y0) * (x1 - x0), dtype=np.float32)
+                .reshape(y1 - y0, x1 - x0) * 10.0)
+
+
+def test_mesmer_loader_source_reads_raw_not_normalized():
+    # Step1 Mesmer patch preview passes the loader as channel_source. Each channel
+    # must be read RAW (normalize=False) so the raw-unit remap window is correct;
+    # read_region defaults to normalize=True, which caused the preview intensity bug.
+    ldr = _FakeLoader()
+    mu.build_mesmer_input(ldr, nuclear_channel="DAPI", membrane_channels=["PanCK"],
+                          bbox=(0, 8, 0, 8), input_mode="selected_channels")
+    assert ldr.calls  # nuclear + membrane read
+    assert all(norm is False for _ch, norm in ldr.calls)
+
+
 def test_mesmer_remap_window_above_data_zeroes_channel():
     batch = mu.build_mesmer_input(
         _src(), nuclear_channel="DAPI", membrane_channels=["PanCK"],

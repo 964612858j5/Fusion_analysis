@@ -195,7 +195,13 @@ def _read_channel(channel_source: Any, channel: str, bbox=None):
         if bbox is None:
             raise ValueError("bbox is required for OMETIFFLoader channel_source")
         y0, y1, x0, x1 = [int(v) for v in bbox]
-        return channel_source.read_region(channel, y0, y1, x0, x1, downsample=1)
+        # RAW native intensity (normalize=False): build_mesmer_input does its own
+        # conditioning — apply_channel_remap (raw-unit Min/Max) for a remapped
+        # channel, percentile otherwise. read_region defaults to normalize=True,
+        # which would hand pre-normalized [0,1] data to the raw-unit remap window
+        # (the Step1 Mesmer preview intensity-space bug).
+        return channel_source.read_region(channel, y0, y1, x0, x1, downsample=1,
+                                           normalize=False)
     if hasattr(channel_source, "__getitem__"):
         return np.asarray(channel_source[channel])
     raise TypeError(f"Unsupported channel_source: {type(channel_source)!r}")

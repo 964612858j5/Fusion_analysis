@@ -6,6 +6,7 @@ synthetic segmentation only.
 """
 
 import os
+import types
 
 import numpy as np
 import pytest
@@ -558,11 +559,25 @@ def test_worker_finished_marks_applied(_step2):
     assert "worker validated" in _step2._last_remap_status
 
 
-def test_worker_error_marks_not_applied(_step2):
+def test_worker_error_before_prepare_marks_not_applied(_step2):
+    # worker never prepared (per_channel empty) -> the remap itself failed validation
     _step2._source_aware_attached = True
+    _step2._worker = types.SimpleNamespace(_source_aware_per_channel=None)
     _step2._mark_source_aware_failed("prepare failed: shape frame mismatch")
     assert "NOT applied" in _step2._last_remap_status
     assert "worker validation failed" in _step2._last_remap_status
+
+
+def test_worker_error_after_prepare_stays_applied(_step2):
+    # worker prepared (per_channel present) -> remap validated + in use; a later
+    # segmentation failure must NOT be reported as validation failure
+    _step2._source_aware_attached = True
+    _step2._source_aware_summary = "2 marker(s), homogeneous_corrected"
+    _step2._worker = types.SimpleNamespace(_source_aware_per_channel={"CK19": object()})
+    _step2._mark_source_aware_failed("cellpose CUDA error on tile 3")
+    assert "applied —" in _step2._last_remap_status
+    assert "worker validated" in _step2._last_remap_status
+    assert "segmentation failed" in _step2._last_remap_status
 
 
 def test_worker_result_leaves_status_when_not_source_aware(_step2):

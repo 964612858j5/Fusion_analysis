@@ -2249,8 +2249,6 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
-        # Auto-apply the Step0 manual remap (HQ2/CSD) via source-alignment promotion.
-        self._promote_step0_remap(seg_config)
         if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             channels = seg_config.get("hq_channels") or []
             try:
@@ -2288,6 +2286,11 @@ class Step2Page(QWidget):
             self._set_tile_colour(key[0], key[1], 'idle')
         self._total_cells = 0
         self._cells_lbl.setText('Total cells detected: 0')
+
+        # Auto-apply the Step0 remap (HQ2/CSD) via source-aware promotion — AFTER the
+        # pre-checks (validate_hq_channels etc.) so a pre-check failure never leaves a
+        # stale "awaiting worker validation" status.
+        self._promote_step0_remap(seg_config)
 
         self._worker = SegmentMergeWorker(
             zarr_path        = self._zarr_path,
@@ -2374,10 +2377,26 @@ class Step2Page(QWidget):
                 f"Step0 remap applied — {self._source_aware_summary} (worker validated).")
 
     def _mark_source_aware_failed(self, msg):
-        """Flip an attached source-aware descriptor to NOT applied when the worker
-        errors (re-resolve / shape / ROI / read failure) — called from _on_error."""
-        if getattr(self, "_source_aware_attached", False):
-            first = str(msg or "").strip().splitlines()[0] if msg else ""
+        """A worker error occurred. Distinguish whether the source-aware remap was
+        validated BEFORE the failure: the worker sets self._source_aware_per_channel
+        only after _prepare_source_aware_runtime re-resolves + cross-checks the sources.
+
+        - not prepared (per_channel empty) -> the remap ITSELF failed validation:
+          NOT applied — worker validation failed.
+        - prepared (per_channel present) -> the remap was validated + in use; a later
+          (Cellpose/GPU/tile) failure is downstream, so it stays applied:
+          applied — worker validated; segmentation failed.
+        """
+        if not getattr(self, "_source_aware_attached", False):
+            return
+        first = str(msg or "").strip().splitlines()[0] if msg else ""
+        prepared = bool(getattr(getattr(self, "_worker", None),
+                                "_source_aware_per_channel", None))
+        if prepared:
+            self._set_remap_status(
+                f"Step0 remap applied — {self._source_aware_summary} (worker validated); "
+                "segmentation failed" + (f": {first}" if first else "."))
+        else:
             self._set_remap_status(
                 "Step0 remap NOT applied — worker validation failed"
                 + (f": {first}" if first else "."))

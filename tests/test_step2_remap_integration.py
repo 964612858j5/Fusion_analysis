@@ -464,9 +464,19 @@ def test_step2_get_seg_config_never_attaches_preview_remap(_step2, tmp_path):
         assert "channel_remap_config_path" not in cfg, m
 
 
-def test_promote_step0_remap_non_hq2csd_is_noop(_step2, tmp_path):
-    # only HQ2/CSD read raw_ome markers that match Step0's raw calibration
+_ENV = "ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME"
+_RUNTIME_FROM_SOURCES = "block01.utils.remap_promotion.promote_source_aware_runtime_from_sources"
+
+
+def _hq2_seg(mode="selected_channels_from_source", channels=("PanCK",)):
+    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+    return {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": list(channels),
+            "hq_input_mode": mode}
+
+
+def test_promote_step0_remap_non_hq2csd_is_noop(_step2, tmp_path, monkeypatch):
     from block01.utils.segmentation_config import MESMER_WHOLE_CELL
+    monkeypatch.setenv(_ENV, "1")
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
     _step2._rois = []
     _step2._full_h, _step2._full_w = 512, 512
@@ -475,64 +485,80 @@ def test_promote_step0_remap_non_hq2csd_is_noop(_step2, tmp_path):
     assert "channel_remap_config_path" not in seg
 
 
+def test_promote_step0_remap_flag_off_not_applied(_step2, tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV, raising=False)
+    monkeypatch.setattr(_RUNTIME_FROM_SOURCES,
+                        lambda *a, **k: pytest.fail("must not resolve when flag off"))
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = _hq2_seg()
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
+    assert "runtime disabled" in _step2._last_remap_status
+
+
 def test_promote_step0_remap_no_preview_config_is_noop(_step2, tmp_path):
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
     _step2.set_roi_context(roi_id="r1", roi_dir=str(tmp_path))  # no step0 remap file
     _step2._rois = []
     _step2._full_h, _step2._full_w = 512, 512
-    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    seg = _hq2_seg()
     _step2._promote_step0_remap(seg)
     assert "channel_remap_config_path" not in seg
 
 
-def test_promote_step0_remap_roi_run_skipped(_step2, tmp_path):
-    # an ROI crop is a different grid than the full raw_ome source; skip (no crash)
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+def test_promote_step0_remap_roi_run_not_applied(_step2, tmp_path, monkeypatch):
+    monkeypatch.setenv(_ENV, "1")
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
     _step2._rois = [{"name": "r1", "bbox_fullres": [0, 100, 0, 100]}]
     _step2._full_h, _step2._full_w = 512, 512
-    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    seg = _hq2_seg()
     _step2._promote_step0_remap(seg)
     assert "channel_remap_config_path" not in seg
+    assert "ROI" in _step2._last_remap_status
 
 
-def test_promote_step0_remap_attaches_promoted_on_success(_step2, tmp_path, monkeypatch):
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+def test_promote_step0_remap_wrong_input_mode_not_applied(_step2, tmp_path, monkeypatch):
+    monkeypatch.setenv(_ENV, "1")
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = _hq2_seg(mode="hybrid")
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg
+    assert "selected_channels_from_source" in _step2._last_remap_status
+
+
+def test_promote_step0_remap_attaches_runtime_on_success(_step2, tmp_path, monkeypatch):
+    monkeypatch.setenv(_ENV, "1")
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
                            step2_dir=str(tmp_path / "step2"))
     _step2._rois = []
     _step2._full_h, _step2._full_w = 512, 512
-    promoted = {"channels": {"PanCK": {"min": 0.0, "max": 200.0}},
-                "source_policy": {"step2_ready": True, "preview_only": False},
-                "used_for": "segmentation_only"}
-    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
-                        lambda cfg: object())
-    monkeypatch.setattr(
-        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
-        lambda *a, **k: (promoted, {"promoted": True, "source_kind": "raw_ome",
-                                    "source_path": "/x/raw.ome.tiff"}))
-    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    runtime = {"channels": {"PanCK": {"min": 0.0, "max": 200.0}},
+               "source_mixture_mode": "homogeneous_corrected",
+               "created_by_source_aware_promotion": True, "runtime_supported": True}
+    monkeypatch.setattr(_RUNTIME_FROM_SOURCES,
+                        lambda *a, **k: (runtime, {"runtime_supported": True}))
+    seg = _hq2_seg()
     _step2._promote_step0_remap(seg)
     assert seg["channel_remap_config_path"].endswith("channel_remap_config.step2ready.json")
-    assert seg["allow_preview_remap"] is False
-    assert seg["remap_gate_mode"] == "remap_and_gi"
     assert os.path.exists(seg["channel_remap_config_path"])
+    assert "applied" in _step2._last_remap_status
 
 
-def test_promote_step0_remap_refusal_attaches_nothing(_step2, tmp_path, monkeypatch):
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+def test_promote_step0_remap_refusal_not_applied(_step2, tmp_path, monkeypatch):
+    monkeypatch.setenv(_ENV, "1")
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
                            step2_dir=str(tmp_path / "step2"))
     _step2._rois = []
     _step2._full_h, _step2._full_w = 512, 512
-    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
-                        lambda cfg: object())
-    monkeypatch.setattr(
-        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
-        lambda *a, **k: (None, {"promoted": False, "failures": ["source mismatch"]}))
-    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK"]}
+    monkeypatch.setattr(_RUNTIME_FROM_SOURCES,
+                        lambda *a, **k: (None, {"failures": ["geometry frame mismatch"]}))
+    seg = _hq2_seg()
     _step2._promote_step0_remap(seg)
     assert "channel_remap_config_path" not in seg
+    assert "geometry frame mismatch" in _step2._last_remap_status
 
 
 def test_promotion_refuses_realistic_source_aware_dapi_config():
@@ -576,25 +602,20 @@ def test_promotion_refuses_realistic_source_aware_dapi_config():
     assert "DAPI" in fails or "source-aware" in fails
 
 
-def test_promote_step0_remap_uncovered_channel_attaches_nothing(_step2, tmp_path, monkeypatch):
-    # promotion succeeded but the promoted config does not cover a selected marker
-    # -> refuse (no silent mixed remap/legacy gate)
-    from block01.utils.segmentation_config import CELLPOSE_NUCLEI_HQ2
+def test_promote_step0_remap_uncovered_marker_not_applied(_step2, tmp_path, monkeypatch):
+    # projection refuses before any resolve: a selected marker (CD45) is not in the
+    # saved Step0 remap (which only has PanCK) -> uncovered-marker, attach nothing.
+    monkeypatch.setenv(_ENV, "1")
+    monkeypatch.setattr(_RUNTIME_FROM_SOURCES,
+                        lambda *a, **k: pytest.fail("must not resolve when projection fails"))
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path),
                            step2_dir=str(tmp_path / "step2"))
     _step2._rois = []
     _step2._full_h, _step2._full_w = 512, 512
-    promoted = {"channels": {"PanCK": {"min": 0.0, "max": 200.0}},
-                "source_policy": {"step2_ready": True, "preview_only": False},
-                "used_for": "segmentation_only"}
-    monkeypatch.setattr("block01.scripts.promote_remap_config.build_resolved_source",
-                        lambda cfg: object())
-    monkeypatch.setattr(
-        "block01.utils.remap_promotion.promote_step1_5_config_for_step2",
-        lambda *a, **k: (promoted, {"promoted": True}))
-    seg = {"method": CELLPOSE_NUCLEI_HQ2, "hq_channels": ["PanCK", "CD45"]}  # CD45 uncovered
+    seg = _hq2_seg(channels=("PanCK", "CD45"))          # CD45 not in the saved remap
     _step2._promote_step0_remap(seg)
     assert "channel_remap_config_path" not in seg
+    assert "NOT applied" in _step2._last_remap_status
 
 
 # ── Phase 5d.1: remap gate shape alignment hardening ─────────────────────────

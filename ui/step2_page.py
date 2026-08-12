@@ -91,6 +91,7 @@ class Step2Page(QWidget):
         self._roi_id = ""
         self._roi_dir = ""
         self._step2_dir = ""
+        self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
         self._suggested_tile_strategy = {}
 
         self._build_ui()
@@ -1947,73 +1948,97 @@ class Step2Page(QWidget):
             print(f"[HQ2-UI] worker config keys={sorted(cfg.keys())}")
         return cfg
 
+    def _set_remap_status(self, msg):
+        """Surface the Step0-remap outcome (applied / NOT applied — reason). Stored for
+        tests + printed; mirrored to the overview status label when present."""
+        self._last_remap_status = msg
+        print(f"[Step2] {msg}")
+        lbl = getattr(self, "_ov_status", None)
+        if lbl is not None:
+            try:
+                lbl.setText(msg)
+            except Exception:
+                pass
+
     def _promote_step0_remap(self, seg_config):
-        """Auto-apply the Step0 manual remap to Step2 via source-alignment promotion.
-
-        HQ2/CSD only: only those read raw_ome markers that match Step0's raw_ome
-        calibration. promote_step1_5_config_for_step2 SELF-VALIDATES — it returns a
-        step2_ready config only when the Step0 calibration identity (path / shape /
-        intensity-space) matches Step2's resolved raw_ome source and geometry. On
-        any mismatch it refuses and we attach nothing, so the worker runs without a
-        remap and NEVER receives the Step2-incompatible preview config (which it
-        would reject). Mutates seg_config in place; never raises.
-
-        Fires only for a full-image run: the guard needs the segmentation-input
-        geometry to equal the resolved full raw_ome source shape. An ROI crop is a
-        different grid and needs a separate geometry contract (not yet wired), so we
-        skip it (safe — no remap, no crash).
+        """v14.5d B3d: attach a source-aware RUNTIME remap config so the worker applies
+        the Step0 remap per marker channel. Flag-gated
+        (ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME): OFF -> attach nothing, status
+        'NOT applied — runtime disabled'. HQ2/CSD + selected_channels_from_source +
+        full-image only. Every outcome sets an EXPLICIT status (applied / NOT applied —
+        reason); never a silent fallback. Mutates seg_config in place; never raises.
         """
-        from ..utils.segmentation_config import is_hq2_csd_method
-        if not is_hq2_csd_method(seg_config.get("method")):
-            return
+        from ..utils.segmentation_config import (
+            is_hq2_csd_method, step2_source_aware_runtime_enabled)
+        method = seg_config.get("method")
+        if not is_hq2_csd_method(method):
+            return  # non-marker method: remap arrives via the Step1 fused input, or n/a
         preview_path = self._auto_remap_config_path()
         if not preview_path:
+            self._set_remap_status("Step0 remap: none saved for this ROI.")
+            return
+        if not step2_source_aware_runtime_enabled():
+            self._set_remap_status("Step0 remap NOT applied — source-aware runtime disabled.")
+            return
+        hq_mode = str(seg_config.get("hq_input_mode") or "")
+        if hq_mode != "selected_channels_from_source":
+            self._set_remap_status(
+                "Step0 remap NOT applied — requires selected_channels_from_source "
+                f"(got {hq_mode or 'n/a'}).")
             return
         if self._rois:
-            print("[Step2] Step0 remap auto-apply skipped: ROI-cropped run "
-                  "(full-image source-geometry contract required)")
+            self._set_remap_status(
+                "Step0 remap NOT applied — ROI run (full-image only in v14.5d).")
             return
         if self._full_h <= 0 or self._full_w <= 0:
+            self._set_remap_status("Step0 remap NOT applied — unknown input geometry.")
             return
         try:
-            from ..utils.remap_promotion import promote_step1_5_config_for_step2
-            from ..scripts.promote_remap_config import build_resolved_source
-            from ..utils.channel_remap_config import (
-                validate_remap_covers_selected_channels)
+            from ..utils.remap_promotion import (
+                project_marker_only_config, promote_source_aware_runtime_from_sources)
+            from ..core.io_loader import OMETIFFLoader
             with open(preview_path, "r", encoding="utf-8") as f:
                 preview = json.load(f)
-            resolved = build_resolved_source(seg_config)
-            promoted, report = promote_step1_5_config_for_step2(
-                preview, resolved, [int(self._full_h), int(self._full_w)],
-                active_method=seg_config.get("method"))
+            projected, prep = project_marker_only_config(
+                preview, seg_config.get("hq_channels") or [])
+            if projected is None:
+                self._set_remap_status(
+                    "Step0 remap NOT applied — "
+                    + "; ".join(prep.get("failures") or ["projection failed"]))
+                return
+            runtime, report = promote_source_aware_runtime_from_sources(
+                projected, step2_input_shape=[int(self._full_h), int(self._full_w)],
+                raw_channel_source_path=(seg_config.get("raw_channel_source_path")
+                                         or seg_config.get("raw_ome_path") or ""),
+                corrected_zarr_path=(seg_config.get("multichannel_source_path")
+                                     or seg_config.get("hq_source_zarr")
+                                     or seg_config.get("corrected_channels_zarr") or ""),
+                roi_id=str(seg_config.get("roi_id") or self._roi_id or ""),
+                requested_roi_names={str(n) for n in (seg_config.get("roi_name"),
+                                                      seg_config.get("roi_display_name")) if n},
+                abs_fn=os.path.abspath, loader_factory=OMETIFFLoader,
+                active_method=method)
         except Exception as exc:
-            print(f"[Step2] Step0 remap auto-apply skipped (promotion error): {exc}")
+            self._set_remap_status(f"Step0 remap NOT applied — error: {exc}")
             return
-        if promoted is None:
-            print("[Step2] Step0 remap NOT applied — source-alignment promotion refused:")
-            for fail in (report or {}).get("failures", []):
-                print(f"[Step2]   - {fail}")
-            return
-        cov = validate_remap_covers_selected_channels(
-            promoted.get("channels") or {}, seg_config.get("hq_channels") or [],
-            seg_config.get("hq_input_mode"))
-        if cov:
-            print(f"[Step2] Step0 remap NOT applied — selected channels not covered: {cov}")
+        if runtime is None:
+            self._set_remap_status(
+                "Step0 remap NOT applied — "
+                + "; ".join((report or {}).get("failures") or ["promotion refused"]))
             return
         out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
         try:
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, "channel_remap_config.step2ready.json")
             with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(promoted, f, indent=2, ensure_ascii=False)
+                json.dump(runtime, f, indent=2, ensure_ascii=False)
         except Exception as exc:
-            print(f"[Step2] Step0 remap auto-apply skipped (write error): {exc}")
+            self._set_remap_status(f"Step0 remap NOT applied — write error: {exc}")
             return
         seg_config["channel_remap_config_path"] = out_path
-        seg_config["allow_preview_remap"] = False
-        seg_config["remap_gate_mode"] = "remap_and_gi"
-        print(f"[Step2] Step0 remap auto-applied (promoted step2_ready) -> {out_path}")
-        print(f"[Step2]   source: {report.get('source_kind')} {report.get('source_path')}")
+        n = len(runtime.get("channels") or {})
+        self._set_remap_status(
+            f"Step0 remap applied — {n} marker(s), {runtime.get('source_mixture_mode')}.")
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION

@@ -12,7 +12,8 @@ import block01.utils.remap_promotion as rp
 from block01.utils.channel_remap_config import (
     validate_source_aware_runtime_config, validate_step2_remap_config)
 from block01.utils.segmentation_config import (
-    step2_source_aware_runtime_enabled, STEP2_SOURCE_AWARE_RUNTIME_ENV)
+    step2_source_aware_runtime_enabled, STEP2_SOURCE_AWARE_RUNTIME_ENV,
+    CELLPOSE_NUCLEI_HQ2)
 
 _SOURCE_AWARE_GUARD = "source-aware remap config with step2_ready"
 
@@ -254,3 +255,55 @@ def test_promote_to_runtime_refuses_already_runtime_supported(monkeypatch):
         cand, _Resolved("homogeneous_corrected"), [200, 200])
     assert runtime is None
     assert any("already runtime_supported" in f for f in report["failures"])
+
+
+# ── promote_source_aware_runtime_from_sources (launch helper) ────────────────
+
+def _preview(kinds=(("CK19", "corrected_zarr"), ("CD68", "corrected_zarr"))):
+    return {"channels": {ch: {"min": 0.0, "max": 1.0,
+                              "calibration_source_identity": {"actual_source_kind": k}}
+                         for ch, k in kinds},
+            "source_policy": {}, "used_for": "segmentation_only"}
+
+
+def test_runtime_from_sources_success(monkeypatch):
+    import block01.workers.hq_source_resolver as hqsr
+    monkeypatch.setattr(hqsr, "resolve_per_channel_marker_sources",
+                        lambda requests, **k: ("PC", requests))
+    monkeypatch.setattr(rp, "promote_source_aware_config_for_step2",
+                        lambda cfg, per, shape, **k: ({"candidate": True}, {"promoted": True}))
+    monkeypatch.setattr(rp, "promote_candidate_to_runtime",
+                        lambda cand, per, shape, **k: ({"runtime": True}, {"runtime_supported": True}))
+    out, rep = rp.promote_source_aware_runtime_from_sources(
+        _preview(), step2_input_shape=[200, 200], active_method=CELLPOSE_NUCLEI_HQ2)
+    assert out == {"runtime": True}
+
+
+def test_runtime_from_sources_resolution_error(monkeypatch):
+    import block01.workers.hq_source_resolver as hqsr
+
+    def _boom(requests, **k):
+        raise hqsr.PerChannelResolutionError(
+            channel="CD68", requested_source="corrected_zarr", reason="not found")
+    monkeypatch.setattr(hqsr, "resolve_per_channel_marker_sources", _boom)
+    out, rep = rp.promote_source_aware_runtime_from_sources(
+        _preview(), step2_input_shape=[200, 200], active_method=CELLPOSE_NUCLEI_HQ2)
+    assert out is None and any("CD68" in f for f in rep["failures"])
+
+
+def test_runtime_from_sources_missing_identity():
+    preview = {"channels": {"CK19": {"min": 0.0, "max": 1.0}},
+               "used_for": "segmentation_only"}
+    out, rep = rp.promote_source_aware_runtime_from_sources(
+        preview, step2_input_shape=[200, 200], active_method=CELLPOSE_NUCLEI_HQ2)
+    assert out is None and any("calibration_source_identity" in f for f in rep["failures"])
+
+
+def test_runtime_from_sources_candidate_refused(monkeypatch):
+    import block01.workers.hq_source_resolver as hqsr
+    monkeypatch.setattr(hqsr, "resolve_per_channel_marker_sources", lambda requests, **k: object())
+    monkeypatch.setattr(rp, "promote_source_aware_config_for_step2",
+                        lambda *a, **k: (None, {"promoted": False, "failures": ["geometry"]}))
+    out, rep = rp.promote_source_aware_runtime_from_sources(
+        _preview(), step2_input_shape=[200, 200], active_method=CELLPOSE_NUCLEI_HQ2)
+    assert out is None and any("geometry" in f for f in rep["failures"])

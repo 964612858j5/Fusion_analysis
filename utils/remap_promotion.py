@@ -662,3 +662,56 @@ def promote_candidate_to_runtime(candidate, per_channel_resolved, step2_input_sh
         return None, report
     report["runtime_supported"] = True
     return runtime, report
+
+
+def promote_source_aware_runtime_from_sources(preview_config, *, step2_input_shape,
+                                              raw_channel_source_path="",
+                                              corrected_zarr_path="", roi_id="",
+                                              requested_roi_names=None, abs_fn=None,
+                                              loader_factory=None, active_method=None):
+    """Launch helper (v14.5d B3d): resolve each marker source ONCE, build the candidate,
+    then the runtime config — the end-to-end path the Step2 launcher attaches when the
+    feature flag is on. Returns (runtime_config | None, report).
+
+    preview_config is expected to be a marker-only PROJECTION (project_marker_only_config)
+    of the saved Step0 config: selected markers, reference layers already dropped. Per-
+    channel requests are derived from each channel's recorded calibration_source_identity.
+    A resolution failure (recorded=corrected but corrected unresolvable) is a whole
+    refusal — no raw substitution.
+    """
+    from ..workers.hq_source_resolver import (
+        resolve_per_channel_marker_sources, PerChannelResolutionError)
+
+    cfg = normalize_channel_remap_config(preview_config)
+    channels = cfg.get("channels", {}) or {}
+    if not channels:
+        return None, {"promoted": False, "failures": ["config has no marker channels"]}
+    requests = {}
+    for ch, params in channels.items():
+        csi = params.get("calibration_source_identity")
+        kind = csi.get("actual_source_kind") if isinstance(csi, dict) else None
+        if kind == REQUESTED_SOURCE_CORRECTED_ZARR or kind == "corrected_zarr":
+            requests[ch] = REQUESTED_SOURCE_CORRECTED_ZARR
+        elif kind == REQUESTED_SOURCE_RAW_OME or kind == "raw_ome":
+            requests[ch] = REQUESTED_SOURCE_RAW_OME
+        else:
+            return None, {"promoted": False, "failures": [
+                f"channel '{ch}': missing recorded calibration_source_identity"]}
+
+    try:
+        per_channel = resolve_per_channel_marker_sources(
+            requests, raw_channel_source_path=raw_channel_source_path,
+            corrected_zarr_path=corrected_zarr_path, roi_id=roi_id,
+            requested_roi_names=requested_roi_names, abs_fn=abs_fn,
+            loader_factory=loader_factory, allow_corrected_to_raw_fallback=False)
+    except PerChannelResolutionError as exc:
+        return None, {"promoted": False, "failures": [
+            f"channel '{exc.channel}': source could not be resolved "
+            f"(requested {exc.requested_source}): {exc.reason}"]}
+
+    candidate, rep = promote_source_aware_config_for_step2(
+        cfg, per_channel, step2_input_shape, active_method=active_method)
+    if candidate is None:
+        return None, rep
+    return promote_candidate_to_runtime(
+        candidate, per_channel, step2_input_shape, active_method=active_method)

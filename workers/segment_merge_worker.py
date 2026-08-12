@@ -78,6 +78,7 @@ from .hq_source_resolver import (
     resolve_hq_marker_source,
     open_hq_channel_group,
     channel_array_names as _resolver_channel_array_names,
+    read_per_channel_marker_blocks,
     SOURCE_MODE_CORRECTED_THEN_RAW,
     SOURCE_MODE_RAW_ONLY,
 )
@@ -1832,53 +1833,52 @@ class SegmentMergeWorker(QThread):
             paths[meta_key] = self._abs(ome_path if self.write_hq2_debug_tiffs else zarr_path)
         return paths
 
-    def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
-        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source")
-        marker_channels = []
+    def _read_one_marker_block(self, group, ch, y0, y1, x0, x1):
+        """Read ONE marker channel's RAW native block (normalize=False) from ITS group —
+        a raw_ome loader dict {kind,loader} (with the region-bbox full-image offset) or an
+        open corrected zarr group. This is the SINGLE read implementation shared by the
+        single-source loop and the source-aware per-channel reader, so the two never drift.
+        """
         if isinstance(group, dict) and group.get("kind") == "raw_ome":
             loader = group["loader"]
-            by0, _by1, bx0, _bx1 = [0, 0, 0, 0]
+            by0, bx0 = 0, 0
             if self._current_region_bbox and len(self._current_region_bbox) == 4:
                 by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
             fy0, fy1 = by0 + int(y0), by0 + int(y1)
             fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
-            if mode == "step1_weighted_fusion" and self.method != CELLPOSE_NUCLEI_CSD:
-                fused = None
-                weights = dict(self.seg_config.get("channel_weights") or {})
-                for ch in channels:
-                    if getattr(self, "_channel_store", None) is not None:
-                        arr = self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
-                    else:
-                        arr = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
-                    arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
-                    fused = arr if fused is None else np.maximum(fused, arr)
-                marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
-                return marker_channels
-            for ch in channels:
-                if getattr(self, "_channel_store", None) is not None:
-                    marker_channels.append(self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False))
-                else:
-                    marker_channels.append(loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False))
-            return marker_channels
+            if getattr(self, "_channel_store", None) is not None:
+                return self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
+            return loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
+        if getattr(self, "_channel_store", None) is not None:
+            return self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
+        return np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
+
+    def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
+        # v14.5d: a pending descriptor that was NOT prepared is a hard failure — never
+        # read markers single-source for a runtime config.
+        if self._pending_source_aware_runtime and self._source_aware_per_channel is None:
+            raise RuntimeError(
+                "source-aware runtime descriptor is pending but per-channel sources were "
+                "not prepared; refusing to read markers (no single-source fallback).")
+        # v14.5d: source-aware runtime -> read each marker from ITS per-channel handle
+        # (selected_channels_from_source only, so no weighted-fusion branch). Same
+        # _read_one_marker_block primitive as below.
+        if self._source_aware_per_channel is not None:
+            blocks = read_per_channel_marker_blocks(
+                self._source_aware_per_channel, channels, (y0, y1, x0, x1),
+                read_block=self._read_one_marker_block)
+            return [blocks[ch] for ch in channels]
+
+        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source")
         if mode == "step1_weighted_fusion" and self.method != CELLPOSE_NUCLEI_CSD:
             fused = None
             weights = dict(self.seg_config.get("channel_weights") or {})
             for ch in channels:
-                if getattr(self, "_channel_store", None) is not None:
-                    arr = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
-                else:
-                    arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
-                arr = self._normalize01(arr) * float(weights.get(ch, 1.0))
+                arr = self._normalize01(self._read_one_marker_block(group, ch, y0, y1, x0, x1)) \
+                    * float(weights.get(ch, 1.0))
                 fused = arr if fused is None else np.maximum(fused, arr)
-            marker_channels.append(fused if fused is not None else np.zeros((y1-y0, x1-x0), dtype=np.float32))
-            return marker_channels
-        for ch in channels:
-            if getattr(self, "_channel_store", None) is not None:
-                arr = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
-            else:
-                arr = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
-            marker_channels.append(arr)
-        return marker_channels
+            return [fused if fused is not None else np.zeros((y1 - y0, x1 - x0), dtype=np.float32)]
+        return [self._read_one_marker_block(group, ch, y0, y1, x0, x1) for ch in channels]
 
     def _is_lean_csd(self):
         """True when the active method is CSD with the streaming lean_carve engine."""
@@ -2214,6 +2214,13 @@ class SegmentMergeWorker(QThread):
             full_w = z.shape[1]
         log.info(f"  zarr: {full_h}×{full_w} px")
 
+        # v14.5d: re-resolve + cross-check the source-aware runtime remap IMMEDIATELY
+        # after opening the segmentation-input zarr and BEFORE creating any scheduler /
+        # memmap / tile output — so a source/geometry failure aborts with no output
+        # (all-or-nothing before any segmentation output).
+        if self._pending_source_aware_runtime:
+            self._prepare_source_aware_runtime((full_h, full_w))
+
         strategy_info = self._record_tile_strategy(
             full_h,
             full_w,
@@ -2268,7 +2275,11 @@ class SegmentMergeWorker(QThread):
         hq2_layer_mmaps = {}
         hq2_layer_mmap_paths = {}
         if is_hq and not is_mesmer_guided:
-            hq_channels, hq_group = self._validate_hq_config(out_prefix)
+            # prepare already ran right after zarr.open (above); here only select.
+            if self._source_aware_per_channel is not None:
+                hq_channels, hq_group = self._hq_source_aware_selection()
+            else:
+                hq_channels, hq_group = self._validate_hq_config(out_prefix)
         if is_mesmer:
             mesmer_group = self._validate_mesmer_config(out_prefix)
         if is_hq:
@@ -3084,6 +3095,12 @@ class SegmentMergeWorker(QThread):
                 full_w  = z.shape[1]
             log.info(f"Input zarr: {full_h}×{full_w} px")
 
+            # v14.5d: re-resolve + cross-check the source-aware runtime remap IMMEDIATELY
+            # after opening the zarr and BEFORE any scheduler / memmap / tile output
+            # (all-or-nothing before any segmentation output).
+            if self._pending_source_aware_runtime:
+                self._prepare_source_aware_runtime((full_h, full_w))
+
             strategy_info = self._record_tile_strategy(
                 full_h,
                 full_w,
@@ -3135,7 +3152,11 @@ class SegmentMergeWorker(QThread):
             hq2_layer_mmaps = {}
             hq2_layer_mmap_paths = {}
             if is_hq and not is_mesmer_guided:
-                hq_channels, hq_group = self._validate_hq_config()
+                # prepare already ran right after zarr.open (above); here only select.
+                if self._source_aware_per_channel is not None:
+                    hq_channels, hq_group = self._hq_source_aware_selection()
+                else:
+                    hq_channels, hq_group = self._validate_hq_config()
             if is_mesmer:
                 mesmer_group = self._validate_mesmer_config()
             if is_hq:

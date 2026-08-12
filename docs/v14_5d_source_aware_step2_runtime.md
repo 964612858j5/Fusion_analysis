@@ -1,9 +1,9 @@
 # v14.5d — Source-aware Step2 runtime + Step0 remap auto-apply (design, for review)
 
-Status: **rev4** — A + B2-core + B1 + B3a + B3b (descriptor accept, worker re-resolve
-+ exact cross-check) implemented & offscreen-tested (all local, flag default off,
-guard intact, no live path). Remaining: B3c (run-loop wiring + per-tile per-channel
-read) and B3d (launch orchestration + UI). rev2 incorporated the first ChatGPT review
+Status: **rev5** — A + B2-core + B1 + B3a + B3b + B3c (selection split, read routing,
+both run-entry wirings) implemented & offscreen-tested (all local, flag default off,
+guard intact, no live path — every current run byte-identical). Remaining: B3d (launch
+orchestration + UI surfacing), then raw + corrected GPU acceptance. rev2 incorporated the first ChatGPT review
 (DAPI stays
 in the Step0 save; promote only selected markers; B1 not shippable alone; ROI →
 v14.5e; explicit applied/not-applied surfacing). rev3 added the two projection

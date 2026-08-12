@@ -1,7 +1,10 @@
 # v14.5d — Source-aware Step2 runtime + Step0 remap auto-apply (design, for review)
 
-Status: **rev3** — Workstream A implemented (project_marker_only_config, 62a4d17);
-B1/B2/B3 still design-only. rev2 incorporated the first ChatGPT review (DAPI stays
+Status: **rev4** — A + B2-core + B1 + B3a + B3b (descriptor accept, worker re-resolve
++ exact cross-check) implemented & offscreen-tested (all local, flag default off,
+guard intact, no live path). Remaining: B3c (run-loop wiring + per-tile per-channel
+read) and B3d (launch orchestration + UI). rev2 incorporated the first ChatGPT review
+(DAPI stays
 in the Step0 save; promote only selected markers; B1 not shippable alone; ROI →
 v14.5e; explicit applied/not-applied surfacing). rev3 added the two projection
 invariants (coverage / mixture recompute), the B3 input-mode gate, and the
@@ -129,6 +132,27 @@ and enable together, gated by one feature switch.
   - **Read (B2-core, B3c):** per tile, `read_per_channel_marker_blocks` reuses the stored
     handles via a channel-store-backed `read_block` (raw_ome/zarr dispatch, normalize=False).
     Full-image only, so the raw region offset is 0 and per-channel frames coincide.
+
+  **B3c wiring — exact call-sites (two run-entry paths, neither may be missed):**
+  `segment_merge_worker` has TWO paths that open the segmentation-input zarr and read
+  markers: `~2167` (`z = zarr.open(zarr_path)`) and `run()`'s `~3037`
+  (`z = zarr.open(self.zarr_path)`). In BOTH, right after `zarr.open` and before any tile:
+  - if `self._pending_source_aware_runtime`: call `self._prepare_source_aware_runtime(z.shape[:2])`
+    once; on failure it raises (hard-fail, no fallback).
+  - HQ source selection (`~2218` / `~3085`): when `self._source_aware_per_channel` is set,
+    set `hq_group = None` and DO NOT call `_validate_hq_config` (never open/read the single
+    hq_group alongside the per-channel handles).
+  - `_read_hq_marker_channels(group, channels, ...)`: when `self._source_aware_per_channel`
+    is set, route to `read_per_channel_marker_blocks(self._source_aware_per_channel,
+    channels, bbox, read_block=self._read_one_marker_block)`; else the existing group read.
+  - Extract `_read_one_marker_block(group, ch, y0,y1,x0,x1)` from the current
+    `_read_hq_marker_channels` branch bodies (raw_ome via channel-store `read_raw_ome`/
+    `read_region` normalize=False; zarr via `read_zarr_channel`) — a behavior-preserving
+    single-(group,channel) primitive reused by both the single-source loop and the
+    per-channel reader. No per-tile reopen. If `_pending_source_aware_runtime` is set but
+    `_source_aware_per_channel` is None (prepare didn't run/succeed) -> hard-fail.
+  Guarded on `_source_aware_per_channel` (None in every current run) so existing behavior
+  is byte-identical; the pixel-read extraction needs raw + corrected GPU acceptance.
 - Per-channel intensity space is safe: the candidate verified recorded == resolved
   intensity_space per channel, so raw-unit `apply_channel_remap` acts on the matching
   native source.

@@ -1582,7 +1582,12 @@ class SegmentMergeWorker(QThread):
     def _channel_array_names(group):
         return _resolver_channel_array_names(group)
 
-    def _validate_hq_config(self, roi_name=None):
+    def _validate_hq_selection(self):
+        """Source-INDEPENDENT HQ marker selection: normalize the input mode, parse the
+        requested channels + fusion weights, and pick the pre-availability channel list.
+        No source open. Shared by the single-source path (_validate_hq_config) and the
+        source-aware runtime path so the selection semantics are identical.
+        Returns (mode, channels, requested, fusion_weights)."""
         mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source").strip()
         if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
             mode = "selected_channels_from_source"
@@ -1591,6 +1596,13 @@ class SegmentMergeWorker(QThread):
         requested = parse_hq_channels(self.seg_config.get("hq_channels") or [])
         fusion_weights = dict(self.seg_config.get("step1_fusion_weights") or self.seg_config.get("channel_weights") or {})
         channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in fusion_weights.items() if float(w or 0) > 0]
+        return mode, channels, requested, fusion_weights
+
+    def _validate_hq_config(self, roi_name=None):
+        mode, channels, requested, fusion_weights = self._validate_hq_selection()
+        return self._open_hq_single_source(mode, channels, requested, fusion_weights, roi_name)
+
+    def _open_hq_single_source(self, mode, channels, requested, fusion_weights, roi_name=None):
         # Source DECISION (Step A initial choice + Step B corrected->raw whole-source
         # fallback) is delegated to the shared pure resolver. The worker keeps every
         # side effect: _hq_resolved_source_path tracking, the [Step2-HQ] debug prints,
@@ -1663,6 +1675,39 @@ class SegmentMergeWorker(QThread):
             self._logger.debug("[HQ] selected ROI group attrs: %s", group_attrs)
             self._logger.debug("[HQ] available channel array_keys: %s", available)
         return channels, group
+
+    def _hq_source_aware_selection(self):
+        """Source-aware runtime HQ selection: run the source-INDEPENDENT selection, then
+        validate it against the RE-RESOLVED per-channel descriptor map with EXACT set
+        equality (reference names excluded) instead of opening the single hq source.
+        Requires _pending_source_aware_runtime. Returns (channels, None) — markers are read
+        from the stored per-channel handles, so there is no hq_group.
+        """
+        from ..utils.channel_remap_config import _is_reference_channel_name
+        mode, channels, requested, fusion_weights = self._validate_hq_selection()
+        descriptor = self._pending_source_aware_runtime or {}
+        desc_channels = list((descriptor.get("channels") or {}).keys())
+        context = ("source-aware HQ selection:\n"
+                   f"  requested channels: {channels}\n"
+                   f"  runtime descriptor channels: {desc_channels}")
+        # Normalize/dedup + subset-of-descriptor via the SAME validator the single-source
+        # path uses (the descriptor channels act as 'available').
+        channels = validate_hq_channels(channels, desc_channels, context=context)
+        # Exact equality AFTER normalization, excluding reference names: the descriptor
+        # must not carry an extra 'resolved-but-unused' marker (validate_hq_channels above
+        # already rejects a selected marker absent from the descriptor).
+        sel = {c for c in channels if not _is_reference_channel_name(c)}
+        desc = {c for c in desc_channels if not _is_reference_channel_name(c)}
+        if sel != desc:
+            raise ValueError(
+                "source-aware runtime marker set must equal the selected markers exactly "
+                f"(selected={sorted(sel)}, descriptor={sorted(desc)}).")
+        if mode == "hybrid":
+            self.seg_config["channel_weights"] = {
+                ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
+        self.seg_config["hq_channels"] = channels
+        self.seg_config["hq_input_mode"] = mode
+        return channels, None
 
     def _mesmer_uses_selected_channels(self):
         mode = str(self.seg_config.get("input_mode") or "selected_channels").strip().lower()

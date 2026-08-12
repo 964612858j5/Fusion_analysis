@@ -139,9 +139,22 @@ and enable together, gated by one feature switch.
   (`z = zarr.open(self.zarr_path)`). In BOTH, right after `zarr.open` and before any tile:
   - if `self._pending_source_aware_runtime`: call `self._prepare_source_aware_runtime(z.shape[:2])`
     once; on failure it raises (hard-fail, no fallback).
-  - HQ source selection (`~2218` / `~3085`): when `self._source_aware_per_channel` is set,
-    set `hq_group = None` and DO NOT call `_validate_hq_config` (never open/read the single
-    hq_group alongside the per-channel handles).
+  - HQ source selection (`~2218` / `~3085`): must NOT simply set `hq_group=None` and skip
+    `_validate_hq_config` — that method also parses/normalizes mode + hq_channels + weights
+    and does parameter-layer validation (empty/illegal selection). **Split it:**
+    - `_validate_hq_selection()` — source-INDEPENDENT: normalize mode, parse `hq_channels`
+      + weights, mutate `seg_config`, validate a non-empty legal selection. (lines ~1586-1593
+      + the selection checks).
+    - `_open_hq_single_source(...)` — source-DEPENDENT: `resolve_hq_marker_source` +
+      `validate_hq_channels(vs available)` + return `group`. (the current remainder).
+    - Existing callers = `_validate_hq_selection()` then `_open_hq_single_source()` (behavior
+      identical). Source-aware branch = `_validate_hq_selection()` then validate the
+      selection against the RE-RESOLVED per-channel map, skip `_open_hq_single_source`,
+      `hq_group=None`.
+  - **Exact-equality (not coverage):** the source-aware branch requires
+    `set(selected non-reference markers) == set(runtime descriptor channels)`. Auto-projection
+    already yields exact equality; a manual runtime config carrying extra markers is rejected
+    (no "resolved-but-unused" ambiguity).
   - `_read_hq_marker_channels(group, channels, ...)`: when `self._source_aware_per_channel`
     is set, route to `read_per_channel_marker_blocks(self._source_aware_per_channel,
     channels, bbox, read_block=self._read_one_marker_block)`; else the existing group read.
@@ -151,6 +164,9 @@ and enable together, gated by one feature switch.
     single-(group,channel) primitive reused by both the single-source loop and the
     per-channel reader. No per-tile reopen. If `_pending_source_aware_runtime` is set but
     `_source_aware_per_channel` is None (prepare didn't run/succeed) -> hard-fail.
+  - **CSD lean-carve path too:** `_hq_block_loader` (used by CSD lean-carve, `~2355`/`~3217`)
+    must also route through the per-channel reader when `hq_group=None` — a B3c test covers
+    it, not just HQ2's one-shot tile reader.
   Guarded on `_source_aware_per_channel` (None in every current run) so existing behavior
   is byte-identical; the pixel-read extraction needs raw + corrected GPU acceptance.
 - Per-channel intensity space is safe: the candidate verified recorded == resolved

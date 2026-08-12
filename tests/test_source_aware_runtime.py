@@ -24,6 +24,8 @@ def _runtime_config(mixture="homogeneous_corrected", with_resolved=True,
     if with_resolved:
         ch["resolved_source_kind"] = "corrected_zarr"
         ch["resolved_source_path"] = "/data/corrected.zarr"
+        ch["resolved_group_name"] = "ROI_1"
+        ch["resolved_source_shape"] = [200, 200]
     channels = {"CK19": dict(ch), "CD68": dict(ch)}
     if dapi:
         channels["DAPI"] = dict(ch)
@@ -66,6 +68,22 @@ def test_runtime_validator_requires_resolved_source_per_channel():
     errs = validate_source_aware_runtime_config(_runtime_config(with_resolved=False))
     assert any("resolved_source_kind" in e for e in errs)
     assert any("resolved_source_path" in e for e in errs)
+
+
+def test_runtime_validator_requires_resolved_group_name():
+    cfg = _runtime_config()
+    for c in cfg["channels"].values():
+        c.pop("resolved_group_name", None)
+    errs = validate_source_aware_runtime_config(cfg)
+    assert any("resolved_group_name" in e for e in errs)
+
+
+def test_runtime_validator_requires_valid_resolved_shape():
+    cfg = _runtime_config()
+    for c in cfg["channels"].values():
+        c["resolved_source_shape"] = None                # missing/invalid -> hard fail
+    errs = validate_source_aware_runtime_config(cfg)
+    assert any("resolved_source_shape" in e for e in errs)
 
 
 def test_runtime_validator_rejects_reference_channel():

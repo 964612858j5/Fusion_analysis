@@ -630,6 +630,12 @@ def validate_source_aware_runtime_config(config):
                 f"source_mixture_mode '{mixture}' (expected {expected_kind})")
         if not params.get("resolved_source_path"):
             errors.append(f"channel '{name}': missing resolved_source_path")
+        if not params.get("resolved_group_name"):
+            errors.append(f"channel '{name}': missing resolved_group_name")
+        shp = params.get("resolved_source_shape")
+        if not (isinstance(shp, (list, tuple)) and len(shp) >= 2
+                and all(isinstance(v, (int, float)) and int(v) > 0 for v in shp[-2:])):
+            errors.append(f"channel '{name}': missing/invalid resolved_source_shape")
         if not bool(params.get("step2_compatible", False)):
             errors.append(f"channel '{name}': step2_compatible is false")
     return errors

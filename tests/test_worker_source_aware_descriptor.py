@@ -19,7 +19,9 @@ def _runtime_cfg(runtime_supported=True, channels=("CK19", "CD68")):
     ch = {"min": 0.0, "max": 1.0, "gamma": 1.0, "step2_compatible": True,
           "calibration_source_matches_step2": True,
           "resolved_source_kind": "corrected_zarr",
-          "resolved_source_path": "/data/corrected.zarr"}
+          "resolved_source_path": "/data/corrected.zarr",
+          "resolved_group_name": "ROI_1",
+          "resolved_source_shape": [200, 200]}
     return {
         "channels": {c: dict(ch) for c in channels},
         "source_policy": {"step2_ready": True,

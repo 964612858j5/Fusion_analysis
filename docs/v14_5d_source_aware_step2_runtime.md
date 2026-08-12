@@ -119,7 +119,7 @@ and enable together, gated by one feature switch.
     is off** (no single-source fallback), validate the descriptor SHAPE
     (`validate_source_aware_runtime_config`), and stash it in
     `self._pending_source_aware_runtime`. No source resolve, no ROI check here.
-  - **Prep stage (B3b-2, next; GPU):** `_prepare_source_aware_runtime` at the HQ
+  - **Prep stage (B3b-2, DONE — method + cross-check; run-loop call-site lands with B3c; GPU):** `_prepare_source_aware_runtime` at the HQ
     marker-source preparation point (active source / ROI / input geometry known):
     worker-side full-image gate → `resolve_per_channel_marker_sources` from
     `_raw_channel_source_path()`/`_multichannel_source_path()` (never trust the config's

@@ -390,6 +390,150 @@ class SegmentMergeWorker(QThread):
             f"mixture={raw_cfg.get('source_mixture_mode')}); per-channel source "
             "re-resolve deferred to marker-source preparation.")
 
+    def _prepare_source_aware_runtime(self, step2_input_shape):
+        """v14.5d B3b-2 (marker-source prep stage): re-resolve every marker source in the
+        WORKER, cross-check against the stashed runtime descriptor, and store the opened
+        per-channel handles for reuse (no per-tile reopen).
+
+        step2_input_shape : the REAL [H, W] of the opened segmentation input (the caller
+            passes the actual zarr/tile-grid geometry). Every marker must satisfy
+            resolved_shape == descriptor_shape == step2_input_shape, so the remap acts on
+            the SAME full-image coordinate frame the segmentation reads — not merely a
+            descriptor↔source agreement. Unknown geometry -> refuse.
+
+        Runs only when a descriptor was accepted at construction. ALL-OR-NOTHING: on any
+        resolution or identity mismatch it raises BEFORE any segmentation output, and
+        self._source_aware_per_channel / self._channel_remap_params are left unset so the
+        run can never fall through to the single-source path. The worker does its OWN
+        resolution (does not trust the config's paths/handles) and exact-matches the
+        descriptor per channel (kind, canonical path, group name, shape).
+        """
+        raw_cfg = self._pending_source_aware_runtime
+        if not raw_cfg:
+            return
+        from .hq_source_resolver import (
+            resolve_per_channel_marker_sources, PerChannelResolutionError,
+            require_homogeneous_source)
+        from ..utils.source_identity import (
+            REQUESTED_SOURCE_RAW_OME, REQUESTED_SOURCE_CORRECTED_ZARR)
+
+        # Worker-side full-image gate (never trust the UI gate alone). v14.5d is
+        # full-image only; ROI coordinate contract is v14.5e.
+        if self.rois:
+            raise ValueError(
+                "source-aware runtime remap is full-image only in v14.5d; this run has "
+                "ROI(s). Refusing (ROI coordinate contract is v14.5e).")
+
+        def _canon(p):
+            return os.path.realpath(os.path.abspath(str(p or "")))
+
+        def _hw(s):
+            try:
+                seq = list(s)
+            except TypeError:
+                return None
+            return [int(seq[-2]), int(seq[-1])] if len(seq) >= 2 else None
+
+        # Geometry gate up front (before the expensive resolve): the real Step2 input
+        # geometry must be known.
+        step2_hw = _hw(step2_input_shape)
+        if step2_hw is None:
+            raise ValueError(
+                "source-aware runtime: unknown Step2 input geometry; refusing "
+                "(the geometry gate is never skipped).")
+
+        channels = raw_cfg.get("channels", {}) or {}
+        requests = {}
+        for ch, params in channels.items():
+            kind = (params or {}).get("resolved_source_kind")
+            if kind == "corrected_zarr":
+                requests[ch] = REQUESTED_SOURCE_CORRECTED_ZARR
+            elif kind == "raw_ome":
+                requests[ch] = REQUESTED_SOURCE_RAW_OME
+            else:
+                raise ValueError(f"channel '{ch}': bad resolved_source_kind {kind!r}")
+
+        try:
+            per_channel = resolve_per_channel_marker_sources(
+                requests,
+                raw_channel_source_path=self._raw_channel_source_path(),
+                corrected_zarr_path=self._multichannel_source_path(),
+                roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
+                requested_roi_names=self._requested_roi_names(),
+                param_file=self.param_file or "",
+                abs_fn=self._abs, loader_factory=OMETIFFLoader,
+                allow_corrected_to_raw_fallback=False)
+        except PerChannelResolutionError as exc:
+            raise ValueError(
+                f"worker could not re-resolve marker source for channel "
+                f"'{exc.channel}' (requested {exc.requested_source}): {exc.reason}")
+
+        require_homogeneous_source(per_channel)
+
+        # Marker set must match EXACTLY (no extra, no missing).
+        resolved_map = getattr(per_channel, "per_channel", {}) or {}
+        if set(resolved_map) != set(channels):
+            raise ValueError(
+                "source-aware re-resolve marker-set mismatch: descriptor="
+                f"{sorted(channels)} resolved={sorted(resolved_map)}")
+
+        for ch, params in channels.items():
+            params = params or {}
+            rs = resolved_map[ch]
+            rec_kind = str(params.get("resolved_source_kind"))
+            if str(getattr(rs, "kind", "")) != rec_kind:
+                raise ValueError(
+                    f"channel '{ch}': re-resolved kind {getattr(rs, 'kind', '')!r} != "
+                    f"descriptor {rec_kind!r}")
+            if _canon(getattr(rs, "source_path", "")) != _canon(params.get("resolved_source_path")):
+                raise ValueError(
+                    f"channel '{ch}': re-resolved source_path != descriptor "
+                    "resolved_source_path")
+            # Group name is exact-checked for EVERY marker (raw must be 'raw_ome').
+            rec_group = str(params.get("resolved_group_name") or "")
+            if not rec_group:
+                raise ValueError(f"channel '{ch}': descriptor missing resolved_group_name")
+            if rec_kind == "raw_ome" and rec_group != "raw_ome":
+                raise ValueError(
+                    f"channel '{ch}': raw marker descriptor resolved_group_name must be "
+                    f"'raw_ome', got {rec_group!r}")
+            if str(getattr(rs, "group_name", "") or "") != rec_group:
+                raise ValueError(
+                    f"channel '{ch}': re-resolved group_name "
+                    f"{getattr(rs, 'group_name', '')!r} != descriptor {rec_group!r}")
+            # Shape: resolved == descriptor == real Step2 input geometry (same frame).
+            rec_shape = _hw(params.get("resolved_source_shape"))
+            if rec_shape is None:
+                raise ValueError(
+                    f"channel '{ch}': descriptor missing/invalid resolved_source_shape")
+            res_shape = _hw(rs.channel_shape(ch))
+            if res_shape is None:
+                raise ValueError(f"channel '{ch}': re-resolved shape unavailable")
+            if not (res_shape == rec_shape == step2_hw):
+                raise ValueError(
+                    f"channel '{ch}': shape frame mismatch — re-resolved {res_shape}, "
+                    f"descriptor {rec_shape}, step2_input {step2_hw} (must be equal)")
+
+        # All checks passed -> COMMIT (only now are the runtime attributes set, so any
+        # earlier raise leaves the run with no _channel_remap_params -> no per-channel
+        # branch entry and no single-source fallback for a runtime config).
+        self._source_aware_per_channel = per_channel
+        self._channel_remap_params = {ch: dict(params or {}) for ch, params in channels.items()}
+        self.seg_config["_channel_remap_params"] = self._channel_remap_params
+        self._manual_remap_enabled = True
+        self._remap_provenance = {
+            "manual_remap_enabled": True,
+            "source_aware_runtime": True,
+            "source_mixture_mode": raw_cfg.get("source_mixture_mode"),
+            "channels": sorted(channels.keys()),
+        }
+        try:
+            self._write_remap_provenance(raw_cfg)
+        except Exception as exc:
+            print(f"[Step2] remap provenance write failed: {exc}")
+        print(f"[Step2] source-aware runtime remap prepared: {len(channels)} markers, "
+              f"mixture={raw_cfg.get('source_mixture_mode')}")
+
     def _write_remap_provenance(self, cfg):
         """Copy the used remap config + provenance into the run output dir."""
         out = self.output_dir

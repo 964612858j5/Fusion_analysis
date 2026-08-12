@@ -92,6 +92,8 @@ class Step2Page(QWidget):
         self._roi_dir = ""
         self._step2_dir = ""
         self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
+        self._source_aware_attached = False       # a runtime descriptor was attached
+        self._source_aware_summary = ""           # "N marker(s), <mixture>"
         self._suggested_tile_strategy = {}
 
         self._build_ui()
@@ -1970,6 +1972,14 @@ class Step2Page(QWidget):
         """
         from ..utils.segmentation_config import (
             is_hq2_csd_method, step2_source_aware_runtime_enabled)
+        # Reset per-launch + clear a stale source-aware runtime path from a prior run or a
+        # loaded param file, so a not-applied / flag-off launch NEVER hands a source-aware
+        # runtime config to the worker (legacy manual configs are left untouched).
+        self._source_aware_attached = False
+        self._source_aware_summary = ""
+        if str(seg_config.get("channel_remap_config_path") or "").endswith(
+                "channel_remap_config.step2ready.json"):
+            seg_config.pop("channel_remap_config_path", None)
         method = seg_config.get("method")
         if not is_hq2_csd_method(method):
             return  # non-marker method: remap arrives via the Step1 fused input, or n/a
@@ -2037,8 +2047,12 @@ class Step2Page(QWidget):
             return
         seg_config["channel_remap_config_path"] = out_path
         n = len(runtime.get("channels") or {})
+        self._source_aware_attached = True
+        self._source_aware_summary = f"{n} marker(s), {runtime.get('source_mixture_mode')}"
+        # NOT "applied" yet — the worker still re-resolves + cross-checks the sources.
         self._set_remap_status(
-            f"Step0 remap applied — {n} marker(s), {runtime.get('source_mixture_mode')}.")
+            "Step0 remap: source-aware descriptor attached — awaiting worker validation "
+            f"({self._source_aware_summary}).")
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
@@ -2352,7 +2366,24 @@ class Step2Page(QWidget):
             f'Total cells detected: {self._total_cells:,}'
         )
 
+    def _mark_source_aware_applied(self):
+        """Flip the remap status to applied — only after the worker re-resolved +
+        cross-checked the sources and the run completed (called from _on_finished)."""
+        if getattr(self, "_source_aware_attached", False):
+            self._set_remap_status(
+                f"Step0 remap applied — {self._source_aware_summary} (worker validated).")
+
+    def _mark_source_aware_failed(self, msg):
+        """Flip an attached source-aware descriptor to NOT applied when the worker
+        errors (re-resolve / shape / ROI / read failure) — called from _on_error."""
+        if getattr(self, "_source_aware_attached", False):
+            first = str(msg or "").strip().splitlines()[0] if msg else ""
+            self._set_remap_status(
+                "Step0 remap NOT applied — worker validation failed"
+                + (f": {first}" if first else "."))
+
     def _on_finished(self, output_dir, total_cells):
+        self._mark_source_aware_applied()
         runtime = {}
         try:
             if self._worker is not None and hasattr(self._worker, "runtime_summary"):
@@ -2419,6 +2450,9 @@ class Step2Page(QWidget):
             self.open_qc_requested.emit(output_dir)   # step3 auto-loads too
 
     def _on_error(self, msg):
+        # v14.5d: if the worker (which re-resolves + cross-checks the attached source-aware
+        # config) errors, flip the "awaiting worker validation" status to NOT applied.
+        self._mark_source_aware_failed(msg)
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)
         self._btn_back.setEnabled(True)

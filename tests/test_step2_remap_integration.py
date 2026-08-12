@@ -544,7 +544,57 @@ def test_promote_step0_remap_attaches_runtime_on_success(_step2, tmp_path, monke
     _step2._promote_step0_remap(seg)
     assert seg["channel_remap_config_path"].endswith("channel_remap_config.step2ready.json")
     assert os.path.exists(seg["channel_remap_config_path"])
-    assert "applied" in _step2._last_remap_status
+    # NOT "applied" yet — the worker still re-resolves + cross-checks
+    assert _step2._source_aware_attached is True
+    assert "awaiting worker validation" in _step2._last_remap_status
+    assert "applied —" not in _step2._last_remap_status
+
+
+def test_worker_finished_marks_applied(_step2):
+    _step2._source_aware_attached = True
+    _step2._source_aware_summary = "2 marker(s), homogeneous_corrected"
+    _step2._mark_source_aware_applied()
+    assert "applied —" in _step2._last_remap_status
+    assert "worker validated" in _step2._last_remap_status
+
+
+def test_worker_error_marks_not_applied(_step2):
+    _step2._source_aware_attached = True
+    _step2._mark_source_aware_failed("prepare failed: shape frame mismatch")
+    assert "NOT applied" in _step2._last_remap_status
+    assert "worker validation failed" in _step2._last_remap_status
+
+
+def test_worker_result_leaves_status_when_not_source_aware(_step2):
+    _step2._source_aware_attached = False
+    _step2._last_remap_status = "prev"
+    _step2._mark_source_aware_failed("unrelated error")
+    _step2._mark_source_aware_applied()
+    assert _step2._last_remap_status == "prev"          # untouched for legacy runs
+
+
+def test_flag_off_clears_stale_step2ready_path(_step2, tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV, raising=False)
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = _hq2_seg()
+    seg["channel_remap_config_path"] = "/old/run/channel_remap_config.step2ready.json"
+    _step2._promote_step0_remap(seg)
+    assert "channel_remap_config_path" not in seg        # stale runtime path cleared
+    assert "runtime disabled" in _step2._last_remap_status
+
+
+def test_legacy_manual_config_path_preserved(_step2, tmp_path, monkeypatch):
+    # a NON-source-aware manual config path is left untouched (legacy manual policy)
+    monkeypatch.delenv(_ENV, raising=False)
+    _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
+    _step2._rois = []
+    _step2._full_h, _step2._full_w = 512, 512
+    seg = _hq2_seg()
+    seg["channel_remap_config_path"] = "/old/manual_remap.json"
+    _step2._promote_step0_remap(seg)
+    assert seg["channel_remap_config_path"] == "/old/manual_remap.json"
 
 
 def test_promote_step0_remap_refusal_not_applied(_step2, tmp_path, monkeypatch):

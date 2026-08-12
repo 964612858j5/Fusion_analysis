@@ -1,6 +1,6 @@
 # v14.5d — Source-aware Step2 runtime + Step0 remap auto-apply (design, for review)
 
-Status: **rev6 — implementation complete, offscreen-tested, flag default OFF.**
+Status: **rev7 — implementation complete, offscreen-tested, flag default OFF.**
 A + B2-core + B1 + B3a + B3b + B3c + B3d (launch orchestration + status surfacing) all
 local, guard intact, no live path — every current run byte-identical while the flag is
 off. REMAINING: raw + corrected GPU acceptance, then flag flip + merge/push. rev2 incorporated the first ChatGPT review
@@ -271,3 +271,35 @@ Locked:
 9. **Feature flag** — `ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME`, default False, internal-only;
    off → status "NOT applied — source-aware runtime disabled"; default True only after raw
    + corrected GPU acceptance.
+
+## 10. GPU acceptance checklist (pre-merge)
+
+Implementation complete + offscreen-tested + review-approved (through cb55941). The
+pixel reads cannot be verified offscreen; run these on GPU before flipping the flag
+default and merging/pushing. Enable per-session:
+
+    export ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME=1
+
+Scope under test: HQ2/CSD · hq_input_mode=selected_channels_from_source · full-image
+(non-ROI). Watch the Step2 remap status transitions + the console `[Step2]` lines.
+
+1. **Corrected homogeneous** — full-image HQ2 (and CSD), markers with a Step0
+   corrected_channels.zarr. Expect: status "descriptor attached — awaiting worker
+   validation" at launch → "applied — N marker(s), homogeneous_corrected (worker
+   validated)" on finish; segmentation visibly reflects the Step0 Min/Max/gamma.
+2. **Raw homogeneous** — same, no corrected zarr (markers from raw OME). Expect
+   homogeneous_raw applied.
+3. **Forced mismatch** — perturb the runtime config's recorded resolved_source_* (path/
+   shape/group) or point the run at a different-geometry input. Expect the run to ABORT
+   before any seg output (no global_mask*/global_dapi* memmap written) with status
+   "NOT applied — worker validation failed".
+4. **ROI run** — expect "NOT applied — ROI run (full-image only in v14.5d)", legacy
+   (un-remapped) path runs normally.
+
+Also confirm: flag OFF → "NOT applied — source-aware runtime disabled", no descriptor
+attached, behavior identical to today; a downstream Cellpose/GPU/tile failure AFTER a
+successful prepare shows "applied … worker validated; segmentation failed" (not a
+validation failure).
+
+On all four passing: flip the default (step2_source_aware_runtime_enabled) to on,
+merge, push.

@@ -157,6 +157,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         root.addWidget(self._status_lbl)
 
         split = QtWidgets.QSplitter(Qt.Horizontal)
+        self._h_split = split   # exposed so a host can align its own left column
 
         # Left — channel layer list + marker bulk controls. Step0 wraps it in a
         # titled "Channels" group box (blue #61afef border + title, drawn in the

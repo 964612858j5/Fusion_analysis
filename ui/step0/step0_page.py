@@ -350,6 +350,11 @@ class Step0Page(QWidget):
             self._cond_tab, "Channel Remap")
         self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
+        # Keep the BG-tab left column (channel list + params) and the Remap-tab left
+        # column (Channels + Intensity) the SAME width + position, and draggable: a
+        # drag on either syncs the other, so switching tabs feels like channels never
+        # moved. No fixed cap.
+        self._wire_left_column_sync()
 
         # ── Section B（左 25%）— ROI & Patch Definition ───────────────
         sec_b = QWidget()
@@ -565,13 +570,13 @@ class Step0Page(QWidget):
         # Section C 内部：左（通道列表+参数+patch选择） / 右（三联预览+metrics+决策）
         c_split = QSplitter(Qt.Horizontal)
         c_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
+        self._bg_c_split = c_split   # synced with the Remap tab's left column
         cl.addWidget(c_split, stretch=1)
 
         # C-左：通道列表 + 参数滑块 + patch 选择. Capped narrow so the Channels
         # list matches the Channel Remap tab's left-column width; the freed width
         # goes to the triple Patch Preview on the right.
         c_left = QWidget()
-        c_left.setMaximumWidth(170)   # ~ the Channel Remap tab's left column
         cll = QVBoxLayout(c_left)
         cll.setContentsMargins(0, 0, 0, 0)
         cll.setSpacing(4)
@@ -1176,6 +1181,57 @@ class Step0Page(QWidget):
                 and hasattr(self, "_cond_workbench") \
                 and not self._cond_workbench.has_channel_data():
             self._sync_step0_to_workbench()
+        # Re-apply the shared channels-column width to the now-visible tab so the
+        # left column looks unmoved across the switch.
+        now = (self._bg_c_split if idx == 0
+               else getattr(getattr(self, "_cond_workbench", None), "_h_split", None))
+        if now is not None and getattr(self, "_left_col_width", None):
+            QtCore.QTimer.singleShot(0, lambda s=now: self._apply_left_col_width(s))
+
+    def _wire_left_column_sync(self):
+        """Bidirectionally sync the BG tab's left column (channel list + params) and the
+        Remap tab's left column (Channels + Intensity): a drag on either updates the
+        shared width and the other splitter, and a tab switch re-applies it. Draggable,
+        no fixed cap — so switching tabs never appears to move the channels column."""
+        a = getattr(self, "_bg_c_split", None)
+        b = getattr(getattr(self, "_cond_workbench", None), "_h_split", None)
+        if a is None or b is None:
+            return
+        self._left_col_width = None
+        self._syncing_left_cols = False
+
+        def _remember(src, dst):
+            if self._syncing_left_cols:
+                return
+            s = src.sizes()
+            if len(s) < 2 or s[0] <= 0:
+                return
+            self._left_col_width = s[0]
+            self._apply_left_col_width(dst)
+
+        a.splitterMoved.connect(lambda _p, _i: _remember(a, b))
+        b.splitterMoved.connect(lambda _p, _i: _remember(b, a))
+
+        # Shared starting width so both tabs align from the first paint (BG tab is
+        # shown first; the Remap split gets it applied on the first tab switch).
+        self._left_col_width = 170
+        QtCore.QTimer.singleShot(0, lambda: self._apply_left_col_width(a))
+
+    def _apply_left_col_width(self, split):
+        w = getattr(self, "_left_col_width", None)
+        if not w or split is None:
+            return
+        d = split.sizes()
+        if len(d) < 2:
+            return
+        total = sum(d)
+        if total <= 0:
+            return
+        self._syncing_left_cols = True
+        try:
+            split.setSizes([int(w), max(1, total - int(w))])
+        finally:
+            self._syncing_left_cols = False
 
     def _maybe_refresh_conditioning(self):
         """Re-feed the workbench from the current patch, once conditioning is in

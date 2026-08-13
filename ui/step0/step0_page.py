@@ -355,9 +355,9 @@ class Step0Page(QWidget):
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
         # Keep the BG-tab left column (channel list + params) and the Remap-tab left
         # column (Channels + Intensity) the SAME width + position, and draggable: a
-        # drag on either syncs the other, so switching tabs feels like channels never
-        # moved. No fixed cap.
-        self._wire_left_column_sync()
+        # drag on either syncs the other. Deferred: Section C (which builds _bg_c_split)
+        # is constructed after this point, so wire it once the whole page exists.
+        QtCore.QTimer.singleShot(0, self._wire_left_column_sync)
 
         # ── Section B（左 25%）— ROI & Patch Definition ───────────────
         sec_b = QWidget()
@@ -591,7 +591,7 @@ class Step0Page(QWidget):
 
         # All选项行
         all_row = QHBoxLayout()
-        self._cb_all = QtWidgets.QCheckBox("All channels")
+        self._cb_all = QtWidgets.QCheckBox("All")
         self._cb_all.setStyleSheet("color:#ddd;font-size:11px;")
         self._cb_all.setToolTip("Select all non-nucleus channels")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
@@ -607,8 +607,7 @@ class Step0Page(QWidget):
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
         all_row.addWidget(self._cb_all)
         all_row.addStretch()
-        all_row.addWidget(QLabel("Method:"))
-        all_row.addWidget(self._method_all)
+        all_row.addWidget(self._method_all)   # "Method:" label dropped (combo is clear)
         chl.addLayout(all_row)
 
         # 分隔线
@@ -1208,25 +1207,38 @@ class Step0Page(QWidget):
         b = getattr(getattr(self, "_cond_workbench", None), "_h_split", None)
         if a is None or b is None:
             return
-        self._left_col_width = None
+        self._left_split_a = a
+        self._left_split_b = b
         self._syncing_left_cols = False
+        # Start both at the LARGER of the two left-pane minimums (+ a little), so the
+        # right borders line up and neither is clamped below its own minimum.
+        wa = a.widget(0).minimumSizeHint().width() if a.widget(0) else 0
+        wb = b.widget(0).minimumSizeHint().width() if b.widget(0) else 0
+        self._left_col_width = max(wa, wb, 120) + 4
+        a.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(a))
+        b.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(b))
+        self._apply_left_col_width(a)
+        self._apply_left_col_width(b)
 
-        def _remember(src, dst):
-            if self._syncing_left_cols:
-                return
-            s = src.sizes()
-            if len(s) < 2 or s[0] <= 0:
-                return
-            self._left_col_width = s[0]
-            self._apply_left_col_width(dst)
-
-        a.splitterMoved.connect(lambda _p, _i: _remember(a, b))
-        b.splitterMoved.connect(lambda _p, _i: _remember(b, a))
-
-        # Shared starting width so both tabs align from the first paint (BG tab is
-        # shown first; the Remap split gets it applied on the first tab switch).
-        self._left_col_width = 170
-        QtCore.QTimer.singleShot(0, lambda: self._apply_left_col_width(a))
+    def _on_left_split_dragged(self, src):
+        if getattr(self, "_syncing_left_cols", False):
+            return
+        s = src.sizes()
+        if len(s) < 2 or s[0] <= 0:
+            return
+        a = getattr(self, "_left_split_a", None)
+        b = getattr(self, "_left_split_b", None)
+        self._left_col_width = s[0]
+        self._apply_left_col_width(a)
+        self._apply_left_col_width(b)
+        # Reconcile: if the drag went below the other column's minimum it clamped and
+        # they diverged — pin BOTH to the larger actual width so they always match.
+        if a is not None and b is not None:
+            actual = max(a.sizes()[0], b.sizes()[0])
+            if actual != self._left_col_width:
+                self._left_col_width = actual
+                self._apply_left_col_width(a)
+                self._apply_left_col_width(b)
 
     def _apply_left_col_width(self, split):
         w = getattr(self, "_left_col_width", None)

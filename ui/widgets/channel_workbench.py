@@ -207,7 +207,6 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         # (#2 declutter) "Select all markers" / "Clear all markers" buttons
         # were removed; the single "All" checkbox above replaces them.
-        split.addWidget(left)
 
         # Center — viewer
         center = QtWidgets.QWidget()
@@ -233,27 +232,35 @@ class ChannelWorkbench(QtWidgets.QWidget):
             # status code can probe them without AttributeError.
             self._ref_chk = {}
             self._ref_op = {}
-        split.addWidget(center)
 
-        # Right — active channel inspector
-        split.addWidget(self._build_inspector())
+        # Inspector — "Intensity" (Step0) / "Active Channel"
+        inspector = self._build_inspector()
 
         if self._step0_intensity_panel:
-            # Channels wide; inspector the SAME width as Channels. Let the
-            # histogram shrink so its min size doesn't force the inspector wide,
-            # then pin equal INITIAL sizes (setSizes; stretch only governs the
-            # EXTRA space on resize — initial sizes otherwise follow sizeHint,
-            # which is why the inspector rendered wide).
+            # (#1) Stack Intensity BELOW Channels in a left column (vertical
+            # splitter), so the whole left pane is narrow and the image takes the
+            # freed horizontal width — more patches fit side by side. The user can
+            # drag the Channels|Intensity divider.
             self._histogram.setMinimumWidth(0)
             self._histogram._plot.setMinimumWidth(0)
-            # Channels == Intensity, each HALF their previous width; the image
-            # (middle) takes the freed space. Stretch mirrors the size ratio so
-            # the proportions hold on resize.
-            split.setStretchFactor(0, 15)
-            split.setStretchFactor(1, 70)
-            split.setStretchFactor(2, 15)
-            split.setSizes([150, 700, 150])
+            left_col = QtWidgets.QSplitter(Qt.Vertical)
+            left_col.addWidget(left)          # Channels (top)
+            left_col.addWidget(inspector)     # Intensity (bottom)
+            left_col.setStretchFactor(0, 3)
+            left_col.setStretchFactor(1, 2)
+            left_col.setChildrenCollapsible(False)
+            self._left_col = left_col
+            split.addWidget(left_col)
+            split.addWidget(center)
+            # Left column default width = 3/5 of the previous 240 (~144); the image
+            # takes the rest. Still user-draggable.
+            split.setStretchFactor(0, 12)
+            split.setStretchFactor(1, 88)
+            split.setSizes([144, 856])
         else:
+            split.addWidget(left)
+            split.addWidget(center)
+            split.addWidget(inspector)
             split.setStretchFactor(0, 2)
             split.setStretchFactor(1, 5)
             split.setStretchFactor(2, 3)
@@ -286,6 +293,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
+        if step0:
+            # Narrow left column: stack each label ABOVE its field so the form width
+            # is just the field (slider + spin), not label-column + field. Lets the
+            # column default to ~3/5 without cramping controls.
+            form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapAllRows)
+            form.setHorizontalSpacing(4)
+            form.setVerticalSpacing(2)
 
         # Min/Max spinboxes are the authoritative value holders (params + tests).
         # Min is never negative (bounded at 0 so every setValue path is clamped).
@@ -301,8 +315,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if step0:
             # QuPath layout: Min/Max as draggable sliders + editable spinboxes,
             # two-way synced with the histogram window.
-            self._sp_min.setFixedWidth(72)
-            self._sp_max.setFixedWidth(72)
+            self._sp_min.setFixedWidth(56)
+            self._sp_max.setFixedWidth(56)
             self._sl_min, self._lbl_min = self._minmax_slider_row(
                 form, "Min", self._on_min_slider, spin=self._sp_min)
             self._sl_max, self._lbl_max = self._minmax_slider_row(
@@ -342,7 +356,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._sp_gamma.setDecimals(2)
             self._sp_gamma.setSingleStep(0.05)
             self._sp_gamma.setValue(1.0)
-            self._sp_gamma.setFixedWidth(72)
+            self._sp_gamma.setFixedWidth(56)
             self._sp_gamma.valueChanged.connect(self._on_gamma_spin)
             grow.addWidget(self._sl_gamma, stretch=1)
             grow.addWidget(self._sp_gamma)
@@ -362,6 +376,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._btn_auto.clicked.connect(self._on_auto)
         self._btn_reset = QtWidgets.QPushButton("Reset")
         self._btn_reset.clicked.connect(self._on_reset)
+        if step0:
+            # Don't let the two buttons set the narrow left-column floor; let them
+            # shrink with the column.
+            for _b in (self._btn_auto, self._btn_reset):
+                _b.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                 QtWidgets.QSizePolicy.Fixed)
+                _b.setMinimumWidth(0)
         btn_row.addWidget(self._btn_auto)
         btn_row.addWidget(self._btn_reset)
         lay.addLayout(btn_row)
@@ -370,6 +391,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._chk_enabled = QtWidgets.QCheckBox("Enabled (used for fusion)")
             self._chk_enabled.setChecked(True)
             self._chk_enabled.toggled.connect(self._on_enabled_changed)
+            if step0:
+                # Long label must not force the narrow left column wide; let it clip
+                # when the column is dragged narrow (text still readable at default).
+                self._chk_enabled.setSizePolicy(
+                    QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
             lay.addWidget(self._chk_enabled)
 
         lay.addStretch()

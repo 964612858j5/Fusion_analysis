@@ -627,8 +627,10 @@ class SearchCtrlPanel(QWidget):
             QtWidgets.QSizePolicy.MinimumExpanding,
         )
         self.hq2_params_panel.setStyleSheet(
-            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
+            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;margin-top:16px;"
             "font-weight:bold;color:#7dd3fc;font-size:11px;}"
+            "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:top left;"
+            "left:8px;padding:0 4px;}"
         )
         outer = QVBoxLayout(self.hq2_params_panel)
         outer.setContentsMargins(6, 8, 6, 6)
@@ -817,8 +819,10 @@ class SearchCtrlPanel(QWidget):
             QtWidgets.QSizePolicy.MinimumExpanding,
         )
         self.csd_params_panel.setStyleSheet(
-            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;"
+            "QGroupBox{border:1px solid #7dd3fc;border-radius:4px;margin-top:16px;"
             "font-weight:bold;color:#7dd3fc;font-size:11px;}"
+            "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:top left;"
+            "left:8px;padding:0 4px;}"
         )
         outer = QVBoxLayout(self.csd_params_panel)
         outer.setContentsMargins(6, 8, 6, 6)
@@ -943,8 +947,10 @@ class SearchCtrlPanel(QWidget):
             QtWidgets.QSizePolicy.Preferred,
         )
         self.mesmer_params_panel.setStyleSheet(
-            "QGroupBox{border:1px solid #56b6c2;border-radius:4px;"
+            "QGroupBox{border:1px solid #56b6c2;border-radius:4px;margin-top:16px;"
             "font-weight:bold;color:#56b6c2;font-size:11px;}"
+            "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:top left;"
+            "left:8px;padding:0 4px;}"
         )
         outer = QVBoxLayout(self.mesmer_params_panel)
         grid = QtWidgets.QGridLayout()

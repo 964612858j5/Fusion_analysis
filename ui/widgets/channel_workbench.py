@@ -222,6 +222,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         btn_fit = QtWidgets.QPushButton("Fit view")
         btn_fit.setToolTip("Reset zoom/pan to fit the whole patch.")
         btn_fit.clicked.connect(self._on_fit_view)
+        self._btn_fit = btn_fit
+        self._view_bar = view_bar
         view_bar.addWidget(btn_fit)
         view_bar.addStretch()
         cl.addLayout(view_bar)
@@ -244,10 +246,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._histogram.setMinimumWidth(0)
             self._histogram._plot.setMinimumWidth(0)
             left_col = QtWidgets.QSplitter(Qt.Vertical)
-            left_col.addWidget(left)          # Channels (top)
-            left_col.addWidget(inspector)     # Intensity (bottom)
-            left_col.setStretchFactor(0, 3)
-            left_col.setStretchFactor(1, 2)
+            left_col.addWidget(left)          # Channels (top)  — 4/7
+            left_col.addWidget(inspector)     # Intensity (bottom) — 3/7
+            left_col.setStretchFactor(0, 4)
+            left_col.setStretchFactor(1, 3)
+            left_col.setSizes([400, 300])
             left_col.setChildrenCollapsible(False)
             self._left_col = left_col
             split.addWidget(left_col)
@@ -267,7 +270,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         root.addWidget(split, stretch=1)
 
         # Bottom — preview load / save config
-        root.addLayout(self._build_bottom_bar())
+        bottom = QtWidgets.QWidget()
+        bottom.setLayout(self._build_bottom_bar())
+        self._bottom_bar = bottom
+        root.addWidget(bottom)
 
     def _build_inspector(self):
         step0 = self._step0_intensity_panel
@@ -294,12 +300,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         if step0:
-            # Narrow left column: stack each label ABOVE its field so the form width
-            # is just the field (slider + spin), not label-column + field. Lets the
-            # column default to ~3/5 without cramping controls.
-            form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapAllRows)
+            # Compact INLINE rows: label | slider + spin all on ONE row.
             form.setHorizontalSpacing(4)
-            form.setVerticalSpacing(2)
+            form.setVerticalSpacing(3)
+            form.setContentsMargins(0, 0, 0, 0)
 
         # Min/Max spinboxes are the authoritative value holders (params + tests).
         # Min is never negative (bounded at 0 so every setValue path is clamped).
@@ -315,8 +319,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if step0:
             # QuPath layout: Min/Max as draggable sliders + editable spinboxes,
             # two-way synced with the histogram window.
-            self._sp_min.setFixedWidth(56)
-            self._sp_max.setFixedWidth(56)
+            self._sp_min.setFixedWidth(42)
+            self._sp_max.setFixedWidth(42)
             self._sl_min, self._lbl_min = self._minmax_slider_row(
                 form, "Min", self._on_min_slider, spin=self._sp_min)
             self._sl_max, self._lbl_max = self._minmax_slider_row(
@@ -356,7 +360,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._sp_gamma.setDecimals(2)
             self._sp_gamma.setSingleStep(0.05)
             self._sp_gamma.setValue(1.0)
-            self._sp_gamma.setFixedWidth(56)
+            self._sp_gamma.setFixedWidth(42)
             self._sp_gamma.valueChanged.connect(self._on_gamma_spin)
             grow.addWidget(self._sl_gamma, stretch=1)
             grow.addWidget(self._sp_gamma)
@@ -544,6 +548,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         btn_validate = QtWidgets.QPushButton("Validate config")
         btn_validate.clicked.connect(self._on_validate)
+        self._btn_validate = btn_validate
         bar.addWidget(btn_validate)
 
         btn_save = QtWidgets.QPushButton("Save remap config…")
@@ -556,8 +561,18 @@ class ChannelWorkbench(QtWidgets.QWidget):
         bar.addWidget(btn_save)
         return bar
 
+    def fit_view(self):
+        """Public: reset zoom/pan to fit the patch (host can drive it from its own
+        toolbar when the internal Fit-view button is hidden)."""
+        self._on_fit_view()
+
+    def validate_config(self):
+        """Public: validate the current remap config (host-driven Validate button)."""
+        self._on_validate()
+
     def configure_host_actions(self, refresh_label=None, refresh_tooltip=None,
-                               show_internal_save=None, show_load_buttons=None):
+                               show_internal_save=None, show_load_buttons=None,
+                               show_fit_button=None, show_bottom_bar=None):
         """Adapt the generic bottom-bar actions to the hosting page.
 
         The workbench is shared between Step3 (review/QC) and Step1.5
@@ -588,6 +603,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 btn = getattr(self, attr, None)
                 if btn is not None:
                     btn.setVisible(bool(show_load_buttons))
+        if show_fit_button is not None and hasattr(self, "_btn_fit"):
+            # Host moved Fit-view to its own toolbar -> hide the in-canvas button.
+            self._btn_fit.setVisible(bool(show_fit_button))
+        if show_bottom_bar is not None and hasattr(self, "_bottom_bar"):
+            # Host relocated Validate + provides its own Save -> drop the whole
+            # bottom bar so the Channels/Intensity/preview panes expand downward.
+            self._bottom_bar.setVisible(bool(show_bottom_bar))
 
     # ── public API (host feeds data here) ─────────────────────────────
     def set_pixel_provider(self, fn):

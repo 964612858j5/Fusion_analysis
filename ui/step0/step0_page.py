@@ -1095,6 +1095,17 @@ class Step0Page(QWidget):
         self._cond_patch_buttons_row.setSpacing(4)
         patch_sel_row.addLayout(self._cond_patch_buttons_row)
         patch_sel_row.addStretch()
+        # Fit view + Validate config live here (top row, right of the patch buttons),
+        # not inside the workbench — frees the workbench height for the panes. They
+        # drive the workbench's public actions (workbench built just below).
+        _btn_fit = QPushButton("Fit view")
+        _btn_fit.setToolTip("Reset zoom/pan to fit the patch.")
+        _btn_fit.clicked.connect(lambda: self._cond_workbench.fit_view())
+        patch_sel_row.addWidget(_btn_fit)
+        _btn_val = QPushButton("Validate config")
+        _btn_val.setToolTip("Validate the current per-channel remap config.")
+        _btn_val.clicked.connect(lambda: self._cond_workbench.validate_config())
+        patch_sel_row.addWidget(_btn_val)
         lay.addLayout(patch_sel_row)
 
         # (#6/#8) Step0 conditioning: DAPI is a normal channel (no reference
@@ -1114,7 +1125,8 @@ class Step0Page(QWidget):
         # (#2-cleanup) Hide the manual data-load buttons: Step0 auto-syncs the
         # current patch (+ lazy-load), so host-refresh / demo / file are redundant.
         self._cond_workbench.configure_host_actions(
-            show_internal_save=False, show_load_buttons=False)
+            show_internal_save=False, show_load_buttons=False,
+            show_fit_button=False, show_bottom_bar=False)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
         # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
         # workbench fetches the rest on-demand (when the user selects them) via
@@ -1125,6 +1137,7 @@ class Step0Page(QWidget):
         self._cond_workbench.viewer.viewport_changed.connect(
             self._update_tissue_view_rect)
         lay.addWidget(self._cond_workbench, stretch=1)
+        lay.addSpacing(8)   # small gap so the panes don't sit flush against Save
 
         bar = QHBoxLayout()
         # (#2-cleanup) The redundant "Load current patch channels" button was

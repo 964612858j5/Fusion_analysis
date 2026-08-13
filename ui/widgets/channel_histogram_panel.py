@@ -42,7 +42,9 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
         self._plot.setMaximumHeight(160)
         self._plot.showGrid(x=False, y=False)
         self._plot.getPlotItem().setMouseEnabled(x=True, y=False)
-        self._plot.setLabel("bottom", "intensity")
+        # No "intensity" x-axis label — the tick values already say what the axis is,
+        # and dropping the label gives the freed height to the histogram curve.
+        self._plot.getPlotItem().getAxis("bottom").showLabel(False)
         lay.addWidget(self._plot)
 
         # stepMode is supplied per-setData call (histogram edges = counts+1);

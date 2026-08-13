@@ -133,7 +133,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
     # ── UI construction ───────────────────────────────────────────────
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
+        # Step0 tightens the outer margin to 0 so the Channels border aligns with the
+        # BG tab's Channels border (top + left/right); other hosts keep the padding.
+        _rm = 0 if self._step0_intensity_panel else 6
+        root.setContentsMargins(_rm, _rm, _rm, _rm)
         root.setSpacing(6)
 
         if self._show_banner:
@@ -213,6 +216,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         center = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
+        self._center_layout = cl   # host can insert a top bar above the image
         self._canvas = ChannelViewerCanvas()
         cl.addWidget(self._canvas, stretch=1)
         view_bar = QtWidgets.QHBoxLayout()
@@ -561,6 +565,14 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._btn_save_internal = btn_save
         bar.addWidget(btn_save)
         return bar
+
+    def set_center_top_bar(self, widget):
+        """Insert a host widget at the TOP of the center (image) column, above the
+        viewer. Lets Step0 put its 'Preview Patch: …' row over the image instead of
+        above the whole workbench, so the left Channels column rises to the top."""
+        lay = getattr(self, "_center_layout", None)
+        if lay is not None and widget is not None:
+            lay.insertWidget(0, widget)
 
     def fit_view(self):
         """Public: reset zoom/pan to fit the patch (host can drive it from its own

@@ -1092,7 +1092,7 @@ class Step0Page(QWidget):
         # of the default gray.
         w.setStyleSheet("background:#1c1c1c;")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setContentsMargins(4, 4, 4, 4)   # match the BG tab so the left edges align
 
         # Preview-patch selector for the conditioning view. The BG tab's P1/P2/…
         # buttons are not visible from this tab, so mirror them here. Both rows are
@@ -1118,7 +1118,12 @@ class Step0Page(QWidget):
         _btn_val.setToolTip("Validate the current per-channel remap config.")
         _btn_val.clicked.connect(lambda: self._cond_workbench.validate_config())
         patch_sel_row.addWidget(_btn_val)
-        lay.addLayout(patch_sel_row)
+        # NOT added to the tab column: this bar goes into the workbench's center
+        # (above the image) so the left Channels column rises to the top and its
+        # border aligns with the BG tab's Channels border.
+        patch_sel_row.setContentsMargins(0, 0, 0, 2)
+        _patch_bar = QWidget()
+        _patch_bar.setLayout(patch_sel_row)
 
         # (#6/#8) Step0 conditioning: DAPI is a normal channel (no reference
         # overlay) and fusion participation is Step1's call (no per-channel
@@ -1139,6 +1144,9 @@ class Step0Page(QWidget):
         self._cond_workbench.configure_host_actions(
             show_internal_save=False, show_load_buttons=False,
             show_fit_button=False, show_bottom_bar=False)
+        # Put the Preview Patch + Fit/Validate bar over the image (center top), so the
+        # Channels column top is not pushed down by it and aligns with the BG tab.
+        self._cond_workbench.set_center_top_bar(_patch_bar)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
         # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
         # workbench fetches the rest on-demand (when the user selects them) via

@@ -152,6 +152,9 @@ class PreloadWorker(QThread):
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
 
+    # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
+    _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.loader = None
@@ -2434,20 +2437,21 @@ class Step0Page(QWidget):
             label.setMinimumWidth(48)
             lay.addWidget(label)
 
-            # 方法下拉（nucleus锁定）— immediately after the channel name
+            # 方法下拉（nucleus锁定）— immediately after the channel name. Also the
+            # single source of truth for the ASSIGNED method: "Original" folds in the
+            # old separate decision badge (tophat/cucim/original), so no extra widget.
             method_cb = QtWidgets.QComboBox()
-            method_cb.addItems(["TopHat", "cucim", "Both"])
+            method_cb.addItems(["TopHat", "cucim", "Both", "Original"])
             method_cb.setEnabled(not is_nucleus)
-            method_cb.setFixedWidth(60)
+            method_cb.setFixedWidth(64)
             method_cb.setStyleSheet(
                 "QComboBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
                 "border-radius:3px;padding:1px 2px;font-size:10px;}"
                 "QComboBox::drop-down{border:none;}"
                 "QComboBox:disabled{color:#555;}"
             )
-            saved = self._channel_methods.get(ch, "both")
-            idx_map = {"tophat": 0, "cucim": 1, "both": 2}
-            method_cb.setCurrentIndex(idx_map.get(saved, 2))  # default Both
+            saved = self._channel_decisions.get(ch) or self._channel_methods.get(ch, "both")
+            method_cb.setCurrentIndex(self._METHOD_IDX.get(saved, 2))  # default Both
             method_cb.currentTextChanged.connect(
                 lambda txt, name=ch: self._on_channel_method_changed(name, txt))
             lay.addWidget(method_cb)
@@ -2898,18 +2902,24 @@ class Step0Page(QWidget):
         if not row:
             return
         cb = row["checkbox"]
+        method_cb = row.get("method_cb")
         cb.blockSignals(True)
         if ch == self.nucleus_channel:
-            txt, color = "excluded", "#666"
             cb.setChecked(False)
+            row["status_lbl"].setText("★")
+            row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
         else:
             decision = self._channel_decisions.get(ch, "original")
-            txt = decision
-            color = {"tophat": "#e5c07b", "cucim": "#56b6c2", "original": "#777"}.get(decision, "#888")
             cb.setChecked(decision != "original")
+            # The Method combo IS the assigned-method display now (folds in the old
+            # decision badge) — reflect the decision here, no separate badge text.
+            if method_cb is not None:
+                method_cb.blockSignals(True)
+                method_cb.setCurrentIndex(self._METHOD_IDX.get(decision, 3))
+                method_cb.blockSignals(False)
+            if row["status_lbl"].text() != "⟳":   # don't clobber a running spinner
+                row["status_lbl"].setText("")
         cb.blockSignals(False)
-        row["badge"].setText(txt)
-        row["badge"].setStyleSheet(f"color:{color};font-size:10px;font-weight:bold;")
 
     def _on_channel_checkbox_toggled(self, ch, state):
         if ch == self.nucleus_channel:
@@ -3027,15 +3037,26 @@ class Step0Page(QWidget):
             row = self._channel_rows.get(ch)
             if row and row["checkbox"].isChecked():
                 self._channel_methods[ch] = method
-                idx_map = {"tophat": 0, "cucim": 1, "both": 2}
+                self._channel_decisions[ch] = method
                 row["method_cb"].blockSignals(True)
-                row["method_cb"].setCurrentIndex(idx_map.get(method, 0))
+                row["method_cb"].setCurrentIndex(self._METHOD_IDX.get(method, 0))
                 row["method_cb"].blockSignals(False)
 
     def _on_channel_method_changed(self, ch, txt):
-        """Single channel method dropdown change."""
-        self._channel_methods[ch] = txt.lower()
-        self._channel_decisions[ch] = txt.lower()
+        """Single channel method dropdown change. The combo now also carries the
+        assigned decision: "Original" means no correction (channel unchecked)."""
+        m = txt.lower()
+        self._channel_decisions[ch] = m
+        if m == "original":
+            self._channel_methods.pop(ch, None)
+        else:
+            self._channel_methods[ch] = m
+        row = self._channel_rows.get(ch)
+        if row:
+            cb = row["checkbox"]
+            cb.blockSignals(True)
+            cb.setChecked(m != "original")   # original = raw = not corrected
+            cb.blockSignals(False)
 
     def _on_channel_checkbox_toggled(self, ch, state):
         if ch == self.nucleus_channel:

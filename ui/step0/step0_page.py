@@ -567,8 +567,11 @@ class Step0Page(QWidget):
         c_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
         cl.addWidget(c_split, stretch=1)
 
-        # C-左：通道列表 + 参数滑块 + patch 选择
+        # C-左：通道列表 + 参数滑块 + patch 选择. Capped narrow so the Channels
+        # list matches the Channel Remap tab's left-column width; the freed width
+        # goes to the triple Patch Preview on the right.
         c_left = QWidget()
+        c_left.setMaximumWidth(170)   # ~ the Channel Remap tab's left column
         cll = QVBoxLayout(c_left)
         cll.setContentsMargins(0, 0, 0, 0)
         cll.setSpacing(4)
@@ -1050,6 +1053,7 @@ class Step0Page(QWidget):
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}"
         )
+        self._btn_continue.setFixedHeight(38)   # unify with the Remap-tab Save
         self._btn_continue.clicked.connect(self._save_and_continue)
         save_row.addWidget(self._btn_continue)
         cl.addLayout(save_row)
@@ -1154,6 +1158,7 @@ class Step0Page(QWidget):
             "QPushButton{background:#2a5;color:white;border-radius:4px;"
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}")
+        btn_save.setFixedHeight(38)   # unify with the BG-tab Save
         btn_save.clicked.connect(self._save_step0_remap_config)
         # Right-align Save to match the BG tab's save_row (stretch -> button).
         bar.addStretch()
@@ -2352,10 +2357,10 @@ class Step0Page(QWidget):
 
         for ch in self.loader.channel_names():
             item = QtWidgets.QListWidgetItem(self._channel_list)
-            item.setSizeHint(QtCore.QSize(300, 36))
+            item.setSizeHint(QtCore.QSize(300, 29))   # 4/5 of the old 36
             row = QWidget()
             lay = QHBoxLayout(row)
-            lay.setContentsMargins(4, 2, 4, 2)
+            lay.setContentsMargins(4, 1, 4, 1)
             lay.setSpacing(4)
 
             is_nucleus = (ch == self.nucleus_channel)
@@ -2367,14 +2372,13 @@ class Step0Page(QWidget):
             cb.stateChanged.connect(lambda state, name=ch: self._on_channel_checkbox_toggled(name, state))
             lay.addWidget(cb)
 
-            # 通道名
+            # 通道名 — no stretch, so the Method dropdown sits right next to it.
             label = QLabel(ch if not is_nucleus else f"{ch} ★")
             label.setStyleSheet("color:#ddd;font-size:11px;")
-            label.setMinimumWidth(60)
-            lay.addWidget(label, stretch=1)
+            label.setMinimumWidth(48)
+            lay.addWidget(label)
 
-
-            # 方法下拉（nucleus锁定）
+            # 方法下拉（nucleus锁定）— immediately after the channel name
             method_cb = QtWidgets.QComboBox()
             method_cb.addItems(["TopHat", "cucim", "Both"])
             method_cb.setEnabled(not is_nucleus)
@@ -2391,6 +2395,8 @@ class Step0Page(QWidget):
             method_cb.currentTextChanged.connect(
                 lambda txt, name=ch: self._on_channel_method_changed(name, txt))
             lay.addWidget(method_cb)
+
+            lay.addStretch(1)   # push the status icon to the right edge
 
             # 状态图标（空/转圈/绿勾）
             status_lbl = QLabel("—")

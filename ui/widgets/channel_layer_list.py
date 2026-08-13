@@ -33,7 +33,7 @@ class _ChannelRow(QtWidgets.QWidget):
         self._name = name
 
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setContentsMargins(4, 1, 4, 1)   # compact: 4/5 row height
         lay.setSpacing(6)
 
         self._chk = QtWidgets.QCheckBox()
@@ -153,7 +153,8 @@ class ChannelLayerList(QtWidgets.QWidget):
             row.visibility_toggled.connect(self.visibility_changed.emit)
             row.color_clicked.connect(self.color_clicked.emit)
             item = QtWidgets.QListWidgetItem()
-            item.setSizeHint(row.sizeHint())
+            _sh = row.sizeHint()   # 4/5 row height to match the compact BG channel list
+            item.setSizeHint(QtCore.QSize(_sh.width(), int(_sh.height() * 0.8)))
             item.setData(Qt.UserRole, name)
             self._list.addItem(item)
             self._list.setItemWidget(item, row)

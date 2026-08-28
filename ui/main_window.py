@@ -450,6 +450,12 @@ class MainWindow(QMainWindow):
 
         right_tabs.addTab(method_params_tab, "Method & Parameters")
         right_tabs.addTab(patch_results_tab, "Patch Results")
+
+        # v15: shared-channel-dock flat weights view, additive (ConfigPanel
+        # stays the source of truth for fusion config).
+        from .step1_dock_adapter import Step1FusionDockAdapter
+        self._step1_dock_adapter = Step1FusionDockAdapter(self.config)
+        right_tabs.addTab(self._step1_dock_adapter.dock, "Channels")
         right_tabs.setCurrentWidget(method_params_tab)
         print("[Step1-Tabs] right tabs created")
         print("[Step1-Tabs] default tab=Method & Parameters")

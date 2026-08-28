@@ -616,14 +616,14 @@ class Step0Page(QWidget):
         sep.setStyleSheet("color:#333;")
         chl.addWidget(sep)
 
-        self._channel_list = QtWidgets.QListWidget()
-        self._channel_list.setStyleSheet(
-            "QListWidget{background:#111;border:1px solid #333;border-radius:3px;}"
-            "QListWidget::item{padding:1px;}"
-            "QListWidget::item:selected{background:#1f2f3f;}"
-        )
+        # v15: shared ChannelDock mounted through an adapter. The dock's inner
+        # QListWidget is exposed as self._channel_list so every legacy code
+        # path (setCurrentItem / currentRowChanged / item registry) is intact.
+        from .step0_dock_adapter import Step0ChannelDockAdapter
+        self._dock_adapter = Step0ChannelDockAdapter(self)
+        self._channel_list = self._dock_adapter.dock.list_widget
         self._channel_list.currentRowChanged.connect(self._on_channel_row_changed)
-        chl.addWidget(self._channel_list, stretch=1)
+        chl.addWidget(self._dock_adapter.dock, stretch=1)
         cll.addWidget(ch_box, stretch=2)
 
         # ── Method Parameters ─────────────────────────────────────────
@@ -2427,6 +2427,11 @@ class Step0Page(QWidget):
         self._refresh_slider_labels()
 
     def _rebuild_channel_list(self):
+        # v15: rebuilt through the shared-dock adapter; the legacy row
+        # construction below is retained only as the pre-adapter fallback.
+        if getattr(self, "_dock_adapter", None) is not None:
+            self._dock_adapter.rebuild()
+            return
         current = self.current_channel
         self._channel_rows.clear()
         self._channel_order = []

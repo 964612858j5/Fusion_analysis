@@ -1,0 +1,45 @@
+{
+  "environment": {
+    "hostname": "ubuntu-H12D-8D",
+    "python": "3.10.20",
+    "qt_qpa_platform": "offscreen",
+    "offscreen": true,
+    "offscreen_note": "offscreen: excludes real compositor/vsync -- numbers measure frame PREP cost only"
+  },
+  "dataset_path": "/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif",
+  "channel": "TOX",
+  "n_range_handler_samples": 43,
+  "n_blit_tick_samples": 64,
+  "range_handler_ms_p50": 12.96836487017572,
+  "range_handler_ms_p95": 19.543509930372238,
+  "range_handler_ms_max": 22.346002981066704,
+  "blit_tick_ms_p50": 74.96666815131903,
+  "blit_tick_ms_p95": 156.6348171327263,
+  "blit_tick_ms_max": 171.6763700824231,
+  "frame_prep_worst_case_p95_ms": 176.17832706309855,
+  "range_handler_over_budget": 7,
+  "blit_tick_over_budget": 60,
+  "time_to_first_observed_overview_ms": 144.1134219057858,
+  "time_to_first_observed_raw_fill_ms_p50": 175.23081810213625,
+  "time_to_first_observed_precise_fill_ms_p50": 375.8647250942886,
+  "n_raw_fill_samples": 19,
+  "n_precise_fill_samples": 19,
+  "viewport_first_raw_tile_ms_p50": 8.148076012730598,
+  "viewport_full_raw_tile_ms_p50": 9.04842815361917,
+  "viewport_first_precise_tile_ms_p50": 2.826396841555834,
+  "viewport_full_precise_ms_p50": 2.778267953544855,
+  "jump_wall_ms": [
+    142.34416699036956,
+    819.4064109120518,
+    164.0732849482447
+  ],
+  "stats": {
+    "frames_prepared": 43,
+    "raw_tiles_blitted": 185,
+    "precise_tiles_blitted": 1059,
+    "stale_precise_dropped": 95,
+    "mismatched_key_dropped": 0,
+    "mismatched_raw_dropped": 0
+  },
+  "measured_only": true
+}

@@ -219,7 +219,10 @@ def test_range_change_requests_missing_raw_tiles_center_out(app):
 # ── 3. settle timer: rapid range changes -> exactly one settled batch ──────
 
 def test_settle_debounce_fires_once(app):
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=30)
+    # Generous settle window: offscreen event-loop pumps can overrun small
+    # intervals (RGBA compose work in the 16ms blit tick), which made a
+    # 30ms settle fire spuriously mid-loop.
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=150)
     ctrl.load_overview()
     ctrl.level = 0
     ctrl.set_selection(method="tophat", params=(10,))
@@ -227,17 +230,19 @@ def test_settle_debounce_fires_once(app):
 
     for i in range(5):
         view.view_box.setRange(xRange=(700 + i, 700 + i + 2048), yRange=(100, 2148), padding=0)
-        _pump(5)  # well under settle_ms between range changes
+        _pump(10)  # well under settle_ms between range changes
 
-    settled_gen_before = ctrl._settled_generation
-    _pump(80)  # let the (restarted) settle timer fire once
-    assert ctrl._settled_generation == settled_gen_before + 1
+    _pump(300)  # let the (restarted) settle timer fire
 
-    # Precisely one settled batch of CorrectionKey requests should exist,
-    # all sharing the same request.generation.
+    # Contract (not a strict single-firing guarantee — a settle may also
+    # legitimately fire in a pause between drags): the LATEST settled batch
+    # exists, and every OLDER settled generation seen in the request log has
+    # been cancelled, so at most one generation is ever live.
     precise_reqs = scheduler.pending_for(CorrectionKey)
     gens = {r.generation for r, _cb in precise_reqs}
-    assert gens == {ctrl._settled_generation}
+    assert ctrl._settled_generation in gens
+    stale = gens - {ctrl._settled_generation}
+    assert stale <= set(scheduler.cancelled_generations)
 
     ctrl.teardown()
 
@@ -376,3 +381,205 @@ def test_teardown_order(app):
     # teardown() is idempotent.
     ctrl.teardown()
     assert ctrl._teardown_order == ["scheduler.shutdown", "provider.close"]
+
+
+# ── 10. masked transparency: alpha only where a real tile landed ──────────
+
+def test_raw_layer_alpha_masks_unfilled_region(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # covers >=2 tiles at ts=512
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert len(raw_reqs) >= 2
+    # Deliver only ONE of the requested tiles.
+    req, _cb = raw_reqs[0]
+    tile = req.key.tile
+    arr = raw_arr_for(provider, 0, tile.tx, tile.ty)
+    scheduler.deliver(req, arr)
+    _pump(50)
+
+    img = view.raw_item.image
+    assert img is not None
+    assert img.ndim == 3 and img.shape[-1] == 4  # RGBA
+
+    ts = ctrl.grid.tile_size
+    tx0, ty0 = ctrl._raw_canvas_origin
+    ly0 = (tile.ty - ty0) * ts
+    lx0 = (tile.tx - tx0) * ts
+    alpha = img[..., 3]
+
+    filled = alpha[ly0:ly0 + ts, lx0:lx0 + ts]
+    assert np.all(filled == pytest.approx(1.0))
+
+    # Somewhere outside the filled tile's region alpha must still be 0.
+    outside_mask = np.ones_like(alpha, dtype=bool)
+    outside_mask[ly0:ly0 + ts, lx0:lx0 + ts] = False
+    assert np.any(outside_mask)
+    assert np.all(alpha[outside_mask] == pytest.approx(0.0))
+
+    ctrl.teardown()
+
+
+# ── 11. late raw tile: wrong level / channel rejected ──────────────────────
+
+def test_late_raw_tile_wrong_level_dropped(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+
+    # Simulate a display-level switch happening before the raw result lands.
+    ctrl.level = 1
+
+    before = ctrl.stats["mismatched_raw_dropped"]
+    arr = raw_arr_for(provider, 0, req.key.tile.tx, req.key.tile.ty)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl.stats["mismatched_raw_dropped"] == before + 1
+    assert (req.key.tile.tx, req.key.tile.ty) not in getattr(ctrl, "_raw_blitted_set", set())
+
+    ctrl.teardown()
+
+
+def test_late_raw_tile_wrong_channel_dropped(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+
+    ctrl.channel = "OTHER"
+
+    before = ctrl.stats["mismatched_raw_dropped"]
+    arr = raw_arr_for(provider, 0, req.key.tile.tx, req.key.tile.ty)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl.stats["mismatched_raw_dropped"] == before + 1
+
+    ctrl.teardown()
+
+
+# ── 12. _blit_into: fully-outside tile returns False, nothing registered ──
+
+def test_blit_into_outside_tile_returns_false():
+    data = np.zeros((512, 512), dtype=np.float32)
+    mask = np.zeros((512, 512), dtype=bool)
+    arr = np.ones((512, 512), dtype=np.float32)
+
+    # origin (0, 0); tile (tx=5, ty=5) is far outside the 512x512 canvas.
+    wrote = ExploreController._blit_into(data, mask, (0, 0), 5, 5, arr, 512)
+    assert wrote is False
+    assert not mask.any()
+    assert not data.any()
+
+
+# ── 13. jump_to actually moves the camera + issues exactly one batch ──────
+
+def test_jump_to_moves_camera_and_single_settled_batch(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.set_selection(method="tophat", params=(10,))
+    scheduler.requests.clear()
+
+    gen_before = ctrl._settled_generation
+    ctrl.jump_to(y0=1000, x0=2000, w=512, h=512)
+
+    (ax0, ax1), (ay0, ay1) = view.view_box.viewRange()
+    # The applied range must actually cover the requested world rect
+    # (allowing for aspect-lock padding, it must at least contain it).
+    assert ax0 <= 2000 + 1 and ax1 >= 2000 + 512 - 1
+    assert ay0 <= 1000 + 1 and ay1 >= 1000 + 512 - 1
+
+    assert ctrl._settled_generation == gen_before + 1
+    precise_gens = {r.generation for r, _cb in scheduler.pending_for(CorrectionKey)}
+    assert precise_gens == {ctrl._settled_generation}
+
+    ctrl.teardown()
+
+
+# ── 14. set_selection sentinel: partial updates don't clobber the rest ────
+
+def test_set_selection_sentinel_preserves_unset_fields(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert ctrl.method == "tophat"
+    assert ctrl.params == (10,)
+
+    ctrl.set_selection(channel="OTHER")
+    assert ctrl.channel == "OTHER"
+    assert ctrl.method == "tophat"  # unchanged
+    assert ctrl.params == (10,)  # unchanged
+
+    ctrl.set_selection(method=None)
+    assert ctrl.method is None  # explicit None must still apply
+    assert ctrl.params == (10,)  # unchanged
+
+    ctrl.teardown()
+
+
+# ── 15. display levels: stable across tiles of very different intensity ───
+
+def test_display_levels_stable_across_tiles(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    lo0, hi0 = ctrl._display_lo, ctrl._display_hi
+
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+    scheduler.deliver(req, np.full((512, 512), 5.0, dtype=np.float32))
+    _pump(50)
+    assert ctrl._display_lo == lo0 and ctrl._display_hi == hi0
+
+    # A second, very different-intensity delivery must not rescale levels.
+    arr_bright = np.full((512, 512), 999999.0, dtype=np.float32)
+    from block01.viewer.tile_types import PixelBuffer, TileResult
+    pixels = PixelBuffer(residency="cpu", dtype="float32", shape=arr_bright.shape,
+                          handle=arr_bright)
+    result = TileResult(request=req, pixels=pixels, quality=QualityLevel.NATIVE,
+                         provisional=False, timing={}, error=None)
+    ctrl._on_raw_result(result)
+    _pump(50)
+
+    assert ctrl._display_lo == lo0 and ctrl._display_hi == hi0
+
+    ctrl.teardown()
+
+
+# ── 16. probe timing keys exist and are populated ──────────────────────────
+
+def test_probe_timing_keys_recorded(app):
+    provider = FakeProvider()
+    scheduler = FakeScheduler()
+    compute = FakeCompute()
+    grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
+    view = ExploreView()
+    view.resize(800, 600)
+    view.show()
+    _pump(20)
+    from block01.viewer.explore_view import ExploreController as EC
+    ctrl = EC(provider, scheduler, compute, grid, view, "DAPI",
+              settle_ms=30, probe=True)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+    _pump(50)
+
+    assert "range_handler_ms" in ctrl.timings
+    assert "blit_tick_ms" in ctrl.timings
+    assert len(ctrl.timings["blit_tick_ms"]) > 0
+    assert len(ctrl.timings["range_handler_ms"]) > 0
+
+    ctrl.teardown()

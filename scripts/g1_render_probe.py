@@ -213,23 +213,51 @@ def main():
 
     fill_timings = run_scripted_sequence(ctrl, view, provider, seed=0)
 
-    frame_ms = ctrl.timings
-    over_budget = sum(1 for t in frame_ms if t > FRAME_BUDGET_MS)
+    # Two real per-frame costs, measured separately (finding 3):
+    #   range_handler_ms -- the range-changed handler (level pick, raw
+    #                        request issuance, canvas resize).
+    #   blit_tick_ms      -- the coalesced tick: canvas->RGBA compose +
+    #                        setImage + setRect for every dirty layer.
+    # The two costs are NOT 1:1 per frame (blit ticks fire only when dirty
+    # and can outnumber or undernumber range handlers), so index-pairing
+    # would be a methodology error. We report each distribution separately
+    # plus a conservative WORST-CASE frame estimate = p95(range) + p95(blit)
+    # (upper bound: assumes both worst halves land in one frame). Over-budget
+    # counts are reported per distribution.
+    range_ms = ctrl.timings["range_handler_ms"]
+    blit_ms = ctrl.timings["blit_tick_ms"]
+    def _p(v, q):
+        return pct(v, q) or 0.0
+    worst_case_p95 = _p(range_ms, 95) + _p(blit_ms, 95)
+    over_budget_range = sum(1 for t in range_ms if t > FRAME_BUDGET_MS)
+    over_budget_blit = sum(1 for t in blit_ms if t > FRAME_BUDGET_MS)
 
     report = {
         "environment": environment_block(offscreen),
         "dataset_path": os.path.abspath(args.path),
         "channel": channel,
-        "n_frames": len(frame_ms),
-        "frame_prep_ms_p50": pct(frame_ms, 50),
-        "frame_prep_ms_p95": pct(frame_ms, 95),
-        "frame_prep_ms_max": max(frame_ms) if frame_ms else None,
-        "frames_over_16_7ms_budget": over_budget,
-        "time_to_first_overview_pixel_ms": fill_timings["time_to_first_overview_pixel_ms"],
-        "raw_fill_latency_ms_p50": pct(fill_timings["raw_fill_latencies_ms"], 50),
-        "precise_fill_latency_ms_p50": pct(fill_timings["precise_fill_latencies_ms"], 50),
+        "n_range_handler_samples": len(range_ms),
+        "n_blit_tick_samples": len(blit_ms),
+        "range_handler_ms_p50": pct(range_ms, 50),
+        "range_handler_ms_p95": pct(range_ms, 95),
+        "range_handler_ms_max": max(range_ms) if range_ms else None,
+        "blit_tick_ms_p50": pct(blit_ms, 50),
+        "blit_tick_ms_p95": pct(blit_ms, 95),
+        "blit_tick_ms_max": max(blit_ms) if blit_ms else None,
+        "frame_prep_worst_case_p95_ms": worst_case_p95,
+        "range_handler_over_budget": over_budget_range,
+        "blit_tick_over_budget": over_budget_blit,
+        "time_to_first_observed_overview_ms": fill_timings["time_to_first_overview_pixel_ms"],
+        "time_to_first_observed_raw_fill_ms_p50": pct(fill_timings["raw_fill_latencies_ms"], 50),
+        "time_to_first_observed_precise_fill_ms_p50": pct(fill_timings["precise_fill_latencies_ms"], 50),
         "n_raw_fill_samples": len(fill_timings["raw_fill_latencies_ms"]),
         "n_precise_fill_samples": len(fill_timings["precise_fill_latencies_ms"]),
+        # Per settled batch: issue -> first/all currently-visible tiles
+        # matching (finding 3).
+        "viewport_first_raw_tile_ms_p50": pct(ctrl.timings["viewport_first_raw_tile_ms"], 50),
+        "viewport_full_raw_tile_ms_p50": pct(ctrl.timings["viewport_full_raw_tile_ms"], 50),
+        "viewport_first_precise_tile_ms_p50": pct(ctrl.timings["viewport_first_precise_tile_ms"], 50),
+        "viewport_full_precise_ms_p50": pct(ctrl.timings["viewport_full_precise_ms"], 50),
         "jump_wall_ms": fill_timings.get("jump_wall_ms", []),
         "stats": dict(ctrl.stats),
         "measured_only": True,
@@ -251,19 +279,34 @@ def main():
         if offscreen:
             f.write("\n**offscreen: excludes real compositor/vsync — numbers "
                      "measure frame PREP cost only**\n")
-        f.write("\n## Frame prep timing\n\n")
-        f.write(f"- n_frames: {report['n_frames']}\n")
-        f.write(f"- p50: {fmt(report['frame_prep_ms_p50'])} ms\n")
-        f.write(f"- p95: {fmt(report['frame_prep_ms_p95'])} ms\n")
-        f.write(f"- max: {fmt(report['frame_prep_ms_max'])} ms\n")
-        f.write(f"- frames over 16.7ms budget: {report['frames_over_16_7ms_budget']}\n\n")
+        f.write("\n## Frame prep timing (range_handler + blit_tick)\n\n")
+        f.write(f"- n_range_handler_samples: {report['n_range_handler_samples']}, "
+                f"n_blit_tick_samples: {report['n_blit_tick_samples']}\n")
+        f.write(f"- range_handler_ms: p50={fmt(report['range_handler_ms_p50'])} "
+                f"p95={fmt(report['range_handler_ms_p95'])} "
+                f"max={fmt(report['range_handler_ms_max'])}\n")
+        f.write(f"- blit_tick_ms: p50={fmt(report['blit_tick_ms_p50'])} "
+                f"p95={fmt(report['blit_tick_ms_p95'])} "
+                f"max={fmt(report['blit_tick_ms_max'])}\n")
+        f.write(f"- frame_prep worst-case estimate (p95 range + p95 blit, upper bound): "
+                f"{fmt(report['frame_prep_worst_case_p95_ms'])} ms\n")
+        f.write(f"- over 16.7ms budget: range_handler {report['range_handler_over_budget']}, "
+                f"blit_tick {report['blit_tick_over_budget']} "
+                f"(counted per distribution; blit samples exclude idle ticks)\n")
+        f.write("\n")
+
         f.write("## Fill latencies\n\n")
-        f.write(f"- time-to-first-overview-pixel: "
-                f"{fmt(report['time_to_first_overview_pixel_ms'])} ms\n")
-        f.write(f"- raw fill latency p50 ({report['n_raw_fill_samples']} samples): "
-                f"{fmt(report['raw_fill_latency_ms_p50'])} ms\n")
-        f.write(f"- precise fill latency p50 ({report['n_precise_fill_samples']} samples): "
-                f"{fmt(report['precise_fill_latency_ms_p50'])} ms\n")
+        f.write(f"- time_to_first_observed_overview_ms: "
+                f"{fmt(report['time_to_first_observed_overview_ms'])} ms\n")
+        f.write(f"- time_to_first_observed_raw_fill_ms p50 ({report['n_raw_fill_samples']} samples): "
+                f"{fmt(report['time_to_first_observed_raw_fill_ms_p50'])} ms\n")
+        f.write(f"- time_to_first_observed_precise_fill_ms p50 ({report['n_precise_fill_samples']} samples): "
+                f"{fmt(report['time_to_first_observed_precise_fill_ms_p50'])} ms\n")
+        f.write("\n## Viewport-first/full (issue -> first/all visible tiles matching)\n\n")
+        f.write(f"- viewport_first_raw_tile_ms p50: {fmt(report['viewport_first_raw_tile_ms_p50'])} ms\n")
+        f.write(f"- viewport_full_raw_tile_ms p50: {fmt(report['viewport_full_raw_tile_ms_p50'])} ms\n")
+        f.write(f"- viewport_first_precise_tile_ms p50: {fmt(report['viewport_first_precise_tile_ms_p50'])} ms\n")
+        f.write(f"- viewport_full_precise_ms p50: {fmt(report['viewport_full_precise_ms_p50'])} ms\n")
         f.write(f"\n## Controller stats\n\n")
         for k, v in report["stats"].items():
             f.write(f"- {k}: {v}\n")

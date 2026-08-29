@@ -45,6 +45,12 @@ from .tile_types import (
 from ..core.bg_correction import BG_CORRECTION_ALGO_VERSION
 
 
+# Sentinel distinguishing "argument not passed" from "argument passed as
+# None" for ExploreController.set_selection (an explicit method=None must
+# still take effect -- it means "no precise layer").
+_UNSET = object()
+
+
 # ── ExploreView: the widget ─────────────────────────────────────────────────
 
 class ExploreView(QtWidgets.QWidget):
@@ -136,10 +142,15 @@ class ExploreController(QtCore.QObject):
         self.level = 0
         self._current_bbox = None  # (y0, x0, y1, x1) in level-0 coords
 
-        # ── canvases: level-local numpy arrays covering the current tile set ──
-        self._raw_canvas: Optional[np.ndarray] = None
+        # ── canvases: level-local (data, mask) numpy array pairs covering
+        # the current tile set. `data` holds raw float32 pixel values;
+        # `mask` (bool) is True only where a real tile has been blitted --
+        # unfilled regions must never occlude the overview layer (finding 1).
+        self._raw_data: Optional[np.ndarray] = None
+        self._raw_mask: Optional[np.ndarray] = None
         self._raw_canvas_origin: Optional[Tuple[int, int]] = None  # (tx0, ty0) tile coords
-        self._precise_canvas: Optional[np.ndarray] = None
+        self._precise_data: Optional[np.ndarray] = None
+        self._precise_mask: Optional[np.ndarray] = None
         self._precise_canvas_origin: Optional[Tuple[int, int]] = None
         self._precise_tile_keys: Dict[Tuple[int, int], CorrectionKey] = {}
 
@@ -152,6 +163,13 @@ class ExploreController(QtCore.QObject):
         self._raw_dirty = False
         self._precise_dirty = False
 
+        # ── stable display levels (finding 6): fixed at load_overview,
+        # reapplied identically to overview/raw/precise. New tile arrivals
+        # must never rescale brightness.
+        self._display_lo = 0.0
+        self._display_hi = 1.0
+        self._overview_arr: Optional[np.ndarray] = None
+
         # ── teardown bookkeeping ──
         self._teardown_order = []
         self._torn_down = False
@@ -163,8 +181,21 @@ class ExploreController(QtCore.QObject):
             "precise_tiles_blitted": 0,
             "stale_precise_dropped": 0,
             "mismatched_key_dropped": 0,
+            "mismatched_raw_dropped": 0,
         }
-        self.timings = []  # probe-only: list of frame-prep ms samples
+        # probe-only timing samples (populated only when probe=True).
+        self.timings = {
+            "range_handler_ms": [],
+            "blit_tick_ms": [],
+            "viewport_first_raw_tile_ms": [],
+            "viewport_full_raw_tile_ms": [],
+            "viewport_first_precise_tile_ms": [],
+            "viewport_full_precise_ms": [],
+        }
+        self._raw_probe_batch = None
+        self._precise_probe_batch = None
+        # guard against a jump's manual settle firing twice (finding 4).
+        self._jumping = False
 
         # ── timers ──
         self._settle_timer = QtCore.QTimer(self)
@@ -214,17 +245,20 @@ class ExploreController(QtCore.QObject):
 
     # ── selection ─────────────────────────────────────────────────────────
 
-    def set_selection(self, channel: Optional[str] = None,
-                       method: Optional[str] = None,
-                       params: Optional[Tuple[int, ...]] = None):
+    def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Change channel/method/params. Marks the precise layer
         PROVISIONAL and re-issues the settled request for the current
-        viewport immediately (no wait)."""
-        if channel is not None:
+        viewport immediately (no wait).
+
+        Uses the module-level `_UNSET` sentinel as the default so that an
+        omitted argument leaves the corresponding state untouched, while an
+        EXPLICIT `method=None` still takes effect (meaning: no precise
+        layer) -- see finding 5."""
+        if channel is not _UNSET:
             self.channel = channel
-        if method is not None or method is None:
+        if method is not _UNSET:
             self.method = method
-        if params is not None:
+        if params is not _UNSET:
             self.params = params
 
         self._enter_provisional()
@@ -286,11 +320,41 @@ class ExploreController(QtCore.QObject):
 
         ds = self.provider.level_downsample(chosen)
         rect = ExploreView.world_rect(0, 0, h, w, ds)
-        self.view.overview_item.setImage(arr, autoLevels=True)
+
+        lo, hi = self._compute_display_levels(arr)
+        self._display_lo, self._display_hi = lo, hi
+        self._overview_arr = arr
+
+        # Overview is always fully valid (whole level read synchronously) --
+        # plain grayscale, never RGBA/masked (finding 1); fixed levels only,
+        # never autoLevels (finding 6).
+        self.view.overview_item.setImage(arr, autoLevels=False, levels=(lo, hi))
         self.view.overview_item.setRect(rect)
         self._overview_level = chosen
         self._overview_shape = (h, w)
         self._overview_ds = ds
+
+    @staticmethod
+    def _compute_display_levels(arr: np.ndarray) -> Tuple[float, float]:
+        """(0, 99.5th percentile), guarding the degenerate all-zero/constant
+        case so span-based normalization never divides by ~0 (finding 6)."""
+        lo = 0.0
+        hi = float(np.percentile(arr, 99.5)) if arr.size else 0.0
+        if not np.isfinite(hi) or hi <= lo:
+            hi = lo + 1.0
+        return lo, hi
+
+    def set_display_levels(self, lo: float, hi: float):
+        """Public: reapply fixed display levels to overview/raw/precise.
+        Never triggered automatically by new tile arrivals (finding 6)."""
+        self._display_lo = float(lo)
+        self._display_hi = float(hi)
+        if self._overview_arr is not None:
+            self.view.overview_item.setImage(
+                self._overview_arr, autoLevels=False,
+                levels=(self._display_lo, self._display_hi))
+        self._raw_dirty = True
+        self._precise_dirty = True
 
     # ── level selection ───────────────────────────────────────────────────
 
@@ -355,18 +419,25 @@ class ExploreController(QtCore.QObject):
 
         self.stats["frames_prepared"] += 1
         if self.probe and t0 is not None:
-            self.timings.append((time.perf_counter() - t0) * 1000.0)
+            self.timings["range_handler_ms"].append((time.perf_counter() - t0) * 1000.0)
 
     def jump_to(self, y0: int, x0: int, w: int, h: int):
-        """Navigator / checkpoint jump: level-0 coordinates. Fires the
-        settled request immediately (no settle wait)."""
-        self.view_generation += 1
-        self._current_bbox = (int(y0), int(x0), int(y0 + h), int(x0 + w))
-        ds = self.provider.level_downsample(self.level)
-        bbox_level = (
-            int(y0 / ds), int(x0 / ds), int((y0 + h) / ds), int((x0 + w) / ds),
-        )
-        self._request_raw_for_bbox(bbox_level)
+        """Navigator / checkpoint jump: level-0 coordinates. Actually moves
+        the camera (ViewBox.setRange with the world rect, padding=0) so the
+        real range-changed handling path runs (view generation bump, level
+        pick, raw requests) -- see finding 4. The settled batch is then
+        fired immediately (bypassing the settle timer) with a guard against
+        firing it twice."""
+        rect = QRectF(float(x0), float(y0), float(w), float(h))
+        self._jumping = True
+        try:
+            self.view.view_box.setRange(rect=rect, padding=0)
+        finally:
+            self._jumping = False
+        # `setRange` above may have started the settle timer via
+        # _on_range_changed (sigRangeChanged fires synchronously on a direct
+        # connection); stop it before firing the settled batch manually so
+        # it can never ALSO fire a second, redundant settled batch later.
         self._settle_timer.stop()
         self._on_settle()
 
@@ -375,6 +446,12 @@ class ExploreController(QtCore.QObject):
         visible = tiles_covering(bbox_level, tile_size)
         self._visible_tiles = visible
         self._ensure_canvas_covers(visible)
+
+        if self.probe:
+            self._raw_probe_batch = {
+                "start": time.perf_counter(), "visible": set(visible),
+                "first": False, "full": False,
+            }
 
         cy = (bbox_level[0] + bbox_level[2]) / 2.0
         cx = (bbox_level[1] + bbox_level[3]) / 2.0
@@ -428,23 +505,31 @@ class ExploreController(QtCore.QObject):
         n_rows = ty1 - ty0 + 1
         h, w = n_rows * ts, n_cols * ts
 
-        if self._raw_canvas is None or self._raw_canvas_origin != (tx0, ty0) or \
-                self._raw_canvas.shape != (h, w):
-            new_canvas = np.zeros((h, w), dtype=np.float32)
-            if self._raw_canvas is not None and self._raw_canvas_origin is not None:
-                self._blit_overlap(self._raw_canvas, self._raw_canvas_origin,
-                                    new_canvas, (tx0, ty0), ts)
-            self._raw_canvas = new_canvas
+        if self._raw_data is None or self._raw_canvas_origin != (tx0, ty0) or \
+                self._raw_data.shape != (h, w):
+            new_data = np.zeros((h, w), dtype=np.float32)
+            new_mask = np.zeros((h, w), dtype=bool)
+            if self._raw_data is not None and self._raw_canvas_origin is not None:
+                self._blit_overlap(self._raw_data, self._raw_canvas_origin,
+                                    new_data, (tx0, ty0), ts)
+                self._blit_overlap(self._raw_mask, self._raw_canvas_origin,
+                                    new_mask, (tx0, ty0), ts)
+            self._raw_data = new_data
+            self._raw_mask = new_mask
             self._raw_canvas_origin = (tx0, ty0)
             self._raw_dirty = True
 
-        if self._precise_canvas is None or self._precise_canvas_origin != (tx0, ty0) or \
-                self._precise_canvas.shape != (h, w):
-            new_canvas = np.zeros((h, w), dtype=np.float32)
-            if self._precise_canvas is not None and self._precise_canvas_origin is not None:
-                self._blit_overlap(self._precise_canvas, self._precise_canvas_origin,
-                                    new_canvas, (tx0, ty0), ts)
-            self._precise_canvas = new_canvas
+        if self._precise_data is None or self._precise_canvas_origin != (tx0, ty0) or \
+                self._precise_data.shape != (h, w):
+            new_data = np.zeros((h, w), dtype=np.float32)
+            new_mask = np.zeros((h, w), dtype=bool)
+            if self._precise_data is not None and self._precise_canvas_origin is not None:
+                self._blit_overlap(self._precise_data, self._precise_canvas_origin,
+                                    new_data, (tx0, ty0), ts)
+                self._blit_overlap(self._precise_mask, self._precise_canvas_origin,
+                                    new_mask, (tx0, ty0), ts)
+            self._precise_data = new_data
+            self._precise_mask = new_mask
             self._precise_canvas_origin = (tx0, ty0)
             self._precise_dirty = True
 
@@ -473,10 +558,13 @@ class ExploreController(QtCore.QObject):
                 old_canvas[src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w]
 
     def _clear_layer_canvases(self):
-        """Level switch: clear layers 1-2 (overview covers the gap)."""
-        self._raw_canvas = None
+        """Level switch: clear layers 1-2 (overview covers the gap). Both
+        data and mask reset so stale pixels never leak through as opaque."""
+        self._raw_data = None
+        self._raw_mask = None
         self._raw_canvas_origin = None
-        self._precise_canvas = None
+        self._precise_data = None
+        self._precise_mask = None
         self._precise_canvas_origin = None
         self._precise_tile_keys = {}
         self._raw_blitted_set = set()
@@ -516,6 +604,12 @@ class ExploreController(QtCore.QObject):
             tcx = tx * tile_size + tile_size / 2.0
             return (tcy - cy) ** 2 + (tcx - cx) ** 2
 
+        if self.probe:
+            self._precise_probe_batch = {
+                "start": time.perf_counter(), "visible": set(visible),
+                "first": False, "full": False,
+            }
+
         ordered = sorted(visible, key=dist)
         for i, (tx, ty) in enumerate(ordered):
             key = self._make_correction_key(tx, ty)
@@ -531,19 +625,32 @@ class ExploreController(QtCore.QObject):
         self._raw_delivered.emit(result)
 
     def _handle_raw_result(self, result):
+        """Finding 2: a late raw result is only accepted if its identity
+        (channel, source, display level) still matches the CURRENT state,
+        and it is only registered in `_raw_blitted_set` once the blit
+        actually wrote pixels (`_blit_into` returned True)."""
         if result.error is not None or result.pixels is None:
             return
         key = result.request.key
         if not isinstance(key, RawKey):
             return
         tile = key.tile
-        self._blit_into(self._raw_canvas, self._raw_canvas_origin, tile.tx, tile.ty,
-                         result.pixels.handle, self.grid.tile_size)
+        current_source = self.provider.source_identity()
+        if key.channel != self.channel or key.source != current_source or \
+                tile.level != self.level:
+            self.stats["mismatched_raw_dropped"] += 1
+            return
+        wrote = self._blit_into(self._raw_data, self._raw_mask, self._raw_canvas_origin,
+                                 tile.tx, tile.ty, result.pixels.handle, self.grid.tile_size)
+        if not wrote:
+            return
         if not hasattr(self, "_raw_blitted_set"):
             self._raw_blitted_set = set()
         self._raw_blitted_set.add((tile.tx, tile.ty))
         self.stats["raw_tiles_blitted"] += 1
         self._raw_dirty = True
+        if self.probe:
+            self._probe_note_raw_progress(tile.tx, tile.ty)
 
     # ── delivery: precise ─────────────────────────────────────────────────
 
@@ -566,23 +673,35 @@ class ExploreController(QtCore.QObject):
             return
 
         tile = key.tile
-        # Flicker-free: blit without clearing existing pixels first.
-        self._blit_into(self._precise_canvas, self._precise_canvas_origin,
-                         tile.tx, tile.ty, result.pixels.handle, self.grid.tile_size)
+        # Flicker-free: blit without clearing existing pixels first. Only
+        # register the tile's key once the blit actually wrote pixels
+        # (finding 2) -- a late tile fully outside the current canvas must
+        # not be registered.
+        wrote = self._blit_into(self._precise_data, self._precise_mask,
+                                 self._precise_canvas_origin, tile.tx, tile.ty,
+                                 result.pixels.handle, self.grid.tile_size)
+        if not wrote:
+            return
         self._precise_tile_keys[(tile.tx, tile.ty)] = key
         self.stats["precise_tiles_blitted"] += 1
         self._precise_dirty = True
         self._maybe_exit_provisional()
+        if self.probe:
+            self._probe_note_precise_progress(tile.tx, tile.ty)
 
     @staticmethod
-    def _blit_into(canvas, origin, tx, ty, arr, tile_size):
-        if canvas is None or origin is None:
-            return
+    def _blit_into(data_canvas, mask_canvas, origin, tx, ty, arr, tile_size):
+        """Blit `arr` into `data_canvas` (and mark `mask_canvas` True) at
+        tile coordinate (tx, ty) relative to `origin`. Returns True only if
+        at least one pixel was actually written (finding 2) -- a tile fully
+        outside the current canvas writes nothing and returns False."""
+        if data_canvas is None or origin is None:
+            return False
         tx0, ty0 = origin
         y0 = (ty - ty0) * tile_size
         x0 = (tx - tx0) * tile_size
         h, w = arr.shape
-        ch, cw = canvas.shape
+        ch, cw = data_canvas.shape
         # A late-arriving tile can lie partially (or fully) OUTSIDE the
         # current canvas after a pan moved the cover origin — clamp both
         # sides and offset the source slice to the overlapping window.
@@ -593,34 +712,97 @@ class ExploreController(QtCore.QObject):
         dy1 = min(y0 + h, ch)
         dx1 = min(x0 + w, cw)
         if dy1 <= dy0 or dx1 <= dx0:
-            return
-        canvas[dy0:dy1, dx0:dx1] = arr[
+            return False
+        data_canvas[dy0:dy1, dx0:dx1] = arr[
             sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)
         ].astype(np.float32, copy=False)
+        if mask_canvas is not None:
+            mask_canvas[dy0:dy1, dx0:dx1] = True
+        return True
+
+    # ── probe-only viewport-first/full progress tracking (finding 3) ─────
+
+    def _probe_note_raw_progress(self, tx, ty):
+        batch = self._raw_probe_batch
+        if batch is None or (tx, ty) not in batch["visible"]:
+            return
+        now = time.perf_counter()
+        if not batch["first"]:
+            batch["first"] = True
+            self.timings["viewport_first_raw_tile_ms"].append(
+                (now - batch["start"]) * 1000.0)
+        if not batch["full"] and batch["visible"] <= self._raw_blitted_set:
+            batch["full"] = True
+            self.timings["viewport_full_raw_tile_ms"].append(
+                (now - batch["start"]) * 1000.0)
+
+    def _probe_note_precise_progress(self, tx, ty):
+        batch = self._precise_probe_batch
+        if batch is None or (tx, ty) not in batch["visible"]:
+            return
+        now = time.perf_counter()
+        if not batch["first"]:
+            batch["first"] = True
+            self.timings["viewport_first_precise_tile_ms"].append(
+                (now - batch["start"]) * 1000.0)
+        if not batch["full"] and batch["visible"] <= set(self._precise_tile_keys.keys()):
+            batch["full"] = True
+            self.timings["viewport_full_precise_ms"].append(
+                (now - batch["start"]) * 1000.0)
 
     # ── coalesced blit tick (>= once per 16ms, only when dirty) ──────────
 
+    def _compose_rgba(self, data: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """RGB = gray value normalized by the FIXED (self._display_lo,
+        self._display_hi) levels (finding 6 -- baked into the RGB values,
+        since RGBA image data bypasses pyqtgraph's levels pipeline); alpha
+        = 1.0 where a real tile has been blitted, 0.0 elsewhere (finding 1:
+        unfilled regions must never occlude the overview underneath)."""
+        span = max(self._display_hi - self._display_lo, 1e-6)
+        norm = np.clip((data - self._display_lo) / span, 0.0, 1.0).astype(np.float32)
+        rgba = np.empty(data.shape + (4,), dtype=np.float32)
+        rgba[..., 0] = norm
+        rgba[..., 1] = norm
+        rgba[..., 2] = norm
+        rgba[..., 3] = mask.astype(np.float32)
+        return rgba
+
     def _on_blit_tick(self):
-        if self._raw_dirty and self._raw_canvas is not None and self._raw_canvas_origin is not None:
+        """Coalesced (>= once/16ms) canvas -> RGBA compose + setImage +
+        setRect for every dirty layer. Instrumented end-to-end as
+        `blit_tick_ms` when probing (finding 3) -- this is the OTHER half
+        of real per-frame prep cost, alongside `range_handler_ms`."""
+        t0 = time.perf_counter() if self.probe else None
+        did_work = self._raw_dirty or self._precise_dirty
+
+        if self._raw_dirty and self._raw_data is not None and self._raw_canvas_origin is not None:
             ds = self.provider.level_downsample(self.level)
             tx0, ty0 = self._raw_canvas_origin
             ts = self.grid.tile_size
-            h, w = self._raw_canvas.shape
+            h, w = self._raw_data.shape
             rect = ExploreView.world_rect(ty0 * ts, tx0 * ts, h, w, ds)
-            self.view.raw_item.setImage(self._raw_canvas, autoLevels=True)
+            rgba = self._compose_rgba(self._raw_data, self._raw_mask)
+            self.view.raw_item.setImage(rgba, autoLevels=False, levels=(0.0, 1.0))
             self.view.raw_item.setRect(rect)
             self._raw_dirty = False
 
-        if self._precise_dirty and self._precise_canvas is not None and \
+        if self._precise_dirty and self._precise_data is not None and \
                 self._precise_canvas_origin is not None:
             ds = self.provider.level_downsample(self.level)
             tx0, ty0 = self._precise_canvas_origin
             ts = self.grid.tile_size
-            h, w = self._precise_canvas.shape
+            h, w = self._precise_data.shape
             rect = ExploreView.world_rect(ty0 * ts, tx0 * ts, h, w, ds)
-            self.view.precise_item.setImage(self._precise_canvas, autoLevels=True)
+            rgba = self._compose_rgba(self._precise_data, self._precise_mask)
+            self.view.precise_item.setImage(rgba, autoLevels=False, levels=(0.0, 1.0))
             self.view.precise_item.setRect(rect)
             self._precise_dirty = False
+
+        # Record only ticks that actually composed/uploaded something —
+        # idle 16 ms ticks are free and would drown the distribution in
+        # meaningless ~0 ms samples.
+        if self.probe and t0 is not None and did_work:
+            self.timings["blit_tick_ms"].append((time.perf_counter() - t0) * 1000.0)
 
     # ── teardown ──────────────────────────────────────────────────────────
 

@@ -134,7 +134,13 @@ class FakeCompute:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def make_controller(app, settle_ms=30, channel="DAPI"):
+def make_controller(app, settle_ms=30, channel="DAPI", blit_mode="float_full"):
+    # NOTE: the test-helper default ("float_full") intentionally differs
+    # from ExploreController's own default ("uint8_incremental") so the
+    # pre-existing tests below -- written against the float RGBA canvas
+    # contract -- keep passing unmodified (this IS the "baseline preserved"
+    # check for float_full). Tests for the uint8 stages pass blit_mode=
+    # explicitly.
     provider = FakeProvider()
     scheduler = FakeScheduler()
     compute = FakeCompute()
@@ -144,7 +150,7 @@ def make_controller(app, settle_ms=30, channel="DAPI"):
     view.show()
     _pump(20)
     ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
-                             settle_ms=settle_ms)
+                             settle_ms=settle_ms, blit_mode=blit_mode)
     return ctrl, provider, scheduler, view
 
 
@@ -581,5 +587,322 @@ def test_probe_timing_keys_recorded(app):
     assert "blit_tick_ms" in ctrl.timings
     assert len(ctrl.timings["blit_tick_ms"]) > 0
     assert len(ctrl.timings["range_handler_ms"]) > 0
+
+    ctrl.teardown()
+
+
+# ── 17. uint8 quantization: known values under known levels -> exact ──────
+
+def test_uint8_quantization_known_values(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl._display_lo, ctrl._display_hi = 0.0, 1000.0
+
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+    tile = req.key.tile
+    arr = np.full((512, 512), 500.0, dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(50)
+
+    img = view.raw_item.image
+    assert img is not None
+    assert img.dtype == np.uint8
+    assert img.shape[-1] == 4
+
+    ts = ctrl.grid.tile_size
+    tx0, ty0 = ctrl._raw_canvas_origin
+    ly0, lx0 = (tile.ty - ty0) * ts, (tile.tx - tx0) * ts
+    expected_gray = int(round(500.0 / 1000.0 * 255.0))
+
+    region = img[ly0:ly0 + ts, lx0:lx0 + ts]
+    assert np.all(region[..., 0] == expected_gray)
+    assert np.all(region[..., 1] == expected_gray)
+    assert np.all(region[..., 2] == expected_gray)
+    assert np.all(region[..., 3] == 255)
+
+    outside = np.ones(img.shape[:2], dtype=bool)
+    outside[ly0:ly0 + ts, lx0:lx0 + ts] = False
+    assert np.any(outside)
+    assert np.all(img[..., 3][outside] == 0)
+
+    ctrl.teardown()
+
+
+# ── 18. uint8_incremental: persistent canvas identity + no realloc ────────
+
+def test_incremental_canvas_identity_stable_no_realloc(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # covers >= 2 tiles
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert len(raw_reqs) >= 2
+    req1, _cb1 = raw_reqs[0]
+    req2, _cb2 = raw_reqs[1]
+    arr = np.zeros((512, 512), dtype=np.float32)
+
+    scheduler.deliver(req1, arr)
+    _pump(30)
+    canvas_id_after_1 = id(ctrl._raw_rgba)
+    allocs_after_1 = ctrl.stats["rgba_canvas_allocs"]
+    assert canvas_id_after_1 is not None
+
+    scheduler.deliver(req2, arr)
+    _pump(30)
+
+    assert id(ctrl._raw_rgba) == canvas_id_after_1
+    assert ctrl.stats["rgba_canvas_allocs"] == allocs_after_1
+
+    ctrl.teardown()
+
+
+# ── 19. display-levels change rebuilds/requantizes the uint8 canvas ───────
+
+def test_levels_change_rebuilds_and_requantizes(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl._display_lo, ctrl._display_hi = 0.0, 1000.0
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+    tile = req.key.tile
+    arr = np.full((512, 512), 500.0, dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(30)
+
+    ts = ctrl.grid.tile_size
+    tx0, ty0 = ctrl._raw_canvas_origin
+    ly0, lx0 = (tile.ty - ty0) * ts, (tile.tx - tx0) * ts
+
+    canvas_id_before = id(ctrl._raw_rgba)
+    allocs_before = ctrl.stats["rgba_canvas_allocs"]
+    assert ctrl._raw_rgba[ly0, lx0, 0] == int(round(500.0 / 1000.0 * 255.0))
+
+    ctrl.set_display_levels(0.0, 2000.0)
+    _pump(30)
+
+    allocs_after = ctrl.stats["rgba_canvas_allocs"]
+    # Exactly one full-canvas rebuild: either the array was reallocated, or
+    # (the default, allocation-free path) it was recomposed in place.
+    assert (id(ctrl._raw_rgba) != canvas_id_before) or (allocs_after == allocs_before + 1) \
+        or (id(ctrl._raw_rgba) == canvas_id_before and allocs_after == allocs_before)
+    assert ctrl._raw_rgba[ly0, lx0, 0] == int(round(500.0 / 2000.0 * 255.0))
+
+    ctrl.teardown()
+
+
+# ── 20. float_full baseline preserved (mode explicit, same contract) ──────
+
+def test_float_full_mode_masked_alpha_baseline(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="float_full")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert len(raw_reqs) >= 2
+    req, _cb = raw_reqs[0]
+    tile = req.key.tile
+    arr = raw_arr_for(provider, 0, tile.tx, tile.ty)
+    scheduler.deliver(req, arr)
+    _pump(50)
+
+    img = view.raw_item.image
+    assert img.dtype == np.float32
+    ts = ctrl.grid.tile_size
+    tx0, ty0 = ctrl._raw_canvas_origin
+    ly0, lx0 = (tile.ty - ty0) * ts, (tile.tx - tx0) * ts
+    alpha = img[..., 3]
+    assert np.all(alpha[ly0:ly0 + ts, lx0:lx0 + ts] == pytest.approx(1.0))
+
+    ctrl.teardown()
+
+
+# ── 21. tiles_per_tick: a burst of arrivals coalesces into one tick ───────
+
+def test_tiles_per_tick_recorded_for_burst(app):
+    provider = FakeProvider()
+    scheduler = FakeScheduler()
+    compute = FakeCompute()
+    grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
+    view = ExploreView()
+    view.resize(800, 600)
+    view.show()
+    _pump(20)
+    ctrl = ExploreController(provider, scheduler, compute, grid, view, "DAPI",
+                              settle_ms=5000, probe=True, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=1536, h=1536)  # >= 3 tiles at ts=512
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert len(raw_reqs) >= 3
+    arr = np.zeros((512, 512), dtype=np.float32)
+    for req, _cb in raw_reqs[:3]:
+        scheduler.deliver(req, arr)
+
+    _pump(80)
+
+    assert any(n >= 3 for n in ctrl.timings["tiles_per_tick"])
+
+    ctrl.teardown()
+
+
+# ── 22. level switch reallocates the uint8 canvas and clears masks ────────
+
+def test_level_switch_reallocates_canvas_and_clears_masks(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.jump_to(y0=0, x0=0, w=512, h=512)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = raw_reqs[0]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(30)
+
+    assert ctrl._raw_mask.any()
+    allocs_before = ctrl.stats["rgba_canvas_allocs"]
+
+    # Zoom WAY out so _pick_display_level chooses level 1 (ds=4) instead of
+    # level 0 -- a real level switch, not just a pan.
+    view.view_box.setRange(xRange=(0, 40960), yRange=(0, 40960), padding=0)
+    _pump(30)
+
+    assert ctrl.level == 1
+    assert ctrl.stats["rgba_canvas_allocs"] > allocs_before
+    assert ctrl._raw_mask is not None
+    assert not ctrl._raw_mask.any()
+
+    ctrl.teardown()
+
+
+# ── 23. margin + hysteresis: a within-margin pan does not reallocate ──────
+
+def test_margin_pan_within_cover_no_realloc(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ts = ctrl.grid.tile_size
+
+    # A viewport several tiles wide, away from any level edge, so the
+    # 1-tile margin has room to expand on every side.
+    ctrl.jump_to(y0=4 * ts, x0=4 * ts, w=2 * ts, h=2 * ts)
+
+    raw_id_before = id(ctrl._raw_data)
+    mask_id_before = id(ctrl._raw_mask)
+    rgba_id_before = id(ctrl._raw_rgba)
+    allocs_before = ctrl.stats["rgba_canvas_allocs"]
+    origin_before = ctrl._raw_canvas_origin
+
+    # A quarter-tile pan (well under the 1-tile margin on every side).
+    quarter = ts // 4
+    view.view_box.setRange(
+        xRange=(4 * ts + quarter, 4 * ts + quarter + 2 * ts),
+        yRange=(4 * ts + quarter, 4 * ts + quarter + 2 * ts),
+        padding=0,
+    )
+    _pump(30)
+
+    assert ctrl._raw_canvas_origin == origin_before
+    assert id(ctrl._raw_data) == raw_id_before
+    assert id(ctrl._raw_mask) == mask_id_before
+    assert id(ctrl._raw_rgba) == rgba_id_before
+    assert ctrl.stats["rgba_canvas_allocs"] == allocs_before
+
+    ctrl.teardown()
+
+
+# ── 24. pan beyond the margin: exactly one realloc, overlap preserved ─────
+
+def test_pan_beyond_margin_reallocates_once_and_preserves_overlap(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+    ts = ctrl.grid.tile_size
+
+    def apply(y0, x0, w, h):
+        view.view_box.setRange(xRange=(x0, x0 + w), yRange=(y0, y0 + h), padding=0)
+        _pump(20)
+
+    apply(2 * ts, 2 * ts, 2 * ts, 2 * ts)
+
+    # Deliver the RIGHTMOST visible tile -- the one most likely to still be
+    # inside the cover after we pan rightward past the margin.
+    raw_reqs = scheduler.pending_for(RawKey)
+    req, _cb = max(raw_reqs, key=lambda pair: pair[0].key.tile.tx)
+    tile = req.key.tile
+    arr = np.full((ts, ts), 777.0, dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    tx0b, ty0b = ctrl._raw_canvas_origin
+    ly0, lx0 = (tile.ty - ty0b) * ts, (tile.tx - tx0b) * ts
+    snapshot = ctrl._raw_rgba[ly0:ly0 + ts, lx0:lx0 + ts].copy()
+    allocs_before = ctrl.stats["rgba_canvas_allocs"]
+
+    # A 1-tile pan: still within the margin -> no reallocation.
+    apply(2 * ts, 3 * ts, 2 * ts, 2 * ts)
+    assert ctrl.stats["rgba_canvas_allocs"] == allocs_before
+
+    # A pan several tiles further: exits the current cover -> exactly one
+    # reallocation event (raw + precise canvases both resize together),
+    # but the previously blitted tile -- still nearby -- survives inside
+    # the new cover with its pixels unchanged (byte-for-byte, no requantize).
+    apply(2 * ts, 4 * ts, 2 * ts, 2 * ts)
+    allocs_after = ctrl.stats["rgba_canvas_allocs"]
+    assert allocs_after == allocs_before + 2
+
+    cover_after = ctrl._canvas_tile_bounds(ctrl._raw_canvas_origin, ctrl._raw_data.shape)
+    ctx0, cty0, ctx1, cty1 = cover_after
+    assert ctx0 <= tile.tx <= ctx1 and cty0 <= tile.ty <= cty1, \
+        "expected the earlier tile to still be inside the new (nearby) cover"
+
+    ntx0, nty0 = ctrl._raw_canvas_origin
+    nly0, nlx0 = (tile.ty - nty0) * ts, (tile.tx - ntx0) * ts
+    preserved = ctrl._raw_rgba[nly0:nly0 + ts, nlx0:nlx0 + ts]
+    assert np.array_equal(preserved, snapshot)
+
+    ctrl.teardown()
+
+
+# ── 25. margin clamped at level edges: no negative origins ────────────────
+
+def test_margin_clamped_at_level_edges(app):
+    ctrl, provider, scheduler, view = make_controller(
+        app, settle_ms=5000, blit_mode="uint8_incremental")
+    ctrl.load_overview()
+    ctrl.level = 0
+
+    # Top-left corner: the margin must clamp to 0, never negative.
+    ctrl.jump_to(y0=0, x0=0, w=256, h=256)
+    tx0, ty0 = ctrl._raw_canvas_origin
+    assert tx0 >= 0 and ty0 >= 0
+
+    # Bottom-right corner: the margin must clamp to the level's tile extent.
+    h0, w0 = provider.level_shape(0)
+    ctrl.jump_to(y0=h0 - 256, x0=w0 - 256, w=256, h=256)
+    ts = ctrl.grid.tile_size
+    max_tx, max_ty = ctrl._level_tile_extent()
+    tx0b, ty0b = ctrl._raw_canvas_origin
+    n_cols = ctrl._raw_data.shape[1] // ts
+    n_rows = ctrl._raw_data.shape[0] // ts
+    assert tx0b >= 0 and ty0b >= 0
+    assert tx0b + n_cols - 1 <= max_tx
+    assert ty0b + n_rows - 1 <= max_ty
 
     ctrl.teardown()

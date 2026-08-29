@@ -1,0 +1,54 @@
+{
+  "dataset_path": "/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif",
+  "channel": "TOX",
+  "environment": {
+    "hostname": "ubuntu-H12D-8D",
+    "python": "3.10.20",
+    "qt_qpa_platform": "offscreen",
+    "offscreen": true,
+    "offscreen_note": "offscreen: excludes real compositor/vsync -- numbers measure frame PREP cost only"
+  },
+  "note": "provider/scheduler/compute stack reused across modes -- caches are warm equally for every mode after the first",
+  "rows": [
+    {
+      "mode": "float_full",
+      "blit_tick_p50": 76.09761296771467,
+      "blit_tick_p95": 154.6627029310912,
+      "set_image_p50": null,
+      "set_image_p95": null,
+      "tile_convert_p50": null,
+      "tile_convert_p95": null,
+      "window_p95": 153.1923550646752,
+      "windows_over_budget": 68,
+      "n_windows": 106,
+      "rgba_canvas_allocs": 0
+    },
+    {
+      "mode": "uint8_full",
+      "blit_tick_p50": 57.07540805451572,
+      "blit_tick_p95": 116.69044103473425,
+      "set_image_p50": 0.15807407908141613,
+      "set_image_p95": 1.2819899711757898,
+      "tile_convert_p50": 46.29208613187075,
+      "tile_convert_p95": 59.57801407203078,
+      "window_p95": 138.7017930392176,
+      "windows_over_budget": 82,
+      "n_windows": 97,
+      "rgba_canvas_allocs": 64
+    },
+    {
+      "mode": "uint8_incremental",
+      "blit_tick_p50": 0.1916650217026472,
+      "blit_tick_p95": 1.7300520557910204,
+      "set_image_p50": 0.12306799180805683,
+      "set_image_p95": 0.9799590334296227,
+      "tile_convert_p50": 1.1276239529252052,
+      "tile_convert_p95": 2.329374896362424,
+      "window_p95": 137.41130102425814,
+      "windows_over_budget": 32,
+      "n_windows": 86,
+      "rgba_canvas_allocs": 64
+    }
+  ],
+  "measured_only": true
+}

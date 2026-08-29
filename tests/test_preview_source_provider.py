@@ -21,12 +21,32 @@ def app():
 
 
 class _Loader:
-    """Fake loader with the corrected-store surface the provider reads."""
-    _corrected_zarr_path = None
-    _corrected_decisions = {}
+    """Fake loader mimicking the corrected-store surface: read_region serves
+    a corrected marker value (100+i) for channels in the store decisions and
+    a raw marker (i+1) otherwise — same contract as OMETIFFLoader."""
+
+    _CHANNELS = ["DAPI", "CD3", "CD20"]
+
+    def __init__(self):
+        self._corrected_zarr_path = None
+        self._corrected_decisions = {}
 
     def channel_names(self):
-        return ["DAPI", "CD3", "CD20"]
+        return list(self._CHANNELS)
+
+    def set_corrected_zarr_store(self, zarr_path, decisions):
+        self._corrected_zarr_path = zarr_path
+        self._corrected_decisions = {
+            str(ch): str(m).strip().lower()
+            for ch, m in dict(decisions or {}).items()
+            if str(m).strip().lower() in {"tophat", "cucim"}
+        } if zarr_path else {}
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1,
+                    correction_config=None, normalize=True):
+        i = self._CHANNELS.index(ch)
+        val = 100.0 + i if ch in self._corrected_decisions else float(i + 1)
+        return np.full((y1 - y0, x1 - x0), val, np.float32)
 
 
 def _page(app):
@@ -130,6 +150,53 @@ def test_region_reserved_for_viewport_foundation(app):
     with pytest.raises(NotImplementedError):
         page._preview_provider.get_pixels("CD3", "corrected",
                                           region=(0, 10, 0, 10))
+
+
+def _saved_via_store(page, decisions):
+    """Go through the real reconcile entry point (store swap + cache diff)."""
+    page._apply_corrected_store("/fake/corrected_channels.zarr", decisions)
+
+
+def test_withdrawn_correction_reverts_to_raw(app):
+    """corrected -> Original: the cache must stop serving old corrected."""
+    page = _page(app)
+    pr = page._preview_provider
+    _saved_via_store(page, {"CD3": "tophat"})
+    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 101.0
+    got = []
+    pr.stage_invalidated.connect(lambda ch, st: got.append(ch))
+    # re-save with CD3 switched to Original -> store no longer lists it
+    _saved_via_store(page, {"CD3": "original"})
+    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 2.0   # raw again
+    assert pr.describe("CD3")["served_corrected_stage"] == "raw_unsaved"
+    assert "CD3" in got
+
+
+def test_incremental_save_drops_removed_channel(app):
+    """corrected {A,B} -> {A}: B reverts to raw, A stays corrected."""
+    page = _page(app)
+    pr = page._preview_provider
+    _saved_via_store(page, {"CD3": "tophat", "CD20": "cucim"})
+    assert float(pr.get_pixels("CD20", "corrected")[0, 0]) == 102.0
+    _saved_via_store(page, {"CD3": "tophat"})
+    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 101.0
+    assert float(pr.get_pixels("CD20", "corrected")[0, 0]) == 3.0  # raw again
+    assert pr.describe("CD20")["served_corrected_stage"] == "raw_unsaved"
+
+
+def test_clear_all_corrections_reverts_everything(app):
+    """all corrected -> none (store cleared): every channel back to raw."""
+    page = _page(app)
+    pr = page._preview_provider
+    _saved_via_store(page, {"CD3": "tophat", "CD20": "cucim"})
+    got = []
+    pr.stage_invalidated.connect(lambda ch, st: got.append(ch))
+    page._apply_corrected_store(None, {})
+    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 2.0
+    assert float(pr.get_pixels("CD20", "corrected")[0, 0]) == 3.0
+    assert set(got) == {"CD3", "CD20"}
+    for ch in ("CD3", "CD20"):
+        assert pr.describe(ch)["served_corrected_stage"] == "raw_unsaved"
 
 
 def test_save_invalidation_repulls_into_workbench(app):

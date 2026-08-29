@@ -3738,7 +3738,8 @@ class Step0Page(QWidget):
             # decision + handoff so downstream still works, and tell the user
             # plainly there is nothing to save + where to go next.
             self._ensure_empty_corrected_zarr(zarr_path, rois)
-            self.loader.set_corrected_zarr_store(None, {})
+            # Reconciles the cache: previously corrected channels revert to raw.
+            self._apply_corrected_store(None, {})
             self._emit_complete(config, zarr_path, {})
             QMessageBox.information(
                 self, "No background correction",
@@ -3777,8 +3778,9 @@ class Step0Page(QWidget):
 
         if not to_process:
             # Everything already saved with the same method -> no reprocessing.
-            # The zarr already holds every channel; just (re)wire the handoff.
-            self.loader.set_corrected_zarr_store(zarr_path, corrected)
+            # The zarr already holds every channel; (re)wire the handoff and
+            # reconcile the cache (corrected re-read; withdrawn revert to raw).
+            self._apply_corrected_store(zarr_path, corrected)
             self._emit_complete(config, zarr_path, corrected)
             return
 
@@ -3811,31 +3813,50 @@ class Step0Page(QWidget):
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.accept()
-        self.loader.set_corrected_zarr_store(zarr_path, decisions)
-        # Hot-swap: corrected channels now read corrected pixels from the loader;
-        # replace their preload-cache entries so the conditioning overlay shows
-        # the corrected data (and refresh if conditioning is engaged). On an
-        # incremental save only the channels actually REprocessed this run need a
-        # re-read — skipped channels were already corrected in the cache.
+        # Store swap + cache reconcile in one place: corrected channels re-read
+        # corrected pixels; channels whose correction was withdrawn re-read raw.
+        # On an incremental save only channels REprocessed this run re-read as
+        # corrected — skipped channels were already corrected in the cache.
         only = getattr(self, "_incremental_processed", None)
         self._incremental_processed = None
-        self._hotswap_corrected(decisions, only=only)
+        self._apply_corrected_store(zarr_path, decisions, only=only)
         self._emit_complete(config, zarr_path, decisions)
 
-    def _hotswap_corrected(self, decisions, only=None):
-        """Re-read the corrected channels (per patch) into the preload cache.
+    def _apply_corrected_store(self, zarr_path, decisions, only=None):
+        """Single entry point for swapping the corrected store.
+
+        Snapshots the OLD decisions, applies the new store, then reconciles
+        the preload cache with the decision DIFF: added/changed channels are
+        re-read as corrected, and channels REMOVED from the corrected set
+        (switched to Original, or the store cleared) are re-read as raw — so
+        the cache can never keep serving stale corrected pixels for a channel
+        whose correction was withdrawn. Both sets are invalidated."""
+        old = dict(getattr(self, "_applied_corrected_decisions", {}) or {})
+        self.loader.set_corrected_zarr_store(zarr_path, decisions)
+        new = ({ch: m for ch, m in (decisions or {}).items()
+                if str(m).strip().lower() in {"tophat", "cucim"}}
+               if zarr_path else {})
+        self._applied_corrected_decisions = new
+        removed = set(old) - set(new)
+        self._hotswap_corrected(new, only=only, removed=removed)
+
+    def _hotswap_corrected(self, decisions, only=None, removed=None):
+        """Re-read changed channels (per patch) into the preload cache.
 
         After set_corrected_zarr_store, loader.read_region returns CORRECTED
-        pixels for the corrected channels; uncorrected channels are untouched.
-        `only` (a set) restricts the re-read to the channels reprocessed this run
-        (incremental save); None re-reads all corrected channels.
-        Synchronous (few channels × few patches)."""
-        if not decisions or not self.loader or not self.patches:
+        pixels for channels in the store's decisions and RAW pixels for
+        everything else. `only` (a set) restricts the corrected re-read to the
+        channels reprocessed this run (incremental save); None re-reads all
+        corrected channels. `removed` channels lost their corrected status and
+        are re-read (now raw). Synchronous (few channels × few patches)."""
+        if not self.loader or not self.patches:
             return
+        decisions = decisions or {}
         corrected = [ch for ch, m in decisions.items()
                      if str(m).lower() not in ("", "original", "none")
                      and (only is None or ch in only)]
-        if not corrected:
+        stale = list(dict.fromkeys(corrected + sorted(removed or ())))
+        if not stale:
             return
         for pidx, bbox in enumerate(self.patches):
             try:
@@ -3843,7 +3864,7 @@ class Step0Page(QWidget):
             except Exception:
                 continue
             pc = self._preload_cache.setdefault(pidx, {})
-            for ch in corrected:
+            for ch in stale:
                 try:
                     arr = self.loader.read_region(ch, y0, y1, x0, x1,
                                                   normalize=False)
@@ -3853,10 +3874,11 @@ class Step0Page(QWidget):
                     pc[ch] = arr
                 except Exception:
                     continue
-        # Announce the Save (the ONLY corrected-stage invalidation trigger),
-        # then drop the workbench's stale raw for corrected channels + repaint.
+        # Announce the store change (the ONLY corrected-stage invalidation
+        # trigger) for BOTH gained and lost channels, then drop the
+        # workbench's stale pixels + repaint.
         if getattr(self, "_preview_provider", None) is not None:
-            for ch in corrected:
+            for ch in stale:
                 self._preview_provider.invalidate(ch)
         self._maybe_refresh_conditioning()
 

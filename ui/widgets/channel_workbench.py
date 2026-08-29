@@ -1122,6 +1122,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         hexc = chosen.name()
         self._colors[name] = hexc
         self._layer_list.set_channel_color(name, hexc)
+        if name == self._active:
+            self._histogram.set_color(hexc)
         self._refresh_preview()
 
     def _load_params_into_controls(self, name):
@@ -1144,7 +1146,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
             hist_src = self._raw.get(name)
             if hist_src is None:
                 hist_src = np.zeros((1, 1), np.float32)
-            self._histogram.set_data(hist_src, p["min"], p["max"])
+            self._histogram.set_data(hist_src, p["min"], p["max"],
+                                     color=self._colors.get(name))
             # step0 Min/Max sliders: range from this channel's data, then sync.
             if hasattr(self, "_sl_min"):
                 finite = hist_src[np.isfinite(hist_src)] if hist_src.size else hist_src

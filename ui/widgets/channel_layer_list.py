@@ -77,6 +77,7 @@ class _ChannelRow(QtWidgets.QWidget):
         self._mini.setStyleSheet("color:#879bb1;font-size:10px;")
         self._mini.setFixedWidth(48)
         self._mini.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._mini.setVisible(False)   # v15: dropped from the row (user request)
         lay.addWidget(self._mini)
 
     def _set_swatch_color(self, color):

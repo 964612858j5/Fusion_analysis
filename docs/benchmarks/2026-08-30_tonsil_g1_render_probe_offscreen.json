@@ -1,0 +1,34 @@
+{
+  "environment": {
+    "hostname": "ubuntu-H12D-8D",
+    "python": "3.10.20",
+    "qt_qpa_platform": "offscreen",
+    "offscreen": true,
+    "offscreen_note": "offscreen: excludes real compositor/vsync -- numbers measure frame PREP cost only"
+  },
+  "dataset_path": "/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif",
+  "channel": "TOX",
+  "n_frames": 40,
+  "frame_prep_ms_p50": 8.923921966925263,
+  "frame_prep_ms_p95": 17.373614013195038,
+  "frame_prep_ms_max": 18.310963176190853,
+  "frames_over_16_7ms_budget": 4,
+  "time_to_first_overview_pixel_ms": 117.03885602764785,
+  "raw_fill_latency_ms_p50": 20.253022899851203,
+  "precise_fill_latency_ms_p50": 81.79644122719765,
+  "n_raw_fill_samples": 19,
+  "n_precise_fill_samples": 19,
+  "jump_wall_ms": [
+    135.48219087533653,
+    133.73953592963517,
+    140.14617213979363
+  ],
+  "stats": {
+    "frames_prepared": 40,
+    "raw_tiles_blitted": 230,
+    "precise_tiles_blitted": 924,
+    "stale_precise_dropped": 16,
+    "mismatched_key_dropped": 0
+  },
+  "measured_only": true
+}

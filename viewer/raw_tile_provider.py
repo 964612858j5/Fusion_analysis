@@ -194,10 +194,9 @@ class RawTileProvider:
 
     def close(self):
         """Close every handle this provider opened for "per_thread" and
-        "shared_lock" modes. After close(), threads must not call
-        read_tile/read_region on this provider again (per_call mode is
-        unaffected -- it opens/closes its own handle per call and holds
-        nothing to close here)."""
+        "shared_lock" modes. Lifecycle contract is uniform across ALL modes
+        (per_call included, even though it tracks no handles): after
+        close(), any read_tile/read_region raises RuntimeError."""
         self._closed = True
         with self._registry_lock:
             handles = list(self._thread_registry)

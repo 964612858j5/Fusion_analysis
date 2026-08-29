@@ -33,6 +33,26 @@ Layer 0 (bottom) pinned overview   whole-slide coarse level (smallest pyramid
   benchmark); level switches clear layers 1–2 canvases but layer 0 always
   covers the gap.
 
+### 1.1 One world coordinate system (review addition)
+
+All three ImageItems live in the SAME full-resolution WSI pixel coordinate
+system. Every layer/tile image is placed via an explicit rect/transform:
+an image at pyramid level L with top-left (y0, x0) in level-L pixels is
+drawn at rect (x0*ds, y0*ds, w*ds, h*ds) where ds = level_downsample(L).
+Zoom-driven level switches therefore never shift the image, and Navigator
+jumps address level-0 coordinates directly.
+
+### 1.2 Precise-layer identity (review addition)
+
+Each blitted precise tile stores its full CorrectionKey (source identity,
+channel, method, params, level, quality). A displayed tile counts as a
+VALID precise result only while its key matches the CURRENT selection.
+On any change of channel / method / params / source (e.g. a Save):
+old precise pixels may remain on screen briefly but the view immediately
+enters a visible "updating…" provisional state (and the raw layer shows
+through where possible); they are never presented as current results.
+Flicker-free overwrite applies only within one unchanged key context.
+
 ## 2. Interaction loop (ExploreController)
 
 - ViewBox sigRangeChanged → update view_generation, recompute the visible

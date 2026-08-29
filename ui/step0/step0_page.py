@@ -1214,7 +1214,9 @@ class Step0Page(QWidget):
         # right borders line up and neither is clamped below its own minimum.
         wa = a.widget(0).minimumSizeHint().width() if a.widget(0) else 0
         wb = b.widget(0).minimumSizeHint().width() if b.widget(0) else 0
-        self._left_col_width = max(wa, wb, 120) + 4
+        # v15 user feedback: the BG Channels column starts at 2x the previous
+        # default width (still draggable and synced with the Remap tab).
+        self._left_col_width = 2 * (max(wa, wb, 120) + 4)
         a.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(a))
         b.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(b))
         self._apply_left_col_width(a)

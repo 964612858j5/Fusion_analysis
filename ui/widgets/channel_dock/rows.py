@@ -112,6 +112,16 @@ class Step0ChannelRow(ChannelRowBase):
         super().__init__(model, cid, parent)
         st = model.get(cid)
 
+        # Fixed geometry so rows never shift: the checkbox keeps a constant
+        # footprint even when the page restyles its indicator (green "done"
+        # state), and the name column has a fixed width so every name stays
+        # left-aligned with the method combo directly after it.
+        self.checkbox.setFixedSize(22, 18)
+        self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                      QtWidgets.QSizePolicy.Preferred)
+        self.name_label.setFixedWidth(110)
+        self._extras_layout.setStretchFactor(self.name_label, 0)
+
         self.method_cb = QtWidgets.QComboBox()
         self.method_cb.addItems(self.METHODS)
         self.method_cb.setFixedWidth(64)
@@ -128,6 +138,7 @@ class Step0ChannelRow(ChannelRowBase):
         self.method_cb.currentTextChanged.connect(
             lambda txt: self.method_changed.emit(self._cid, txt))
         self._extras_layout.addWidget(self.method_cb)
+        self._extras_layout.addStretch(1)   # push only the status badge right
 
         self.status_lbl = QtWidgets.QLabel("—")
         self.status_lbl.setAlignment(Qt.AlignCenter)

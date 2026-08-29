@@ -287,3 +287,38 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     # the color swatch is hidden in Step0 BG rows (read as a dead checkbox)
     assert not page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(
         page._channel_rows["CD3"]["row_widget"])
+
+
+# ── Step0 rows: names stay left-aligned at a fixed x through state changes ───
+
+def test_step0_row_name_position_stable_after_done(app):
+    from PyQt5 import QtWidgets
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _Loader:
+        def channel_names(self):
+            return ["DAPI", "CD3", "CD20"]
+
+    page = Step0Page()
+    page.loader = _Loader()
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    dock = page._dock_adapter.dock
+    dock.resize(360, 300)
+    dock.show()
+    QtWidgets.QApplication.processEvents()
+
+    rows = {ch: page._channel_rows[ch]["row_widget"] for ch in ("CD3", "CD20")}
+    before = {ch: r.name_label.x() for ch, r in rows.items()}
+    # all names share one fixed left position
+    assert len(set(before.values())) == 1
+
+    page._set_channel_computing("CD3")
+    page._set_channel_done("CD3")
+    QtWidgets.QApplication.processEvents()
+    after = {ch: r.name_label.x() for ch, r in rows.items()}
+    assert after == before                      # green state must not shift names
+    # checkbox footprint constant regardless of the green indicator restyle
+    for r in rows.values():
+        assert (r.checkbox.width(), r.checkbox.height()) == (22, 18)
+    dock.hide()

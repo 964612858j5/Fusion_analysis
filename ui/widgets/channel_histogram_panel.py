@@ -70,6 +70,25 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
         self._min_line.sigPositionChanged.connect(self._on_line_moved)
         self._max_line.sigPositionChanged.connect(self._on_line_moved)
 
+        # Pan overshoot beyond the data bounds stays a small FIXED width on
+        # screen at every zoom level: the allowed margin is a fraction of the
+        # CURRENT view span, recomputed on every range change.
+        self._data_bounds = None            # (lo, hi) incl. window lines
+        self._margin_frac = 0.02
+        self._plot.getPlotItem().getViewBox().sigXRangeChanged.connect(
+            self._on_xrange_changed)
+
+    def _on_xrange_changed(self, _vb, xrange):
+        if self._data_bounds is None:
+            return
+        lo, hi = self._data_bounds
+        pad = self._margin_frac * max(float(xrange[1]) - float(xrange[0]), 1e-12)
+        vb = self._plot.getPlotItem().getViewBox()
+        cur = vb.state["limits"]["xLimits"]
+        new = [lo - pad, hi + pad]
+        if cur != new:
+            vb.setLimits(xMin=new[0], xMax=new[1])
+
     def set_color(self, color):
         """Curve/fill follow the channel's display color."""
         c = pg.mkColor(color)
@@ -95,6 +114,7 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
             vb = self._plot.getPlotItem().getViewBox()
             if arr.size == 0:
                 self._curve.setData(np.array([0.0, 1.0]), np.array([0.0, 0.0]))
+                self._data_bounds = (0.0, 1.0)
                 vb.setLimits(xMin=0.0, xMax=1.0, yMin=0.0,
                              maxXRange=1.0, minXRange=0.01)
                 vb.setXRange(0.0, 1.0, padding=0)
@@ -113,10 +133,13 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
                 self._curve.setData(centers, smooth)
 
                 # View bounds: include the window lines if they sit outside
-                # the data range, plus a hair of padding.
+                # the data range. The pan margin beyond the bounds is handled
+                # dynamically (_on_xrange_changed) so it stays a fixed small
+                # width on screen at every zoom level.
                 xmin = min(lo, float(min_value) if min_value is not None else lo)
                 xmax = max(hi, float(max_value) if max_value is not None else hi)
-                pad = 0.02 * (xmax - xmin)
+                self._data_bounds = (xmin, xmax)
+                pad = self._margin_frac * (xmax - xmin)
                 span = (xmax - xmin) + 2 * pad
                 vb.setLimits(xMin=xmin - pad, xMax=xmax + pad, yMin=0.0,
                              maxXRange=span,            # no zoom-out past initial

@@ -513,15 +513,20 @@ def summarize_pan(pan_steps):
 IO_SWEEP_TILE_SIZE = 512
 IO_SWEEP_LEVEL = 0
 IO_SWEEP_METHODS = [("tophat", 25), ("cucim", 50)]
-IO_SWEEP_WORKERS = [1, 2, 4, 8]
+IO_SWEEP_WORKERS = [1, 2, 4]
+IO_SWEEP_HANDLE_MODES = ["per_call", "per_thread", "shared_lock"]
 
 
-def run_io_sweep_config(provider, channel, io_workers):
-    """One io_workers value of the --io-sweep: fresh provider-independent
-    caches/scheduler, measure (a) app-cold viewport fill wall time for the
-    FIRST method (the staged-parallel path), (b) the second method's fill
-    (raw cache already warm, shared across methods), (c) the 12-step pan
-    trajectory (new-tile fill p50/p95 is the cold-region number)."""
+def run_io_sweep_config(path, channel, io_workers, handle_mode):
+    """One (handle_mode, io_workers) cell of the --io-sweep: a FRESH
+    RawTileProvider (so open_count/handle state doesn't leak across cells),
+    fresh caches/scheduler, measuring (a) app-cold viewport fill wall time
+    for the FIRST method (the staged-parallel path), (b) the second
+    method's fill (raw cache already warm, shared across methods), (c) the
+    12-step pan trajectory (new-tile fill p50/p95 is the cold-region
+    number). Also reports provider.open_count so handle reuse is
+    verifiable in the data."""
+    provider = RawTileProvider(path, handle_mode=handle_mode)
     source = provider.source_identity()
     grid = TileGridSpec(tile_size=IO_SWEEP_TILE_SIZE, source_chunk_shape=(), grid_version="v1")
     level_shape = provider.level_shape(IO_SWEEP_LEVEL)
@@ -565,9 +570,13 @@ def run_io_sweep_config(provider, channel, io_workers):
 
     raw_stats = raw_cache.stats()
     sched.shutdown()
+    open_count = provider.open_count
+    provider.close()
 
     return {
+        "handle_mode": handle_mode,
         "io_workers": io_workers,
+        "open_count": open_count,
         "cold_fill_s_method1": cold_fill_s,
         "method1": f"{method1[0]}_{method1[1]}",
         "second_method_ms": wall_ms2,
@@ -579,8 +588,14 @@ def run_io_sweep_config(provider, channel, io_workers):
     }
 
 
-def run_io_sweep(provider, channel):
-    return [run_io_sweep_config(provider, channel, w) for w in IO_SWEEP_WORKERS]
+def run_io_sweep(path, channel):
+    """Sweep matrix: handle_mode x io_workers. Fresh provider/caches/
+    scheduler per cell (see run_io_sweep_config)."""
+    return [
+        run_io_sweep_config(path, channel, w, mode)
+        for mode in IO_SWEEP_HANDLE_MODES
+        for w in IO_SWEEP_WORKERS
+    ]
 
 
 def main():
@@ -590,8 +605,9 @@ def main():
     ap.add_argument("--channel", default=None, help="channel name or integer index")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--io-sweep", action="store_true",
-                     help="Additionally run the io_workers=[1,2,4,8] raw-I/O-staging "
-                          "sweep (tile=512, level=0, methods tophat_25/cucim_50). "
+                     help="Additionally run the handle_mode=[per_call,per_thread,"
+                          "shared_lock] x io_workers=[1,2,4] raw-I/O-staging sweep "
+                          "(tile=512, level=0, methods tophat_25/cucim_50). "
                           "Independent of --quick; the normal matrix still runs.")
     args = ap.parse_args()
 
@@ -615,7 +631,7 @@ def main():
 
     io_sweep_results = None
     if args.io_sweep:
-        io_sweep_results = run_io_sweep(provider, channel_name)
+        io_sweep_results = run_io_sweep(args.path, channel_name)
 
     tile_sizes = [512] if args.quick else TILE_SIZES
     levels = [0, 1] if args.quick else LEVELS
@@ -714,17 +730,19 @@ def main():
             f.write(f"GPU device mem_info (free/total): {cfg['gpu_device_mem_info']}\n\n")
 
         if io_sweep_results:
-            f.write("## I/O staging sweep (io_workers = 1/2/4/8)\n\n")
+            f.write("## I/O staging sweep (handle_mode x io_workers = 1/2/4)\n\n")
             f.write(f"tile={IO_SWEEP_TILE_SIZE} level={IO_SWEEP_LEVEL} "
                     f"methods={[f'{m}_{p}' for m, p in IO_SWEEP_METHODS]} "
-                    "(measured-only; fresh provider+caches+scheduler per io_workers value)\n\n")
-            f.write("| io_workers | cold fill s (method1) | 2nd method ms | "
-                    "pan new-tile fill p50/p95 ms | raw cache hits/misses |\n")
-            f.write("|---|---|---|---|---|\n")
+                    "(measured-only; fresh provider+caches+scheduler per cell; "
+                    "open_count = provider.open_count, verifies handle reuse)\n\n")
+            f.write("| handle_mode | io_workers | open_count | cold fill s (method1) | "
+                    "2nd method ms | pan new-tile fill p50/p95 ms | raw cache hits/misses |\n")
+            f.write("|---|---|---|---|---|---|---|\n")
             for row in io_sweep_results:
                 raw_stats = row["raw_cache_stats"]
                 f.write(
-                    f"| {row['io_workers']} | {fmt(row['cold_fill_s_method1'])} "
+                    f"| {row['handle_mode']} | {row['io_workers']} | {row['open_count']} | "
+                    f"{fmt(row['cold_fill_s_method1'])} "
                     f"({row['method1']}) | {fmt(row['second_method_ms'])} "
                     f"({row['method2']}) | {fmt(row['pan_new_tile_fill_p50_ms'])}/"
                     f"{fmt(row['pan_new_tile_fill_p95_ms'])} | "

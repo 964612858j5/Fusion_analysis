@@ -17,6 +17,7 @@ from block01.core import bg_correction  # noqa: E402
 from block01.viewer.assembler import RawTileAssembler  # noqa: E402
 from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute, halo_for  # noqa: E402
+from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
@@ -949,3 +950,116 @@ def test_staging_runs_with_io_parallelism(monkeypatch):
     assert reached_four.is_set()
     assert max_concurrent[0] >= 4
     sched.shutdown()
+
+
+# ── RawTileProvider handle_mode ────────────────────────────────────────────
+
+def _write_small_ome_tiff(path):
+    """2-channel 256x256 uint16 OME-TIFF, one pixel value scheme per
+    channel so a read at (c, y, x) is verifiable positionally."""
+    tifffile = pytest.importorskip("tifffile")
+    h = w = 256
+    data = np.zeros((2, h, w), dtype=np.uint16)
+    rows = np.arange(h).reshape(-1, 1)
+    cols = np.arange(w).reshape(1, -1)
+    data[0] = (rows * 1000 + cols).astype(np.uint16)
+    data[1] = (rows * 1000 + cols + 1).astype(np.uint16)
+    tifffile.imwrite(path, data, ome=True, metadata={"Channel": {"Name": ["ch0", "ch1"]}})
+    return data
+
+
+@pytest.fixture
+def small_ome_tiff(tmp_path):
+    path = str(tmp_path / "small.ome.tif")
+    data = _write_small_ome_tiff(path)
+    return path, data
+
+
+def test_provider_per_thread_mode_concurrent_reads_correct(small_ome_tiff):
+    path, data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    assert provider.open_count == 1  # metadata open at construction
+
+    n_threads = 2
+    reads_per_thread = 5
+    results = {}
+    results_lock = threading.Lock()
+    barrier = threading.Barrier(n_threads)
+
+    def worker(idx):
+        barrier.wait(timeout=5)
+        local = []
+        for _ in range(reads_per_thread):
+            arr, _off = provider.read_region(idx % 2, 0, 0, 256, 0, 256)
+            local.append(arr)
+        with results_lock:
+            results[idx] = local
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    for idx, arrs in results.items():
+        expected = data[idx % 2]
+        for arr in arrs:
+            np.testing.assert_array_equal(arr, expected)
+
+    # open_count = 1 (metadata) + at most one TiffFile per distinct thread,
+    # NOT one per call (reads_per_thread * n_threads calls happened).
+    assert provider.open_count <= 1 + n_threads
+    provider.close()
+
+
+def test_provider_shared_lock_mode_serializes_correctly(small_ome_tiff):
+    path, data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="shared_lock")
+    assert provider.open_count == 1
+
+    n_threads = 4
+    results = {}
+    results_lock = threading.Lock()
+    barrier = threading.Barrier(n_threads)
+
+    def worker(idx):
+        barrier.wait(timeout=5)
+        arr, _off = provider.read_region(idx % 2, 0, 0, 256, 0, 256)
+        with results_lock:
+            results[idx] = arr
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    for idx, arr in results.items():
+        np.testing.assert_array_equal(arr, data[idx % 2])
+
+    # Exactly two TiffFile opens total: one at construction (metadata) and
+    # one lazy shared-handle open on first read -- concurrent reads from
+    # n_threads threads must NOT open additional handles.
+    assert provider.open_count == 2
+    provider.close()
+
+
+def test_provider_close_closes_tracked_handles_without_error(small_ome_tiff):
+    path, _data = small_ome_tiff
+
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    provider.read_region(0, 0, 0, 256, 0, 256)
+    provider.close()  # must not raise
+
+    provider2 = RawTileProvider(path, handle_mode="shared_lock")
+    provider2.read_region(0, 0, 0, 256, 0, 256)
+    provider2.close()  # must not raise
+
+    # per_call mode: close() is a no-op (nothing tracked) and reads before
+    # AND after close() still work correctly (per_call opens its own handle
+    # every call and never depends on cached state).
+    provider3 = RawTileProvider(path, handle_mode="per_call")
+    arr_before, _ = provider3.read_region(0, 0, 0, 256, 0, 256)
+    provider3.close()
+    arr_after, _ = provider3.read_region(0, 0, 0, 256, 0, 256)
+    np.testing.assert_array_equal(arr_before, arr_after)

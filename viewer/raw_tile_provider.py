@@ -1,15 +1,31 @@
 """Pyramid raw-tile I/O for OME-TIFF sources.
 
 Opens the OME-TIFF once at construction to record pyramid geometry, dtype
-and channel names; each `read_tile`/`read_region` call opens its own
-`tifffile.TiffFile` handle so that concurrent calls from an I/O thread pool
-are safe (tifffile/zarr handles are not guaranteed thread-safe to share).
+and channel names. Pixel reads then go through one of three handle modes
+(see `handle_mode` in `__init__`):
+
+- "per_call" (default, UNCHANGED baseline behavior): each `read_region` call
+  opens its own `tifffile.TiffFile` handle, so concurrent calls from an I/O
+  thread pool are trivially safe (tifffile/zarr handles are not guaranteed
+  thread-safe to share) -- at the cost of a fresh TiffFile open per call.
+- "per_thread": each thread lazily opens and caches its OWN TiffFile (and
+  {level: zarr array} view) in thread-local storage, reused for the life of
+  the provider. Avoids repeated opens for a thread that reads many tiles,
+  while still never sharing a single handle across threads.
+- "shared_lock": ONE TiffFile (and {level: zarr array} view), opened lazily,
+  shared by all threads and serialized through a single `threading.Lock`.
+  Measures whether handle reuse alone (no parallel decode) helps.
+
+`open_count` tracks how many `tifffile.TiffFile(...)` opens this provider
+instance has actually performed, across all modes, so handle reuse is
+verifiable in benchmark output.
 """
 
 import os
 import re
+import threading
 import xml.etree.ElementTree as ET
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -17,16 +33,48 @@ from .tile_types import SourceIdentity, TileAddress
 
 _OME_NS = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
 
+_HANDLE_MODES = ("per_call", "per_thread", "shared_lock")
+
 
 class RawTileProvider:
     """Reads float32 tiles/regions from an OME-TIFF pyramid on demand."""
 
-    def __init__(self, path: str):
+    # Default measured 2026-08-30 (docs/benchmarks/..._handle_modes.md):
+    # per-call TiffFile+aszarr opening re-parses the TIFF structure on every
+    # read (~13x slower cold viewport fill, ~10x slower cold-region pan).
+    # "per_thread" reuses one handle per I/O thread; "per_call" remains
+    # available as the measurement baseline.
+    def __init__(self, path: str, handle_mode: str = "per_thread"):
+        if handle_mode not in _HANDLE_MODES:
+            raise ValueError(
+                f"handle_mode must be one of {_HANDLE_MODES}, got {handle_mode!r}")
         self.path = os.path.abspath(path)
+        self.handle_mode = handle_mode
+
+        # open_count: total number of tifffile.TiffFile(...) opens performed
+        # by this provider instance (any mode) -- a benchmark-verifiable
+        # handle-reuse counter.
+        self.open_count = 0
+        self._open_count_lock = threading.Lock()
+
+        # per_thread mode state: thread-local cache of (TiffFile, {level:
+        # zarr array}), plus a registry (guarded by _registry_lock) of every
+        # thread-local TiffFile opened, so close() can close them all.
+        self._thread_local = threading.local()
+        self._thread_registry: List = []
+        self._registry_lock = threading.Lock()
+
+        # shared_lock mode state: one lazily-opened TiffFile + level-array
+        # cache, guarded by _shared_lock for both open and every read.
+        self._shared_lock = threading.Lock()
+        self._shared_tf = None
+        self._shared_levels: Dict[int, object] = {}
+
+        self._closed = False
 
         import tifffile
 
-        with tifffile.TiffFile(self.path) as tf:
+        with self._counted_tifffile(tifffile, self.path) as tf:
             series0 = tf.series[0]
             self._level_shapes: List[Tuple[int, int, int]] = [
                 tuple(level.shape) for level in series0.levels
@@ -34,6 +82,11 @@ class RawTileProvider:
             self._dtype = str(series0.dtype)
             self._num_channels = self._level_shapes[0][0]
             self._channel_names = self._parse_channel_names(tf, self._num_channels)
+
+    def _counted_tifffile(self, tifffile_mod, path):
+        with self._open_count_lock:
+            self.open_count += 1
+        return tifffile_mod.TiffFile(path)
 
     # ── metadata ─────────────────────────────────────────────────────────
 
@@ -111,6 +164,58 @@ class RawTileProvider:
             z = z[str(level)]
         return z
 
+    # ── handle-mode plumbing ─────────────────────────────────────────────
+
+    def _per_thread_state(self):
+        """Return this thread's (TiffFile, {level: zarr array}) pair,
+        opening + registering it on first use in this thread."""
+        state = getattr(self._thread_local, "state", None)
+        if state is not None:
+            return state
+
+        import tifffile
+
+        tf = self._counted_tifffile(tifffile, self.path).__enter__()
+        levels: Dict[int, object] = {}
+        state = (tf, levels)
+        self._thread_local.state = state
+        with self._registry_lock:
+            self._thread_registry.append(tf)
+        return state
+
+    def _shared_state(self):
+        """Return the single shared (TiffFile, {level: zarr array}) pair,
+        opening it lazily on first use. Caller must hold `_shared_lock`."""
+        if self._shared_tf is None:
+            import tifffile
+
+            self._shared_tf = self._counted_tifffile(tifffile, self.path).__enter__()
+        return self._shared_tf, self._shared_levels
+
+    def close(self):
+        """Close every handle this provider opened for "per_thread" and
+        "shared_lock" modes. After close(), threads must not call
+        read_tile/read_region on this provider again (per_call mode is
+        unaffected -- it opens/closes its own handle per call and holds
+        nothing to close here)."""
+        self._closed = True
+        with self._registry_lock:
+            handles = list(self._thread_registry)
+            self._thread_registry.clear()
+        for tf in handles:
+            try:
+                tf.close()
+            except Exception:
+                pass
+        with self._shared_lock:
+            if self._shared_tf is not None:
+                try:
+                    self._shared_tf.close()
+                except Exception:
+                    pass
+                self._shared_tf = None
+                self._shared_levels.clear()
+
     def read_tile(self, channel, tile: TileAddress):
         """Return (2D array in NATIVE source dtype, io_ms).
 
@@ -151,8 +256,6 @@ class RawTileProvider:
         caller's responsibility (see read_tile / RawTileAssembler, which wrap
         this call themselves).
         """
-        import tifffile
-
         h, w = self.level_shape(level)
         cy0 = max(0, min(y0, h))
         cy1 = max(0, min(y1, h))
@@ -161,8 +264,31 @@ class RawTileProvider:
 
         c = self.channel_index(channel)
 
-        with tifffile.TiffFile(self.path) as tf:
-            zarr_arr = self._open_level_array(tf, level)
+        if self.handle_mode == "per_call":
+            import tifffile
+
+            with self._counted_tifffile(tifffile, self.path) as tf:
+                zarr_arr = self._open_level_array(tf, level)
+                data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
+
+        elif self.handle_mode == "per_thread":
+            tf, levels = self._per_thread_state()
+            zarr_arr = levels.get(level)
+            if zarr_arr is None:
+                zarr_arr = self._open_level_array(tf, level)
+                levels[level] = zarr_arr
             data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
+
+        elif self.handle_mode == "shared_lock":
+            with self._shared_lock:
+                tf, levels = self._shared_state()
+                zarr_arr = levels.get(level)
+                if zarr_arr is None:
+                    zarr_arr = self._open_level_array(tf, level)
+                    levels[level] = zarr_arr
+                data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
+
+        else:
+            raise ValueError(f"unknown handle_mode: {self.handle_mode!r}")
 
         return data, (cy0, cx0)

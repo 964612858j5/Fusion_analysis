@@ -114,12 +114,13 @@ class Step0ChannelRow(ChannelRowBase):
 
         # Fixed geometry so rows never shift: the checkbox keeps a constant
         # footprint even when the page restyles its indicator (green "done"
-        # state), and the name column has a fixed width so every name stays
-        # left-aligned with the method combo directly after it.
+        # state), and the name column is non-stretching so the method combo
+        # sits directly after the name. The host (adapter) sets one uniform
+        # name width across rows — the longest name — so combos align.
         self.checkbox.setFixedSize(22, 18)
         self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
                                       QtWidgets.QSizePolicy.Preferred)
-        self.name_label.setFixedWidth(110)
+        self.name_label.setFixedWidth(self.name_label.sizeHint().width() + 2)
         self._extras_layout.setStretchFactor(self.name_label, 0)
 
         self.method_cb = QtWidgets.QComboBox()

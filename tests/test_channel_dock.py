@@ -309,13 +309,22 @@ def test_step0_row_name_position_stable_after_done(app):
     QtWidgets.QApplication.processEvents()
 
     rows = {ch: page._channel_rows[ch]["row_widget"] for ch in ("CD3", "CD20")}
+    for r in rows.values():           # force a real layout pass (offscreen)
+        r.resize(300, 26)
+        r.layout().activate()
     before = {ch: r.name_label.x() for ch, r in rows.items()}
     # all names share one fixed left position
     assert len(set(before.values())) == 1
+    # combos aligned and directly after the (uniform-width) name column
+    for r in rows.values():
+        assert r.method_cb.x() == r.name_label.x() + r.name_label.width() + 5
+    assert len({r.method_cb.x() for r in rows.values()}) == 1
 
     page._set_channel_computing("CD3")
     page._set_channel_done("CD3")
     QtWidgets.QApplication.processEvents()
+    for r in rows.values():
+        r.layout().activate()
     after = {ch: r.name_label.x() for ch, r in rows.items()}
     assert after == before                      # green state must not shift names
     # checkbox footprint constant regardless of the green indicator restyle

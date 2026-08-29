@@ -18,24 +18,43 @@ Contract (docs/v15_viewer_foundation_interfaces.md §4):
   to any waiter whose generation is stale at completion time is simply
   skipped (no callback for that waiter) -- this is the "lands in the cache,
   not necessarily delivered" rule from the design doc.
+- **Raw I/O staging** (docs/v15_viewer_foundation_interfaces.md §4): before a
+  compute worker runs a CorrectionKey, it asks
+  `compute.raw_keys_for(key)` for the halo-padded tile set and stages any
+  cache-missing raw tiles through the SAME single-flight `_pending`
+  machinery as external RawKey requests (`_stage_raw_tile`), submitted in
+  parallel to the I/O ThreadPoolExecutor (`io_workers` wide). The worker
+  blocks on all of them (generous timeout, then proceeds anyway — the
+  assembler falls back to direct reads for anything still missing) so raw
+  reads for one CorrectionKey are never duplicated across compute workers
+  and always run with I/O parallelism instead of serially inside compute.
 """
 
 import dataclasses
 import heapq
 import itertools
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .tile_types import CorrectionKey, PixelBuffer, QualityLevel, RawKey, TileResult
 
 
 class _Entry:
-    """Bookkeeping for one in-flight (deduped) key."""
+    """Bookkeeping for one in-flight (deduped) key.
 
-    __slots__ = ("waiters", "started")
+    `waiters` are external (req, callback) pairs delivered via `_deliver`
+    (subject to generation staleness). `internal_waiters` are plain
+    zero-arg callables used by raw-tile staging: they always fire on
+    completion (success or error), regardless of any generation, because
+    staging has no generation of its own -- it just wants the cache filled.
+    """
 
-    def __init__(self, req, callback):
-        self.waiters = [(req, callback)]
+    __slots__ = ("waiters", "internal_waiters", "started")
+
+    def __init__(self):
+        self.waiters = []
+        self.internal_waiters = []
         self.started = False
 
 
@@ -81,7 +100,8 @@ class TileScheduler:
             if entry is not None:
                 entry.waiters.append((req, callback))
                 return
-            entry = _Entry(req, callback)
+            entry = _Entry()
+            entry.waiters.append((req, callback))
             self._pending[key] = entry
             if isinstance(key, RawKey):
                 entry.started = True
@@ -148,6 +168,9 @@ class TileScheduler:
         with self._lock:
             entry = self._pending.pop(key, None)
         waiters = entry.waiters if entry is not None else []
+        internal_waiters = entry.internal_waiters if entry is not None else []
+        for iw in internal_waiters:
+            iw()
 
         if error is not None:
             self._deliver(waiters, lambda req: TileResult(
@@ -197,7 +220,58 @@ class TileScheduler:
 
             self._run_compute(key, entry)
 
+    def _stage_raw_tile(self, raw_key: RawKey, on_done):
+        """Ensure `raw_key` is staged into `raw_cache`, deduped via the same
+        single-flight `_pending` machinery as external RawKey requests.
+        `on_done()` fires exactly once, unconditionally, when the tile is
+        either already cached or the (possibly shared) fetch completes."""
+        if self.raw_cache.get(raw_key) is not None:
+            on_done()
+            return
+
+        submit = False
+        with self._lock:
+            entry = self._pending.get(raw_key)
+            if entry is not None:
+                entry.internal_waiters.append(on_done)
+            else:
+                entry = _Entry()
+                entry.internal_waiters.append(on_done)
+                entry.started = True
+                self._pending[raw_key] = entry
+                submit = True
+
+        if submit:
+            self._io_executor.submit(self._run_raw, raw_key)
+
+    def _stage_raw_for(self, key: CorrectionKey):
+        """Stage every raw tile `key`'s halo needs (parallel, single-flight),
+        blocking the calling compute worker until all are resolved (or a
+        generous timeout elapses). Returns (staged_tiles, staging_wall_ms)."""
+        missing = [rk for rk in self.compute.raw_keys_for(key) if self.raw_cache.get(rk) is None]
+        if not missing:
+            return 0, 0.0
+
+        t0 = time.perf_counter()
+        event = threading.Event()
+        remaining = [len(missing)]
+        remaining_lock = threading.Lock()
+
+        def on_done():
+            with remaining_lock:
+                remaining[0] -= 1
+                done = remaining[0] <= 0
+            if done:
+                event.set()
+
+        for rk in missing:
+            self._stage_raw_tile(rk, on_done)
+
+        event.wait(timeout=120.0)  # on timeout, proceed anyway -- assembler falls back
+        return len(missing), (time.perf_counter() - t0) * 1000.0
+
     def _run_compute(self, key: CorrectionKey, entry: _Entry):
+        staged_tiles, staging_wall_ms = self._stage_raw_for(key)
         try:
             result = self.compute.compute(key)
             error = None
@@ -205,6 +279,8 @@ class TileScheduler:
             result, error = None, str(exc)
 
         if error is None:
+            result.timing["staged_tiles"] = staged_tiles
+            result.timing["staging_wall_ms"] = staging_wall_ms
             self.corrected_cache.put(key, result.pixels.handle)
 
         with self._lock:

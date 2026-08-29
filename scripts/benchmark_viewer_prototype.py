@@ -510,12 +510,89 @@ def summarize_pan(pan_steps):
     }
 
 
+IO_SWEEP_TILE_SIZE = 512
+IO_SWEEP_LEVEL = 0
+IO_SWEEP_METHODS = [("tophat", 25), ("cucim", 50)]
+IO_SWEEP_WORKERS = [1, 2, 4, 8]
+
+
+def run_io_sweep_config(provider, channel, io_workers):
+    """One io_workers value of the --io-sweep: fresh provider-independent
+    caches/scheduler, measure (a) app-cold viewport fill wall time for the
+    FIRST method (the staged-parallel path), (b) the second method's fill
+    (raw cache already warm, shared across methods), (c) the 12-step pan
+    trajectory (new-tile fill p50/p95 is the cold-region number)."""
+    source = provider.source_identity()
+    grid = TileGridSpec(tile_size=IO_SWEEP_TILE_SIZE, source_chunk_shape=(), grid_version="v1")
+    level_shape = provider.level_shape(IO_SWEEP_LEVEL)
+    tiles, vp_box = tiles_for_viewport(level_shape, IO_SWEEP_TILE_SIZE, VIEWPORT_PX)
+
+    def make_key(tx, ty, method_param):
+        addr = TileAddress(grid=grid, level=IO_SWEEP_LEVEL, tx=tx, ty=ty)
+        method, base_param = method_param
+        return CorrectionKey(
+            source=source, channel=channel, tile=addr, method=method,
+            params=(base_param,), algorithm_version=ALGO_VERSION,
+            quality=QualityLevel.NATIVE,
+        )
+
+    raw_cache = LRUByteCache(RAW_CACHE_BYTES)
+    corr_cache = LRUByteCache(CORR_CACHE_BYTES)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache,
+                           io_workers=io_workers, compute_workers=1)
+
+    method1, method2 = IO_SWEEP_METHODS
+
+    gen = 0
+    gen += 1
+    keys1 = [make_key(tx, ty, method1) for tx, ty in tiles]
+    reqs1 = [TileRequest(key=k, generation=gen, priority=0) for k in keys1]
+    t0 = time.perf_counter()
+    _results1, wall_ms1, _records1 = fill_sync(sched, reqs1)
+    cold_fill_s = (time.perf_counter() - t0)
+
+    gen += 1
+    keys2 = [make_key(tx, ty, method2) for tx, ty in tiles]
+    reqs2 = [TileRequest(key=k, generation=gen, priority=0) for k in keys2]
+    _results2, wall_ms2, _records2 = fill_sync(sched, reqs2)
+
+    def pan_make_key(tx, ty):
+        return make_key(tx, ty, method1)
+    pan_steps = run_pan_test(sched, pan_make_key, vp_box, IO_SWEEP_TILE_SIZE, level_shape,
+                              generation_base=10_000)
+    pan_summary = summarize_pan(pan_steps)
+
+    raw_stats = raw_cache.stats()
+    sched.shutdown()
+
+    return {
+        "io_workers": io_workers,
+        "cold_fill_s_method1": cold_fill_s,
+        "method1": f"{method1[0]}_{method1[1]}",
+        "second_method_ms": wall_ms2,
+        "method2": f"{method2[0]}_{method2[1]}",
+        "pan_new_tile_fill_p50_ms": pan_summary["new_tile_fill_overall"]["wall_p50_ms"],
+        "pan_new_tile_fill_p95_ms": pan_summary["new_tile_fill_overall"]["wall_p95_ms"],
+        "pan_warning": pan_summary["warning"],
+        "raw_cache_stats": raw_stats,
+    }
+
+
+def run_io_sweep(provider, channel):
+    return [run_io_sweep_config(provider, channel, w) for w in IO_SWEEP_WORKERS]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--path", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--channel", default=None, help="channel name or integer index")
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--io-sweep", action="store_true",
+                     help="Additionally run the io_workers=[1,2,4,8] raw-I/O-staging "
+                          "sweep (tile=512, level=0, methods tophat_25/cucim_50). "
+                          "Independent of --quick; the normal matrix still runs.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -534,10 +611,14 @@ def main():
             channel_index = provider.channel_index(args.channel)
     channel_name = provider.channel_names[channel_index]
 
+    channel_stats = sample_channel_stats(provider, channel_index)
+
+    io_sweep_results = None
+    if args.io_sweep:
+        io_sweep_results = run_io_sweep(provider, channel_name)
+
     tile_sizes = [512] if args.quick else TILE_SIZES
     levels = [0, 1] if args.quick else LEVELS
-
-    channel_stats = sample_channel_stats(provider, channel_index)
 
     results = []
     for tile_size in tile_sizes:
@@ -558,6 +639,7 @@ def main():
         "raw_cache_budget_bytes": RAW_CACHE_BYTES,
         "corrected_cache_budget_bytes": CORR_CACHE_BYTES,
         "configs": results,
+        "io_sweep": io_sweep_results,
     }
 
     results_path = os.path.join(args.out, "benchmark_results.json")
@@ -630,6 +712,27 @@ def main():
                     f"peak(ru_maxrss)={cfg['rss']['peak_kb_ru_maxrss']}KB\n")
             f.write(f"GPU mem pool peak: {cfg['gpu_mem_pool_peak']}\n")
             f.write(f"GPU device mem_info (free/total): {cfg['gpu_device_mem_info']}\n\n")
+
+        if io_sweep_results:
+            f.write("## I/O staging sweep (io_workers = 1/2/4/8)\n\n")
+            f.write(f"tile={IO_SWEEP_TILE_SIZE} level={IO_SWEEP_LEVEL} "
+                    f"methods={[f'{m}_{p}' for m, p in IO_SWEEP_METHODS]} "
+                    "(measured-only; fresh provider+caches+scheduler per io_workers value)\n\n")
+            f.write("| io_workers | cold fill s (method1) | 2nd method ms | "
+                    "pan new-tile fill p50/p95 ms | raw cache hits/misses |\n")
+            f.write("|---|---|---|---|---|\n")
+            for row in io_sweep_results:
+                raw_stats = row["raw_cache_stats"]
+                f.write(
+                    f"| {row['io_workers']} | {fmt(row['cold_fill_s_method1'])} "
+                    f"({row['method1']}) | {fmt(row['second_method_ms'])} "
+                    f"({row['method2']}) | {fmt(row['pan_new_tile_fill_p50_ms'])}/"
+                    f"{fmt(row['pan_new_tile_fill_p95_ms'])} | "
+                    f"{raw_stats.get('hits')}/{raw_stats.get('misses')} |\n"
+                )
+                if row["pan_warning"]:
+                    f.write(f"  - {row['pan_warning']}\n")
+            f.write("\n")
 
     print(report_path)
 

@@ -22,7 +22,7 @@ import numpy as np
 
 from ..core import bg_correction
 from .assembler import RawTileAssembler
-from .tile_types import CorrectionKey, PixelBuffer, TileRequest, TileResult
+from .tile_types import CorrectionKey, PixelBuffer, RawKey, TileAddress, TileRequest, TileResult, tiles_covering
 
 
 def halo_for(method: str, param: int) -> int:
@@ -42,12 +42,10 @@ class CorrectionCompute:
         self.raw_cache = raw_cache
         self.assembler = RawTileAssembler(provider, raw_cache)
 
-    def compute(self, key: CorrectionKey) -> TileResult:
-        """Run the correction for `key.method` and return a TileResult.
-
-        Not used for raw tiles ("original"/RawKey) — the scheduler/raw cache
-        serve those directly via the provider.
-        """
+    def _halo_bbox(self, key: CorrectionKey):
+        """Shared bbox/halo derivation used by both `compute()` and
+        `raw_keys_for()`, so staging and assembly always cover identical
+        tiles (unclamped padded window; clamping happens in the caller)."""
         tile = key.tile
         ts = tile.grid.tile_size
         y0 = tile.ty * ts
@@ -60,6 +58,40 @@ class CorrectionCompute:
 
         py0, py1 = y0 - halo, y1 + halo
         px0, px1 = x0 - halo, x1 + halo
+        return y0, y1, x0, x1, py0, py1, px0, px1, halo
+
+    def raw_keys_for(self, key: CorrectionKey):
+        """Canonical raw tiles covering `key`'s halo-padded, edge-clamped
+        bbox — identical coverage to what `compute()` assembles, so the
+        scheduler can stage exactly these through the I/O pool ahead of
+        compute."""
+        _y0, _y1, _x0, _x1, py0, py1, px0, px1, _halo = self._halo_bbox(key)
+        level = key.tile.level
+        h, w = self.provider.level_shape(level)
+        cy0, cy1 = max(0, min(py0, h)), max(0, min(py1, h))
+        cx0, cx1 = max(0, min(px0, w)), max(0, min(px1, w))
+        if cy1 <= cy0 or cx1 <= cx0:
+            return []
+
+        ts = key.tile.grid.tile_size
+        coords = tiles_covering((cy0, cx0, cy1, cx1), ts)
+        return [
+            RawKey(
+                source=key.source, channel=key.channel,
+                tile=TileAddress(grid=key.tile.grid, level=level, tx=tx, ty=ty),
+            )
+            for tx, ty in coords
+        ]
+
+    def compute(self, key: CorrectionKey) -> TileResult:
+        """Run the correction for `key.method` and return a TileResult.
+
+        Not used for raw tiles ("original"/RawKey) — the scheduler/raw cache
+        serve those directly via the provider.
+        """
+        y0, y1, x0, x1, py0, py1, px0, px1, halo = self._halo_bbox(key)
+        tile = key.tile
+        param = int(key.params[0])
 
         padded_native, (ry0, rx0), assemble_stats = self.assembler.assemble(
             key.source, tile.grid, key.channel, tile.level, py0, py1, px0, px1

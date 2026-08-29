@@ -456,6 +456,10 @@ class FakeCompute:
         self.delay_event = delay_event
         self.started_event = started_event
 
+    def raw_keys_for(self, key: CorrectionKey):
+        # Existing scheduler tests don't exercise raw staging; no raw deps.
+        return []
+
     def compute(self, key: CorrectionKey):
         with self.calls_lock:
             self.calls += 1
@@ -699,4 +703,249 @@ def test_scheduler_raw_key_path():
     assert results[0].error is None
     assert results[0].quality == QualityLevel.NATIVE
     assert raw_cache.get(key) is not None
+    sched.shutdown()
+
+
+# ── raw I/O staging (docs/v15_viewer_foundation_interfaces.md §4) ──────────
+
+def test_raw_keys_for_matches_assembler_coverage(monkeypatch):
+    """`raw_keys_for(key)` must name exactly the raw tiles `compute()`
+    actually assembles -- no more, no less."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    raw_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=2, ty=3)
+    key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                         params=(10,), algorithm_version="v1")
+
+    raw_keys = compute.raw_keys_for(key)
+    assert raw_keys  # non-trivial halo -> at least the core tile
+
+    result = compute.compute(key)
+    assert result.error is None
+
+    # Every tile named by raw_keys_for is now in the raw cache (assembled),
+    # and nothing else was fetched.
+    for rk in raw_keys:
+        assert raw_cache.get(rk) is not None
+    assert provider.read_tile_calls == len(raw_keys)
+
+
+def test_staging_single_flight_across_correction_keys(monkeypatch):
+    """Two CorrectionKeys whose halos share a raw tile, staged concurrently
+    by two compute workers, must read that shared tile exactly once."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=8000, image_w=8000)
+    orig_read_tile = provider.read_tile
+    call_counts = {}
+    counts_lock = threading.Lock()
+
+    def slow_read_tile(channel, tile):
+        addr = (tile.tx, tile.ty)
+        with counts_lock:
+            call_counts[addr] = call_counts.get(addr, 0) + 1
+        time.sleep(0.05)  # widen the window so both workers' staging overlaps
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = slow_read_tile
+
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=4, compute_workers=2)
+
+    src = make_source()
+    # Large halo (2*300=600) guarantees tile (tx=4,ty=4) and (tx=5,ty=4) share
+    # raw tiles in their halo-padded windows.
+    tile_a = make_tile(tile_size=512, tx=4, ty=4)
+    tile_b = make_tile(tile_size=512, tx=5, ty=4)
+    key_a = CorrectionKey(source=src, channel="DAPI", tile=tile_a, method="tophat",
+                           params=(300,), algorithm_version="v1")
+    key_b = CorrectionKey(source=src, channel="DAPI", tile=tile_b, method="tophat",
+                           params=(300,), algorithm_version="v1")
+    assert set(compute.raw_keys_for(key_a)) & set(compute.raw_keys_for(key_b))
+
+    results = []
+    lock = threading.Lock()
+
+    def cb(r):
+        with lock:
+            results.append(r)
+
+    sched.request(TileRequest(key=key_a, generation=0, priority=0), cb)
+    sched.request(TileRequest(key=key_b, generation=0, priority=0), cb)
+
+    deadline = time.time() + 15
+    while len(results) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert len(results) == 2
+    assert all(r.error is None for r in results)
+    assert all(v == 1 for v in call_counts.values())  # single-flight: read each tile once
+    sched.shutdown()
+
+
+def test_staging_shares_with_external_raw_request(monkeypatch):
+    """Staging for a CorrectionKey must dedup against an external RawKey
+    request already in flight for the same raw tile -- no duplicate read."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    orig_read_tile = provider.read_tile
+    call_counts = {}
+    counts_lock = threading.Lock()
+    gate = threading.Event()
+
+    def gated_read_tile(channel, tile):
+        addr = (tile.tx, tile.ty)
+        with counts_lock:
+            call_counts[addr] = call_counts.get(addr, 0) + 1
+        gate.wait(timeout=5)
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = gated_read_tile
+
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=4, compute_workers=1)
+
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=2, ty=2)
+    key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                         params=(10,), algorithm_version="v1")
+    shared_raw_key = compute.raw_keys_for(key)[0]
+
+    raw_results = []
+    corr_results = []
+    sched.request(TileRequest(key=shared_raw_key, generation=0, priority=0), raw_results.append)
+    time.sleep(0.1)  # let the external raw fetch start and block on the gate
+    sched.request(TileRequest(key=key, generation=0, priority=0), corr_results.append)
+    time.sleep(0.1)  # let the compute worker's staging attach as a waiter
+    gate.set()
+
+    deadline = time.time() + 15
+    while (not raw_results or not corr_results) and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert raw_results and raw_results[0].error is None
+    assert corr_results and corr_results[0].error is None
+    assert call_counts.get((shared_raw_key.tile.tx, shared_raw_key.tile.ty)) == 1
+    sched.shutdown()
+
+
+def test_staging_populates_cache_for_full_hits(monkeypatch):
+    """Staged tiles land in raw_cache before compute() assembles, so the
+    assembler reports 100% hits and the TileResult carries staging timing."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=4, compute_workers=1)
+
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=2, ty=2)
+    key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                         params=(10,), algorithm_version="v1")
+    expected_staged = len(compute.raw_keys_for(key))
+
+    results = []
+    sched.request(TileRequest(key=key, generation=0, priority=0), results.append)
+    deadline = time.time() + 10
+    while not results and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert results[0].error is None
+    timing = results[0].timing
+    assert timing["staged_tiles"] == expected_staged
+    assert timing["staging_wall_ms"] >= 0.0
+    assert timing["raw_tiles_hit"] == timing["raw_tiles_total"]  # 100% hits post-staging
+    sched.shutdown()
+
+
+def test_staged_read_failure_surfaces_as_deterministic_error(monkeypatch):
+    """If a staged raw tile's read fails, staging still completes (the
+    failing tile is simply left uncached) and the assembler's own direct
+    read then re-raises -> compute() fails deterministically."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    orig_read_tile = provider.read_tile
+
+    def failing_read_tile(channel, tile):
+        if (tile.tx, tile.ty) == (2, 2):
+            raise RuntimeError("boom")
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = failing_read_tile
+
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=4, compute_workers=1)
+
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=2, ty=2)  # core tile IS the failing address
+    key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                         params=(10,), algorithm_version="v1")
+
+    results = []
+    sched.request(TileRequest(key=key, generation=0, priority=0), results.append)
+    deadline = time.time() + 10
+    while not results and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert results[0].error is not None
+    assert "boom" in results[0].error
+    sched.shutdown()
+
+
+def test_staging_runs_with_io_parallelism(monkeypatch):
+    """With io_workers=4 and >=4 missing raw tiles, staging must actually
+    overlap reads across threads (proves parallel submission, not a serial
+    loop inside compute)."""
+    monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
+    provider = FakeProvider(image_h=8000, image_w=8000)
+    orig_read_tile = provider.read_tile
+    concurrent = [0]
+    max_concurrent = [0]
+    reached_four = threading.Event()
+    lock = threading.Lock()
+
+    def tracking_read_tile(channel, tile):
+        with lock:
+            concurrent[0] += 1
+            max_concurrent[0] = max(max_concurrent[0], concurrent[0])
+            if concurrent[0] >= 4:
+                reached_four.set()
+        time.sleep(0.05)
+        with lock:
+            concurrent[0] -= 1
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = tracking_read_tile
+
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=4, compute_workers=1)
+
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=4, ty=4)
+    # Large halo -> the padded window spans a 3x3 (or larger) block of raw
+    # tiles, well past the 4 concurrent readers this test needs to observe.
+    key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                         params=(200,), algorithm_version="v1")
+    assert len(compute.raw_keys_for(key)) >= 4
+
+    results = []
+    sched.request(TileRequest(key=key, generation=0, priority=0), results.append)
+    deadline = time.time() + 15
+    while not results and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert results[0].error is None
+    assert reached_four.is_set()
+    assert max_concurrent[0] >= 4
     sched.shutdown()

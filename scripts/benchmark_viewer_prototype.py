@@ -37,26 +37,15 @@ import time
 
 import numpy as np
 
-# Self-bootstrap: make `block01` resolve to THIS tree regardless of the
-# checkout directory name (worktrees like block01_v14), same as the repo's
-# conftest.py does for pytest. Allows: python scripts/benchmark_viewer_prototype.py
-if "block01" not in sys.modules:
-    import importlib.util as _ilu
-    import pathlib as _pl
-    _root = _pl.Path(__file__).resolve().parent.parent
-    _spec = _ilu.spec_from_file_location(
-        "block01", _root / "__init__.py",
-        submodule_search_locations=[str(_root)])
-    _mod = _ilu.module_from_spec(_spec)
-    sys.modules["block01"] = _mod
-    _spec.loader.exec_module(_mod)
-
-
 def _register_block01_alias():
     """Bind the `block01` package name to THIS checkout, regardless of the
     directory name it lives in (e.g. a `block01_v14` git worktree) — mirrors
     the repo-root conftest.py shim so `python scripts/benchmark_...py` and
-    `pytest` resolve the same module tree."""
+    `pytest` resolve the same module tree.
+
+    If a DIFFERENT `block01` checkout is already imported, this is a hard
+    failure (mirrors conftest.py): silently keeping the foreign module would
+    make this script measure the wrong code without any indication."""
     import importlib.util
     import pathlib
 
@@ -64,9 +53,12 @@ def _register_block01_alias():
     existing = sys.modules.get("block01")
     if existing is not None:
         path = getattr(existing, "__file__", "") or ""
-        if pathlib.Path(path).resolve().parent == root:
+        existing_root = pathlib.Path(path).resolve().parent if path else None
+        if existing_root == root:
             return
-        return  # a different block01 is already imported; don't clobber it
+        raise RuntimeError(
+            f"'block01' already imported from {existing_root!r}, not from "
+            f"{root!r}; refusing to benchmark against the wrong checkout.")
     spec = importlib.util.spec_from_file_location(
         "block01", root / "__init__.py", submodule_search_locations=[str(root)])
     mod = importlib.util.module_from_spec(spec)
@@ -91,13 +83,14 @@ from block01.viewer.tile_types import (
     TileGridSpec,
     TileRequest,
     effective_param,
+    tiles_covering,
 )
 
 VIEWPORT_PX = 2048
 METHOD_PARAMS = [("tophat", 25), ("tophat", 50), ("cucim", 50), ("cucim", 100)]
 TILE_SIZES = [256, 512, 1024]
 LEVELS = [0, 1, 2]
-ALGO_VERSION = "v1"
+ALGO_VERSION = bg_correction.BG_CORRECTION_ALGO_VERSION
 ROUNDS = 3
 RAW_CACHE_BYTES = 512 * 1024 * 1024   # 512 MB -- provisional default candidate
 CORR_CACHE_BYTES = 512 * 1024 * 1024  # 512 = provisional default candidate
@@ -205,10 +198,9 @@ def tiles_for_viewport(level_shape, tile_size, viewport_px):
     x0 = max(0, cx - vp // 2)
     y1 = min(h, y0 + vp)
     x1 = min(w, x0 + vp)
-    tx0, tx1 = x0 // tile_size, (x1 - 1) // tile_size
-    ty0, ty1 = y0 // tile_size, (y1 - 1) // tile_size
-    tiles = [(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)]
-    return tiles, (y0, x0, y1, x1)
+    bbox = (y0, x0, y1, x1)
+    tiles = sorted(tiles_covering(bbox, tile_size))
+    return tiles, bbox
 
 
 def fill_sync(scheduler, requests):
@@ -264,9 +256,12 @@ def sample_channel_stats(provider, channel_index, level=0, tile_size=512):
 
 # ─────────────────────────── pan trajectory ───────────────────────────────
 
-def pan_trajectory_steps(tile_size, n_steps=8):
-    """8-step continuous trajectory: quarter-tile steps, alternating +x/+y,
-    so some steps cross a tile boundary and some don't."""
+def pan_trajectory_steps(tile_size, n_steps=12):
+    """N-step continuous trajectory: quarter-tile steps, alternating +x/+y,
+    so some steps cross a tile boundary (new column/row) and some don't.
+    Extended past the original 8 steps so the cumulative shift (n_steps/2
+    quarter-tiles per axis) walks beyond the ~25-tile footprint warmed by
+    the initial (unaligned) viewport fill and MUST fetch new tiles."""
     q = tile_size // 4
     steps = []
     for i in range(n_steps):
@@ -277,47 +272,60 @@ def pan_trajectory_steps(tile_size, n_steps=8):
     return steps
 
 
-def run_pan_test(sched, make_key, start_tiles, tile_size, level_shape, generation_base=1000):
-    """Walk the continuous pan trajectory; per-step record new-tile count and
-    step-prep wall-clock ms."""
-    max_tx = level_shape[1] // tile_size
-    max_ty = level_shape[0] // tile_size
+def run_pan_test(sched, make_key, start_bbox, tile_size, level_shape, generation_base=1000):
+    """Walk a continuous pan trajectory over a FLOATING viewport bbox.
 
-    # Track viewport top-left in pixel space, starting at the tile-set's
-    # min tx/ty * tile_size (approximation for a synthetic viewport).
-    px = min(tx for tx, _ in start_tiles) * tile_size
-    py = min(ty for _, ty in start_tiles) * tile_size
-    known_tiles = set(start_tiles)
+    Unlike a naive "fixed tile count from an aligned origin" pan test, this
+    tracks the actual (possibly unaligned) pixel bbox, shifts it by a
+    quarter-tile each step, and recomputes the covering tile set FROM THE
+    BBOX each step via `tiles_covering` (same floor/ceil convention as the
+    initial fill). This guarantees steps eventually request tiles outside
+    the initially-warmed footprint (n_new_tiles > 0), unlike re-deriving a
+    fixed-size tile block from an aligned tile origin (which can re-request
+    already-warmed tiles forever).
+    """
+    h, w = level_shape
+    y0, x0, y1, x1 = start_bbox
+    known_tiles = set(tiles_covering(start_bbox, tile_size))
+    prev_tileset = set(known_tiles)
 
     steps = pan_trajectory_steps(tile_size)
     step_records = []
     for i, (dx, dy) in enumerate(steps):
-        px += dx
-        py += dy
-        crossed = (dx != 0 and (px // tile_size) != ((px - dx) // tile_size)) or \
-                  (dy != 0 and (py // tile_size) != ((py - dy) // tile_size))
-        tx0 = px // tile_size
-        ty0 = py // tile_size
-        n_tx = max(1, VIEWPORT_PX // tile_size)
-        n_ty = max(1, VIEWPORT_PX // tile_size)
-        step_tiles = [
-            (tx0 + j, ty0 + k) for k in range(n_ty) for j in range(n_tx)
-            if 0 <= tx0 + j <= max_tx and 0 <= ty0 + k <= max_ty
-        ]
-        new_tiles = [t for t in step_tiles if t not in known_tiles]
-        known_tiles.update(step_tiles)
+        y0, y1 = y0 + dy, y1 + dy
+        x0, x1 = x0 + dx, x1 + dx
+        # Clamp to level bounds (keep viewport size constant where possible).
+        if y1 > h:
+            y0, y1 = y0 - (y1 - h), h
+        if x1 > w:
+            x0, x1 = x0 - (x1 - w), w
+        y0, x0 = max(0, y0), max(0, x0)
+        bbox = (y0, x0, y1, x1)
+
+        step_tiles = tiles_covering(bbox, tile_size)
+        new_tiles = step_tiles - known_tiles
+        crossed = step_tiles != prev_tileset
+        known_tiles |= step_tiles
+        prev_tileset = step_tiles
 
         keys = [make_key(tx, ty) for tx, ty in step_tiles]
         reqs = [TileRequest(key=k, generation=generation_base + i, priority=0) for k in keys]
-        _results, wall_ms, _records = fill_sync(sched, reqs)
+        _results, wall_ms, records = fill_sync(sched, reqs)
+
+        new_tile_io = [r["io_ms"] for r in records if r["io_ms"] is not None]
+        new_tile_kernel = [r["kernel_ms"] for r in records if r["kernel_ms"] is not None]
 
         step_records.append({
             "step": i,
             "dx": dx, "dy": dy,
             "crossed_boundary": bool(crossed),
+            "new_column": bool(crossed and dx != 0),
+            "new_row": bool(crossed and dy != 0),
             "n_new_tiles": len(new_tiles),
             "n_tiles_total": len(step_tiles),
-            "prep_ms": wall_ms,
+            "wall_ms": wall_ms,
+            "new_tile_io_ms": new_tile_io,
+            "new_tile_kernel_ms": new_tile_kernel,
         })
     return step_records
 
@@ -445,7 +453,7 @@ def run_config(provider, channel, tile_size, level, out):
     # Pan trajectory.
     def pan_make_key(tx, ty):
         return make_key(tx, ty, (last_method, last_param))[0]
-    config_result["pan"] = run_pan_test(sched, pan_make_key, tiles, tile_size, level_shape)
+    config_result["pan"] = run_pan_test(sched, pan_make_key, vp_box, tile_size, level_shape)
 
     config_result["cache_stats"] = {"raw": raw_cache.stats(), "corrected": corr_cache.stats()}
     current_kb, peak_kb = rss_kb()
@@ -457,13 +465,48 @@ def run_config(provider, channel, tile_size, level, out):
 
 
 def summarize_pan(pan_steps):
-    prep_ms = [s["prep_ms"] for s in pan_steps]
-    crossed = sum(1 for s in pan_steps if s["crossed_boundary"])
+    """Four buckets, reported separately (never conflated):
+
+    - non_crossing: cache-hit-only steps (tile set unchanged from prior step)
+    - crossing_new_column: boundary crossing that introduced new column tiles
+    - crossing_new_row: boundary crossing that introduced new row tiles
+    - new_tile_fill: ALL steps that actually fetched >=1 new tile (overall
+      wall p50/p95) — this is the number that speaks to boundary-crossing
+      performance; the other three are diagnostic breakdowns.
+
+    Also runs the hard self-check: if NO step in this run fetched a new
+    tile, `warning` is set so the caller can print it into the report
+    instead of silently claiming boundary performance.
+    """
+    def bucket_stats(steps):
+        walls = [s["wall_ms"] for s in steps]
+        return {
+            "n_steps": len(steps),
+            "wall_p50_ms": pct(walls, 50), "wall_p95_ms": pct(walls, 95),
+            "wall_max_ms": max(walls) if walls else None,
+        }
+
+    non_crossing = [s for s in pan_steps if not s["crossed_boundary"]]
+    crossing_new_column = [s for s in pan_steps if s["new_column"]]
+    crossing_new_row = [s for s in pan_steps if s["new_row"]]
+    new_tile_fill = [s for s in pan_steps if s["n_new_tiles"] > 0]
+
+    any_new_tiles = any(s["n_new_tiles"] > 0 for s in pan_steps)
+    warning = None
+    if not any_new_tiles:
+        warning = ("WARNING: pan trajectory fetched ZERO new tiles in every "
+                    "step (n_new_tiles=0 for all steps) — this run measured "
+                    "cache-hit lookups only; it says NOTHING about "
+                    "boundary-crossing / new-tile-fill performance.")
+
     return {
-        "p50_ms": pct(prep_ms, 50), "p95_ms": pct(prep_ms, 95),
-        "max_ms": max(prep_ms) if prep_ms else None,
-        "n_boundary_crossing": crossed,
-        "n_non_crossing": len(pan_steps) - crossed,
+        "non_crossing": bucket_stats(non_crossing),
+        "crossing_new_column": bucket_stats(crossing_new_column),
+        "crossing_new_row": bucket_stats(crossing_new_row),
+        "new_tile_fill_overall": bucket_stats(new_tile_fill),
+        "n_steps_total": len(pan_steps),
+        "any_new_tiles": any_new_tiles,
+        "warning": warning,
     }
 
 
@@ -518,11 +561,11 @@ def main():
     }
 
     results_path = os.path.join(args.out, "benchmark_results.json")
-    with open(results_path, "w") as f:
+    with open(results_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, default=str)
 
     report_path = os.path.join(args.out, "benchmark_report.md")
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write("# Viewer prototype benchmark (measured-only)\n\n")
         f.write(f"Dataset: `{args.path}`\n\n")
         f.write("## Environment\n\n")
@@ -567,11 +610,19 @@ def main():
                     "(render path untested)\n")
 
             pan_summary = summarize_pan(cfg["pan"])
-            f.write(f"\nPan (8-step, quarter-tile, alternating x/y): "
-                    f"p50={fmt(pan_summary['p50_ms'])}ms p95={fmt(pan_summary['p95_ms'])}ms "
-                    f"max={fmt(pan_summary['max_ms'])}ms, "
-                    f"boundary-crossing={pan_summary['n_boundary_crossing']}, "
-                    f"non-crossing={pan_summary['n_non_crossing']}\n")
+            if pan_summary["warning"]:
+                f.write(f"\n{pan_summary['warning']}\n")
+            f.write(f"\nPan ({pan_summary['n_steps_total']}-step, quarter-tile, "
+                    "alternating x/y, floating bbox):\n\n")
+            for label, key in (
+                ("non-crossing (cache-hit)", "non_crossing"),
+                ("crossing, new column", "crossing_new_column"),
+                ("crossing, new row", "crossing_new_row"),
+                ("new-tile fill (overall)", "new_tile_fill_overall"),
+            ):
+                b = pan_summary[key]
+                f.write(f"- {label}: n={b['n_steps']} wall p50={fmt(b['wall_p50_ms'])}ms "
+                        f"p95={fmt(b['wall_p95_ms'])}ms max={fmt(b['wall_max_ms'])}ms\n")
 
             cs = cfg["cache_stats"]
             f.write(f"\nCache stats: raw={cs['raw']} corrected={cs['corrected']}\n")

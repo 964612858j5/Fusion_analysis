@@ -14,6 +14,13 @@ from ..config import (
     BG_CORR_MAX_TILE,
 )
 
+# Bump on ANY numeric change of the correction methods (cache keys and
+# provenance depend on it). "2": gaussian/cucim tiled halo widened from
+# 2*sigma to ceil(4*sigma) (full filter support, truncate=4) — tophat
+# unchanged at 2*radius. Saved outputs produced by version "1" can differ
+# from "2" near internal tile borders of the gaussian method.
+BG_CORRECTION_ALGO_VERSION = "2"
+
 # ── GPU availability ──────────────────────────────────────────────────
 _GPU_FAILURE_CACHE = set()
 GPU_MORPH_AVAILABLE = False
@@ -244,7 +251,18 @@ def _apply_background_method_tiled(arr, method, radius=None, sigma=None,
     else:
         return arr32.copy()
 
-    overlap = max(1, 2 * param)
+    # Method-specific halo (v15 alignment, BG_CORRECTION_ALGO_VERSION "2"):
+    # - tophat: erosion+dilation reach exactly 2*radius;
+    # - cucim/gaussian: the filter's effective support is truncate*sigma with
+    #   truncate=4 (cupyx/scipy/skimage default). The previous uniform
+    #   2*param overlap truncated the gaussian's support and could leave
+    #   faint seams at tile borders; 4*sigma removes them (verified by the
+    #   golden seam tests in tests/test_viewer_prototype.py and
+    #   tests/test_bg_correction_halo.py).
+    if method == "cucim":
+        overlap = max(1, int(np.ceil(4 * param)))
+    else:
+        overlap = max(1, 2 * param)
     h, w = arr32.shape
     out = np.zeros((h, w), dtype=np.float32)
 

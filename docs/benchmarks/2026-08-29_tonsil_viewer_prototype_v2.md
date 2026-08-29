@@ -328,14 +328,26 @@ measured-only on this machine/dataset.
    near-free once raw tiles are resident.
 2. **Kernels remain milliseconds**: 0.45–6.2 ms/tile incl. transfers,
    backend confirmed GPU (no fallback mid-run), first-touch init 4.5 ms.
-3. **G1-data-cache: PASS at ≤0.05 ms/tile cache-hit lookup. G1-render:
-   UNTESTED** (no renderer in the prototype).
-4. **Pan trajectory** (8×quarter-tile, 2 boundary crossings): step prep
-   p95 ≤ 1.7 ms with warm caches.
+3. **G1-data-cache: ≤0.05 ms/tile cache-hit lookup holds for the 512/1024
+   candidate configs.** The 256/L0 config is an outlier: ~2.45 ms/tile
+   (198 ms / 81 tiles) — anomaly noted, unexplained (not yet root-caused;
+   do not extrapolate it to other configs). **G1-render: UNTESTED** (no
+   renderer in the prototype).
+4. **Pan trajectory measured cache-hit only in this run** (n_new_tiles=0
+   for every step in the tables above — a coverage bug in this run's pan
+   test, fixed in the next run). Do NOT claim boundary-crossing performance
+   from this file's pan tables; that number does not exist yet.
 5. **Interactive quality now scales params per level** (e.g. base 25 →
-   effective 2 at downsample 4) and records base+effective.
-6. **Gaussian halo corrected to 4σ** (tophat stays 2r); golden seam test
-   pins stitched == whole-image within 1e-4 for both methods.
+   effective 6 at downsample 4; base 25 → effective 2 at downsample 16, for
+   the base-25 tiles shown above) and records base+effective.
+6. **CPU golden seam passed; GPU seam parity pending.** The CPU tiled path
+   pins stitched == whole-image within 1e-4 for both methods (gaussian halo
+   corrected to 4σ; tophat stays 2r). GPU seam parity was not measured in
+   this run. Pre-existing open question: GPU tophat (cucim/cupyx morphology)
+   uses a SQUARE structuring element vs. the CPU disk-based tophat's
+   circular one — GPU tophat is therefore not expected to numerically match
+   CPU tophat; GPU parity testing (when run) checks GPU-tiled ==
+   GPU-whole-image self-consistency for tophat, not GPU-vs-CPU parity.
 7. **512 remains the provisional default candidate** (not frozen).
 8. **Memory**: RSS peak ~1.5 GB under 512+512 MB budgets, zero evictions in
    these configs; raw cache now native dtype (uint8). GPU pool peak sampled
@@ -346,3 +358,8 @@ measured-only on this machine/dataset.
    25 tiles ≈ 2.2 s wall). Next candidate optimization — prefetching raw
    tiles through the I/O pool before compute — must be MEASURED before any
    speedup is claimed.
+10. **Production gaussian halo now aligned to 4·sigma**
+    (`BG_CORRECTION_ALGO_VERSION = "2"`). Saved outputs produced under
+    algorithm version 1 (halo = 2·sigma) may differ from version-2 outputs
+    near internal tile borders for the gaussian ("cucim") method; tophat is
+    unaffected (halo unchanged at 2·radius).

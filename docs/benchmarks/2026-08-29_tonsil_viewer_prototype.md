@@ -1,5 +1,8 @@
 # Viewer prototype benchmark
 
+**SUPERSEDED BY** `2026-08-29_tonsil_viewer_prototype_v2.md` — v1 conclusions
+overstated (order effects, pan coverage bug); kept for provenance only.
+
 Dataset: `/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif`
 
 | tile | level | method | param | tiles | cold s | io ms med/p90 | kernel ms med/p90 | warm ms | pan reuse% | pan ms | RSS MB | GPU MB |

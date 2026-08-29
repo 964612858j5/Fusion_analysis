@@ -10,7 +10,7 @@ error strings) and are plain (non-frozen) dataclasses.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional, Set, Tuple, Union
 
 
 # ── Quality levels ───────────────────────────────────────────────────────────
@@ -101,6 +101,23 @@ def effective_param(base: int, level: int, downsample: float) -> int:
     if level <= 0 or downsample <= 1:
         return int(base)
     return max(1, int(round(base / downsample)))
+
+
+def tiles_covering(bbox: Tuple[int, int, int, int], tile_size: int) -> Set[Tuple[int, int]]:
+    """Return the set of (tx, ty) tile coords covering a pixel bbox.
+
+    `bbox` is (y0, x0, y1, x1), possibly unaligned to the tile grid (e.g. a
+    center-anchored viewport). Uses floor/ceil division so the returned set
+    is exactly the tiles needed to cover [y0, y1) x [x0, x1) — the same
+    convention used for the initial viewport fill, so pan-step coverage is
+    computed identically to the fill phase.
+    """
+    y0, x0, y1, x1 = bbox
+    if y1 <= y0 or x1 <= x0:
+        return set()
+    tx0, tx1 = x0 // tile_size, (x1 - 1) // tile_size
+    ty0, ty1 = y0 // tile_size, (y1 - 1) // tile_size
+    return {(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)}
 
 
 # ── Request / result ─────────────────────────────────────────────────────────

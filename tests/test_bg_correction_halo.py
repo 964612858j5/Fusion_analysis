@@ -47,3 +47,62 @@ def test_tophat_tiled_matches_whole_image(image, monkeypatch):
 def test_algo_version_bumped():
     from block01.core import bg_correction as bg
     assert bg.BG_CORRECTION_ALGO_VERSION == "2"
+
+
+def test_method_overlap_single_source_of_truth():
+    from block01.core import bg_correction as bg
+    assert bg.method_overlap("tophat", 25) == 50
+    assert bg.method_overlap("cucim", 50) == 200          # ceil(4*sigma)
+    # the worker's tiling must use the same helper (no duplicated formula)
+    import inspect
+    from block01.ui.step0 import search_ctrl
+    src = inspect.getsource(search_ctrl.WsiCorrectionWorker.run)
+    assert "method_overlap(method, param)" in src
+    assert "2 * param" not in src
+
+
+# ── incremental-save identity includes the algorithm version ─────────────────
+
+def _make_corrected_zarr(tmp_path, ch_attrs):
+    zarr = pytest.importorskip("zarr")
+    path = str(tmp_path / "corrected_channels.zarr")
+    root = zarr.open_group(path, mode="w")
+    grp = root.create_group("ROI_1")
+    grp.attrs["bbox_fullres"] = [0, 64, 0, 64]
+    ds = grp.create_dataset("CD3", shape=(64, 64), dtype="f4")
+    ds.attrs.update(ch_attrs)
+    return path
+
+
+def test_legacy_zarr_without_version_is_reprocessed(tmp_path):
+    """v1 zarr (no version stamp) must NEVER match a v2 signature."""
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION
+    path = _make_corrected_zarr(tmp_path, {
+        "correction_method": "cucim", "correction_param_value": 50})
+    sigs, bboxes = read_corrected_zarr_state(path)
+    assert sigs["CD3"] == ("cucim", 50, "1")              # legacy -> "1"
+    current = ("cucim", 50, BG_CORRECTION_ALGO_VERSION)
+    assert sigs["CD3"] != current                          # -> reprocess
+
+
+def test_current_version_zarr_is_skipped(tmp_path):
+    """Same method+param+current version -> incremental save may skip."""
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION
+    path = _make_corrected_zarr(tmp_path, {
+        "correction_method": "cucim", "correction_param_value": 50,
+        "bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION})
+    sigs, _ = read_corrected_zarr_state(path)
+    assert sigs["CD3"] == ("cucim", 50, BG_CORRECTION_ALGO_VERSION)
+
+
+def test_stamp_writes_algo_version(tmp_path):
+    zarr = pytest.importorskip("zarr")
+    from block01.core import bg_correction as bg
+    root = zarr.open_group(str(tmp_path / "z.zarr"), mode="w")
+    ds = root.create_dataset("CD3", shape=(8, 8), dtype="f4")
+    bg.stamp_corrected_channel_identity(
+        ds, channel_name="CD3", correction_method="tophat",
+        correction_param_name="tophat_radius", correction_param_value=25)
+    assert ds.attrs["bg_correction_algo_version"] == bg.BG_CORRECTION_ALGO_VERSION

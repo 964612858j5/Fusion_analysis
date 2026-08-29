@@ -3755,11 +3755,15 @@ class Step0Page(QWidget):
         mp = config.get("method_params") or {}
         cp_all = config.get("channel_params") or {}
         def _cur_sig(ch, method):
+            from ...core.bg_correction import BG_CORRECTION_ALGO_VERSION
             pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
             pdefault = (TOPHAT_RADIUS_DEFAULT if method == "tophat"
                         else CUCIM_SIGMA_DEFAULT)
             cp = cp_all.get(ch) or {}
-            return (method, int(cp.get(pname, mp.get(pname, pdefault))))
+            # (method, param, algorithm version): a channel saved by an older
+            # numeric version never matches, so incremental save reprocesses it.
+            return (method, int(cp.get(pname, mp.get(pname, pdefault))),
+                    BG_CORRECTION_ALGO_VERSION)
         current_sigs = {ch: _cur_sig(ch, m) for ch, m in corrected.items()}
 
         existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)

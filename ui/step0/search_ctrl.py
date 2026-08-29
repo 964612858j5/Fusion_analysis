@@ -37,6 +37,8 @@ from ...core.bg_correction import (
     _apply_cucim_or_cpu,
     _compute_bg_metrics,
     _tile_slices,
+    method_overlap,
+    BG_CORRECTION_ALGO_VERSION,
     stamp_corrected_channel_identity,
 )
 from ...core.io_loader import OMETIFFLoader
@@ -1908,13 +1910,16 @@ def read_corrected_zarr_state(zarr_path):
     """Inspect an existing corrected_channels.zarr for incremental save.
 
     Returns (signatures, roi_bboxes):
-      signatures : {channel_name: (method, param_value)} for channels present in
-                   EVERY ROI group with a single consistent (method, param) — the
-                   v14.5a correction_method attr plus the additive
-                   correction_param_value (None when an older zarr did not stamp
-                   it; a None param compares unequal to the current int param, so
-                   such a channel is safely reprocessed). A channel present in
-                   only some groups, or with a mixed signature, is omitted.
+      signatures : {channel_name: (method, param_value, algo_version)} for
+                   channels present in EVERY ROI group with a single consistent
+                   signature — the v14.5a correction_method attr plus the
+                   additive correction_param_value (None when an older zarr did
+                   not stamp it; a None param compares unequal to the current
+                   int param, so such a channel is safely reprocessed) plus
+                   bg_correction_algo_version (missing -> "1", which never
+                   matches the current version, forcing a reprocess of legacy
+                   gaussian outputs). A channel present in only some groups, or
+                   with a mixed signature, is omitted.
       roi_bboxes : sorted list of each ROI group's bbox_fullres tuple — the ROI
                    signature used to decide whether the cached zarr still matches
                    the current ROI set.
@@ -1943,7 +1948,11 @@ def read_corrected_zarr_state(zarr_path):
             if not m:
                 continue
             pv = a.get("correction_param_value")
-            gm[str(ch)] = (str(m), None if pv is None else int(pv))
+            # Legacy zarrs without the stamp were produced by version "1"
+            # (2*sigma gaussian halo) — their signature never matches the
+            # current version, so they are reprocessed on the next Save.
+            ver = str(a.get("bg_correction_algo_version") or "1")
+            gm[str(ch)] = (str(m), None if pv is None else int(pv), ver)
         per_group.append(gm)
     common = set(per_group[0])
     for gm in per_group[1:]:
@@ -2060,6 +2069,10 @@ class WsiCorrectionWorker(QThread):
             root.attrs["source_ome"] = os.path.abspath(getattr(self.loader, "filepath", "") or "")
             root.attrs["output_dir"] = os.path.abspath(self.output_dir)
             root.attrs["created_by"] = "Step0"
+            # Version of the correction numerics that LAST wrote this zarr.
+            # Per-channel identity (bg_correction_algo_version on each array)
+            # is what incremental save compares; this root attr is provenance.
+            root.attrs["bg_correction_algo_version"] = BG_CORRECTION_ALGO_VERSION
             root.attrs["roi_names"] = [str(r.get("name") or f"ROI_{i}") for i, r in enumerate(rois, start=1)]
             root.attrs["correction_config"] = self.correction_config
             # Seed with the channels we are KEEPING (already in the zarr, same
@@ -2102,8 +2115,9 @@ class WsiCorrectionWorker(QThread):
             tile_counts = []
             for info in roi_infos:
                 roi_h, roi_w = info["shape"]
-                for _, _, param in channels:
-                    tile_counts.append(len(list(_tile_slices(roi_h, roi_w, 4096, max(1, 2 * param)))))
+                for _, method, param in channels:
+                    tile_counts.append(len(list(_tile_slices(
+                        roi_h, roi_w, 4096, method_overlap(method, param)))))
             total_units = sum(tile_counts)
             started = time.time()
             completed_units = 0
@@ -2130,7 +2144,7 @@ class WsiCorrectionWorker(QThread):
                 for ch_name, method, param in channels:
                     progress_idx += 1
                     print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
-                    overlap = max(1, 2 * param)
+                    overlap = method_overlap(method, param)
                     tiles = list(_tile_slices(roi_h, roi_w, 4096, overlap))
                     ds = group.create_dataset(
                         ch_name,

@@ -21,6 +21,23 @@ from ..config import (
 # from "2" near internal tile borders of the gaussian method.
 BG_CORRECTION_ALGO_VERSION = "2"
 
+
+def method_overlap(method, param):
+    """Tile halo required by a correction method — the SINGLE source of truth
+    for both the preview path (_apply_background_method_tiled) and the
+    production WsiCorrectionWorker tiling.
+
+    - tophat: erosion+dilation reach exactly 2*radius;
+    - cucim/gaussian: effective support is truncate*sigma with truncate=4
+      (cupyx/scipy/skimage default). The version-"1" uniform 2*param overlap
+      truncated the gaussian's support and could leave faint seams at tile
+      borders (verified by tests/test_bg_correction_halo.py).
+    """
+    param = max(1, int(param))
+    if str(method).strip().lower() == "cucim":
+        return int(np.ceil(4 * param))
+    return 2 * param
+
 # ── GPU availability ──────────────────────────────────────────────────
 _GPU_FAILURE_CACHE = set()
 GPU_MORPH_AVAILABLE = False
@@ -251,18 +268,7 @@ def _apply_background_method_tiled(arr, method, radius=None, sigma=None,
     else:
         return arr32.copy()
 
-    # Method-specific halo (v15 alignment, BG_CORRECTION_ALGO_VERSION "2"):
-    # - tophat: erosion+dilation reach exactly 2*radius;
-    # - cucim/gaussian: the filter's effective support is truncate*sigma with
-    #   truncate=4 (cupyx/scipy/skimage default). The previous uniform
-    #   2*param overlap truncated the gaussian's support and could leave
-    #   faint seams at tile borders; 4*sigma removes them (verified by the
-    #   golden seam tests in tests/test_viewer_prototype.py and
-    #   tests/test_bg_correction_halo.py).
-    if method == "cucim":
-        overlap = max(1, int(np.ceil(4 * param)))
-    else:
-        overlap = max(1, 2 * param)
+    overlap = method_overlap(method, param)
     h, w = arr32.shape
     out = np.zeros((h, w), dtype=np.float32)
 
@@ -343,6 +349,10 @@ def stamp_corrected_channel_identity(ds, channel_name, channel_index=None,
         ds.attrs["correction_param_name"] = str(correction_param_name)
     if correction_param_value is not None:
         ds.attrs["correction_param_value"] = int(correction_param_value)
+    # Algorithm version participates in artifact identity: an incremental
+    # Save must NOT reuse a channel computed by an older numeric version
+    # (e.g. version "1" gaussian with the truncated 2*sigma halo).
+    ds.attrs["bg_correction_algo_version"] = BG_CORRECTION_ALGO_VERSION
 
 
 def corrected_zarr_report(path):

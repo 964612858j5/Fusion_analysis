@@ -33,42 +33,63 @@ class _ChannelRow(QtWidgets.QWidget):
         self._name = name
 
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(4, 1, 4, 1)   # compact: 4/5 row height
-        lay.setSpacing(6)
+        lay.setContentsMargins(6, 1, 6, 1)   # compact: 4/5 row height
+        lay.setSpacing(5)
+
+        # v15 template (matches the Step0 BG rows): transparent children so the
+        # list's hover/selected highlight paints through, and an explicitly
+        # drawn checkbox indicator that sits visibly on top of the highlight.
+        self.setStyleSheet(
+            "*{background:transparent;}"
+            "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
+            "border:1px solid #6d8196;background:#182230;}"
+            "QCheckBox::indicator:checked{background:#9bd0ff;border:1px solid #9bd0ff;}"
+            "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}")
 
         self._chk = QtWidgets.QCheckBox()
         self._chk.setChecked(bool(visible))
+        self._chk.setFixedSize(22, 18)
         self._chk.setToolTip("Visible in viewer")
         self._chk.toggled.connect(self._on_toggle)
         lay.addWidget(self._chk)
 
-        # Clickable pseudocolor swatch -> opens a color picker (handled upstream).
+        self._name_lbl = QtWidgets.QLabel(name)
+        self._name_lbl.setStyleSheet("color:#dce5ef;font-size:11px;")
+        # Non-stretching fixed column; the list applies one uniform width (the
+        # longest name) after populate so the color boxes align across rows.
+        self._name_lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                     QtWidgets.QSizePolicy.Preferred)
+        self._name_lbl.setFixedWidth(self._name_lbl.sizeHint().width() + 2)
+        self._name_lbl.setToolTip(name)
+        lay.addWidget(self._name_lbl)
+
+        # Clickable pseudocolor box directly after the name (where the BG rows
+        # put the method combo). Checkbox-indicator size; shows the channel
+        # color; click opens the color picker (handled upstream).
         self._swatch = QtWidgets.QLabel()
-        self._swatch.setFixedSize(14, 14)
+        self._swatch.setFixedSize(13, 13)
         self._swatch.setCursor(QtCore.Qt.PointingHandCursor)
         self._swatch.setToolTip("Click to change channel color")
         self._swatch.mousePressEvent = self._on_swatch_clicked
         self._set_swatch_color(color)
         lay.addWidget(self._swatch)
 
-        self._name_lbl = QtWidgets.QLabel(name)
-        self._name_lbl.setStyleSheet("color:#ddd;font-size:11px;")
-        # Elide rather than grow: keeps the list inside its width (no h-scroll).
-        self._name_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
-                                     QtWidgets.QSizePolicy.Preferred)
-        self._name_lbl.setToolTip(name)
-        lay.addWidget(self._name_lbl, stretch=1)
+        lay.addStretch(1)                    # push only the mini value right
 
         self._mini = QtWidgets.QLabel(f"{mini_label}:{mini_value:.2f}")
-        self._mini.setStyleSheet("color:#888;font-size:10px;")
+        self._mini.setStyleSheet("color:#879bb1;font-size:10px;")
         self._mini.setFixedWidth(48)
         self._mini.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self._mini)
 
     def _set_swatch_color(self, color):
         self._swatch.setStyleSheet(
-            f"background:{color};border:1px solid #333;border-radius:2px;"
+            f"background:{color};border:1px solid #6d8196;border-radius:2px;"
         )
+
+    def set_name_width(self, width):
+        """Uniform name-column width (set by the list to the longest name)."""
+        self._name_lbl.setFixedWidth(int(width))
 
     def _on_toggle(self, checked):
         self.visibility_toggled.emit(self._name, bool(checked))
@@ -123,9 +144,15 @@ class ChannelLayerList(QtWidgets.QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        # v15 template palette: same base / hover / selected colors as the
+        # shared ChannelDock (Step0 BG tab).
         self._list.setStyleSheet(
-            "QListWidget{background:#161616;border:1px solid #333;}"
-            "QListWidget::item:selected{background:#2c3e50;}"
+            "QListWidget{background:#101620;border:1px solid #253246;"
+            "border-radius:4px;}"
+            "QListWidget::item{border-bottom:1px solid #202c3b;}"
+            "QListWidget::item:hover{background:#1a3e33;}"
+            "QListWidget::item:selected{background:#1a2b3e;}"
+            "QListWidget::item:selected:hover{background:#1a2b3e;}"
         )
         self._list.currentItemChanged.connect(self._on_current_changed)
         lay.addWidget(self._list, stretch=1)
@@ -159,6 +186,15 @@ class ChannelLayerList(QtWidgets.QWidget):
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             self._rows[name] = row
+
+        # Uniform name column = longest name, so the color boxes align across
+        # rows while sitting right next to each name (BG-row template).
+        if self._rows:
+            width = max(
+                r._name_lbl.fontMetrics().boundingRect(r._name_lbl.text()).width()
+                for r in self._rows.values()) + 6
+            for r in self._rows.values():
+                r.set_name_width(width)
 
         if self._list.count() > 0:
             self._list.setCurrentRow(0)

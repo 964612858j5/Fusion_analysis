@@ -25,7 +25,7 @@ QPushButton#dockTool { color:#9bd0ff; background:#182230;
 QPushButton#dockTool:hover { background:#23354a; }
 QListWidget { background:#101620; border:1px solid #253246; border-radius:4px; }
 QListWidget::item { border-bottom:1px solid #202c3b; }
-QListWidget::item:hover { background:#151d29; }
+QListWidget::item:hover { background:#1a3e33; }
 QListWidget::item:selected { background:#1a2b3e; }
 QListWidget::item:selected:hover { background:#1a2b3e; }
 """

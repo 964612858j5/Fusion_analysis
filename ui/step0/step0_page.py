@@ -1032,6 +1032,13 @@ class Step0Page(QWidget):
         self._decision_status.setWordWrap(True)
         self._decision_status.setStyleSheet("color:#aaa;font-size:10px;")
         dl.addWidget(self._decision_status)
+
+        # v15 mutual visibility: the current channel's LIVE remap state
+        # (from the Channel Remap tab) shown on the correction side.
+        self._remap_state_lbl = QLabel("Remap: —")
+        self._remap_state_lbl.setWordWrap(True)
+        self._remap_state_lbl.setStyleSheet("color:#879bb1;font-size:10px;")
+        dl.addWidget(self._remap_state_lbl)
         bottom_row.addWidget(decision_box, stretch=1)
 
         crl.addLayout(bottom_row)
@@ -1147,10 +1154,20 @@ class Step0Page(QWidget):
         # Channels column top is not pushed down by it and aligns with the BG tab.
         self._cond_workbench.set_center_top_bar(_patch_bar)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
-        # Lazy-load (#2 perf): patch switch pre-loads ONLY the active channel; the
-        # workbench fetches the rest on-demand (when the user selects them) via
-        # this provider, which always reads the CURRENT patch.
-        self._cond_workbench.set_pixel_provider(self._provide_channel_pixels)
+        # v15: single data-access seam. Remap now eats the LIVE corrected stage
+        # (in-memory preview results, no Save required); channels without a
+        # computed preview fall back to raw. Lazy per-channel fetch preserved.
+        from .preview_source_provider import (
+            Step0PreviewSourceProvider, STAGE_CORRECTED)
+        self._preview_provider = Step0PreviewSourceProvider(self)
+        self._cond_workbench.set_pixel_provider(
+            lambda name: self._preview_provider.get_pixels(name, STAGE_CORRECTED))
+        self._preview_provider.stage_invalidated.connect(
+            self._on_stage_invalidated)
+        # Mutual visibility: remap edits surface live in the BG tab's
+        # Per-Channel Decision panel.
+        self._cond_workbench.params_changed.connect(
+            self._on_remap_params_changed)
         # v14.2c: when the viewer's viewport settles (debounced), update the
         # Tissue Navigator current-view rectangle.
         self._cond_workbench.viewer.viewport_changed.connect(
@@ -1259,6 +1276,38 @@ class Step0Page(QWidget):
             split.setSizes([int(w), max(1, total - int(w))])
         finally:
             self._syncing_left_cols = False
+
+    # ── v15 live correction<->remap interaction ────────────────────────────
+    def _on_stage_invalidated(self, channel, _stage):
+        """A live corrected preview landed or a method changed: the remap view
+        must re-pull that channel from the provider (no Save involved)."""
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            wb.invalidate_channel_pixels(channel)
+
+    def _on_remap_params_changed(self, channel):
+        """Remap edits are visible live on the correction side."""
+        self._refresh_remap_state_label(channel)
+
+    def _refresh_remap_state_label(self, channel=None):
+        lbl = getattr(self, "_remap_state_lbl", None)
+        provider = getattr(self, "_preview_provider", None)
+        if lbl is None or provider is None:
+            return
+        ch = self.current_channel
+        if not ch or (channel is not None and channel != ch):
+            return
+        info = provider.describe(ch)
+        r = info["remap"]
+        if r["min"] is None and r["max"] is None:
+            lbl.setText("Remap: not tuned yet")
+            return
+        fmt = lambda v: "—" if v is None else f"{v:.4g}"
+        adj = " (user-adjusted)" if r["user_adjusted"] else ""
+        lbl.setText(
+            f"Remap: min {fmt(r['min'])} · max {fmt(r['max'])} · "
+            f"γ {fmt(r['gamma'])}{adj} — on "
+            f"{info['served_corrected_stage']}")
 
     def _maybe_refresh_conditioning(self):
         """Re-feed the workbench from the current patch, once conditioning is in
@@ -2931,6 +2980,7 @@ class Step0Page(QWidget):
                     f"{ch}: set radius/sigma, pick a method, press Enter or Process.")
         finally:
             self._loading_decision = False
+        self._refresh_remap_state_label()
 
     def _refresh_channel_row(self, ch):
         row = self._channel_rows.get(ch)
@@ -3100,6 +3150,8 @@ class Step0Page(QWidget):
             self._channel_methods.pop(ch, None)
         else:
             self._channel_methods[ch] = m
+        if getattr(self, "_preview_provider", None) is not None:
+            self._preview_provider.invalidate(ch)   # corrected stage semantics changed
         row = self._channel_rows.get(ch)
         if row:
             cb = row["checkbox"]
@@ -3225,6 +3277,9 @@ class Step0Page(QWidget):
     def _on_batch_patch_done(self, ch, p_idx, payload):
         """一个patch计算完成，存入缓存。"""
         self._preview_cache[(ch, p_idx)] = payload
+        if (p_idx == self.current_patch_idx
+                and getattr(self, "_preview_provider", None) is not None):
+            self._preview_provider.invalidate(ch)
         # 如果当前正在查看这个通道的这个patch，立刻刷新
         if ch == self.current_channel and p_idx == self.current_patch_idx:
             self._last_payload = payload
@@ -3489,6 +3544,8 @@ class Step0Page(QWidget):
         if req_id != self._preview_req_id:
             return
         self._preview_cache[(self.current_channel, self.current_patch_idx)] = payload
+        if getattr(self, "_preview_provider", None) is not None:
+            self._preview_provider.invalidate(self.current_channel)
         self._last_payload = payload
         self._rebuild_payload_rgb_from(
             payload,

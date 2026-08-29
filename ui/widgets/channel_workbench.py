@@ -74,6 +74,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
     """
 
     refresh_requested = pyqtSignal()
+    # v15: a channel's remap params changed via the controls (live mutual
+    # visibility with the background-correction side).
+    params_changed = pyqtSignal(str)
 
     def __init__(self, parent=None, *, show_reference_bar=True,
                  show_enabled_checkbox=True, multichannel_overlay=False,
@@ -1003,6 +1006,19 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._layer_list.set_channels(rows)
         self._apply_channel_filter()        # keep the search filter across rebuilds
 
+    def invalidate_channel_pixels(self, name):
+        """v15: a pipeline stage upstream of this view changed (e.g. a live
+        background-correction preview landed) — drop this channel's cached
+        pixels and, if it is on screen, re-pull from the provider now."""
+        if name not in self._names:
+            return
+        self._raw[name] = None
+        if name == self._active or self._visible.get(name):
+            self._ensure_loaded(name)
+            if name == self._active:
+                self._load_params_into_controls(name)
+            self._refresh_preview()
+
     def _ensure_loaded(self, name):
         """Lazily fetch a channel's pixels via the provider if not yet loaded.
 
@@ -1176,6 +1192,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             p["enabled"] = self._chk_enabled.isChecked()
         # else: no fusion-enable surface (Step0) -> keep params' default
         # enabled=True; Step1 decides fusion participation downstream.
+        self.params_changed.emit(self._active)
 
     def _on_minmax_changed(self, _v=None):
         if self._loading or self._active is None:

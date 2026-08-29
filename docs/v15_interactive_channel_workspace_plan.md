@@ -403,9 +403,13 @@ Shared across all pages:
 
 Per-page content:
 
-**Step0 rows**: channel color; channel name; currently previewed background
-method; user's final selected background method; status badge (e.g. Original,
-Top-hat, cuCIM, selected / unsaved). **Step0 selected-channel tool area**: Min,
+**Step0 rows**: channel name; currently previewed background method; user's
+final selected background method; status badge (e.g. Original, Top-hat, cuCIM,
+selected / unsaved). Amendment (2026-08-29, user acceptance feedback): the BG
+tab rows show NO color swatch — the grey square read as a dead checkbox; per-
+channel display color stays in the Remap tab. A previous run's saved
+channel_decisions are reference only and must not pre-seed a new session's
+method combos; unassigned rows mirror the global Method box (default Both). **Step0 selected-channel tool area**: Min,
 Max, Gamma; background-method parameters; the Compare entry point. Parameters are
 NOT expanded inside every channel row — only in the selected-channel tool area.
 

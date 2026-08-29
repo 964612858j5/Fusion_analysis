@@ -243,3 +243,47 @@ def test_step0_adapter_legacy_registry(app):
     assert ("method", "CD20", "Original") in page.calls
     # saved decision reflected
     assert page._channel_rows["CD3"]["method_cb"].currentText() == "TopHat"
+
+
+# ── Step0 fresh session: prior decisions don't seed combos; no dead swatch ───
+
+def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
+    import json
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _Loader:
+        def channel_names(self):
+            return ["DAPI", "CD3", "CD20", "CD8"]
+
+    cfg = {"channel_decisions": {"CD3": "cucim", "CD20": "cucim", "CD8": "tophat"},
+           "method_params": {"tophat_radius": 30, "cucim_sigma": 50}}
+    (tmp_path / "correction_config.json").write_text(json.dumps(cfg))
+
+    page = Step0Page()
+    page.output_dir = str(tmp_path)
+    page.loader = _Loader()
+    page.nucleus_channel = "DAPI"
+    page._load_existing_config()
+    page._rebuild_channel_list()
+
+    # previous run's final methods are reference only, not this session's
+    assert page._channel_decisions == {}
+    assert page._prior_channel_decisions == {
+        "CD3": "cucim", "CD20": "cucim", "CD8": "tophat"}
+    # unassigned rows mirror the global Method box (default Both), unchecked
+    for ch in ("CD3", "CD20", "CD8"):
+        row = page._channel_rows[ch]
+        assert row["method_cb"].currentText() == "Both"
+        assert not row["checkbox"].isChecked()
+    # global method change mirrors into unassigned rows without assigning
+    page._method_all.setCurrentText("TopHat")
+    for ch in ("CD3", "CD20", "CD8"):
+        assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
+    assert page._channel_decisions == {}
+    # explicit assignment still sticks
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    assert page._channel_decisions["CD3"] == "cucim"
+    assert page._channel_rows["CD3"]["checkbox"].isChecked()
+    # the color swatch is hidden in Step0 BG rows (read as a dead checkbox)
+    assert not page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(
+        page._channel_rows["CD3"]["row_widget"])

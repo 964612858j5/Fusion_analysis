@@ -52,6 +52,9 @@ class Step0ChannelDockAdapter(QObject):
     def _make_row(self, model, cid):
         page = self._page
         row = Step0ChannelRow(model, cid)
+        # BG tab has no per-channel display color; the grey swatch reads as a
+        # dead checkbox next to the real one — hide it (user request).
+        row.swatch.setVisible(False)
         is_nucleus = (cid == page.nucleus_channel)
         # Forward user interaction to the unchanged page slots. The page's
         # legacy lambda signature uses Qt CheckState ints.
@@ -77,7 +80,10 @@ class Step0ChannelDockAdapter(QObject):
         for ch in page.loader.channel_names():
             is_nucleus = (ch == page.nucleus_channel)
             saved = (page._channel_decisions.get(ch)
-                     or page._channel_methods.get(ch, "both"))
+                     or page._channel_methods.get(ch)
+                     or getattr(page, "_method_all", None)
+                     and page._method_all.currentText().lower()
+                     or "both")
             states.append(ChannelState(
                 channel_id=ch,
                 name=f"{ch} ★" if is_nucleus else ch,

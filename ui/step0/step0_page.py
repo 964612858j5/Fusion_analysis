@@ -2404,7 +2404,13 @@ class Step0Page(QWidget):
         path = os.path.join(self.output_dir, "correction_config.json")
         self._loaded_config = _load_correction_config(path)
         raw_decisions = dict((self._loaded_config or {}).get("channel_decisions") or {})
-        self._channel_decisions = {k: ("original" if v == "both" else v) for k, v in raw_decisions.items()}
+        # v15: a previous run's final methods are kept only as reference — they
+        # no longer pre-seed this session's assignments. Until the user assigns
+        # a method (checkbox / combo / decision panel), rows display the global
+        # Method box value (default Both) via _refresh_channel_row.
+        self._prior_channel_decisions = {
+            k: ("original" if v == "both" else v) for k, v in raw_decisions.items()}
+        self._channel_decisions = {}
         # Restore per-channel param overrides (int-normalized); channels absent
         # fall back to the global method_params.
         self._channel_params = {}
@@ -2934,13 +2940,20 @@ class Step0Page(QWidget):
             row["status_lbl"].setText("★")
             row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
         else:
-            decision = self._channel_decisions.get(ch, "original")
-            cb.setChecked(decision != "original")
+            decision = self._channel_decisions.get(ch)
+            cb.setChecked(bool(decision) and decision != "original")
             # The Method combo IS the assigned-method display now (folds in the old
-            # decision badge) — reflect the decision here, no separate badge text.
+            # decision badge). Unassigned channels (no decision THIS session)
+            # mirror the global Method box (default Both) instead of a stale
+            # previous-run decision.
             if method_cb is not None:
+                if decision:
+                    idx = self._METHOD_IDX.get(decision, 3)
+                else:
+                    idx = self._METHOD_IDX.get(
+                        self._method_all.currentText().lower(), 2)
                 method_cb.blockSignals(True)
-                method_cb.setCurrentIndex(self._METHOD_IDX.get(decision, 3))
+                method_cb.setCurrentIndex(idx)
                 method_cb.blockSignals(False)
             if row["status_lbl"].text() != "⟳":   # don't clobber a running spinner
                 row["status_lbl"].setText("")
@@ -3060,12 +3073,19 @@ class Step0Page(QWidget):
             if ch == self.nucleus_channel:
                 continue
             row = self._channel_rows.get(ch)
-            if row and row["checkbox"].isChecked():
+            if not row:
+                continue
+            if row["checkbox"].isChecked():
                 self._channel_methods[ch] = method
                 self._channel_decisions[ch] = method
-                row["method_cb"].blockSignals(True)
-                row["method_cb"].setCurrentIndex(self._METHOD_IDX.get(method, 0))
-                row["method_cb"].blockSignals(False)
+            elif ch in self._channel_decisions:
+                # explicitly assigned (e.g. Original) — leave it alone
+                continue
+            # checked rows adopt the method; unassigned rows just mirror the
+            # global box in their display (no decision is written for them)
+            row["method_cb"].blockSignals(True)
+            row["method_cb"].setCurrentIndex(self._METHOD_IDX.get(method, 0))
+            row["method_cb"].blockSignals(False)
 
     def _on_channel_method_changed(self, ch, txt):
         """Single channel method dropdown change. The combo now also carries the

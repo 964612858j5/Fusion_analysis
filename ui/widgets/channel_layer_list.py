@@ -180,8 +180,10 @@ class ChannelLayerList(QtWidgets.QWidget):
             row.visibility_toggled.connect(self.visibility_changed.emit)
             row.color_clicked.connect(self.color_clicked.emit)
             item = QtWidgets.QListWidgetItem()
-            _sh = row.sizeHint()   # 4/5 row height to match the compact BG channel list
-            item.setSizeHint(QtCore.QSize(_sh.width(), int(_sh.height() * 0.8)))
+            # Same row height as the shared ChannelDock template (min 26px) —
+            # no 0.8 compression.
+            _sh = row.sizeHint()
+            item.setSizeHint(QtCore.QSize(_sh.width(), max(26, _sh.height())))
             item.setData(Qt.UserRole, name)
             self._list.addItem(item)
             self._list.setItemWidget(item, row)

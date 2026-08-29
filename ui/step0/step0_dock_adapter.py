@@ -55,6 +55,11 @@ class Step0ChannelDockAdapter(QObject):
         # BG tab has no per-channel display color; the grey swatch reads as a
         # dead checkbox next to the real one — hide it (user request).
         row.swatch.setVisible(False)
+        # The right-edge status badge column (★ on nucleus, — boxes elsewhere)
+        # adds no information here — computing/done are shown by the row
+        # background and the green checkbox. Hidden, not removed: legacy code
+        # still writes text into it harmlessly.
+        row.status_lbl.setVisible(False)
         is_nucleus = (cid == page.nucleus_channel)
         # Forward user interaction to the unchanged page slots. The page's
         # legacy lambda signature uses Qt CheckState ints.

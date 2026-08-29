@@ -56,6 +56,10 @@ class ChannelRowBase(QtWidgets.QWidget):
         lay.addWidget(self.name_label, stretch=1)
 
         self._extras_layout = lay          # subclasses append here
+        # Rows and their children stay transparent so the list's hover/selected
+        # highlight paints through; host pages (e.g. Step0's #1c1c1c section
+        # stylesheet) would otherwise cascade opaque boxes onto each child.
+        self.setStyleSheet("background:transparent;")
         self._apply_color(st.color if st else "#888888")
 
         model.color_changed.connect(self._on_model_color)

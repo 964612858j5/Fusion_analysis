@@ -1146,7 +1146,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._loading = True
         try:
             p = self._params[name]
-            self._active_lbl.setText(name)
+            note = (self._channel_meta.get(name) or {}).get("source_note")
+            self._active_lbl.setText(f"{name}  ·  {note}" if note else name)
             self._sp_min.setValue(float(p["min"]))
             self._sp_max.setValue(float(p["max"]))
             self._sl_bright.setValue(int(round(p["brightness"] * 100)))

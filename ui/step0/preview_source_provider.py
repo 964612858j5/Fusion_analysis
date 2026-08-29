@@ -1,25 +1,32 @@
-"""Step0 PreviewSourceProvider — the single data-access seam for the future
-merged Channel Conditioning workspace (v15 Workstream B, step 1).
+"""Step0 PreviewSourceProvider — the single data-access seam between the
+background-correction workspace and the remap workspace (v15, revised).
 
-Contract (agreed 2026-08-29):
+Contract (revised 2026-08-29 after design review):
 
-- Background correction and channel remap interact LIVE on the same data:
-  remap no longer waits for a background-correction Save — the corrected
-  stage is served from the in-memory preview results (``page._preview_cache``)
-  computed with the current per-channel method/params.
-- Both sides' current state is mutually visible through :meth:`describe`.
-- ``region=None`` means "the current patch" — the only region today. The
-  signature already carries ``region`` so Workstream C can later swap this
-  provider for a viewport tile provider without touching the UI.
+- HARD BOUNDARY: remap consumes ONLY the saved corrected artifact. Save is
+  the single hand-off point — in-memory correction previews never feed remap,
+  so remap Min/Max/Gamma is always calibrated in a stable, identified
+  intensity space.
+- The corrected stage is whatever the loader serves for a channel:
+  * after Save, `loader.set_corrected_zarr_store(...)` makes `read_region`
+    return the SAVED corrected pixels for channels with a saved decision;
+  * before Save (or for Original channels) it is the raw source, and
+    :meth:`describe` / `source_note` say so honestly
+    ("raw — background correction not saved").
+- Mutual state visibility stays: :meth:`describe` exposes both sides'
+  current state (correction method/params/saved + remap min/max/gamma).
+- ``region=None`` means "the current patch". The signature carries
+  ``region`` so the v15 viewer foundation can swap in a viewport tile
+  provider without touching the UI; a true raw bypass stage (raw pixels
+  even after Save) also arrives with that foundation.
 
-Stages (explicit pipeline order):
+Stages:
 
-    raw -> corrected (optional, live preview) -> remapped (display transform)
+    corrected (= loader-served: saved corrected, else raw)
+        -> remapped (production display transform)
 
 The remapped stage runs the PRODUCTION algorithm
-(:func:`core.channel_remap.apply_channel_remap`) on the corrected stage —
-preview is a local execution of the production pipeline, never a separate
-display filter.
+(:func:`core.channel_remap.apply_channel_remap`) on the corrected stage.
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -28,12 +35,8 @@ import numpy as np
 
 from ...core.channel_remap import apply_channel_remap
 
-STAGE_RAW = "raw"
 STAGE_CORRECTED = "corrected"
 STAGE_REMAPPED = "remapped"
-
-# Methods with a single corrected array in the preview payload.
-_PAYLOAD_KEY = {"tophat": "tophat_raw", "cucim": "cucim_raw"}
 
 
 class Step0PreviewSourceProvider(QObject):
@@ -42,9 +45,8 @@ class Step0PreviewSourceProvider(QObject):
     Signals
     -------
     stage_invalidated(str channel, str stage):
-        The named stage of a channel changed (new preview computed, method or
-        params changed). Consumers (e.g. the remap workbench) should drop
-        their cached pixels for that channel and re-pull.
+        The saved corrected artifact for the channel changed (a Save landed);
+        consumers should drop cached pixels for that channel and re-pull.
     """
 
     stage_invalidated = pyqtSignal(str, str)
@@ -57,17 +59,13 @@ class Step0PreviewSourceProvider(QObject):
     def get_pixels(self, channel, stage=STAGE_CORRECTED, region=None):
         """Return float32 pixels of `channel` at `stage` for `region`.
 
-        region=None -> current patch. Falls back down the pipeline when a
-        stage is not available (corrected without a live preview -> raw), so
-        callers always get the best currently-true data, never stale saved
-        output.
+        region=None -> current patch (the only region until the viewer
+        foundation lands).
         """
         if region is not None:
             raise NotImplementedError(
                 "viewport regions arrive with the v15 viewer foundation; "
                 "only the current patch (region=None) is supported")
-        if stage == STAGE_RAW:
-            return self._raw(channel)
         if stage == STAGE_CORRECTED:
             return self._corrected(channel)
         if stage == STAGE_REMAPPED:
@@ -77,38 +75,36 @@ class Step0PreviewSourceProvider(QObject):
             return apply_channel_remap(corrected, self._remap_params(channel))
         raise ValueError(f"unknown stage: {stage}")
 
-    def _raw(self, channel):
+    def _corrected(self, channel):
+        """Loader-served pixels: SAVED corrected data for channels with a
+        saved decision (the preload cache is hot-swapped on Save), raw
+        otherwise. Never an unsaved in-memory preview."""
         page = self._page
         cached = page._preload_cache.get(page.current_patch_idx, {}).get(channel)
         if cached is not None:
             return cached
         return page._read_cond_patch_channel(channel, normalize=False)
 
-    def _corrected(self, channel):
-        """Live corrected pixels: the in-memory preview result for the
-        channel's CURRENT single method — no Save required. Channels without
-        a single-method assignment (unassigned / original / both) or without
-        a computed preview fall back to raw."""
-        page = self._page
-        method = self.active_method(channel)
-        key = _PAYLOAD_KEY.get(method)
-        if key:
-            payload = page._preview_cache.get(
-                (channel, page.current_patch_idx)) or {}
-            arr = payload.get(key)
-            if arr is not None:
-                return np.asarray(arr, dtype=np.float32)
-        return self._raw(channel)
-
     # ── mutual state visibility ─────────────────────────────────────────────
-    def active_method(self, channel):
-        """The channel's current single correction method, or None."""
-        page = self._page
-        if channel == page.nucleus_channel:
-            return None
-        m = (page._channel_methods.get(channel)
-             or page._channel_decisions.get(channel))
-        return m if m in _PAYLOAD_KEY else None
+    def is_saved_corrected(self, channel):
+        """True when the loader serves SAVED corrected pixels for `channel`."""
+        loader = getattr(self._page, "loader", None)
+        decisions = getattr(loader, "_corrected_decisions", None) or {}
+        path = getattr(loader, "_corrected_zarr_path", None)
+        return bool(path) and channel in decisions
+
+    def saved_method(self, channel):
+        loader = getattr(self._page, "loader", None)
+        decisions = getattr(loader, "_corrected_decisions", None) or {}
+        return decisions.get(channel)
+
+    def source_note(self, channel):
+        """Honest one-line provenance for UI display next to the channel."""
+        if channel == self._page.nucleus_channel:
+            return "raw (nucleus — excluded from correction)"
+        if self.is_saved_corrected(channel):
+            return f"corrected ({self.saved_method(channel)}, saved)"
+        return "raw — background correction not saved"
 
     def _remap_params(self, channel):
         wb = getattr(self._page, "_cond_workbench", None)
@@ -118,13 +114,9 @@ class Step0PreviewSourceProvider(QObject):
 
     def describe(self, channel):
         """One dict both sides can read: what correction AND remap currently
-        think about this channel (live, unsaved state included)."""
+        think about this channel."""
         page = self._page
-        method = self.active_method(channel)
-        payload_ready = bool(
-            method and (page._preview_cache.get(
-                (channel, page.current_patch_idx)) or {}).get(
-                _PAYLOAD_KEY[method]) is not None)
+        saved = self.is_saved_corrected(channel)
         tr, cs = None, None
         cp = page._channel_params.get(channel)
         if cp:
@@ -135,10 +127,9 @@ class Step0PreviewSourceProvider(QObject):
             "correction": {
                 "assigned_method": page._channel_decisions.get(channel),
                 "preview_method": page._channel_methods.get(channel),
-                "active_method": method,
+                "saved_method": self.saved_method(channel),
                 "params": {"tophat_radius": tr, "cucim_sigma": cs},
-                "preview_computed": payload_ready,
-                "saved": channel in getattr(page, "_computed_channels", set()),
+                "saved": saved,
             },
             "remap": {
                 "min": remap.get("min"),
@@ -148,11 +139,12 @@ class Step0PreviewSourceProvider(QObject):
                     getattr(getattr(page, "_cond_workbench", None),
                             "_user_adjusted", {}).get(channel)),
             },
-            "served_corrected_stage": ("corrected_preview" if payload_ready
-                                       else "raw"),
+            "served_corrected_stage": ("corrected_saved" if saved
+                                       else "raw_unsaved"),
+            "source_note": self.source_note(channel),
         }
 
-    # ── invalidation ─────────────────────────────────────────────────────────
+    # ── invalidation (Save is the only trigger) ──────────────────────────────
     def invalidate(self, channel, stage=STAGE_CORRECTED):
-        """Announce that a stage changed (new preview, method/params edit)."""
+        """Announce that the saved corrected artifact changed for `channel`."""
         self.stage_invalidated.emit(channel, stage)

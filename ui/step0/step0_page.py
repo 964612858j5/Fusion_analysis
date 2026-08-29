@@ -1154,9 +1154,9 @@ class Step0Page(QWidget):
         # Channels column top is not pushed down by it and aligns with the BG tab.
         self._cond_workbench.set_center_top_bar(_patch_bar)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
-        # v15: single data-access seam. Remap now eats the LIVE corrected stage
-        # (in-memory preview results, no Save required); channels without a
-        # computed preview fall back to raw. Lazy per-channel fetch preserved.
+        # v15: single data-access seam with the SAVE boundary — remap eats
+        # only loader-served pixels (saved corrected after Save, raw before,
+        # honestly labeled). Lazy per-channel fetch preserved.
         from .preview_source_provider import (
             Step0PreviewSourceProvider, STAGE_CORRECTED)
         self._preview_provider = Step0PreviewSourceProvider(self)
@@ -1452,6 +1452,11 @@ class Step0Page(QWidget):
             # from the Step0 patch, NOT proven to match the source Step2 will read.
             meta[ch] = {
                 "source": "step0_loader",
+                # Honest per-channel note shown in the workbench: saved
+                # corrected vs raw-unsaved (the Save boundary, v15 contract).
+                "source_note": (self._preview_provider.source_note(ch)
+                                if getattr(self, "_preview_provider", None)
+                                else ""),
                 "intensity_space": "raw_ome_native_float",
                 "normalization": "none",
                 "step2_compatible": False,
@@ -3150,8 +3155,6 @@ class Step0Page(QWidget):
             self._channel_methods.pop(ch, None)
         else:
             self._channel_methods[ch] = m
-        if getattr(self, "_preview_provider", None) is not None:
-            self._preview_provider.invalidate(ch)   # corrected stage semantics changed
         row = self._channel_rows.get(ch)
         if row:
             cb = row["checkbox"]
@@ -3277,9 +3280,6 @@ class Step0Page(QWidget):
     def _on_batch_patch_done(self, ch, p_idx, payload):
         """一个patch计算完成，存入缓存。"""
         self._preview_cache[(ch, p_idx)] = payload
-        if (p_idx == self.current_patch_idx
-                and getattr(self, "_preview_provider", None) is not None):
-            self._preview_provider.invalidate(ch)
         # 如果当前正在查看这个通道的这个patch，立刻刷新
         if ch == self.current_channel and p_idx == self.current_patch_idx:
             self._last_payload = payload
@@ -3544,8 +3544,6 @@ class Step0Page(QWidget):
         if req_id != self._preview_req_id:
             return
         self._preview_cache[(self.current_channel, self.current_patch_idx)] = payload
-        if getattr(self, "_preview_provider", None) is not None:
-            self._preview_provider.invalidate(self.current_channel)
         self._last_payload = payload
         self._rebuild_payload_rgb_from(
             payload,
@@ -3855,7 +3853,11 @@ class Step0Page(QWidget):
                     pc[ch] = arr
                 except Exception:
                     continue
-        # Drop the workbench's stale raw for corrected channels + repaint.
+        # Announce the Save (the ONLY corrected-stage invalidation trigger),
+        # then drop the workbench's stale raw for corrected channels + repaint.
+        if getattr(self, "_preview_provider", None) is not None:
+            for ch in corrected:
+                self._preview_provider.invalidate(ch)
         self._maybe_refresh_conditioning()
 
     def _on_wsi_canceled(self, zarr_path):

@@ -1,10 +1,9 @@
-"""v15 Workstream B step 1: Step0PreviewSourceProvider.
+"""v15: Step0PreviewSourceProvider — the SAVE-boundary contract (revised).
 
-New contract (replaces the old save-then-remap flow): background correction
-and channel remap interact LIVE on the same data — the corrected stage is
-served from in-memory preview results with no Save, both sides' state is
-mutually visible via describe(), and stage changes invalidate downstream
-consumers.
+Background correction and remap stay separate: remap consumes only the saved
+corrected artifact (loader-served after Save), never an unsaved in-memory
+preview. Unsaved channels are served raw and honestly labeled. Mutual state
+stays visible via describe(); Save is the only corrected-stage invalidation.
 
 Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 """
@@ -22,6 +21,10 @@ def app():
 
 
 class _Loader:
+    """Fake loader with the corrected-store surface the provider reads."""
+    _corrected_zarr_path = None
+    _corrected_decisions = {}
+
     def channel_names(self):
         return ["DAPI", "CD3", "CD20"]
 
@@ -34,120 +37,109 @@ def _page(app):
     p.patches = [(0, 32, 0, 32)]
     p.current_patch_idx = 0
     p._rebuild_channel_list()
-    # deterministic raw pixels through the preload cache (no disk IO)
+    # deterministic pixels through the preload cache (no disk IO); after a
+    # real Save, _hotswap_corrected re-reads these as corrected pixels.
     p._preload_cache = {0: {ch: np.full((32, 32), i + 1, np.float32)
                             for i, ch in enumerate(["DAPI", "CD3", "CD20"])}}
     return p
 
 
-def _provider(page):
-    from block01.ui.step0.preview_source_provider import Step0PreviewSourceProvider
-    return Step0PreviewSourceProvider(page)
+def _mark_saved(page, channel, method, pixels):
+    """Simulate the Save hand-off: loader now serves corrected pixels."""
+    page.loader._corrected_zarr_path = "/fake/corrected_channels.zarr"
+    page.loader._corrected_decisions = dict(page.loader._corrected_decisions,
+                                            **{channel: method})
+    page._preload_cache[0][channel] = pixels          # hot-swapped cache
 
 
-def test_raw_stage_serves_preload_cache(app):
+def test_unsaved_channel_served_raw_and_labeled(app):
     page = _page(app)
-    pr = _provider(page)
-    arr = pr.get_pixels("CD3", "raw")
-    assert float(arr[0, 0]) == 2.0
-
-
-def test_corrected_falls_back_to_raw_without_preview(app):
-    page = _page(app)
-    pr = _provider(page)
-    # no method assigned, no preview computed -> raw
-    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 2.0
-    d = pr.describe("CD3")
-    assert d["served_corrected_stage"] == "raw"
-    assert d["correction"]["preview_computed"] is False
-
-
-def test_corrected_serves_live_preview_without_save(app):
-    page = _page(app)
-    pr = _provider(page)
+    pr = page._preview_provider
+    # a computed but UNSAVED preview must NOT leak into the corrected stage
     page._channel_methods["CD3"] = "tophat"
-    corrected = np.full((32, 32), 7.5, np.float32)
-    page._preview_cache[("CD3", 0)] = {"tophat_raw": corrected}
-    # NOT in _computed_channels, nothing saved — still served live
+    page._preview_cache[("CD3", 0)] = {
+        "tophat_raw": np.full((32, 32), 99.0, np.float32)}
     out = pr.get_pixels("CD3", "corrected")
-    assert float(out[0, 0]) == 7.5
+    assert float(out[0, 0]) == 2.0                    # raw, not 99.0
     d = pr.describe("CD3")
-    assert d["served_corrected_stage"] == "corrected_preview"
+    assert d["served_corrected_stage"] == "raw_unsaved"
+    assert d["source_note"] == "raw — background correction not saved"
     assert d["correction"]["saved"] is False
 
 
-def test_both_or_original_method_has_no_single_corrected_stage(app):
+def test_saved_channel_served_corrected_and_labeled(app):
     page = _page(app)
-    pr = _provider(page)
-    page._preview_cache[("CD3", 0)] = {
-        "tophat_raw": np.ones((32, 32), np.float32)}
-    for m in ("both", "original"):
-        page._channel_methods["CD3"] = m
-        assert pr.active_method("CD3") is None
-        assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 2.0  # raw
+    pr = page._preview_provider
+    corrected = np.full((32, 32), 7.5, np.float32)
+    _mark_saved(page, "CD3", "tophat", corrected)
+    assert float(pr.get_pixels("CD3", "corrected")[0, 0]) == 7.5
+    d = pr.describe("CD3")
+    assert d["served_corrected_stage"] == "corrected_saved"
+    assert d["source_note"] == "corrected (tophat, saved)"
+    assert d["correction"]["saved_method"] == "tophat"
 
 
-def test_remapped_stage_runs_production_remap_on_corrected(app):
+def test_nucleus_note(app):
+    page = _page(app)
+    assert page._preview_provider.source_note("DAPI") == (
+        "raw (nucleus — excluded from correction)")
+
+
+def test_remapped_stage_runs_production_remap_on_served_stage(app):
     from block01.core.channel_remap import apply_channel_remap
     page = _page(app)
-    pr = _provider(page)
-    page._channel_methods["CD3"] = "cucim"
+    pr = page._preview_provider
     corrected = np.linspace(0, 100, 32 * 32, dtype=np.float32).reshape(32, 32)
-    page._preview_cache[("CD3", 0)] = {"cucim_raw": corrected}
-    params = {"min": 10.0, "max": 90.0, "gamma": 1.0}
-    page._cond_workbench._params["CD3"] = dict(params)
+    _mark_saved(page, "CD3", "cucim", corrected)
+    page._cond_workbench._params["CD3"] = {"min": 10.0, "max": 90.0,
+                                           "gamma": 1.0}
     out = pr.get_pixels("CD3", "remapped")
     expect = apply_channel_remap(corrected, page._cond_workbench._params["CD3"])
     assert np.allclose(out, expect)
 
 
-def test_invalidation_signal_on_preview_and_method_change(app):
+def test_preview_and_method_changes_do_not_invalidate(app):
     page = _page(app)
     got = []
     page._preview_provider.stage_invalidated.connect(
         lambda ch, st: got.append((ch, st)))
-    # a live preview payload lands for the current patch
+    page.current_channel = "CD3"
     page._on_batch_patch_done("CD20", 0, {"tophat_raw": np.ones((4, 4))})
-    # a method change
     page._on_channel_method_changed("CD20", "cucim")
-    assert ("CD20", "corrected") in got
-    assert got.count(("CD20", "corrected")) >= 2
+    assert got == []                                   # only Save invalidates
 
 
 def test_describe_mutual_visibility(app):
     page = _page(app)
-    pr = _provider(page)
+    pr = page._preview_provider
     page._channel_methods["CD3"] = "tophat"
     page._channel_decisions["CD3"] = "tophat"
     page._channel_params["CD3"] = {"tophat_radius": 33, "cucim_sigma": 44}
-    page._cond_workbench._params["CD3"] = {
-        "min": 5.0, "max": 200.0, "gamma": 1.5}
+    page._cond_workbench._params["CD3"] = {"min": 5.0, "max": 200.0,
+                                           "gamma": 1.5}
     page._cond_workbench._user_adjusted["CD3"] = True
     d = pr.describe("CD3")
-    # correction state visible to the remap side
     assert d["correction"]["assigned_method"] == "tophat"
     assert d["correction"]["params"]["tophat_radius"] == 33
-    # remap state visible to the correction side
     assert d["remap"] == {"min": 5.0, "max": 200.0, "gamma": 1.5,
                           "user_adjusted": True}
 
 
 def test_region_reserved_for_viewport_foundation(app):
     page = _page(app)
-    pr = _provider(page)
     with pytest.raises(NotImplementedError):
-        pr.get_pixels("CD3", "raw", region=(0, 10, 0, 10))
+        page._preview_provider.get_pixels("CD3", "corrected",
+                                          region=(0, 10, 0, 10))
 
 
-def test_workbench_invalidate_channel_pixels_repulls_provider(app):
-    """End-to-end: preview lands -> remap view drops cache and re-pulls the
-    live corrected pixels (no Save)."""
+def test_save_invalidation_repulls_into_workbench(app):
+    """End-to-end: Save lands -> provider announces -> remap view re-pulls
+    the saved corrected pixels."""
     page = _page(app)
     wb = page._cond_workbench
     wb.set_channel_images({"CD3": page._preload_cache[0]["CD3"]})
     assert float(wb._raw["CD3"][0, 0]) == 2.0
-    page.current_channel = "CD20"   # keep the BG display path out of this test
-    page._channel_methods["CD3"] = "tophat"
     corrected = np.full((32, 32), 9.0, np.float32)
-    page._on_batch_patch_done("CD3", 0, {"tophat_raw": corrected})
-    assert float(wb._raw["CD3"][0, 0]) == 9.0   # live re-pull happened
+    _mark_saved(page, "CD3", "tophat", corrected)
+    page._preview_provider.invalidate("CD3")           # what Save emits
+    assert float(wb._raw["CD3"][0, 0]) == 9.0

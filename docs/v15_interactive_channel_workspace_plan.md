@@ -499,3 +499,75 @@ shader, or whole-slide background computation:
 
 Mode switching must never modify production parameters.
 
+## 13. Revised architecture decisions (2026-08-29, design review)
+
+These supersede any conflicting statements above.
+
+### 13.1 Correction/remap stay SEPARATE — Save is the hand-off
+
+Workstream B (merged conditioning workspace) is dropped. The pipeline keeps a
+hard boundary: BG correction workspace (compare methods, choose, Save) →
+saved corrected artifact → remap workspace (reads ONLY loader-served saved
+corrected data; raw for unsaved/Original channels, honestly labeled
+"raw — background correction not saved"). Unsaved in-memory previews never
+feed remap. `Step0PreviewSourceProvider` is the seam: stages
+corrected → remapped, `describe()` for mutual state visibility, Save is the
+only corrected-stage invalidation trigger, `region` parameter reserved for
+the viewer foundation.
+
+### 13.2 Patches become pinned checkpoints; whole-slide is primary
+
+- BG workspace: whole-slide Explore by default; Compare 2×2 for methods;
+  region switching via drag, Navigator, checkpoint click, or Compare ROI.
+- Remap workspace: whole-slide drag browsing by default; plus a
+  multi-checkpoint compare (up to 2×2): same channel, SHARED remap params,
+  each cell a different pinned checkpoint.
+
+### 13.3 Viewer foundation requirements (beyond the Odon skeleton)
+
+Odon supplies the viewer-plane skeleton only (viewport tiles, pyramid, LRU,
+latest-wins, coarse→fine, prefetch, budgets). Block01 adds a compute layer:
+
+- **Canonical tiles, not per-viewport arrays**: fixed display tiles
+  (e.g. 512²) computed with per-method halo then cropped; cache key =
+  source identity + channel + level + tile x/y + method + params +
+  algorithm version + boundary mode. Panning recomputes only edge tiles.
+- **Quality tiers**: `interactive` (computed at displayed pyramid level,
+  scale-adjusted params, labeled approximation) / `native` (L0-local,
+  numerically production-aligned) / `production` (full deterministic tiled
+  run, writes artifacts). Only native+ claims numeric equality.
+- **Generation atomicity (Compare)**: every result carries viewport
+  generation, bbox, level, method, param hash, quality; the 2×2 either
+  shows one complete older generation or clearly-marked provisional cells —
+  never a silent mix of positions/qualities. Four views share one camera,
+  one scheduler, one raw cache, one correction cache, one texture pool;
+  Original/Final are references, so at most two unique corrections compute.
+- **Adaptive scheduling, not a fixed 100 ms**: render path never blocks;
+  fast drag = coarse/raw, slow drag = reuse corrected tiles, rest
+  ~60–120 ms = precise request; checkpoint/Navigator jumps fire immediately.
+- **Display ops never invalidate compute caches** (remap/color/weights are
+  shader/LUT-side).
+
+### 13.4 Benchmark gate before full build
+
+No performance numbers are commitments until measured. A minimal prototype
+(real OME pyramid, one viewport, raw display, tile+halo top-hat/cuCIM,
+tile reuse on pan, latest-generation drop) must be benchmarked on the real
+machine (tile 256/512/1024; typical radius/sigma; L0–L2; cold/warm cache;
+I/O, H2D, kernel, D2H/texture upload split; peak RAM/VRAM) before choosing
+tile size, halo strategy, intermediate caches (e.g. per-sigma background),
+CUDA–GL interop, or custom kernels. No Rust rewrite, no Odon code copying
+(GPL-3.0), no Odon embedding.
+
+### 13.5 Delivery order
+
+1. ✅ Provider seam with Save boundary (this revision).
+2. Interface design page: TileRequest/TileResult/SourceIdentity/
+   ViewportGeneration/QualityLevel/CorrectionKey + cancellation & cache
+   contracts.
+3. Minimal prototype + benchmark on real data.
+4. Step0 Explore on the foundation.
+5. Compare 2×2 with shared caches.
+6. Remap whole-slide browsing + multi-checkpoint compare; patches demoted
+   to pinned checkpoints.
+

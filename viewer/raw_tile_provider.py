@@ -256,6 +256,14 @@ class RawTileProvider:
         caller's responsibility (see read_tile / RawTileAssembler, which wrap
         this call themselves).
         """
+        if self._closed:
+            # A stale thread-local handle after close() would be undefined
+            # behavior; fail loudly instead. Lifecycle contract: stop the
+            # scheduler -> join its workers -> provider.close().
+            raise RuntimeError(
+                f"RawTileProvider for {self.path!r} is closed; "
+                "no further reads are allowed")
+
         h, w = self.level_shape(level)
         cy0 = max(0, min(y0, h))
         cy1 = max(0, min(y1, h))

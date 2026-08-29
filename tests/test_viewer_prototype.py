@@ -1055,11 +1055,28 @@ def test_provider_close_closes_tracked_handles_without_error(small_ome_tiff):
     provider2.read_region(0, 0, 0, 256, 0, 256)
     provider2.close()  # must not raise
 
-    # per_call mode: close() is a no-op (nothing tracked) and reads before
-    # AND after close() still work correctly (per_call opens its own handle
-    # every call and never depends on cached state).
+    # per_call mode: close() tracks no handles, but the lifecycle contract is
+    # uniform — after close(), reads MUST fail loudly in every mode.
     provider3 = RawTileProvider(path, handle_mode="per_call")
-    arr_before, _ = provider3.read_region(0, 0, 0, 256, 0, 256)
+    provider3.read_region(0, 0, 0, 256, 0, 256)
     provider3.close()
-    arr_after, _ = provider3.read_region(0, 0, 0, 256, 0, 256)
-    np.testing.assert_array_equal(arr_before, arr_after)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="closed"):
+        provider3.read_region(0, 0, 0, 256, 0, 256)
+
+
+def test_provider_read_after_close_raises_every_mode(small_ome_tiff):
+    """Lifecycle contract: stop scheduler -> join workers -> close();
+    any read after close() is a hard error, never an undefined re-open of a
+    stale thread-local handle."""
+    import pytest as _pytest
+    path, _data = small_ome_tiff
+    for mode in ("per_thread", "shared_lock", "per_call"):
+        provider = RawTileProvider(path, handle_mode=mode)
+        provider.read_region(0, 0, 0, 64, 0, 64)
+        provider.close()
+        with _pytest.raises(RuntimeError, match="closed"):
+            provider.read_region(0, 0, 0, 64, 0, 64)
+        with _pytest.raises(RuntimeError, match="closed"):
+            provider.read_tile(0, TileAddress(
+                grid=TileGridSpec(tile_size=64), level=0, tx=0, ty=0))

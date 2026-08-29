@@ -59,7 +59,14 @@ class ChannelRowBase(QtWidgets.QWidget):
         # Rows and their children stay transparent so the list's hover/selected
         # highlight paints through; host pages (e.g. Step0's #1c1c1c section
         # stylesheet) would otherwise cascade opaque boxes onto each child.
-        self.setStyleSheet("background:transparent;")
+        # Explicit indicator style so the checkbox is drawn visibly ON TOP of
+        # the hover/selected highlight instead of blending into it.
+        self.setStyleSheet(
+            "*{background:transparent;}"
+            "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
+            "border:1px solid #6d8196;background:#182230;}"
+            "QCheckBox::indicator:checked{background:#9bd0ff;border:1px solid #9bd0ff;}"
+            "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}")
         self._apply_color(st.color if st else "#888888")
 
         model.color_changed.connect(self._on_model_color)

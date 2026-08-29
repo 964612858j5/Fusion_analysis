@@ -14,8 +14,9 @@ import pytest
 pytest.importorskip("tifffile")
 
 from block01.core import bg_correction  # noqa: E402
+from block01.viewer.assembler import RawTileAssembler  # noqa: E402
 from block01.viewer.caches import LRUByteCache  # noqa: E402
-from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
+from block01.viewer.correction_compute import CorrectionCompute, halo_for  # noqa: E402
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
@@ -26,6 +27,7 @@ from block01.viewer.tile_types import (  # noqa: E402
     TileAddress,
     TileGridSpec,
     TileRequest,
+    effective_param,
 )
 
 
@@ -48,12 +50,27 @@ class FakeProvider:
     verified positionally. Bounds are clamped to a configurable image size.
     """
 
-    def __init__(self, image_h=2000, image_w=2000):
+    def __init__(self, image_h=2000, image_w=2000, dtype=np.float32, level_shapes=None):
         self.image_h = image_h
         self.image_w = image_w
+        self.dtype = dtype
         self.read_region_calls = 0
+        self.read_tile_calls = 0
+        # level_shapes: optional list of (h, w) for level_downsample support.
+        self._level_shapes = level_shapes or [(image_h, image_w)]
+
+    def level_shape(self, level: int):
+        return self._level_shapes[level]
+
+    def level_downsample(self, level: int) -> float:
+        h0, _w0 = self._level_shapes[0]
+        hn, _wn = self._level_shapes[level]
+        if hn <= 0:
+            return 1.0
+        return round(h0 / hn)
 
     def read_tile(self, channel, tile: TileAddress):
+        self.read_tile_calls += 1
         ts = tile.grid.tile_size
         y0, x0 = tile.ty * ts, tile.tx * ts
         y1, x1 = min(y0 + ts, self.image_h), min(x0 + ts, self.image_w)
@@ -66,7 +83,7 @@ class FakeProvider:
         cx0, cx1 = max(0, x0), min(x1, self.image_w)
         rows = np.arange(cy0, cy1).reshape(-1, 1)
         cols = np.arange(cx0, cx1).reshape(1, -1)
-        arr = (rows * 1000 + cols).astype(np.float32)
+        arr = (rows * 1000 + cols).astype(self.dtype)
         return arr, (cy0, cx0)
 
 
@@ -137,7 +154,8 @@ def test_correction_compute_crops_halo_exactly(monkeypatch):
     monkeypatch.setattr(bg_correction, "_apply_tophat_gpu_or_cpu", lambda arr, radius: arr.copy())
 
     provider = FakeProvider(image_h=4000, image_w=4000)
-    compute = CorrectionCompute(provider)
+    raw_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
     src = make_source()
     tile = make_tile(tile_size=512, tx=2, ty=3)  # y0=1536, x0=1024, well inside bounds
     key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
@@ -159,13 +177,185 @@ def test_correction_compute_crops_halo_at_edge(monkeypatch):
     monkeypatch.setattr(bg_correction, "_apply_cucim_or_cpu",
                          lambda arr, sigma, prefer_gpu=True: arr.copy())
     provider = FakeProvider(image_h=1000, image_w=1000)
-    compute = CorrectionCompute(provider)
+    raw_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
     src = make_source()
     tile = make_tile(tile_size=512, tx=1, ty=1)  # core clamped to 488x488
     key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="cucim",
                          params=(10,), algorithm_version="v1")
     result = compute.compute(key)
     assert result.pixels.shape == (488, 488)
+
+
+# ── halo sizing contract ──────────────────────────────────────────────────
+
+def test_halo_for_tophat_and_cucim():
+    assert halo_for("tophat", 6) == 12
+    assert halo_for("tophat", 25) == 50
+    # cucim/gaussian: ceil(4 * sigma), matching truncate=4 defaults.
+    assert halo_for("cucim", 8) == 32
+    assert halo_for("cucim", 7) == 28
+    with pytest.raises(ValueError):
+        halo_for("bogus", 1)
+
+
+# ── effective_param scaling ──────────────────────────────────────────────
+
+def test_effective_param_scaling():
+    assert effective_param(24, level=0, downsample=1) == 24
+    assert effective_param(24, level=1, downsample=2) == 12
+    assert effective_param(24, level=2, downsample=4) == 6
+    # rounds, never below 1
+    assert effective_param(3, level=1, downsample=8) == 1
+    assert effective_param(1, level=3, downsample=100) == 1
+    # level 0 is never scaled regardless of a stray downsample value
+    assert effective_param(24, level=0, downsample=4) == 24
+
+
+# ── RawTileAssembler: stitching correctness + cache-hit accounting ────────
+
+def test_assembler_stitches_and_reuses_cache():
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    raw_cache = LRUByteCache(50_000_000)
+    assembler = RawTileAssembler(provider, raw_cache)
+    src = make_source()
+    grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
+
+    # A window spanning a 2x2 block of canonical 512 tiles.
+    y0, y1, x0, x1 = 400, 900, 400, 900
+    arr, (ry0, rx0), stats = assembler.assemble(src, grid, "DAPI", 0, y0, y1, x0, x1)
+
+    assert (ry0, rx0) == (y0, x0)
+    assert arr.shape == (y1 - y0, x1 - x0)
+    rows = np.arange(y0, y1).reshape(-1, 1)
+    cols = np.arange(x0, x1).reshape(1, -1)
+    expected = (rows * 1000 + cols).astype(np.float32)
+    np.testing.assert_array_equal(arr, expected)
+
+    # 2x2 tiles covered, all cold on the first call.
+    assert stats["tiles_total"] == 4
+    assert stats["tiles_hit"] == 0
+    assert stats["io_ms"] >= 0.0
+    first_call_reads = provider.read_tile_calls
+    assert first_call_reads == 4
+
+    # Second call over the same window: everything should now be a cache hit
+    # and no new provider.read_tile calls should happen.
+    arr2, _, stats2 = assembler.assemble(src, grid, "DAPI", 0, y0, y1, x0, x1)
+    np.testing.assert_array_equal(arr2, expected)
+    assert stats2["tiles_total"] == 4
+    assert stats2["tiles_hit"] == 4
+    assert provider.read_tile_calls == first_call_reads
+
+
+# ── native dtype raw cache ─────────────────────────────────────────────────
+
+def test_raw_cache_and_pixelbuffer_are_native_dtype():
+    provider = FakeProvider(image_h=2000, image_w=2000, dtype=np.uint8)
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=1, compute_workers=1)
+
+    src = make_source()
+    tile = make_tile(tile_size=512, tx=0, ty=0)
+    key = RawKey(source=src, channel="DAPI", tile=tile)
+    results = []
+    sched.request(TileRequest(key=key, generation=0, priority=0), results.append)
+
+    deadline = time.time() + 5
+    while not results and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert results[0].error is None
+    assert results[0].pixels.dtype == "uint8"
+    assert results[0].pixels.handle.dtype == np.uint8
+
+    cached = raw_cache.get(key)
+    assert cached is not None
+    assert cached.dtype == np.uint8
+    sched.shutdown()
+
+
+# ── golden seam test: stitched tiled correction == whole-image reference ──
+
+def _synthetic_image(size=1024, seed=0):
+    rng = np.random.RandomState(seed)
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    gradient = 50.0 + 30.0 * (xx / size) + 20.0 * (yy / size)
+    blobs = np.zeros((size, size), dtype=np.float32)
+    for _ in range(15):
+        cy, cx = rng.randint(0, size, size=2)
+        r = rng.randint(10, 40)
+        yyi, xxi = np.ogrid[:size, :size]
+        mask = (yyi - cy) ** 2 + (xxi - cx) ** 2 <= r * r
+        blobs[mask] += rng.uniform(80, 200)
+    noise = rng.normal(0, 2.0, size=(size, size)).astype(np.float32)
+    return np.clip(gradient + blobs + noise, 0, None).astype(np.float32)
+
+
+class _SyntheticProvider:
+    """Real-shaped provider over a single in-memory float32 image."""
+
+    def __init__(self, image: np.ndarray):
+        self.image = image
+        h, w = image.shape
+        self._shape = (h, w)
+
+    def level_shape(self, level):
+        assert level == 0
+        return self._shape
+
+    def level_downsample(self, level):
+        return 1.0
+
+    def read_tile(self, channel, tile: TileAddress):
+        ts = tile.grid.tile_size
+        y0, x0 = tile.ty * ts, tile.tx * ts
+        h, w = self._shape
+        y1, x1 = min(y0 + ts, h), min(x0 + ts, w)
+        arr, offset = self.read_region(channel, tile.level, y0, y1, x0, x1)
+        return arr, 0.0
+
+    def read_region(self, channel, level, y0, y1, x0, x1):
+        h, w = self._shape
+        cy0, cy1 = max(0, min(y0, h)), max(0, min(y1, h))
+        cx0, cx1 = max(0, min(x0, w)), max(0, min(x1, w))
+        return self.image[cy0:cy1, cx0:cx1].copy(), (cy0, cx0)
+
+
+@pytest.mark.parametrize("method,param", [("cucim", 8), ("tophat", 6)])
+def test_golden_seam_stitched_matches_whole_image_reference(monkeypatch, method, param):
+    monkeypatch.setattr(bg_correction, "GPU_MORPH_AVAILABLE", False)
+
+    image = _synthetic_image(size=1024, seed=0)
+    provider = _SyntheticProvider(image)
+    raw_cache = LRUByteCache(200_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+
+    src = make_source()
+    grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
+
+    if method == "cucim":
+        reference = bg_correction._apply_cucim_or_cpu(image, param, prefer_gpu=False)
+    else:
+        reference = bg_correction._apply_tophat_gpu_or_cpu(image, param)
+
+    stitched = np.zeros_like(image)
+    for ty in range(2):
+        for tx in range(2):
+            addr = TileAddress(grid=grid, level=0, tx=tx, ty=ty)
+            key = CorrectionKey(
+                source=src, channel="DAPI", tile=addr, method=method,
+                params=(param,), algorithm_version="v1",
+            )
+            result = compute.compute(key)
+            assert result.error is None
+            y0, x0 = ty * 512, tx * 512
+            h, w = result.pixels.shape
+            stitched[y0:y0 + h, x0:x0 + w] = result.pixels.handle
+
+    np.testing.assert_allclose(stitched, reference, atol=1e-4)
 
 
 # ── Fake compute for scheduler tests (avoids real bg_correction/GPU) ────────

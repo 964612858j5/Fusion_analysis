@@ -91,6 +91,14 @@ class RawTileProvider:
         _, h, w = self._level_shapes[level]
         return (h, w)
 
+    def level_downsample(self, level: int) -> float:
+        """Downsample factor of `level` relative to level 0 (>= 1)."""
+        h0, _w0 = self.level_shape(0)
+        hn, _wn = self.level_shape(level)
+        if hn <= 0:
+            return 1.0
+        return round(h0 / hn)
+
     # ── pixel reads ──────────────────────────────────────────────────────
 
     def _open_level_array(self, tf, level: int):
@@ -104,7 +112,12 @@ class RawTileProvider:
         return z
 
     def read_tile(self, channel, tile: TileAddress):
-        """Return (float32 2D array, io_ms). Array may be smaller at edges."""
+        """Return (2D array in NATIVE source dtype, io_ms).
+
+        Array may be smaller at edges. dtype is whatever the source stores
+        (e.g. uint8/uint16) — no float cast here; callers (assembler /
+        compute) cast to float32 only at the compute boundary.
+        """
         import time
 
         h, w = self.level_shape(tile.level)
@@ -133,8 +146,10 @@ class RawTileProvider:
         The requested bounds are clamped to the level's valid extent. The
         returned offset is the actual top-left the array corresponds to,
         which may differ from (y0, x0) when the request ran off the image.
-        Timing is the caller's responsibility (see read_tile / correction
-        compute, which wrap this call themselves).
+        The array is returned in the source's NATIVE dtype (no float cast) —
+        callers cast to float32 only at the compute boundary. Timing is the
+        caller's responsibility (see read_tile / RawTileAssembler, which wrap
+        this call themselves).
         """
         import tifffile
 
@@ -150,5 +165,4 @@ class RawTileProvider:
             zarr_arr = self._open_level_array(tf, level)
             data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
 
-        arr = data.astype(np.float32, copy=False)
-        return arr, (cy0, cx0)
+        return data, (cy0, cx0)

@@ -88,6 +88,21 @@ class CorrectionKey:
 TileKey = Union[RawKey, CorrectionKey]
 
 
+def effective_param(base: int, level: int, downsample: float) -> int:
+    """Scale a base method param down for a coarser pyramid level.
+
+    Used for QualityLevel.INTERACTIVE at level > 0: the correction is run at
+    the displayed (downsampled) resolution, so a radius/sigma tuned for
+    level-0 pixels must shrink by the level's downsample factor to keep the
+    same *physical* feature size. `downsample` is the ratio
+    level0_size / levelN_size (>= 1 for level > 0, == 1 for level 0).
+    Always at least 1 (a param of 0 is meaningless to the kernels).
+    """
+    if level <= 0 or downsample <= 1:
+        return int(base)
+    return max(1, int(round(base / downsample)))
+
+
 # ── Request / result ─────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

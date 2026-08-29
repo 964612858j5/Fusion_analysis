@@ -11,12 +11,28 @@ Rows write user interaction into the ChannelSetModel and follow model signals
 for their channel; they never touch config files.
 """
 
+import os
+
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 
 from .model import ChannelSetModel
 
 _NAME_STYLE = "color:#dce5ef;font-size:11px;"
+
+_CHECK_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "check.svg").replace(os.sep, "/")
+
+# Shared checkbox template: explicitly drawn indicator that sits visibly on
+# top of the list highlight; a CHECKMARK (not a filled box) when checked.
+# Pages may override per-widget (e.g. Step0's green filled "done" state).
+CHECKBOX_INDICATOR_QSS = (
+    "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
+    "border:1px solid #6d8196;background:#182230;}"
+    "QCheckBox::indicator:checked{background:#182230;"
+    f"border:1px solid #9bd0ff;image:url({_CHECK_ICON});}}"
+    "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}"
+)
 
 
 class ChannelRowBase(QtWidgets.QWidget):
@@ -59,14 +75,7 @@ class ChannelRowBase(QtWidgets.QWidget):
         # Rows and their children stay transparent so the list's hover/selected
         # highlight paints through; host pages (e.g. Step0's #1c1c1c section
         # stylesheet) would otherwise cascade opaque boxes onto each child.
-        # Explicit indicator style so the checkbox is drawn visibly ON TOP of
-        # the hover/selected highlight instead of blending into it.
-        self.setStyleSheet(
-            "*{background:transparent;}"
-            "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
-            "border:1px solid #6d8196;background:#182230;}"
-            "QCheckBox::indicator:checked{background:#9bd0ff;border:1px solid #9bd0ff;}"
-            "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}")
+        self.setStyleSheet("*{background:transparent;}" + CHECKBOX_INDICATOR_QSS)
         self._apply_color(st.color if st else "#888888")
 
         model.color_changed.connect(self._on_model_color)

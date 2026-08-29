@@ -37,14 +37,11 @@ class _ChannelRow(QtWidgets.QWidget):
         lay.setSpacing(5)
 
         # v15 template (matches the Step0 BG rows): transparent children so the
-        # list's hover/selected highlight paints through, and an explicitly
-        # drawn checkbox indicator that sits visibly on top of the highlight.
-        self.setStyleSheet(
-            "*{background:transparent;}"
-            "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
-            "border:1px solid #6d8196;background:#182230;}"
-            "QCheckBox::indicator:checked{background:#9bd0ff;border:1px solid #9bd0ff;}"
-            "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}")
+        # list's hover/selected highlight paints through, and the shared
+        # checkmark indicator. Remap involves no computation, so rows here
+        # always use the checkmark (never a filled box).
+        from .channel_dock.rows import CHECKBOX_INDICATOR_QSS
+        self.setStyleSheet("*{background:transparent;}" + CHECKBOX_INDICATOR_QSS)
 
         self._chk = QtWidgets.QCheckBox()
         self._chk.setChecked(bool(visible))

@@ -514,6 +514,75 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 --no-directional-prefetch`) is the A/B switch. Stats: `dir_prefetch_issued`,
 `dir_prefetch_completed`, `dir_prefetch_cancelled`,
 `dir_prefetch_direction_changes`.
+
+## Level-switch swap
+
+Steady panning is effectively solved: over 60-100 step drags (straight,
+zigzag, reversal, varying speed), measured current-level coverage is
+96-100%, with ZERO corrected-cache evictions (the cache peaked at 165MB of
+its 512MB budget). Zooming across a pyramid level boundary was not: a
+continuous zoom-in crossing level 1 into level 0 measured mean coverage
+73.3%, and at the instant the display level switches, coverage of the NEW
+level is 0.0%. The new level's tiles then landed one at a time on top of
+the old level; because corrected pixels are brightness- and sharpness-
+normalized per level (see "Per-level display gain" above), each arriving
+tile drew a visible square boundary against its neighbors.
+
+Two causes, both addressed here:
+
+1. The range handler's cache-serve fast path (above, "Serving prefetched
+   tiles without tick latency") was guarded by `prev_level == self.level`,
+   so at exactly the moment every visible tile is new -- a level switch --
+   nothing was served from cache, even for tiles already computed and
+   resident from the level the camera is leaving/entering (e.g. a fallback
+   tile pooled at `level + 1` before the switch, now the current level).
+   Fixed: when the display level has just changed, the ENTIRE current
+   visible set is treated as newly exposed (the previous set is in a
+   different level's tile coordinates and is not comparable), and the same
+   corrected-cache lookup is done for each, served through
+   `_on_precise_cache_hit` exactly as the pan path already does. This stays
+   cheap: a level switch is rare and the visible set is ~20 tiles, so it is
+   at most one dict lookup per visible tile, bounded by the visible-set
+   size (see `test_cache_serve_lookup_bounded_by_visible_set`).
+
+2. New-level tiles are otherwise shown PROGRESSIVELY as they arrive (the
+   deliberate trade described above under "Anti-checkerboard for precise
+   tiles"). That policy is correct during a pan -- it was measured, and the
+   whole-viewport atomic gate it replaced caused a visible flash on every
+   camera movement. It is WRONG for a level switch specifically, because
+   what sits underneath during a level switch is a COMPLETE, same-stage
+   (corrected) image at the adjacent level -- the level just left, still
+   fully pooled -- so swapping the whole current level in as one step is
+   strictly better than a tile-by-tile mosaic on top of it.
+
+   Fixed with a gate scoped ONLY to the level-switch transition:
+   `_on_range_changed` records `self._level_switch_pending = True` and
+   `self._level_switch_at = time.perf_counter()` whenever `self.level`
+   changes. While pending, `_update_layer_visibility` computes the current
+   level's visibility as `covered` (the existing `_coverage_complete()`
+   boolean) instead of the unconditional `True` it would otherwise use once
+   the floor is ready -- coarser tiles and the floor stay visible
+   underneath exactly as before, so the screen keeps showing the complete
+   adjacent-level image rather than a growing mosaic. The flag clears the
+   moment `_coverage_complete()` becomes true (the swap then happens in a
+   single visibility pass, one frame), and is ALSO cleared unconditionally
+   once `LEVEL_SWITCH_GATE_MS` (250ms) has elapsed since the switch, even if
+   coverage never completes -- a level that is slow to compute must never
+   leave the user staring at a stale image indefinitely; after the timeout,
+   progressive display resumes, which is the honest behavior. A further
+   level change while one is pending simply restarts the gate (new
+   timestamp). Stats: `level_switches`, `level_switch_gate_timeouts`.
+
+   THIS IS NOT THE GENERAL ATOMIC GATE described above and removed for
+   good reason (a whole-viewport flash on every camera motion, measured
+   worse than the checkerboard bug it prevented). It is a strictly
+   NARROWER gate that applies only to the rare instant a level switch is
+   detected, where -- unlike ordinary motion -- a complete same-stage image
+   is already available underneath, and it carries its own timeout so it
+   can never regress into an indefinite stale-image stall. Ordinary
+   panning with incomplete coverage still shows current-level tiles
+   progressively, unchanged (see
+   `test_level_switch_gate_does_not_apply_to_panning`).
 """
 
 import threading
@@ -620,6 +689,15 @@ DIRECTIONAL_PREFETCH_BASE_PRIORITY = 2000
 # How far ahead the candidate corridor is swept, in VIEWPORTS, along the
 # smoothed direction of travel.
 DIRECTIONAL_PREFETCH_CORRIDOR = 1.0
+
+# Level-switch swap (module docstring "Level-switch swap"): while a display-
+# level switch is pending, the current level's precise visibility is gated
+# by `_coverage_complete()` instead of shown unconditionally, so the screen
+# keeps the complete adjacent-level image underneath rather than a growing
+# tile-by-tile mosaic. Cleared the moment coverage completes, or -- always
+# -- once this many milliseconds have elapsed since the switch, whichever
+# comes first.
+LEVEL_SWITCH_GATE_MS = 250
 
 
 def _pick_calibration_windows(overview_arr: np.ndarray, ds_y: float, ds_x: float,
@@ -956,6 +1034,13 @@ class ExploreController(QtCore.QObject):
         self._viewport_shrinking = False
         self._viewport_zooming = False
 
+        # Level-switch swap (module docstring "Level-switch swap"): set
+        # whenever `self.level` changes in `_on_range_changed`; cleared once
+        # `_coverage_complete()` is true or `LEVEL_SWITCH_GATE_MS` elapses,
+        # whichever comes first.
+        self._level_switch_pending = False
+        self._level_switch_at: Optional[float] = None
+
         # Directional prefetch (module docstring "Directional prefetch
         # (pan only)"): A/B switch plus all direction-estimation and
         # in-flight-cap bookkeeping.
@@ -1045,6 +1130,8 @@ class ExploreController(QtCore.QObject):
             "dir_prefetch_completed": 0,
             "dir_prefetch_cancelled": 0,
             "dir_prefetch_direction_changes": 0,
+            "level_switches": 0,
+            "level_switch_gate_timeouts": 0,
         }
         # probe-only timing samples (populated only when probe=True).
         self.timings = {
@@ -1218,7 +1305,18 @@ class ExploreController(QtCore.QObject):
         missing current-level tile is itself corrected-stage, so tiles are
         shown progressively, per tile, as they land -- the atomic
         all-or-nothing gate is kept only for the floor-not-ready window,
-        where a corrected tile next to raw would still be a hard seam."""
+        where a corrected tile next to raw would still be a hard seam.
+
+        Level-switch swap (module docstring "Level-switch swap"): a
+        strictly NARROWER exception to the progressive-display rule above.
+        While `self._level_switch_pending` (set by `_on_range_changed`
+        whenever `self.level` just changed), `current_level_visible` is
+        `covered` even when `floor_ok` -- so the screen keeps showing the
+        complete, same-stage adjacent-level image underneath instead of a
+        growing tile-by-tile mosaic. The flag is cleared here the instant
+        `covered` becomes true, or unconditionally once
+        `LEVEL_SWITCH_GATE_MS` has elapsed since the switch (whichever
+        first), after which progressive display resumes."""
         wants = self._wants_precise()
         covered = wants and bool(self._visible_tiles) and self._coverage_complete()
         floor_ctx = self._current_floor_ctx(self._floor_level, self._floor_stride)
@@ -1233,7 +1331,37 @@ class ExploreController(QtCore.QObject):
         self._raw_pool.apply_visibility(
             self.level, current_level_visible=raw_on, coarser_visible=raw_on)
 
+        if self._level_switch_pending:
+            if covered:
+                self._level_switch_pending = False
+            elif (self._level_switch_at is not None and
+                  (time.perf_counter() - self._level_switch_at) * 1000.0
+                  >= LEVEL_SWITCH_GATE_MS):
+                self._level_switch_pending = False
+                self.stats["level_switch_gate_timeouts"] += 1
+
         current_level_visible = True if floor_ok else covered
+        # The same swap logic covers a continuous ZOOM-OUT, not just the
+        # switch instant. A growing viewport keeps exposing world area that
+        # can only come from a coarser source, so its centre and its edge
+        # are necessarily at different levels for the whole gesture --
+        # measured, 67% of frames during a zoom-out showed two levels at
+        # once, against 20% for a pan the user had already accepted.
+        # Holding the gate while the viewport grows shows ONE uniform
+        # coarser image instead of a growing mosaic: mixed-level frames
+        # went to 0% and coverage improved slightly (65.2% -> 68.9%), with
+        # the pan control unchanged at 96.0% / 20%.
+        #
+        # The timeout is re-based while the gesture is live, so it means
+        # "250ms after the viewport stops growing", not "250ms into a long
+        # zoom-out" -- otherwise a slow gesture would trip it mid-way and
+        # bring the mosaic back.
+        if self._viewport_zooming and not self._viewport_shrinking:
+            self._level_switch_pending = True
+            self._level_switch_at = time.perf_counter()
+
+        if self._level_switch_pending:
+            current_level_visible = covered
         self._precise_pool.apply_visibility(
             self.level, current_level_visible=current_level_visible, coarser_visible=True,
             key_ok=self._precise_key_current_for_level)
@@ -1691,12 +1819,19 @@ class ExploreController(QtCore.QObject):
 
         old_level = self.level
         self.level = new_level
-        if new_level != old_level:
+        level_switched = new_level != old_level
+        if level_switched:
             # Directional prefetch (module docstring): a display-level
             # change makes every pending candidate's level/effective-params
             # stale -- cancel rather than let it compute against the old
             # level.
             self._cancel_directional_prefetch()
+            # Level-switch swap (module docstring "Level-switch swap"): a
+            # further switch while one is already pending simply restarts
+            # the gate (new timestamp).
+            self._level_switch_pending = True
+            self._level_switch_at = time.perf_counter()
+            self.stats["level_switches"] += 1
         ds = self.provider.level_downsample(self.level)
         bbox_level = (
             int(bbox_l0[0] / ds), int(bbox_l0[1] / ds),
@@ -1718,7 +1853,6 @@ class ExploreController(QtCore.QObject):
         self._prev_world_area = world_area
 
         prev_visible = self._visible_tiles
-        prev_level = getattr(self, "_prev_level_for_serve", None)
         self._visible_tiles = tiles_covering(bbox_level, self.grid.tile_size)
         # Serve a newly-visible tile IMMEDIATELY when its corrected result
         # is already in the cache, instead of waiting for the next 30ms
@@ -1735,8 +1869,18 @@ class ExploreController(QtCore.QObject):
         # time but not BLITTED until the next tick. Prefetch alone moved
         # mean coarser fallback 14.6% -> 11.4%; with this, the same
         # prefetch reaches 1.6%.
-        if (self._wants_precise() and prev_level == self.level):
-            newly = self._visible_tiles - prev_visible
+        #
+        # Level-switch swap (module docstring "Level-switch swap"): a
+        # display-level switch is exactly the moment EVERY visible tile is
+        # new (the previous set is in a different level's tile coordinates
+        # and is not comparable), so on a switch the WHOLE current visible
+        # set is treated as newly exposed rather than skipping the cache
+        # serve entirely -- previously this fast path was restricted to
+        # `prev_level == self.level`, which meant a level switch (the case
+        # that most needs it) never benefited at all.
+        if self._wants_precise():
+            newly = (set(self._visible_tiles) if level_switched
+                     else self._visible_tiles - prev_visible)
             if newly:
                 cache = getattr(self.scheduler, "corrected_cache", None)
                 if cache is not None:
@@ -1747,7 +1891,6 @@ class ExploreController(QtCore.QObject):
                             self.scheduler.request(
                                 TileRequest(key=k, generation=gen, priority=0),
                                 self._on_precise_cache_hit)
-        self._prev_level_for_serve = self.level
         self._update_layer_visibility()
 
         viewport_rect = QRectF(x0, y0, x1 - x0, y1 - y0)

@@ -50,6 +50,7 @@ from block01.viewer.explore_view import (  # noqa: E402
     GAIN_CLAMP,
     PRECISE_CURRENT_BASE_PRIORITY,
     DIRECTIONAL_PREFETCH_INFLIGHT,
+    LEVEL_SWITCH_GATE_MS,
 )
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 
@@ -2214,5 +2215,317 @@ def test_directional_prefetch_disabled_by_switch(app):
 
     assert ctrl.stats["dir_prefetch_issued"] == 0
     assert _dirprefetch_reqs(ctrl, scheduler) == []
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Level-switch swap -- module docstring "Level-switch swap". Zooming across a
+# pyramid level boundary measured mean coverage 73.3%, with coverage of the
+# NEW level 0.0% at the switch instant; two fixes: (1) the cache-serve fast
+# path treats the whole visible set as newly exposed on a level switch
+# instead of being skipped by the `prev_level == self.level` guard, and (2)
+# an atomic swap gate holds the adjacent (previous) level's complete image
+# visible until the new level's coverage completes or `LEVEL_SWITCH_GATE_MS`
+# elapses, instead of showing the new level as a growing tile-by-tile mosaic.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_cache_serve_works_across_level_switch(app):
+    """A corrected tile already resident in the cache at the level a
+    switch is landing ON must be blitted on the very range event that
+    performs the switch, not skipped because the previous visible set was
+    computed against a different level's tile coordinates."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    # Zoom out far enough to guarantee the coarse level (level 1).
+    set_view_and_pump(view, 0, 0, 100000, 100000, ms=80)
+    assert ctrl.level == 1, "test setup: a very wide view must land on the coarse level"
+    ctrl._motion_timer.stop()
+
+    # Dry run: discover exactly which level-0 tiles a zoom-in to a small
+    # region will expose (no cache seeded yet, so nothing is served).
+    ctrl._motion_timer.stop()
+    view.view_box.setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
+    _pump(30)
+    ctrl._motion_timer.stop()
+    assert ctrl.level == 0, "test setup: the zoom-in should switch to level 0"
+    targets = list(ctrl._visible_tiles)
+    assert targets, "test setup: the zoom-in must expose at least one level-0 tile"
+
+    # Reset back to the zoomed-out level-1 state.
+    set_view_and_pump(view, 0, 0, 100000, 100000, ms=80)
+    assert ctrl.level == 1
+    ctrl._motion_timer.stop()
+
+    ts = ctrl.grid.tile_size
+    arr = np.full((ts, ts), 9.0, dtype=np.float32)
+    seeded = {ctrl._make_correction_key(tx, ty, level=0): arr for tx, ty in targets}
+
+    class _Cache:
+        def __init__(self, d):
+            self._d = d
+
+        def get(self, k):
+            return self._d.get(k)
+
+    scheduler.corrected_cache = _Cache(seeded)
+    real_request = scheduler.request
+
+    def request_with_cache_hits(req, callback):
+        cached = scheduler.corrected_cache.get(req.key)
+        if cached is not None:
+            callback(TileResult(
+                request=req,
+                pixels=PixelBuffer(residency="cpu", dtype=str(cached.dtype),
+                                   shape=tuple(cached.shape), handle=cached),
+                quality=req.key.quality, provisional=False, timing={}, error=None))
+            return
+        real_request(req, callback)
+
+    scheduler.request = request_with_cache_hits
+    assert not any(ctrl._precise_pool.get(0, *t) for t in targets)
+
+    # The real level-switch event, motion timer stopped beforehand so
+    # nothing but the range handler itself can have served these tiles.
+    ctrl._motion_timer.stop()
+    view.view_box.setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
+    _pump(30)
+    ctrl._motion_timer.stop()
+
+    assert ctrl.level == 0
+    served = [t for t in targets if ctrl._precise_pool.get(0, *t) is not None]
+    assert served, (
+        "no cached corrected tile was served on the range event that "
+        "performed the level switch")
+
+    ctrl.teardown()
+
+
+def test_cache_serve_lookup_bounded_by_visible_set(app):
+    """The cache-serve fast path must stay cheap on a level switch: the
+    number of cache lookups performed by the range handler must never
+    exceed the size of the newly-current visible set."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    set_view_and_pump(view, 0, 0, 100000, 100000, ms=80)
+    assert ctrl.level == 1
+    ctrl._motion_timer.stop()
+
+    class _CountingCache:
+        def __init__(self):
+            self.get_calls = 0
+
+        def get(self, k):
+            self.get_calls += 1
+            return None  # every lookup is a miss -- irrelevant to this test
+
+    cache = _CountingCache()
+    scheduler.corrected_cache = cache
+
+    ctrl._motion_timer.stop()
+    view.view_box.setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
+    _pump(30)
+    ctrl._motion_timer.stop()
+
+    assert ctrl.level == 0, "test setup: the zoom-in should switch to level 0"
+    assert cache.get_calls <= len(ctrl._visible_tiles), (
+        f"cache-serve performed {cache.get_calls} lookups for a "
+        f"{len(ctrl._visible_tiles)}-tile visible set on a level switch")
+
+    ctrl.teardown()
+
+
+def test_level_switch_gate_holds_new_level_until_covered(app):
+    """Right after a level switch, with partial current-level coverage,
+    the current level's precise items must stay hidden (the coarser/
+    adjacent-level item stays visible underneath) even though the floor is
+    ready -- the case that would otherwise show `current_level_visible =
+    True` unconditionally. Once coverage completes, everything at the
+    current level becomes visible in the same visibility pass."""
+    from PyQt5.QtCore import QRectF as _QRectF
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    ctrl.level = 0
+    ctrl._current_bbox = (0, 0, 1024, 1024)
+    ctrl._visible_tiles = tiles_covering((0, 0, 1024, 1024), ctrl.grid.tile_size)
+    assert len(ctrl._visible_tiles) >= 2, "test setup: need >=2 tiles for partial coverage"
+
+    # Force the floor ready so `current_level_visible` would otherwise be
+    # the unconditional True this gate must override.
+    ctrl._floor_level = 1
+    ctrl._floor_stride = 1
+    ctrl._floor_ctx = ctrl._current_floor_ctx(1, 1)
+    ctrl._floor_ready = True
+
+    tiles = sorted(ctrl._visible_tiles)
+    tx0, ty0 = tiles[0]
+    key0 = ctrl._make_correction_key(tx0, ty0)
+    rect = _QRectF(0.0, 0.0, 10.0, 10.0)
+    ctrl._precise_pool.put(0, tx0, ty0, rect, np.zeros((4, 4), dtype=np.uint8), key0)
+
+    # A coarser (adjacent, level+1) item representing the complete image
+    # that sits underneath during the switch.
+    coarse_key = ctrl._make_correction_key(0, 0, level=1)
+    ctrl._precise_pool.put(1, 0, 0, rect, np.zeros((4, 4), dtype=np.uint8), coarse_key)
+
+    ctrl._level_switch_pending = True
+    ctrl._level_switch_at = time.perf_counter()
+    ctrl._update_layer_visibility()
+
+    assert ctrl._level_switch_pending is True, (
+        "gate must still be pending: coverage is incomplete and no timeout has elapsed")
+    entry0 = ctrl._precise_pool.get(0, tx0, ty0)
+    assert entry0.item.isVisible() is False, (
+        "current-level tile must stay hidden while coverage is incomplete under the gate")
+    coarse_entry = ctrl._precise_pool.get(1, 0, 0)
+    assert coarse_entry.item.isVisible() is True, (
+        "the adjacent-level (coarser) complete image must remain visible under the gate")
+
+    # Deliver the rest of the current level -> coverage completes.
+    for tx, ty in tiles[1:]:
+        key = ctrl._make_correction_key(tx, ty)
+        ctrl._precise_pool.put(0, tx, ty, rect, np.zeros((4, 4), dtype=np.uint8), key)
+    ctrl._update_layer_visibility()
+
+    assert ctrl._level_switch_pending is False, (
+        "gate must clear the instant coverage completes"
+    )
+    for tx, ty in tiles:
+        entry = ctrl._precise_pool.get(0, tx, ty)
+        assert entry.item.isVisible() is True, "swap must be atomic: all current-level tiles visible at once"
+
+    ctrl.teardown()
+
+
+def test_level_switch_gate_held_through_zoom_out(app):
+    """A growing viewport keeps the swap gate pending for the whole
+    gesture, not just the switch instant, and keeps re-basing its timeout.
+
+    A zoom-out exposes world area that can only come from a coarser
+    source, so the viewport's centre and edge are necessarily at different
+    levels throughout -- measured, 67% of frames during a zoom-out showed
+    two levels at once, against 20% for a pan the user had accepted.
+    Holding the gate shows one uniform coarser image instead: mixed-level
+    frames went to 0%."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    ctrl._level_switch_pending = False
+    ctrl._viewport_zooming = True
+    ctrl._viewport_shrinking = False   # growing == zoom out
+    ctrl._level_switch_at = time.perf_counter() - 10.0  # long past the timeout
+
+    ctrl._update_layer_visibility()
+    assert ctrl._level_switch_pending is True, (
+        "a growing viewport must hold the swap gate")
+    assert time.perf_counter() - ctrl._level_switch_at < 1.0, (
+        "the timeout must be re-based while the gesture is live, or a slow "
+        "zoom-out trips it mid-gesture and the mosaic comes back")
+
+    # Once the gesture stops, the ordinary timeout applies again.
+    ctrl._viewport_zooming = False
+    ctrl._level_switch_at = time.perf_counter() - (LEVEL_SWITCH_GATE_MS / 1000.0) - 0.05
+    ctrl._update_layer_visibility()
+    assert ctrl._level_switch_pending is False
+
+    ctrl.teardown()
+
+
+def test_level_switch_gate_times_out(app):
+    """With coverage that never completes, the gate must clear itself
+    unconditionally once LEVEL_SWITCH_GATE_MS has elapsed, falling back to
+    progressive display rather than leaving the user staring at a stale
+    adjacent-level image indefinitely."""
+    from PyQt5.QtCore import QRectF as _QRectF
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    ctrl.level = 0
+    ctrl._current_bbox = (0, 0, 1024, 1024)
+    ctrl._visible_tiles = tiles_covering((0, 0, 1024, 1024), ctrl.grid.tile_size)
+    assert len(ctrl._visible_tiles) >= 2
+
+    ctrl._floor_level = 1
+    ctrl._floor_stride = 1
+    ctrl._floor_ctx = ctrl._current_floor_ctx(1, 1)
+    ctrl._floor_ready = True
+
+    tiles = sorted(ctrl._visible_tiles)
+    tx0, ty0 = tiles[0]
+    key0 = ctrl._make_correction_key(tx0, ty0)
+    rect = _QRectF(0.0, 0.0, 10.0, 10.0)
+    ctrl._precise_pool.put(0, tx0, ty0, rect, np.zeros((4, 4), dtype=np.uint8), key0)
+    # Deliberately leave the rest of `tiles` uncovered -- coverage never
+    # completes in this test.
+
+    timeouts_before = ctrl.stats["level_switch_gate_timeouts"]
+
+    # Just short of the timeout: gate still holds.
+    ctrl._level_switch_pending = True
+    ctrl._level_switch_at = time.perf_counter() - (LEVEL_SWITCH_GATE_MS / 1000.0) * 0.5
+    ctrl._update_layer_visibility()
+    assert ctrl._level_switch_pending is True
+    entry0 = ctrl._precise_pool.get(0, tx0, ty0)
+    assert entry0.item.isVisible() is False
+    assert ctrl.stats["level_switch_gate_timeouts"] == timeouts_before
+
+    # Past the timeout: gate clears unconditionally, progressive display
+    # resumes for whatever IS covered (here, just the one pooled tile).
+    ctrl._level_switch_at = time.perf_counter() - (LEVEL_SWITCH_GATE_MS / 1000.0) * 1.5
+    ctrl._update_layer_visibility()
+
+    assert ctrl._level_switch_pending is False
+    assert ctrl.stats["level_switch_gate_timeouts"] == timeouts_before + 1
+    entry0_after = ctrl._precise_pool.get(0, tx0, ty0)
+    assert entry0_after.item.isVisible() is True, (
+        "after the timeout, progressive display must show the one tile that IS covered")
+
+    ctrl.teardown()
+
+
+def test_level_switch_gate_does_not_apply_to_panning(app):
+    """A pan (no level switch pending) with incomplete coverage must still
+    show current-level tiles progressively as they land -- the gate must
+    never regress ordinary in-motion behavior kept from an earlier round."""
+    from PyQt5.QtCore import QRectF as _QRectF
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    ctrl.level = 0
+    ctrl._current_bbox = (0, 0, 1024, 1024)
+    ctrl._visible_tiles = tiles_covering((0, 0, 1024, 1024), ctrl.grid.tile_size)
+    assert len(ctrl._visible_tiles) >= 2
+
+    ctrl._floor_level = 1
+    ctrl._floor_stride = 1
+    ctrl._floor_ctx = ctrl._current_floor_ctx(1, 1)
+    ctrl._floor_ready = True
+
+    tiles = sorted(ctrl._visible_tiles)
+    tx0, ty0 = tiles[0]
+    key0 = ctrl._make_correction_key(tx0, ty0)
+    rect = _QRectF(0.0, 0.0, 10.0, 10.0)
+    ctrl._precise_pool.put(0, tx0, ty0, rect, np.zeros((4, 4), dtype=np.uint8), key0)
+    # No level switch pending -- this is ordinary in-motion partial coverage.
+    assert ctrl._level_switch_pending is False
+
+    ctrl._update_layer_visibility()
+
+    entry0 = ctrl._precise_pool.get(0, tx0, ty0)
+    assert entry0.item.isVisible() is True, (
+        "progressive display must show a landed current-level tile immediately "
+        "during ordinary panning, gate or no gate")
 
     ctrl.teardown()

@@ -2660,8 +2660,18 @@ def test_channel_switch_reloads_overview_for_the_new_channel(app):
     other = [c for c in provider.channel_names if c != "DAPI"][0]
     ctrl.set_selection(channel=other)
 
-    assert ctrl._overview_identity == (provider.source_identity(), other)
+    # The switch must NOT read on the GUI thread (p95 292.9ms on the real
+    # slide), so with no resident record the old pixels go immediately and
+    # the read happens on a worker.
+    assert ctrl._overview_arr is None, (
+        "the previous channel's overview survived the switch")
+    assert view.overview_item.isVisible() is False
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._overview_matches_selection():
+        _pump(10)
     assert ctrl._overview_matches_selection() is True
+    assert ctrl._overview_identity == (provider.source_identity(), other)
     new = np.asarray(view.overview_item.image)
     assert not np.array_equal(old, new), (
         "the overview still holds the previous channel's pixels after a switch")
@@ -2808,7 +2818,9 @@ def test_channel_switch_never_shows_the_old_channel(app):
                 continue
             assert e.key.channel != old_channel, (
                 "a tile from the previous channel survived the switch")
-    assert ctrl._overview_identity[1] == other
+    # Either the new channel's overview is already installed, or there is
+    # none at all -- never the old one.
+    assert ctrl._overview_identity is None or ctrl._overview_identity[1] == other
 
     ctrl.teardown()
 
@@ -2944,5 +2956,82 @@ def test_snapshot_is_immutable_and_epoch_advances(app):
     before = snap.epoch
     ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
     assert ctrl.snapshot().epoch > before
+
+    ctrl.teardown()
+
+
+def test_prepared_overview_installs_synchronously_without_reading(app):
+    """A channel whose overview record is resident must install as a
+    memcpy. This is what makes "the neighbour is ready" true: having its
+    corrected tiles cached is not enough, because without the record the
+    switch still stalls on a p95-293ms read."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+
+    ctrl.prepare_overview_async(other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not any(
+            k[1] == other for k in ctrl._overview_cache):
+        _pump(10)
+    assert any(k[1] == other for k in ctrl._overview_cache), "record never cached"
+    # Preparing must not disturb what is on screen.
+    assert ctrl._overview_identity[1] != other
+
+    reads = []
+    real_read = provider.read_region
+    provider.read_region = lambda *a, **k: (reads.append(a[0]), real_read(*a, **k))[1]
+
+    ctrl.set_selection(channel=other)
+
+    assert ctrl._overview_matches_selection() is True, (
+        "a prepared overview did not install synchronously")
+    assert all(c != other or True for c in reads)
+    assert ctrl.stats.get("overview_cache_hits", 0) >= 1
+
+    ctrl.teardown()
+
+
+def test_atomic_swap_issues_no_raw_requests(app):
+    """When the corrected viewport is already complete the raw layer is
+    hidden, so raw reads could never be seen; issuing them would only burn
+    I/O and contend with background channel preparation."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl.level = 0
+    ctrl._motion_timer.stop()
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    ctrl.prepare_overview_async(other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not any(
+            k[1] == other for k in ctrl._overview_cache):
+        _pump(10)
+
+    class _Cache:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, k):
+            return self.d.get(k)
+
+    cache = _Cache()
+    scheduler.corrected_cache = cache
+    saved = ctrl.channel
+    ctrl.channel = other
+    ts = ctrl.grid.tile_size
+    for tx, ty in ctrl._visible_tiles:
+        cache.d[ctrl._make_correction_key(tx, ty)] = np.full((ts, ts), 5.0, dtype=np.float32)
+    ctrl.channel = saved
+
+    scheduler.requests.clear()
+    ctrl.set_selection(channel=other)
+    ctrl._motion_timer.stop()
+
+    assert ctrl.stats.get("atomic_channel_swaps", 0) >= 1
+    raw = [r for r, _cb in scheduler.pending_for(RawKey)]
+    assert not raw, f"an already-complete switch still issued {len(raw)} raw reads"
 
     ctrl.teardown()

@@ -591,6 +591,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 import threading
 import time
 from dataclasses import dataclass, field
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -759,6 +760,39 @@ def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
     return np.ascontiguousarray(reshaped.mean(axis=(1, 3), dtype=np.float32))
 
 
+# An overview level for the real 57-channel slide is 1980x1680 float32 =
+# 13.3 MB, so holding every channel would be ~758 MB. This cap keeps the
+# current channel plus a +-2 HOT neighbourhood (5) and a little slack.
+OVERVIEW_CACHE_RECORDS = 8
+
+
+@dataclass(frozen=True)
+class OverviewRecord:
+    """One channel's overview level, with the display range derived FROM it.
+
+    Identity is `(source, channel, level)`. The display range travels with
+    the pixels deliberately: `display_lo`/`display_hi` come from this
+    array's own percentile, so installing a record means installing a
+    matched (pixels, range) pair. Installing pixels and keeping a previous
+    channel's range would misrepresent brightness just as surely as showing
+    the wrong pixels.
+
+    Why it exists: a channel switch has to know this channel's display range
+    before it can show anything, and reading the level costs p50 132.7 ms /
+    p95 292.9 ms on the real 57-channel slide -- a visible GUI stall. Having
+    corrected tiles cached does NOT avoid it, so "a neighbour channel is
+    ready" is only true if its overview record is ready too.
+    """
+
+    source: object
+    channel: str
+    level: int
+    arr: object
+    display_lo: float
+    display_hi: float
+    shape: Tuple[int, int]
+
+
 # ── Interaction snapshot ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -771,8 +805,15 @@ class PrefetchSnapshot:
     they run: by the time a background batch starts, the live fields may
     describe a different channel, method, level or viewport, and work
     planned against the live state would carry the wrong identity. Every
-    field needed to build a `CorrectionKey` is here, so a consumer can
-    construct keys for OTHER channels without touching the controller.
+    Every field needed to build a `CorrectionKey` for the CURRENT method is
+    here, so a consumer can construct keys for other channels without
+    touching the controller.
+
+    LIMIT, stated because an earlier version of this docstring overstated
+    it: this carries ONE method and one parameter set. It cannot express
+    "both tophat and cuCIM are prepared for this channel". A consumer that
+    needs to reason about several methods at once needs a richer, still
+    immutable spec (a `ChannelCorrectionSpec`), which is not defined yet.
 
     `epoch` increments on every interaction event and every selection
     change. A consumer that captured epoch N must re-check it before
@@ -1065,6 +1106,7 @@ class ExploreController(QtCore.QObject):
     _precise_delivered = QtCore.pyqtSignal(object)
     _floor_delivered = QtCore.pyqtSignal(object)
     _dirprefetch_delivered = QtCore.pyqtSignal(object)
+    _overview_delivered = QtCore.pyqtSignal(object)
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
@@ -1149,6 +1191,12 @@ class ExploreController(QtCore.QObject):
         # channel's identity -- pixels from one channel claiming to be
         # another. See `_overview_matches_selection`.
         self._overview_identity = None
+        # (source, channel, level) -> OverviewRecord. Lets a prepared
+        # channel be installed with a memcpy instead of a p95-293ms disk
+        # read on the GUI thread; see `OverviewRecord`.
+        self._overview_cache = OrderedDict()
+        self._overview_gen = 0
+        self._overview_threads = []
         # Bumped on every interaction event and every selection change; see
         # PrefetchSnapshot.epoch.
         self._interaction_epoch = 0
@@ -1238,6 +1286,7 @@ class ExploreController(QtCore.QObject):
         self._precise_delivered.connect(self._handle_precise_result, QtCore.Qt.QueuedConnection)
         self._floor_delivered.connect(self._handle_floor_result, QtCore.Qt.QueuedConnection)
         self._dirprefetch_delivered.connect(self._handle_dirprefetch_result, QtCore.Qt.QueuedConnection)
+        self._overview_delivered.connect(self._handle_overview_result, QtCore.Qt.QueuedConnection)
 
         self.view.view_box.sigRangeChanged.connect(self._on_range_changed)
 
@@ -1297,6 +1346,7 @@ class ExploreController(QtCore.QObject):
         pixel is simply the wrong data -- unlike a method/param change,
         there is no "still technically raw and fine" fallback)."""
         channel_changed = channel is not _UNSET and channel != self.channel
+        atomic_swapped = False
         if channel is not _UNSET:
             self.channel = channel
         if method is not _UNSET:
@@ -1314,14 +1364,19 @@ class ExploreController(QtCore.QObject):
             # `_overview_matches_selection`). Reloading also refreshes
             # `_display_lo`/`_display_hi` for the new channel, which the
             # quantisation in the swap below depends on.
-            self.load_overview(ensure_floor=False)
+            # Never a synchronous read here: it costs p95 292.9ms on the
+            # real 57-channel slide. A resident record installs as a
+            # memcpy; otherwise the old pixels are cleared at once and the
+            # read runs on a worker (`switch_overview_for_current_channel`).
+            self.switch_overview_for_current_channel()
 
             # Then try to swap in a fully-cached corrected viewport within
             # THIS SAME GUI event -- clear, fill, and one visibility update,
             # with no queued signal in between. The normal request path
             # would leave at least one painted frame showing raw before the
             # corrected tiles land.
-            if not self._try_atomic_cached_channel_swap():
+            atomic_swapped = self._try_atomic_cached_channel_swap()
+            if not atomic_swapped:
                 self._raw_pool.clear()
                 self._precise_pool.clear()
 
@@ -1335,12 +1390,17 @@ class ExploreController(QtCore.QObject):
             self._ensure_corrected_floor()
         if self._current_bbox is not None:
             self._issue_settled_request()
-            if channel_changed:
+            if channel_changed and not atomic_swapped:
                 # Do not wait for the next motion tick: the new channel has
                 # nothing pooled, so its raw tiles must be asked for now.
                 # This does not make them arrive instantly; until they do,
                 # the honest display is the NEW channel's coarse overview
                 # (a provisional state), never the old channel's pixels.
+                #
+                # Skipped when the atomic swap succeeded: the corrected
+                # viewport is already complete and the raw layer is hidden,
+                # so these reads could never be seen. They would only burn
+                # I/O and contend with background channel preparation.
                 self._issue_raw_requests()
 
         # The atomic cached swap fills the pool BEFORE `_enter_provisional`
@@ -1552,36 +1612,83 @@ class ExploreController(QtCore.QObject):
 
     # ── startup ───────────────────────────────────────────────────────────
 
-    def load_overview(self, ensure_floor: bool = True):
-        """Pick the smallest pyramid level with max(h, w) >= 512 pixels
-        (else the smallest available level), read the WHOLE level
-        synchronously, and set it as the never-evicted overview layer."""
+    def _pick_overview_level(self) -> int:
+        """Smallest pyramid level with max(h, w) >= 512, else the coarsest."""
         num_levels = self.provider.num_levels
-        chosen = num_levels - 1  # default: the smallest (coarsest) level
+        chosen = num_levels - 1
         for level in range(num_levels - 1, -1, -1):
             h, w = self.provider.level_shape(level)
             if max(h, w) >= 512:
                 chosen = level
                 break
+        return chosen
 
-        h, w = self.provider.level_shape(chosen)
-        arr, _offset = self.provider.read_region(self.channel, chosen, 0, h, 0, w)
+    @staticmethod
+    def _read_overview_record(provider, source, channel, level) -> OverviewRecord:
+        """Read one channel's overview level and derive its display range.
+        Pure with respect to controller state, so it is safe to call from a
+        worker thread."""
+        h, w = provider.level_shape(level)
+        arr, _offset = provider.read_region(channel, level, 0, h, 0, w)
         arr = arr.astype(np.float32, copy=False)
+        lo, hi = ExploreController._compute_display_levels(arr)
+        return OverviewRecord(source=source, channel=channel, level=level,
+                              arr=arr, display_lo=lo, display_hi=hi, shape=(h, w))
 
-        ds_y, ds_x = self._downsample_yx(chosen)
-        rect = ExploreView.world_rect(0, 0, h, w, ds_y, ds_x)
+    def _overview_cache_get(self, source, channel, level):
+        rec = self._overview_cache.get((source, channel, level))
+        if rec is not None:
+            self._overview_cache.move_to_end((source, channel, level))
+        return rec
 
-        lo, hi = self._compute_display_levels(arr)
-        self._display_lo, self._display_hi = lo, hi
-        self._overview_arr = arr
-        self._overview_identity = (self.provider.source_identity(), self.channel)
+    def _overview_cache_put(self, rec: OverviewRecord):
+        key = (rec.source, rec.channel, rec.level)
+        self._overview_cache[key] = rec
+        self._overview_cache.move_to_end(key)
+        while len(self._overview_cache) > OVERVIEW_CACHE_RECORDS:
+            self._overview_cache.popitem(last=False)
 
-        # Overview is always fully valid (whole level read synchronously) --
-        # plain grayscale, never masked; fixed levels only, never autoLevels.
-        self.view.overview_item.setImage(arr, autoLevels=False, levels=(lo, hi))
-        self.view.overview_item.setRect(rect)
-        self._overview_level = chosen
-        self._overview_shape = (h, w)
+    def _install_overview_record(self, rec: OverviewRecord):
+        """Install a record as the live overview. GUI thread only, and no
+        I/O: pixels and the display range that was derived FROM them are
+        installed together, so brightness can never be interpreted against
+        another channel's range."""
+        ds_y, ds_x = self._downsample_yx(rec.level)
+        h, w = rec.shape
+        self._display_lo, self._display_hi = rec.display_lo, rec.display_hi
+        self._overview_arr = rec.arr
+        self._overview_identity = (rec.source, rec.channel)
+        self._overview_level = rec.level
+        self._overview_shape = rec.shape
+        # Whole level read at once, so always fully valid -- plain
+        # grayscale, never masked; fixed levels only, never autoLevels.
+        self.view.overview_item.setImage(
+            rec.arr, autoLevels=False, levels=(rec.display_lo, rec.display_hi))
+        self.view.overview_item.setRect(ExploreView.world_rect(0, 0, h, w, ds_y, ds_x))
+        self.view.overview_item.setVisible(True)
+        self._overview_cache_put(rec)
+
+    def _clear_overview(self):
+        """Drop the live overview and hide it. Used the instant a switch
+        lands on a channel whose overview is NOT resident: showing nothing
+        is correct, showing the previous channel's pixels is not."""
+        self._overview_arr = None
+        self._overview_identity = None
+        self.view.overview_item.setVisible(False)
+
+    def load_overview(self, ensure_floor: bool = True):
+        """Read this channel's overview level SYNCHRONOUSLY and install it.
+
+        Used at startup, where a blocking read is fine because there is
+        nothing on screen yet. A channel switch must not call this: the read
+        costs p50 132.7ms / p95 292.9ms on the real 57-channel slide, which
+        is a visible GUI stall. See `switch_overview_for_current_channel`.
+        """
+        source = self.provider.source_identity()
+        level = self._pick_overview_level()
+        rec = (self._overview_cache_get(source, self.channel, level)
+               or self._read_overview_record(self.provider, source, self.channel, level))
+        self._install_overview_record(rec)
 
         # `ensure_floor=False` is used by the channel-switch path, which
         # calls `_ensure_corrected_floor()` itself once, at the end. Starting
@@ -1591,6 +1698,78 @@ class ExploreController(QtCore.QObject):
         # then thrown away as stale, and the pending job re-does all of it.
         if ensure_floor and self._wants_precise():
             self._ensure_corrected_floor()
+
+    def switch_overview_for_current_channel(self) -> bool:
+        """Make the live overview belong to `self.channel`, without ever
+        blocking the GUI thread on a disk read.
+
+        Returns True when a resident record was installed synchronously (a
+        memcpy), False when the read had to be started in the background --
+        in which case the old pixels are cleared IMMEDIATELY, so the gap is
+        an honest empty/provisional state rather than another channel's
+        image, and `_handle_overview_result` installs the result when it
+        arrives.
+        """
+        source = self.provider.source_identity()
+        level = self._pick_overview_level()
+        rec = self._overview_cache_get(source, self.channel, level)
+        if rec is not None:
+            self._install_overview_record(rec)
+            self.stats["overview_cache_hits"] = self.stats.get("overview_cache_hits", 0) + 1
+            return True
+
+        self.stats["overview_cache_misses"] = self.stats.get("overview_cache_misses", 0) + 1
+        self._clear_overview()
+        self.prepare_overview_async(self.channel)
+        return False
+
+    def prepare_overview_async(self, channel: str):
+        """Read `channel`'s overview record on a worker thread and cache it.
+
+        Public because this is exactly what a background consumer needs to
+        call for a neighbour channel: having that channel's corrected tiles
+        cached is NOT enough to switch to it instantly -- without its
+        overview record the switch still stalls on a read.
+        """
+        source = self.provider.source_identity()
+        level = self._pick_overview_level()
+        if self._overview_cache_get(source, channel, level) is not None:
+            return
+        self._overview_gen += 1
+        gen = self._overview_gen
+        provider = self.provider
+
+        def work():
+            try:
+                rec = self._read_overview_record(provider, source, channel, level)
+                err = None
+            except Exception as exc:  # noqa: BLE001 -- reported, never raised on a worker
+                rec, err = None, exc
+            self._overview_delivered.emit((gen, rec, err))
+
+        t = threading.Thread(target=work, daemon=True, name="explore-overview-read")
+        self._overview_threads = [x for x in self._overview_threads if x.is_alive()]
+        self._overview_threads.append(t)
+        t.start()
+
+    def _handle_overview_result(self, payload):
+        """GUI-thread delivery. Caches every successful read -- a record for
+        a channel the user has since left is still worth keeping, that is
+        the point of the cache -- but only INSTALLS one that still matches
+        the live selection."""
+        gen, rec, err = payload
+        if self._torn_down or rec is None:
+            if err is not None:
+                self.stats["overview_read_failed"] = self.stats.get("overview_read_failed", 0) + 1
+            return
+        self._overview_cache_put(rec)
+        source = self.provider.source_identity()
+        if (rec.source, rec.channel) != (source, self.channel):
+            return
+        self._install_overview_record(rec)
+        if self._wants_precise():
+            self._ensure_corrected_floor()
+        self._update_layer_visibility()
 
     # ── corrected floor (module docstring "corrected floor + single-stage
     # motion guarantee") ────────────────────────────────────────────────
@@ -3018,6 +3197,9 @@ class ExploreController(QtCore.QObject):
         # (`_handle_floor_result`'s guard above), so this join is a
         # best-effort cleanup, not a correctness requirement.
         for t in self._floor_threads:
+            if t.is_alive():
+                t.join(timeout=2.0)
+        for t in getattr(self, "_overview_threads", []):
             if t.is_alive():
                 t.join(timeout=2.0)
 

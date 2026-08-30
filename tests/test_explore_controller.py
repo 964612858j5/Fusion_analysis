@@ -2669,23 +2669,97 @@ def test_channel_switch_reloads_overview_for_the_new_channel(app):
     ctrl.teardown()
 
 
-def test_stale_overview_is_not_fed_to_floor_or_gain_calibration(app):
-    """The floor's input and the gain calibration's tissue-window search
-    must both refuse an overview belonging to another channel; each falls
-    back to reading the right channel itself, on the worker thread."""
-    ctrl, provider, scheduler, view = make_controller(app)
+def test_floor_and_gain_consume_only_the_new_channels_pixels(app):
+    """The corrected floor and the display-gain calibration are the two
+    consumers of `_overview_arr`, and both used to be fed a stale one after
+    a channel switch -- the floor then registered its result under the NEW
+    channel's context, and the calibration chose its tissue windows by the
+    WRONG channel's intensity distribution.
+
+    This runs a REAL floor job across a switch and asserts on what it
+    actually consumed. (An earlier version of this test asserted only that
+    `_overview_matches_selection()` was False, which proves nothing about
+    either consumer -- the name claimed two code paths it never executed.)
+    `FakeProvider` gives every channel a distinct 1e6-scaled offset, so the
+    provenance of any array is checkable by value.
+    """
+    ctrl, provider, scheduler, view = make_controller(app, channel="DAPI",
+                                                      settle_ms=5000)
     ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._floor_ready:
+        _pump(10)
+    assert ctrl._floor_ready, "test setup: the first floor never completed"
+    assert ctrl._floor_ctx[1] == "DAPI"
 
-    captured = {}
+    old_offset = provider._channel_offset("DAPI")
+    new_channel = "CD8"
+    new_offset = provider._channel_offset(new_channel)
+    assert new_offset != old_offset
+
+    read_channels = []
+    corrected_inputs = []
+    real_read = provider.read_region
+    real_correct = ctrl.compute.correct_array
+
+    def spy_read(channel, level, y0, y1, x0, x1):
+        read_channels.append(channel)
+        return real_read(channel, level, y0, y1, x0, x1)
+
+    def spy_correct(arr, method, param):
+        corrected_inputs.append(float(np.min(arr)))
+        return real_correct(arr, method, param)
+
+    provider.read_region = spy_read
+    ctrl.compute.correct_array = spy_correct
+
+    ctrl.set_selection(channel=new_channel)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not (
+            ctrl._floor_ready and ctrl._floor_ctx
+            and ctrl._floor_ctx[1] == new_channel):
+        _pump(10)
+
+    assert ctrl._floor_ready, "the floor never completed for the new channel"
+    assert ctrl._floor_ctx[1] == new_channel, (
+        "the floor registered itself under the wrong channel")
+
+    assert read_channels, "the switch read nothing at all"
+    assert all(c == new_channel for c in read_channels), (
+        f"the switch read the old channel: {sorted(set(read_channels))}")
+
+    assert corrected_inputs, "no correction ran across the switch"
+    # Every array handed to the kernel must carry the NEW channel's offset.
+    for lo in corrected_inputs:
+        assert lo >= new_offset, (
+            f"a correction consumed pixels whose offset ({lo}) is below the "
+            f"new channel's ({new_offset}) -- i.e. the old channel's pixels")
+
+    ctrl.teardown()
+
+
+def test_channel_switch_starts_exactly_one_floor_job(app):
+    """`load_overview` used to start a floor job of its own, and
+    `set_selection` started a second immediately after, so every switch
+    computed a whole floor -- read, correction and gain calibration -- and
+    then discarded it as stale before redoing it."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._floor_ready:
+        _pump(10)
+
+    starts = []
     real_start = ctrl._start_floor_job
+    ctrl._start_floor_job = lambda gen: (starts.append(gen), real_start(gen))[1]
 
-    ctrl.channel = "OTHER"          # overview now belongs to nobody live
-    assert ctrl._overview_matches_selection() is False
+    ctrl.set_selection(channel="CD3")
+    _pump(30)
 
-    # The guard the floor job consults is exactly this predicate; assert the
-    # job would therefore pass no overview through.
-    assert ctrl._overview_arr is not None
-    assert ctrl._overview_matches_selection() is False
+    assert len(starts) == 1, (
+        f"a single channel switch started {len(starts)} floor jobs")
 
     ctrl.teardown()
 
@@ -2777,6 +2851,12 @@ def test_fully_cached_channel_switch_is_atomic_and_shows_no_raw(app):
               if e.level == ctrl.level}
     assert ctrl._visible_tiles <= pooled, (
         "cached corrected tiles were not pooled within the same GUI event")
+    # And the switch must not leave the view stuck in provisional: the swap
+    # fills the pool BEFORE `_enter_provisional`, so no later delivery
+    # arrives to clear the flag.
+    assert ctrl._provisional is False, (
+        "an already-complete switch left the view in a provisional state")
+    assert ctrl._precise_visible is True
 
     ctrl.teardown()
 
@@ -2795,16 +2875,52 @@ def test_interaction_contract_signals(app):
     set_view_and_pump(view, 0, 0, 1024, 1024, ms=60)
     assert any(k in ("PAN", "ZOOM") for k, _s in events)
 
+    before = len(events)
     ctrl.jump_to(y0=0, x0=0, w=2048, h=2048)
-    assert events[-1][0] == "NAVIGATOR_JUMP"
+    jump_events = [k for k, _s in events[before:]]
+    # Exactly one, and it says NAVIGATOR_JUMP. `setRange` inside `jump_to`
+    # also runs the range handler, but a jump must announce itself once with
+    # its true source, not first as PAN/ZOOM and then again as a jump.
+    assert jump_events == ["NAVIGATOR_JUMP"], jump_events
 
     other = [c for c in provider.channel_names if c != ctrl.channel][0]
     ctrl.set_selection(channel=other)
     assert events[-1][0] == "CHANNEL_SWITCH"
     assert selections, "selection_context_changed never fired"
 
-    ctrl._on_settle()
-    assert quiets, "gesture_quiet never fired"
+    ctrl.teardown()
+
+
+def test_gesture_quiet_fires_from_the_real_timer_after_jump_and_switch(app):
+    """Both a navigator jump and a channel switch end with the camera
+    stationary and no further range events, so nothing else would start the
+    quiet period. `jump_to` used to STOP the settle timer and never restart
+    it, so `gesture_quiet` never fired after a jump and a background
+    consumer could never reach its own SETTLED.
+
+    Deliberately does not call `_on_settle()` by hand: that would prove only
+    that the emit statement exists, not that the timer ever reaches it."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=30)
+    ctrl.load_overview()
+
+    quiets = []
+    ctrl.gesture_quiet.connect(quiets.append)
+
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+    assert ctrl._settle_timer.isActive(), "jump_to left the quiet timer stopped"
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not quiets:
+        _pump(10)
+    assert quiets, "gesture_quiet never fired after a navigator jump"
+
+    quiets.clear()
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    ctrl.set_selection(channel=other)
+    assert ctrl._settle_timer.isActive(), "a channel switch started no quiet period"
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not quiets:
+        _pump(10)
+    assert quiets, "gesture_quiet never fired after a channel switch"
     assert ctrl._viewport_zooming is False
 
     ctrl.teardown()

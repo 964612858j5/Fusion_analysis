@@ -1314,7 +1314,7 @@ class ExploreController(QtCore.QObject):
             # `_overview_matches_selection`). Reloading also refreshes
             # `_display_lo`/`_display_hi` for the new channel, which the
             # quantisation in the swap below depends on.
-            self.load_overview()
+            self.load_overview(ensure_floor=False)
 
             # Then try to swap in a fully-cached corrected viewport within
             # THIS SAME GUI event -- clear, fill, and one visibility update,
@@ -1343,11 +1343,22 @@ class ExploreController(QtCore.QObject):
                 # (a provisional state), never the old channel's pixels.
                 self._issue_raw_requests()
 
+        # The atomic cached swap fills the pool BEFORE `_enter_provisional`
+        # above, so no later delivery arrives to clear the flag: without
+        # this the view would sit in a provisional state for a switch that
+        # is in fact already complete. Cheap and idempotent otherwise.
+        self._maybe_exit_provisional()
+
         self._interaction_epoch += 1
         snap = self.snapshot()
         self.selection_context_changed.emit(snap)
         if channel_changed:
             self.interaction_event.emit("CHANNEL_SWITCH", snap)
+            # A switch is a discrete event with no camera motion behind it,
+            # so nothing else would ever start the quiet period. Without
+            # this the 80ms `gesture_quiet` never fires and a background
+            # consumer can never reach its own SETTLED.
+            self._settle_timer.start(self.settle_ms)
 
     def _try_atomic_cached_channel_swap(self) -> bool:
         """If every visible tile of the NEW selection is already in the
@@ -1370,6 +1381,12 @@ class ExploreController(QtCore.QObject):
         eventual gain would differ and these tiles would sit at a different
         brightness from their neighbours, so there we fall through to the
         normal path.
+
+        SCOPE, stated so it is not over-claimed: "switching to a fully
+        cached corrected channel shows no raw flash" holds at LEVEL 0 ONLY.
+        At a coarser level the switch takes the ordinary raw/provisional
+        path, which is the safe behaviour, not the seamless one. Any
+        acceptance run that exercises coarser levels must say so.
         """
         if not self._wants_precise() or self.level != 0:
             return False
@@ -1535,7 +1552,7 @@ class ExploreController(QtCore.QObject):
 
     # ── startup ───────────────────────────────────────────────────────────
 
-    def load_overview(self):
+    def load_overview(self, ensure_floor: bool = True):
         """Pick the smallest pyramid level with max(h, w) >= 512 pixels
         (else the smallest available level), read the WHOLE level
         synchronously, and set it as the never-evicted overview layer."""
@@ -1566,7 +1583,13 @@ class ExploreController(QtCore.QObject):
         self._overview_level = chosen
         self._overview_shape = (h, w)
 
-        if self._wants_precise():
+        # `ensure_floor=False` is used by the channel-switch path, which
+        # calls `_ensure_corrected_floor()` itself once, at the end. Starting
+        # it here as well would launch a floor job and then immediately
+        # supersede it: the second call bumps `_floor_gen`, so the first
+        # job's whole read + correction + gain calibration is computed and
+        # then thrown away as stale, and the pending job re-does all of it.
+        if ensure_floor and self._wants_precise():
             self._ensure_corrected_floor()
 
     # ── corrected floor (module docstring "corrected floor + single-stage
@@ -2082,7 +2105,13 @@ class ExploreController(QtCore.QObject):
         # PAN vs ZOOM is decided here, where the viewport geometry that
         # distinguishes them is already computed, and handed to consumers
         # explicitly rather than left to be guessed from displacement.
-        self._emit_interaction("ZOOM" if self._viewport_zooming else "PAN")
+        # Suppressed while `jump_to` is driving the camera: the contract is
+        # that the source is EXPLICIT, and a jump would otherwise announce
+        # itself twice -- once as PAN/ZOOM from `setRange`, then again as
+        # NAVIGATOR_JUMP -- advancing the epoch twice and making a consumer
+        # cancel and restart for no reason.
+        if not self._jumping:
+            self._emit_interaction("ZOOM" if self._viewport_zooming else "PAN")
 
         # Debounced: ISSUING requests (both raw and precise, from
         # `_issue_raw_requests`) waits for motion to settle for MOTION_MS
@@ -2187,11 +2216,15 @@ class ExploreController(QtCore.QObject):
             self._jumping = False
         self._motion_timer.stop()
         self._issue_raw_requests()
-        self._settle_timer.stop()
         # The navigator KNOWS it jumped; it does not have to be inferred
         # from displacement. This is the explicit source a background
         # consumer consumes (module docstring / `interaction_event`).
         self._emit_interaction("NAVIGATOR_JUMP")
+        # RESTART, do not stop. A jump ends with the camera stationary and
+        # no further range events coming, so if the settle timer is left
+        # stopped here `gesture_quiet` never fires after a jump and a
+        # background consumer can never reach its own SETTLED.
+        self._settle_timer.start(self.settle_ms)
 
     # ── settle / precise request ─────────────────────────────────────────
 

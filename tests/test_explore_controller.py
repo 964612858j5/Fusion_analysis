@@ -48,6 +48,7 @@ from block01.viewer.explore_view import (  # noqa: E402
     _box_downsample,
     _pick_calibration_windows,
     GAIN_CLAMP,
+    PRECISE_CURRENT_BASE_PRIORITY,
 )
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 
@@ -897,8 +898,13 @@ def test_corrected_mode_never_shows_raw_stage_during_motion(app):
     ctrl._precise_pool.put(coarse_level, 0, 0, coarse_rect, np.zeros((ts, ts), dtype=np.uint8), coarse_key)
 
     # Deliver only ONE of the current-level precise tiles: coverage stays
-    # incomplete (this is the "motion" moment -- coverage breaks).
-    precise_reqs = scheduler.pending_for(CorrectionKey)
+    # incomplete (this is the "motion" moment -- coverage breaks). Filtered
+    # to level == ctrl.level: `scheduler.pending_for(CorrectionKey)` now
+    # also contains the level+1 intermediate fallback batch (module
+    # docstring "Intermediate corrected fallback"), which this step is not
+    # about.
+    precise_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                     if r.key.tile.level == ctrl.level]
     assert len(precise_reqs) >= 2
     arr = np.zeros((512, 512), dtype=np.float32)
     scheduler.deliver(precise_reqs[0][0], arr)
@@ -1170,7 +1176,16 @@ def test_atomic_gate_still_applies_before_floor_ready(app):
     checkerboard gate must still hold atomically (a corrected tile next to
     a raw tile is still a hard cross-stage seam while raw can show
     through), so the delivered current-level precise tile stays hidden and
-    raw is shown as the honest fallback."""
+    raw is shown as the honest fallback.
+
+    UPDATED for the intermediate corrected fallback (module docstring):
+    `precise_reqs` now also contains a level+1 fallback batch. A fallback
+    tile is COARSER than the current level, so -- per the pre-existing,
+    unchanged rule that coarser precise items are exempt from the atomic
+    `covered` gate -- it is legitimately visible even while floor is not
+    ready; only the CURRENT level's atomic gate is under test here. Picks
+    `req0` from the current-level batch explicitly so the fallback batch
+    cannot masquerade as the tile this test is pinning."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
@@ -1185,7 +1200,8 @@ def test_atomic_gate_still_applies_before_floor_ready(app):
     ctrl._floor_ready = False
     ctrl._update_layer_visibility()
 
-    precise_reqs = scheduler.pending_for(CorrectionKey)
+    precise_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                     if r.key.tile.level == ctrl.level]
     assert len(precise_reqs) >= 2
     req0, _cb0 = precise_reqs[0]
     arr = np.zeros((512, 512), dtype=np.float32)
@@ -1528,17 +1544,35 @@ def test_precise_requests_missing_tiles_only(app):
     """Deliver one precise tile, then simulate another motion-timer pass
     over the same viewport: the already-covered tile must NOT be
     re-requested, while a genuinely missing neighbour (never delivered)
-    IS."""
+    IS.
+
+    UPDATED for the intermediate corrected fallback (module docstring):
+    `_issue_settled_request` now also issues a level+1 fallback batch, so
+    `precise_reqs` mixes CURRENT-level (level 0) and fallback-level
+    (level 1) requests. Comparing tile addresses by bare `(tx, ty)` (the
+    original form of this test) is no longer safe -- a level-1 tile and a
+    level-0 tile can legitimately share the same `(tx, ty)` numeric
+    coordinates while addressing different physical tiles, which
+    previously could not happen because only one level was ever in
+    flight. This version filters to the CURRENT level explicitly (the
+    "missing tiles only" behavior this test targets) and compares full
+    `(level, tx, ty)` tuples everywhere else, so the fallback batch cannot
+    produce a false collision."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
     ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # 2x2 tiles at ts=512
 
-    precise_reqs = scheduler.pending_for(CorrectionKey)
+    def current_level_reqs():
+        return [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                if r.key.tile.level == ctrl.level]
+
+    precise_reqs = current_level_reqs()
     assert len(precise_reqs) >= 2
     req0, _cb0 = precise_reqs[0]
-    covered_tile = (req0.key.tile.tx, req0.key.tile.ty)
-    other_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in precise_reqs} - {covered_tile}
+    covered_tile = (req0.key.tile.level, req0.key.tile.tx, req0.key.tile.ty)
+    other_tiles = {(r.key.tile.level, r.key.tile.tx, r.key.tile.ty)
+                   for r, _cb in precise_reqs} - {covered_tile}
     assert other_tiles
 
     arr = np.zeros((512, 512), dtype=np.float32)
@@ -1553,8 +1587,8 @@ def test_precise_requests_missing_tiles_only(app):
     ctrl._issue_raw_requests()
     _pump(20)
 
-    new_precise_reqs = scheduler.pending_for(CorrectionKey)
-    new_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in new_precise_reqs}
+    new_tiles = {(r.key.tile.level, r.key.tile.tx, r.key.tile.ty)
+                 for r, _cb in current_level_reqs()}
     assert covered_tile not in new_tiles, "already-covered tile must not be re-requested"
     assert new_tiles & other_tiles, "a genuinely missing neighbour must still be requested"
 
@@ -1608,3 +1642,279 @@ def test_selection_change_reissues_all_visible(app):
     assert new_tiles == visible_tiles
 
     ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Intermediate corrected fallback (module docstring "Intermediate corrected
+# fallback") -- corrected tiles requested/blitted at level + 1 as a coarser,
+# visually-consistent underlay while the current level fills in.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_intermediate_fallback_requested_at_level_plus_one(app):
+    """At level 0, the motion/jump issuing path must also request a batch
+    of CorrectionKeys at level 1 covering the same viewport, at priorities
+    strictly below PRECISE_CURRENT_BASE_PRIORITY; the current level's own
+    batch must sit at or above that base."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # 2x2 tiles at level 0, ts=512
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    fallback_reqs = [(r, cb) for r, cb in precise_reqs if r.key.tile.level == 1]
+    current_reqs = [(r, cb) for r, cb in precise_reqs if r.key.tile.level == 0]
+    assert fallback_reqs, "expected an intermediate fallback batch at level+1"
+    assert current_reqs
+
+    # The fallback batch covers the viewport PLUS a FALLBACK_HALO_TILES
+    # look-ahead ring (see test_intermediate_fallback_requests_look_ahead_ring
+    # for why), so the viewport's own tiles are a strict subset here rather
+    # than the whole batch.
+    ds1 = provider.level_downsample(1)
+    bbox1 = (0, 0, int(1024 / ds1), int(1024 / ds1))
+    viewport_fallback_tiles = tiles_covering(bbox1, ctrl.grid.tile_size)
+    fallback_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in fallback_reqs}
+    assert viewport_fallback_tiles <= fallback_tiles
+
+    # The fallback batch splits by urgency: tiles that cover the viewport
+    # NOW keep the floor off the screen and go above the current level;
+    # look-ahead RING tiles are speculative and queue below it, at
+    # FALLBACK_RING_BASE_PRIORITY (see the module docstring -- unsplit, the
+    # ring cost ~7 points of current-level coverage during a zoom).
+    from block01.viewer.explore_view import FALLBACK_RING_BASE_PRIORITY
+    urgent = [(r, cb) for r, cb in fallback_reqs
+              if (r.key.tile.tx, r.key.tile.ty) in viewport_fallback_tiles]
+    ring = [(r, cb) for r, cb in fallback_reqs
+            if (r.key.tile.tx, r.key.tile.ty) not in viewport_fallback_tiles]
+    assert urgent
+    assert all(r.priority < PRECISE_CURRENT_BASE_PRIORITY for r, _cb in urgent)
+    assert all(r.priority >= PRECISE_CURRENT_BASE_PRIORITY for r, _cb in current_reqs)
+    assert all(r.priority >= FALLBACK_RING_BASE_PRIORITY for r, _cb in ring)
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_requests_look_ahead_ring(app):
+    """The fallback batch covers the viewport EXPANDED by
+    FALLBACK_HALO_TILES at the fallback level, not just the viewport.
+    Without the ring the fallback is only requested once the viewport
+    already needs it, so every crossing of a fallback-level tile boundary
+    reopens a window where the floor shows through: measured on the real
+    slide, floor occupied 6.4% of the screen during a drag (p95 20.0%)
+    without the ring and 0.0% (p95 0.0%) with it."""
+    from block01.viewer.explore_view import FALLBACK_HALO_TILES
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+
+    fb_level = ctrl.level + 1
+    fb_reqs = [r for r, _cb in scheduler.pending_for(CorrectionKey)
+               if r.key.tile.level == fb_level]
+    assert fb_reqs, "no fallback-level requests issued"
+
+    ts = ctrl.grid.tile_size
+    fds = provider.level_downsample(fb_level)
+    bbox = ctrl._current_bbox
+    inner = tiles_covering(
+        (int(bbox[0] / fds), int(bbox[1] / fds),
+         int(bbox[2] / fds), int(bbox[3] / fds)), ts)
+    fh, fw = provider.level_shape(fb_level)
+    pad = FALLBACK_HALO_TILES * ts
+    outer = tiles_covering(
+        (max(0, int(bbox[0] / fds) - pad), max(0, int(bbox[1] / fds) - pad),
+         min(fh, int(bbox[2] / fds) + pad), min(fw, int(bbox[3] / fds) + pad)), ts)
+
+    assert outer > inner, "test setup: ring should add tiles"
+    issued = {(r.key.tile.tx, r.key.tile.ty) for r in fb_reqs}
+    assert issued <= outer, "fallback requested outside the look-ahead ring"
+    assert issued - inner, "fallback requested no look-ahead tiles at all"
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_key_uses_its_own_effective_param(app):
+    """The level-1 fallback key's params must equal `effective_param(base,
+    1, ds1)` -- the level-1-scaled radius -- NOT the level-0 (current)
+    value."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                      if r.key.tile.level == 1]
+    assert fallback_reqs
+
+    ds1 = provider.level_downsample(1)
+    expected = tuple(effective_param(p, 1, ds1) for p in ctrl.params)
+    for r, _cb in fallback_reqs:
+        assert r.key.params == expected
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_blitted_at_own_level_with_own_gain(app):
+    """A delivered level-1 fallback result must be pooled AT level 1, with
+    level-1 world geometry, and quantized through level 1's own calibrated
+    display gain (not level 0's, and not unscaled)."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._level_gain = {0: 1.0, 1: 3.5}
+
+    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                      if r.key.tile.level == 1]
+    assert fallback_reqs
+    req, _cb = fallback_reqs[0]
+    tx, ty = req.key.tile.tx, req.key.tile.ty
+
+    arr = raw_arr_for(provider, 1, tx, ty)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    entry = ctrl._precise_pool.get(1, tx, ty)
+    assert entry is not None
+    assert entry.level == 1
+
+    ds_y, ds_x = provider.level_downsample_yx(1)
+    ts = ctrl.grid.tile_size
+    expected_rect = ExploreView.world_rect(ty * ts, tx * ts, arr.shape[0], arr.shape[1], ds_y, ds_x)
+    assert entry.rect.x() == pytest.approx(expected_rect.x())
+    assert entry.rect.y() == pytest.approx(expected_rect.y())
+    assert entry.rect.width() == pytest.approx(expected_rect.width())
+    assert entry.rect.height() == pytest.approx(expected_rect.height())
+
+    expected_gray = ctrl._quantize_tile_uint8(arr.astype(np.float32) * 3.5)
+    np.testing.assert_array_equal(entry.item.image, expected_gray)
+
+    assert ctrl.stats["mid_tiles_blitted"] >= 1
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_does_not_count_as_coverage(app):
+    """With ONLY fallback (level+1) tiles delivered -- no current-level
+    tile at all -- `_coverage_complete()` must be False and
+    `_precise_visible` / `view.precise_visible` must be False: a fallback
+    tile never counts toward "the viewport is covered"."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                      if r.key.tile.level == 1]
+    assert fallback_reqs
+    arr = np.zeros((512, 512), dtype=np.float32)
+    for req, _cb in fallback_reqs:
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl._coverage_complete() is False
+    assert ctrl._precise_visible is False
+    assert ctrl.view.precise_visible is False
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_rejected_when_key_stale(app):
+    """A level-1 result whose params match a DIFFERENT (since-changed)
+    selection must be dropped, not blitted -- the per-own-level key
+    staleness guard applies to the fallback path exactly as it does to the
+    current level."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                      if r.key.tile.level == 1]
+    assert fallback_reqs
+    req, _cb = fallback_reqs[0]
+
+    # Change params directly (bypassing set_selection) so only the
+    # key-staleness guard -- not the generation guard -- is exercised.
+    ctrl.params = (99,)
+
+    before_blitted = ctrl.stats["mid_tiles_blitted"]
+    before_mismatch = ctrl.stats["mismatched_key_dropped"]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl.stats["mid_tiles_blitted"] == before_blitted
+    assert ctrl.stats["mismatched_key_dropped"] == before_mismatch + 1
+    assert ctrl._precise_pool.get(1, req.key.tile.tx, req.key.tile.ty) is None
+
+    ctrl.teardown()
+
+
+def test_intermediate_fallback_disabled_by_switch(app):
+    """With `intermediate_corrected_fallback` off, no level+1 request is
+    issued at all, and a level+1 delivery (even one whose key matches the
+    live selection) is rejected outright -- the switch, not staleness, is
+    what blocks it."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.intermediate_corrected_fallback = False
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                      if r.key.tile.level == 1]
+    assert fallback_reqs == []
+
+    from block01.viewer.tile_types import TileRequest
+
+    key = _make_correction_key_for(ctrl, provider, 1, 0, 0, ctrl.params)
+    req = TileRequest(key=key, generation=ctrl._settled_generation, priority=0)
+    result_arr = np.zeros((512, 512), dtype=np.float32)
+    pixels = PixelBuffer(residency="cpu", dtype=str(result_arr.dtype),
+                          shape=tuple(result_arr.shape), handle=result_arr)
+    result = TileResult(request=req, pixels=pixels, quality=QualityLevel.INTERACTIVE,
+                         provisional=False, timing={}, error=None)
+
+    before = ctrl.stats["mid_tiles_blitted"]
+    ctrl._on_precise_result(result)
+    _pump(20)
+
+    assert ctrl.stats["mid_tiles_blitted"] == before
+    assert ctrl._precise_pool.get(1, 0, 0) is None
+
+    ctrl.teardown()
+
+
+def test_fallback_never_covers_current_level(app):
+    """A pooled level-1 (coarser) item's zValue must sit BELOW a pooled
+    level-0 item's in the same pool -- the pre-existing z-order guarantee
+    (module docstring "Level switching without clearing") that makes a
+    fallback tile unable to ever draw above the current level."""
+    from PyQt5.QtCore import QRectF as _QRectF
+
+    class FakeViewBox:
+        def __init__(self):
+            self.items = []
+
+        def addItem(self, item):
+            self.items.append(item)
+
+        def removeItem(self, item):
+            self.items.remove(item)
+
+    vb = FakeViewBox()
+    pool = TileItemPool(vb, base_z=200, num_levels=2, budget=100)
+    rect0 = _QRectF(0.0, 0.0, 10.0, 10.0)
+    rect1 = _QRectF(0.0, 0.0, 40.0, 40.0)
+    pool.put(level=0, tx=0, ty=0, rect=rect0, arr_uint8=np.zeros((4, 4), dtype=np.uint8), key=None)
+    pool.put(level=1, tx=0, ty=0, rect=rect1, arr_uint8=np.zeros((4, 4), dtype=np.uint8), key=None)
+
+    entry0 = pool.get(0, 0, 0)
+    entry1 = pool.get(1, 0, 0)
+    assert entry1.item.zValue() < entry0.item.zValue()

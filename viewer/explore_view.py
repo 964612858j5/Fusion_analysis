@@ -343,6 +343,94 @@ too. A calibration failure is caught, leaves the gain table empty (all
 1.0), increments `stats["gain_calibration_failed"]`, and never costs the
 floor itself -- a successful floor is installed regardless of whether
 calibration succeeded.
+
+## Intermediate corrected fallback
+
+Measured during a level-0 tophat drag, on-screen composition was
+current-level 91.2%, coarser-level 0.0%, floor 8.8% (fallback p95 20.0%);
+raw mode's equivalent was current 88.6%, coarser 0.0%, floor 11.4%
+(fallback p95 20.0%). The fallback AREA is the same in both modes, so the
+difference is fallback QUALITY: with no intermediate level pooled, an
+uncovered corrected tile drops straight from level 0 to the level-2 floor
+-- 16x blur, and a 1.35x-1.72x brightness mismatch even after the per-level
+display gain. Raw mode's fallback (the raw overview) is the same 16x blur
+but only ~1.24x off, and corrected images are dark and sparse, so a
+brighter blurry patch on a dark field is far more visible than the
+equivalent raw mismatch.
+
+A level-1 fallback is measurably closer on both axes: 4x blur instead of
+16x, and after its own display gain the mismatch against level 0 is
+1.14x-1.21x in the mean and 1.03x-1.11x at p90 (versus level 2's
+1.35x-1.45x and 1.19x-1.26x). Covering a 20-tile level-0 viewport takes
+only about 5-9 tiles at level 1.
+
+`ExploreController.intermediate_corrected_fallback` (default True,
+settable via the constructor for A/B testing, mirrored by
+`scripts/explore_demo.py --intermediate-fallback` / `--no-intermediate-
+fallback`) requests, on every motion-timer tick, corrected tiles at
+`self.level + 1` covering the same viewport IN ADDITION to the current
+level's tiles -- letting them be drawn as the coarser fallback the
+existing visibility policy (`TileItemPool.apply_visibility`) already
+supports. There is no two-level ladder: when `self.level + 1 >=
+provider.num_levels` there is no fallback level and this is a no-op. Only
+meaningful when `_wants_precise()` -- raw mode already keeps coarser raw
+tiles.
+
+`_issue_settled_request` issues, in order: (1) the intermediate fallback
+batch at `level + 1`, priorities starting at 0, then (2) the current
+level's precise batch, priorities starting at `PRECISE_CURRENT_BASE_
+PRIORITY = 100`. The fallback batch is only 5-9 tiles, so putting it first
+costs the current level almost nothing, and it buys a complete, visually
+consistent underlay in roughly 15ms at 4 compute workers instead of
+letting 20 current-level tiles uncover the floor one at a time. No
+dedicated compute slot is reserved for the fallback batch: it does not
+need one, since it is issued first at strictly better (lower-numbered)
+priority and is only a handful of tiles, so the scheduler's min-heap
+cannot starve it behind the much larger current-level batch.
+
+Both batches keep the existing "missing tiles only" filter, each against
+its OWN level: the fallback level uses `_precise_key_current_for_level`
+(which recomputes `effective_param` for that level); the current level
+keeps `_key_matches_context` as before. `_make_correction_key(tx, ty,
+level=...)` takes an explicit level (defaulting to `self.level` so
+existing call sites are unchanged) and derives `effective_param` from THAT
+level's downsample -- the fallback level's tiles carry the same source
+identity, channel, method, algorithm version and quality as the current
+level's; only the level and the level-scaled effective params differ.
+Both batches share the existing `("precise", n)` generation and its
+cancel/bump discipline; there is no new namespace.
+
+On delivery, `_handle_precise_result` accepts a tile at `self.level + 1`
+(in addition to `self.level`, its previous only acceptance) when
+`intermediate_corrected_fallback` is enabled, subject to ALL of: the
+generation still matches the live `_settled_generation` exactly; the key
+is current FOR ITS OWN LEVEL via `_precise_key_current_for_level(key,
+tile.level)` (not `_key_matches_context`, which is bound to the current
+level); and the tile is a member of `self._fallback_visible_tiles` (the
+fallback-level tile set computed the same way the issuing path computed
+it, at issue time, and kept on the controller for exactly this membership
+test) with `tile.level == self._fallback_level == self.level + 1`. An
+accepted fallback tile is quantized with `_quantize_corrected_uint8(arr,
+tile.level)` -- its OWN level's display gain -- placed at its own level's
+`world_rect`, and pooled at its own level, counted in
+`stats["mid_tiles_blitted"]` (fallback requests issued are counted in
+`stats["mid_requests_issued"]`). Anything rejected still lands in the
+scheduler's cache (automatic) but is never blitted.
+
+`selection_key_context()`, `_coverage_complete()`, `_precise_visible` /
+`view.precise_visible` and the provisional badge stay defined against the
+CURRENT level only -- a fallback tile never counts toward "the viewport is
+covered". The active-draw-set rule is likewise unchanged: a fallback tile
+is coarser than the current level, so it can never draw above a
+current-level item (module docstring "Level switching without clearing";
+`TileItemPool`'s z-order guarantees this, unchanged here). The corrected
+floor, the raw layer suppression rule, and the gain machinery are
+untouched.
+
+One welcome consequence: after a zoom OUT, the fallback tiles computed for
+`level + 1` become the new current level's tiles and are already valid,
+since `_precise_key_current_for_level` validates per level -- no extra
+work is required to make a zoom-out land on already-sharp tiles.
 """
 
 import threading
@@ -412,6 +500,23 @@ GAIN_WINDOW_L0 = 2048
 GAIN_WINDOWS = 3
 GAIN_PERCENTILE = 99.5
 GAIN_CLAMP = (1.0, 8.0)
+
+# Intermediate corrected fallback (module docstring): priority floor for the
+# CURRENT level's precise batch, so the fallback batch at `level + 1`
+# (priorities starting at 0) always sorts ahead of it in the scheduler's
+# min-heap without needing a reserved worker slot.
+PRECISE_CURRENT_BASE_PRIORITY = 100
+
+# Look-ahead ring, in FALLBACK-LEVEL tiles, around the viewport at the
+# intermediate fallback level (module docstring "Intermediate corrected
+# fallback"). One tile is enough because a fallback-level tile already
+# covers several times the world area of a current-level tile.
+FALLBACK_HALO_TILES = 1
+
+# Priority base for the SPECULATIVE part of the fallback batch (the
+# look-ahead ring). Strictly above PRECISE_CURRENT_BASE_PRIORITY, so the
+# ring can never delay a tile the user is looking at right now.
+FALLBACK_RING_BASE_PRIORITY = 1000
 
 
 def _pick_calibration_windows(overview_arr: np.ndarray, ds_y: float, ds_x: float,
@@ -724,7 +829,8 @@ class ExploreController(QtCore.QObject):
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
-                 probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET):
+                 probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET,
+                 intermediate_corrected_fallback: bool = True):
         super().__init__()
         self.provider = provider
         self.scheduler = scheduler
@@ -733,6 +839,16 @@ class ExploreController(QtCore.QObject):
         self.view = view
         self.settle_ms = settle_ms
         self.probe = probe
+        # Intermediate corrected fallback (module docstring): A/B switch.
+        self.intermediate_corrected_fallback = intermediate_corrected_fallback
+        # Fallback-level tile set computed at issue time, kept for the
+        # delivery-side membership test (module docstring "Intermediate
+        # corrected fallback"). None/empty when disabled or no fallback
+        # level exists.
+        self._fallback_level: Optional[int] = None
+        self._fallback_visible_tiles = set()
+        self._prev_world_area = None
+        self._viewport_shrinking = False
 
         # ── selection state ──
         self.channel = channel
@@ -791,6 +907,8 @@ class ExploreController(QtCore.QObject):
         self.stats = {
             "raw_tiles_blitted": 0,
             "precise_tiles_blitted": 0,
+            "mid_tiles_blitted": 0,
+            "mid_requests_issued": 0,
             "stale_precise_dropped": 0,
             "mismatched_key_dropped": 0,
             "mismatched_raw_dropped": 0,
@@ -871,13 +989,24 @@ class ExploreController(QtCore.QObject):
     def _wants_precise(self) -> bool:
         return self.method is not None
 
-    def _make_correction_key(self, tx: int, ty: int) -> CorrectionKey:
-        source, channel, method, eff_params, level, quality = self.selection_key_context()
+    def _make_correction_key(self, tx: int, ty: int, level: Optional[int] = None) -> CorrectionKey:
+        """`level` defaults to `self.level` (existing call sites unchanged).
+        An explicit `level` (module docstring "Intermediate corrected
+        fallback") derives `effective_param` from THAT level's own
+        downsample -- the fallback level's tiles carry the same source
+        identity, channel, method, algorithm version and quality as the
+        current level's; only the level and the level-scaled effective
+        params differ."""
+        if level is None:
+            level = self.level
+        source = self.provider.source_identity()
+        ds = self.provider.level_downsample(level)
+        eff_params = tuple(effective_param(p, level, ds) for p in self.params)
         addr = TileAddress(grid=self.grid, level=level, tx=tx, ty=ty)
         return CorrectionKey(
-            source=source, channel=channel, tile=addr, method=method,
+            source=source, channel=self.channel, tile=addr, method=self.method,
             params=eff_params, algorithm_version=BG_CORRECTION_ALGO_VERSION,
-            quality=quality,
+            quality=self.quality,
         )
 
     def _make_raw_key(self, tx: int, ty: int) -> RawKey:
@@ -1432,6 +1561,14 @@ class ExploreController(QtCore.QObject):
             int(bbox_l0[0] / ds), int(bbox_l0[1] / ds),
             int(bbox_l0[2] / ds), int(bbox_l0[3] / ds),
         )
+        # Cheap zoom-direction signal for the fallback look-ahead ring
+        # (see `_issue_settled_request`): world-area shrinking == zoom-in.
+        world_area = max(0.0, (x1 - x0)) * max(0.0, (y1 - y0))
+        prev_area = self._prev_world_area
+        self._viewport_shrinking = (
+            prev_area is not None and world_area < prev_area * 0.995)
+        self._prev_world_area = world_area
+
         self._visible_tiles = tiles_covering(bbox_level, self.grid.tile_size)
         self._update_layer_visibility()
 
@@ -1588,6 +1725,12 @@ class ExploreController(QtCore.QObject):
         self._settled_generation = ("precise", self._settled_gen_n)
         gen = self._settled_generation
 
+        # Reset every call -- a disabled switch, or no fallback level
+        # existing for the current level, must leave no stale membership
+        # set behind for `_handle_precise_result` to accept against.
+        self._fallback_level = None
+        self._fallback_visible_tiles = set()
+
         if not self._wants_precise() or self._current_bbox is None:
             return
 
@@ -1614,6 +1757,111 @@ class ExploreController(QtCore.QObject):
                 "first": False, "full": False,
             }
 
+        # ── (1) intermediate corrected fallback batch, at level + 1,
+        # priorities starting at 0 (module docstring "Intermediate
+        # corrected fallback") -- issued BEFORE the current level's batch
+        # below, so it costs the current level almost nothing while buying
+        # a complete, visually consistent underlay quickly. ──
+        # The fallback batch is for PANNING, which exposes world area the
+        # viewport has not shown before. A zoom-IN exposes none: the
+        # viewport shrinks, and the level being left is already pooled and
+        # already serving as the coarser fallback -- measured, the floor
+        # stayed at 0.0% of the screen through a 12-step zoom with this
+        # batch OFF as well, so it buys nothing there. Skipped while the
+        # viewport is shrinking, purely to avoid pointless work.
+        #
+        # HONEST LIMIT: this guard does what it says (measured, zero
+        # fallback requests are issued during a zoom) but it did NOT
+        # recover the coverage gap that motivated it. With the fallback
+        # enabled, current-level coverage during a zoom measured 64-67%
+        # against 75-80% with it disabled, across three repeats, even
+        # though both start from 100% coverage at the same level and
+        # neither issues a fallback request during the zoom itself. The
+        # cause is not identified. It is not the floor -- that stays at
+        # 0.0% either way -- so the visible difference is more of the
+        # screen showing 4x-blurred level+1 instead of sharp current-level
+        # during the gesture. `intermediate_corrected_fallback` exists so
+        # this can be A/B'd by eye (`--no-intermediate-fallback`).
+        if self.intermediate_corrected_fallback and not self._viewport_shrinking:
+            fallback_level = self.level + 1
+            if fallback_level < self.provider.num_levels:
+                fds = self.provider.level_downsample(fallback_level)
+                fbbox_level = (
+                    int(self._current_bbox[0] / fds), int(self._current_bbox[1] / fds),
+                    int(self._current_bbox[2] / fds), int(self._current_bbox[3] / fds),
+                )
+                # One-tile look-ahead RING at the fallback level (module
+                # docstring "Intermediate corrected fallback"). Without it
+                # the fallback is only requested once the viewport already
+                # needs it, so every crossing of a fallback-level tile
+                # boundary reopens a window where the floor shows through:
+                # measured, floor stayed at 6.4% of the screen during a
+                # drag (p95 20.0%) with no ring, and 0.0% (p95 0.0%) with
+                # it. It is cheap precisely because it is at the COARSER
+                # level -- one fallback tile spans FALLBACK_HALO_TILES
+                # times more world area than a current-level tile, so the
+                # ring is a handful of tiles (measured 3 -> 15 requests
+                # over a 25-step drag) and current-level throughput was
+                # unchanged (36 tiles blitted either way). This is NOT the
+                # current-level halo prefetch that measured as a
+                # regression; see "Worker counts".
+                fh, fw = self.provider.level_shape(fallback_level)
+                pad = FALLBACK_HALO_TILES * tile_size
+                fbbox_pad = (
+                    max(0, fbbox_level[0] - pad), max(0, fbbox_level[1] - pad),
+                    min(fh, fbbox_level[2] + pad), min(fw, fbbox_level[3] + pad),
+                )
+                fvisible = tiles_covering(fbbox_pad, tile_size)
+                self._fallback_level = fallback_level
+                self._fallback_visible_tiles = set(fvisible)
+
+                fcy = (fbbox_level[0] + fbbox_level[2]) / 2.0
+                fcx = (fbbox_level[1] + fbbox_level[3]) / 2.0
+
+                def fdist(coord):
+                    tx, ty = coord
+                    tcy = ty * tile_size + tile_size / 2.0
+                    tcx = tx * tile_size + tile_size / 2.0
+                    return (tcy - fcy) ** 2 + (tcx - fcx) ** 2
+
+                def is_missing_fallback(coord):
+                    tx, ty = coord
+                    entry = self._precise_pool.get(fallback_level, tx, ty)
+                    return (entry is None or entry.key is None
+                            or not self._precise_key_current_for_level(entry.key, fallback_level))
+
+                # The batch splits by urgency. Fallback tiles that cover
+                # the viewport RIGHT NOW are what keeps the floor off the
+                # screen, so they go first, above the current level. The
+                # look-ahead RING is speculative -- it only pays off on a
+                # pan that has not happened yet -- so it queues BELOW the
+                # current level, at FALLBACK_RING_BASE_PRIORITY, and gets
+                # computed in the slack between motion ticks.
+                #
+                # Measured why this split is necessary: with the whole
+                # ring at top priority, a zoom regressed current-level
+                # coverage from 81.9% to 65.6%, because during a zoom the
+                # previous level's own tiles are ALREADY serving as the
+                # coarser fallback (floor was 0.0% either way), so the ring
+                # was pure competition for the current level.
+                finner = tiles_covering(fbbox_level, tile_size)
+                fmissing = [c for c in fvisible if is_missing_fallback(c)]
+                furgent = sorted((c for c in fmissing if c in finner), key=fdist)
+                fring = sorted((c for c in fmissing if c not in finner), key=fdist)
+                for i, (tx, ty) in enumerate(furgent):
+                    key = self._make_correction_key(tx, ty, level=fallback_level)
+                    req = TileRequest(key=key, generation=gen, priority=i)
+                    self.scheduler.request(req, self._on_precise_result)
+                for i, (tx, ty) in enumerate(fring):
+                    key = self._make_correction_key(tx, ty, level=fallback_level)
+                    req = TileRequest(key=key, generation=gen,
+                                      priority=FALLBACK_RING_BASE_PRIORITY + i)
+                    self.scheduler.request(req, self._on_precise_result)
+                self.stats["mid_requests_issued"] += len(furgent) + len(fring)
+
+        # ── (2) current level's precise batch, priorities starting at
+        # PRECISE_CURRENT_BASE_PRIORITY (strictly above every fallback
+        # priority above). ──
         ctx = self.selection_key_context()
 
         def is_missing(coord):
@@ -1626,7 +1874,7 @@ class ExploreController(QtCore.QObject):
         ordered = sorted(missing, key=dist)
         for i, (tx, ty) in enumerate(ordered):
             key = self._make_correction_key(tx, ty)
-            req = TileRequest(key=key, generation=gen, priority=i)
+            req = TileRequest(key=key, generation=gen, priority=PRECISE_CURRENT_BASE_PRIORITY + i)
             self.scheduler.request(req, self._on_precise_result)
 
     # ── delivery: raw ─────────────────────────────────────────────────────
@@ -1685,6 +1933,14 @@ class ExploreController(QtCore.QObject):
         self._precise_delivered.emit(result)
 
     def _handle_precise_result(self, result):
+        """GUI-side delivery guard (module docstring). Accepts a tile at
+        `self.level` (as before) OR, when `intermediate_corrected_fallback`
+        is enabled, at `self.level + 1` (module docstring "Intermediate
+        corrected fallback") -- each validated against its OWN level's
+        identity/membership, never the current level's. A fallback tile
+        never touches `_visible_tiles` / `selection_key_context()` / the
+        coverage machinery, so it can never count toward "the viewport is
+        covered"."""
         req = result.request
         if req.generation != self._settled_generation:
             self.stats["stale_precise_dropped"] += 1
@@ -1694,12 +1950,29 @@ class ExploreController(QtCore.QObject):
         key = req.key
         if not isinstance(key, CorrectionKey):
             return
-        current_ctx = self.selection_key_context()
-        if not self._key_matches_context(key, current_ctx):
-            self.stats["mismatched_key_dropped"] += 1
-            return
         tile = key.tile
-        if (tile.tx, tile.ty) not in self._visible_tiles or tile.level != self.level:
+
+        is_fallback = False
+        if tile.level == self.level:
+            current_ctx = self.selection_key_context()
+            if not self._key_matches_context(key, current_ctx):
+                self.stats["mismatched_key_dropped"] += 1
+                return
+            if (tile.tx, tile.ty) not in self._visible_tiles:
+                self.stats["late_precise_rejected"] += 1
+                return
+        elif (self.intermediate_corrected_fallback
+              and self._fallback_level is not None
+              and tile.level == self._fallback_level
+              and self._fallback_level == self.level + 1):
+            if not self._precise_key_current_for_level(key, tile.level):
+                self.stats["mismatched_key_dropped"] += 1
+                return
+            if (tile.tx, tile.ty) not in self._fallback_visible_tiles:
+                self.stats["late_precise_rejected"] += 1
+                return
+            is_fallback = True
+        else:
             self.stats["late_precise_rejected"] += 1
             return
 
@@ -1711,13 +1984,17 @@ class ExploreController(QtCore.QObject):
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
             arr.shape[0], arr.shape[1], ds_y, ds_x)
         self._precise_pool.put(tile.level, tile.tx, tile.ty, rect, gray, key)
-        self.stats["precise_tiles_blitted"] += 1
+        if is_fallback:
+            self.stats["mid_tiles_blitted"] += 1
+        else:
+            self.stats["precise_tiles_blitted"] += 1
         self.stats["items_created"] = self._raw_pool.items_created + self._precise_pool.items_created
         if self.probe and t0 is not None:
             dt_ms = (time.perf_counter() - t0) * 1000.0
             self.timings["tile_item_update_ms"].append(dt_ms)
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
-            self._probe_note_precise_progress(tile.tx, tile.ty)
+            if not is_fallback:
+                self._probe_note_precise_progress(tile.tx, tile.ty)
 
         self._maybe_exit_provisional()
         self._update_layer_visibility()

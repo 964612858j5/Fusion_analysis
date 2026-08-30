@@ -75,6 +75,14 @@ def main():
                     help="raw I/O worker threads (default 8; measured best)")
     ap.add_argument("--compute-workers", type=int, default=4,
                     help="correction compute worker threads (default 4)")
+    ap.add_argument("--intermediate-fallback", dest="intermediate_fallback",
+                    action="store_true", default=True,
+                    help="request corrected tiles at level+1 as a fallback "
+                         "underlay during motion (default: on)")
+    ap.add_argument("--no-intermediate-fallback", dest="intermediate_fallback",
+                    action="store_false",
+                    help="disable the level+1 intermediate corrected fallback "
+                         "(for A/B comparison against the level-2 floor only)")
     args = ap.parse_args()
 
     # Crash diagnosis: native faults AND Python exceptions land in the log.
@@ -114,7 +122,8 @@ def main():
     view.setWindowTitle(base_title)
     view.resize(1400, 1000)
 
-    ctrl = ExploreController(provider, scheduler, compute, grid, view, channel)
+    ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
+                              intermediate_corrected_fallback=args.intermediate_fallback)
 
     def _on_floor_preparing_changed(preparing):
         suffix = " — Preparing corrected preview…" if preparing else ""

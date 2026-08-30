@@ -7,17 +7,28 @@ Contract (docs/v15_viewer_foundation_interfaces.md §4):
   asks for it, and all waiters receive the same TileResult object.
 - `generation` on a TileRequest is a delivery token only. It never affects
   whether work runs or whether a result enters a cache.
-- RawKey requests go straight to an I/O ThreadPoolExecutor. CorrectionKey
-  requests go onto a priority ready-queue (min-heap on `priority`, FIFO
-  within a priority tier) served by exactly `compute_workers` worker
-  thread(s).
+- RawKey requests go onto a priority ready-queue (min-heap on `priority`,
+  FIFO within a priority tier) served by exactly `io_workers` persistent
+  raw-worker thread(s) -- mirroring the compute path exactly, so a burst of
+  stale raw requests (fast zoom/pan) never backs up FIFO behind hundreds of
+  queued reads. CorrectionKey requests go onto their own priority
+  ready-queue served by exactly `compute_workers` worker thread(s).
 - `cancel_generation(gen)` marks `gen` stale. A queued-but-not-started
-  compute entry wanted only by stale generations is dropped without
-  running its callbacks receive error="cancelled". Work already running
+  compute OR raw entry wanted only by stale generations is dropped without
+  running; its callbacks receive error="cancelled". Work already running
   always finishes and its result is always written to the cache; delivery
   to any waiter whose generation is stale at completion time is simply
   skipped (no callback for that waiter) -- this is the "lands in the cache,
   not necessarily delivered" rule from the design doc.
+- Before a raw worker thread executes a queued raw entry, it checks the
+  entry's waiters: external waiters whose generation is stale are ignored
+  for the "should this run at all" decision. If there are no live external
+  waiters AND no internal (staging) waiters, the read is skipped entirely
+  and the queued external waiters are delivered error="cancelled" (same
+  drop semantics as the compute path). Internal staging waiters (added by
+  `_stage_raw_tile`) are never stale -- an entry with at least one internal
+  waiter always executes and always populates the cache, regardless of
+  whether every external waiter for it has gone stale.
 - **Raw I/O staging** (docs/v15_viewer_foundation_interfaces.md §4): before a
   compute worker runs a CorrectionKey, it asks
   `compute.raw_keys_for(key)` for the halo-padded tile set and stages any
@@ -35,7 +46,6 @@ import heapq
 import itertools
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from .tile_types import CorrectionKey, PixelBuffer, QualityLevel, RawKey, TileResult
 
@@ -72,16 +82,23 @@ class TileScheduler:
         self._cv = threading.Condition(self._lock)
         self._pending = {}  # key -> _Entry
         self._heap = []  # (priority, seq, key) for CorrectionKey work
+        self._raw_heap = []  # (priority, seq, key) for RawKey work
         self._seq = itertools.count()
         self._stale_gens = set()
         self._shutdown = False
 
-        self._io_executor = ThreadPoolExecutor(max_workers=io_workers, thread_name_prefix="tile-io")
         self._compute_threads = [
             threading.Thread(target=self._compute_worker, daemon=True, name=f"tile-compute-{i}")
             for i in range(compute_workers)
         ]
         for t in self._compute_threads:
+            t.start()
+
+        self._raw_threads = [
+            threading.Thread(target=self._raw_worker, daemon=True, name=f"tile-io-{i}")
+            for i in range(io_workers)
+        ]
+        for t in self._raw_threads:
             t.start()
 
     # ── public API ───────────────────────────────────────────────────────
@@ -104,15 +121,10 @@ class TileScheduler:
             entry.waiters.append((req, callback))
             self._pending[key] = entry
             if isinstance(key, RawKey):
-                entry.started = True
-                submit_raw = True
+                heapq.heappush(self._raw_heap, (req.priority, next(self._seq), key))
             else:
                 heapq.heappush(self._heap, (req.priority, next(self._seq), key))
-                submit_raw = False
-                self._cv.notify_all()
-
-        if submit_raw:
-            self._io_executor.submit(self._run_raw, key)
+            self._cv.notify_all()
 
     def cancel_generation(self, gen: int):
         """Mark `gen` stale; drop queued compute work wanted only by it."""
@@ -127,7 +139,8 @@ class TileScheduler:
             self._cv.notify_all()
         for t in self._compute_threads:
             t.join()
-        self._io_executor.shutdown(wait=True)
+        for t in self._raw_threads:
+            t.join()
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -154,6 +167,40 @@ class TileScheduler:
             cb(build_result(req))
 
     # -- raw path --
+
+    def _raw_worker(self):
+        while True:
+            with self._cv:
+                while not self._raw_heap and not self._shutdown:
+                    self._cv.wait()
+                if self._shutdown and not self._raw_heap:
+                    return
+                _priority, _seq, key = heapq.heappop(self._raw_heap)
+                entry = self._pending.get(key)
+                if entry is None:
+                    continue  # already resolved/removed concurrently
+
+                waiters_snapshot = list(entry.waiters)
+                has_internal = bool(entry.internal_waiters)
+                live_external = [w for w in waiters_snapshot if w[0].generation not in self._stale_gens]
+                if not live_external and not has_internal:
+                    # Nobody still wants this (and no internal staging waiter
+                    # forces it): drop without reading.
+                    del self._pending[key]
+                    to_cancel = waiters_snapshot
+                else:
+                    entry.started = True
+                    to_cancel = None
+
+            if to_cancel is not None:
+                for req, cb in to_cancel:
+                    cb(TileResult(
+                        request=req, pixels=None, quality=QualityLevel.NATIVE,
+                        provisional=False, timing={}, error="cancelled",
+                    ))
+                continue
+
+            self._run_raw(key)
 
     def _run_raw(self, key: RawKey):
         try:
@@ -229,7 +276,6 @@ class TileScheduler:
             on_done()
             return
 
-        submit = False
         with self._lock:
             entry = self._pending.get(raw_key)
             if entry is not None:
@@ -237,12 +283,12 @@ class TileScheduler:
             else:
                 entry = _Entry()
                 entry.internal_waiters.append(on_done)
-                entry.started = True
                 self._pending[raw_key] = entry
-                submit = True
-
-        if submit:
-            self._io_executor.submit(self._run_raw, raw_key)
+                # Staging has no per-request priority of its own; queue it
+                # at the highest priority tier (0) so it is never starved
+                # behind a backlog of lower-priority external raw requests.
+                heapq.heappush(self._raw_heap, (0, next(self._seq), raw_key))
+            self._cv.notify_all()
 
     def _stage_raw_for(self, key: CorrectionKey):
         """Stage every raw tile `key`'s halo needs (parallel, single-flight),

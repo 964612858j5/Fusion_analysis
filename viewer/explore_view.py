@@ -21,6 +21,44 @@ under. A tile only counts as a valid, current precise result while its key
 matches the CONTROLLER's current selection_key_context(); on any selection
 change the view enters a "provisional" state (opacity 0.5) until every
 visible tile has been re-blitted under the new key.
+
+## Anti-checkerboard contract (atomic precise presentation)
+
+Corrected (precise) tiles are brightness-normalized per-tile relative to
+their own local background; sitting a corrected tile next to a raw (or
+differently-corrected) tile in the same mosaic produces a visible seam --
+the tissue looks "cut into blocks" while the precise layer fills in.  To
+avoid this, the precise ImageItem is made visible ONLY when EVERY tile in
+`_visible_tiles` has a blitted precise result whose CorrectionKey matches
+the current `selection_key_context()` -- i.e. only when the precise layer
+gives 100% coverage of the viewport under a SINGLE, consistent correction.
+Whenever that isn't true (mid-fill, a pan reveals an uncovered tile, a
+selection/level/range change breaks coverage), the precise item is fully
+hidden (`setVisible(False)`) while its canvas keeps accumulating tiles in
+the background; coverage completing flips it visible in one frame (an
+atomic swap, never a per-tile checkerboard). The existing opacity contract
+(0.5 provisional / 1.0 valid) still applies once the item is visible -- see
+`_update_precise_visibility`. The raw layer is exempt: it holds only
+single-stage (uncorrected) pixels, so there is no cross-stage seam and it
+keeps filling progressively, tile by tile, as before.
+
+## Range-change coalescing (interactive-bug fix round)
+
+`sigRangeChanged` can fire hundreds of times during a fast wheel-zoom or
+drag-pan. Running the full range handler (level pick, canvas
+cover/reallocation, raw tile requests) on every single event floods the
+scheduler's raw ready-queue and can visibly freeze the UI until the queue
+drains. Instead, `_on_range_changed` only records that a range change
+happened and (re)starts a 30ms single-shot "motion" timer; the actual work
+runs once, in `_process_range`, driven by the timer with the LATEST
+viewport range (panning of already-drawn pixels between ticks is free --
+it's just the ViewBox's scene transform moving the existing ImageItems).
+`view_generation` is bumped once per PROCESSED range (not per event), and
+the previous view generation is cancelled via `scheduler.cancel_generation`
+so stale queued raw work from superseded ranges is dropped rather than
+piling up. Level switches additionally apply hysteresis (see
+`_pick_display_level_with_hysteresis`) so a zoom that only nudges past a
+level boundary doesn't trigger a canvas clear/reallocate thrash mid-zoom.
 """
 
 import dataclasses
@@ -230,11 +268,30 @@ class ExploreController(QtCore.QObject):
         # guard against a jump's manual settle firing twice (finding 4).
         self._jumping = False
 
+        # ── atomic precise presentation (anti-checkerboard contract) ──
+        # Hidden until every visible tile has a matching precise key; see
+        # `_update_precise_visibility` and the module docstring.
+        self.view.precise_item.setVisible(False)
+
         # ── timers ──
         self._settle_timer = QtCore.QTimer(self)
         self._settle_timer.setSingleShot(True)
         self._settle_timer.setInterval(self.settle_ms)
         self._settle_timer.timeout.connect(self._on_settle)
+
+        # Coalescing "motion" timer (finding: range-event flood): a burst of
+        # sigRangeChanged events restarts this single-shot timer instead of
+        # each one running the full range-change handler; only the LATEST
+        # range is processed, once, when the timer fires.
+        self.MOTION_MS = 30
+        self._motion_timer = QtCore.QTimer(self)
+        self._motion_timer.setSingleShot(True)
+        self._motion_timer.setInterval(self.MOTION_MS)
+        self._motion_timer.timeout.connect(self._process_range)
+
+        # Level-switch hysteresis threshold (fraction); see
+        # `_pick_display_level_with_hysteresis`.
+        self.LEVEL_HYSTERESIS = 0.2
 
         self._blit_timer = QtCore.QTimer(self)
         self._blit_timer.setInterval(16)
@@ -310,6 +367,10 @@ class ExploreController(QtCore.QObject):
         ]
         for coord in stale_coords:
             del self._precise_tile_keys[coord]
+        # Coverage almost certainly just broke (unless every visible tile
+        # happened to already match the new context) -- re-evaluate rather
+        # than assume: hides immediately per the anti-checkerboard contract.
+        self._update_precise_visibility()
 
     def _maybe_exit_provisional(self):
         """Restore full opacity / clear provisional once every visible
@@ -324,6 +385,28 @@ class ExploreController(QtCore.QObject):
             self._provisional = False
             self.view.precise_item.setOpacity(1.0)
             self.provisional_changed.emit(False)
+        self._update_precise_visibility()
+
+    def _update_precise_visibility(self):
+        """Anti-checkerboard contract (module docstring): the precise
+        ImageItem is visible ONLY when every tile in `_visible_tiles` has a
+        blitted precise result whose key matches the CURRENT selection
+        context -- i.e. full, single-correction coverage of the viewport.
+        Otherwise it is fully hidden so raw/precise (or two different
+        corrections) never sit side by side in the same visible mosaic.
+        Called whenever something that could change coverage happens: a
+        precise tile arrives, the visible tile set changes (pan/zoom), or
+        the selection changes (entering provisional)."""
+        fully_covered = (
+            self._wants_precise()
+            and bool(self._visible_tiles)
+            and all(coord in self._precise_tile_keys for coord in self._visible_tiles)
+        )
+        if not fully_covered:
+            self.view.precise_item.setVisible(False)
+            return
+        self.view.precise_item.setVisible(True)
+        self.view.precise_item.setOpacity(0.5 if self._provisional else 1.0)
 
     @staticmethod
     def _key_matches_context(key: CorrectionKey, ctx) -> bool:
@@ -400,6 +483,25 @@ class ExploreController(QtCore.QObject):
 
     # ── level selection ───────────────────────────────────────────────────
 
+    def _pick_display_level_with_hysteresis(self, screen_px_per_world_px: float) -> int:
+        """As `_pick_display_level`, but only actually switches away from
+        the CURRENT level when the ideal downsample ratio has crossed the
+        level boundary by more than `LEVEL_HYSTERESIS` (20%). This prevents
+        clear/realloc thrash when the zoom sits right at a level boundary
+        during a fast wheel-zoom (each coalesced motion tick would otherwise
+        re-pick a level right on the edge back and forth)."""
+        ideal_level = self._pick_display_level(screen_px_per_world_px)
+        if ideal_level == self.level:
+            return self.level
+        if screen_px_per_world_px <= 0:
+            return ideal_level
+        ideal_ds = 1.0 / screen_px_per_world_px
+        cur_ds = self.provider.level_downsample(self.level)
+        ratio = ideal_ds / cur_ds if cur_ds else 1.0
+        if abs(ratio - 1.0) > self.LEVEL_HYSTERESIS:
+            return ideal_level
+        return self.level
+
     def _pick_display_level(self, screen_px_per_world_px: float) -> int:
         """Nearest-below choice: pick the FINEST level whose downsample is
         <= 1/screen_px_per_world_px is not quite the framing we want here —
@@ -425,8 +527,26 @@ class ExploreController(QtCore.QObject):
     # ── viewport / range-change handling ─────────────────────────────────
 
     def _on_range_changed(self, *_args):
+        """Coalescing entry point: sigRangeChanged can fire hundreds of
+        times during a fast zoom/pan. Record that a change happened and
+        (re)start the single-shot motion timer; the actual work happens
+        once, in `_process_range`, using whatever the LATEST viewport range
+        is when the timer fires (visual panning of already-drawn pixels is
+        free in between -- the ViewBox scene transform handles it)."""
+        self._motion_timer.start(self.MOTION_MS)
+
+    def _process_range(self):
+        """The real range-change work (level pick w/ hysteresis, canvas
+        cover, raw tile requests), run once per COALESCED motion-timer
+        fire -- see module docstring "Range-change coalescing"."""
         t0 = time.perf_counter() if self.probe else None
+        prev_view_generation = self.view_generation
         self.view_generation += 1
+        # Drop stale queued raw work left over from the superseded range
+        # (finding: raw request backlog) -- queued-but-not-started raw
+        # entries wanted only by `prev_view_generation` are dropped rather
+        # than piling up behind newly-visible tiles.
+        self.scheduler.cancel_generation(prev_view_generation)
 
         vb = self.view.view_box
         (x0, x1), (y0, y1) = vb.viewRange()
@@ -436,7 +556,7 @@ class ExploreController(QtCore.QObject):
         world_w = max(1e-9, x1 - x0)
         screen_px_per_world_px = screen_w / world_w
 
-        new_level = self._pick_display_level(screen_px_per_world_px)
+        new_level = self._pick_display_level_with_hysteresis(screen_px_per_world_px)
 
         ds0 = self.provider.level_downsample(0)
         # Clamp the world (level-0) bbox to the level-0 extent.
@@ -456,6 +576,7 @@ class ExploreController(QtCore.QObject):
         )
         self._current_bbox = bbox_l0
         self._request_raw_for_bbox(bbox_level)
+        self._update_precise_visibility()
 
         self._settle_timer.start(self.settle_ms)
 
@@ -478,10 +599,13 @@ class ExploreController(QtCore.QObject):
             self.view.view_box.setRange(rect=rect, padding=0)
         finally:
             self._jumping = False
-        # `setRange` above may have started the settle timer via
-        # _on_range_changed (sigRangeChanged fires synchronously on a direct
-        # connection); stop it before firing the settled batch manually so
-        # it can never ALSO fire a second, redundant settled batch later.
+        # `setRange` above triggers sigRangeChanged synchronously, which
+        # under normal operation only (re)starts the coalescing motion
+        # timer (see `_on_range_changed`). A jump is a deliberate, explicit
+        # navigation -- it must not wait 30ms for that timer, so stop it and
+        # run the range work (and then the settled precise batch) right now.
+        self._motion_timer.stop()
+        self._process_range()
         self._settle_timer.stop()
         self._on_settle()
 
@@ -810,6 +934,12 @@ class ExploreController(QtCore.QObject):
             self._precise_data, self._precise_mask, self._precise_rgba,
             self._precise_canvas_origin, tile.tx, tile.ty, arr)
         self._maybe_exit_provisional()
+        # Unconditional (not just via _maybe_exit_provisional, which early-
+        # returns when _provisional is already False): a pan can reveal an
+        # uncovered tile and then have it re-filled without the selection
+        # ever going provisional again, and that must still flip visibility
+        # back on once coverage completes.
+        self._update_precise_visibility()
         if self.probe:
             self._probe_note_precise_progress(tile.tx, tile.ty)
 
@@ -1055,6 +1185,7 @@ class ExploreController(QtCore.QObject):
         self._torn_down = True
 
         self._settle_timer.stop()
+        self._motion_timer.stop()
         self._blit_timer.stop()
         try:
             self.view.view_box.sigRangeChanged.disconnect(self._on_range_changed)

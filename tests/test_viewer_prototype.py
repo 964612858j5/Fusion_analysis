@@ -952,6 +952,151 @@ def test_staging_runs_with_io_parallelism(monkeypatch):
     sched.shutdown()
 
 
+# ── raw ready-queue: cancellation / staging / priority (interactive-bug ───
+# fix round: raw requests are now queued through a cancellable priority
+# ready-queue exactly like the compute path, instead of going straight to
+# an I/O ThreadPoolExecutor -- see viewer/scheduler.py module docstring).
+
+def test_raw_queued_request_dropped_when_only_waiter_generation_cancelled():
+    """A queued RawKey request whose only external waiter's generation was
+    cancelled before it started must be dropped WITHOUT ever calling
+    provider.read_tile."""
+    started = threading.Event()
+    delay = threading.Event()
+    provider = FakeProvider()
+    orig_read_tile = provider.read_tile
+
+    def blocking_first_read(channel, tile):
+        started.set()
+        delay.wait(timeout=5)
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = blocking_first_read
+    compute = FakeCompute()
+    raw_cache = LRUByteCache(10_000_000)
+    corr_cache = LRUByteCache(10_000_000)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=1, compute_workers=1)
+
+    src = make_source()
+    tile_blocking = make_tile(tx=0, ty=0)
+    tile_cancelled = make_tile(tx=1, ty=0)
+    key_blocking = RawKey(source=src, channel="DAPI", tile=tile_blocking)
+    key_cancelled = RawKey(source=src, channel="DAPI", tile=tile_cancelled)
+
+    blocking_results = []
+    cancelled_results = []
+    sched.request(TileRequest(key=key_blocking, generation=1, priority=0), blocking_results.append)
+    assert started.wait(timeout=5)  # the single raw worker is now blocked
+
+    sched.request(TileRequest(key=key_cancelled, generation=2, priority=0), cancelled_results.append)
+    sched.cancel_generation(2)
+    delay.set()  # release the blocking read; worker moves on to the queue
+
+    deadline = time.time() + 5
+    while (not blocking_results or not cancelled_results) and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert blocking_results and blocking_results[0].error is None
+    assert cancelled_results and cancelled_results[0].error == "cancelled"
+    # The read for the cancelled tile must never have happened.
+    assert provider.read_tile_calls == 1
+    sched.shutdown()
+
+
+def test_raw_staged_work_still_executes_after_cancel_generation():
+    """Internal staging waiters (from _stage_raw_tile) are never stale:
+    staged raw work must still execute (and populate the cache) even when
+    every generation that would otherwise want it has been cancelled."""
+    monkeypatch_targets = []
+    provider = FakeProvider(image_h=4000, image_w=4000)
+    raw_cache = LRUByteCache(50_000_000)
+    corr_cache = LRUByteCache(50_000_000)
+    compute = CorrectionCompute(provider, raw_cache)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=2, compute_workers=1)
+
+    import block01.core.bg_correction as bg_correction_mod
+    orig = bg_correction_mod._apply_tophat_gpu_or_cpu
+    bg_correction_mod._apply_tophat_gpu_or_cpu = lambda arr, radius: arr.copy()
+    monkeypatch_targets.append((bg_correction_mod, "_apply_tophat_gpu_or_cpu", orig))
+    try:
+        src = make_source()
+        tile = make_tile(tile_size=512, tx=2, ty=3)
+        key = CorrectionKey(source=src, channel="DAPI", tile=tile, method="tophat",
+                             params=(10,), algorithm_version="v1")
+        raw_keys = compute.raw_keys_for(key)
+        assert raw_keys
+
+        # Cancel the generation BEFORE issuing the compute request: the
+        # correction request itself is dropped as stale-queued compute work,
+        # but staging (triggered separately here, directly) must still run.
+        sched.cancel_generation(999)
+
+        done = threading.Event()
+        for rk in raw_keys:
+            sched._stage_raw_tile(rk, lambda: None)
+        # Give the raw workers time to drain the staged reads.
+        deadline = time.time() + 5
+        while time.time() < deadline and any(
+            raw_cache.get(rk) is None for rk in raw_keys
+        ):
+            time.sleep(0.01)
+
+        for rk in raw_keys:
+            assert raw_cache.get(rk) is not None
+    finally:
+        for mod, name, orig_fn in monkeypatch_targets:
+            setattr(mod, name, orig_fn)
+        sched.shutdown()
+
+
+def test_raw_priority_respected_single_worker():
+    started = threading.Event()
+    delay = threading.Event()
+    provider = FakeProvider()
+    orig_read_tile = provider.read_tile
+
+    def blocking_first_read(channel, tile):
+        started.set()
+        delay.wait(timeout=5)
+        return orig_read_tile(channel, tile)
+
+    provider.read_tile = blocking_first_read
+    compute = FakeCompute()
+    raw_cache = LRUByteCache(10_000_000)
+    corr_cache = LRUByteCache(10_000_000)
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache, io_workers=1, compute_workers=1)
+
+    src = make_source()
+    key_first = RawKey(source=src, channel="DAPI", tile=make_tile(tx=0, ty=0))
+    key_low_prio = RawKey(source=src, channel="DAPI", tile=make_tile(tx=1, ty=0))
+    key_high_prio = RawKey(source=src, channel="DAPI", tile=make_tile(tx=2, ty=0))
+
+    order = []
+    order_lock = threading.Lock()
+
+    def make_cb(name):
+        def cb(r):
+            with order_lock:
+                order.append(name)
+        return cb
+
+    sched.request(TileRequest(key=key_first, generation=1, priority=0), make_cb("first"))
+    assert started.wait(timeout=5)
+
+    sched.request(TileRequest(key=key_low_prio, generation=1, priority=5), make_cb("low"))
+    sched.request(TileRequest(key=key_high_prio, generation=1, priority=1), make_cb("high"))
+
+    delay.set()
+
+    deadline = time.time() + 5
+    while len(order) < 3 and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert order[0] == "first"
+    assert order[1:] == ["high", "low"]
+    sched.shutdown()
+
+
 # ── RawTileProvider handle_mode ────────────────────────────────────────────
 
 def _write_small_ome_tiff(path):

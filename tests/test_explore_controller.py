@@ -194,7 +194,7 @@ def test_range_change_requests_missing_raw_tiles_center_out(app):
     # Unaligned viewport in level-0 world coords.
     y0, x0, y1, x1 = 100, 700, 100 + 2048, 700 + 2048
     view.view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
-    _pump(10)
+    _pump(80)  # past the 30ms motion-coalescing timer
 
     # pyqtgraph's aspect-locked ViewBox may pad the requested range to match
     # the widget's aspect ratio, so recompute the expected tile set from the
@@ -779,7 +779,7 @@ def test_level_switch_reallocates_canvas_and_clears_masks(app):
     # Zoom WAY out so _pick_display_level chooses level 1 (ds=4) instead of
     # level 0 -- a real level switch, not just a pan.
     view.view_box.setRange(xRange=(0, 40960), yRange=(0, 40960), padding=0)
-    _pump(30)
+    _pump(80)  # past the 30ms motion-coalescing timer
 
     assert ctrl.level == 1
     assert ctrl.stats["rgba_canvas_allocs"] > allocs_before
@@ -837,7 +837,7 @@ def test_pan_beyond_margin_reallocates_once_and_preserves_overlap(app):
 
     def apply(y0, x0, w, h):
         view.view_box.setRange(xRange=(x0, x0 + w), yRange=(y0, y0 + h), padding=0)
-        _pump(20)
+        _pump(60)  # past the 30ms motion-coalescing timer
 
     apply(2 * ts, 2 * ts, 2 * ts, 2 * ts)
 
@@ -904,5 +904,105 @@ def test_margin_clamped_at_level_edges(app):
     assert tx0b >= 0 and ty0b >= 0
     assert tx0b + n_cols - 1 <= max_tx
     assert ty0b + n_rows - 1 <= max_ty
+
+    ctrl.teardown()
+
+
+# ── 26. rapid range changes coalesce into exactly ONE processed range ─────
+
+def test_rapid_range_changes_coalesce_to_one_process(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    gen_before = ctrl.view_generation
+
+    # 10 setRange calls back-to-back, all well within the 30ms motion
+    # window (no _pump between them -> no event-loop turn to let the
+    # motion timer fire in between).
+    for i in range(10):
+        view.view_box.setRange(xRange=(700 + i, 700 + i + 2048), yRange=(100, 2148), padding=0)
+
+    _pump(80)  # let the (single) coalesced motion timer fire
+
+    assert ctrl.view_generation == gen_before + 1
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert len(raw_reqs) > 0
+
+    ctrl.teardown()
+
+
+# ── 27. cancel_generation invoked with the PREVIOUS view generation ───────
+
+def test_process_range_cancels_previous_view_generation(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+
+    view.view_box.setRange(xRange=(0, 2048), yRange=(0, 2048), padding=0)
+    _pump(80)
+    gen_after_first = ctrl.view_generation
+
+    view.view_box.setRange(xRange=(200, 2248), yRange=(200, 2248), padding=0)
+    _pump(80)
+
+    assert ctrl.view_generation == gen_after_first + 1
+    assert gen_after_first in scheduler.cancelled_generations
+
+    ctrl.teardown()
+
+
+# ── 28. level-switch hysteresis: small change keeps level, large switches ─
+
+def test_level_hysteresis_small_change_keeps_large_change_switches(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.level = 1  # ds=4 (FakeProvider: level0 ds=1, level1 ds=4)
+
+    # ideal_ds = 3.7 is just below the level-1 downsample (4): the naive
+    # pick would prefer level 0, but the deviation from the CURRENT level's
+    # downsample is only ~7.5% (< 20%) -> stay on level 1.
+    kept = ctrl._pick_display_level_with_hysteresis(1.0 / 3.7)
+    assert kept == 1
+
+    # ideal_ds = 1.0 (matches level 0 exactly): deviation from the current
+    # level's downsample (4) is 75% (>> 20%) -> switch to level 0.
+    switched = ctrl._pick_display_level_with_hysteresis(1.0 / 1.0)
+    assert switched == 0
+
+    ctrl.teardown()
+
+
+# ── 29. atomic precise presentation: hidden until full coverage ───────────
+
+def test_atomic_precise_hidden_until_full_coverage_then_pan_hides_again(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.level = 0
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # at least 4 tiles at ts=512
+
+    precise_reqs = [
+        (r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+        if r.generation == ctrl._settled_generation
+    ]
+    assert len(precise_reqs) >= 4
+    assert view.precise_item.isVisible() is False
+
+    for req, _cb in precise_reqs[:-1]:
+        arr = np.zeros((512, 512), dtype=np.float32)
+        scheduler.deliver(req, arr)
+    _pump(20)
+    assert view.precise_item.isVisible() is False
+
+    req, _cb = precise_reqs[-1]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(20)
+    assert view.precise_item.isVisible() is True
+
+    # Pan so one previously-covered tile scrolls out and an uncovered one
+    # scrolls in -> full coverage breaks -> hidden again immediately.
+    view.view_box.setRange(xRange=(512, 512 + 1024), yRange=(0, 1024), padding=0)
+    _pump(80)
+    assert view.precise_item.isVisible() is False
 
     ctrl.teardown()

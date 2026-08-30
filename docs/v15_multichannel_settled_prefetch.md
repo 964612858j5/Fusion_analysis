@@ -130,10 +130,15 @@ an RTX 4090 with 48 GB VRAM of which 1.9 GB is in use.
 
 The premise that 2 GB "will not fit" assumed a tight budget. It is not
 tight here: the full two-method 57-channel viewport set is 2.39 GB against
-106 GB available. **proposed**: raise the corrected cache from its current
-512 MB to a configured budget in the 4–8 GB range and keep `float32`
-throughout, rather than introducing a hot/cold split whose only
-justification would be a memory pressure that this machine does not have.
+106 GB available. **proposed**: raise the corrected cache from its current 512 MB to **8 GB**,
+configurable, with memory monitoring, and keep `float32` throughout.
+
+8 GB rather than 4: the 2.39 GB figure covers only 57 channels x 2 methods x
+the CURRENT viewport. Real use also holds roughly twice that area under
+precompute, plus the level+1 fallback tiles, which puts the realistic working
+set nearer 5–7 GB. A hot/cold split is not justified on this machine — its
+only motivation would be a memory pressure that 106 GB of free RAM does not
+create.
 
 If a tiered cache is wanted anyway (for smaller machines), the boundary
 must be explicit:
@@ -163,6 +168,45 @@ it.
 - no unbounded queue, no unbounded memory growth
 - once the user moves again, the old background queue must stop consuming
   the GPU
+
+## 8b. Cold start: per-thread TIFF handle construction
+
+**measured**: a worker thread's first read on a fresh provider costs 168.3 ms
+against 0.9 ms for its second, and eight fresh threads serialise to 126, 218,
+295, 401, 517, 648, 748, 865 ms — 883 ms of wall before any real work. The
+serialisation is inside `tifffile`'s pure-Python OME-XML and page-table parse,
+so it is GIL-bound; `RawTileProvider`'s only lock guards a list append.
+
+**Correction to an earlier claim of mine.** I proposed "warm the worker handles
+in parallel at startup". Because the parse is GIL-bound, warming them
+concurrently does NOT make the 883 ms shorter. Warming can only MOVE the cost
+off the interaction path — it is a relocation, not a speed-up, and must not be
+described as one.
+
+**proposed** startup sequence, on that basis:
+
+    show the overview immediately
+    -> warm every I/O worker handle in the background
+    -> Explore reports "Preparing fast navigation…" meanwhile
+    -> full interaction once warming completes
+
+**proposed**, and to be settled by measurement before anything is built: the
+number of I/O workers should be re-swept (1/2/4/8) with handles pre-warmed. If
+4 workers reach the same throughput as 8, there is no reason to pay eight TIFF
+initialisations.
+
+## 8c. Event source must be explicit, not inferred
+
+The policy layer currently infers a navigator jump from displacement relative
+to the viewport (1.5 viewports). That is better than the absolute pixel count
+it replaced, but it is still a heuristic, and it is only acceptable inside the
+benchmark/policy layer.
+
+**The product contract must not guess.** The navigator knows it called
+`jump_to()`. The live integration must pass an explicit event source —
+`NAVIGATOR_JUMP`, `PAN`, `ZOOM`, `CHANNEL_SWITCH` — and the state machine must
+consume that, never a distance threshold. The 1.5-viewport rule stays only as
+the fallback for callers that cannot supply a source.
 
 ## 9. What this round does NOT do
 

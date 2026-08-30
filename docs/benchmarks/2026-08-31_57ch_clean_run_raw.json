@@ -1,0 +1,1245 @@
+{
+  "path": "/sda1/Albert/fusion/20260210/20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif",
+  "channel_index": 1,
+  "channel_name": "CD15",
+  "quick": false,
+  "seed": 20260831,
+  "args": {
+    "path": "/sda1/Albert/fusion/20260210/20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif",
+    "channel_index": 1,
+    "methods": [
+      "tophat",
+      "cucim"
+    ],
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "io_workers": 8,
+    "compute_workers": 4,
+    "seed": 20260831,
+    "out": "/tmp/claude-0/-sda1-Fusion-analysis-pipline-block01-v14/a685ea1e-9e71-4e7f-88be-de32aba6be09/scratchpad/full.json",
+    "quick": false,
+    "timeout": 60.0
+  },
+  "measurements": [
+    {
+      "id": "bench.seed",
+      "label": "measured",
+      "description": "seed for the RNG that draws channels for the neighbour and batch-size cells (--seed)",
+      "value": 20260831,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.window_chosen",
+      "label": "measured",
+      "description": "tissue window chosen by block-means over a coarse overview level (explore_view.py::_pick_calibration_windows logic)",
+      "value": {
+        "overview_level": 2,
+        "ty0": 50,
+        "tx0": 35,
+        "y0_l0": 25600,
+        "x0_l0": 17920,
+        "rows": 5,
+        "cols": 4,
+        "n_tiles": 20,
+        "channel_index": 1,
+        "channel_name": "CD15"
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.rss_mb.start",
+      "label": "measured",
+      "description": "process RSS at start",
+      "value": 350.4765625,
+      "unit": "MB",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_mem.start",
+      "label": "measured",
+      "description": "GPU memory (cupy mempool) at start",
+      "value": {
+        "used_mb": 0.0,
+        "total_mb": 0.00341796875
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.cupy_available",
+      "label": "measured",
+      "description": "cupy import",
+      "value": true,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_morph_available",
+      "label": "measured",
+      "description": "bg_correction.GPU_MORPH_AVAILABLE (whether the GPU kernels actually engaged, vs CPU fallback)",
+      "value": true,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.tophat.first_tile_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=tophat: first-tile",
+      "value": 170.6354769412428,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=cold (evicted for this file just before the first method's run), raw LRU=cold (fresh), corrected LRU=n/a (sequential)"
+    },
+    {
+      "id": "baseline.tophat.full_coverage_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=tophat: full-coverage (20 tiles) \u2014 this is the CORRECTNESS ground truth for all parallel/batched comparisons below",
+      "value": 418.4307630639523,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "profiling.baseline.tophat",
+      "label": "measured",
+      "description": "per-tile profiling breakdown (baseline.tophat): TIFF read / halo staging / GPU kernel (incl. transfers, not separable) / Python overhead",
+      "value": {
+        "n_tiles": 20,
+        "tiff_read_io_ms_total": 346.7965496238321,
+        "halo_staging_ms_total": 0.0,
+        "gpu_kernel_ms_total_incl_transfers": 49.641464836895466,
+        "host_device_transfer_ms": "not separable \u2014 kernel_includes_transfers=True (CorrectionCompute.compute)",
+        "wall_ms_total": 418.2124277576804,
+        "python_scheduling_overhead_ms_total": 21.774413296952844,
+        "python_overhead_fraction_of_wall": 0.052065438164284585
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.cucim.first_tile_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=cucim: first-tile",
+      "value": 90.16464091837406,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (prior method already read this window), raw LRU=cold (fresh), corrected LRU=n/a (sequential)"
+    },
+    {
+      "id": "baseline.cucim.full_coverage_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=cucim: full-coverage (20 tiles) \u2014 this is the CORRECTNESS ground truth for all parallel/batched comparisons below",
+      "value": 201.22050493955612,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "profiling.baseline.cucim",
+      "label": "measured",
+      "description": "per-tile profiling breakdown (baseline.cucim): TIFF read / halo staging / GPU kernel (incl. transfers, not separable) / Python overhead",
+      "value": {
+        "n_tiles": 20,
+        "tiff_read_io_ms_total": 142.97753293067217,
+        "halo_staging_ms_total": 0.0,
+        "gpu_kernel_ms_total_incl_transfers": 40.487151592969894,
+        "host_device_transfer_ms": "not separable \u2014 kernel_includes_transfers=True (CorrectionCompute.compute)",
+        "wall_ms_total": 201.04359439574182,
+        "python_scheduling_overhead_ms_total": 17.578909872099757,
+        "python_overhead_fraction_of_wall": 0.08743829876766313
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.tophat.first_tile_ms",
+      "label": "measured",
+      "description": "first-tile wall time, method=tophat",
+      "value": 155.17856180667877,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "viewport.tophat.full_coverage_ms",
+      "label": "measured",
+      "description": "full-coverage wall time (20 tiles), method=tophat",
+      "value": 247.83543008379638,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "viewport.cucim.first_tile_ms",
+      "label": "measured",
+      "description": "first-tile wall time, method=cucim",
+      "value": 91.57658205367625,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "viewport.cucim.full_coverage_ms",
+      "label": "measured",
+      "description": "full-coverage wall time (20 tiles), method=cucim",
+      "value": 203.23067693971097,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "cache.cold.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=tophat: full-coverage (20 tiles)",
+      "value": 185.58501894585788,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (likely; not reset here), raw LRU=cold (fresh), corrected LRU=n/a (sequential, no CorrectionKey cache used here)"
+    },
+    {
+      "id": "cache.cold.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=tophat: first-tile",
+      "value": 85.19432391040027,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.warm.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache WARM (same raw tiles reused), method=tophat: full-coverage",
+      "value": 41.38279287144542,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "corrected-tile compute still re-runs the kernel; only raw I/O is warm. OS page cache: not deliberately controlled by this cell"
+    },
+    {
+      "id": "cache.warm.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache WARM, method=tophat: first-tile",
+      "value": 5.4825469851493835,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold_vs_warm.max_abs_diff",
+      "label": "measured",
+      "description": "correctness: cold-cache vs warm-cache corrected pixels for same tiles",
+      "value": 0.0,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": "compared=20, missing=0"
+    },
+    {
+      "id": "cache.raw_cache.stats_after_cold_and_warm",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the raw cache after cold+warm runs",
+      "value": {
+        "hits": 318,
+        "misses": 42,
+        "evictions": 0,
+        "bytes": 11010048,
+        "items": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=cucim: full-coverage (20 tiles)",
+      "value": 341.8750260025263,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (likely; not reset here), raw LRU=cold (fresh), corrected LRU=n/a (sequential, no CorrectionKey cache used here)"
+    },
+    {
+      "id": "cache.cold.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=cucim: first-tile",
+      "value": 235.00153585337102,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.warm.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache WARM (same raw tiles reused), method=cucim: full-coverage",
+      "value": 30.73729109019041,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "corrected-tile compute still re-runs the kernel; only raw I/O is warm. OS page cache: not deliberately controlled by this cell"
+    },
+    {
+      "id": "cache.warm.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache WARM, method=cucim: first-tile",
+      "value": 3.2301160972565413,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold_vs_warm.max_abs_diff",
+      "label": "measured",
+      "description": "correctness: cold-cache vs warm-cache corrected pixels for same tiles",
+      "value": 0.0,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": "compared=20, missing=0"
+    },
+    {
+      "id": "cache.raw_cache.stats_after_cold_and_warm",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the raw cache after cold+warm runs",
+      "value": {
+        "hits": 318,
+        "misses": 42,
+        "evictions": 0,
+        "bytes": 11010048,
+        "items": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.cache_state_headline.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for cache_state_headline (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 860.148515086621,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "cache_state.os_cold.full_coverage_ms",
+      "label": "measured",
+      "description": "headline viewport, io_workers=8 compute_workers=4, method=tophat: full-coverage TRUE WALL TIME",
+      "value": 184.84162911772728,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=cold (evicted for this file just before this run), raw LRU=cold (fresh), corrected LRU=cold (fresh)"
+    },
+    {
+      "id": "cache_state.os_cold.aggregate_service_ms",
+      "label": "measured",
+      "description": "same run: AGGREGATE service time summed across tiles (inflated by parallelism; do not divide by total_ms without saying so)",
+      "value": 92.12508983910084,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache_state.os_warm_app_cold.full_coverage_ms",
+      "label": "measured",
+      "description": "headline viewport, io_workers=8 compute_workers=4, method=tophat: full-coverage TRUE WALL TIME",
+      "value": 108.39615599252284,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (from run 1's own reads, not re-evicted), raw LRU=cold (cleared just before this run), corrected LRU=cold (cleared just before this run)"
+    },
+    {
+      "id": "cache_state.all_warm.full_coverage_ms",
+      "label": "measured",
+      "description": "headline viewport, io_workers=8 compute_workers=4, method=tophat: full-coverage TRUE WALL TIME",
+      "value": 0.8794819004833698,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm, raw LRU=warm (reused from run 2, not cleared), corrected LRU=warm (reused from run 2, not cleared)"
+    },
+    {
+      "id": "warmup.io1.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for io1 (io_workers=1) \u2014 reported separately, never inside another timing",
+      "value": 76.87387894839048,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=2/2"
+    },
+    {
+      "id": "io_sweep.io1.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=1 compute_workers=4: first-tile TRUE WALL TIME",
+      "value": 19.705201033502817,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io1.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=1 compute_workers=4: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 96.14583500660956,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io1.aggregate_service_ms",
+      "label": "measured",
+      "description": "io_workers=1: AGGREGATE service time (sum across tiles, inflated by parallelism \u2014 not a ratio numerator/denominator with total_ms)",
+      "value": 40.403073420748115,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.io2.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for io2 (io_workers=2) \u2014 reported separately, never inside another timing",
+      "value": 176.3734791893512,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=3/3"
+    },
+    {
+      "id": "io_sweep.io2.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=2 compute_workers=4: first-tile TRUE WALL TIME",
+      "value": 18.326140008866787,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io2.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=2 compute_workers=4: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 133.0839260481298,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io2.aggregate_service_ms",
+      "label": "measured",
+      "description": "io_workers=2: AGGREGATE service time (sum across tiles, inflated by parallelism \u2014 not a ratio numerator/denominator with total_ms)",
+      "value": 98.27317646704614,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.io4.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for io4 (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 393.4582541696727,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "io_sweep.io4.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=4: first-tile TRUE WALL TIME",
+      "value": 19.566172035411,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io4.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=4: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 94.8683931492269,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io4.aggregate_service_ms",
+      "label": "measured",
+      "description": "io_workers=4: AGGREGATE service time (sum across tiles, inflated by parallelism \u2014 not a ratio numerator/denominator with total_ms)",
+      "value": 66.38437672518194,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.io8.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for io8 (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 785.2759521920234,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "io_sweep.io8.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=8 compute_workers=4: first-tile TRUE WALL TIME",
+      "value": 31.26127296127379,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io8.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=8 compute_workers=4: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 101.0987889021635,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "io_sweep.io8.aggregate_service_ms",
+      "label": "measured",
+      "description": "io_workers=8: AGGREGATE service time (sum across tiles, inflated by parallelism \u2014 not a ratio numerator/denominator with total_ms)",
+      "value": 82.71710854023695,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "io_sweep.winner",
+      "label": "inferred",
+      "description": "io_workers value with the lowest measured full-coverage time in this sweep \u2014 used to save time in later sweeps, NOT asserted as globally optimal",
+      "value": 4,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.compute1.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for compute1 (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 369.97213400900364,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "compute_sweep.compute1.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=1: first-tile TRUE WALL TIME",
+      "value": 15.033968957141042,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute1.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=1: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 160.0757739506662,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute1.aggregate_service_ms",
+      "label": "measured",
+      "description": "compute_workers=1: AGGREGATE service time (sum across tiles, inflated by parallelism)",
+      "value": 24.164900183677673,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.compute2.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for compute2 (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 404.36864783987403,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "compute_sweep.compute2.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=2: first-tile TRUE WALL TIME",
+      "value": 16.52685017324984,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute2.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=2: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 107.31828515417874,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute2.aggregate_service_ms",
+      "label": "measured",
+      "description": "compute_workers=2: AGGREGATE service time (sum across tiles, inflated by parallelism)",
+      "value": 27.261395705863833,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.compute4.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for compute4 (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 406.04483895003796,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "compute_sweep.compute4.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=4: first-tile TRUE WALL TIME",
+      "value": 23.100262973457575,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute4.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=4: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 98.40595000423491,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute4.aggregate_service_ms",
+      "label": "measured",
+      "description": "compute_workers=4: AGGREGATE service time (sum across tiles, inflated by parallelism)",
+      "value": 62.99539213068783,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.compute8.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for compute8 (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 396.2518600746989,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "compute_sweep.compute8.first_tile_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=8: first-tile TRUE WALL TIME",
+      "value": 23.47545907832682,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute8.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=4 compute_workers=8: full-coverage (20 tiles) TRUE WALL TIME",
+      "value": 102.7989350259304,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "compute_sweep.compute8.aggregate_service_ms",
+      "label": "measured",
+      "description": "compute_workers=8: AGGREGATE service time (sum across tiles, inflated by parallelism)",
+      "value": 97.97096578404307,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "compute_sweep.winner",
+      "label": "inferred",
+      "description": "compute_workers value with the lowest measured full-coverage time in this sweep \u2014 used for the batch-size/neighbour cells below, NOT asserted as globally optimal",
+      "value": 4,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.batch_sweep.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for batch_sweep (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 399.15995788760483,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "batch.n1.wall_ms",
+      "label": "measured",
+      "description": "batch=1 channels, method=tophat: TRUE WALL TIME distribution over 10 reps (random channel draws)",
+      "value": {
+        "p50": 195.57777396403253,
+        "p95": 323.5343378968537,
+        "max": 334.4222800806165,
+        "samples": [
+          152.00426010414958,
+          92.19960798509419,
+          119.86534809693694,
+          170.04333692602813,
+          221.11221100203693,
+          334.4222800806165,
+          310.22685300558805,
+          106.33249511010945,
+          276.4702681452036,
+          249.6144031174481
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n=10/10 reps usable, seed-drawn random channels each rep, correctness checked on 0 rep(s) that happened to include channel 1 (mismatches suppressed: 0); cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "batch.n1.aggregate_service_ms",
+      "label": "measured",
+      "description": "batch=1 channels, method=tophat: AGGREGATE service time distribution (summed per-tile, inflated by parallelism; never divide by wall_ms without saying so)",
+      "value": {
+        "p50": 63.78226529341191,
+        "p95": 87.50506514916195,
+        "max": 91.80817194283009,
+        "samples": [
+          75.6054655648768,
+          72.28933763690293,
+          82.24571240134537,
+          67.9423469118774,
+          46.15645273588598,
+          35.86658136919141,
+          42.74706309661269,
+          91.80817194283009,
+          46.91719519905746,
+          59.62218367494643
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.n2.wall_ms",
+      "label": "measured",
+      "description": "batch=2 channels, method=tophat: TRUE WALL TIME distribution over 10 reps (random channel draws)",
+      "value": {
+        "p50": 270.8248815033585,
+        "p95": 652.6926524005829,
+        "max": 681.8832429125905,
+        "samples": [
+          594.3800630047917,
+          226.44856595434248,
+          356.2621830496937,
+          681.8832429125905,
+          225.99979490041733,
+          617.0152639970183,
+          199.65313491411507,
+          315.2011970523745,
+          204.41172900609672,
+          210.96152695827186
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n=10/10 reps usable, seed-drawn random channels each rep, correctness checked on 0 rep(s) that happened to include channel 1 (mismatches suppressed: 0); cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "batch.n2.aggregate_service_ms",
+      "label": "measured",
+      "description": "batch=2 channels, method=tophat: AGGREGATE service time distribution (summed per-tile, inflated by parallelism; never divide by wall_ms without saying so)",
+      "value": {
+        "p50": 115.29701040126383,
+        "p95": 132.2851323406212,
+        "max": 135.90381923131645,
+        "samples": [
+          92.72439428605139,
+          124.76689764298499,
+          113.02524409256876,
+          80.20667475648224,
+          127.86229280754924,
+          91.68106876313686,
+          117.56877670995891,
+          92.27914549410343,
+          127.40625976584852,
+          135.90381923131645
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.n4.wall_ms",
+      "label": "measured",
+      "description": "batch=4 channels, method=tophat: TRUE WALL TIME distribution over 10 reps (random channel draws)",
+      "value": {
+        "p50": 554.4929768657312,
+        "p95": 716.038704488892,
+        "max": 759.5186850521713,
+        "samples": [
+          386.1554160248488,
+          604.6837600879371,
+          590.3029339388013,
+          603.3971519209445,
+          382.18535599298775,
+          759.5186850521713,
+          662.8965060226619,
+          479.060284094885,
+          518.6830197926611,
+          499.76619193330407
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n=10/10 reps usable, seed-drawn random channels each rep, correctness checked on 1 rep(s) that happened to include channel 1 (mismatches suppressed: 0); cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "batch.n4.aggregate_service_ms",
+      "label": "measured",
+      "description": "batch=4 channels, method=tophat: AGGREGATE service time distribution (summed per-tile, inflated by parallelism; never divide by wall_ms without saying so)",
+      "value": {
+        "p50": 189.61405113805085,
+        "p95": 252.07143890438599,
+        "max": 261.3859227858484,
+        "samples": [
+          240.687069715932,
+          186.04337121360004,
+          211.05912001803517,
+          183.03484423086047,
+          261.3859227858484,
+          179.7758936882019,
+          173.4189074486494,
+          179.75366464816034,
+          193.18473106250167,
+          231.46149120293558
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.n8.wall_ms",
+      "label": "measured",
+      "description": "batch=8 channels, method=tophat: TRUE WALL TIME distribution over 10 reps (random channel draws)",
+      "value": {
+        "p50": 829.9274259479716,
+        "p95": 1270.9065083414314,
+        "max": 1369.0079250372946,
+        "samples": [
+          1151.0047768242657,
+          805.8950579725206,
+          757.1979169733822,
+          1099.414455005899,
+          997.9884081985801,
+          853.9597939234227,
+          1369.0079250372946,
+          695.5144880339503,
+          724.4863701052964,
+          744.0162149723619
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n=10/10 reps usable, seed-drawn random channels each rep, correctness checked on 2 rep(s) that happened to include channel 1 (mismatches suppressed: 0); cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "batch.n8.aggregate_service_ms",
+      "label": "measured",
+      "description": "batch=8 channels, method=tophat: AGGREGATE service time distribution (summed per-tile, inflated by parallelism; never divide by wall_ms without saying so)",
+      "value": {
+        "p50": 475.84132046904415,
+        "p95": 513.8412836007774,
+        "max": 520.3551065642387,
+        "samples": [
+          441.52056449092925,
+          505.8799444232136,
+          486.534079303965,
+          455.53234382532537,
+          401.7204982228577,
+          503.4652608446777,
+          385.5695519596338,
+          465.1485616341233,
+          498.35837655700743,
+          520.3551065642387
+        ]
+      },
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.neighbor_sweep.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for neighbor_sweep (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 980.2142309490591,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "neighbor.+-1.p95_ms",
+      "label": "measured",
+      "description": "neighbour +-1 full-coverage prep time from settled state, base channel drawn fresh per rep from seeded RNG (n=20 samples, 10 rep(s) x 2 offset(s))",
+      "value": 102.12756006512791,
+      "unit": "ms",
+      "target": 500.0,
+      "verdict": "MET",
+      "notes": "p50_ms=93.90658710617572, samples_ms=[96.30827489309013, 96.4032132178545, 93.35027495399117, 101.48903401568532, 106.74423910677433, 98.1337248813361, 95.31873906962574, 93.39285315945745, 92.75407809764147, 94.26000318489969, 83.12216703779995, 93.55317102745175, 85.8858679421246, 90.8427401445806, 85.41578496806324, 84.367117844522, 101.14303114823997, 93.47562701441348, 101.88457695767283, 97.90347702801228]; cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "neighbor.+-2.p95_ms",
+      "label": "measured",
+      "description": "neighbour +-2 full-coverage prep time from settled state, base channel drawn fresh per rep from seeded RNG (n=20 samples, 10 rep(s) x 2 offset(s))",
+      "value": 110.51159891067081,
+      "unit": "ms",
+      "target": 1000.0,
+      "verdict": "MET",
+      "notes": "p50_ms=97.76566154323518, samples_ms=[231.432368978858, 102.32618800364435, 99.66455702669919, 102.56526106968522, 102.74025588296354, 91.26833011396229, 95.3947699163109, 93.11638004146516, 91.89735795371234, 88.3197458460927, 97.80746907927096, 86.07241394929588, 97.7238540071994, 83.09809304773808, 96.74223093315959, 99.30094098672271, 104.14734785445035, 96.45020985044539, 103.77264302223921, 98.98517490364611]; cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "warmup.far_click.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for far_click (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 746.3257920462638,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "far_click.full_coverage_ms",
+      "label": "measured",
+      "description": "FAR channel promoted to top priority while HOT + 8 background channels are queued: time to finish its own 20-tile viewport (TRUE WALL TIME)",
+      "value": 110.34605512395501,
+      "unit": "ms",
+      "target": 2000.0,
+      "verdict": "MET",
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "warmup.bg_degradation.alone.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for bg_degradation.alone (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 828.9508770685643,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "warmup.bg_degradation.with_bg.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for bg_degradation.with_bg (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 790.3822879306972,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "bg_degradation.alone_ms",
+      "label": "measured",
+      "description": "HOT channel full-coverage, NO background load (TRUE WALL TIME)",
+      "value": 102.01866715215147,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "bg_degradation.with_bg_ms",
+      "label": "measured",
+      "description": "HOT channel full-coverage, WITH 8 background channels queued (TRUE WALL TIME)",
+      "value": 100.42800405062735,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "bg_degradation.fraction",
+      "label": "measured",
+      "description": "fractional degradation of HOT full-coverage time due to concurrent background load",
+      "value": -0.015591882798780215,
+      "unit": null,
+      "target": 0.1,
+      "verdict": "MET",
+      "notes": null
+    },
+    {
+      "id": "warmup.cancellation.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for cancellation (io_workers=8) \u2014 reported separately, never inside another timing",
+      "value": 794.1093768458813,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=9/9"
+    },
+    {
+      "id": "cancellation.stop_latency_ms",
+      "label": "measured",
+      "description": "time from cancel_generation() call to the LAST 'cancelled' delivery (i.e. how long queued-but-not-started work kept arriving as cancelled rather than being run), observed after a 1.0s quiet period with no further deliveries",
+      "value": 9.86007391475141,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n_queued_total=200, n_delivered_cancelled=196, n_delivered_completed=0 (already-running work that finished and whose waiter happened to still be live), n_never_delivered=4 (already-running-at-cancel-time work that completed AFTER its waiter went stale \u2014 scheduler contract skips delivery entirely for these, so no callback and no timing sample exists for them; this is not a script bug); cache state: OS page cache=warm (file read repeatedly earlier in this run; not reset for this cell), raw LRU=cold (fresh LRUByteCache for this cell), corrected LRU=cold (fresh LRUByteCache for this cell)"
+    },
+    {
+      "id": "shared_staging.independent.hits_misses",
+      "label": "measured",
+      "description": "independent per-method raw caches: total raw-tile hits/misses across both methods",
+      "value": {
+        "hits": 276,
+        "misses": 84
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "shared_staging.shared.hits_misses",
+      "label": "measured",
+      "description": "single shared raw cache across both methods: total raw-tile hits/misses",
+      "value": {
+        "hits": 318,
+        "misses": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "shared_staging.io_reduction_fraction",
+      "label": "measured",
+      "description": "fractional reduction in raw-tile MISSES from sharing staged raw input between tophat and cucim vs computing them independently",
+      "value": 0.5,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.streams_pool.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for streams_pool (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 377.32963101007044,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "streams.default_stream_ms",
+      "label": "measured",
+      "description": "n_parallel=4 compute threads sharing cupy's implicit default stream: median wall time (3 reps, persistent thread pool, handles pre-warmed)",
+      "value": 7.010304136201739,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "samples=[7.005123887211084, 7.010304136201739, 7.315149996429682]"
+    },
+    {
+      "id": "streams.explicit_streams_ms",
+      "label": "measured",
+      "description": "n_parallel=4 compute threads each binding its own cp.cuda.Stream(): median wall time (3 reps, persistent thread pool, handles pre-warmed)",
+      "value": 12.246484169736505,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "samples=[12.246484169736505, 8.476435905322433, 12.412392068654299]"
+    },
+    {
+      "id": "streams.verdict",
+      "label": "measured",
+      "description": "explicit per-thread streams measured SLOWER than the shared default stream",
+      "value": -5.236180033534765,
+      "unit": "ms (default - explicit)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "warmup.peak_memory.wall_ms",
+      "label": "measured",
+      "description": "handle warm-up wall time for peak_memory (io_workers=4) \u2014 reported separately, never inside another timing",
+      "value": 363.8111660256982,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "rounds=1, open_count=5/5"
+    },
+    {
+      "id": "peak_memory.rss_mb",
+      "label": "measured",
+      "description": "peak process RSS while holding current viewport (20 tiles) PLUS 8 channels (~8.0x the viewport's channel count) under concurrent precompute, 8 GB corrected-cache cap (finished=True)",
+      "value": 1586.2890625,
+      "unit": "MB",
+      "target": null,
+      "verdict": null,
+      "notes": "n_rss_samples=17"
+    },
+    {
+      "id": "peak_memory.corrected_cache_stats",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the corrected (8 GB cap) cache at end of this cell",
+      "value": {
+        "hits": 0,
+        "misses": 180,
+        "evictions": 0,
+        "bytes": 188743680,
+        "items": 180
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "peak_memory.raw_cache_stats",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the raw cache at end of this cell",
+      "value": {
+        "hits": 2826,
+        "misses": 852,
+        "evictions": 0,
+        "bytes": 99090432,
+        "items": 402
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "peak_memory.gpu_mempool",
+      "label": "measured",
+      "description": "cupy default memory pool used/total at end of this cell",
+      "value": {
+        "used_mb": 0.0,
+        "total_mb": 80.6328125
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.rss_mb.end",
+      "label": "measured",
+      "description": "process RSS at end",
+      "value": 1301.8828125,
+      "unit": "MB",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_mem.end",
+      "label": "measured",
+      "description": "GPU memory (cupy mempool) at end",
+      "value": {
+        "used_mb": 0.0,
+        "total_mb": 80.6328125
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    }
+  ]
+}

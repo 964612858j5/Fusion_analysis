@@ -63,18 +63,47 @@ budget is exceeded, for items both off-level and outside the viewport
 ## + corrected floor + single-stage motion guarantee
 
 Corrected (precise) tiles are brightness-normalized per-tile relative to
-their own local background; sitting a corrected tile next to a raw (or
-differently-corrected) tile produces a visible seam. The CURRENT-LEVEL
-precise gate stays a single cheap boolean flag (`_coverage_complete()`):
-current-level precise items are visible only once every tile in the
-CURRENT wanted set (at the current level, under the current selection
-context) has a matching, current `CorrectionKey` recorded against it --
-coverage completing flips them visible in one atomic step, never a
-per-tile checkerboard. COARSER-level precise items are exempt from that
-gate and stay visible underneath as a sharper-than-floor fallback while
-the current level fills in -- they are the same (corrected) stage as the
-current-level tiles, so there is no cross-stage seam, only a sharper/
-blurrier transition.
+their own local background; sitting a corrected tile next to a raw tile
+produces a visible cross-stage seam. `_coverage_complete()` still computes
+a single cheap boolean -- "every tile in the CURRENT wanted set (at the
+current level, under the current selection context) has a matching,
+current `CorrectionKey` recorded against it" -- and `_precise_visible` /
+`view.precise_visible` still mean exactly that; `_maybe_exit_provisional`
+still uses it for the provisional badge. What CHANGED is what that boolean
+is used to gate.
+
+An earlier round used `covered` as an ATOMIC visibility gate on the whole
+current level: any single missing tile (e.g. one more tile entering the
+wanted set mid-pan) hid EVERY current-level precise item at once, dropping
+the whole viewport down to the coarser fallback and snapping back --
+visible as a whole-viewport flash on every camera motion, worse than the
+bug it was meant to prevent. That was only ever justified as anti-
+checkerboard protection against a corrected tile sitting next to a RAW
+tile (a hard cross-stage seam). It was NOT protection against a corrected
+tile sitting next to another CORRECTED-stage image (a coarser precise tile
+or the corrected floor) -- that is a sharpness difference, not a stage
+seam, and was always fine to show.
+
+So the atomic gate now applies ONLY while raw pixels can still reach the
+screen, i.e. only until the corrected floor is ready (`floor_ok` below):
+
+    current_level_visible = True if floor_ok else covered
+
+Once the floor is ready the raw layer is forced entirely invisible (next
+paragraph), so whatever sits under a missing current-level precise tile is
+itself corrected-stage -- floor, or a coarser precise tile -- and current-
+level tiles are shown PROGRESSIVELY, per tile, the moment each one lands
+(still gated by `key_ok=_precise_key_current_for_level`, so a shown tile
+can never be stale-method/stale-radius). This is a DELIBERATE trade made
+after manual testing, not an oversight: newly-exposed regions may briefly
+show the coarser floor beneath already-sharp neighboring tiles (a visible
+sharpness boundary) in exchange for the viewport never flashing all at
+once. Before the floor is ready, the old atomic behavior is unchanged
+(anti-checkerboard against raw still holds), and COARSER-level precise
+items are, as before, exempt from `covered` entirely and stay visible
+underneath as a sharper-than-floor fallback while the current level fills
+in -- they are the same (corrected) stage as the current-level tiles, so
+there is no cross-stage seam, only a sharper/blurrier transition.
 
 The raw layer holds a different, single-stage pixel pipeline than the
 precise layer, so raw-next-to-precise is itself a seam. When no correction
@@ -105,8 +134,11 @@ claimed to match production numerics; it exists solely so the screen never
 shows raw-stage pixels while in corrected mode. When no pyramid level is
 both >= `FLOOR_MIN_MAX_DIM` on its long side and under the `FLOOR_MAX_PIXELS`
 safety cap, `_pick_floor_level_and_stride` falls back to decimating the
-coarsest big-enough level by an integer stride `k` (`arr[::k, ::k]`) so the
-correction kernel still runs on a bounded number of pixels; the floor's
+coarsest big-enough level by an integer stride `k` -- via an area/box-mean
+downsample (`_box_downsample`), not point-sampling, so a bright structure
+that happens to land off the sample grid is never missed or over-weighted
+-- so the correction kernel still runs on a bounded number of pixels; the
+floor's
 effective per-axis downsample becomes `(ds_y*k, ds_x*k)` and the
 correction param is scaled by the same total factor, so the decimated
 floor still lands exactly on the full world rect at the right physical
@@ -228,6 +260,30 @@ PRUNE_MARGIN_TILES = 1
 # `_pick_floor_level_and_stride`).
 FLOOR_MIN_MAX_DIM = 1024
 FLOOR_MAX_PIXELS = 4_000_000
+
+
+def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
+    """Area/box-mean downsample by integer stride `k` on both axes: crop to
+    a `(h // k * k, w // k * k)` multiple, reshape to `(h//k, k, w//k, k)`,
+    and mean over the two `k`-sized axes -- unlike point-sampling
+    (`arr[::k, ::k]`), this cannot miss or over-weight a bright structure
+    that happens to land off the sample grid. `k == 1` returns `arr`
+    unchanged (no-op). Always returns a C-contiguous float32 array.
+
+    NOTE for the real tonsil pyramid this path is INACTIVE: the floor
+    level there is 1963x1800 = 3.53 MP, under `FLOOR_MAX_PIXELS`
+    (4,000,000), so `_pick_floor_level_and_stride` picks `k == 1` and this
+    function is a no-op. This change is robustness for OTHER pyramid
+    layouts (where no level is small enough to skip decimation), not a fix
+    for any currently-observed artifact on the tonsil data."""
+    if k <= 1:
+        return np.ascontiguousarray(arr, dtype=np.float32)
+    arr = arr.astype(np.float32, copy=False)
+    h, w = arr.shape
+    h_crop, w_crop = (h // k) * k, (w // k) * k
+    cropped = arr[:h_crop, :w_crop]
+    reshaped = cropped.reshape(h_crop // k, k, w_crop // k, k)
+    return np.ascontiguousarray(reshaped.mean(axis=(1, 3), dtype=np.float32))
 
 
 # ── TileItemPool ─────────────────────────────────────────────────────────────
@@ -410,6 +466,33 @@ class ExploreView(QtWidgets.QWidget):
         self.view_box.addItem(self.corrected_floor_item)
         self.corrected_floor_item.setVisible(False)
 
+        # Always-available in-view status badge (e.g. "Preparing corrected
+        # preview…") -- a window-title suffix is easy to miss, and a future
+        # Step0 host may not even own a window title to append to. Parented
+        # to the widget itself (not the graphics scene) so it floats over
+        # the graphics area in WIDGET coordinates, unaffected by camera
+        # pan/zoom. Transparent-for-mouse so it never eats camera input.
+        self.status_label = QtWidgets.QLabel(self)
+        self.status_label.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 160); color: #eeeeee;"
+            "padding: 4px 8px; border-radius: 3px; font-size: 11px;")
+        self.status_label.move(8, 8)
+        self.status_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.status_label.setVisible(False)
+        self.status_label.adjustSize()
+        self.status_label.raise_()
+
+    def set_status_text(self, text: Optional[str]):
+        """Show `text` in the in-view status badge, or hide it entirely
+        when `text` is empty/None."""
+        if not text:
+            self.status_label.setVisible(False)
+            return
+        self.status_label.setText(text)
+        self.status_label.adjustSize()
+        self.status_label.setVisible(True)
+        self.status_label.raise_()
+
     @staticmethod
     def world_rect(y0: float, x0: float, h: float, w: float,
                     ds_y: float, ds_x: float) -> QRectF:
@@ -431,6 +514,12 @@ class ExploreController(QtCore.QObject):
 
     provisional_changed = QtCore.pyqtSignal(bool)
     floor_preparing_changed = QtCore.pyqtSignal(bool)
+    # Emitted from `_handle_floor_result`: True when a floor result was
+    # accepted (current generation/context, no error), False when it was
+    # dropped as stale or failed to compute. Lets a host (or this class
+    # itself, for the in-view status badge) know the floor's outcome
+    # without polling `_floor_ready`.
+    floor_ready_changed = QtCore.pyqtSignal(bool)
 
     # Internal cross-thread delivery signals (scheduler callbacks fire on
     # worker threads; Qt widgets must only be touched on the GUI thread).
@@ -558,6 +647,11 @@ class ExploreController(QtCore.QObject):
 
         self.view.view_box.sigRangeChanged.connect(self._on_range_changed)
 
+        # Drive the in-view status badge ourselves (module docstring
+        # "make the floor's state observable") -- a host need not connect
+        # anything for the badge to work.
+        self.floor_preparing_changed.connect(self._on_floor_preparing_changed_for_badge)
+
     # ── source identity / correction key helpers ─────────────────────────
 
     def selection_key_context(self):
@@ -644,16 +738,26 @@ class ExploreController(QtCore.QObject):
 
     def _update_layer_visibility(self):
         """Display-policy gate (module docstring: anti-checkerboard +
-        corrected floor + single-stage motion guarantee).
+        corrected floor + single-stage motion guarantee + progressive
+        per-tile corrected coverage).
 
         `covered` is the CURRENT-LEVEL precise coverage boolean (unchanged
-        meaning/contract from the old `_update_precise_visibility`).
-        `floor_ok` additionally requires a ready corrected-floor image that
-        matches the live selection context. While `wants_precise()` is true
-        and the floor is not yet ready, the raw layer stays visible as the
-        honest (if brighter) fallback; once the floor IS ready, the raw
-        layer is forced entirely invisible so no raw-stage pixel can ever
-        appear alongside corrected pixels."""
+        meaning/contract from the old `_update_precise_visibility` -- it
+        still drives `_precise_visible` / `view.precise_visible` and
+        `_maybe_exit_provisional`, exactly as before). `floor_ok`
+        additionally requires a ready corrected-floor image that matches
+        the live selection context. While `wants_precise()` is true and the
+        floor is not yet ready, the raw layer stays visible as the honest
+        (if brighter) fallback; once the floor IS ready, the raw layer is
+        forced entirely invisible so no raw-stage pixel can ever appear
+        alongside corrected pixels.
+
+        `covered` is NOT used to gate current-level precise visibility any
+        more (module docstring): once the floor is ready, anything under a
+        missing current-level tile is itself corrected-stage, so tiles are
+        shown progressively, per tile, as they land -- the atomic
+        all-or-nothing gate is kept only for the floor-not-ready window,
+        where a corrected tile next to raw would still be a hard seam."""
         wants = self._wants_precise()
         covered = wants and bool(self._visible_tiles) and self._coverage_complete()
         floor_ctx = self._current_floor_ctx(self._floor_level, self._floor_stride)
@@ -668,8 +772,9 @@ class ExploreController(QtCore.QObject):
         self._raw_pool.apply_visibility(
             self.level, current_level_visible=raw_on, coarser_visible=raw_on)
 
+        current_level_visible = True if floor_ok else covered
         self._precise_pool.apply_visibility(
-            self.level, current_level_visible=covered, coarser_visible=True,
+            self.level, current_level_visible=current_level_visible, coarser_visible=True,
             key_ok=self._precise_key_current_for_level)
 
     # Backward-compatible alias (pre-rename name).
@@ -786,6 +891,9 @@ class ExploreController(QtCore.QObject):
         source = self.provider.source_identity()
         return (source, self.channel, self.method, eff_params)
 
+    def _on_floor_preparing_changed_for_badge(self, preparing: bool):
+        self.view.set_status_text("Preparing corrected preview…" if preparing else None)
+
     def _ensure_corrected_floor(self):
         """(Re)request the corrected floor for the current selection.
         Called whenever `_wants_precise()` is true from `set_selection()`
@@ -861,8 +969,7 @@ class ExploreController(QtCore.QObject):
                     h, w = provider.level_shape(floor_level)
                     arr_in, _off = provider.read_region(channel, floor_level, 0, h, 0, w)
                     arr_in = arr_in.astype(np.float32, copy=False)
-                if k > 1:
-                    arr_in = np.ascontiguousarray(arr_in[::k, ::k])
+                arr_in = _box_downsample(arr_in, k)
                 result_arr = compute.correct_array(arr_in, method, param)
                 error = None
             except Exception as exc:  # noqa: BLE001 -- reported via signal, never raised on worker thread
@@ -890,6 +997,7 @@ class ExploreController(QtCore.QObject):
             return
 
         current = gen == self._floor_gen and ctx == self._current_floor_ctx(floor_level, stride)
+        accepted = False
         if current:
             if error is not None or result_arr is None:
                 self.stats["floor_compute_failed"] += 1
@@ -903,6 +1011,8 @@ class ExploreController(QtCore.QObject):
                 self.view.corrected_floor_item.setRect(rect)
                 self._floor_ready = True
                 self._floor_ctx = ctx
+                accepted = True
+        self.floor_ready_changed.emit(accepted)
 
         if self._floor_pending:
             self._floor_pending = False
@@ -1310,6 +1420,10 @@ class ExploreController(QtCore.QObject):
             pass
         try:
             self._floor_delivered.disconnect(self._handle_floor_result)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.floor_preparing_changed.disconnect(self._on_floor_preparing_changed_for_badge)
         except (TypeError, RuntimeError):
             pass
 

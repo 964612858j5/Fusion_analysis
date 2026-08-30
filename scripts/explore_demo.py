@@ -19,6 +19,7 @@ import argparse
 import faulthandler
 import os
 import sys
+import time
 import traceback
 
 
@@ -108,6 +109,58 @@ def main():
 
     ctrl.floor_preparing_changed.connect(_on_floor_preparing_changed)
 
+    # [floor] diagnostics -- verifiable from the terminal even if the
+    # in-view badge / title suffix is missed. `_start_floor_job` is a
+    # plain `self._start_floor_job(gen)` call (not a signal slot), so
+    # overriding it at the INSTANCE level intercepts every internal call
+    # -- unlike `_handle_floor_result`, which is already bound into a
+    # QueuedConnection at ExploreController.__init__ time and would not
+    # see an instance-level override, hence the landing side below uses
+    # the `floor_ready_changed` signal instead.
+    _floor_diag = {"start": None}
+    _real_start_floor_job = ctrl._start_floor_job
+
+    def _start_floor_job_traced(gen):
+        _real_start_floor_job(gen)
+        _floor_diag["start"] = time.perf_counter()
+        level, stride = ctrl._floor_level, ctrl._floor_stride
+        h, w = provider.level_shape(level)
+        approx_shape = (h // stride, w // stride)
+        ctx = ctrl._current_floor_ctx(level, stride)
+        eff_params = ctx[3] if ctx else ()
+        print(f"[floor] job started: level={level} stride={stride} "
+              f"approx_shape={approx_shape} effective_param={eff_params} "
+              f"method={ctrl.method} channel={ctrl.channel}")
+
+    ctrl._start_floor_job = _start_floor_job_traced
+
+    def _on_floor_ready_changed(accepted):
+        start = _floor_diag.get("start")
+        elapsed_ms = (time.perf_counter() - start) * 1000.0 if start is not None else float("nan")
+        level, stride = ctrl.stats["floor_level"], ctrl.stats["floor_stride"]
+        shape = None
+        if level is not None:
+            h, w = provider.level_shape(level)
+            shape = (h // stride, w // stride)
+        # effective_param here is against the CURRENT live selection, which
+        # may have moved on since this job started (that is in fact why a
+        # result gets dropped as stale) -- reported for context, not as a
+        # claim that it matches the job that just finished.
+        ctx = ctrl._current_floor_ctx(level, stride) if level is not None else None
+        eff_params = ctx[3] if ctx else ()
+        status = "accepted" if accepted else "dropped-as-stale-or-failed"
+        print(f"[floor] job landed: level={level} stride={stride} shape={shape} "
+              f"effective_param={eff_params} elapsed_ms={elapsed_ms:.1f} status={status}")
+
+    ctrl.floor_ready_changed.connect(_on_floor_ready_changed)
+
+    # Show the window and pump the event loop BEFORE load_overview()/
+    # set_selection() start (and possibly finish) the floor job -- a
+    # window that only appears afterward can never show the transient
+    # "Preparing corrected preview…" title/badge state.
+    view.show()
+    app.processEvents()
+
     ctrl.load_overview()
     if args.method != "none":
         ctrl.set_selection(method=args.method, params=(args.param,))
@@ -115,13 +168,14 @@ def main():
     # Start looking at the whole slide.
     h0, w0 = provider.level_shape(0)
     view.view_box.setRange(xRange=(0, w0), yRange=(0, h0), padding=0)
-    view.show()
 
     print(f"[explore_demo] channel={channel} method={args.method} param={args.param}")
     print(f"[explore_demo] drag = pan, wheel = zoom; crash log -> {args.log}")
 
     code = app.exec_()
     ctrl.teardown()
+    print(f"[floor] at exit: failed={ctrl.stats['floor_compute_failed']} "
+          f"level={ctrl.stats['floor_level']} stride={ctrl.stats['floor_stride']}")
     log_f.close()
     sys.exit(code)
 

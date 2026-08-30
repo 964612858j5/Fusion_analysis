@@ -41,7 +41,12 @@ from block01.viewer.tile_types import (  # noqa: E402
     effective_param,
     tiles_covering,
 )
-from block01.viewer.explore_view import ExploreController, ExploreView, TileItemPool  # noqa: E402
+from block01.viewer.explore_view import (  # noqa: E402
+    ExploreController,
+    ExploreView,
+    TileItemPool,
+    _box_downsample,
+)
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 
 
@@ -891,15 +896,23 @@ def test_corrected_mode_never_shows_raw_stage_during_motion(app):
     scheduler.deliver(precise_reqs[0][0], arr)
     _pump(20)
 
-    assert ctrl._precise_visible is False  # coverage incomplete
+    assert ctrl._precise_visible is False  # coverage genuinely incomplete --
+    # `_precise_visible` / `view.precise_visible` keep their exact old
+    # meaning; only what that boolean GATES has changed (module docstring
+    # "progressive per-tile corrected coverage").
 
     for entry in ctrl._raw_pool.entries.values():
         assert entry.item.isVisible() is False, "raw stage must never show once the floor is ready"
     assert view.corrected_floor_item.isVisible() is True
 
+    # Once the floor is ready, a current-level precise tile whose key
+    # matches is shown PROGRESSIVELY as soon as it lands -- anything under
+    # a still-missing neighbor is itself corrected-stage (floor or a
+    # coarser precise tile), not a raw-stage seam, so the whole level is no
+    # longer gated atomically on `covered`.
     cur_level_precise = [e for e in ctrl._precise_pool.entries.values() if e.level == ctrl.level]
     assert cur_level_precise
-    assert all(e.item.isVisible() is False for e in cur_level_precise)
+    assert all(e.item.isVisible() is True for e in cur_level_precise)
 
     coarse_entry = ctrl._precise_pool.get(coarse_level, 0, 0)
     assert coarse_entry.item.isVisible() is True
@@ -1087,5 +1100,178 @@ def test_only_one_floor_job_in_flight(app):
 
     assert ctrl._floor_ready is True
     assert ctrl._floor_ctx == ctrl._current_floor_ctx(ctrl._floor_level, ctrl._floor_stride)
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Progressive per-tile corrected coverage (this round's main fix)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_progressive_precise_shows_partial_coverage(app):
+    """Floor ready, only ONE current-level precise tile delivered while the
+    wanted set has more -- the delivered tile must be shown immediately
+    (progressive display), even though coverage (`_precise_visible`) is
+    genuinely still incomplete, and raw must stay hidden throughout."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # 2x2 tiles at ts=512
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    for req, _cb in raw_reqs:
+        arr = raw_arr_for(provider, req.key.tile.level, req.key.tile.tx, req.key.tile.ty)
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._floor_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._floor_ready = True
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    assert len(precise_reqs) >= 2
+    req0, _cb0 = precise_reqs[0]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req0, arr)
+    _pump(20)
+
+    assert ctrl._precise_visible is False  # coverage genuinely incomplete
+
+    delivered_tile = req0.key.tile
+    delivered_entry = ctrl._precise_pool.get(delivered_tile.level, delivered_tile.tx, delivered_tile.ty)
+    assert delivered_entry is not None
+    assert delivered_entry.item.isVisible() is True
+
+    for entry in ctrl._raw_pool.entries.values():
+        assert entry.item.isVisible() is False
+
+    ctrl.teardown()
+
+
+def test_atomic_gate_still_applies_before_floor_ready(app):
+    """Same setup as above but the floor is NOT ready -- the anti-
+    checkerboard gate must still hold atomically (a corrected tile next to
+    a raw tile is still a hard cross-stage seam while raw can show
+    through), so the delivered current-level precise tile stays hidden and
+    raw is shown as the honest fallback."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    for req, _cb in raw_reqs:
+        arr = raw_arr_for(provider, req.key.tile.level, req.key.tile.tx, req.key.tile.ty)
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    ctrl._floor_ready = False
+    ctrl._update_layer_visibility()
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    assert len(precise_reqs) >= 2
+    req0, _cb0 = precise_reqs[0]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req0, arr)
+    _pump(20)
+
+    assert ctrl._precise_visible is False
+
+    delivered_tile = req0.key.tile
+    delivered_entry = ctrl._precise_pool.get(delivered_tile.level, delivered_tile.tx, delivered_tile.ty)
+    assert delivered_entry is not None
+    assert delivered_entry.item.isVisible() is False
+
+    cur_level_raw = [e for e in ctrl._raw_pool.entries.values() if e.level == ctrl.level]
+    assert cur_level_raw
+    assert all(e.item.isVisible() is True for e in cur_level_raw)
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Floor downsample: area/box mean, not point-sampling
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_floor_downsample_is_area_mean():
+    arr = np.array([
+        [0.0, 2.0, 4.0, 6.0],
+        [8.0, 10.0, 12.0, 14.0],
+        [16.0, 18.0, 20.0, 22.0],
+        [24.0, 26.0, 28.0, 30.0],
+    ], dtype=np.float32)
+
+    result_k1 = _box_downsample(arr, 1)
+    assert result_k1 is not arr or np.array_equal(result_k1, arr)
+    np.testing.assert_array_equal(result_k1, arr)
+
+    result_k2 = _box_downsample(arr, 2)
+    expected = np.array([
+        [(0 + 2 + 8 + 10) / 4.0, (4 + 6 + 12 + 14) / 4.0],
+        [(16 + 18 + 24 + 26) / 4.0, (20 + 22 + 28 + 30) / 4.0],
+    ], dtype=np.float32)
+    assert result_k2.shape == (2, 2)
+    np.testing.assert_allclose(result_k2, expected)
+    assert result_k2.dtype == np.float32
+    assert result_k2.flags["C_CONTIGUOUS"]
+
+    # A non-multiple shape crops the remainder rather than erroring.
+    arr5 = np.arange(25, dtype=np.float32).reshape(5, 5)
+    result_k2b = _box_downsample(arr5, 2)
+    assert result_k2b.shape == (2, 2)
+    cropped = arr5[:4, :4]
+    expected_b = cropped.reshape(2, 2, 2, 2).mean(axis=(1, 3))
+    np.testing.assert_allclose(result_k2b, expected_b)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# In-view status badge
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_status_label_shows_and_hides(app):
+    view = ExploreView()
+    view.resize(400, 300)
+    view.show()
+    _pump(20)
+
+    assert view.status_label.isVisible() is False
+
+    view.set_status_text("Preparing corrected preview…")
+    assert view.status_label.isVisible() is True
+    assert view.status_label.text() == "Preparing corrected preview…"
+
+    view.set_status_text("")
+    assert view.status_label.isVisible() is False
+
+    view.set_status_text(None)
+    assert view.status_label.isVisible() is False
+
+
+def test_controller_drives_status_badge_around_floor_job(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+
+    assert view.status_label.isVisible() is False
+
+    ctrl.set_selection(method="tophat", params=(10,))
+    _pump(200)  # let the (fast, real FakeCompute) floor job land
+
+    # By the time the floor job has landed, the badge is hidden again --
+    # only the interval WHILE `_floor_job_running`/preparing is true shows
+    # it. Assert the observable end state plus the drive wiring itself
+    # (floor_preparing_changed -> set_status_text) rather than trying to
+    # catch the transient window, which a real (fast) worker thread makes
+    # racy to pin exactly.
+    assert ctrl._floor_ready is True
+    assert view.status_label.isVisible() is False
+
+    # Directly exercise the wiring the controller installed on itself.
+    ctrl.floor_preparing_changed.emit(True)
+    assert view.status_label.isVisible() is True
+    assert view.status_label.text() == "Preparing corrected preview…"
+    ctrl.floor_preparing_changed.emit(False)
+    assert view.status_label.isVisible() is False
 
     ctrl.teardown()

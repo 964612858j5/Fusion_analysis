@@ -208,6 +208,28 @@ benchmark/policy layer.
 consume that, never a distance threshold. The 1.5-viewport rule stays only as
 the fallback for callers that cannot supply a source.
 
+## 8d. Agreed starting parameters for the live integration
+
+Decided after the clean 57-channel benchmark, on measured grounds. These are
+STARTING values to be re-measured once live, not permanent settings.
+
+| Queue | Channel batch | Why |
+|---|---|---|
+| `P2_HOT` | **1** | lowest switch latency. **measured**: a single channel's viewport arrives in wall p50 195.6 ms at batch 1, which is the fastest any one channel can appear. |
+| `P3_COVERAGE` | **4** | throughput without coarse cancellation. **measured**: per-channel wall cost falls 195.6 -> 138.6 ms from batch 1 to 4, and 103.7 ms at batch 8 — but a batch-8 unit takes 829.9 ms end to end, which is too coarse to cancel cleanly when the user starts moving again. Batch 4 keeps most of the throughput at a ~554 ms cancellation granularity. |
+
+Worker counts: `io_workers=8`, `compute_workers=4` (`viewer/scheduler.py`
+defaults; see the evidence recorded there — a level-crossing zoom, not just a
+drag, is what justifies 8).
+
+Event source: the live integration MUST pass an explicit
+`NAVIGATOR_JUMP` / `PAN` / `ZOOM` / `CHANNEL_SWITCH`. The 1.5-viewport
+displacement rule in `viewer/prefetch_policy.py` is a fallback for callers that
+genuinely cannot supply a source, never the normal path.
+
+Integration order: **HOT first, then COVERAGE, as separate commits**, so each
+can be accepted or rolled back on its own.
+
 ## 9. What this round does NOT do
 
 No live-viewer integration, no Save changes, no production correction maths

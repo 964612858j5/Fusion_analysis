@@ -18,7 +18,11 @@ from block01.viewer.assembler import RawTileAssembler  # noqa: E402
 from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute, halo_for  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
-from block01.viewer.scheduler import TileScheduler  # noqa: E402
+from block01.viewer.scheduler import (  # noqa: E402
+    DEFAULT_COMPUTE_WORKERS,
+    DEFAULT_IO_WORKERS,
+    TileScheduler,
+)
 from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
     PixelBuffer,
@@ -1225,3 +1229,162 @@ def test_provider_read_after_close_raises_every_mode(small_ome_tiff):
         with _pytest.raises(RuntimeError, match="closed"):
             provider.read_tile(0, TileAddress(
                 grid=TileGridSpec(tile_size=64), level=0, tx=0, ty=0))
+
+
+# ── per-worker handle warming ────────────────────────────────────────────
+
+def test_default_worker_counts_are_shared_constants():
+    """TileScheduler.__init__'s io_workers/compute_workers defaults are the
+    shared DEFAULT_IO_WORKERS/DEFAULT_COMPUTE_WORKERS constants, and every
+    script call site references the constants rather than its own literal
+    (source grep -- the point of this half of the test)."""
+    import inspect
+    import pathlib
+
+    sig = inspect.signature(TileScheduler.__init__)
+    assert sig.parameters["io_workers"].default == DEFAULT_IO_WORKERS
+    assert sig.parameters["compute_workers"].default == DEFAULT_COMPUTE_WORKERS
+    # Pinned deliberately: this value is an evidence-backed decision, not a
+    # taste. 8 beats 4 on a level-crossing zoom (62.7% vs 47.5% in-motion
+    # coverage) and on cold start (20 tiles in 259ms vs 366ms), and ties on
+    # a drag (96.5% vs 97.0%, inside run-to-run spread). An earlier round
+    # lowered it to 4 on the strength of the DRAG sweep alone, which is
+    # saturated at 2 and therefore says nothing about the zoom burst. If you
+    # change this, measure a level-crossing zoom, not just a drag.
+    assert DEFAULT_IO_WORKERS == 8
+    assert DEFAULT_COMPUTE_WORKERS == 4
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    for rel in (
+        "scripts/explore_demo.py",
+        "scripts/g1_render_probe.py",
+        "scripts/benchmark_multichannel_prefetch.py",
+    ):
+        src = (repo_root / rel).read_text(encoding="utf-8")
+        assert "DEFAULT_IO_WORKERS" in src, f"{rel} does not reference DEFAULT_IO_WORKERS"
+        assert "DEFAULT_COMPUTE_WORKERS" in src, f"{rel} does not reference DEFAULT_COMPUTE_WORKERS"
+
+
+def test_every_io_worker_warms_its_own_handle(small_ome_tiff):
+    path, _data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    raw_cache = LRUByteCache(1024 * 1024)
+    corr_cache = LRUByteCache(1024 * 1024)
+    compute = CorrectionCompute(provider, raw_cache)
+    n_io = 3
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache,
+                           io_workers=n_io, compute_workers=1)
+    try:
+        deadline = time.time() + 5.0
+        while sched.warmed_workers < n_io and time.time() < deadline:
+            time.sleep(0.01)
+        assert sched.warmed_workers == n_io
+        # One open for the constructing thread (metadata) + exactly one per
+        # warmed I/O worker thread -- no more, no fewer.
+        assert provider.open_count == 1 + n_io
+    finally:
+        sched.shutdown()
+        provider.close()
+
+
+def test_warm_failure_does_not_block_the_queue(small_ome_tiff, monkeypatch):
+    """If warm_thread_handle's internal path raises for exactly one worker
+    thread's first call, that worker still serves requests normally --
+    warming failure is non-fatal and never propagates."""
+    path, _data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    raw_cache = LRUByteCache(1024 * 1024)
+    corr_cache = LRUByteCache(1024 * 1024)
+    compute = CorrectionCompute(provider, raw_cache)
+
+    orig_per_thread_state = RawTileProvider._per_thread_state
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    def failing_once(self):
+        with calls_lock:
+            calls["n"] += 1
+            first = calls["n"] == 1
+        if first:
+            raise RuntimeError("boom (simulated warm failure)")
+        return orig_per_thread_state(self)
+
+    monkeypatch.setattr(RawTileProvider, "_per_thread_state", failing_once)
+
+    n_io = 3
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache,
+                           io_workers=n_io, compute_workers=1)
+    try:
+        # Wait for every worker's warm attempt to have been counted (calls
+        # reaching n_io) AND for the resulting warmed_workers count to
+        # settle (its increment happens strictly after the call is
+        # recorded, so waiting on `calls` alone can race ahead of it).
+        deadline = time.time() + 5.0
+        while (calls["n"] < n_io or sched.warmed_workers < n_io - 1) and time.time() < deadline:
+            time.sleep(0.01)
+        # Exactly one warm attempt failed; the rest succeeded.
+        assert calls["n"] == n_io
+        assert sched.warmed_workers == n_io - 1
+
+        # The queue must still serve requests correctly despite the failure.
+        grid = TileGridSpec(tile_size=64, source_chunk_shape=(), grid_version="v1")
+        tile = TileAddress(grid=grid, level=0, tx=0, ty=0)
+        src = provider.source_identity()
+        key = RawKey(source=src, channel=0, tile=tile)
+        results = []
+        done = threading.Event()
+
+        def cb(tr):
+            results.append(tr)
+            done.set()
+
+        sched.request(TileRequest(key=key, generation=1, priority=0), cb)
+        assert done.wait(timeout=5.0)
+        assert results[0].error is None
+        np.testing.assert_array_equal(results[0].pixels.handle, _data[0][:64, :64])
+    finally:
+        sched.shutdown()
+        provider.close()
+
+
+def test_warm_on_closed_provider_returns_false(small_ome_tiff):
+    path, _data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    provider.close()
+    assert provider.warm_thread_handle() is False
+
+
+def test_shutdown_during_warm_terminates(small_ome_tiff):
+    """A scheduler whose per-worker warming is slow must still shut down
+    promptly (warming checks the shutdown flag right after it finishes,
+    before ever taking the queue's condition variable) and must leave no
+    provider handle open."""
+    path, _data = small_ome_tiff
+    provider = RawTileProvider(path, handle_mode="per_thread")
+
+    real_warm = provider.warm_thread_handle
+    warm_delay_s = 0.3
+
+    def slow_warm(levels=(0,)):
+        time.sleep(warm_delay_s)
+        return real_warm(levels)
+
+    provider.warm_thread_handle = slow_warm
+
+    raw_cache = LRUByteCache(1024 * 1024)
+    corr_cache = LRUByteCache(1024 * 1024)
+    compute = CorrectionCompute(provider, raw_cache)
+    n_io = 3
+    sched = TileScheduler(provider, compute, raw_cache, corr_cache,
+                           io_workers=n_io, compute_workers=1)
+
+    t0 = time.perf_counter()
+    sched.shutdown()
+    elapsed_s = time.perf_counter() - t0
+    # Generous bound: worst case is roughly one warm_delay_s (workers warm
+    # concurrently), plus scheduling slack -- nowhere near n_io * delay.
+    assert elapsed_s < warm_delay_s + 3.0
+
+    provider.close()
+    with provider._registry_lock:
+        assert provider._thread_registry == []

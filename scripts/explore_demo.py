@@ -60,7 +60,11 @@ from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import ExploreController, ExploreView  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
-from block01.viewer.scheduler import TileScheduler  # noqa: E402
+from block01.viewer.scheduler import (  # noqa: E402
+    DEFAULT_COMPUTE_WORKERS,
+    DEFAULT_IO_WORKERS,
+    TileScheduler,
+)
 from block01.viewer.tile_types import TileGridSpec  # noqa: E402
 
 
@@ -71,10 +75,11 @@ def main():
     ap.add_argument("--method", default="tophat", choices=["tophat", "cucim", "none"])
     ap.add_argument("--param", type=int, default=25)
     ap.add_argument("--log", default="/tmp/explore_demo_crash.log")
-    ap.add_argument("--io-workers", type=int, default=8,
-                    help="raw I/O worker threads (default 8; measured best)")
-    ap.add_argument("--compute-workers", type=int, default=4,
-                    help="correction compute worker threads (default 4)")
+    ap.add_argument("--io-workers", type=int, default=DEFAULT_IO_WORKERS,
+                    help=f"raw I/O worker threads (default {DEFAULT_IO_WORKERS}; "
+                         "see viewer/scheduler.py for the measured basis)")
+    ap.add_argument("--compute-workers", type=int, default=DEFAULT_COMPUTE_WORKERS,
+                    help=f"correction compute worker threads (default {DEFAULT_COMPUTE_WORKERS})")
     ap.add_argument("--intermediate-fallback", dest="intermediate_fallback",
                     action="store_true", default=True,
                     help="request corrected tiles at level+1 as a fallback "

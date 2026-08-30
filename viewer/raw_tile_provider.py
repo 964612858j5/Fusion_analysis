@@ -197,9 +197,35 @@ class RawTileProvider:
         tf = self._counted_tifffile(tifffile, self.path).__enter__()
         levels: Dict[int, object] = {}
         state = (tf, levels)
-        self._thread_local.state = state
+        # Register BEFORE publishing to thread-local storage, and check
+        # _closed only after registering: close() walks the registry under
+        # _registry_lock and clears it, so whichever of {this registration,
+        # that walk} takes the lock second sees the other's effect --
+        # either the handle lands in the registry before close() drains it
+        # (and gets closed there), or _closed is already True by the time we
+        # get here (and we close it ourselves below) -- there is no window
+        # where a handle is neither registered-and-closed nor closed here.
         with self._registry_lock:
             self._thread_registry.append(tf)
+            closed = self._closed
+        if closed:
+            # close() already ran (or is running) and may have finished
+            # draining the registry before we appended -- either way, close
+            # this handle ourselves rather than leaving it open or letting
+            # the caller use a handle on a "closed" provider.
+            try:
+                tf.close()
+            except Exception:
+                pass
+            with self._registry_lock:
+                try:
+                    self._thread_registry.remove(tf)
+                except ValueError:
+                    pass
+            raise RuntimeError(
+                f"RawTileProvider for {self.path!r} is closed; "
+                "no further reads are allowed")
+        self._thread_local.state = state
         return state
 
     def _shared_state(self):
@@ -210,6 +236,40 @@ class RawTileProvider:
 
             self._shared_tf = self._counted_tifffile(tifffile, self.path).__enter__()
         return self._shared_tf, self._shared_levels
+
+    def warm_thread_handle(self, levels=(0,)) -> bool:
+        """Build THIS calling thread's handle (the same state
+        `_per_thread_state()` returns) plus the zarr level arrays named in
+        `levels`, paying tifffile's OME-XML/page-table parse cost now
+        instead of on the thread's first real read.
+
+        Only meaningful in "per_thread" mode (the only mode with a
+        per-thread handle to warm); in "per_call"/"shared_lock" mode this
+        is a cheap, harmless no-op that returns True without opening
+        anything extra.
+
+        Idempotent: a second call on an already-warmed thread just looks up
+        the cached state and cached level arrays again -- cheap.
+
+        Safe on a closed provider: returns False rather than raising or
+        reopening a handle. Non-fatal on ANY failure (closed provider,
+        I/O error, whatever): caught here, reported as False, never
+        propagated -- a worker that fails to warm must still serve
+        requests; it simply pays the setup cost on its first real read
+        instead of upfront.
+        """
+        if self._closed:
+            return False
+        try:
+            if self.handle_mode != "per_thread":
+                return True
+            tf, level_arrays = self._per_thread_state()
+            for level in levels:
+                if level not in level_arrays:
+                    level_arrays[level] = self._open_level_array(tf, level)
+            return True
+        except Exception:
+            return False
 
     def close(self):
         """Close every handle this provider opened for "per_thread" and

@@ -196,15 +196,18 @@ def run_scripted_sequence(ctrl, view, provider, seed=0):
 
 
 def main():
+    from block01.viewer.scheduler import DEFAULT_COMPUTE_WORKERS, DEFAULT_IO_WORKERS
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--path", required=True)
     ap.add_argument("--channel", required=True, help="channel name or integer index")
     ap.add_argument("--out", default="/tmp/g1_render_probe")
     ap.add_argument("--offscreen", action="store_true")
-    ap.add_argument("--io-workers", type=int, default=8,
-                    help="raw I/O worker threads (default 8; measured best)")
-    ap.add_argument("--compute-workers", type=int, default=4,
-                    help="correction compute worker threads (default 4)")
+    ap.add_argument("--io-workers", type=int, default=DEFAULT_IO_WORKERS,
+                    help=f"raw I/O worker threads (default {DEFAULT_IO_WORKERS}; "
+                         "see viewer/scheduler.py for the measured basis)")
+    ap.add_argument("--compute-workers", type=int, default=DEFAULT_COMPUTE_WORKERS,
+                    help=f"correction compute worker threads (default {DEFAULT_COMPUTE_WORKERS})")
     args = ap.parse_args()
 
     offscreen = args.offscreen or not os.environ.get("DISPLAY")

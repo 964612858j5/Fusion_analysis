@@ -54,6 +54,60 @@ import time
 from .tile_types import CorrectionKey, PixelBuffer, QualityLevel, RawKey, TileResult
 
 
+# Measured 2026-08-31 (docs/benchmarks/2026-08-31_57ch_multichannel_prefetch.md,
+# "Clean rerun" section), real 57-channel PCF slide, compute_workers=4:
+#
+#   In-motion coverage during a 25-step drag (the regime that matters --
+#   a static-viewport sweep is NOT the answer, see that doc):
+#       io_workers = 1 -> 46.0%
+#       io_workers = 2 -> 98.2%
+#       io_workers = 4 -> 98.4%
+#       io_workers = 8 -> 98.4%
+#
+#   Per-thread TIFF handle construction (tifffile's pure-Python OME-XML and
+#   page-table parse -- GIL-bound, so more threads does NOT parse faster,
+#   it only serialises longer): a worker thread's first read costs 168.3 ms
+#   against 0.9 ms for its second, and eight fresh threads' first reads
+#   serialise to 126, 218, 295, 401, 517, 648, 748, 865 ms of wall (883 ms
+#   total). Handle warm-up wall time by worker count:
+#       1 worker  ->  76.9 ms
+#       2 workers -> 176.4 ms
+#       4 workers -> 393.5 ms
+#       8 workers -> 785.3 ms
+#
+# Read on its own, that drag sweep argues for a small worker count -- and it
+# was used to argue exactly that, for 4 instead of 8. Two further
+# measurements overturned it, and both are recorded here so the argument is
+# not made again from the drag numbers alone.
+#
+#   ZOOM is a different regime from a drag and is NOT saturated at 2. A
+#   drag asks for a trickle of tiles at its leading edge; a level switch
+#   asks for a whole new level at once, and that burst does scale with I/O
+#   width. In-motion coverage during a 12-step level-crossing zoom, three
+#   repeats each, means:
+#       io_workers =  2 -> 25.0%
+#       io_workers =  4 -> 47.5%
+#       io_workers =  6 -> 60.9%
+#       io_workers =  8 -> 62.7%
+#       io_workers = 12 -> 66.7%
+#
+#   The 785 ms warm-up never blocks anything. Each I/O worker warms its own
+#   handle at thread start and begins serving the moment IT is ready (see
+#   `_raw_worker`), so warming overlaps serving instead of gating it. From a
+#   cold provider, time from scheduler construction to N tiles delivered:
+#       io=4 -> 1st tile 221.5 ms, 20th 366.2 ms
+#       io=8 -> 1st tile 117.5 ms, 20th 258.9 ms
+#   More workers means one becomes ready sooner AND more capacity comes
+#   online during the window, so 8 starts FASTER despite warming longer.
+#
+# Net, across every axis measured: drag 96.5% (io=8) against 97.0% (io=4),
+# inside run-to-run spread; zoom 62.7% against 47.5%; cold start 259 ms
+# against 366 ms. 8 it is. Do not lower this on the strength of the drag
+# sweep alone -- measure a level-crossing zoom too.
+DEFAULT_IO_WORKERS = 8
+DEFAULT_COMPUTE_WORKERS = 4
+
+
 class _Entry:
     """Bookkeeping for one in-flight (deduped) key.
 
@@ -76,7 +130,20 @@ class TileScheduler:
     """Dispatches raw/correction tile requests with dedup and cancellation."""
 
     def __init__(self, provider, compute, raw_cache, corrected_cache,
-                 io_workers: int = 4, compute_workers: int = 1):
+                 io_workers: int = DEFAULT_IO_WORKERS,
+                 compute_workers: int = DEFAULT_COMPUTE_WORKERS):
+        """`io_workers`/`compute_workers` default to `DEFAULT_IO_WORKERS` /
+        `DEFAULT_COMPUTE_WORKERS` (see the measured table above this class).
+
+        Each raw-worker thread warms its own provider handle once, at
+        thread start, before it ever looks at the queue (see
+        `_raw_worker` / `RawTileProvider.warm_thread_handle`). This does
+        NOT make the tifffile OME-XML/page-table parse any faster -- it is
+        GIL-bound, so N threads parsing still costs roughly N times one
+        thread's parse in wall time -- it only moves that fixed cost off
+        the interaction path (a user's first pan/zoom) and onto scheduler
+        startup, where it can run before there is anything to serve.
+        """
         self.provider = provider
         self.compute = compute
         self.raw_cache = raw_cache
@@ -90,6 +157,14 @@ class TileScheduler:
         self._seq = itertools.count()
         self._stale_gens = set()
         self._shutdown = False
+
+        # Incremented once per raw-worker thread that successfully warmed
+        # its own handle (see `_raw_worker`). A test can assert this equals
+        # `io_workers` once all raw threads have started; a thread whose
+        # warm-up failed is NOT counted here but still serves requests
+        # normally (see `RawTileProvider.warm_thread_handle`).
+        self._warmed_workers_lock = threading.Lock()
+        self.warmed_workers = 0
 
         self._compute_threads = [
             threading.Thread(target=self._compute_worker, daemon=True, name=f"tile-compute-{i}")
@@ -177,6 +252,36 @@ class TileScheduler:
     # -- raw path --
 
     def _raw_worker(self):
+        # Warm THIS thread's provider handle once, before the queue loop
+        # begins, so the fixed tifffile OME-XML/page-table parse cost (see
+        # the measured table above TileScheduler) lands here instead of on
+        # a caller's first read. This is done in the worker thread itself
+        # (never by submitting warm-up tasks to a pool): a pool gives no
+        # guarantee that N warm-up tasks land on N distinct threads, so
+        # some threads could stay cold while another warms twice.
+        #
+        # This does NOT make the parse faster -- it is GIL-bound -- it only
+        # moves the cost off the interaction path. It happens BEFORE this
+        # thread ever takes `self._cv`, so warming can never hold the queue
+        # lock while parsing, and each worker starts serving as soon as ITS
+        # OWN warm-up finishes -- there is no barrier / "all ready" gate, so
+        # a warm worker can start loading raw tiles while its siblings are
+        # still parsing.
+        try:
+            warmed = self.provider.warm_thread_handle()
+        except Exception:  # pragma: no cover - warm_thread_handle already
+            # catches everything internally; this is belt-and-suspenders.
+            warmed = False
+        if warmed:
+            with self._warmed_workers_lock:
+                self.warmed_workers += 1
+
+        # Shutdown may have been requested while this thread was warming;
+        # check immediately so warming can never delay teardown.
+        with self._lock:
+            if self._shutdown:
+                return
+
         while True:
             with self._cv:
                 while not self._raw_heap and not self._shutdown:

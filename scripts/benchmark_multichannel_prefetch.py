@@ -87,7 +87,11 @@ from block01.viewer.explore_view import (  # noqa: E402
     _pick_calibration_windows,
 )
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
-from block01.viewer.scheduler import TileScheduler  # noqa: E402
+from block01.viewer.scheduler import (  # noqa: E402
+    DEFAULT_COMPUTE_WORKERS,
+    DEFAULT_IO_WORKERS,
+    TileScheduler,
+)
 from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
     QualityLevel,
@@ -1496,8 +1500,8 @@ def build_argparser():
     ap.add_argument("--methods", nargs="+", default=["tophat", "cucim"],
                      choices=["tophat", "cucim"])
     ap.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 2, 4, 8])
-    ap.add_argument("--io-workers", type=int, default=8)
-    ap.add_argument("--compute-workers", type=int, default=4)
+    ap.add_argument("--io-workers", type=int, default=DEFAULT_IO_WORKERS)
+    ap.add_argument("--compute-workers", type=int, default=DEFAULT_COMPUTE_WORKERS)
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
                      help="seed for the channel-order RNG used by the neighbour/batch cells")
     ap.add_argument("--out", default=None, help="path to write JSON results")

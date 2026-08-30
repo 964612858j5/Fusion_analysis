@@ -199,14 +199,22 @@ stopped:
 
 The gain grows with drag length because the settle-gated policy computed
 LITERALLY NOTHING while the camera moved, so a longer gesture just meant a
-longer stall afterwards; this policy stays roughly flat. Raising
-`compute_workers` from 1 to 4 changed the same measurement by ~1ms, so
-extra compute workers are not a lever -- this was never a throughput
-problem. One corrected tile costs ~5.8ms cold (3.4ms IO + 0.9ms kernel)
-and ~1.1ms with its raw halo already cached, yet the end-to-end cost per
-tile at drag-stop is ~24ms: the remainder is pipeline latency (halo
-staging round-trips through the single IO worker), which is what a future
-prefetch pass would hide. So both layers now
+longer stall afterwards; this policy stays roughly flat.
+
+One corrected tile costs ~5.8ms cold (3.4ms IO + 0.9ms GPU kernel) and
+~1.1ms with its raw halo already cached, yet the end-to-end cost per tile
+at drag-stop is ~24ms. The remainder is pipeline latency: a corrected
+tile's halo is staged through the raw I/O pool before its kernel runs, so
+the number of I/O workers, not the kernel, sets the pace.
+
+CORRECTION, and do not quote the earlier claim: an earlier revision of
+this docstring said raising `compute_workers` from 1 to 4 "changed the
+measurement by ~1ms, so extra compute workers are not a lever". That was
+measured with `io_workers=1`, where the single I/O worker starved the
+compute workers, so it only proved that compute workers cannot help while
+I/O is the bottleneck. Re-measured properly, on the fraction of the
+viewport already sharp DURING a drag (see "Worker counts" below), both
+knobs matter a great deal. So both layers now
 issue from the SAME 30ms coalescing timer (`_issue_raw_requests`, which
 also drives the precise layer's `_issue_settled_request`), and each issuing
 pass requests only tiles that are actually MISSING -- for precise, a
@@ -220,10 +228,44 @@ harmless, just wasted call overhead.
 `_settle_timer` / `settle_ms` still exist, but no longer gate any
 interactive request issuing -- `_on_settle` is kept as an explicit,
 documented hook for a FUTURE higher-quality / native (non-interactive)
-refinement pass that has not been built yet. Do not re-litigate this: do
-not route interactive corrected-tile issuing back through the settle timer,
-and do not raise `compute_workers` to "fix" corrected-tile latency -- both
-were measured and neither helps.
+refinement pass that has not been built yet. Do not route interactive
+corrected-tile issuing back through the settle timer.
+
+## Worker counts (`io_workers` / `compute_workers`)
+
+These are the largest measured lever on perceived sharpness during motion,
+and they are easy to get wrong, so the numbers are recorded here.
+
+The metric is the fraction of the CURRENT viewport already covered by
+current-level tiles, sampled at every step DURING a 25-step drag or a
+12-step zoom -- i.e. "is the newly exposed edge already sharp as it comes
+on screen". Drag-stop-to-full-coverage cannot show this. Real slide,
+tonsil, channel index 1, tophat radius 25, 1400x1000 viewport:
+
+    config          drag/tophat   zoom/tophat   drag/raw
+    io=1  cw=1        52.4%         25.0%        67.5%
+    io=4  cw=1        63.0%         60.9%          --
+    io=4  cw=2        87.5%         53.1%        87.2%
+    io=8  cw=4        89.8%         77.8%        86.8%
+
+`TileScheduler`'s own default is already `io_workers=4`; it was the demo
+and probe SCRIPTS that pinned `io_workers=1, compute_workers=1`, so every
+manual test until now ran with one I/O thread. Raising both is what took
+in-motion coverage from about half the viewport to about nine tenths.
+
+Correctness of the parallel path was verified, not assumed: 24 corrected
+level-0 tiles computed through the scheduler at `io=8 cw=4` are BYTE-
+IDENTICAL to the same tiles at `io=1 cw=1`, with no errored results.
+
+A symmetric halo prefetch (Odon's `prefetch_spec`/`prefetch_keys_for_level`
+policy, ported faithfully including its load-gate tiers) was implemented
+and MEASURED TO BE A REGRESSION at `io=1 cw=1`: drag/tophat 51.9% -> 39.7%,
+drag/raw 70.1% -> 56.8%. Priority ordering only orders the QUEUE; it
+cannot preempt work already started, and a prefetched corrected tile holds
+the single compute worker while blocking on its own halo staging. A
+raw-only variant was no better (drag/raw 60.2%). Prefetch was therefore
+NOT merged. If it is revisited, it must be re-measured on top of the
+raised worker counts, where there is genuine spare capacity.
 
 ## Generation namespaces
 

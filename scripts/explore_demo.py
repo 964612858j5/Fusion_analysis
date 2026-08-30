@@ -71,6 +71,10 @@ def main():
     ap.add_argument("--method", default="tophat", choices=["tophat", "cucim", "none"])
     ap.add_argument("--param", type=int, default=25)
     ap.add_argument("--log", default="/tmp/explore_demo_crash.log")
+    ap.add_argument("--io-workers", type=int, default=8,
+                    help="raw I/O worker threads (default 8; measured best)")
+    ap.add_argument("--compute-workers", type=int, default=4,
+                    help="correction compute worker threads (default 4)")
     args = ap.parse_args()
 
     # Crash diagnosis: native faults AND Python exceptions land in the log.
@@ -93,8 +97,17 @@ def main():
     raw_cache = LRUByteCache(512 * 1024 * 1024)
     corrected_cache = LRUByteCache(512 * 1024 * 1024)
     compute = CorrectionCompute(provider, raw_cache)
+    # Worker counts are the largest measured lever on how sharp the image
+    # is DURING motion (viewer/explore_view.py "Worker counts"): the
+    # fraction of the viewport already covered mid-drag goes from 52.4% at
+    # io=1/cw=1 to 89.8% at io=8/cw=4 (tophat), and mid-zoom from 25.0% to
+    # 77.8%. These scripts previously pinned io=1/cw=1 -- BELOW
+    # TileScheduler's own io_workers=4 default -- so every manual test ran
+    # on a single I/O thread. Parallel output was verified byte-identical
+    # to the serial path before raising these.
     scheduler = TileScheduler(provider, compute, raw_cache, corrected_cache,
-                              io_workers=1, compute_workers=1)
+                              io_workers=args.io_workers,
+                              compute_workers=args.compute_workers)
 
     view = ExploreView()
     base_title = f"Explore demo — {os.path.basename(args.path)} · {channel}"

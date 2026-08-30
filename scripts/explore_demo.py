@@ -131,6 +131,23 @@ def main():
                               compute_workers=args.compute_workers)
 
     view = ExploreView()
+
+    # Minimal channel selector. The point is to drive REAL channel switches
+    # through `ctrl.set_selection(channel=...)` so the switch path can be
+    # accepted by hand -- overview identity, corrected floor, gain
+    # calibration and the raw request all belong to the channel the combo
+    # says. It is deliberately the smallest possible control: the shared
+    # ChannelDock is a Step0 concern and this demo is not where it mounts.
+    channel_bar = QtWidgets.QWidget()
+    _bar = QtWidgets.QHBoxLayout(channel_bar)
+    _bar.setContentsMargins(6, 4, 6, 4)
+    _bar.addWidget(QtWidgets.QLabel("Channel:"))
+    channel_combo = QtWidgets.QComboBox()
+    channel_combo.addItems(list(provider.channel_names))
+    channel_combo.setCurrentText(channel)
+    _bar.addWidget(channel_combo, 1)
+    view.layout().insertWidget(0, channel_bar)
+
     base_title = f"Explore demo — {os.path.basename(args.path)} · {channel}"
     view.setWindowTitle(base_title)
     view.resize(1400, 1000)
@@ -200,6 +217,17 @@ def main():
     # set_selection() start (and possibly finish) the floor job -- a
     # window that only appears afterward can never show the transient
     # "Preparing corrected preview…" title/badge state.
+    def _on_channel_picked(name):
+        t0 = time.perf_counter()
+        ctrl.set_selection(channel=name)
+        view.setWindowTitle(
+            f"Explore demo — {os.path.basename(args.path)} · {name}")
+        print(f"[channel] -> {name} in {(time.perf_counter()-t0)*1000:.1f} ms "
+              f"(atomic cached swaps so far: "
+              f"{ctrl.stats.get('atomic_channel_swaps', 0)})", flush=True)
+
+    channel_combo.currentTextChanged.connect(_on_channel_picked)
+
     view.show()
     app.processEvents()
 

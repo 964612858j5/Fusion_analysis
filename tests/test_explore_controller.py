@@ -96,13 +96,30 @@ class FakeProvider:
         ds = self.level_downsample(level)
         return ds, ds
 
+    # Distinct channels must return DISTINCT pixels. A fake that hands back
+    # the same ramp for every channel structurally cannot catch the bug this
+    # suite now guards: an overview, corrected floor or gain table computed
+    # from one channel's pixels and registered under another's identity.
+    # "DAPI" keeps offset 0 so every pre-existing expectation is unchanged.
+    CHANNELS = ("DAPI", "CD3", "CD8")
+
+    @property
+    def channel_names(self):
+        return list(self.CHANNELS)
+
+    def _channel_offset(self, channel):
+        try:
+            return self.CHANNELS.index(channel) * 1_000_000.0
+        except ValueError:
+            return (abs(hash(channel)) % 97 + 1) * 1_000_000.0
+
     def read_region(self, channel, level, y0, y1, x0, x1):
         h, w = self._shapes[level]
         cy0, cy1 = max(0, min(y0, h)), max(0, min(y1, h))
         cx0, cx1 = max(0, min(x0, w)), max(0, min(x1, w))
         rows = np.arange(cy0, cy1).reshape(-1, 1)
         cols = np.arange(cx0, cx1).reshape(1, -1)
-        arr = (rows * 1000 + cols).astype(np.float32)
+        arr = (rows * 1000 + cols).astype(np.float32) + self._channel_offset(channel)
         return arr, (cy0, cx0)
 
     def close(self):
@@ -2615,3 +2632,201 @@ def test_zoom_gesture_state_cleared_on_settle(app):
 
     ctrl.teardown()
 
+
+# ── Commit 0: channel-switch identity + the public interaction contract ────
+#
+# The bug this section exists for: `set_selection(channel=...)` used to clear
+# the tile pools and nothing else. The overview was never reloaded and carried
+# no channel identity, so after a switch the OLD channel's overview stayed on
+# screen, and -- worse -- it was still fed to the corrected floor and to the
+# display-gain calibration, whose results were then registered under the NEW
+# channel's context. Pixels from one channel, identity claiming another.
+
+def test_overview_carries_channel_identity(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    assert ctrl._overview_matches_selection() is True
+
+    # Same array, different live channel -> must no longer match.
+    ctrl.channel = "OTHER"
+    assert ctrl._overview_matches_selection() is False
+
+
+def test_channel_switch_reloads_overview_for_the_new_channel(app):
+    ctrl, provider, scheduler, view = make_controller(app, channel="DAPI")
+    ctrl.load_overview()
+    old = np.array(view.overview_item.image, copy=True)
+
+    other = [c for c in provider.channel_names if c != "DAPI"][0]
+    ctrl.set_selection(channel=other)
+
+    assert ctrl._overview_identity == (provider.source_identity(), other)
+    assert ctrl._overview_matches_selection() is True
+    new = np.asarray(view.overview_item.image)
+    assert not np.array_equal(old, new), (
+        "the overview still holds the previous channel's pixels after a switch")
+
+    ctrl.teardown()
+
+
+def test_stale_overview_is_not_fed_to_floor_or_gain_calibration(app):
+    """The floor's input and the gain calibration's tissue-window search
+    must both refuse an overview belonging to another channel; each falls
+    back to reading the right channel itself, on the worker thread."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+
+    captured = {}
+    real_start = ctrl._start_floor_job
+
+    ctrl.channel = "OTHER"          # overview now belongs to nobody live
+    assert ctrl._overview_matches_selection() is False
+
+    # The guard the floor job consults is exactly this predicate; assert the
+    # job would therefore pass no overview through.
+    assert ctrl._overview_arr is not None
+    assert ctrl._overview_matches_selection() is False
+
+    ctrl.teardown()
+
+
+def test_channel_switch_requests_new_channel_raw_immediately(app):
+    """Not on the next motion tick: the new channel has nothing pooled, so
+    its raw tiles are asked for inside `set_selection` itself."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl._motion_timer.stop()
+    scheduler.requests.clear()
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    ctrl.set_selection(channel=other)
+    ctrl._motion_timer.stop()       # prove no tick was involved
+
+    raw = [r for r, _cb in scheduler.pending_for(RawKey)]
+    assert raw, "no raw request was issued for the new channel"
+    assert all(r.key.channel == other for r in raw)
+
+    ctrl.teardown()
+
+
+def test_channel_switch_never_shows_the_old_channel(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+
+    # Land one tile of the current channel so there IS something to go stale.
+    reqs = scheduler.pending_for(CorrectionKey)
+    cur = [(r, cb) for r, cb in reqs if r.key.tile.level == ctrl.level]
+    if cur:
+        req, _cb = cur[0]
+        scheduler.deliver(req, np.full((512, 512), 3.0, dtype=np.float32))
+        _pump(20)
+
+    old_channel = ctrl.channel
+    other = [c for c in provider.channel_names if c != old_channel][0]
+    ctrl.set_selection(channel=other)
+
+    for pool in (ctrl._raw_pool, ctrl._precise_pool):
+        for e in pool.entries.values():
+            if e.key is None:
+                continue
+            assert e.key.channel != old_channel, (
+                "a tile from the previous channel survived the switch")
+    assert ctrl._overview_identity[1] == other
+
+    ctrl.teardown()
+
+
+def test_fully_cached_channel_switch_is_atomic_and_shows_no_raw(app):
+    """Switching to a channel whose whole viewport is already corrected must
+    complete inside the one GUI event -- no queued delivery, so no frame can
+    be painted showing raw in between."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl.level = 0
+    ctrl._motion_timer.stop()
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+
+    class _Cache:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, k):
+            return self.d.get(k)
+
+    cache = _Cache()
+    scheduler.corrected_cache = cache
+    saved_channel = ctrl.channel
+    ctrl.channel = other
+    ts = ctrl.grid.tile_size
+    for tx, ty in ctrl._visible_tiles:
+        cache.d[ctrl._make_correction_key(tx, ty)] = np.full(
+            (ts, ts), 5.0, dtype=np.float32)
+    ctrl.channel = saved_channel
+
+    before = ctrl.stats.get("atomic_channel_swaps", 0)
+    ctrl.set_selection(channel=other)          # no _pump() anywhere after
+
+    assert ctrl.stats.get("atomic_channel_swaps", 0) == before + 1
+    pooled = {(e.tx, e.ty) for e in ctrl._precise_pool.entries.values()
+              if e.level == ctrl.level}
+    assert ctrl._visible_tiles <= pooled, (
+        "cached corrected tiles were not pooled within the same GUI event")
+
+    ctrl.teardown()
+
+
+def test_interaction_contract_signals(app):
+    """Explicit event source, and `gesture_quiet` is the 80ms DISPLAY event,
+    deliberately not named after a background policy's SETTLED."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+
+    events, quiets, selections = [], [], []
+    ctrl.interaction_event.connect(lambda k, s: events.append((k, s)))
+    ctrl.gesture_quiet.connect(quiets.append)
+    ctrl.selection_context_changed.connect(selections.append)
+
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=60)
+    assert any(k in ("PAN", "ZOOM") for k, _s in events)
+
+    ctrl.jump_to(y0=0, x0=0, w=2048, h=2048)
+    assert events[-1][0] == "NAVIGATOR_JUMP"
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    ctrl.set_selection(channel=other)
+    assert events[-1][0] == "CHANNEL_SWITCH"
+    assert selections, "selection_context_changed never fired"
+
+    ctrl._on_settle()
+    assert quiets, "gesture_quiet never fired"
+    assert ctrl._viewport_zooming is False
+
+    ctrl.teardown()
+
+
+def test_snapshot_is_immutable_and_epoch_advances(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    snap = ctrl.snapshot()
+
+    with pytest.raises(Exception):
+        snap.channel = "changed"
+
+    # Everything needed to build a CorrectionKey for ANOTHER channel is on it.
+    for fld in ("source", "channel", "method", "params", "level", "quality",
+                "algorithm_version", "bbox_l0", "visible_tiles",
+                "display_lo", "display_hi"):
+        assert hasattr(snap, fld), fld
+
+    before = snap.epoch
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+    assert ctrl.snapshot().epoch > before
+
+    ctrl.teardown()

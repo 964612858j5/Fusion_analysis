@@ -590,6 +590,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -756,6 +757,40 @@ def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
     cropped = arr[:h_crop, :w_crop]
     reshaped = cropped.reshape(h_crop // k, k, w_crop // k, k)
     return np.ascontiguousarray(reshaped.mean(axis=(1, 3), dtype=np.float32))
+
+
+# ── Interaction snapshot ─────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PrefetchSnapshot:
+    """An IMMUTABLE picture of the selection + viewport at the instant an
+    interaction event fired.
+
+    Background consumers (the multi-channel prefetch controller) must plan
+    from one of these and never read the controller's private fields while
+    they run: by the time a background batch starts, the live fields may
+    describe a different channel, method, level or viewport, and work
+    planned against the live state would carry the wrong identity. Every
+    field needed to build a `CorrectionKey` is here, so a consumer can
+    construct keys for OTHER channels without touching the controller.
+
+    `epoch` increments on every interaction event and every selection
+    change. A consumer that captured epoch N must re-check it before
+    starting deferred work and abandon the work if it has moved.
+    """
+
+    epoch: int
+    source: object
+    channel: str
+    method: Optional[str]
+    params: Tuple[int, ...]
+    level: int
+    quality: object
+    algorithm_version: str
+    bbox_l0: Optional[Tuple[int, int, int, int]]
+    visible_tiles: frozenset = field(default_factory=frozenset)
+    display_lo: float = 0.0
+    display_hi: float = 1.0
 
 
 # ── TileItemPool ─────────────────────────────────────────────────────────────
@@ -996,6 +1031,34 @@ class ExploreController(QtCore.QObject):
     # without polling `_floor_ready`.
     floor_ready_changed = QtCore.pyqtSignal(bool)
 
+    # ── public, read-only interaction contract ──
+    #
+    # A background consumer subscribes to these; the controller never
+    # depends on a consumer, so the dependency stays one-directional and a
+    # consumer can be deleted without touching this class.
+    #
+    # `interaction_event(kind, snapshot)` -- kind is one of
+    # "NAVIGATOR_JUMP" / "PAN" / "ZOOM" / "CHANNEL_SWITCH". The source is
+    # EXPLICIT, supplied by whoever caused it; consumers must not infer a
+    # jump from displacement. (`prefetch_policy`'s viewport-fraction rule
+    # is a fallback for callers that genuinely cannot say, not this path.)
+    #
+    # `gesture_quiet(snapshot)` fires from the EXISTING `settle_ms` timer
+    # (80ms by default), and means only "the display system considers the
+    # camera gesture over" -- it is what clears `_viewport_zooming`. It is
+    # deliberately NOT called "settled": a background policy's SETTLED is a
+    # different, longer judgement ("the user is really staying here, it is
+    # worth computing other channels") and belongs to the consumer, which
+    # confirms its own additional quiet period on top of this one. The
+    # display timing that manual testing validated stays at 80ms and must
+    # not be stretched to serve background work.
+    #
+    # `selection_context_changed(snapshot)` fires whenever channel, method
+    # or params change.
+    interaction_event = QtCore.pyqtSignal(str, object)
+    gesture_quiet = QtCore.pyqtSignal(object)
+    selection_context_changed = QtCore.pyqtSignal(object)
+
     # Internal cross-thread delivery signals (scheduler callbacks fire on
     # worker threads; Qt widgets must only be touched on the GUI thread).
     _raw_delivered = QtCore.pyqtSignal(object)
@@ -1077,6 +1140,18 @@ class ExploreController(QtCore.QObject):
         self._floor_job_running = False
         self._floor_pending = False
         self._floor_threads = []
+
+        # Identity of the pixels currently held in `_overview_arr` and shown
+        # in `view.overview_item`: (source, channel). WITHOUT this, a channel
+        # switch left the old channel's overview on screen and, worse, let
+        # the corrected floor and the display-gain calibration be computed
+        # FROM the old channel's pixels and registered under the NEW
+        # channel's identity -- pixels from one channel claiming to be
+        # another. See `_overview_matches_selection`.
+        self._overview_identity = None
+        # Bumped on every interaction event and every selection change; see
+        # PrefetchSnapshot.epoch.
+        self._interaction_epoch = 0
 
         # ── per-level display gain for corrected pixels (module docstring
         # "Per-level display gain for CORRECTED pixels") ──
@@ -1230,8 +1305,25 @@ class ExploreController(QtCore.QObject):
             self.params = params
 
         if channel_changed:
-            self._raw_pool.clear()
-            self._precise_pool.clear()
+            # ORDER MATTERS, and it is a correctness order, not a cosmetic
+            # one. The overview is reloaded FIRST, synchronously, because
+            # everything after it either displays or consumes overview
+            # pixels: leaving the old channel's overview up would show one
+            # channel's pixels while the UI claims another, and it would
+            # also feed the corrected floor and the gain calibration (see
+            # `_overview_matches_selection`). Reloading also refreshes
+            # `_display_lo`/`_display_hi` for the new channel, which the
+            # quantisation in the swap below depends on.
+            self.load_overview()
+
+            # Then try to swap in a fully-cached corrected viewport within
+            # THIS SAME GUI event -- clear, fill, and one visibility update,
+            # with no queued signal in between. The normal request path
+            # would leave at least one painted frame showing raw before the
+            # corrected tiles land.
+            if not self._try_atomic_cached_channel_swap():
+                self._raw_pool.clear()
+                self._precise_pool.clear()
 
         # Directional prefetch (module docstring): a selection change makes
         # every pending candidate's CorrectionKey stale, so cancel outright
@@ -1243,6 +1335,70 @@ class ExploreController(QtCore.QObject):
             self._ensure_corrected_floor()
         if self._current_bbox is not None:
             self._issue_settled_request()
+            if channel_changed:
+                # Do not wait for the next motion tick: the new channel has
+                # nothing pooled, so its raw tiles must be asked for now.
+                # This does not make them arrive instantly; until they do,
+                # the honest display is the NEW channel's coarse overview
+                # (a provisional state), never the old channel's pixels.
+                self._issue_raw_requests()
+
+        self._interaction_epoch += 1
+        snap = self.snapshot()
+        self.selection_context_changed.emit(snap)
+        if channel_changed:
+            self.interaction_event.emit("CHANNEL_SWITCH", snap)
+
+    def _try_atomic_cached_channel_swap(self) -> bool:
+        """If every visible tile of the NEW selection is already in the
+        corrected cache, replace the display in one GUI event: clear the old
+        channel's layers and pool the cached results synchronously, so the
+        single `_update_layer_visibility()` at the end of `set_selection`
+        publishes them. Returns True when it did.
+
+        Why synchronous: the normal path issues requests and receives them
+        through a queued signal, so at least one frame can be painted with
+        the raw layer showing before the corrected tiles arrive -- a raw
+        flash on a switch to a channel that was already fully prepared.
+
+        Restricted to `self.level == 0` deliberately. These tiles are
+        quantised now and a pooled tile keeps its quantisation; the new
+        channel's gain table is not calibrated yet, so
+        `_display_gain_for_level` returns 1.0 for every level. At level 0
+        that is also the FINAL answer -- level 0's calibrated gain is 1.0 by
+        construction -- so nothing shifts later. At a coarser level the
+        eventual gain would differ and these tiles would sit at a different
+        brightness from their neighbours, so there we fall through to the
+        normal path.
+        """
+        if not self._wants_precise() or self.level != 0:
+            return False
+        if not self._visible_tiles or self._current_bbox is None:
+            return False
+        cache = getattr(self.scheduler, "corrected_cache", None)
+        if cache is None:
+            return False
+
+        pending = []
+        for tx, ty in self._visible_tiles:
+            key = self._make_correction_key(tx, ty)
+            arr = cache.get(key)
+            if arr is None:
+                return False
+            pending.append((tx, ty, key, arr))
+
+        self._raw_pool.clear()
+        self._precise_pool.clear()
+        ts = self.grid.tile_size
+        ds_y, ds_x = self._downsample_yx(self.level)
+        for tx, ty, key, arr in pending:
+            gray = self._quantize_corrected_uint8(arr, self.level)
+            rect = ExploreView.world_rect(
+                ty * ts, tx * ts, arr.shape[0], arr.shape[1], ds_y, ds_x)
+            self._precise_pool.put(self.level, tx, ty, rect, gray, key)
+        self.stats["precise_tiles_blitted"] += len(pending)
+        self.stats["atomic_channel_swaps"] = self.stats.get("atomic_channel_swaps", 0) + 1
+        return True
 
     def _enter_provisional(self):
         self._provisional = True
@@ -1342,6 +1498,41 @@ class ExploreController(QtCore.QObject):
             and key.params == eff_params and key.tile.level == level and key.quality == self.quality
         )
 
+    # ── interaction contract ─────────────────────────────────────────────
+
+    def snapshot(self) -> PrefetchSnapshot:
+        """An immutable picture of the live selection + viewport. See
+        `PrefetchSnapshot`."""
+        return PrefetchSnapshot(
+            epoch=self._interaction_epoch,
+            source=self.provider.source_identity(),
+            channel=self.channel,
+            method=self.method,
+            params=tuple(self.params),
+            level=self.level,
+            quality=self.quality,
+            algorithm_version=BG_CORRECTION_ALGO_VERSION,
+            bbox_l0=self._current_bbox,
+            visible_tiles=frozenset(self._visible_tiles),
+            display_lo=self._display_lo,
+            display_hi=self._display_hi,
+        )
+
+    def _emit_interaction(self, kind: str):
+        self._interaction_epoch += 1
+        self.interaction_event.emit(kind, self.snapshot())
+
+    def _overview_matches_selection(self) -> bool:
+        """Do `_overview_arr` / `view.overview_item` actually hold pixels
+        for the LIVE (source, channel)? Anything that consumes the overview
+        -- the corrected floor's input and the display-gain calibration's
+        tissue-window search -- must check this first. Reusing a mismatched
+        overview produces a result whose pixels come from one channel while
+        its recorded identity claims another."""
+        if self._overview_arr is None or self._overview_identity is None:
+            return False
+        return self._overview_identity == (self.provider.source_identity(), self.channel)
+
     # ── startup ───────────────────────────────────────────────────────────
 
     def load_overview(self):
@@ -1366,6 +1557,7 @@ class ExploreController(QtCore.QObject):
         lo, hi = self._compute_display_levels(arr)
         self._display_lo, self._display_hi = lo, hi
         self._overview_arr = arr
+        self._overview_identity = (self.provider.source_identity(), self.channel)
 
         # Overview is always fully valid (whole level read synchronously) --
         # plain grayscale, never masked; fixed levels only, never autoLevels.
@@ -1449,6 +1641,22 @@ class ExploreController(QtCore.QObject):
         `GAIN_WINDOWS` windows, clamped to `GAIN_CLAMP`."""
         num_levels = provider.num_levels
         base_param = int(base_params[0]) if base_params else 0
+
+        # `overview_arr` is None when the resident overview does not belong
+        # to THIS channel (see `_start_floor_job`). Read the level for the
+        # right channel instead of degrading to an uncalibrated table: this
+        # runs on the floor worker thread, so the blocking read is off the
+        # GUI thread, and the provider hands out per-thread handles.
+        if overview_arr is None:
+            try:
+                h, w = provider.level_shape(overview_level)
+                overview_arr, _off = provider.read_region(
+                    channel, overview_level, 0, h, 0, w)
+                overview_arr = overview_arr.astype(np.float32, copy=False)
+            except Exception:
+                # Calibration is best-effort; an unusable overview yields an
+                # all-1.0 table rather than a wrong one.
+                return {}
 
         ds_y, ds_x = self._downsample_yx_for(provider, overview_level)
         windows_l0 = _pick_calibration_windows(overview_arr, ds_y, ds_x)
@@ -1557,8 +1765,16 @@ class ExploreController(QtCore.QObject):
         # `read_region` is blocking I/O and must never run on the GUI
         # thread. The provider hands out per-thread persistent handles, so
         # reading from the worker is safe.
+        # Reuse the resident overview ONLY when it is the same level AND
+        # holds pixels for the live (source, channel). Without the identity
+        # test a channel switch fed the OLD channel's pixels into this
+        # correction and then registered the result under the NEW channel's
+        # context -- pixels from one channel, identity claiming another.
+        # When it does not match, `work()` reads the level itself, on the
+        # worker thread.
         overview_arr = None
-        if floor_level == getattr(self, "_overview_level", None):
+        if (floor_level == getattr(self, "_overview_level", None)
+                and self._overview_matches_selection()):
             overview_arr = self._overview_arr
 
         method = self.method
@@ -1569,7 +1785,13 @@ class ExploreController(QtCore.QObject):
         channel = self.channel
         k = stride
         base_params = self.params
-        cal_overview_arr = self._overview_arr
+        # Same hazard, second site: the gain calibration picks its
+        # tissue-dense sampling windows by block means over this array. Fed
+        # a stale channel's overview it would choose windows by the WRONG
+        # channel's intensity distribution and calibrate the whole per-level
+        # gain table against it. None here means "no usable overview" and
+        # the calibration falls back to reading what it needs.
+        cal_overview_arr = self._overview_arr if self._overview_matches_selection() else None
         cal_overview_level = getattr(self, "_overview_level", floor_level)
 
         def work():
@@ -1857,6 +2079,11 @@ class ExploreController(QtCore.QObject):
         self.stats["items_created"] = self._raw_pool.items_created + self._precise_pool.items_created
         self.stats["items_pruned"] = self._raw_pool.items_pruned + self._precise_pool.items_pruned
 
+        # PAN vs ZOOM is decided here, where the viewport geometry that
+        # distinguishes them is already computed, and handed to consumers
+        # explicitly rather than left to be guessed from displacement.
+        self._emit_interaction("ZOOM" if self._viewport_zooming else "PAN")
+
         # Debounced: ISSUING requests (both raw and precise, from
         # `_issue_raw_requests`) waits for motion to settle for MOTION_MS
         # (module docstring "Camera contract"). `_settle_timer` is also
@@ -1961,6 +2188,10 @@ class ExploreController(QtCore.QObject):
         self._motion_timer.stop()
         self._issue_raw_requests()
         self._settle_timer.stop()
+        # The navigator KNOWS it jumped; it does not have to be inferred
+        # from displacement. This is the explicit source a background
+        # consumer consumes (module docstring / `interaction_event`).
+        self._emit_interaction("NAVIGATOR_JUMP")
 
     # ── settle / precise request ─────────────────────────────────────────
 
@@ -1998,8 +2229,18 @@ class ExploreController(QtCore.QObject):
         has not been built yet; do not route interactive precise-tile
         issuing back through it. It does do one small thing: mark the end
         of a camera gesture, since `settle_ms` with no range events is the
-        only signal we get that the user stopped moving."""
+        only signal we get that the user stopped moving.
+
+        `gesture_quiet` is emitted here, AFTER the gesture state is
+        cleared, and means exactly that and nothing more. It is not a
+        background policy's SETTLED: deciding the user is staying put long
+        enough to be worth computing other channels is a longer, separate
+        judgement that belongs to the consumer, which confirms its own
+        additional quiet period on top of this one. The 80ms display timing
+        that manual testing validated must not be stretched to serve
+        background work."""
         self._clear_zoom_gesture_state()
+        self.gesture_quiet.emit(self.snapshot())
 
     def _issue_settled_request(self):
         """Cancel the previous precise generation, start a new one, and

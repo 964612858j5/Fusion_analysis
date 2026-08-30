@@ -592,6 +592,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -760,10 +761,14 @@ def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
     return np.ascontiguousarray(reshaped.mean(axis=(1, 3), dtype=np.float32))
 
 
-# An overview level for the real 57-channel slide is 1980x1680 float32 =
-# 13.3 MB, so holding every channel would be ~758 MB. This cap keeps the
-# current channel plus a +-2 HOT neighbourhood (5) and a little slack.
-OVERVIEW_CACHE_RECORDS = 8
+# Overview-record cache budget. A record on the real 57-channel slide is
+# 1980x1680 float32 = 13.3 MB, so all 57 would be ~758 MB; 256 MB holds
+# about 19 of them -- the current channel plus a +-2 HOT neighbourhood with
+# room to spare. Budgeted in BYTES rather than a record count on purpose: a
+# very large WSI with few pyramid levels can have an overview level far
+# bigger than 13.3 MB, and a fixed count would silently blow the memory
+# budget there. At least one record is always kept, whatever its size.
+OVERVIEW_CACHE_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -830,8 +835,12 @@ class PrefetchSnapshot:
     algorithm_version: str
     bbox_l0: Optional[Tuple[int, int, int, int]]
     visible_tiles: frozenset = field(default_factory=frozenset)
-    display_lo: float = 0.0
-    display_hi: float = 1.0
+    # None, not a stale number, while this channel's overview record is not
+    # installed: until it is, the display range for this channel is simply
+    # unknown, and a consumer must not act as though it had one.
+    overview_ready: bool = False
+    display_lo: Optional[float] = None
+    display_hi: Optional[float] = None
 
 
 # ── TileItemPool ─────────────────────────────────────────────────────────────
@@ -1108,6 +1117,12 @@ class ExploreController(QtCore.QObject):
     _dirprefetch_delivered = QtCore.pyqtSignal(object)
     _overview_delivered = QtCore.pyqtSignal(object)
 
+    # Public: an overview record for (source, channel, level) finished
+    # preparing; the bool is success. A background consumer needs this to
+    # know a neighbour is genuinely switch-ready, and must not read the
+    # cache dict directly.
+    overview_prepared = QtCore.pyqtSignal(object, str, int, bool)
+
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
                  probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET,
@@ -1195,8 +1210,16 @@ class ExploreController(QtCore.QObject):
         # channel be installed with a memcpy instead of a p95-293ms disk
         # read on the GUI thread; see `OverviewRecord`.
         self._overview_cache = OrderedDict()
-        self._overview_gen = 0
-        self._overview_threads = []
+        # Single-flight: one persistent worker, and one in-flight read per
+        # (source, channel, level). Spawning a thread per call duplicated
+        # reads whenever a settle, a rapid switch and a prefetch all wanted
+        # the same channel, and each new thread makes `RawTileProvider`
+        # parse the TIFF again for its own per-thread handle, which then
+        # lives until the provider closes. One worker is enough: five
+        # records measured 708ms in total.
+        self._overview_inflight = set()
+        self._overview_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="explore-overview")
         # Bumped on every interaction event and every selection change; see
         # PrefetchSnapshot.epoch.
         self._interaction_epoch = 0
@@ -1347,6 +1370,7 @@ class ExploreController(QtCore.QObject):
         there is no "still technically raw and fine" fallback)."""
         channel_changed = channel is not _UNSET and channel != self.channel
         atomic_swapped = False
+        overview_ready = True
         if channel is not _UNSET:
             self.channel = channel
         if method is not _UNSET:
@@ -1368,15 +1392,28 @@ class ExploreController(QtCore.QObject):
             # real 57-channel slide. A resident record installs as a
             # memcpy; otherwise the old pixels are cleared at once and the
             # read runs on a worker (`switch_overview_for_current_channel`).
-            self.switch_overview_for_current_channel()
+            overview_ready = self.switch_overview_for_current_channel()
 
-            # Then try to swap in a fully-cached corrected viewport within
-            # THIS SAME GUI event -- clear, fill, and one visibility update,
-            # with no queued signal in between. The normal request path
-            # would leave at least one painted frame showing raw before the
-            # corrected tiles land.
-            atomic_swapped = self._try_atomic_cached_channel_swap()
-            if not atomic_swapped:
+            if overview_ready:
+                # Then try to swap in a fully-cached corrected viewport
+                # within THIS SAME GUI event -- clear, fill, and one
+                # visibility update, with no queued signal in between. The
+                # normal request path would leave at least one painted
+                # frame showing raw before the corrected tiles land.
+                atomic_swapped = self._try_atomic_cached_channel_swap()
+                if not atomic_swapped:
+                    self._raw_pool.clear()
+                    self._precise_pool.clear()
+            else:
+                # Cold switch: this channel's display range is UNKNOWN until
+                # its overview record lands. Quantisation happens once, when
+                # a tile arrives, and a pooled tile keeps it -- so anything
+                # drawn now would be quantised against the PREVIOUS
+                # channel's range and would keep that wrong brightness for
+                # good. Draw nothing and ask for nothing; the empty,
+                # provisional state is the honest one, and
+                # `_handle_overview_result` resumes the work once the range
+                # is known.
                 self._raw_pool.clear()
                 self._precise_pool.clear()
 
@@ -1386,9 +1423,13 @@ class ExploreController(QtCore.QObject):
         self._cancel_directional_prefetch()
 
         self._enter_provisional()
-        if self._wants_precise():
+        # Withheld on a cold switch (see above): the floor and every tile
+        # request would quantise against a display range that does not
+        # belong to this channel.
+        withhold = channel_changed and not overview_ready
+        if self._wants_precise() and not withhold:
             self._ensure_corrected_floor()
-        if self._current_bbox is not None:
+        if self._current_bbox is not None and not withhold:
             self._issue_settled_request()
             if channel_changed and not atomic_swapped:
                 # Do not wait for the next motion tick: the new channel has
@@ -1580,6 +1621,7 @@ class ExploreController(QtCore.QObject):
     def snapshot(self) -> PrefetchSnapshot:
         """An immutable picture of the live selection + viewport. See
         `PrefetchSnapshot`."""
+        ready = self._overview_matches_selection()
         return PrefetchSnapshot(
             epoch=self._interaction_epoch,
             source=self.provider.source_identity(),
@@ -1591,8 +1633,9 @@ class ExploreController(QtCore.QObject):
             algorithm_version=BG_CORRECTION_ALGO_VERSION,
             bbox_l0=self._current_bbox,
             visible_tiles=frozenset(self._visible_tiles),
-            display_lo=self._display_lo,
-            display_hi=self._display_hi,
+            overview_ready=ready,
+            display_lo=self._display_lo if ready else None,
+            display_hi=self._display_hi if ready else None,
         )
 
     def _emit_interaction(self, kind: str):
@@ -1641,12 +1684,30 @@ class ExploreController(QtCore.QObject):
             self._overview_cache.move_to_end((source, channel, level))
         return rec
 
+    @staticmethod
+    def _record_bytes(rec: OverviewRecord) -> int:
+        arr = rec.arr
+        return int(getattr(arr, "nbytes", 0))
+
     def _overview_cache_put(self, rec: OverviewRecord):
         key = (rec.source, rec.channel, rec.level)
         self._overview_cache[key] = rec
         self._overview_cache.move_to_end(key)
-        while len(self._overview_cache) > OVERVIEW_CACHE_RECORDS:
-            self._overview_cache.popitem(last=False)
+        # Evict oldest-first until inside the byte budget, but never drop
+        # the last record: a single oversized overview must still be usable.
+        total = sum(self._record_bytes(r) for r in self._overview_cache.values())
+        while total > OVERVIEW_CACHE_BYTES and len(self._overview_cache) > 1:
+            _k, dropped = self._overview_cache.popitem(last=False)
+            total -= self._record_bytes(dropped)
+
+    def has_overview_record(self, channel: str, level: Optional[int] = None,
+                            source=None) -> bool:
+        """Public: is `channel` switch-ready? Having its corrected tiles
+        cached is not enough -- without its overview record a switch still
+        has to read, and the display range for it is unknown."""
+        src = source if source is not None else self.provider.source_identity()
+        lvl = self._pick_overview_level() if level is None else level
+        return (src, channel, lvl) in self._overview_cache
 
     def _install_overview_record(self, rec: OverviewRecord):
         """Install a record as the live overview. GUI thread only, and no
@@ -1723,20 +1784,31 @@ class ExploreController(QtCore.QObject):
         self.prepare_overview_async(self.channel)
         return False
 
-    def prepare_overview_async(self, channel: str):
-        """Read `channel`'s overview record on a worker thread and cache it.
+    def _overview_ready_for_current(self) -> bool:
+        return self._overview_matches_selection()
 
-        Public because this is exactly what a background consumer needs to
-        call for a neighbour channel: having that channel's corrected tiles
+    def prepare_overview_async(self, channel: str):
+        """Read `channel`'s overview record on the single overview worker
+        and cache it.
+
+        Public because this is exactly what a background consumer must call
+        for a neighbour channel: having that channel's corrected tiles
         cached is NOT enough to switch to it instantly -- without its
-        overview record the switch still stalls on a read.
+        overview record the switch still stalls on a read, and this
+        channel's display range is unknown until it lands.
+
+        Single-flight per (source, channel, level): a repeat call while one
+        is in flight is a no-op, so a settle, a rapid switch and a prefetch
+        all wanting the same channel cause one read, not three.
         """
         source = self.provider.source_identity()
         level = self._pick_overview_level()
+        key = (source, channel, level)
         if self._overview_cache_get(source, channel, level) is not None:
             return
-        self._overview_gen += 1
-        gen = self._overview_gen
+        if key in self._overview_inflight or self._torn_down:
+            return
+        self._overview_inflight.add(key)
         provider = self.provider
 
         def work():
@@ -1745,31 +1817,56 @@ class ExploreController(QtCore.QObject):
                 err = None
             except Exception as exc:  # noqa: BLE001 -- reported, never raised on a worker
                 rec, err = None, exc
-            self._overview_delivered.emit((gen, rec, err))
+            self._overview_delivered.emit((key, rec, err))
 
-        t = threading.Thread(target=work, daemon=True, name="explore-overview-read")
-        self._overview_threads = [x for x in self._overview_threads if x.is_alive()]
-        self._overview_threads.append(t)
-        t.start()
+        try:
+            self._overview_pool.submit(work)
+        except RuntimeError:
+            # Pool already shut down (teardown raced us) -- drop the claim
+            # so nothing is left permanently marked in flight.
+            self._overview_inflight.discard(key)
 
     def _handle_overview_result(self, payload):
         """GUI-thread delivery. Caches every successful read -- a record for
         a channel the user has since left is still worth keeping, that is
         the point of the cache -- but only INSTALLS one that still matches
-        the live selection."""
-        gen, rec, err = payload
-        if self._torn_down or rec is None:
-            if err is not None:
-                self.stats["overview_read_failed"] = self.stats.get("overview_read_failed", 0) + 1
+        the live selection.
+
+        Installing is also what releases the work that a cold switch
+        deliberately withheld. Until the record lands, this channel's
+        display range is unknown, and anything quantised against the
+        PREVIOUS channel's range would keep that quantisation for the life
+        of the pooled tile (`_quantize_*` runs once, at arrival). So the
+        cold path draws nothing and asks for nothing; it resumes here.
+        """
+        key, rec, err = payload
+        self._overview_inflight.discard(key)
+        source_k, channel_k, level_k = key
+        if rec is None:
+            self.stats["overview_read_failed"] = self.stats.get("overview_read_failed", 0) + 1
+            if not self._torn_down:
+                self.overview_prepared.emit(source_k, channel_k, level_k, False)
+            return
+        if self._torn_down:
             return
         self._overview_cache_put(rec)
+        self.overview_prepared.emit(source_k, channel_k, level_k, True)
+
         source = self.provider.source_identity()
         if (rec.source, rec.channel) != (source, self.channel):
             return
         self._install_overview_record(rec)
-        if self._wants_precise():
-            self._ensure_corrected_floor()
+
+        # The display range is known now, so the withheld work can start.
+        if not self._try_atomic_cached_channel_swap():
+            if self._wants_precise():
+                self._ensure_corrected_floor()
+            if self._current_bbox is not None:
+                self._issue_settled_request()
+                self._issue_raw_requests()
+        self._maybe_exit_provisional()
         self._update_layer_visibility()
+        self.selection_context_changed.emit(self.snapshot())
 
     # ── corrected floor (module docstring "corrected floor + single-stage
     # motion guarantee") ────────────────────────────────────────────────
@@ -3199,9 +3296,11 @@ class ExploreController(QtCore.QObject):
         for t in self._floor_threads:
             if t.is_alive():
                 t.join(timeout=2.0)
-        for t in getattr(self, "_overview_threads", []):
-            if t.is_alive():
-                t.join(timeout=2.0)
+        # Before `provider.close()` below: an overview read in flight would
+        # otherwise touch a closed provider.
+        pool = getattr(self, "_overview_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=True)
 
         if not shutdown_backend:
             return

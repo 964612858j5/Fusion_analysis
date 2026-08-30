@@ -2774,9 +2774,13 @@ def test_channel_switch_starts_exactly_one_floor_job(app):
     ctrl.teardown()
 
 
-def test_channel_switch_requests_new_channel_raw_immediately(app):
-    """Not on the next motion tick: the new channel has nothing pooled, so
-    its raw tiles are asked for inside `set_selection` itself."""
+def test_channel_switch_withholds_raw_until_the_display_range_is_known(app):
+    """A cold switch must ask for NOTHING until this channel's overview
+    record lands. Quantisation happens once, when a tile arrives, and a
+    pooled tile keeps it -- so a tile requested before the record would be
+    quantised against the PREVIOUS channel's display range and would keep
+    that wrong brightness for good. Once the record installs, the request
+    goes out without waiting for a motion tick."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
@@ -2785,10 +2789,19 @@ def test_channel_switch_requests_new_channel_raw_immediately(app):
 
     other = [c for c in provider.channel_names if c != ctrl.channel][0]
     ctrl.set_selection(channel=other)
-    ctrl._motion_timer.stop()       # prove no tick was involved
+    ctrl._motion_timer.stop()       # prove no tick is ever involved
+
+    assert not scheduler.pending_for(RawKey), (
+        "raw was requested while this channel's display range was unknown")
+    assert ctrl._overview_matches_selection() is False
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._overview_matches_selection():
+        _pump(10)
+    ctrl._motion_timer.stop()
 
     raw = [r for r, _cb in scheduler.pending_for(RawKey)]
-    assert raw, "no raw request was issued for the new channel"
+    assert raw, "no raw request was issued once the overview landed"
     assert all(r.key.channel == other for r in raw)
 
     ctrl.teardown()
@@ -2837,6 +2850,13 @@ def test_fully_cached_channel_switch_is_atomic_and_shows_no_raw(app):
     ctrl._motion_timer.stop()
 
     other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    # The record must be resident: without it the switch is a cold one and
+    # correctly withholds everything until the display range is known.
+    ctrl.prepare_overview_async(other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl.has_overview_record(other):
+        _pump(10)
+    assert ctrl.has_overview_record(other)
 
     class _Cache:
         def __init__(self):
@@ -2978,15 +2998,27 @@ def test_prepared_overview_installs_synchronously_without_reading(app):
     # Preparing must not disturb what is on screen.
     assert ctrl._overview_identity[1] != other
 
-    reads = []
-    real_read = provider.read_region
-    provider.read_region = lambda *a, **k: (reads.append(a[0]), real_read(*a, **k))[1]
+    # Count OVERVIEW reads specifically. Watching `provider.read_region`
+    # cannot tell them apart from raw/floor background reads, and an
+    # assertion like `all(c != other or True for c in reads)` is true by
+    # construction and proves nothing.
+    import block01.viewer.explore_view as ev_mod
+    calls = []
+    real_reader = ev_mod.ExploreController._read_overview_record
 
-    ctrl.set_selection(channel=other)
+    def counting_reader(provider_, source_, channel_, level_):
+        calls.append(channel_)
+        return real_reader(provider_, source_, channel_, level_)
 
-    assert ctrl._overview_matches_selection() is True, (
-        "a prepared overview did not install synchronously")
-    assert all(c != other or True for c in reads)
+    ev_mod.ExploreController._read_overview_record = staticmethod(counting_reader)
+    try:
+        ctrl.set_selection(channel=other)
+        assert ctrl._overview_matches_selection() is True, (
+            "a prepared overview did not install synchronously")
+        assert calls == [], (
+            f"a prepared switch still read the overview: {calls}")
+    finally:
+        ev_mod.ExploreController._read_overview_record = staticmethod(real_reader)
     assert ctrl.stats.get("overview_cache_hits", 0) >= 1
 
     ctrl.teardown()
@@ -3033,5 +3065,105 @@ def test_atomic_swap_issues_no_raw_requests(app):
     assert ctrl.stats.get("atomic_channel_swaps", 0) >= 1
     raw = [r for r, _cb in scheduler.pending_for(RawKey)]
     assert not raw, f"an already-complete switch still issued {len(raw)} raw reads"
+
+    ctrl.teardown()
+
+
+def test_cold_switch_never_quantises_against_the_previous_range(app):
+    """The record contract is that pixels and the range derived FROM them
+    install together. A cold switch must therefore not draw at all while
+    the range is unknown: `_quantize_*` runs once per tile, at arrival, and
+    a pooled tile keeps that quantisation for good."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl._motion_timer.stop()
+
+    old_lo, old_hi = ctrl._display_lo, ctrl._display_hi
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    scheduler.requests.clear()
+
+    ctrl.set_selection(channel=other)
+    ctrl._motion_timer.stop()
+
+    # Nothing requested, nothing pooled, and the snapshot says so rather
+    # than handing a consumer the previous channel's range.
+    assert not scheduler.requests, "a cold switch issued work before the range was known"
+    assert not ctrl._raw_pool.entries and not ctrl._precise_pool.entries
+    snap = ctrl.snapshot()
+    assert snap.overview_ready is False
+    assert snap.display_lo is None and snap.display_hi is None
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._overview_matches_selection():
+        _pump(10)
+
+    assert (ctrl._display_lo, ctrl._display_hi) != (old_lo, old_hi), (
+        "the new channel installed the previous channel's display range")
+    snap = ctrl.snapshot()
+    assert snap.overview_ready is True
+    assert snap.display_lo is not None
+
+    ctrl.teardown()
+
+
+def test_overview_prepare_is_single_flight(app):
+    """Repeat calls for the same (source, channel, level) while one read is
+    in flight must not start another. Each extra thread would re-parse the
+    TIFF for its own per-thread provider handle, which then lives until the
+    provider closes."""
+    import block01.viewer.explore_view as ev_mod
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+
+    gate = threading.Event()
+    calls = []
+    real_reader = ev_mod.ExploreController._read_overview_record
+
+    def slow_reader(provider_, source_, channel_, level_):
+        calls.append(channel_)
+        gate.wait(timeout=5.0)
+        return real_reader(provider_, source_, channel_, level_)
+
+    ev_mod.ExploreController._read_overview_record = staticmethod(slow_reader)
+    try:
+        other = [c for c in provider.channel_names if c != ctrl.channel][0]
+        for _ in range(5):
+            ctrl.prepare_overview_async(other)
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not calls:
+            _pump(10)
+        assert len(calls) == 1, f"{len(calls)} reads started for one channel"
+        gate.set()
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not ctrl.has_overview_record(other):
+            _pump(10)
+        assert ctrl.has_overview_record(other)
+        assert len(calls) == 1
+    finally:
+        gate.set()
+        ev_mod.ExploreController._read_overview_record = staticmethod(real_reader)
+
+    ctrl.teardown()
+
+
+def test_overview_prepared_signal_is_the_public_readiness_api(app):
+    """A consumer must not reach into `_overview_cache`."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    seen = []
+    ctrl.overview_prepared.connect(
+        lambda src, ch, lvl, ok: seen.append((ch, lvl, ok)))
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    assert ctrl.has_overview_record(other) is False
+    ctrl.prepare_overview_async(other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not seen:
+        _pump(10)
+
+    assert seen and seen[-1][0] == other and seen[-1][2] is True
+    assert ctrl.has_overview_record(other) is True
 
     ctrl.teardown()

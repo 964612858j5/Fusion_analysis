@@ -151,6 +151,12 @@ def main():
         status = "accepted" if accepted else "dropped-as-stale-or-failed"
         print(f"[floor] job landed: level={level} stride={stride} shape={shape} "
               f"effective_param={eff_params} elapsed_ms={elapsed_ms:.1f} status={status}")
+        # [gain] diagnostics -- interactive DISPLAY gain only (see
+        # explore_view.py module docstring): never claim this matches
+        # production numerics.
+        print(f"[gain] calibrated={ctrl.stats['gain_calibrated']} "
+              f"table={ctrl.stats['level_display_gain']} "
+              f"failed_count={ctrl.stats['gain_calibration_failed']}")
 
     ctrl.floor_ready_changed.connect(_on_floor_ready_changed)
 
@@ -176,6 +182,9 @@ def main():
     ctrl.teardown()
     print(f"[floor] at exit: failed={ctrl.stats['floor_compute_failed']} "
           f"level={ctrl.stats['floor_level']} stride={ctrl.stats['floor_stride']}")
+    print(f"[gain] at exit: calibrated={ctrl.stats['gain_calibrated']} "
+          f"table={ctrl.stats['level_display_gain']} "
+          f"failed_count={ctrl.stats['gain_calibration_failed']}")
     log_f.close()
     sys.exit(code)
 

@@ -200,6 +200,59 @@ counter, which is strictly stronger and immune to the queued-signal race),
 (b) the tile address is still in the CURRENT wanted set for its layer, and
 (c) source/channel/level still match. Any failure drops the result and
 bumps a counter; nothing is ever forced onto a stale layer.
+
+## Per-level display gain for CORRECTED pixels (interactive display only)
+
+Background correction is a high-pass operation, and a downsampled pyramid
+level has already lost the high frequencies it acts on -- so the SAME
+tissue, corrected at different pyramid levels with the level-scaled radius
+(`effective_param`), comes out at systematically different brightness.
+Measured on the real tonsil slide (channel index 1, tophat radius 25, a
+4096x4096 level-0 tissue window): corrected mean drops from 3.69 (level 0,
+effective radius 25) to 2.29 (level 1, radius 6) to 1.33 (level 2, radius
+2) to 0.46 (level 3, radius 1); corrected p99.5 drops from 16 to 13 to 9 to
+5 over the same levels. Every corrected image (tiles and the floor) is
+quantized through one fixed display range derived from the RAW overview,
+so the floor's level renders noticeably darker than level 0 -- a brightness
+jump whenever the displayed level changes or the floor shows through. No
+radius tuning fixes this: the signal genuinely is not present at coarse
+levels.
+
+`ExploreController._level_gain` is a per-pyramid-level multiplicative gain,
+calibrated once per selection (`_calibrate_level_gains`, module-level
+constants `GAIN_WINDOW_L0`/`GAIN_WINDOWS`/`GAIN_PERCENTILE`/`GAIN_CLAMP`)
+and applied ONLY when quantizing CORRECTED pixels (`_quantize_corrected_
+uint8`, used by the precise-tile and floor delivery paths) -- never to raw
+pixels, which vary only ~1.2x across levels and carry no correction. The
+table is installed only alongside a successful, context-matching corrected-
+floor result (`_handle_floor_result`); `_display_gain_for_level` returns
+1.0 for every level whenever the live selection no longer matches the
+context the table was calibrated for, so a stale or absent table never
+silently scales pixels.
+
+Read the following plainly, and do not extend these claims:
+
+- This is an INTERACTIVE DISPLAY gain only. It never touches computed,
+  cached, or saved pixel values -- the preview's brightness therefore does
+  NOT match production output.
+- It aligns HIGHLIGHTS (a p99.5 ratio between level 0 and level L), not the
+  whole distribution. Coarse levels stay darker in the midtones because the
+  signal is genuinely absent there -- measured: level 2's corrected p50 is
+  0 where level 0's is 3.
+- Expected effect: the ~2.8x mean mismatch between the floor level and
+  level 0 drops to roughly 1.2-1.5x. It is NOT eliminated.
+- The calibrated gain varies by about 25% depending on which tissue window
+  is sampled; the median over `GAIN_WINDOWS` (3) windows is a variance
+  reduction, not a guarantee.
+
+Calibration runs on the SAME worker thread as the existing corrected-floor
+job (`_start_floor_job`'s `work()` closure) -- there is no second thread or
+second single-flight mechanism; the floor's generation/context guard
+(`_floor_gen` / `_floor_job_running` / `_floor_pending`) covers calibration
+too. A calibration failure is caught, leaves the gain table empty (all
+1.0), increments `stats["gain_calibration_failed"]`, and never costs the
+floor itself -- a successful floor is installed regardless of whether
+calibration succeeded.
 """
 
 import threading
@@ -260,6 +313,55 @@ PRUNE_MARGIN_TILES = 1
 # `_pick_floor_level_and_stride`).
 FLOOR_MIN_MAX_DIM = 1024
 FLOOR_MAX_PIXELS = 4_000_000
+
+# Per-level display-gain calibration (module docstring "Per-level display
+# gain for CORRECTED pixels"): 3 tissue-dense, non-overlapping level-0
+# windows, GAIN_WINDOW_L0 pixels square, calibrated against the p99.5
+# highlight percentile, gain clamped to GAIN_CLAMP.
+GAIN_WINDOW_L0 = 2048
+GAIN_WINDOWS = 3
+GAIN_PERCENTILE = 99.5
+GAIN_CLAMP = (1.0, 8.0)
+
+
+def _pick_calibration_windows(overview_arr: np.ndarray, ds_y: float, ds_x: float,
+                               window_l0: int = GAIN_WINDOW_L0,
+                               n_windows: int = GAIN_WINDOWS):
+    """Pick up to `n_windows` tissue-dense, NON-OVERLAPPING `window_l0`
+    (level-0 pixels) square windows using block means over the already-
+    resident `overview_arr`. Blocks are laid out on a simple non-
+    overlapping grid at the window size expressed in overview-level pixels
+    (`window_l0 / ds_*`), scored by mean, and the highest-scoring blocks are
+    returned as level-0 top-left corners `(y0, x0)`. Falls back to one
+    window, centred and clamped to the image, when the window does not fit
+    the overview at all (a tiny image) or the overview array is empty."""
+    if overview_arr is None or overview_arr.size == 0:
+        return []
+    h, w = overview_arr.shape
+    win_h = max(1, min(h, int(round(window_l0 / ds_y))))
+    win_w = max(1, min(w, int(round(window_l0 / ds_x))))
+    n_by = h // win_h
+    n_bx = w // win_w
+
+    if n_by < 1 or n_bx < 1:
+        y0 = max(0, (h - win_h) // 2)
+        x0 = max(0, (w - win_w) // 2)
+        return [(int(round(y0 * ds_y)), int(round(x0 * ds_x)))]
+
+    scores = []
+    for by in range(n_by):
+        for bx in range(n_bx):
+            y0, x0 = by * win_h, bx * win_w
+            block = overview_arr[y0:y0 + win_h, x0:x0 + win_w]
+            scores.append((float(block.mean()), by, bx))
+    scores.sort(key=lambda t: t[0], reverse=True)
+
+    windows_l0 = []
+    for _score, by, bx in scores[:n_windows]:
+        y0_l0 = int(round(by * win_h * ds_y))
+        x0_l0 = int(round(bx * win_w * ds_x))
+        windows_l0.append((y0_l0, x0_l0))
+    return windows_l0
 
 
 def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
@@ -576,6 +678,11 @@ class ExploreController(QtCore.QObject):
         self._floor_pending = False
         self._floor_threads = []
 
+        # ── per-level display gain for corrected pixels (module docstring
+        # "Per-level display gain for CORRECTED pixels") ──
+        self._level_gain: Dict[int, float] = {}
+        self._gain_ctx = None
+
         # ── stable display levels (finding 6, carried forward): fixed at
         # load_overview, reapplied identically to overview/raw/precise. New
         # tile arrivals must never rescale brightness.
@@ -601,6 +708,9 @@ class ExploreController(QtCore.QObject):
             "floor_compute_failed": 0,
             "floor_level": None,
             "floor_stride": 1,
+            "level_display_gain": {},
+            "gain_calibrated": False,
+            "gain_calibration_failed": 0,
         }
         # probe-only timing samples (populated only when probe=True).
         self.timings = {
@@ -891,6 +1001,78 @@ class ExploreController(QtCore.QObject):
         source = self.provider.source_identity()
         return (source, self.channel, self.method, eff_params)
 
+    def _display_gain_for_level(self, level: int) -> float:
+        """Per-level display gain for CORRECTED pixels (module docstring).
+        Returns 1.0 for EVERY level whenever `_gain_ctx` does not match the
+        LIVE selection context -- a stale or never-calibrated table must
+        never silently scale pixels."""
+        if self._gain_ctx is None or self._gain_ctx != self._current_floor_ctx(
+                self._floor_level, self._floor_stride):
+            return 1.0
+        return self._level_gain.get(level, 1.0)
+
+    def _calibrate_level_gains(self, provider, compute, channel: str, method: str,
+                                base_params: Tuple[int, ...],
+                                overview_arr: np.ndarray, overview_level: int) -> Dict[int, float]:
+        """Calibrate a per-level display gain (module docstring) by
+        comparing the p99.5 highlight percentile of the SAME tissue window,
+        corrected at every pyramid level with its level-scaled param,
+        against level 0's. Runs entirely on the caller's thread (the floor
+        worker thread -- see `_start_floor_job`). Returns `{level: gain}`;
+        level 0 is always 1.0, a level with no non-degenerate contribution
+        from any window is 1.0, every other gain is the MEDIAN ratio across
+        `GAIN_WINDOWS` windows, clamped to `GAIN_CLAMP`."""
+        num_levels = provider.num_levels
+        base_param = int(base_params[0]) if base_params else 0
+
+        ds_y, ds_x = self._downsample_yx_for(provider, overview_level)
+        windows_l0 = _pick_calibration_windows(overview_arr, ds_y, ds_x)
+
+        ratios_by_level: Dict[int, list] = {L: [] for L in range(num_levels)}
+        for (y0_l0, x0_l0) in windows_l0:
+            p995_by_level: Dict[int, float] = {}
+            for L in range(num_levels):
+                ds_L = provider.level_downsample(L)
+                h_L, w_L = provider.level_shape(L)
+                win_L = max(1, int(round(GAIN_WINDOW_L0 / ds_L)))
+                y0 = max(0, min(int(y0_l0 / ds_L), max(0, h_L - 1)))
+                x0 = max(0, min(int(x0_l0 / ds_L), max(0, w_L - 1)))
+                y1 = min(h_L, y0 + win_L)
+                x1 = min(w_L, x0 + win_L)
+                arr, _off = provider.read_region(channel, L, y0, y1, x0, x1)
+                arr = arr.astype(np.float32, copy=False)
+                param = effective_param(base_param, L, ds_L)
+                corrected = compute.correct_array(arr, method, param)
+                p995_by_level[L] = float(np.percentile(corrected, GAIN_PERCENTILE)) if corrected.size else 0.0
+
+            p0 = p995_by_level.get(0, 0.0)
+            for L in range(num_levels):
+                pL = p995_by_level[L]
+                if p0 <= 0 or pL <= 0:
+                    continue  # degenerate -- this window contributes nothing for level L
+                ratios_by_level[L].append(p0 / pL)
+
+        gain_lo, gain_hi = GAIN_CLAMP
+        gains: Dict[int, float] = {}
+        for L in range(num_levels):
+            if L == 0:
+                gains[0] = 1.0
+                continue
+            vals = ratios_by_level[L]
+            if not vals:
+                gains[L] = 1.0
+                continue
+            gains[L] = float(np.clip(np.median(vals), gain_lo, gain_hi))
+        return gains
+
+    @staticmethod
+    def _downsample_yx_for(provider, level: int) -> Tuple[float, float]:
+        fn = getattr(provider, "level_downsample_yx", None)
+        if fn is not None:
+            return fn(level)
+        ds = provider.level_downsample(level)
+        return ds, ds
+
     def _on_floor_preparing_changed_for_badge(self, preparing: bool):
         self.view.set_status_text("Preparing corrected preview…" if preparing else None)
 
@@ -961,6 +1143,9 @@ class ExploreController(QtCore.QObject):
         provider = self.provider
         channel = self.channel
         k = stride
+        base_params = self.params
+        cal_overview_arr = self._overview_arr
+        cal_overview_level = getattr(self, "_overview_level", floor_level)
 
         def work():
             try:
@@ -975,7 +1160,24 @@ class ExploreController(QtCore.QObject):
             except Exception as exc:  # noqa: BLE001 -- reported via signal, never raised on worker thread
                 result_arr = None
                 error = exc
-            self._floor_delivered.emit((gen, ctx, floor_level, stride, result_arr, error))
+
+            # Calibration (module docstring "Per-level display gain for
+            # CORRECTED pixels"): folded into this same floor job/thread --
+            # no second thread, no second single-flight mechanism. A
+            # calibration failure must never cost the user their floor, so
+            # it is caught independently of the floor computation above.
+            gains: Dict[int, float] = {}
+            gain_error = None
+            try:
+                gains = self._calibrate_level_gains(
+                    provider, compute, channel, method, base_params,
+                    cal_overview_arr, cal_overview_level)
+            except Exception as exc:  # noqa: BLE001 -- reported via signal
+                gains = {}
+                gain_error = exc
+
+            self._floor_delivered.emit(
+                (gen, ctx, floor_level, stride, result_arr, error, gains, gain_error))
 
         t = threading.Thread(target=work, daemon=True, name="explore-floor-compute")
         # Drop already-finished threads so a long session with many
@@ -990,7 +1192,7 @@ class ExploreController(QtCore.QObject):
         no longer matches the live `_floor_gen`, or if the selection
         context has since changed. Then, if a newer request was coalesced
         in while this job ran, start it -- never two jobs in flight."""
-        gen, ctx, floor_level, stride, result_arr, error = payload
+        gen, ctx, floor_level, stride, result_arr, error, gains, gain_error = payload
         self._floor_job_running = False
         if self._torn_down:
             self._floor_pending = False
@@ -999,10 +1201,25 @@ class ExploreController(QtCore.QObject):
         current = gen == self._floor_gen and ctx == self._current_floor_ctx(floor_level, stride)
         accepted = False
         if current:
+            if gain_error is not None:
+                self.stats["gain_calibration_failed"] += 1
+                gains = {}
+            # Install the gain table under the same context guard as the
+            # floor -- independent of whether the floor computation itself
+            # succeeded (module docstring: "a failed calibration must not
+            # cost the user their floor", and symmetrically a failed floor
+            # must not cost the user a successful calibration).
+            self._level_gain = gains
+            self._gain_ctx = ctx if gains else None
             if error is not None or result_arr is None:
                 self.stats["floor_compute_failed"] += 1
             else:
-                gray = self._quantize_tile_uint8(result_arr)
+                # NOTE (module docstring): when stride > 1 the floor's
+                # effective downsample exceeds its level's, so
+                # gain[floor_level] slightly under-corrects the floor
+                # specifically -- accepted, and inactive on the real data
+                # (stride is 1 there).
+                gray = self._quantize_corrected_uint8(result_arr, floor_level)
                 ds_y, ds_x = self._downsample_yx(floor_level)
                 ds_y, ds_x = ds_y * stride, ds_x * stride
                 h, w = result_arr.shape
@@ -1012,6 +1229,8 @@ class ExploreController(QtCore.QObject):
                 self._floor_ready = True
                 self._floor_ctx = ctx
                 accepted = True
+        self.stats["level_display_gain"] = dict(self._level_gain)
+        self.stats["gain_calibrated"] = bool(self._level_gain)
         self.floor_ready_changed.emit(accepted)
 
         if self._floor_pending:
@@ -1333,7 +1552,7 @@ class ExploreController(QtCore.QObject):
 
         t0 = time.perf_counter() if self.probe else None
         arr = result.pixels.handle
-        gray = self._quantize_tile_uint8(arr)
+        gray = self._quantize_corrected_uint8(arr, tile.level)
         ds_y, ds_x = self._downsample_yx(tile.level)
         rect = ExploreView.world_rect(
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
@@ -1361,6 +1580,18 @@ class ExploreController(QtCore.QObject):
         span = max(self._display_hi - self._display_lo, 1e-6)
         norm = np.clip((arr.astype(np.float32, copy=False) - self._display_lo) / span, 0.0, 1.0)
         return np.round(norm * 255.0).astype(np.uint8)
+
+    def _quantize_corrected_uint8(self, arr: np.ndarray, level: int) -> np.ndarray:
+        """Like `_quantize_tile_uint8`, but for CORRECTED pixels only
+        (precise tiles and the floor): multiplies by the calibrated
+        per-level display gain (module docstring "Per-level display gain
+        for CORRECTED pixels") BEFORE normalizing/clipping against the same
+        fixed display range. `_display_gain_for_level` returns 1.0 for an
+        uncalibrated or stale table, so this is a no-op difference from
+        `_quantize_tile_uint8` in that case."""
+        gain = self._display_gain_for_level(level)
+        gained = arr.astype(np.float32, copy=False) * gain
+        return self._quantize_tile_uint8(gained)
 
     # ── probe-only viewport-first/full progress tracking ─────────────────
 

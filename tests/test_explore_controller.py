@@ -46,6 +46,8 @@ from block01.viewer.explore_view import (  # noqa: E402
     ExploreView,
     TileItemPool,
     _box_downsample,
+    _pick_calibration_windows,
+    GAIN_CLAMP,
 )
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 
@@ -1069,6 +1071,13 @@ def test_only_one_floor_job_in_flight(app):
         return arr.astype(np.float32, copy=False)
 
     ctrl.compute.correct_array = blocking_correct_array
+    # This test is about the floor job's single-flight discipline, NOT about
+    # calibration. Calibration runs inside the same worker `work()` closure
+    # and issues its own `correct_array` calls (GAIN_WINDOWS x num_levels of
+    # them) right after the floor's call returns, which would race every
+    # exact-count assertion below. `work()` calls `self._calibrate_level_gains`
+    # by attribute at call time, so an instance override neutralizes it.
+    ctrl._calibrate_level_gains = lambda *a, **k: {}
 
     ctrl.set_selection(method="tophat", params=(10,))
     assert enter_event.wait(timeout=2.0)
@@ -1273,5 +1282,177 @@ def test_controller_drives_status_badge_around_floor_job(app):
     assert view.status_label.text() == "Preparing corrected preview…"
     ctrl.floor_preparing_changed.emit(False)
     assert view.status_label.isVisible() is False
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Per-level display gain for CORRECTED pixels
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_corrected_quantization_applies_level_gain(app):
+    """With a calibrated gain table installed directly against the LIVE
+    selection context, `_quantize_corrected_uint8(arr, L)` must equal the
+    plain quantization of `arr * gain[L]`, and the raw path
+    (`_quantize_tile_uint8`) must be completely unaffected by the table."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._level_gain = {0: 1.0, 1: 3.5}
+
+    arr = np.linspace(0.0, ctrl._display_hi * 0.5, 64, dtype=np.float32).reshape(8, 8)
+
+    q_level1 = ctrl._quantize_corrected_uint8(arr, 1)
+    expected = ctrl._quantize_tile_uint8(arr * 3.5)
+    np.testing.assert_array_equal(q_level1, expected)
+
+    q_level0 = ctrl._quantize_corrected_uint8(arr, 0)
+    np.testing.assert_array_equal(q_level0, ctrl._quantize_tile_uint8(arr))
+
+    # Raw path is a plain quantization -- never scaled by the gain table.
+    raw_q = ctrl._quantize_tile_uint8(arr)
+    assert not np.array_equal(raw_q, q_level1)
+
+    ctrl.teardown()
+
+
+def test_gain_ignored_when_context_stale(app):
+    """A gain table calibrated against a since-superseded selection context
+    must never silently scale pixels: `_display_gain_for_level` returns 1.0
+    for EVERY level once the live context no longer matches `_gain_ctx`."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._level_gain = {1: 5.0}
+
+    assert ctrl._display_gain_for_level(1) == pytest.approx(5.0)
+
+    # Change the selection directly (no pump -- no real floor thread should
+    # be needed to observe the guard) so the live context no longer matches
+    # `_gain_ctx`.
+    ctrl.params = (99,)
+
+    for level in range(provider.num_levels):
+        assert ctrl._display_gain_for_level(level) == 1.0
+
+    ctrl.teardown()
+
+
+def test_gain_calibration_median_and_clamp(app):
+    """Drive `_calibrate_level_gains` against a fake provider/compute whose
+    per-(window, level) p99.5 outputs are fully controlled: pins the
+    per-level MEDIAN-across-windows aggregation, that a degenerate window
+    (p99.5 == 0 at either level 0 or level L) contributes nothing, and that
+    the GAIN_CLAMP bounds are enforced on the aggregate."""
+
+    class FakeProviderGain:
+        num_levels = 3
+
+        def level_downsample(self, level):
+            return {0: 1.0, 1: 2.0, 2: 4.0}[level]
+
+        def level_shape(self, level):
+            return (10_000_000, 10_000_000)
+
+        def read_region(self, channel, level, y0, y1, x0, x1):
+            return np.zeros((4, 4), dtype=np.float32), (y0, x0)
+
+    # Flat call order matches `_calibrate_level_gains`'s loop: for each
+    # window (in the order `_pick_calibration_windows` returns), for each
+    # level 0..2 in order -- 3 windows x 3 levels = 9 values.
+    flat_p995 = [
+        100.0, 50.0, 20.0,   # window0: L1 ratio=2.0,  L2 ratio=5.0
+        100.0, 5.0, 0.0,     # window1: L1 ratio=20.0 (clamps), L2 degenerate (p_L=0)
+        0.0, 5.0, 5.0,       # window2: p0==0 -> degenerate for EVERY level from this window
+    ]
+    call_index = {"i": 0}
+
+    class FakeComputeGain:
+        def raw_keys_for(self, key):
+            return []
+
+        def correct_array(self, arr, method, param):
+            val = flat_p995[call_index["i"]]
+            call_index["i"] += 1
+            return np.full((4, 4), val, dtype=np.float32)
+
+    import block01.viewer.explore_view as explore_view_mod
+    orig_picker = explore_view_mod._pick_calibration_windows
+    explore_view_mod._pick_calibration_windows = lambda *a, **k: [(0, 0), (1, 1), (2, 2)]
+    try:
+        ctrl, provider, scheduler, view = make_controller(app)
+        gains = ctrl._calibrate_level_gains(
+            FakeProviderGain(), FakeComputeGain(), "DAPI", "tophat", (10,),
+            np.zeros((10, 10), dtype=np.float32), 0)
+    finally:
+        explore_view_mod._pick_calibration_windows = orig_picker
+
+    assert gains[0] == 1.0
+    # median([2.0, 20.0]) == 11.0 -> clamped to GAIN_CLAMP's upper bound.
+    assert gains[1] == pytest.approx(GAIN_CLAMP[1])
+    # median([5.0]) == 5.0 -- window1's degenerate (p_L==0) contribution and
+    # window2's degenerate (p0==0) contribution are both excluded.
+    assert gains[2] == pytest.approx(5.0)
+
+    ctrl.teardown()
+
+
+def test_calibration_window_picker_finds_tissue():
+    """An overview array that is dark except for one bright, grid-aligned
+    block: the picker's top-scoring window must be exactly that block
+    (mapped back to level-0 coordinates), and every returned window must
+    lie within the image bounds."""
+    h, w = 4096, 4096
+    arr = np.zeros((h, w), dtype=np.float32)
+    ds_y = ds_x = 4.0
+    window_l0 = 1024
+    win_ov = int(window_l0 / ds_y)  # 256 overview pixels
+    by, bx = 3, 5
+    arr[by * win_ov:(by + 1) * win_ov, bx * win_ov:(bx + 1) * win_ov] = 1000.0
+
+    windows = _pick_calibration_windows(arr, ds_y, ds_x, window_l0=window_l0, n_windows=3)
+
+    assert windows
+    expected_top = (int(by * win_ov * ds_y), int(bx * win_ov * ds_x))
+    assert windows[0] == expected_top
+
+    h0, w0 = h * ds_y, w * ds_x
+    for y0, x0 in windows:
+        assert 0 <= y0 < h0
+        assert 0 <= x0 < w0
+
+
+def test_floor_survives_calibration_failure(app):
+    """A calibration that raises must not cost the user their floor: the
+    floor is still installed and visible, `_level_gain` stays empty, and
+    `stats['gain_calibration_failed']` is incremented."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+
+    def raising_calibrate(*_a, **_k):
+        raise RuntimeError("boom")
+
+    ctrl._calibrate_level_gains = raising_calibrate
+
+    ctrl.set_selection(method="tophat", params=(10,))
+    deadline = time.time() + 3.0
+    while ctrl._floor_job_running and time.time() < deadline:
+        _pump(20)
+    _pump(50)
+
+    assert ctrl._floor_ready is True
+    assert view.corrected_floor_item.isVisible() is True
+    assert ctrl._level_gain == {}
+    assert ctrl.stats["gain_calibration_failed"] == 1
 
     ctrl.teardown()

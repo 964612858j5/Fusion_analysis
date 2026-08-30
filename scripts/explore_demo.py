@@ -96,10 +96,18 @@ def main():
                               io_workers=1, compute_workers=1)
 
     view = ExploreView()
-    view.setWindowTitle(f"Explore demo — {os.path.basename(args.path)} · {channel}")
+    base_title = f"Explore demo — {os.path.basename(args.path)} · {channel}"
+    view.setWindowTitle(base_title)
     view.resize(1400, 1000)
 
     ctrl = ExploreController(provider, scheduler, compute, grid, view, channel)
+
+    def _on_floor_preparing_changed(preparing):
+        suffix = " — Preparing corrected preview…" if preparing else ""
+        view.setWindowTitle(base_title + suffix)
+
+    ctrl.floor_preparing_changed.connect(_on_floor_preparing_changed)
+
     ctrl.load_overview()
     if args.method != "none":
         ctrl.set_selection(method=args.method, params=(args.param,))

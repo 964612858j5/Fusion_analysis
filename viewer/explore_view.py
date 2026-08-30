@@ -33,30 +33,105 @@ Every `pg.ImageItem` (overview, raw-pool, precise-pool) is constructed with
 `pg.setConfigOptions(imageAxisOrder=...)`, which a standalone script (or a
 future host window) might not have set, producing a transposed render.
 
-## Level switching without clearing
+## Level switching without clearing; active draw set
 
 Switching the displayed pyramid level does NOT clear previously-drawn
 items from either pool -- their world rects remain correct (they were
 computed from their own level's geometry) so they stay visually aligned;
-only their z-order changes relative to the new level's tiles. Each pooled
-item's zValue is `layer_base_z + (num_levels - level)`, so a FINER level
-(smaller `level` int, higher resolution) draws ABOVE a coarser one within
-the same layer. Off-level items are eventually pruned once they fall
-outside the viewport (with margin); the pinned overview always covers any
-gap in the meantime.
+only their z-order and VISIBILITY change relative to the new level's
+tiles. Each pooled item's zValue is `layer_base_z + (num_levels - level)`,
+so a FINER level (smaller `level` int, higher resolution) draws ABOVE a
+coarser one within the same layer -- caching is not visibility, and this
+z-order fact is exactly why an item finer than the current level can never
+be allowed to stay visible: it would draw on top and show stale,
+differently-corrected pixels (this was bug: a leftover fine-level tile
+sitting at the viewport center after zoom-out never got pruned because it
+was inside the viewport, and it stayed both cached AND visible forever).
+`TileItemPool.apply_visibility(current_level, ...)` is the active-draw-set
+policy that fixes this: an item strictly FINER than `current_level` is
+ALWAYS hidden (never drawn, regardless of budget/viewport); an item AT
+`current_level` follows the caller's `current_level_visible` flag; an item
+COARSER than `current_level` (a fallback while the current level fills in)
+follows `coarser_visible`. Hiding is independent of pooling/pruning --
+a hidden item stays cached and is instantly re-shown the moment zooming
+back in makes it the current (or a coarser-fallback) level again. Pruning
+(eviction from the pool entirely) still only happens once the per-layer
+budget is exceeded, for items both off-level and outside the viewport
+(with margin).
 
 ## Anti-checkerboard for precise tiles (design doc §1.2 / cheap group gate)
+## + corrected floor + single-stage motion guarantee
 
 Corrected (precise) tiles are brightness-normalized per-tile relative to
 their own local background; sitting a corrected tile next to a raw (or
-differently-corrected) tile produces a visible seam. To avoid this, the
-ENTIRE precise layer is hidden (a single cheap boolean flag applied to
-every pooled precise item) unless every tile in the CURRENT wanted set (at
-the current level, under the current selection context) has a matching,
-current `CorrectionKey` recorded against it. Coverage completing flips the
-whole layer visible in one step (atomic, never a per-tile checkerboard).
-The raw layer is exempt -- it holds only single-stage pixels, so it fills
-in progressively, tile by tile, with no cross-stage seam.
+differently-corrected) tile produces a visible seam. The CURRENT-LEVEL
+precise gate stays a single cheap boolean flag (`_coverage_complete()`):
+current-level precise items are visible only once every tile in the
+CURRENT wanted set (at the current level, under the current selection
+context) has a matching, current `CorrectionKey` recorded against it --
+coverage completing flips them visible in one atomic step, never a
+per-tile checkerboard. COARSER-level precise items are exempt from that
+gate and stay visible underneath as a sharper-than-floor fallback while
+the current level fills in -- they are the same (corrected) stage as the
+current-level tiles, so there is no cross-stage seam, only a sharper/
+blurrier transition.
+
+The raw layer holds a different, single-stage pixel pipeline than the
+precise layer, so raw-next-to-precise is itself a seam. When no correction
+method is selected the raw layer is simply always shown (there is nothing
+else to show). When a method IS selected, the raw layer must never be the
+thing the user sees mixed with corrected pixels during motion -- that was
+the other bug: `_update_precise_visibility` used to hide only the ENTIRE
+precise layer on incomplete coverage, which let the always-visible raw
+layer show through and made the whole image flash brighter every time the
+camera moved. The fix is a "corrected floor": `ExploreController`
+maintains one extra always-covering item, `view.corrected_floor_item`
+(z=`FLOOR_Z`, between the raw overview at z=0 and the raw tile pool at
+`RAW_BASE_Z`) -- a whole-array correction of a coarse pyramid level
+(`_pick_floor_level_and_stride`), computed off the GUI thread and requantized whenever
+selection changes. Once that floor is ready for the current selection
+context, it is shown and the ENTIRE raw layer (both current- and
+coarser-level items) is forced invisible via `apply_visibility`, so the
+screen shows only corrected-stage pixels: floor -> coarser corrected tiles
+-> current-level corrected tiles, in increasing sharpness, and NEVER a
+raw-stage pixel. The raw layer is the honest fallback only until the floor
+is ready for the very first time after a selection change (better than a
+black screen); the always-resident raw overview (z=0) is the ultimate
+never-black-screen guarantee underneath everything, but once the floor
+covers the world rect it is never actually visible.
+
+The floor is an INTERACTIVE-quality DISPLAY PROXY ONLY -- it is never
+claimed to match production numerics; it exists solely so the screen never
+shows raw-stage pixels while in corrected mode. When no pyramid level is
+both >= `FLOOR_MIN_MAX_DIM` on its long side and under the `FLOOR_MAX_PIXELS`
+safety cap, `_pick_floor_level_and_stride` falls back to decimating the
+coarsest big-enough level by an integer stride `k` (`arr[::k, ::k]`) so the
+correction kernel still runs on a bounded number of pixels; the floor's
+effective per-axis downsample becomes `(ds_y*k, ds_x*k)` and the
+correction param is scaled by the same total factor, so the decimated
+floor still lands exactly on the full world rect at the right physical
+scale.
+
+A stale coarser-level precise tile is exactly the same class of bug as a
+stale raw tile: `TileItemPool.apply_visibility` accepts an optional
+`key_ok(entry.key, entry.level)` predicate so the precise pool can ALSO
+require a coarser entry's `CorrectionKey` to still match the current
+selection context (recomputed at THAT entry's level, since
+`effective_param` is level-dependent) before it is allowed to stay
+visible -- an old-method/old-radius coarse tile is hidden immediately on
+a selection change, never just faded back in as a stale fallback. The raw
+pool needs no such predicate: `RawKey` carries no method/params, and
+source/channel mismatches are already rejected at delivery time.
+
+Only ONE corrected-floor computation ever runs at a time
+(`_floor_job_running`). A selection change that arrives while a floor job
+is in flight does not start a second one -- it bumps `_floor_gen` (so the
+in-flight job's result is dropped as stale on arrival, by the same
+generation/context guard as `_handle_precise_result`) and coalesces into a
+single pending flag; when the stale result lands, the pending job (using
+whatever selection is CURRENT at that point, i.e. always the latest) is
+what actually starts. This guarantees the floor path never launches two
+overlapping GPU/CPU-bound corrections.
 
 ## Camera contract: no debounce on the range handler itself
 
@@ -95,6 +170,7 @@ counter, which is strictly stronger and immune to the queued-signal race),
 bumps a counter; nothing is ever forced onto a stale layer.
 """
 
+import threading
 import time
 from typing import Dict, Optional, Tuple
 
@@ -129,6 +205,13 @@ _UNSET = object()
 RAW_BASE_Z = 100
 PRECISE_BASE_Z = 200
 
+# Corrected-floor item z: between the pinned raw overview (0) and the raw
+# tile pool (RAW_BASE_Z) -- it must draw above the overview (it is the
+# thing that replaces the overview as the never-black-screen fallback in
+# corrected mode) but always below any raw tile, in case the raw layer
+# is ever forced visible as the honest fallback (module docstring).
+FLOOR_Z = 50
+
 # Default per-layer pooled-item budget (design doc: "e.g. 400 per layer").
 DEFAULT_ITEM_BUDGET = 400
 
@@ -136,6 +219,15 @@ DEFAULT_ITEM_BUDGET = 400
 # cover margin) -- an item within this many tiles of the current viewport,
 # even off-level, is kept a little longer to absorb small pans.
 PRUNE_MARGIN_TILES = 1
+
+# Corrected-floor level selection (module docstring "corrected floor"):
+# among pyramid levels, pick the COARSEST one whose max(h, w) still meets
+# FLOOR_MIN_MAX_DIM and whose pixel count stays under the safety cap. If no
+# level satisfies both, the coarsest level meeting FLOOR_MIN_MAX_DIM alone
+# is decimated by an integer stride to bring it under the cap (see
+# `_pick_floor_level_and_stride`).
+FLOOR_MIN_MAX_DIM = 1024
+FLOOR_MAX_PIXELS = 4_000_000
 
 
 # ── TileItemPool ─────────────────────────────────────────────────────────────
@@ -199,9 +291,33 @@ class TileItemPool:
         entry.key = key
         return entry
 
-    def set_visible(self, visible: bool):
+    def apply_visibility(self, current_level: int, *,
+                         current_level_visible: bool = True,
+                         coarser_visible: bool = True,
+                         key_ok=None) -> None:
+        """Per-level visibility policy. An item FINER than `current_level`
+        (entry.level < current_level) is NEVER visible -- it would draw
+        above the current level (higher z) and show stale, differently-
+        corrected pixels. Items stay in the pool (cached, instantly
+        re-shown on zoom back in); only their visibility changes.
+
+        `key_ok`, when given, is called as `key_ok(entry.key, entry.level)`
+        and must return True for the entry to be eligible at all; an entry
+        whose key does not match the caller's current context is hidden
+        regardless of level. This keeps selection-context knowledge (e.g.
+        "does this CorrectionKey still match the live method/params?") out
+        of this dumb item-container class -- the caller supplies it."""
         for entry in self.entries.values():
-            entry.item.setVisible(visible)
+            if entry.level < current_level:
+                entry.item.setVisible(False)
+                continue
+            if key_ok is not None and not key_ok(entry.key, entry.level):
+                entry.item.setVisible(False)
+                continue
+            if entry.level == current_level:
+                entry.item.setVisible(current_level_visible)
+            else:
+                entry.item.setVisible(coarser_visible)
 
     def clear(self):
         """Remove every item (used only for a hard invalidation, e.g. a
@@ -285,6 +401,15 @@ class ExploreView(QtWidgets.QWidget):
         self.overview_item.setZValue(0)
         self.view_box.addItem(self.overview_item)
 
+        # Corrected floor (module docstring "corrected floor + single-stage
+        # motion guarantee"): a whole-array corrected preview at a coarse
+        # pyramid level, shown while precise tiles fill in so raw-stage
+        # pixels never reach the screen in corrected mode.
+        self.corrected_floor_item = pg.ImageItem(axisOrder="row-major")
+        self.corrected_floor_item.setZValue(FLOOR_Z)
+        self.view_box.addItem(self.corrected_floor_item)
+        self.corrected_floor_item.setVisible(False)
+
     @staticmethod
     def world_rect(y0: float, x0: float, h: float, w: float,
                     ds_y: float, ds_x: float) -> QRectF:
@@ -305,11 +430,13 @@ class ExploreController(QtCore.QObject):
     """
 
     provisional_changed = QtCore.pyqtSignal(bool)
+    floor_preparing_changed = QtCore.pyqtSignal(bool)
 
     # Internal cross-thread delivery signals (scheduler callbacks fire on
     # worker threads; Qt widgets must only be touched on the GUI thread).
     _raw_delivered = QtCore.pyqtSignal(object)
     _precise_delivered = QtCore.pyqtSignal(object)
+    _floor_delivered = QtCore.pyqtSignal(object)
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
@@ -350,6 +477,16 @@ class ExploreController(QtCore.QObject):
         self._precise_visible = False
         self.view.precise_visible = False  # for tests/introspection
 
+        # ── corrected floor state (module docstring) ──
+        self._floor_level: Optional[int] = None
+        self._floor_stride: int = 1
+        self._floor_ready = False
+        self._floor_ctx = None
+        self._floor_gen = 0
+        self._floor_job_running = False
+        self._floor_pending = False
+        self._floor_threads = []
+
         # ── stable display levels (finding 6, carried forward): fixed at
         # load_overview, reapplied identically to overview/raw/precise. New
         # tile arrivals must never rescale brightness.
@@ -372,6 +509,9 @@ class ExploreController(QtCore.QObject):
             "late_precise_rejected": 0,
             "items_created": 0,
             "items_pruned": 0,
+            "floor_compute_failed": 0,
+            "floor_level": None,
+            "floor_stride": 1,
         }
         # probe-only timing samples (populated only when probe=True).
         self.timings = {
@@ -414,6 +554,7 @@ class ExploreController(QtCore.QObject):
 
         self._raw_delivered.connect(self._handle_raw_result, QtCore.Qt.QueuedConnection)
         self._precise_delivered.connect(self._handle_precise_result, QtCore.Qt.QueuedConnection)
+        self._floor_delivered.connect(self._handle_floor_result, QtCore.Qt.QueuedConnection)
 
         self.view.view_box.sigRangeChanged.connect(self._on_range_changed)
 
@@ -469,13 +610,15 @@ class ExploreController(QtCore.QObject):
             self._precise_pool.clear()
 
         self._enter_provisional()
+        if self._wants_precise():
+            self._ensure_corrected_floor()
         if self._current_bbox is not None:
             self._issue_settled_request()
 
     def _enter_provisional(self):
         self._provisional = True
         self.provisional_changed.emit(True)
-        self._update_precise_visibility()
+        self._update_layer_visibility()
 
     def _maybe_exit_provisional(self):
         """Restore full visibility / clear provisional once every visible
@@ -489,7 +632,7 @@ class ExploreController(QtCore.QObject):
         if self._coverage_complete():
             self._provisional = False
             self.provisional_changed.emit(False)
-        self._update_precise_visibility()
+        self._update_layer_visibility()
 
     def _coverage_complete(self) -> bool:
         ctx = self.selection_key_context()
@@ -499,20 +642,38 @@ class ExploreController(QtCore.QObject):
                 return False
         return True
 
-    def _update_precise_visibility(self):
-        """Anti-checkerboard contract (module docstring): the ENTIRE
-        precise layer (every pooled item) is visible only when every tile
-        in `_visible_tiles` has a blitted precise result whose key matches
-        the CURRENT selection context -- a single cheap boolean flag,
-        never a per-tile decision."""
-        fully_covered = (
-            self._wants_precise()
-            and bool(self._visible_tiles)
-            and self._coverage_complete()
-        )
-        self._precise_visible = fully_covered
-        self.view.precise_visible = fully_covered
-        self._precise_pool.set_visible(fully_covered)
+    def _update_layer_visibility(self):
+        """Display-policy gate (module docstring: anti-checkerboard +
+        corrected floor + single-stage motion guarantee).
+
+        `covered` is the CURRENT-LEVEL precise coverage boolean (unchanged
+        meaning/contract from the old `_update_precise_visibility`).
+        `floor_ok` additionally requires a ready corrected-floor image that
+        matches the live selection context. While `wants_precise()` is true
+        and the floor is not yet ready, the raw layer stays visible as the
+        honest (if brighter) fallback; once the floor IS ready, the raw
+        layer is forced entirely invisible so no raw-stage pixel can ever
+        appear alongside corrected pixels."""
+        wants = self._wants_precise()
+        covered = wants and bool(self._visible_tiles) and self._coverage_complete()
+        floor_ctx = self._current_floor_ctx(self._floor_level, self._floor_stride)
+        floor_ok = wants and self._floor_ready and self._floor_ctx == floor_ctx
+
+        self._precise_visible = covered
+        self.view.precise_visible = covered
+
+        self.view.corrected_floor_item.setVisible(floor_ok)
+
+        raw_on = (not wants) or (not floor_ok)
+        self._raw_pool.apply_visibility(
+            self.level, current_level_visible=raw_on, coarser_visible=raw_on)
+
+        self._precise_pool.apply_visibility(
+            self.level, current_level_visible=covered, coarser_visible=True,
+            key_ok=self._precise_key_current_for_level)
+
+    # Backward-compatible alias (pre-rename name).
+    _update_precise_visibility = _update_layer_visibility
 
     @staticmethod
     def _key_matches_context(key: CorrectionKey, ctx) -> bool:
@@ -520,6 +681,25 @@ class ExploreController(QtCore.QObject):
         return (
             key.source == source and key.channel == channel and key.method == method
             and key.params == eff_params and key.tile.level == level and key.quality == quality
+        )
+
+    def _precise_key_current_for_level(self, key, level) -> bool:
+        """Like `_key_matches_context` but for an arbitrary (typically
+        coarser) pooled level: source/channel/method/quality must match the
+        LIVE selection and `key.params` must equal the effective params for
+        `level` specifically -- `effective_param` is level-dependent, so a
+        coarser entry's expected params are NOT the current level's. Used
+        as the precise pool's `apply_visibility(key_ok=...)` predicate so a
+        stale-method/stale-radius coarse tile is hidden immediately on a
+        selection change rather than shown as a fallback."""
+        if key is None:
+            return False
+        source = self.provider.source_identity()
+        ds = self.provider.level_downsample(level)
+        eff_params = tuple(effective_param(p, level, ds) for p in self.params)
+        return (
+            key.source == source and key.channel == self.channel and key.method == self.method
+            and key.params == eff_params and key.tile.level == level and key.quality == self.quality
         )
 
     # ── startup ───────────────────────────────────────────────────────────
@@ -553,6 +733,184 @@ class ExploreController(QtCore.QObject):
         self.view.overview_item.setRect(rect)
         self._overview_level = chosen
         self._overview_shape = (h, w)
+
+        if self._wants_precise():
+            self._ensure_corrected_floor()
+
+    # ── corrected floor (module docstring "corrected floor + single-stage
+    # motion guarantee") ────────────────────────────────────────────────
+
+    def _pick_floor_level_and_stride(self) -> Tuple[int, int]:
+        """(level, stride) for the corrected floor. Prefers the COARSEST
+        pyramid level whose max(h, w) >= FLOOR_MIN_MAX_DIM and whose pixel
+        count stays under FLOOR_MAX_PIXELS (stride 1). If no level
+        satisfies both, falls back to the coarsest level meeting
+        FLOOR_MIN_MAX_DIM alone, decimated by the smallest integer stride
+        `k` making `(h // k) * (w // k) <= FLOOR_MAX_PIXELS` (module
+        docstring: the floor is an interactive-quality display proxy
+        only). If every level is below FLOOR_MIN_MAX_DIM (a tiny image),
+        the coarsest level is used at stride 1."""
+        num_levels = self.provider.num_levels
+        qualifying = []
+        for level in range(num_levels):
+            h, w = self.provider.level_shape(level)
+            if max(h, w) >= FLOOR_MIN_MAX_DIM and h * w <= FLOOR_MAX_PIXELS:
+                qualifying.append(level)
+        if qualifying:
+            return max(qualifying), 1
+
+        big_enough = [
+            level for level in range(num_levels)
+            if max(self.provider.level_shape(level)) >= FLOOR_MIN_MAX_DIM
+        ]
+        if not big_enough:
+            return num_levels - 1, 1
+
+        level = max(big_enough)
+        h, w = self.provider.level_shape(level)
+        k = 1
+        while (h // k) * (w // k) > FLOOR_MAX_PIXELS:
+            k += 1
+        return level, k
+
+    def _current_floor_ctx(self, floor_level: Optional[int], stride: int = 1):
+        """(source, channel, method, eff_params_at_floor_level) -- the
+        identity tuple a ready floor image must match to be considered
+        current for the LIVE selection (same scaling the tile path uses,
+        via `effective_param`, but against the floor's TOTAL downsample
+        `level_downsample(floor_level) * stride`)."""
+        if floor_level is None:
+            return None
+        ds = self.provider.level_downsample(floor_level) * stride
+        eff_params = tuple(effective_param(p, floor_level, ds) for p in self.params)
+        source = self.provider.source_identity()
+        return (source, self.channel, self.method, eff_params)
+
+    def _ensure_corrected_floor(self):
+        """(Re)request the corrected floor for the current selection.
+        Called whenever `_wants_precise()` is true from `set_selection()`
+        and from `load_overview()` (if a method is already set).
+        Immediately hides the floor and marks it not-ready (module
+        docstring: never show a stale-context floor).
+
+        At most one floor computation runs at a time
+        (`_floor_job_running`); a request that arrives while one is in
+        flight is coalesced into a single pending flag rather than
+        starting a second worker thread -- the in-flight job's result gets
+        dropped as stale on arrival (its `_floor_gen` token no longer
+        matches), and `_handle_floor_result` starts the pending job then,
+        always against whatever selection is CURRENT at that point."""
+        self._floor_gen += 1
+        gen = self._floor_gen
+        self._floor_ready = False
+        self.view.corrected_floor_item.setVisible(False)
+        self.floor_preparing_changed.emit(True)
+        self._update_layer_visibility()
+
+        if self._overview_arr is None:
+            # `_display_lo/_display_hi` are fixed by `load_overview()`.
+            # Quantizing a floor before that would bake in the placeholder
+            # (0.0, 1.0) range and paint a saturated-white floor over the
+            # whole slide. `load_overview()` re-enters here once the levels
+            # are set, so deferring is safe -- and `floor_preparing_changed`
+            # has already been emitted True, which is honest: the floor IS
+            # pending.
+            return
+
+        if self._floor_job_running:
+            self._floor_pending = True
+            return
+        self._start_floor_job(gen)
+
+    def _start_floor_job(self, gen: int):
+        """Read the floor array (GUI thread; reuses `_overview_arr` when
+        levels match) and dispatch `compute.correct_array` on a worker
+        thread. Exactly one such job is ever in flight (enforced by
+        `_ensure_corrected_floor`/`_handle_floor_result`)."""
+        self._floor_job_running = True
+        floor_level, stride = self._pick_floor_level_and_stride()
+        self._floor_level = floor_level
+        self._floor_stride = stride
+        self.stats["floor_level"] = floor_level
+        self.stats["floor_stride"] = stride
+        ctx = self._current_floor_ctx(floor_level, stride)
+
+        # Reuse the already-resident overview array when the floor lands on
+        # the same level (the common case -- both pickers land on the
+        # coarsest level above their min-dimension threshold). Otherwise the
+        # read happens on the WORKER thread below: a whole-level
+        # `read_region` is blocking I/O and must never run on the GUI
+        # thread. The provider hands out per-thread persistent handles, so
+        # reading from the worker is safe.
+        overview_arr = None
+        if floor_level == getattr(self, "_overview_level", None):
+            overview_arr = self._overview_arr
+
+        method = self.method
+        eff_params = ctx[3]
+        param = int(eff_params[0]) if eff_params else 0
+        compute = self.compute
+        provider = self.provider
+        channel = self.channel
+        k = stride
+
+        def work():
+            try:
+                arr_in = overview_arr
+                if arr_in is None:
+                    h, w = provider.level_shape(floor_level)
+                    arr_in, _off = provider.read_region(channel, floor_level, 0, h, 0, w)
+                    arr_in = arr_in.astype(np.float32, copy=False)
+                if k > 1:
+                    arr_in = np.ascontiguousarray(arr_in[::k, ::k])
+                result_arr = compute.correct_array(arr_in, method, param)
+                error = None
+            except Exception as exc:  # noqa: BLE001 -- reported via signal, never raised on worker thread
+                result_arr = None
+                error = exc
+            self._floor_delivered.emit((gen, ctx, floor_level, stride, result_arr, error))
+
+        t = threading.Thread(target=work, daemon=True, name="explore-floor-compute")
+        # Drop already-finished threads so a long session with many
+        # selection changes does not retain one dead Thread per change.
+        self._floor_threads = [x for x in self._floor_threads if x.is_alive()]
+        self._floor_threads.append(t)
+        t.start()
+
+    def _handle_floor_result(self, payload):
+        """GUI-side delivery guard (module docstring), same discipline as
+        `_handle_precise_result`: drop the result if its generation token
+        no longer matches the live `_floor_gen`, or if the selection
+        context has since changed. Then, if a newer request was coalesced
+        in while this job ran, start it -- never two jobs in flight."""
+        gen, ctx, floor_level, stride, result_arr, error = payload
+        self._floor_job_running = False
+        if self._torn_down:
+            self._floor_pending = False
+            return
+
+        current = gen == self._floor_gen and ctx == self._current_floor_ctx(floor_level, stride)
+        if current:
+            if error is not None or result_arr is None:
+                self.stats["floor_compute_failed"] += 1
+            else:
+                gray = self._quantize_tile_uint8(result_arr)
+                ds_y, ds_x = self._downsample_yx(floor_level)
+                ds_y, ds_x = ds_y * stride, ds_x * stride
+                h, w = result_arr.shape
+                rect = ExploreView.world_rect(0, 0, h, w, ds_y, ds_x)
+                self.view.corrected_floor_item.setImage(gray, autoLevels=False, levels=(0, 255))
+                self.view.corrected_floor_item.setRect(rect)
+                self._floor_ready = True
+                self._floor_ctx = ctx
+
+        if self._floor_pending:
+            self._floor_pending = False
+            self._start_floor_job(self._floor_gen)
+        else:
+            self.floor_preparing_changed.emit(False)
+
+        self._update_layer_visibility()
 
     def _downsample_yx(self, level: int) -> Tuple[float, float]:
         """(ds_y, ds_x) for `level`, using the provider's unrounded
@@ -653,7 +1011,7 @@ class ExploreController(QtCore.QObject):
             int(bbox_l0[2] / ds), int(bbox_l0[3] / ds),
         )
         self._visible_tiles = tiles_covering(bbox_level, self.grid.tile_size)
-        self._update_precise_visibility()
+        self._update_layer_visibility()
 
         viewport_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
         margin_world = self.grid.tile_size * ds * PRUNE_MARGIN_TILES
@@ -837,6 +1195,8 @@ class ExploreController(QtCore.QObject):
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
             self._probe_note_raw_progress(tile.tx, tile.ty)
 
+        self._update_layer_visibility()
+
     # ── delivery: precise ─────────────────────────────────────────────────
 
     def _on_precise_result(self, result):
@@ -878,7 +1238,7 @@ class ExploreController(QtCore.QObject):
             self._probe_note_precise_progress(tile.tx, tile.ty)
 
         self._maybe_exit_provisional()
-        self._update_precise_visibility()
+        self._update_layer_visibility()
 
     # ── quantization (once, at arrival) ─────────────────────────────────
 
@@ -948,6 +1308,19 @@ class ExploreController(QtCore.QObject):
             self._precise_delivered.disconnect(self._handle_precise_result)
         except (TypeError, RuntimeError):
             pass
+        try:
+            self._floor_delivered.disconnect(self._handle_floor_result)
+        except (TypeError, RuntimeError):
+            pass
+
+        # Floor-compute worker threads are plain daemon threads (not owned
+        # by Qt); join them here so teardown leaves nothing running behind
+        # it. A result arriving after `_torn_down = True` is a no-op
+        # (`_handle_floor_result`'s guard above), so this join is a
+        # best-effort cleanup, not a correctness requirement.
+        for t in self._floor_threads:
+            if t.is_alive():
+                t.join(timeout=2.0)
 
         if not shutdown_backend:
             return

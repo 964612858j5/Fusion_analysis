@@ -16,6 +16,8 @@ per-axis downsample factors, instead of blitting into a shared canvas.
 """
 
 import os
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -26,14 +28,17 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets, QtTest  # noqa: E402
 
+from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION  # noqa: E402
 from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
     PixelBuffer,
     QualityLevel,
     RawKey,
     SourceIdentity,
+    TileAddress,
     TileGridSpec,
     TileResult,
+    effective_param,
     tiles_covering,
 )
 from block01.viewer.explore_view import ExploreController, ExploreView, TileItemPool  # noqa: E402
@@ -157,6 +162,9 @@ class FakeScheduler:
 class FakeCompute:
     def raw_keys_for(self, key):
         return []
+
+    def correct_array(self, arr, method, param):
+        return arr.astype(np.float32, copy=False)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -794,5 +802,290 @@ def test_precise_visibility_is_atomic_group_gate(app):
         scheduler.deliver(req, arr)
     _pump(20)
     assert ctrl._precise_visible is True
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Display-policy fix tests (active draw set + corrected floor)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _make_correction_key_for(ctrl, provider, level, tx, ty, params):
+    ds = provider.level_downsample(level)
+    eff = tuple(effective_param(p, level, ds) for p in params)
+    addr = TileAddress(grid=ctrl.grid, level=level, tx=tx, ty=ty)
+    return CorrectionKey(
+        source=provider.source_identity(), channel=ctrl.channel, tile=addr,
+        method=ctrl.method, params=eff, algorithm_version=BG_CORRECTION_ALGO_VERSION,
+        quality=ctrl.quality,
+    )
+
+
+# ── D1. Finer-level tiles hidden after zoom-out (bug 2 regression) ─────────
+
+def test_finer_level_tiles_hidden_after_zoom_out(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ts = ctrl.grid.tile_size
+
+    rect0 = ExploreView.world_rect(0, 0, ts, ts, 1.0, 1.0)
+    arr = np.zeros((ts, ts), dtype=np.uint8)
+    ctrl._raw_pool.put(0, 0, 0, rect0, arr, key=None)
+    ctrl._precise_pool.put(0, 0, 0, rect0, arr, key=None)
+
+    rect1 = ExploreView.world_rect(0, 0, ts, ts, 4.0, 4.0)
+    ctrl._raw_pool.put(1, 0, 0, rect1, arr, key=None)
+    ctrl._precise_pool.put(1, 0, 0, rect1, arr, key=None)
+
+    # Zoom OUT: level 0 (finer) tiles are now stale relative to level 1.
+    ctrl.level = 1
+    ctrl._visible_tiles = {(0, 0)}
+    ctrl._update_layer_visibility()
+
+    assert ctrl._raw_pool.get(0, 0, 0).item.isVisible() is False
+    assert ctrl._precise_pool.get(0, 0, 0).item.isVisible() is False
+    # The level-1 raw item is at the current level -> visible (no method
+    # selected, raw always shown).
+    assert ctrl._raw_pool.get(1, 0, 0).item.isVisible() is True
+
+    ctrl.teardown()
+
+
+# ── D2. Corrected mode never shows raw stage during motion (bug 1) ─────────
+
+def test_corrected_mode_never_shows_raw_stage_during_motion(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # 2x2 tiles at ts=512
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    assert raw_reqs
+    for req, _cb in raw_reqs:
+        arr = raw_arr_for(provider, req.key.tile.level, req.key.tile.tx, req.key.tile.ty)
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    # Force the corrected floor ready for the LIVE selection context,
+    # bypassing the async compute path.
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._floor_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._floor_ready = True
+
+    # Seed one coarser-level precise entry whose key matches the CURRENT
+    # selection context (a legitimate sharper-than-floor fallback).
+    ts = ctrl.grid.tile_size
+    coarse_level = ctrl.level + 1
+    ds = provider.level_downsample(coarse_level)
+    coarse_key = _make_correction_key_for(ctrl, provider, coarse_level, 0, 0, ctrl.params)
+    coarse_rect = ExploreView.world_rect(0, 0, ts, ts, ds, ds)
+    ctrl._precise_pool.put(coarse_level, 0, 0, coarse_rect, np.zeros((ts, ts), dtype=np.uint8), coarse_key)
+
+    # Deliver only ONE of the current-level precise tiles: coverage stays
+    # incomplete (this is the "motion" moment -- coverage breaks).
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    assert len(precise_reqs) >= 2
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(precise_reqs[0][0], arr)
+    _pump(20)
+
+    assert ctrl._precise_visible is False  # coverage incomplete
+
+    for entry in ctrl._raw_pool.entries.values():
+        assert entry.item.isVisible() is False, "raw stage must never show once the floor is ready"
+    assert view.corrected_floor_item.isVisible() is True
+
+    cur_level_precise = [e for e in ctrl._precise_pool.entries.values() if e.level == ctrl.level]
+    assert cur_level_precise
+    assert all(e.item.isVisible() is False for e in cur_level_precise)
+
+    coarse_entry = ctrl._precise_pool.get(coarse_level, 0, 0)
+    assert coarse_entry.item.isVisible() is True
+
+    ctrl.teardown()
+
+
+# ── D3. Raw shown as honest fallback when the floor is not ready ──────────
+
+def test_raw_shown_when_floor_not_ready(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    raw_reqs = scheduler.pending_for(RawKey)
+    for req, _cb in raw_reqs:
+        arr = raw_arr_for(provider, req.key.tile.level, req.key.tile.tx, req.key.tile.ty)
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    ctrl._floor_ready = False
+    ctrl._update_layer_visibility()
+
+    cur_level_raw = [e for e in ctrl._raw_pool.entries.values() if e.level == ctrl.level]
+    assert cur_level_raw
+    assert all(e.item.isVisible() is True for e in cur_level_raw)
+    assert view.corrected_floor_item.isVisible() is False
+
+    ctrl.teardown()
+
+
+# ── D4. Floor invalidated immediately by a selection change ───────────────
+
+def test_floor_invalidated_by_selection_change(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._floor_ctx = ctrl._current_floor_ctx(floor_level, stride)
+    ctrl._floor_ready = True
+    ctrl._update_layer_visibility()
+    assert view.corrected_floor_item.isVisible() is True
+
+    ctrl.set_selection(method="cucim", params=(8,))
+
+    assert ctrl._floor_ready is False
+    assert view.corrected_floor_item.isVisible() is False
+
+    ctrl.teardown()
+
+
+# ── D4b. Floor deferred until load_overview() fixes the display levels ────
+
+def test_floor_deferred_until_display_levels_fixed(app):
+    """A host that selects a method BEFORE load_overview() must not get a
+    floor quantized against the placeholder (0.0, 1.0) display range --
+    that would paint a saturated-white floor over the whole slide. The
+    floor job is deferred; load_overview() starts it."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+
+    started = []
+    real_start = ctrl._start_floor_job
+    ctrl._start_floor_job = lambda gen: started.append(gen)
+
+    # No overview yet -> deferred, but honestly reported as "preparing".
+    preparing = []
+    ctrl.floor_preparing_changed.connect(preparing.append)
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert started == []
+    assert preparing[-1] is True
+    assert ctrl._floor_ready is False
+    assert view.corrected_floor_item.isVisible() is False
+
+    # load_overview() fixes _display_lo/_display_hi and re-enters.
+    ctrl.load_overview()
+    assert len(started) == 1
+
+    ctrl._start_floor_job = real_start
+    ctrl.teardown()
+
+
+# ── D5. Stale floor result (out-of-date generation token) dropped ─────────
+
+def test_stale_floor_result_dropped(app):
+    # Set method/params WITHOUT going through set_selection (which would
+    # spawn a real -- if fast -- floor-compute thread and race the manual
+    # stale-token delivery below); this test is only about the generation
+    # guard in `_handle_floor_result`.
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.method = "tophat"
+    ctrl.params = (10,)
+
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctrl._floor_level = floor_level
+    ctrl._floor_stride = stride
+    ctrl._floor_gen = 5  # simulate a live generation ahead of the stale one
+
+    ctx = ctrl._current_floor_ctx(floor_level, stride)
+    arr = np.zeros((64, 64), dtype=np.float32)
+    ctrl._floor_delivered.emit((4, ctx, floor_level, stride, arr, None))
+    _pump(20)
+
+    assert ctrl._floor_ready is False
+    assert view.corrected_floor_item.isVisible() is False
+
+    ctrl.teardown()
+
+
+# ── D6. Stale coarse precise tile hidden after a param change ─────────────
+
+def test_stale_coarse_precise_hidden_after_param_change(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    ts = ctrl.grid.tile_size
+    coarse_level = ctrl.level + 1
+    ds = provider.level_downsample(coarse_level)
+    key = _make_correction_key_for(ctrl, provider, coarse_level, 0, 0, (10,))
+    rect = ExploreView.world_rect(0, 0, ts, ts, ds, ds)
+    ctrl._precise_pool.put(coarse_level, 0, 0, rect, np.zeros((ts, ts), dtype=np.uint8), key)
+
+    ctrl._update_layer_visibility()
+    assert ctrl._precise_pool.get(coarse_level, 0, 0).item.isVisible() is True
+
+    ctrl.set_selection(params=(99,))
+    ctrl._update_layer_visibility()
+    assert ctrl._precise_pool.get(coarse_level, 0, 0).item.isVisible() is False
+
+    ctrl.teardown()
+
+
+# ── D7. Exactly one floor job in flight; coalesced request runs latest ────
+
+def test_only_one_floor_job_in_flight(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+
+    enter_event = threading.Event()
+    release_event = threading.Event()
+    calls = []
+    lock = threading.Lock()
+
+    def blocking_correct_array(arr, method, param):
+        with lock:
+            calls.append((method, param))
+        enter_event.set()
+        release_event.wait(timeout=5.0)
+        return arr.astype(np.float32, copy=False)
+
+    ctrl.compute.correct_array = blocking_correct_array
+
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert enter_event.wait(timeout=2.0)
+    with lock:
+        assert len(calls) == 1
+
+    # A second selection arrives while the first job is still blocked
+    # inside correct_array -- it must NOT start a second worker thread.
+    enter_event.clear()
+    ctrl.set_selection(method="tophat", params=(20,))
+    _pump(50)
+    with lock:
+        assert len(calls) == 1, "a second floor job started while the first was still in flight"
+    assert ctrl._floor_pending is True
+
+    # Release the first (now-stale) job -> its result is dropped, and the
+    # pending (latest) job starts and runs to completion.
+    release_event.set()
+    deadline = time.time() + 3.0
+    while len(calls) < 2 and time.time() < deadline:
+        _pump(20)
+    with lock:
+        assert len(calls) == 2
+        assert calls[0] != calls[1]
+
+    deadline = time.time() + 3.0
+    while ctrl._floor_job_running and time.time() < deadline:
+        _pump(20)
+
+    assert ctrl._floor_ready is True
+    assert ctrl._floor_ctx == ctrl._current_floor_ctx(ctrl._floor_level, ctrl._floor_stride)
 
     ctrl.teardown()

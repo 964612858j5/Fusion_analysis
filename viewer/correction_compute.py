@@ -83,6 +83,19 @@ class CorrectionCompute:
             for tx, ty in coords
         ]
 
+    def correct_array(self, arr: np.ndarray, method: str, param: int) -> np.ndarray:
+        """Run the background-correction kernel for `method` on a whole
+        float32 array (no tiling, no halo -- the caller passes a complete
+        region so there is no seam to pad against). Same kernels as
+        `compute()`, so floor and tile numerics never diverge."""
+        arr_f32 = arr.astype(np.float32, copy=False)
+        if method == "tophat":
+            return bg_correction._apply_tophat_gpu_or_cpu(arr_f32, param)
+        elif method == "cucim":
+            return bg_correction._apply_cucim_or_cpu(arr_f32, param, prefer_gpu=True)
+        else:
+            raise ValueError(f"CorrectionCompute does not handle method {method!r}")
+
     def compute(self, key: CorrectionKey) -> TileResult:
         """Run the correction for `key.method` and return a TileResult.
 
@@ -114,12 +127,7 @@ class CorrectionCompute:
         core_x1 = min(core_x1, w)
 
         t1 = time.perf_counter()
-        if key.method == "tophat":
-            corrected = bg_correction._apply_tophat_gpu_or_cpu(padded, param)
-        elif key.method == "cucim":
-            corrected = bg_correction._apply_cucim_or_cpu(padded, param, prefer_gpu=True)
-        else:
-            raise ValueError(f"CorrectionCompute does not handle method {key.method!r}")
+        corrected = self.correct_array(padded, key.method, param)
         kernel_ms = (time.perf_counter() - t1) * 1000.0
 
         cropped = corrected[core_y0:core_y1, core_x0:core_x1]

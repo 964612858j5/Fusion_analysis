@@ -1,0 +1,741 @@
+{
+  "path": "/sda1/Albert/fusion/20260210/20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif",
+  "channel_index": 1,
+  "channel_name": "CD15",
+  "quick": false,
+  "args": {
+    "path": "/sda1/Albert/fusion/20260210/20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif",
+    "channel_index": 1,
+    "methods": [
+      "tophat",
+      "cucim"
+    ],
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "io_workers": 8,
+    "compute_workers": 4,
+    "out": "/tmp/claude-0/-sda1-Fusion-analysis-pipline-block01-v14/a685ea1e-9e71-4e7f-88be-de32aba6be09/scratchpad/bench_full.json",
+    "quick": false,
+    "timeout": 60.0
+  },
+  "measurements": [
+    {
+      "id": "viewport.window_chosen",
+      "label": "measured",
+      "description": "tissue window chosen by block-means over a coarse overview level (explore_view.py::_pick_calibration_windows logic)",
+      "value": {
+        "overview_level": 2,
+        "ty0": 50,
+        "tx0": 35,
+        "y0_l0": 25600,
+        "x0_l0": 17920,
+        "rows": 5,
+        "cols": 4,
+        "n_tiles": 20,
+        "channel_index": 1,
+        "channel_name": "CD15"
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.rss_mb.start",
+      "label": "measured",
+      "description": "process RSS at start",
+      "value": 349.01953125,
+      "unit": "MB",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_mem.start",
+      "label": "measured",
+      "description": "GPU memory (cupy mempool) at start",
+      "value": {
+        "used_mb": 0.0,
+        "total_mb": 0.00341796875
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.cupy_available",
+      "label": "measured",
+      "description": "cupy import",
+      "value": true,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_morph_available",
+      "label": "measured",
+      "description": "bg_correction.GPU_MORPH_AVAILABLE (whether the GPU kernels actually engaged, vs CPU fallback)",
+      "value": true,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.tophat.first_tile_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=tophat: first-tile",
+      "value": 115.12671201489866,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.tophat.full_coverage_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=tophat: full-coverage (20 tiles) \u2014 this is the CORRECTNESS ground truth for all parallel/batched comparisons below",
+      "value": 214.48981785215437,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "profiling.baseline.tophat",
+      "label": "measured",
+      "description": "per-tile profiling breakdown (baseline.tophat): TIFF read / halo staging / GPU kernel (incl. transfers, not separable) / Python overhead",
+      "value": {
+        "n_tiles": 20,
+        "tiff_read_io_ms_total": 162.10488742217422,
+        "halo_staging_ms_total": 0.0,
+        "gpu_kernel_ms_total_incl_transfers": 36.38512152247131,
+        "host_device_transfer_ms": "not separable \u2014 kernel_includes_transfers=True (CorrectionCompute.compute)",
+        "wall_ms_total": 214.32381100021303,
+        "python_scheduling_overhead_ms_total": 15.833802055567503,
+        "python_overhead_fraction_of_wall": 0.07387794189396793
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.cucim.first_tile_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=cucim: first-tile",
+      "value": 90.8373270649463,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "baseline.cucim.full_coverage_ms",
+      "label": "measured",
+      "description": "SEQUENTIAL (single-threaded) baseline, method=cucim: full-coverage (20 tiles) \u2014 this is the CORRECTNESS ground truth for all parallel/batched comparisons below",
+      "value": 200.4923599306494,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "profiling.baseline.cucim",
+      "label": "measured",
+      "description": "per-tile profiling breakdown (baseline.cucim): TIFF read / halo staging / GPU kernel (incl. transfers, not separable) / Python overhead",
+      "value": {
+        "n_tiles": 20,
+        "tiff_read_io_ms_total": 143.73793988488615,
+        "halo_staging_ms_total": 0.0,
+        "gpu_kernel_ms_total_incl_transfers": 39.10806565545499,
+        "host_device_transfer_ms": "not separable \u2014 kernel_includes_transfers=True (CorrectionCompute.compute)",
+        "wall_ms_total": 200.27947216294706,
+        "python_scheduling_overhead_ms_total": 17.43346662260592,
+        "python_overhead_fraction_of_wall": 0.08704569886434531
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.tophat.first_tile_ms",
+      "label": "measured",
+      "description": "first-tile wall time, method=tophat",
+      "value": 157.2394878603518,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.tophat.full_coverage_ms",
+      "label": "measured",
+      "description": "full-coverage wall time (20 tiles), method=tophat",
+      "value": 246.62518012337387,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.cucim.first_tile_ms",
+      "label": "measured",
+      "description": "first-tile wall time, method=cucim",
+      "value": 87.2020679526031,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "viewport.cucim.full_coverage_ms",
+      "label": "measured",
+      "description": "full-coverage wall time (20 tiles), method=cucim",
+      "value": 196.49799400940537,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=tophat: full-coverage (20 tiles)",
+      "value": 185.78147911466658,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=tophat: first-tile",
+      "value": 85.23717895150185,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.warm.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache WARM (same raw tiles reused), method=tophat: full-coverage",
+      "value": 38.70010003447533,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "corrected-tile compute still re-runs the kernel; only raw I/O is warm"
+    },
+    {
+      "id": "cache.warm.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache WARM, method=tophat: first-tile",
+      "value": 4.469036823138595,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold_vs_warm.max_abs_diff",
+      "label": "measured",
+      "description": "correctness: cold-cache vs warm-cache corrected pixels for same tiles",
+      "value": 0.0,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": "compared=20, missing=0"
+    },
+    {
+      "id": "cache.raw_cache.stats_after_cold_and_warm",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the raw cache after cold+warm runs",
+      "value": {
+        "hits": 318,
+        "misses": 42,
+        "evictions": 0,
+        "bytes": 11010048,
+        "items": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=cucim: full-coverage (20 tiles)",
+      "value": 352.9469450004399,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache COLD, method=cucim: first-tile",
+      "value": 249.11966104991734,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.warm.full_coverage_ms",
+      "label": "measured",
+      "description": "raw cache WARM (same raw tiles reused), method=cucim: full-coverage",
+      "value": 29.765862971544266,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "corrected-tile compute still re-runs the kernel; only raw I/O is warm"
+    },
+    {
+      "id": "cache.warm.first_tile_ms",
+      "label": "measured",
+      "description": "raw cache WARM, method=cucim: first-tile",
+      "value": 2.8743059374392033,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "cache.cold_vs_warm.max_abs_diff",
+      "label": "measured",
+      "description": "correctness: cold-cache vs warm-cache corrected pixels for same tiles",
+      "value": 0.0,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": "compared=20, missing=0"
+    },
+    {
+      "id": "cache.raw_cache.stats_after_cold_and_warm",
+      "label": "measured",
+      "description": "LRUByteCache.stats() for the raw cache after cold+warm runs",
+      "value": {
+        "hits": 318,
+        "misses": 42,
+        "evictions": 0,
+        "bytes": 11010048,
+        "items": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.tophat.n1.aggregate_ms",
+      "label": "measured",
+      "description": "batch=1 channels method=tophat: aggregate wall time for all 1 channel(s) x 20 tiles concurrently",
+      "value": 999.6389609295875,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.tophat.n1.per_channel_ms",
+      "label": "measured",
+      "description": "batch=1 method=tophat: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "1": 226.82724287733436
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.tophat.n2.aggregate_ms",
+      "label": "measured",
+      "description": "batch=2 channels method=tophat: aggregate wall time for all 2 channel(s) x 20 tiles concurrently",
+      "value": 1081.9089030846953,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.tophat.n2.per_channel_ms",
+      "label": "measured",
+      "description": "batch=2 method=tophat: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 236.2651559524238,
+        "1": 333.5369690321386
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.tophat.n4.aggregate_ms",
+      "label": "measured",
+      "description": "batch=4 channels method=tophat: aggregate wall time for all 4 channel(s) x 20 tiles concurrently",
+      "value": 1320.5852850805968,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.tophat.n4.per_channel_ms",
+      "label": "measured",
+      "description": "batch=4 method=tophat: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 203.40877515263855,
+        "3": 252.85583804361522,
+        "4": 295.35298701375723,
+        "1": 451.3685230631381
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.tophat.n8.aggregate_ms",
+      "label": "measured",
+      "description": "batch=8 channels method=tophat: aggregate wall time for all 8 channel(s) x 20 tiles concurrently",
+      "value": 1986.1941328272223,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.tophat.n8.per_channel_ms",
+      "label": "measured",
+      "description": "batch=8 method=tophat: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 247.74192296899855,
+        "3": 296.96161299943924,
+        "4": 354.36209198087454,
+        "5": 420.3357179649174,
+        "6": 470.9437459241599,
+        "7": 514.1661318484694,
+        "8": 561.0258199740201,
+        "1": 911.4696579053998
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.cucim.n1.aggregate_ms",
+      "label": "measured",
+      "description": "batch=1 channels method=cucim: aggregate wall time for all 1 channel(s) x 20 tiles concurrently",
+      "value": 1000.2308320254087,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.cucim.n1.per_channel_ms",
+      "label": "measured",
+      "description": "batch=1 method=cucim: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "1": 170.0209081172943
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.cucim.n2.aggregate_ms",
+      "label": "measured",
+      "description": "batch=2 channels method=cucim: aggregate wall time for all 2 channel(s) x 20 tiles concurrently",
+      "value": 1882.3543170001358,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.cucim.n2.per_channel_ms",
+      "label": "measured",
+      "description": "batch=2 method=cucim: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 198.87802377343178,
+        "1": 316.8231488671154
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.cucim.n4.aggregate_ms",
+      "label": "measured",
+      "description": "batch=4 channels method=cucim: aggregate wall time for all 4 channel(s) x 20 tiles concurrently",
+      "value": 1088.11063808389,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.cucim.n4.per_channel_ms",
+      "label": "measured",
+      "description": "batch=4 method=cucim: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 105.36564001813531,
+        "3": 138.1592641118914,
+        "4": 190.2297679334879,
+        "1": 325.8109549060464
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "batch.cucim.n8.aggregate_ms",
+      "label": "measured",
+      "description": "batch=8 channels method=cucim: aggregate wall time for all 8 channel(s) x 20 tiles concurrently",
+      "value": 1815.4253389220685,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "correctness vs seq baseline (channel 1 only): max_abs_diff=0.0, compared=20, missing=0"
+    },
+    {
+      "id": "batch.cucim.n8.per_channel_ms",
+      "label": "measured",
+      "description": "batch=8 method=cucim: per-channel share of aggregate (wall clock is shared across concurrent channels, not additive)",
+      "value": {
+        "2": 182.29212006554008,
+        "3": 237.7346740104258,
+        "4": 269.6214239113033,
+        "5": 305.25610293261707,
+        "6": 342.6055060699582,
+        "7": 394.7905311360955,
+        "8": 426.33825191296637,
+        "1": 777.7628710027784
+      },
+      "unit": "ms (first-tile-of-channel arrival time)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "workers.defaults",
+      "label": "measured",
+      "description": "current default worker configuration under test (NOT changed by this script)",
+      "value": {
+        "io_workers": 8,
+        "compute_workers": 4
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "workers.compute1.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=8 compute_workers=1: full-coverage (20 tiles, 1 channel) wall time",
+      "value": 916.6747329290956,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "workers.compute2.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=8 compute_workers=2: full-coverage (20 tiles, 1 channel) wall time",
+      "value": 954.9156210850924,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "NOT faster than previous step (no help or noise)"
+    },
+    {
+      "id": "workers.compute4.full_coverage_ms",
+      "label": "measured",
+      "description": "io_workers=8 compute_workers=4: full-coverage (20 tiles, 1 channel) wall time",
+      "value": 986.5069028455764,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "NOT faster than previous step (no help or noise)"
+    },
+    {
+      "id": "neighbor.+-1.p95_ms",
+      "label": "measured",
+      "description": "neighbour +-1 full-coverage prep time from settled state (1 rep(s) x 2 offset(s), n=2)",
+      "value": 921.730875375215,
+      "unit": "ms",
+      "target": 500.0,
+      "verdict": "NOT MET",
+      "notes": "samples_ms=[965.1666330173612, 96.45148017443717]"
+    },
+    {
+      "id": "neighbor.+-2.p95_ms",
+      "label": "measured",
+      "description": "neighbour +-2 full-coverage prep time from settled state (1 rep(s) x 2 offset(s), n=2)",
+      "value": 114.70534707186744,
+      "unit": "ms",
+      "target": 1000.0,
+      "verdict": "MET",
+      "notes": "samples_ms=[108.87305182404816, 115.0123099796474]"
+    },
+    {
+      "id": "far_click.full_coverage_ms",
+      "label": "measured",
+      "description": "FAR channel promoted to top priority while HOT + 8 background channels are queued: time to finish its own 20-tile viewport",
+      "value": 354.4368629809469,
+      "unit": "ms",
+      "target": 2000.0,
+      "verdict": "MET",
+      "notes": null
+    },
+    {
+      "id": "bg_degradation.alone_ms",
+      "label": "measured",
+      "description": "HOT channel full-coverage, NO background load",
+      "value": 984.0390719473362,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "bg_degradation.with_bg_ms",
+      "label": "measured",
+      "description": "HOT channel full-coverage, WITH 8 background channels queued",
+      "value": 953.4635760355741,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "bg_degradation.fraction",
+      "label": "measured",
+      "description": "fractional degradation of HOT full-coverage time due to concurrent background load",
+      "value": -0.03107142468566376,
+      "unit": null,
+      "target": 0.1,
+      "verdict": "MET",
+      "notes": null
+    },
+    {
+      "id": "cancellation.stop_latency_ms",
+      "label": "measured",
+      "description": "time from cancel_generation() call to the LAST 'cancelled' delivery (i.e. how long queued-but-not-started work kept arriving as cancelled rather than being run), observed after a 1.0s quiet period with no further deliveries",
+      "value": 124.23080508597195,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "n_queued_total=200, n_delivered_cancelled=196, n_delivered_completed=0 (already-running work that finished and whose waiter happened to still be live), n_never_delivered=4 (already-running-at-cancel-time work that completed AFTER its waiter went stale \u2014 scheduler contract skips delivery entirely for these, so no callback and no timing sample exists for them; this is not a script bug)"
+    },
+    {
+      "id": "shared_staging.independent.hits_misses",
+      "label": "measured",
+      "description": "independent per-method raw caches: total raw-tile hits/misses across both methods",
+      "value": {
+        "hits": 276,
+        "misses": 84
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "shared_staging.shared.hits_misses",
+      "label": "measured",
+      "description": "single shared raw cache across both methods: total raw-tile hits/misses",
+      "value": {
+        "hits": 318,
+        "misses": 42
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "shared_staging.io_reduction_fraction",
+      "label": "measured",
+      "description": "fractional reduction in raw-tile MISSES from sharing staged raw input between tophat and cucim vs computing them independently",
+      "value": 0.5,
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "streams.default_stream_ms",
+      "label": "measured",
+      "description": "n_parallel=4 compute threads sharing cupy's implicit default stream: median wall time (3 reps)",
+      "value": 7.729068864136934,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "samples=[7.9999330919235945, 7.729068864136934, 7.018059026449919]"
+    },
+    {
+      "id": "streams.explicit_streams_ms",
+      "label": "measured",
+      "description": "n_parallel=4 compute threads each binding its own cp.cuda.Stream(): median wall time (3 reps)",
+      "value": 11.090601095929742,
+      "unit": "ms",
+      "target": null,
+      "verdict": null,
+      "notes": "samples=[10.098638944327831, 12.197535019367933, 11.090601095929742]"
+    },
+    {
+      "id": "streams.verdict",
+      "label": "measured",
+      "description": "explicit per-thread streams measured SLOWER than the shared default stream",
+      "value": -3.3615322317928076,
+      "unit": "ms (default - explicit)",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.rss_mb.end",
+      "label": "measured",
+      "description": "process RSS at end",
+      "value": 1604.484375,
+      "unit": "MB",
+      "target": null,
+      "verdict": null,
+      "notes": null
+    },
+    {
+      "id": "env.gpu_mem.end",
+      "label": "measured",
+      "description": "GPU memory (cupy mempool) at end",
+      "value": {
+        "used_mb": 0.0,
+        "total_mb": 118.88916015625
+      },
+      "unit": null,
+      "target": null,
+      "verdict": null,
+      "notes": null
+    }
+  ]
+}

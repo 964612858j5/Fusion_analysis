@@ -124,10 +124,19 @@ def tiles_covering(bbox: Tuple[int, int, int, int], tile_size: int) -> Set[Tuple
 
 @dataclass(frozen=True)
 class TileRequest:
-    """A single ask for a tile. `generation` gates delivery only, never dedup."""
+    """A single ask for a tile. `generation` gates delivery only, never dedup.
+
+    `generation` is an OPAQUE, hashable token -- not necessarily an int. The
+    scheduler only ever compares generations by equality / set membership
+    (`cancel_generation` adds a token to a stale-set; delivery checks
+    membership), so callers are free to use namespaced tokens such as
+    `("raw", n)` / `("precise", n)` to keep independent generation counters
+    from colliding when both happen to reach the same small integer (e.g. a
+    view-generation counter and a settled/precise-generation counter).
+    """
 
     key: TileKey
-    generation: int
+    generation: object
     priority: int  # 0 = visible-center ... higher = prefetch ring
     deadline_ms: Optional[int] = None
 

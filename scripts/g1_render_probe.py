@@ -59,13 +59,12 @@ _register_block01_alias()
 
 FRAME_BUDGET_MS = 1000.0 / 60.0  # 16.7ms
 WINDOW_MS = FRAME_BUDGET_MS
-BLIT_MODES = ("float_full", "uint8_full", "uint8_incremental")
 
 
 def aggregate_windows(frame_events, window_ms=WINDOW_MS):
     """Frame aggregation (measured-only; NOT exact vsync frames): bucket
-    (timestamp, cost_ms) samples -- tagging BOTH range_handler and blit_tick
-    work -- into `window_ms`-wide windows by wall-clock time, sum the cost
+    (timestamp, cost_ms) samples -- tagging range_handler, request_issue, and
+    tile_item_update work -- into `window_ms`-wide windows by wall-clock time, sum the cost
     within each window, and report the per-window summed-cost distribution.
     This replaces the earlier worst-case-sum caveat (p95(range) + p95(blit))
     with a real per-window total, still window-aggregation rather than a
@@ -139,7 +138,7 @@ def run_scripted_sequence(ctrl, view, provider, seed=0):
         t_raw0 = time.perf_counter()
         view.view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
         QtTest.QTest.qWait(5)
-        deadline = time.time() + 5.0
+        deadline = time.time() + 3.0
         while ctrl.stats["raw_tiles_blitted"] == raw_before and time.time() < deadline:
             QtTest.QTest.qWait(5)
         if ctrl.stats["raw_tiles_blitted"] > raw_before:
@@ -153,14 +152,20 @@ def run_scripted_sequence(ctrl, view, provider, seed=0):
         if ctrl.stats["precise_tiles_blitted"] > precise_before:
             timings["precise_fill_latencies_ms"].append((time.perf_counter() - t_precise0) * 1000.0)
 
-    # 30 pan steps of 1/8 viewport.
+    # 30 pan steps of 1/8 viewport. Fill latency is SAMPLED on every 4th
+    # step (waiting for raw+precise on all 30 made the scripted run exceed
+    # practical wall time on cold data); other steps only advance the camera.
     step = max(1, vp // 8)
     for i in range(30):
         dx = step if i % 2 == 0 else 0
         dy = 0 if i % 2 == 0 else step
         x0, x1 = x0 + dx, x1 + dx
         y0, y1 = y0 + dy, y1 + dy
-        set_range_and_measure_fill(y0, x0, y1, x1)
+        if i % 4 == 0:
+            set_range_and_measure_fill(y0, x0, y1, x1)
+        else:
+            view.view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+            QtTest.QTest.qWait(50)
 
     # 5 zoom-in steps.
     for _ in range(5):
@@ -190,121 +195,12 @@ def run_scripted_sequence(ctrl, view, provider, seed=0):
     return timings
 
 
-def run_compare_blit_modes(provider, scheduler, compute, grid, channel, app):
-    """Run the SAME scripted sequence once per blit_mode, in order
-    (float_full, uint8_full, uint8_incremental), against a fresh
-    ExploreController/ExploreView each time. The provider/scheduler/compute
-    stack is REUSED across modes (deliberate, per the approved plan) -- so
-    raw/precise tile results are cache-warm for every mode after the first;
-    this is noted explicitly in the report and does not affect the
-    blit-path costs being measured (those live entirely downstream of the
-    scheduler callback, in the controller/view). Only the LAST mode's
-    controller does a full teardown (scheduler.shutdown + provider.close);
-    earlier modes stop their own timers/signals only, via
-    `teardown(shutdown_backend=False)`."""
-    from block01.viewer.explore_view import ExploreController, ExploreView
-
-    rows = []
-    for i, mode in enumerate(BLIT_MODES):
-        view = ExploreView()
-        view.resize(1024, 768)
-        view.show()
-        app.processEvents()
-
-        ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
-                                  settle_ms=80, probe=True, blit_mode=mode)
-        ctrl.set_selection(method="tophat", params=(25,))
-        run_scripted_sequence(ctrl, view, provider, seed=0)
-
-        blit_ms = ctrl.timings["blit_tick_ms"]
-        window_agg = aggregate_windows(ctrl.timings["frame_events"])
-        rows.append({
-            "mode": mode,
-            "blit_tick_p50": pct(blit_ms, 50),
-            "blit_tick_p95": pct(blit_ms, 95),
-            "set_image_p50": pct(ctrl.timings["set_image_ms"], 50),
-            "set_image_p95": pct(ctrl.timings["set_image_ms"], 95),
-            "tile_convert_p50": pct(ctrl.timings["tile_convert_ms"], 50),
-            "tile_convert_p95": pct(ctrl.timings["tile_convert_ms"], 95),
-            "window_p95": window_agg["p95"],
-            "windows_over_budget": window_agg["over_budget"],
-            "n_windows": window_agg["n_windows"],
-            "rgba_canvas_allocs": ctrl.stats["rgba_canvas_allocs"],
-        })
-
-        is_last = (i == len(BLIT_MODES) - 1)
-        ctrl.teardown(shutdown_backend=is_last)
-        view.close()
-
-    return rows
-
-
-def write_compare_report(out_dir, args, offscreen, channel, rows):
-    os.makedirs(out_dir, exist_ok=True)
-    json_path = os.path.join(out_dir, "g1_render_probe_compare.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "dataset_path": os.path.abspath(args.path),
-            "channel": channel,
-            "environment": environment_block(offscreen),
-            "note": ("provider/scheduler/compute stack reused across modes -- "
-                     "caches are warm equally for every mode after the first"),
-            "rows": rows,
-            "measured_only": True,
-        }, f, indent=2, default=str)
-
-    md_path = os.path.join(out_dir, "g1_render_probe_compare.md")
-    cols = [
-        ("mode", "mode"),
-        ("blit_tick p50/p95", None),
-        ("set_image p50/p95", None),
-        ("tile_convert p50/p95", None),
-        ("window-agg p95", "window_p95"),
-        ("windows over budget", None),
-        ("rgba_canvas_allocs", "rgba_canvas_allocs"),
-    ]
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write("# G1-render blit-mode comparison (measured-only)\n\n")
-        f.write(f"Dataset: `{os.path.abspath(args.path)}`  Channel: `{channel}`\n\n")
-        f.write("Provider/scheduler/compute stack reused across modes: caches "
-                "are warm equally for every mode from mode 2 onward (not a "
-                "cold-cache comparison).\n\n")
-        f.write("| mode | blit_tick p50/p95 (ms) | set_image p50/p95 (ms) | "
-                "tile_convert p50/p95 (ms) | window-agg p95 (ms) | "
-                "windows over budget | rgba_canvas_allocs |\n")
-        f.write("|---|---|---|---|---|---|---|\n")
-        for row in rows:
-            f.write(
-                f"| {row['mode']} "
-                f"| {fmt(row['blit_tick_p50'])}/{fmt(row['blit_tick_p95'])} "
-                f"| {fmt(row['set_image_p50'])}/{fmt(row['set_image_p95'])} "
-                f"| {fmt(row['tile_convert_p50'])}/{fmt(row['tile_convert_p95'])} "
-                f"| {fmt(row['window_p95'])} "
-                f"| {row['windows_over_budget']}/{row['n_windows']} "
-                f"| {row['rgba_canvas_allocs']} |\n"
-            )
-        f.write("\n(measured-only; window-agg is 16.7ms-bucket-summed cost, "
-                "not exact vsync frames.)\n")
-
-    print(md_path)
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--path", required=True)
     ap.add_argument("--channel", required=True, help="channel name or integer index")
     ap.add_argument("--out", default="/tmp/g1_render_probe")
     ap.add_argument("--offscreen", action="store_true")
-    ap.add_argument("--blit-mode", choices=BLIT_MODES, default="uint8_incremental",
-                     help="ExploreController blit_mode to measure (default: "
-                          "uint8_incremental, the stage-B persistent-canvas path).")
-    ap.add_argument("--compare-blit-modes", action="store_true",
-                     help="Run the SAME scripted sequence once per blit_mode "
-                          "(fresh controller/view per mode; the provider/"
-                          "scheduler/compute stack IS reused across modes, so "
-                          "caches are warm equally from mode 2 onward -- noted "
-                          "in the report) and print a comparison table instead "
-                          "of the single-mode report.")
     args = ap.parse_args()
 
     offscreen = args.offscreen or not os.environ.get("DISPLAY")
@@ -339,40 +235,39 @@ def main():
                                io_workers=1, compute_workers=1)
     grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
 
-    if args.compare_blit_modes:
-        rows = run_compare_blit_modes(provider, scheduler, compute, grid, channel, app)
-        write_compare_report(args.out, args, offscreen, channel, rows)
-        return
-
     view = ExploreView()
     view.resize(1024, 768)
     view.show()
     app.processEvents()
 
     ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
-                              settle_ms=80, probe=True, blit_mode=args.blit_mode)
+                              settle_ms=80, probe=True)
     ctrl.set_selection(method="tophat", params=(25,))
 
     fill_timings = run_scripted_sequence(ctrl, view, provider, seed=0)
 
-    # Two real per-frame costs, measured separately (finding 3):
-    #   range_handler_ms -- the range-changed handler (level pick, raw
-    #                        request issuance, canvas resize).
-    #   blit_tick_ms      -- the coalesced tick: canvas->RGBA compose +
-    #                        setImage + setRect for every dirty layer.
-    # The two costs are NOT 1:1 per frame (blit ticks fire only when dirty
-    # and can outnumber or undernumber range handlers), so index-pairing
-    # would be a methodology error. We report each distribution separately
-    # plus a conservative WORST-CASE frame estimate = p95(range) + p95(blit)
-    # (upper bound: assumes both worst halves land in one frame). Over-budget
-    # counts are reported per distribution.
+    # Two real per-frame costs, measured separately:
+    #   range_handler_ms  -- the (cheap, un-debounced) sigRangeChanged
+    #                        handler: level pick, wanted-tile-set recompute,
+    #                        prune check.
+    #   request_issue_ms  -- the debounced (30ms motion timer) callback that
+    #                        actually issues raw tile requests.
+    # tile_item_update_ms (quantize + setImage + setRect per delivered
+    # tile) is the third real cost, reported separately below since it is
+    # per-TILE, not per-frame.
+    # The three costs are NOT 1:1 per frame, so index-pairing across them
+    # would be a methodology error; each distribution is reported
+    # separately plus a conservative WORST-CASE frame estimate =
+    # p95(range) + p95(request_issue) (upper bound: assumes both worst
+    # halves land in one frame).
     range_ms = ctrl.timings["range_handler_ms"]
-    blit_ms = ctrl.timings["blit_tick_ms"]
+    issue_ms = ctrl.timings["request_issue_ms"]
+    tile_update_ms = ctrl.timings["tile_item_update_ms"]
     def _p(v, q):
         return pct(v, q) or 0.0
-    worst_case_p95 = _p(range_ms, 95) + _p(blit_ms, 95)
+    worst_case_p95 = _p(range_ms, 95) + _p(issue_ms, 95)
     over_budget_range = sum(1 for t in range_ms if t > FRAME_BUDGET_MS)
-    over_budget_blit = sum(1 for t in blit_ms if t > FRAME_BUDGET_MS)
+    over_budget_issue = sum(1 for t in issue_ms if t > FRAME_BUDGET_MS)
 
     window_agg = aggregate_windows(ctrl.timings["frame_events"])
 
@@ -380,27 +275,25 @@ def main():
         "environment": environment_block(offscreen),
         "dataset_path": os.path.abspath(args.path),
         "channel": channel,
-        "blit_mode": args.blit_mode,
-        "rgba_canvas_allocs": ctrl.stats["rgba_canvas_allocs"],
-        "tile_convert_ms_p50": pct(ctrl.timings["tile_convert_ms"], 50),
-        "tile_convert_ms_p95": pct(ctrl.timings["tile_convert_ms"], 95),
-        "set_image_ms_p50": pct(ctrl.timings["set_image_ms"], 50),
-        "set_image_ms_p95": pct(ctrl.timings["set_image_ms"], 95),
+        "items_created": ctrl.stats["items_created"],
+        "items_pruned": ctrl.stats["items_pruned"],
+        "tile_item_update_ms_p50": pct(tile_update_ms, 50),
+        "tile_item_update_ms_p95": pct(tile_update_ms, 95),
         "window_aggregated_p50_ms": window_agg["p50"],
         "window_aggregated_p95_ms": window_agg["p95"],
         "windows_over_budget": window_agg["over_budget"],
         "n_windows": window_agg["n_windows"],
         "n_range_handler_samples": len(range_ms),
-        "n_blit_tick_samples": len(blit_ms),
+        "n_request_issue_samples": len(issue_ms),
         "range_handler_ms_p50": pct(range_ms, 50),
         "range_handler_ms_p95": pct(range_ms, 95),
         "range_handler_ms_max": max(range_ms) if range_ms else None,
-        "blit_tick_ms_p50": pct(blit_ms, 50),
-        "blit_tick_ms_p95": pct(blit_ms, 95),
-        "blit_tick_ms_max": max(blit_ms) if blit_ms else None,
+        "request_issue_ms_p50": pct(issue_ms, 50),
+        "request_issue_ms_p95": pct(issue_ms, 95),
+        "request_issue_ms_max": max(issue_ms) if issue_ms else None,
         "frame_prep_worst_case_p95_ms": worst_case_p95,
         "range_handler_over_budget": over_budget_range,
-        "blit_tick_over_budget": over_budget_blit,
+        "request_issue_over_budget": over_budget_issue,
         "time_to_first_observed_overview_ms": fill_timings["time_to_first_overview_pixel_ms"],
         "time_to_first_observed_raw_fill_ms_p50": pct(fill_timings["raw_fill_latencies_ms"], 50),
         "time_to_first_observed_precise_fill_ms_p50": pct(fill_timings["precise_fill_latencies_ms"], 50),
@@ -433,35 +326,32 @@ def main():
         if offscreen:
             f.write("\n**offscreen: excludes real compositor/vsync — numbers "
                      "measure frame PREP cost only**\n")
-        f.write("\n## Frame prep timing (range_handler + blit_tick)\n\n")
+        f.write("\n## Frame prep timing (range_handler + request_issue)\n\n")
         f.write(f"- n_range_handler_samples: {report['n_range_handler_samples']}, "
-                f"n_blit_tick_samples: {report['n_blit_tick_samples']}\n")
+                f"n_request_issue_samples: {report['n_request_issue_samples']}\n")
         f.write(f"- range_handler_ms: p50={fmt(report['range_handler_ms_p50'])} "
                 f"p95={fmt(report['range_handler_ms_p95'])} "
                 f"max={fmt(report['range_handler_ms_max'])}\n")
-        f.write(f"- blit_tick_ms: p50={fmt(report['blit_tick_ms_p50'])} "
-                f"p95={fmt(report['blit_tick_ms_p95'])} "
-                f"max={fmt(report['blit_tick_ms_max'])}\n")
-        f.write(f"- frame_prep worst-case estimate (p95 range + p95 blit, upper bound): "
+        f.write(f"- request_issue_ms: p50={fmt(report['request_issue_ms_p50'])} "
+                f"p95={fmt(report['request_issue_ms_p95'])} "
+                f"max={fmt(report['request_issue_ms_max'])}\n")
+        f.write(f"- frame_prep worst-case estimate (p95 range + p95 request_issue, upper bound): "
                 f"{fmt(report['frame_prep_worst_case_p95_ms'])} ms\n")
         f.write(f"- over 16.7ms budget: range_handler {report['range_handler_over_budget']}, "
-                f"blit_tick {report['blit_tick_over_budget']} "
-                f"(counted per distribution; blit samples exclude idle ticks)\n")
+                f"request_issue {report['request_issue_over_budget']}\n")
         f.write("\n")
 
-        f.write("## Blit-path breakdown (measured-only)\n\n")
-        f.write(f"- blit_mode: `{report['blit_mode']}`\n")
-        f.write(f"- tile_convert_ms: p50={fmt(report['tile_convert_ms_p50'])} "
-                f"p95={fmt(report['tile_convert_ms_p95'])}\n")
-        f.write(f"- set_image_ms: p50={fmt(report['set_image_ms_p50'])} "
-                f"p95={fmt(report['set_image_ms_p95'])}\n")
+        f.write("## Per-tile item update breakdown (measured-only)\n\n")
+        f.write(f"- tile_item_update_ms (quantize + setImage/setRect per delivered tile): "
+                f"p50={fmt(report['tile_item_update_ms_p50'])} "
+                f"p95={fmt(report['tile_item_update_ms_p95'])}\n")
         f.write(f"- window-aggregated (16.7ms buckets, summed cost): "
                 f"p50={fmt(report['window_aggregated_p50_ms'])} "
                 f"p95={fmt(report['window_aggregated_p95_ms'])}, "
                 f"{report['windows_over_budget']}/{report['n_windows']} windows over budget "
                 f"(window-aggregation, NOT exact vsync frames)\n")
-        f.write(f"- rgba_canvas_allocs: {report['rgba_canvas_allocs']} "
-                f"(steady-state should be ~0 for uint8_incremental)\n")
+        f.write(f"- items_created: {report['items_created']}, "
+                f"items_pruned: {report['items_pruned']}\n")
         f.write("\n")
 
         f.write("## Fill latencies\n\n")

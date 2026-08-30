@@ -6,7 +6,11 @@ Contract (docs/v15_viewer_foundation_interfaces.md §4):
   request generation: a tile already in flight collects every waiter that
   asks for it, and all waiters receive the same TileResult object.
 - `generation` on a TileRequest is a delivery token only. It never affects
-  whether work runs or whether a result enters a cache.
+  whether work runs or whether a result enters a cache. Generation tokens
+  are OPAQUE and hashable -- the scheduler never assumes they are ints; it
+  only ever puts them in a set (`cancel_generation`) and tests membership
+  (`_is_stale`). Callers may use namespaced tuples (e.g. `("raw", 5)` vs
+  `("precise", 5)`) so two independent generation counters never collide.
 - RawKey requests go onto a priority ready-queue (min-heap on `priority`,
   FIFO within a priority tier) served by exactly `io_workers` persistent
   raw-worker thread(s) -- mirroring the compute path exactly, so a burst of
@@ -126,8 +130,12 @@ class TileScheduler:
                 heapq.heappush(self._heap, (req.priority, next(self._seq), key))
             self._cv.notify_all()
 
-    def cancel_generation(self, gen: int):
-        """Mark `gen` stale; drop queued compute work wanted only by it."""
+    def cancel_generation(self, gen):
+        """Mark opaque token `gen` stale; drop queued work wanted only by it.
+
+        `gen` may be any hashable value (plain int or a namespaced tuple
+        like `("raw", n)`); it is only ever added to a set and tested for
+        membership, so its type never affects semantics."""
         with self._lock:
             self._stale_gens.add(gen)
             self._cv.notify_all()
@@ -173,7 +181,22 @@ class TileScheduler:
             with self._cv:
                 while not self._raw_heap and not self._shutdown:
                     self._cv.wait()
-                if self._shutdown and not self._raw_heap:
+                if self._shutdown:
+                    # Drop queued raw work on shutdown (mirror of the compute
+                    # worker): deliver 'cancelled' to external waiters and
+                    # fire internal staging waiters so nothing blocks teardown.
+                    while self._raw_heap:
+                        _p, _s, k = heapq.heappop(self._raw_heap)
+                        entry = self._pending.pop(k, None)
+                        if entry is None:
+                            continue
+                        for req, cb in entry.waiters:
+                            cb(TileResult(
+                                request=req, pixels=None,
+                                quality=QualityLevel.NATIVE,
+                                provisional=False, timing={}, error="cancelled"))
+                        for icb in entry.internal_waiters:
+                            icb()
                     return
                 _priority, _seq, key = heapq.heappop(self._raw_heap)
                 entry = self._pending.get(key)
@@ -240,7 +263,22 @@ class TileScheduler:
             with self._cv:
                 while not self._heap and not self._shutdown:
                     self._cv.wait()
-                if self._shutdown and not self._heap:
+                if self._shutdown:
+                    # Shutdown DROPS queued work instead of draining it: each
+                    # queued compute entry would stage raw reads whose worker
+                    # threads may already have exited, stalling teardown on
+                    # the 120s staging timeout per entry. Deliver 'cancelled'.
+                    while self._heap:
+                        _p, _s, k = heapq.heappop(self._heap)
+                        entry = self._pending.pop(k, None)
+                        if entry is None:
+                            continue
+                        for req, cb in entry.waiters:
+                            cb(TileResult(
+                                request=req, pixels=None, quality=req.key.quality,
+                                provisional=False, timing={}, error="cancelled"))
+                        for icb in entry.internal_waiters:
+                            icb()
                     return
                 _priority, _seq, key = heapq.heappop(self._heap)
                 entry = self._pending.get(key)
@@ -313,7 +351,13 @@ class TileScheduler:
         for rk in missing:
             self._stage_raw_tile(rk, on_done)
 
-        event.wait(timeout=120.0)  # on timeout, proceed anyway -- assembler falls back
+        # Wake up promptly on shutdown too — a raw worker that exited before
+        # our staged entries were queued would otherwise leave this waiting
+        # for the full timeout during teardown.
+        deadline = time.monotonic() + 120.0
+        while not event.wait(timeout=0.25):
+            if self._shutdown or time.monotonic() >= deadline:
+                break                # assembler falls back to direct reads
         return len(missing), (time.perf_counter() - t0) * 1000.0
 
     def _run_compute(self, key: CorrectionKey, entry: _Entry):

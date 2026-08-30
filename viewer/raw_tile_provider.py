@@ -145,12 +145,31 @@ class RawTileProvider:
         return (h, w)
 
     def level_downsample(self, level: int) -> float:
-        """Downsample factor of `level` relative to level 0 (>= 1)."""
+        """Downsample factor of `level` relative to level 0 (>= 1), ROUNDED
+        to the nearest integer. This is a parameter-scaling convenience
+        (see `effective_param`) -- NOT geometry. Any world-rect / placement
+        math must use `level_downsample_yx` instead (unrounded, per-axis),
+        or cumulative drift creeps in across non-integer pyramids."""
         h0, _w0 = self.level_shape(0)
         hn, _wn = self.level_shape(level)
         if hn <= 0:
             return 1.0
         return round(h0 / hn)
+
+    def level_downsample_yx(self, level: int) -> Tuple[float, float]:
+        """(ds_y, ds_x) downsample factors of `level` relative to level 0,
+        as UNROUNDED floats, computed independently per axis
+        (h0/hL, w0/wL). Pyramids are not always square-ratio per level (a
+        3000x1000 level-0 could reduce to 1000x333 -- ds_y=3.0, ds_x=3.003),
+        and even a "square" pyramid accumulates rounding drift if a single
+        rounded scalar is applied to both axes over many tiles/levels. All
+        world-rect / placement geometry in the viewer must use this, not
+        `level_downsample`."""
+        h0, w0 = self.level_shape(0)
+        hn, wn = self.level_shape(level)
+        ds_y = (h0 / hn) if hn > 0 else 1.0
+        ds_x = (w0 / wn) if wn > 0 else 1.0
+        return ds_y, ds_x
 
     # ── pixel reads ──────────────────────────────────────────────────────
 

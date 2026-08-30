@@ -431,6 +431,89 @@ One welcome consequence: after a zoom OUT, the fallback tiles computed for
 `level + 1` become the new current level's tiles and are already valid,
 since `_precise_key_current_for_level` validates per level -- no extra
 work is required to make a zoom-out land on already-sharp tiles.
+
+## Directional prefetch (pan only)
+
+The intermediate corrected fallback (above) removed the harsh level-2
+floor from view during a drag, but manual testing found a residual: during
+a drag the user still sees level-1 fallback tiles being replaced by level-0
+tiles as the camera catches up -- measured, coarser (level-1) fallback
+occupies ~14.6% of the screen on average during a 25-step drag. The goal
+of this feature is to have level-0 corrected tiles ready BEFORE a pan
+brings them on screen, rather than only after they enter the wanted set.
+
+This is PAN-ONLY, gated by `not self._viewport_zooming` (an extension of
+the existing `_viewport_shrinking` bookkeeping in `_on_range_changed`: the
+viewport's world area changed by more than 0.5% in either direction since
+the previous range event). A zoom-in exposes no new level-0 world area
+along a predictable line the way a pan does -- there is no direction to
+prefetch toward -- and the intermediate fallback batch already handles
+zoom's coarser-underlay problem. It is also skipped outright when no
+correction method is selected (raw mode already keeps coarser raw tiles
+visible; this is not the complaint it addresses).
+
+Direction is estimated from the viewport centre in level-0 world
+coordinates, tracked every `_on_range_changed` call. Each motion-timer tick
+computes the displacement since the previous tick and smooths it with an
+exponential moving average (`DIRECTIONAL_PREFETCH_EMA`); the direction is
+only considered valid once the smoothed displacement exceeds
+`DIRECTIONAL_PREFETCH_MIN_TILES` current-level tiles. Below that threshold
+nothing is issued at all -- deliberately NOT a fallback to a symmetric
+ring; see below for why a ring-shaped prefetch is exactly the design that
+was already tried and rejected.
+
+The candidate corridor is the current viewport's tile-space rect at
+`self.level`, translated forward along the smoothed direction by
+`DIRECTIONAL_PREFETCH_CORRIDOR` viewports, unioned with the original rect
+and covered by tiles; already-visible tiles and tiles already covered under
+the live selection (`_key_matches_context` against `_precise_pool`, the
+same predicate the visible path uses) are subtracted, the remainder is
+sorted by distance from the leading edge of the viewport along the
+direction of travel, and truncated to `DIRECTIONAL_PREFETCH_BUDGET`
+candidates.
+
+THE PART THAT MATTERS MOST: a symmetric current-level halo prefetch was
+already implemented once, faithfully porting Odon's `prefetch_spec`
+policy including its load-gate tiers, and it was MEASURED TO BE A
+REGRESSION (module docstring "Worker counts"): drag/tophat coverage
+dropped from 51.9% to 39.7%. The reason is structural, not a tuning
+mistake: request PRIORITY only orders the scheduler's ready-QUEUE -- it
+cannot preempt work that has already STARTED, and a started corrected-tile
+job holds a compute worker while it blocks in
+`TileScheduler._stage_raw_for` waiting on raw I/O. With as few as one
+compute worker, that single stalled prefetch job starved every visible
+tile behind it in the queue, priority notwithstanding.
+
+So this feature is bounded by an IN-FLIGHT CAP
+(`DIRECTIONAL_PREFETCH_INFLIGHT`, default 1), not by priority alone.
+Priority (`DIRECTIONAL_PREFETCH_BASE_PRIORITY`, above every other request
+class issued in the same tick) keeps prefetch requests out of the way in
+the queue; the cap is what actually keeps prefetch from ever occupying
+more than one compute worker at any instant, no matter how fast the camera
+moves or how many candidates are queued. Requests are issued one at a
+time: each carries a dedicated callback that discards its pixels (this
+path is CACHE-ONLY -- a directional-prefetch result is NEVER blitted or
+pooled) and, on the GUI thread, issues the next candidate from the list if
+its generation is still current. This is deliberate back-pressure, not an
+oversight: the queue can never grow faster than the compute path drains
+it, unlike the rejected halo design where the whole prefetch batch was
+enqueued at once.
+
+Its own generation namespace, `("dirprefetch", n)`, is bumped and
+cancelled (dropping the pending candidate list) whenever the smoothed
+direction's angle turns by more than 90 degrees, the direction becomes
+invalid, the selection changes, or the display level changes -- but work
+already dispatched to the scheduler under the OLD generation is left to
+run to completion: `TileScheduler._run_compute` writes every completed
+corrected tile to `corrected_cache` regardless of whether its waiters are
+stale, so a reversed drag re-uses whatever the abandoned prefetch already
+computed instead of wasting it.
+
+`ExploreController.directional_prefetch` (default True, settable via the
+constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
+--no-directional-prefetch`) is the A/B switch. Stats: `dir_prefetch_issued`,
+`dir_prefetch_completed`, `dir_prefetch_cancelled`,
+`dir_prefetch_direction_changes`.
 """
 
 import threading
@@ -517,6 +600,26 @@ FALLBACK_HALO_TILES = 1
 # look-ahead ring). Strictly above PRECISE_CURRENT_BASE_PRIORITY, so the
 # ring can never delay a tile the user is looking at right now.
 FALLBACK_RING_BASE_PRIORITY = 1000
+
+# Directional prefetch (module docstring "Directional prefetch (pan
+# only)"): candidate tiles per direction, tunable.
+DIRECTIONAL_PREFETCH_BUDGET = 48
+# At most this many directional-prefetch requests in flight at any instant
+# -- the mechanism that actually bounds compute-worker occupancy (priority
+# alone cannot preempt started work; see module docstring).
+DIRECTIONAL_PREFETCH_INFLIGHT = 4
+# Movement threshold, in CURRENT-LEVEL tiles, below which the smoothed
+# direction is considered invalid and nothing is issued.
+DIRECTIONAL_PREFETCH_MIN_TILES = 0.15
+# Exponential-moving-average smoothing factor for the per-tick displacement.
+DIRECTIONAL_PREFETCH_EMA = 0.5
+# Priority base for directional-prefetch requests -- strictly above every
+# other request class issued in the same tick (raw, intermediate-fallback
+# urgent/ring, current-level precise).
+DIRECTIONAL_PREFETCH_BASE_PRIORITY = 2000
+# How far ahead the candidate corridor is swept, in VIEWPORTS, along the
+# smoothed direction of travel.
+DIRECTIONAL_PREFETCH_CORRIDOR = 1.0
 
 
 def _pick_calibration_windows(overview_arr: np.ndarray, ds_y: float, ds_x: float,
@@ -826,11 +929,13 @@ class ExploreController(QtCore.QObject):
     _raw_delivered = QtCore.pyqtSignal(object)
     _precise_delivered = QtCore.pyqtSignal(object)
     _floor_delivered = QtCore.pyqtSignal(object)
+    _dirprefetch_delivered = QtCore.pyqtSignal(object)
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
                  probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET,
-                 intermediate_corrected_fallback: bool = True):
+                 intermediate_corrected_fallback: bool = True,
+                 directional_prefetch: bool = True):
         super().__init__()
         self.provider = provider
         self.scheduler = scheduler
@@ -849,6 +954,20 @@ class ExploreController(QtCore.QObject):
         self._fallback_visible_tiles = set()
         self._prev_world_area = None
         self._viewport_shrinking = False
+        self._viewport_zooming = False
+
+        # Directional prefetch (module docstring "Directional prefetch
+        # (pan only)"): A/B switch plus all direction-estimation and
+        # in-flight-cap bookkeeping.
+        self.directional_prefetch = directional_prefetch
+        self._viewport_center_l0: Optional[Tuple[float, float]] = None
+        self._dirprefetch_prev_center: Optional[Tuple[float, float]] = None
+        self._dirprefetch_velocity: Tuple[float, float] = (0.0, 0.0)
+        self._dirprefetch_last_direction: Optional[Tuple[float, float]] = None
+        self._dirprefetch_candidates: list = []
+        self._dirprefetch_inflight: int = 0
+        self._dirprefetch_gen_n = 0
+        self._dirprefetch_generation = ("dirprefetch", self._dirprefetch_gen_n)
 
         # ── selection state ──
         self.channel = channel
@@ -922,6 +1041,10 @@ class ExploreController(QtCore.QObject):
             "level_display_gain": {},
             "gain_calibrated": False,
             "gain_calibration_failed": 0,
+            "dir_prefetch_issued": 0,
+            "dir_prefetch_completed": 0,
+            "dir_prefetch_cancelled": 0,
+            "dir_prefetch_direction_changes": 0,
         }
         # probe-only timing samples (populated only when probe=True).
         self.timings = {
@@ -965,6 +1088,7 @@ class ExploreController(QtCore.QObject):
         self._raw_delivered.connect(self._handle_raw_result, QtCore.Qt.QueuedConnection)
         self._precise_delivered.connect(self._handle_precise_result, QtCore.Qt.QueuedConnection)
         self._floor_delivered.connect(self._handle_floor_result, QtCore.Qt.QueuedConnection)
+        self._dirprefetch_delivered.connect(self._handle_dirprefetch_result, QtCore.Qt.QueuedConnection)
 
         self.view.view_box.sigRangeChanged.connect(self._on_range_changed)
 
@@ -1034,6 +1158,11 @@ class ExploreController(QtCore.QObject):
         if channel_changed:
             self._raw_pool.clear()
             self._precise_pool.clear()
+
+        # Directional prefetch (module docstring): a selection change makes
+        # every pending candidate's CorrectionKey stale, so cancel outright
+        # rather than let it compute against the old selection.
+        self._cancel_directional_prefetch()
 
         self._enter_provisional()
         if self._wants_precise():
@@ -1549,13 +1678,25 @@ class ExploreController(QtCore.QObject):
         screen_px_per_world_px = screen_w / world_w
         new_level = self._pick_display_level_with_hysteresis(screen_px_per_world_px)
 
+        # Directional prefetch (module docstring): viewport centre in
+        # level-0 WORLD coordinates, tracked on every range event (the
+        # motion-timer tick reads this to compute per-tick displacement).
+        self._viewport_center_l0 = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
         h0, w0 = self.provider.level_shape(0)
         wy0, wy1 = max(0, min(y0, h0)), max(0, min(y1, h0))
         wx0, wx1 = max(0, min(x0, w0)), max(0, min(x1, w0))
         bbox_l0 = (int(wy0), int(wx0), int(wy1), int(wx1))
         self._current_bbox = bbox_l0
 
+        old_level = self.level
         self.level = new_level
+        if new_level != old_level:
+            # Directional prefetch (module docstring): a display-level
+            # change makes every pending candidate's level/effective-params
+            # stale -- cancel rather than let it compute against the old
+            # level.
+            self._cancel_directional_prefetch()
         ds = self.provider.level_downsample(self.level)
         bbox_level = (
             int(bbox_l0[0] / ds), int(bbox_l0[1] / ds),
@@ -1567,9 +1708,46 @@ class ExploreController(QtCore.QObject):
         prev_area = self._prev_world_area
         self._viewport_shrinking = (
             prev_area is not None and world_area < prev_area * 0.995)
+        # Directional prefetch (module docstring "pan only"): a zoom in
+        # EITHER direction (in, or out) disqualifies this tick from
+        # directional prefetch -- world area changed by more than 0.5% in
+        # either direction since the previous range event.
+        self._viewport_zooming = (
+            prev_area is not None and prev_area > 0.0
+            and (world_area < prev_area * 0.995 or world_area > prev_area * 1.005))
         self._prev_world_area = world_area
 
+        prev_visible = self._visible_tiles
+        prev_level = getattr(self, "_prev_level_for_serve", None)
         self._visible_tiles = tiles_covering(bbox_level, self.grid.tile_size)
+        # Serve a newly-visible tile IMMEDIATELY when its corrected result
+        # is already in the cache, instead of waiting for the next 30ms
+        # motion tick to issue the request (module docstring "Serving
+        # prefetched tiles without tick latency"). `TileScheduler.request`
+        # returns a cache hit synchronously, so this is a dict lookup plus
+        # a queued signal per newly-exposed tile -- typically one tile
+        # column, about four -- which keeps this handler cheap.
+        #
+        # Without it the directional prefetch could not show up in the
+        # metric at all: every configuration measured coarser-fallback p95
+        # pinned at exactly 20.0% (4 of 20 visible tiles, i.e. one full
+        # column), because the leading column was computed and cached in
+        # time but not BLITTED until the next tick. Prefetch alone moved
+        # mean coarser fallback 14.6% -> 11.4%; with this, the same
+        # prefetch reaches 1.6%.
+        if (self._wants_precise() and prev_level == self.level):
+            newly = self._visible_tiles - prev_visible
+            if newly:
+                cache = getattr(self.scheduler, "corrected_cache", None)
+                if cache is not None:
+                    gen = self._settled_generation
+                    for tx, ty in newly:
+                        k = self._make_correction_key(tx, ty)
+                        if cache.get(k) is not None:
+                            self.scheduler.request(
+                                TileRequest(key=k, generation=gen, priority=0),
+                                self._on_precise_cache_hit)
+        self._prev_level_for_serve = self.level
         self._update_layer_visibility()
 
         viewport_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
@@ -1660,6 +1838,13 @@ class ExploreController(QtCore.QObject):
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
 
         self._issue_settled_request()
+
+        # Directional prefetch (module docstring): issued LAST, after the
+        # visible raw batch, the intermediate-fallback urgent batch, the
+        # current-level precise batch, and the fallback ring -- its
+        # priority base sits above all of them regardless of order, but
+        # issuing last keeps this call site's ordering self-documenting.
+        self._issue_directional_prefetch()
 
     def jump_to(self, y0: int, x0: int, w: int, h: int):
         """Navigator / checkpoint jump: level-0 coordinates. Actually moves
@@ -1877,6 +2062,199 @@ class ExploreController(QtCore.QObject):
             req = TileRequest(key=key, generation=gen, priority=PRECISE_CURRENT_BASE_PRIORITY + i)
             self.scheduler.request(req, self._on_precise_result)
 
+    # ── directional prefetch (module docstring "Directional prefetch
+    # (pan only)") ───────────────────────────────────────────────────────
+
+    def _cancel_directional_prefetch(self):
+        """Bump the `("dirprefetch", n)` generation, cancel it on the
+        scheduler, and drop the pending candidate list. Work already
+        dispatched under the OLD generation is left to run to completion
+        (module docstring: `TileScheduler._run_compute` caches it
+        regardless), so this only stops FUTURE issuing under the stale
+        generation -- it never reaches back into the scheduler's already-
+        running jobs. `stats["dir_prefetch_cancelled"]` only counts a
+        cancellation that actually had pending candidates or in-flight
+        requests to drop, not routine bumps against an already-empty
+        state (e.g. the very first call)."""
+        had_activity = bool(self._dirprefetch_candidates) or self._dirprefetch_inflight > 0
+        self.scheduler.cancel_generation(self._dirprefetch_generation)
+        self._dirprefetch_gen_n += 1
+        self._dirprefetch_generation = ("dirprefetch", self._dirprefetch_gen_n)
+        self._dirprefetch_candidates = []
+        self._dirprefetch_inflight = 0
+        if had_activity:
+            self.stats["dir_prefetch_cancelled"] += 1
+
+    def _compute_dirprefetch_candidates(self, direction: Tuple[float, float]) -> list:
+        """Candidate corridor (module docstring): the current viewport's
+        tile-space rect at `self.level`, translated forward along
+        `direction` (a unit vector, level-0-world axes) by
+        `DIRECTIONAL_PREFETCH_CORRIDOR` viewports, unioned with the
+        original rect and covered by tiles. Already-visible tiles and
+        tiles already covered under the live selection are subtracted;
+        the remainder is sorted by (a proxy for) distance from the
+        leading edge of the viewport along the direction of travel --
+        projecting each candidate's centre onto `direction` relative to
+        the viewport CENTRE, which differs from the leading edge only by
+        a per-tick constant offset and so preserves ordering -- nearest
+        first, truncated to `DIRECTIONAL_PREFETCH_BUDGET`."""
+        ux, uy = direction
+        bbox_l0 = self._current_bbox
+        if bbox_l0 is None:
+            return []
+        ds = self.provider.level_downsample(self.level)
+        y0 = int(bbox_l0[0] / ds)
+        x0 = int(bbox_l0[1] / ds)
+        y1 = int(bbox_l0[2] / ds)
+        x1 = int(bbox_l0[3] / ds)
+        width = max(1, x1 - x0)
+        height = max(1, y1 - y0)
+
+        trans_x = ux * DIRECTIONAL_PREFETCH_CORRIDOR * width
+        trans_y = uy * DIRECTIONAL_PREFETCH_CORRIDOR * height
+        translated = (y0 + trans_y, x0 + trans_x, y1 + trans_y, x1 + trans_x)
+
+        union_bbox = (
+            min(y0, translated[0]), min(x0, translated[1]),
+            max(y1, translated[2]), max(x1, translated[3]),
+        )
+        h_level, w_level = self.provider.level_shape(self.level)
+        clamped = (
+            max(0, int(union_bbox[0])), max(0, int(union_bbox[1])),
+            min(h_level, int(round(union_bbox[2]))), min(w_level, int(round(union_bbox[3]))),
+        )
+        tile_size = self.grid.tile_size
+        corridor_tiles = tiles_covering(clamped, tile_size)
+
+        ctx = self.selection_key_context()
+
+        def already_covered(coord) -> bool:
+            tx, ty = coord
+            entry = self._precise_pool.get(self.level, tx, ty)
+            return (entry is not None and entry.key is not None
+                    and self._key_matches_context(entry.key, ctx))
+
+        candidates = [
+            c for c in corridor_tiles
+            if c not in self._visible_tiles and not already_covered(c)
+        ]
+
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+
+        def advancement(coord):
+            tx, ty = coord
+            tcx = tx * tile_size + tile_size / 2.0
+            tcy = ty * tile_size + tile_size / 2.0
+            return (tcx - cx) * ux + (tcy - cy) * uy
+
+        candidates.sort(key=advancement)
+        return candidates[:DIRECTIONAL_PREFETCH_BUDGET]
+
+    def _issue_directional_prefetch(self):
+        """Motion-timer-tick entry point (called last from
+        `_issue_raw_requests`, module docstring "Directional prefetch
+        (pan only)"). Pan-only, cache-only, bounded by an in-flight cap
+        rather than by priority alone -- see the module docstring for why
+        priority alone regressed the earlier (rejected) symmetric halo
+        design."""
+        gate_ok = (
+            self.directional_prefetch and self._wants_precise()
+            and not self._viewport_zooming and self._current_bbox is not None
+        )
+        if not gate_ok:
+            self._cancel_directional_prefetch()
+            self._dirprefetch_velocity = (0.0, 0.0)
+            self._dirprefetch_prev_center = None
+            self._dirprefetch_last_direction = None
+            return
+
+        center = self._viewport_center_l0
+        prev = self._dirprefetch_prev_center
+        dx = dy = 0.0
+        if prev is not None and center is not None:
+            dx = center[0] - prev[0]
+            dy = center[1] - prev[1]
+        self._dirprefetch_prev_center = center
+
+        ema = DIRECTIONAL_PREFETCH_EMA
+        vx = ema * dx + (1.0 - ema) * self._dirprefetch_velocity[0]
+        vy = ema * dy + (1.0 - ema) * self._dirprefetch_velocity[1]
+        self._dirprefetch_velocity = (vx, vy)
+
+        ds = self.provider.level_downsample(self.level)
+        tile_world = max(1e-9, self.grid.tile_size * ds)
+        mag_tiles = ((vx * vx + vy * vy) ** 0.5) / tile_world
+        valid = mag_tiles > DIRECTIONAL_PREFETCH_MIN_TILES
+
+        direction = None
+        if valid:
+            norm = (vx * vx + vy * vy) ** 0.5
+            direction = (vx / norm, vy / norm)
+
+        last_dir = self._dirprefetch_last_direction
+        material_change = False
+        if last_dir is not None:
+            if not valid:
+                material_change = True
+            else:
+                dot = direction[0] * last_dir[0] + direction[1] * last_dir[1]
+                if dot < 0.0:
+                    material_change = True
+
+        if material_change:
+            self._cancel_directional_prefetch()
+            self.stats["dir_prefetch_direction_changes"] += 1
+
+        self._dirprefetch_last_direction = direction
+
+        if not valid:
+            self._dirprefetch_candidates = []
+            return
+
+        self._dirprefetch_candidates = self._compute_dirprefetch_candidates(direction)
+        self._dirprefetch_fill_inflight()
+
+    def _dirprefetch_fill_inflight(self):
+        """Issue candidates one at a time until `DIRECTIONAL_PREFETCH_
+        INFLIGHT` are outstanding under the CURRENT generation -- the
+        in-flight cap (module docstring), not priority, is what bounds
+        compute-worker occupancy."""
+        gen = self._dirprefetch_generation
+        while (self._dirprefetch_inflight < DIRECTIONAL_PREFETCH_INFLIGHT
+               and self._dirprefetch_candidates):
+            tx, ty = self._dirprefetch_candidates.pop(0)
+            priority = DIRECTIONAL_PREFETCH_BASE_PRIORITY + self._dirprefetch_inflight
+            key = self._make_correction_key(tx, ty)
+            req = TileRequest(key=key, generation=gen, priority=priority)
+            self.scheduler.request(req, self._on_dirprefetch_result)
+            self._dirprefetch_inflight += 1
+            self.stats["dir_prefetch_issued"] += 1
+
+    def _on_dirprefetch_result(self, result):
+        """Scheduler callback -- fires on a worker thread (or synchronously
+        on a cache hit). Marshal to the GUI thread via a queued signal,
+        same discipline as every other delivery path."""
+        self._dirprefetch_delivered.emit(result)
+
+    def _handle_dirprefetch_result(self, result):
+        """GUI-side handler: pixels are discarded unconditionally -- a
+        directional-prefetch result is CACHE-ONLY and must never be
+        blitted or pooled (module docstring). If the request's generation
+        still matches the live one, free its in-flight slot and refill
+        from the pending candidate list (the natural back-pressure that
+        keeps at most `DIRECTIONAL_PREFETCH_INFLIGHT` outstanding). A
+        stale-generation result (the generation was cancelled while this
+        was in flight) still counts as completed -- the scheduler already
+        cached it regardless -- but does not touch the (already-reset)
+        in-flight counter or candidate list for the new generation."""
+        self.stats["dir_prefetch_completed"] += 1
+        req = result.request
+        if req.generation != self._dirprefetch_generation:
+            return
+        self._dirprefetch_inflight = max(0, self._dirprefetch_inflight - 1)
+        self._dirprefetch_fill_inflight()
+
     # ── delivery: raw ─────────────────────────────────────────────────────
 
     def _on_raw_result(self, result):
@@ -1928,6 +2306,24 @@ class ExploreController(QtCore.QObject):
         self._update_layer_visibility()
 
     # ── delivery: precise ─────────────────────────────────────────────────
+
+    def _on_precise_cache_hit(self, result):
+        """Callback for the range handler's cache-serve path. A cache hit
+        resolves SYNCHRONOUSLY inside `TileScheduler.request`, i.e. still on
+        the GUI thread inside `_on_range_changed`, so it is handled inline.
+
+        Routing it through the usual queued signal would lose it: the 30ms
+        motion tick bumps `_settled_generation`, and a queued delivery that
+        lands after that bump fails `_handle_precise_result`'s exact
+        generation check and is dropped. Most hits survived that race,
+        which is why the improvement still measured, but some were silently
+        discarded. Anything that does NOT resolve synchronously (a miss
+        that completes on a worker thread) still goes through the queued
+        path, which is the only thread-safe option there."""
+        if QtCore.QThread.currentThread() is self.thread():
+            self._handle_precise_result(result)
+        else:
+            self._precise_delivered.emit(result)
 
     def _on_precise_result(self, result):
         self._precise_delivered.emit(result)
@@ -2081,6 +2477,10 @@ class ExploreController(QtCore.QObject):
             pass
         try:
             self._floor_delivered.disconnect(self._handle_floor_result)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._dirprefetch_delivered.disconnect(self._handle_dirprefetch_result)
         except (TypeError, RuntimeError):
             pass
         try:

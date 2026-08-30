@@ -49,6 +49,7 @@ from block01.viewer.explore_view import (  # noqa: E402
     _pick_calibration_windows,
     GAIN_CLAMP,
     PRECISE_CURRENT_BASE_PRIORITY,
+    DIRECTIONAL_PREFETCH_INFLIGHT,
 )
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
 
@@ -1918,3 +1919,300 @@ def test_fallback_never_covers_current_level(app):
     entry0 = pool.get(0, 0, 0)
     entry1 = pool.get(1, 0, 0)
     assert entry1.item.zValue() < entry0.item.zValue()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Directional prefetch (pan only) -- module docstring "Directional prefetch
+# (pan only)". Every test drives the controller by directly setting the
+# viewport-tracking fields (`_current_bbox` / `_visible_tiles` /
+# `_viewport_center_l0`) and calling `_issue_raw_requests()` -- the same
+# pattern several existing tests (e.g. T6) already use to bypass real Qt
+# range events -- because the feature's direction estimator needs at least
+# two ticks at a KNOWN displacement, which is far more reliable to drive
+# this way than via real mouse/range-change timing.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _set_viewport(ctrl, y0, x0, y1, x1):
+    """Directly install a viewport (level-0 bbox) without going through a
+    real sigRangeChanged event -- sets exactly the fields
+    `_issue_raw_requests` / `_issue_directional_prefetch` read."""
+    ctrl._current_bbox = (y0, x0, y1, x1)
+    ds = ctrl.provider.level_downsample(ctrl.level)
+    bbox_level = (int(y0 / ds), int(x0 / ds), int(y1 / ds), int(x1 / ds))
+    ctrl._visible_tiles = tiles_covering(bbox_level, ctrl.grid.tile_size)
+    ctrl._viewport_center_l0 = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    ctrl._viewport_zooming = False
+    ctrl._viewport_shrinking = False
+
+
+def _dirprefetch_reqs(ctrl, scheduler):
+    return [(r, cb) for r, cb in scheduler.requests if cb == ctrl._on_dirprefetch_result]
+
+
+def _setup_dirprefetch_ctrl(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    scheduler.requests.clear()
+    return ctrl, provider, scheduler, view
+
+
+def test_newly_visible_tile_served_from_cache_without_waiting_for_tick(app):
+    """A tile whose corrected result is already cached must be blitted on
+    the range event that exposes it, not on the next 30ms motion tick.
+
+    Why this exists: with directional prefetch computing the leading tile
+    column in time but nothing blitting it until the next tick, the
+    coarser-fallback p95 measured EXACTLY 20.0% (4 of 20 visible tiles --
+    one full column) in every prefetch configuration tried. Serving cache
+    hits straight from the range handler took mean coarser fallback from
+    11.4% to 1.6% with the same prefetch settings. `TileScheduler.request`
+    resolves a cache hit synchronously, so the handler stays cheap
+    (measured mean 1.84ms, p95 5.5ms, 0/60 events over a 16.7ms frame)."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+
+    # Give the fake scheduler the cache-hit behavior the real one has:
+    # `TileScheduler.request` resolves a cached key SYNCHRONOUSLY, which is
+    # what lets the range handler serve a tile without a tick.
+    ts = ctrl.grid.tile_size
+    ctrl._motion_timer.stop()
+    # Seed every tile the pan below will newly expose, so the assertion
+    # does not depend on exactly how many range events pyqtgraph emits.
+    targets = [(2, 0), (2, 1), (3, 0), (3, 1)]
+    arr = np.full((ts, ts), 7.0, dtype=np.float32)
+    seeded = {ctrl._make_correction_key(tx, ty): arr for tx, ty in targets}
+
+    class _Cache:
+        def __init__(self, d):
+            self._d = d
+
+        def get(self, k):
+            return self._d.get(k)
+
+    scheduler.corrected_cache = _Cache(seeded)
+    real_request = scheduler.request
+
+    def request_with_cache_hits(req, callback):
+        cached = scheduler.corrected_cache.get(req.key)
+        if cached is not None:
+            callback(TileResult(
+                request=req,
+                pixels=PixelBuffer(residency="cpu", dtype=str(cached.dtype),
+                                   shape=tuple(cached.shape), handle=cached),
+                quality=req.key.quality, provisional=False, timing={}, error=None))
+            return
+        real_request(req, callback)
+
+    scheduler.request = request_with_cache_hits
+    assert not any(ctrl._precise_pool.get(ctrl.level, *t) for t in targets)
+
+    # A PAN that exposes it (same span, so the display level cannot
+    # change -- the cache-serve path deliberately skips level switches),
+    # with the motion timer stopped, so nothing but the range handler
+    # itself can have issued the request.
+    view.view_box.setRange(xRange=(512, 1536), yRange=(0, 1024), padding=0)
+    _pump(30)
+    ctrl._motion_timer.stop()
+
+    assert any(t in ctrl._visible_tiles for t in targets), \
+        "test setup: the pan should have exposed at least one seeded tile"
+    served = [t for t in targets
+              if ctrl._precise_pool.get(ctrl.level, *t) is not None]
+    assert served, (
+        "no cached corrected tile was served on the range event that "
+        "exposed it")
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_requires_sustained_direction(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    # Priming tick: no previous center yet -> displacement is zero by
+    # construction, direction invalid, nothing issued.
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    assert ctrl.stats["dir_prefetch_issued"] == 0
+
+    # Jitter: displacement well under DIRECTIONAL_PREFETCH_MIN_TILES current
+    # -level tiles (20 world px / 512 px-per-tile ~= 0.04 tiles) -> still
+    # invalid, still nothing issued.
+    _set_viewport(ctrl, 0, 20, 2048, 2068)
+    ctrl._issue_raw_requests()
+    assert ctrl.stats["dir_prefetch_issued"] == 0
+    assert ctrl._dirprefetch_candidates == []
+
+    # Sustained motion in the same direction: the EMA-smoothed displacement
+    # now clears the threshold -> requests are issued.
+    _set_viewport(ctrl, 0, 320, 2048, 2368)
+    ctrl._issue_raw_requests()
+    assert ctrl.stats["dir_prefetch_issued"] > 0
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_corridor_is_ahead_only(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._issue_raw_requests()
+
+    dir_reqs = _dirprefetch_reqs(ctrl, scheduler)
+    assert dir_reqs, "expected directional-prefetch requests for a sustained rightward pan"
+
+    cx, _cy = ctrl._viewport_center_l0
+    ts = ctrl.grid.tile_size
+    for req, _cb in dir_reqs:
+        tx, ty = req.key.tile.tx, req.key.tile.ty
+        assert (tx, ty) not in ctrl._visible_tiles
+        tile_cx = tx * ts + ts / 2.0
+        assert tile_cx > cx, "directional-prefetch tile must lie AHEAD of the viewport"
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_inflight_cap(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._issue_raw_requests()
+
+    outstanding = _dirprefetch_reqs(ctrl, scheduler)
+    assert len(outstanding) == DIRECTIONAL_PREFETCH_INFLIGHT
+    assert len(ctrl._dirprefetch_candidates) > 0, "test setup: need more candidates than the cap"
+    issued_before = ctrl.stats["dir_prefetch_issued"]
+
+    req, _cb = outstanding[0]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl.stats["dir_prefetch_completed"] == 1
+    assert ctrl.stats["dir_prefetch_issued"] == issued_before + 1
+    assert len(_dirprefetch_reqs(ctrl, scheduler)) == issued_before + 1
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_reversal_cancels(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)  # rightward
+    ctrl._issue_raw_requests()
+
+    old_reqs = _dirprefetch_reqs(ctrl, scheduler)
+    assert old_reqs
+    stale_req, _cb = old_reqs[0]
+    gen_before = ctrl._dirprefetch_generation
+    changes_before = ctrl.stats["dir_prefetch_direction_changes"]
+
+    # Sharp reversal: a big leftward displacement flips the smoothed
+    # direction by more than 90 degrees.
+    _set_viewport(ctrl, 0, -700, 2048, 1348)
+    ctrl._issue_raw_requests()
+
+    assert ctrl._dirprefetch_generation != gen_before
+    assert gen_before in scheduler.cancelled_generations
+    assert ctrl.stats["dir_prefetch_direction_changes"] > changes_before
+    assert ctrl.stats["dir_prefetch_cancelled"] > 0
+
+    # A late result under the OLD (cancelled) generation must be discarded:
+    # it completes (the scheduler already cached it) but must never touch
+    # the precise pool and must never refill under the new generation.
+    completed_before = ctrl.stats["dir_prefetch_completed"]
+    issued_before = ctrl.stats["dir_prefetch_issued"]
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(stale_req, arr)
+    _pump(20)
+
+    assert ctrl.stats["dir_prefetch_completed"] == completed_before + 1
+    assert ctrl.stats["dir_prefetch_issued"] == issued_before  # no refill for the stale gen
+    tile = stale_req.key.tile
+    assert ctrl._precise_pool.get(tile.level, tile.tx, tile.ty) is None
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_never_blitted(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._issue_raw_requests()
+
+    dir_reqs = _dirprefetch_reqs(ctrl, scheduler)
+    assert dir_reqs
+    req, _cb = dir_reqs[0]
+    tile = req.key.tile
+
+    precise_before = ctrl.stats["precise_tiles_blitted"]
+    mid_before = ctrl.stats["mid_tiles_blitted"]
+    arr = np.full((512, 512), 5.0, dtype=np.float32)
+    scheduler.deliver(req, arr)
+    _pump(20)
+
+    assert ctrl._precise_pool.get(tile.level, tile.tx, tile.ty) is None
+    assert ctrl.stats["precise_tiles_blitted"] == precise_before
+    assert ctrl.stats["mid_tiles_blitted"] == mid_before
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_skipped_while_zooming(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._viewport_zooming = True  # override: this tick is a zoom
+    ctrl._issue_raw_requests()
+
+    assert ctrl.stats["dir_prefetch_issued"] == 0
+    assert ctrl._dirprefetch_candidates == []
+    assert _dirprefetch_reqs(ctrl, scheduler) == []
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_priority_above_all_classes(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    scheduler.requests.clear()
+
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._issue_raw_requests()
+
+    dir_reqs = [r for r, cb in scheduler.requests if cb == ctrl._on_dirprefetch_result]
+    other_reqs = [r for r, cb in scheduler.requests if cb != ctrl._on_dirprefetch_result]
+    assert dir_reqs, "expected directional-prefetch requests this tick"
+    assert other_reqs, "expected raw/fallback/current-level requests this tick"
+    assert min(r.priority for r in dir_reqs) > max(r.priority for r in other_reqs)
+
+    ctrl.teardown()
+
+
+def test_directional_prefetch_disabled_by_switch(app):
+    ctrl, provider, scheduler, view = _setup_dirprefetch_ctrl(app)
+    ctrl.directional_prefetch = False
+
+    _set_viewport(ctrl, 0, 0, 2048, 2048)
+    ctrl._issue_raw_requests()
+    _set_viewport(ctrl, 0, 300, 2048, 2348)
+    ctrl._issue_raw_requests()
+
+    assert ctrl.stats["dir_prefetch_issued"] == 0
+    assert _dirprefetch_reqs(ctrl, scheduler) == []
+
+    ctrl.teardown()

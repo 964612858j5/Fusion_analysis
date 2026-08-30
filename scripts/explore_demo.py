@@ -83,6 +83,14 @@ def main():
                     action="store_false",
                     help="disable the level+1 intermediate corrected fallback "
                          "(for A/B comparison against the level-2 floor only)")
+    ap.add_argument("--directional-prefetch", dest="directional_prefetch",
+                    action="store_true", default=True,
+                    help="prefetch current-level corrected tiles ahead of a "
+                         "sustained pan, cache-only, capped to one in-flight "
+                         "request (default: on)")
+    ap.add_argument("--no-directional-prefetch", dest="directional_prefetch",
+                    action="store_false",
+                    help="disable directional prefetch (for A/B comparison)")
     args = ap.parse_args()
 
     # Crash diagnosis: native faults AND Python exceptions land in the log.
@@ -123,7 +131,8 @@ def main():
     view.resize(1400, 1000)
 
     ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
-                              intermediate_corrected_fallback=args.intermediate_fallback)
+                              intermediate_corrected_fallback=args.intermediate_fallback,
+                              directional_prefetch=args.directional_prefetch)
 
     def _on_floor_preparing_changed(preparing):
         suffix = " — Preparing corrected preview…" if preparing else ""

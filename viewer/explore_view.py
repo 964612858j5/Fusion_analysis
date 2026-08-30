@@ -171,11 +171,59 @@ The ViewBox's native mouse pan/wheel interaction is completely unmodified
 (pyqtgraph's default: wheel zooms about the mouse cursor). `sigRangeChanged`
 runs a CHEAP handler on every single event: recompute the wanted tile set
 and run the (cheap) item-pool prune check. Nothing here touches the
-scheduler. Actual REQUEST ISSUING is what gets debounced -- a 30ms
-single-shot "motion" timer coalesces a burst of range-change events into
-one batch of raw tile requests, cancelling the previous batch's now-stale
-`("raw", n)` generation token. This is what keeps a fast wheel-zoom from
-flooding the scheduler's ready-queue while never fighting the camera.
+scheduler. Actual REQUEST ISSUING -- for BOTH the raw layer and the
+interactive precise (corrected) layer -- is what gets debounced: a 30ms
+single-shot "motion" timer (`_motion_timer`, `MOTION_MS`) coalesces a burst
+of range-change events into one batch of requests, cancelling each layer's
+previous now-stale generation token (`("raw", n)` / `("precise", n)`
+respectively). This is what keeps a fast wheel-zoom or drag from flooding
+the scheduler's ready-queue while never fighting the camera.
+
+Earlier, interactive precise tiles were requested ONLY from a separate 80ms
+`settle_ms` timer that `_on_range_changed` restarted on every single range
+event -- so during a continuous drag the settle timer never fired, and no
+corrected tile was computed until the user stopped moving entirely; a newly
+exposed viewport edge showed only the coarse corrected floor for the whole
+duration of the gesture.
+
+Measured on the real slide (tonsil, channel index 1, tophat radius 25, a
+20-tile viewport), time from drag-stop to full current-level corrected
+coverage, with the number of corrected tiles computed DURING the drag and
+the fraction of the final viewport already covered at the moment the drag
+stopped:
+
+    10-step drag: settle-gated 311ms (0 computed during, 8/20 covered)
+                  this policy  222ms (3 computed during, 11/20 covered)
+    40-step drag: settle-gated 561ms (0 computed during, 0/20 covered)
+                  this policy  243ms (23 computed during, 7/20 covered)
+
+The gain grows with drag length because the settle-gated policy computed
+LITERALLY NOTHING while the camera moved, so a longer gesture just meant a
+longer stall afterwards; this policy stays roughly flat. Raising
+`compute_workers` from 1 to 4 changed the same measurement by ~1ms, so
+extra compute workers are not a lever -- this was never a throughput
+problem. One corrected tile costs ~5.8ms cold (3.4ms IO + 0.9ms kernel)
+and ~1.1ms with its raw halo already cached, yet the end-to-end cost per
+tile at drag-stop is ~24ms: the remainder is pipeline latency (halo
+staging round-trips through the single IO worker), which is what a future
+prefetch pass would hide. So both layers now
+issue from the SAME 30ms coalescing timer (`_issue_raw_requests`, which
+also drives the precise layer's `_issue_settled_request`), and each issuing
+pass requests only tiles that are actually MISSING -- for precise, a
+visible tile whose pooled `CorrectionKey` does not match the live selection
+context (`_key_matches_context`); for raw, a visible tile with no pool
+entry at all. A tile that is already cached or already in flight needs no
+special handling: the scheduler's cache check and single-flight dedup
+(`TileScheduler._pending`) cover both, so requesting a tile redundantly is
+harmless, just wasted call overhead.
+
+`_settle_timer` / `settle_ms` still exist, but no longer gate any
+interactive request issuing -- `_on_settle` is kept as an explicit,
+documented hook for a FUTURE higher-quality / native (non-interactive)
+refinement pass that has not been built yet. Do not re-litigate this: do
+not route interactive corrected-tile issuing back through the settle timer,
+and do not raise `compute_workers` to "fix" corrected-tile latency -- both
+were measured and neither helps.
 
 ## Generation namespaces
 
@@ -609,9 +657,12 @@ class ExploreController(QtCore.QObject):
     """Drives an ExploreView from a provider/scheduler/compute stack.
 
     Selection state (channel/method/params) plus the viewport define the
-    current "settled" request set. Raw tiles fill in immediately on
-    viewport change; precise (corrected) tiles are requested only after a
-    `settle_ms` quiet period (or immediately via `jump_to`).
+    current wanted tile set. Both raw and precise (corrected) tiles are
+    requested from the same 30ms motion-coalescing timer (module docstring
+    "Camera contract") -- immediately via `jump_to`/`set_selection`, or
+    after a burst of camera motion settles for `MOTION_MS`. `settle_ms` is
+    retained only as a future-refinement hook (`_on_settle`); it no longer
+    gates any interactive request.
     """
 
     provisional_changed = QtCore.pyqtSignal(bool)
@@ -1350,8 +1401,19 @@ class ExploreController(QtCore.QObject):
         self.stats["items_created"] = self._raw_pool.items_created + self._precise_pool.items_created
         self.stats["items_pruned"] = self._raw_pool.items_pruned + self._precise_pool.items_pruned
 
-        # Debounced: only ISSUING raw requests waits for motion to settle.
-        self._motion_timer.start(self.MOTION_MS)
+        # Debounced: ISSUING requests (both raw and precise, from
+        # `_issue_raw_requests`) waits for motion to settle for MOTION_MS
+        # (module docstring "Camera contract"). `_settle_timer` is also
+        # (re)started here but no longer gates any interactive request --
+        # it is a future-refinement hook only (see `_on_settle`).
+        # THROTTLE, not debounce: restarting the timer on every range event
+        # means it never fires at all while the camera keeps moving (events
+        # arrive faster than MOTION_MS), which is the same class of bug as
+        # the settle gate this replaced -- a continuous drag would still
+        # compute nothing. Leaving an already-running timer alone makes it
+        # fire every MOTION_MS *during* motion instead.
+        if not self._motion_timer.isActive():
+            self._motion_timer.start(self.MOTION_MS)
         self._settle_timer.start(self.settle_ms)
 
         if self.probe and t0 is not None:
@@ -1360,9 +1422,14 @@ class ExploreController(QtCore.QObject):
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
 
     def _issue_raw_requests(self):
-        """Debounced request-issuing callback (module docstring). Cancels
-        the previous raw generation and issues center-out requests for the
-        current wanted set's cache misses."""
+        """The 30ms motion-timer callback (module docstring "Camera
+        contract") -- the single place both layers' requests are issued
+        from. Cancels the previous raw generation and issues center-out
+        requests for the current wanted set's cache misses, then does the
+        same for the precise (corrected) layer via `_issue_settled_request`
+        (missing-tiles-only; a no-op when no method is selected). Despite
+        the name (kept for the timer connection / existing call sites),
+        this is no longer raw-only."""
         t0 = time.perf_counter() if self.probe else None
 
         self.scheduler.cancel_generation(self.view_generation)
@@ -1413,12 +1480,15 @@ class ExploreController(QtCore.QObject):
             self.timings["request_issue_ms"].append(dt_ms)
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
 
+        self._issue_settled_request()
+
     def jump_to(self, y0: int, x0: int, w: int, h: int):
         """Navigator / checkpoint jump: level-0 coordinates. Actually moves
         the camera (ViewBox.setRange with the world rect, padding=0) so the
-        real range-changed handling path runs. The settled batch AND the
-        debounced raw-request batch are then both fired immediately
-        (bypassing their timers)."""
+        real range-changed handling path runs. Both the raw and precise
+        request batches are then fired immediately (bypassing the motion
+        timer) via `_issue_raw_requests`, which now issues both layers
+        (module docstring "Camera contract")."""
         rect = QRectF(float(x0), float(y0), float(w), float(h))
         self._jumping = True
         try:
@@ -1428,17 +1498,49 @@ class ExploreController(QtCore.QObject):
         self._motion_timer.stop()
         self._issue_raw_requests()
         self._settle_timer.stop()
-        self._on_settle()
 
     # ── settle / precise request ─────────────────────────────────────────
 
     def _on_settle(self):
-        self._issue_settled_request()
+        """`_settle_timer`'s timeout callback. Interactive corrected-tile
+        issuing no longer happens here (module docstring "Camera contract")
+        -- it moved onto the 30ms motion timer alongside raw, because
+        gating it on this 80ms-by-default quiet period meant a continuous
+        drag never requested a single corrected tile until the user
+        stopped moving (measured on the real slide: a 40-step drag went
+        from 561ms drag-stop-to-full-coverage with 0 tiles computed during
+        the drag, to 243ms with 23 computed during it).
+
+        This hook is kept deliberately as a place for a FUTURE pass -- e.g.
+        requesting a higher-quality / native-resolution refinement of the
+        settled viewport once the camera has been still for a while -- that
+        has not been built yet. It intentionally does nothing today; do not
+        route interactive precise-tile issuing back through it."""
+        return
 
     def _issue_settled_request(self):
-        """Cancel the previous settled generation, start a new one, and
-        issue CorrectionKeys for the current selection (skipping precise
-        entirely when method is None)."""
+        """Cancel the previous precise generation, start a new one, and
+        issue `CorrectionKey` requests for visible tiles that are MISSING
+        under the current selection context -- i.e. `self._precise_pool`
+        has no entry at `(self.level, tx, ty)` whose key matches
+        `selection_key_context()` (`_key_matches_context`, the same
+        predicate `_coverage_complete` uses -- one definition of "current"
+        shared by both). A tile that already has a matching pooled entry,
+        or is already in flight, needs no special handling here: the
+        scheduler's cache check and single-flight dedup
+        (`TileScheduler._pending`) cover both, so this only needs to filter
+        out tiles that are demonstrably already covered.
+
+        Called from `_issue_raw_requests` (the 30ms motion-timer callback)
+        for coalesced, in-motion issuing, and directly from `set_selection`
+        for immediate re-issuing on a selection change. A selection change
+        needs no separate "force all" path: every visible tile's pooled key
+        (if any) was computed against the OLD selection context, so it
+        stops matching `selection_key_context()` the instant the selection
+        changes, and every visible tile becomes "missing" here naturally.
+
+        Skips entirely (after bumping/cancelling the generation) when no
+        method is selected or there is no current viewport yet."""
         self.scheduler.cancel_generation(self._settled_generation)
         self._settled_gen_n += 1
         self._settled_generation = ("precise", self._settled_gen_n)
@@ -1470,7 +1572,16 @@ class ExploreController(QtCore.QObject):
                 "first": False, "full": False,
             }
 
-        ordered = sorted(visible, key=dist)
+        ctx = self.selection_key_context()
+
+        def is_missing(coord):
+            tx, ty = coord
+            entry = self._precise_pool.get(self.level, tx, ty)
+            return (entry is None or entry.key is None
+                    or not self._key_matches_context(entry.key, ctx))
+
+        missing = [coord for coord in visible if is_missing(coord)]
+        ordered = sorted(missing, key=dist)
         for i, (tx, ty) in enumerate(ordered):
             key = self._make_correction_key(tx, ty)
             req = TileRequest(key=key, generation=gen, priority=i)

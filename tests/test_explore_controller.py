@@ -252,9 +252,14 @@ def test_range_change_requests_missing_raw_tiles_center_out(app):
     ctrl.teardown()
 
 
-# ── 3. settle timer: rapid range changes -> exactly one live settled gen ──
+# ── 3. motion timer (not the settle timer): rapid range changes coalesce
+#      into exactly one live settled gen ────────────────────────────────────
 
 def test_settle_debounce_fires_once(app):
+    """Precise issuing is coalesced by the 30ms `_motion_timer`, not by
+    `_settle_timer` -- `settle_ms=150` is set deliberately larger than the
+    time this test actually waits (well under 150ms total), so a passing
+    result here cannot be explained by the settle timer having fired."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=150)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
@@ -263,10 +268,11 @@ def test_settle_debounce_fires_once(app):
     for i in range(5):
         set_view_and_pump(view, 700 + i, 100, 700 + i + 2048, 2148, ms=10)
 
-    _pump(300)
+    _pump(60)  # >> MOTION_MS (30ms) after the last event, << settle_ms (150ms)
 
     precise_reqs = scheduler.pending_for(CorrectionKey)
     gens = {r.generation for r, _cb in precise_reqs}
+    assert precise_reqs, "precise requests must appear via the motion timer, well before settle_ms"
     assert ctrl._settled_generation in gens
     stale = gens - {ctrl._settled_generation}
     assert stale <= set(scheduler.cancelled_generations)
@@ -1454,5 +1460,151 @@ def test_floor_survives_calibration_failure(app):
     assert view.corrected_floor_item.isVisible() is True
     assert ctrl._level_gain == {}
     assert ctrl.stats["gain_calibration_failed"] == 1
+
+    ctrl.teardown()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Interactive precise issuing moved onto the 30ms motion timer
+# (module docstring "Camera contract" -- 322ms -> 108ms measured fix)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_motion_timer_throttles_rather_than_debounces(app):
+    """A running motion timer must NOT be restarted by a further range
+    event. Restarting it on every event means it never fires while the
+    camera keeps moving (events arrive faster than MOTION_MS), so a
+    continuous drag would compute nothing -- the same bug as the settle
+    gate this replaced. Measured on the real slide, a 40-step drag went
+    from 561ms drag-stop-to-full-coverage (0 tiles computed during the
+    drag, 0/20 covered at stop) to 243ms (23 computed during, 7/20
+    covered) once this became a throttle."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    set_view_and_pump(view, 0, 0, 2048, 2048, ms=60)
+    ctrl._motion_timer.start(ctrl.MOTION_MS)
+    remaining_before = ctrl._motion_timer.remainingTime()
+    _pump(15)
+    remaining_mid = ctrl._motion_timer.remainingTime()
+    assert remaining_mid < remaining_before, "timer should be counting down"
+
+    # A further range change must leave the running timer alone.
+    view.view_box.setRange(xRange=(10, 2058), yRange=(10, 2058), padding=0)
+    remaining_after = ctrl._motion_timer.remainingTime()
+    assert remaining_after <= remaining_mid + 2, (
+        "range event restarted a running motion timer (debounce); under "
+        "continuous motion that timer would never fire")
+
+    ctrl.teardown()
+
+
+def test_precise_requested_during_continuous_motion(app):
+    """With a large `settle_ms` (so the settle timer provably cannot be the
+    source), drive several range changes ~16ms apart -- closer together
+    than MOTION_MS (30ms), so the motion timer keeps coalescing rather than
+    firing mid-drag -- and assert CorrectionKey requests appear shortly
+    after motion stops, long before settle_ms could have fired."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    scheduler.requests.clear()
+
+    for i in range(6):
+        view.view_box.setRange(xRange=(700 + i, 700 + i + 2048),
+                                yRange=(100, 100 + 2048), padding=0)
+        _pump(16)
+
+    # Nothing should have been issued yet mid-drag (still coalescing).
+    _pump(60)  # >> MOTION_MS after the last event, way << settle_ms
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    assert precise_reqs, "precise requests must be issued during/after motion, not gated on settle_ms"
+
+    ctrl.teardown()
+
+
+def test_precise_requests_missing_tiles_only(app):
+    """Deliver one precise tile, then simulate another motion-timer pass
+    over the same viewport: the already-covered tile must NOT be
+    re-requested, while a genuinely missing neighbour (never delivered)
+    IS."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)  # 2x2 tiles at ts=512
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    assert len(precise_reqs) >= 2
+    req0, _cb0 = precise_reqs[0]
+    covered_tile = (req0.key.tile.tx, req0.key.tile.ty)
+    other_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in precise_reqs} - {covered_tile}
+    assert other_tiles
+
+    arr = np.zeros((512, 512), dtype=np.float32)
+    scheduler.deliver(req0, arr)
+    _pump(20)
+
+    scheduler.requests.clear()
+
+    # Simulate the motion timer firing again over the SAME viewport (no
+    # selection or camera change) -- the normal "another motion pass"
+    # trigger.
+    ctrl._issue_raw_requests()
+    _pump(20)
+
+    new_precise_reqs = scheduler.pending_for(CorrectionKey)
+    new_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in new_precise_reqs}
+    assert covered_tile not in new_tiles, "already-covered tile must not be re-requested"
+    assert new_tiles & other_tiles, "a genuinely missing neighbour must still be requested"
+
+    ctrl.teardown()
+
+
+def test_settle_timer_does_not_issue_interactive_precise(app):
+    """Calling `_on_settle` directly must issue no CorrectionKey requests
+    at all -- it is retained only as a future-refinement hook (module
+    docstring), not a path for interactive precise issuing."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+    scheduler.requests.clear()
+
+    ctrl._on_settle()
+    _pump(20)
+
+    assert scheduler.pending_for(CorrectionKey) == []
+
+    ctrl.teardown()
+
+
+def test_selection_change_reissues_all_visible(app):
+    """Once every visible tile is covered under method A, changing to
+    method B must re-request every visible tile again -- no pooled key
+    matches the new selection context any more, so "missing tiles only"
+    naturally degenerates to "all tiles" on a selection change; there must
+    be no separate force-all path."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+
+    precise_reqs = scheduler.pending_for(CorrectionKey)
+    visible_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in precise_reqs}
+    assert len(visible_tiles) >= 2
+
+    arr = np.zeros((512, 512), dtype=np.float32)
+    for req, _cb in precise_reqs:
+        scheduler.deliver(req, arr)
+    _pump(20)
+
+    scheduler.requests.clear()
+    ctrl.set_selection(method="cucim", params=(8,))
+    _pump(20)
+
+    new_reqs = scheduler.pending_for(CorrectionKey)
+    new_tiles = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in new_reqs}
+    assert new_tiles == visible_tiles
 
     ctrl.teardown()

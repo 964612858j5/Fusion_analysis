@@ -65,19 +65,34 @@ class FakeController(QtCore.QObject):
             display_hi=None,
         )
 
+    # The host keeps overview records at ITS OWN overview level, which is
+    # NOT the display level -- on the real slides the display is L0 while
+    # the overview lives at L2. `level=None` means "the host's level", and
+    # that is how a consumer must ask. Modelling both as the same level is
+    # what let a bug through where HOT queried the display level: the
+    # lookup never matched, the channel could never be ready, and
+    # `prepare_overview_async` then returned without emitting for a record
+    # that was already cached, wedging the one-at-a-time gate for good.
+    OVERVIEW_LEVEL = 2
+
     def has_overview_record(self, channel, level=None, source=None):
-        return (source, channel, level) in self.overviews
+        lvl = self.OVERVIEW_LEVEL if level is None else level
+        return (source, channel, lvl) in self.overviews
 
     def prepare_overview_async(self, channel):
+        # Matches the host: already-cached is a silent no-op, NO signal.
+        if (self.source, channel, self.OVERVIEW_LEVEL) in self.overviews:
+            return
         self.prepare_calls.append(channel)
         self.overview_inflight.append(channel)
 
-    def finish_overview(self, channel, ok=True, level=1):
+    def finish_overview(self, channel, ok=True, level=None):
+        lvl = self.OVERVIEW_LEVEL if level is None else level
         if channel in self.overview_inflight:
             self.overview_inflight.remove(channel)
         if ok:
-            self.overviews.add((self.source, channel, level))
-        self.overview_prepared.emit(self.source, channel, level, ok)
+            self.overviews.add((self.source, channel, lvl))
+        self.overview_prepared.emit(self.source, channel, lvl, ok)
 
 
 class FakeScheduler:
@@ -151,7 +166,10 @@ def _make(channels=("c0", "c1", "c2", "c3", "c4"),
     return controller, scheduler, hot
 
 
-def _ready_overviews(controller, channels=None, level=1):
+def _ready_overviews(controller, channels=None, level=None):
+    # Seed at the HOST's overview level, not the display level -- see
+    # FakeController.OVERVIEW_LEVEL.
+    level = controller.OVERVIEW_LEVEL if level is None else level
     for channel in channels or controller.channels:
         controller.overviews.add((controller.source, channel, level))
 
@@ -321,7 +339,8 @@ def test_readiness_requires_overview_and_exact_both_method_keys(app):
         snapshot = _snapshot(controller, channel="c1", visible=((0, 0),))
         assert not hot.is_channel_ready("c0", snapshot)
 
-        controller.overviews.add((controller.source, "c0", snapshot.level))
+        controller.overviews.add(
+            (controller.source, "c0", controller.OVERVIEW_LEVEL))
         assert not hot.is_channel_ready("c0", snapshot)
 
         grid = hot.grid
@@ -411,3 +430,104 @@ def test_stop_twice_is_safe_and_leaves_no_local_work(app):
     assert len(scheduler.requests) == before
     assert not hot._tile_queue
     assert len(scheduler.cancelled_generations) == 1
+
+
+def test_overview_is_queried_at_the_hosts_level_not_the_display_level(app):
+    """Regression for a defect that made HOT unusable on real data.
+
+    The display level is L0 while zoomed in; the host keeps its overview
+    record at its OWN level (L2 on the real slides). Querying the DISPLAY
+    level meant the lookup never matched, so no channel could ever be
+    reported ready -- and HOT then called `prepare_overview_async` for a
+    record that was already cached, which is a silent no-op emitting
+    nothing, wedging the one-overview-at-a-time gate permanently. The
+    earlier tests hid this by modelling both levels as the same number.
+    """
+    controller, scheduler, hot = _make()
+    try:
+        snapshot = _snapshot(controller, level=0)      # displaying L0
+        assert snapshot.level != controller.OVERVIEW_LEVEL, "test setup"
+
+        _ready_overviews(controller)                    # stored at L2 only
+        for tx, ty in snapshot.visible_tiles:
+            for method, base in (("tophat", 9), ("cucim", 13)):
+                key = hot._make_key(snapshot, "c1", tx, ty, method, base)
+                scheduler.corrected_cache[key] = object()
+
+        assert hot.is_channel_ready("c1", snapshot) is True, (
+            "readiness asked for the display level instead of the host's")
+
+        controller.prepare_calls.clear()
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        assert controller.prepare_calls == [], (
+            "HOT asked to prepare overviews it already has")
+        assert hot._overview_inflight is None, (
+            "the one-at-a-time overview gate wedged on an already-cached record")
+    finally:
+        hot.stop()
+
+
+def test_stale_tile_callback_refills_the_freed_slot(app):
+    """A callback from a superseded generation frees its in-flight slot. If
+    it returns without pumping, a newer plan sits stalled with capacity
+    available and nobody to use it."""
+    controller, scheduler, hot = _make(cancel_callbacks=False)
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller)
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        assert scheduler.requests, "test setup: nothing was requested"
+
+        controller.interaction_event.emit("PAN", snapshot)
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        issued_before = len(scheduler.requests)
+
+        # A callback from the OLD generation now arrives.
+        scheduler.complete(0)
+
+        assert len(scheduler.requests) > issued_before, (
+            "a stale callback freed a slot but nothing refilled it")
+    finally:
+        hot.stop()
+
+
+def test_failures_are_not_counted_as_completions(app):
+    """A benchmark reporting "120 of 120 completed" has to mean it."""
+    controller, scheduler, hot = _make(cancel_callbacks=False)
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller)
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        scheduler.complete(0, error="boom")
+
+        assert hot.stats["hot_tiles_completed"] == 0
+        assert hot.stats["hot_tiles_failed"] == 1
+    finally:
+        hot.stop()
+
+
+def test_failed_overview_does_not_make_a_channel_ready(app):
+    """A channel whose overview could not be read has an unknown display
+    range; queueing its corrected tiles would spend the budget on a channel
+    that cannot be switched to."""
+    controller, scheduler, hot = _make()
+    try:
+        snapshot = _snapshot(controller)
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        target = controller.prepare_calls[0]
+        before = len(scheduler.requests)
+        controller.finish_overview(target, ok=False)
+
+        assert hot.stats["overviews_failed"] == 1
+        assert hot.is_channel_ready(target, snapshot) is False
+        queued = [r["request"] for r in scheduler.requests[before:]
+                  if r["request"].key.channel == target]
+        assert not queued, (
+            "tiles were queued for a channel whose overview failed")
+    finally:
+        hot.stop()

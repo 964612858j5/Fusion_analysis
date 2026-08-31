@@ -41,6 +41,8 @@ class MultiChannelPrefetchController(QtCore.QObject):
             "hot_tiles_completed": 0,
             "hot_cancelled": 0,
             "overviews_requested": 0,
+            "overviews_failed": 0,
+            "hot_tiles_failed": 0,
             "settle_confirmations": 0,
             "settle_aborted": 0,
         }
@@ -90,8 +92,16 @@ class MultiChannelPrefetchController(QtCore.QObject):
         if spec is None:
             return False
 
+        # NOT `snapshot.level`. That is the DISPLAY level (L0 while zoomed
+        # in); the overview record lives at the host's own overview level
+        # (L2 on the real slides). Asking for the display level made this
+        # never match, so a channel could never be reported ready -- and it
+        # made the caller below call `prepare_overview_async` for a record
+        # that was already cached, which returns without emitting, leaving
+        # the one-at-a-time overview gate stuck for good. Passing None lets
+        # the host resolve its own level.
         if not self.controller.has_overview_record(
-                channel, level=snapshot.level, source=snapshot.source):
+                channel, source=snapshot.source):
             return False
 
         cache = getattr(self.scheduler, "corrected_cache", None)
@@ -222,8 +232,10 @@ class MultiChannelPrefetchController(QtCore.QObject):
         generation = self._hot_generation
         while self._overview_position < len(self._overview_plan):
             channel, hot_index = self._overview_plan[self._overview_position]
+            # Host's overview level, not the display level -- see
+            # `is_channel_ready`.
             if self.controller.has_overview_record(
-                    channel, level=snapshot.level, source=snapshot.source):
+                    channel, source=snapshot.source):
                 self._overview_position += 1
                 self._queue_channel_tiles(snapshot, channel, hot_index,
                                           generation)
@@ -235,11 +247,23 @@ class MultiChannelPrefetchController(QtCore.QObject):
             return
         self._pump_tiles()
 
-    def _on_overview_prepared(self, source, channel, _level, _ok):
+    def _on_overview_prepared(self, source, channel, _level, ok):
         waiting = self._overview_inflight
         if waiting is None or source != waiting[1] or channel != waiting[2]:
             return
         self._overview_inflight = None
+
+        if not ok:
+            # A channel whose overview could not be read is not ready and
+            # never will be from this plan. Queueing its corrected tiles
+            # anyway would spend the budget on a channel that cannot be
+            # switched to, and would let `is_channel_ready` be asked about
+            # a channel whose display range is unknown.
+            self.stats["overviews_failed"] += 1
+            if not self._stopped and self._settled and waiting[0] == self._hot_generation:
+                self._overview_position += 1
+            self._pump_overviews()
+            return
 
         if (self._stopped or not self._settled
                 or waiting[0] != self._hot_generation):
@@ -301,11 +325,21 @@ class MultiChannelPrefetchController(QtCore.QObject):
             return
         if self._stopped or generation != self._hot_generation:
             # TileScheduler has already put a completed result in its cache;
-            # HOT never consumes the callback payload or blits it.
+            # HOT never consumes the callback payload or blits it. But the
+            # slot this occupied has just been freed, and a NEWER plan may
+            # be waiting on it -- returning here left the new queue stalled
+            # with capacity available and nobody pumping.
+            if not self._stopped and self._settled:
+                self._pump_tiles()
             return
 
-        if getattr(result, "error", None) == "cancelled":
+        error = getattr(result, "error", None)
+        if error == "cancelled":
             self.stats["hot_cancelled"] += 1
+        elif error is not None or getattr(result, "pixels", None) is None:
+            # Any other error is a FAILURE, not a completion. Counting it as
+            # done made a benchmark's "120 of 120 completed" meaningless.
+            self.stats["hot_tiles_failed"] += 1
         else:
             self.stats["hot_tiles_completed"] += 1
         self._pump_tiles()

@@ -3074,6 +3074,79 @@ def test_atomic_swap_issues_no_raw_requests(app):
     ctrl.teardown()
 
 
+def test_quantisation_is_bit_identical_to_the_reference_formula(app):
+    """The uint8 quantisation is the pixels a user compares between
+    channels, so an implementation change must be provably a no-op.
+
+    The reference here is the formula the viewer used before the
+    allocation rewrite -- `round(clip((v - lo) / span, 0, 1) * 255)` --
+    written out independently, not called from the code under test.
+    A faster fused multiply-add would give a different float rounding and
+    a scattered +/-1 in the output; this test is what forbids it.
+
+    Fixed seed, and deliberately covering: float32 and integer-derived
+    input, values below `lo` and above `hi` so both clip sides are hit,
+    tiny and huge dynamic ranges, and BOTH the gain == 1.0 fast path and
+    the gain != 1.0 path.
+    """
+    ctrl, _provider, _scheduler, _view = make_controller(app)
+    try:
+        rng = np.random.default_rng(20260901)
+
+        def reference(arr, lo, hi, gain):
+            gained = arr.astype(np.float32, copy=False) * gain
+            span = max(hi - lo, 1e-6)
+            norm = np.clip((gained - lo) / span, 0.0, 1.0)
+            return np.round(norm * 255.0).astype(np.uint8)
+
+        applied_gains = set()
+        cases = []
+        for span in (1e-3, 1.0, 255.0, 4000.0, 65535.0):
+            for lo in (-7.5, 0.0, 12.0):
+                cases.append((lo, lo + span))
+
+        for lo, hi in cases:
+            for integer_source in (False, True):
+                # Deliberately overshoot the display range on both sides.
+                raw = (rng.random((64, 96), dtype=np.float32)
+                       * (hi - lo) * 1.4 + lo - (hi - lo) * 0.2)
+                arr = raw.astype(np.uint16).astype(np.float32) if integer_source else raw
+                ctrl._display_lo, ctrl._display_hi = lo, hi
+
+                got = ctrl._quantize_tile_uint8(arr)
+                assert np.array_equal(got, reference(arr, lo, hi, 1.0)), (
+                    f"plain quantisation differs at lo={lo} hi={hi} "
+                    f"integer_source={integer_source}")
+
+                # The table is only honoured when `_gain_ctx` matches the
+                # LIVE floor context -- a stale table must never scale
+                # pixels -- so install it the way the floor job does.
+                if ctrl._floor_level is None:
+                    ctrl._floor_level, ctrl._floor_stride = 0, 1
+                ctrl._level_gain = {0: 1.0, 1: 1.75, 2: 0.5}
+                ctrl._gain_ctx = ctrl._current_floor_ctx(
+                    ctrl._floor_level, ctrl._floor_stride)
+                for level in (0, 1, 2):
+                    applied = ctrl._display_gain_for_level(level)
+                    applied_gains.add(applied)
+                    got = ctrl._quantize_corrected_uint8(arr, level)
+                    assert np.array_equal(
+                        got, reference(arr, lo, hi, applied)), (
+                        f"corrected quantisation differs at lo={lo} hi={hi} "
+                        f"level={level} gain={applied}")
+                    if applied == 1.0:
+                        # The fast path must return exactly what the general
+                        # path would have.
+                        assert np.array_equal(got, ctrl._quantize_tile_uint8(arr))
+
+        # Guard against a vacuous run: if the gain table never installed,
+        # every case above would have exercised the 1.0 fast path only.
+        assert applied_gains - {1.0}, (
+            f"no non-unit gain was ever applied: {applied_gains}")
+    finally:
+        ctrl.teardown()
+
+
 def test_atomic_swap_defers_fallback_synthesis_but_still_requests_it(app):
     """The synthesis is DEFERRED on an atomic swap, not skipped.
 

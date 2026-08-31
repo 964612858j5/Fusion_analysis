@@ -84,10 +84,24 @@ later revision:
 
 ## After the switch-path optimisation (same day, real machine)
 
-Three commits, none of which changes an output pixel: `source_identity`
-cached per provider; the atomic swap defers the local fallback synthesis to
-the scheduler; fewer allocations per quantised tile plus no autoLevels scan
-on item creation.
+Three commits. Two of them are pixel-identical: `source_identity` cached
+per provider, and fewer allocations per quantised tile plus no autoLevels
+scan on item creation (a regression test asserts the quantisation is
+bit-identical to the previous formula).
+
+The third is NOT pixel-identical, and the distinction matters. Deferring
+the atomic swap's fallback synthesis changes where the level+1 underlay's
+pixels come from: previously it was box-downsampled from already-corrected
+level-0 tiles; now the scheduler computes it from level+1 pyramid data with
+a level-scaled radius. Top-hat is non-linear, so these are not equivalent —
+measured elsewhere in this project at a 15-25% brightness gap, and the
+downsample-from-finer version is the ACCURATE one. What changed is
+therefore a quality trade in a layer that is invisible at the moment of the
+switch and only surfaces if a later pan outruns the current level. Measured
+on the real machine, the first drag after a switch showed no floor
+exposure, block boundary or brightness regression (A/B: current-level
+coverage 96.7% both arms, floor showing 3.3% both arms), and the operator
+confirmed the same by eye. It is a trade, not a free win.
 
 Profiled cost of `set_selection` to a fully-cached channel (offscreen,
 background prefetch quiesced, 3 runs each, medians):
@@ -112,8 +126,10 @@ Near switches show `blank=0 raw=0` throughout. Far switches are unchanged
 in kind — they wait on the overview (`blank` 4–6 frames, 48–81ms) — which
 is the behaviour this document's earlier section decided to keep.
 
-**Qt painting is NOT the bottleneck**, contrary to what the offscreen
-measurement suggested. On the real machine `[channel] -> X in NN ms` (the
+**Qt painting is not the bottleneck on this machine, with this data and
+this viewport** (1400x1000 window, 24 tiles at level 0), contrary to what
+the offscreen measurement suggested. This is one configuration, not a
+general claim about the renderer. On the real machine `[channel] -> X in NN ms` (the
 synchronous return) and `full_precise` (sampled from the actual scene,
 timed from before the call) differ by ~1ms — 42.5/43, 18.2/23, 39.1/40,
 34.2/35, 33.7/34. The 79–203ms `processEvents` seen offscreen is a
@@ -125,5 +141,7 @@ shows no floor exposure, block boundaries or brightness jumps; zoom
 regression clean.
 
 Remaining synchronous cost, if it is ever worth attacking: ~9.6ms
-quantisation (memory-bandwidth bound at identical rounding), ~9.6ms Qt item
-creation (this is the deferred ItemPool-reuse idea), ~11ms elsewhere.
+quantisation, ~9.6ms Qt item creation (this is the deferred ItemPool-reuse
+idea), ~11ms elsewhere. INFERRED, not measured: that the quantisation is at
+its floor while the rounding stays identical — the remaining passes are
+memory-bound in shape, but no roofline or bandwidth measurement was taken.

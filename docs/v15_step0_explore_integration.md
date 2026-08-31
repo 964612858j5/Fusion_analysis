@@ -1,3 +1,13 @@
+> **SUPERSEDED (2026-09-01) — see `docs/v15_step0_mount_plan.md`.**
+>
+> Kept for the design record, not as guidance. Sections 1 and 2 describe a
+> three-layer mosaic canvas with per-frame `setImage` blits; the viewer has
+> since moved to one ImageItem per tile in fixed world coordinates, a
+> corrected floor layer, and multi-channel HOT/COVERAGE prefetch. The
+> "Explore previews the FINAL SELECTED method only" contract in §3 is also
+> replaced, by the four preview modes (Original / Top-hat / cuCIM /
+> Selected Final) in the new plan.
+
 # v15 Step0 Explore integration — one-page design (for review)
 
 Status: design for review / implementation not started

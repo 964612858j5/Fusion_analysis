@@ -1453,7 +1453,14 @@ class ExploreController(QtCore.QObject):
                 # I/O and contend with background channel preparation.
                 self._issue_raw_requests()
             else:
-                self._issue_settled_request()
+                # After an atomic swap the viewport is ALREADY complete at
+                # the current level, so a synthesized coarse underlay cannot
+                # be seen -- but building it costs ~30ms of `np.mean` on the
+                # GUI thread, inside the switch. Request the same tiles
+                # asynchronously instead; the underlay is ready for the next
+                # pan either way.
+                self._issue_settled_request(
+                    allow_local_synthesis=not atomic_swapped)
 
         # The atomic cached swap fills the pool BEFORE `_enter_provisional`
         # above, so no later delivery arrives to clear the flag: without
@@ -2598,7 +2605,7 @@ class ExploreController(QtCore.QObject):
         self._clear_zoom_gesture_state()
         self.gesture_quiet.emit(self.snapshot())
 
-    def _issue_settled_request(self):
+    def _issue_settled_request(self, allow_local_synthesis: bool = True):
         """Cancel the previous precise generation, start a new one, and
         issue `CorrectionKey` requests for visible tiles that are MISSING
         under the current selection context -- i.e. `self._precise_pool`
@@ -2620,7 +2627,18 @@ class ExploreController(QtCore.QObject):
         changes, and every visible tile becomes "missing" here naturally.
 
         Skips entirely (after bumping/cancelling the generation) when no
-        method is selected or there is no current viewport yet."""
+        method is selected or there is no current viewport yet.
+
+        `allow_local_synthesis=False` forbids the SYNCHRONOUS local
+        construction of missing fallback-level tiles from pooled finer
+        tiles; those tiles are still requested from the scheduler, so the
+        fallback layer is still filled, just asynchronously. Used by the
+        atomic cached channel swap, where the whole viewport is already
+        covered by current-level corrected tiles: the synthesis is invisible
+        at that moment and measured at ~30ms of GUI-thread `np.mean` inside
+        a switch that costs ~90ms in total. Every other caller (motion
+        ticks, pans, zooms) keeps the synchronous path, where the synthesized
+        underlay IS what the user sees instead of the floor."""
         if self._blocked_on_overview():
             return
         self.scheduler.cancel_generation(self._settled_generation)
@@ -2760,14 +2778,23 @@ class ExploreController(QtCore.QObject):
                 # failure (a source tile missing/stale, or a non-integer
                 # level ratio) falls through to the request exactly as
                 # before.
-                furgent_to_request = [
-                    c for c in furgent
-                    if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
-                ]
-                fring_to_request = [
-                    c for c in fring
-                    if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
-                ]
+                if allow_local_synthesis:
+                    furgent_to_request = [
+                        c for c in furgent
+                        if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
+                    ]
+                    fring_to_request = [
+                        c for c in fring
+                        if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
+                    ]
+                else:
+                    # Not skipped, DEFERRED: every one of these is still
+                    # requested below, so the fallback layer still fills --
+                    # off the GUI thread.
+                    furgent_to_request, fring_to_request = furgent, fring
+                    self.stats["fallback_synthesis_deferred"] = (
+                        self.stats.get("fallback_synthesis_deferred", 0)
+                        + len(furgent) + len(fring))
                 for i, (tx, ty) in enumerate(furgent_to_request):
                     key = self._make_correction_key(tx, ty, level=fallback_level)
                     req = TileRequest(key=key, generation=gen, priority=i)

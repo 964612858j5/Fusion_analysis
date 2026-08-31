@@ -3074,6 +3074,76 @@ def test_atomic_swap_issues_no_raw_requests(app):
     ctrl.teardown()
 
 
+def test_atomic_swap_defers_fallback_synthesis_but_still_requests_it(app):
+    """The synthesis is DEFERRED on an atomic swap, not skipped.
+
+    After an atomic swap the viewport is already complete at the current
+    level, so a locally synthesized coarse underlay cannot be seen -- but
+    building it is ~30ms of `np.mean` on the GUI thread, measured inside a
+    switch that cost ~90ms in total. So the switch must not build it, and
+    must still ASK the scheduler for the same tiles, or the next pan would
+    expose the floor where the underlay should have been.
+    """
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl.level = 0
+    ctrl._motion_timer.stop()
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+    ctrl.prepare_overview_async(other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl.has_overview_record(other):
+        _pump(10)
+    assert ctrl.has_overview_record(other)
+
+    class _Cache:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, k):
+            return self.d.get(k)
+
+    cache = _Cache()
+    scheduler.corrected_cache = cache
+    saved = ctrl.channel
+    ctrl.channel = other
+    ts = ctrl.grid.tile_size
+    for tx, ty in ctrl._visible_tiles:
+        cache.d[ctrl._make_correction_key(tx, ty)] = np.full(
+            (ts, ts), 5.0, dtype=np.float32)
+    ctrl.channel = saved
+
+    synth_calls = []
+    real_synth = ctrl._synthesize_and_pool_fallback_tile
+    ctrl._synthesize_and_pool_fallback_tile = (
+        lambda *a, **k: synth_calls.append(a) or False)
+    scheduler.requests.clear()
+    try:
+        ctrl.set_selection(channel=other)
+    finally:
+        ctrl._synthesize_and_pool_fallback_tile = real_synth
+    ctrl._motion_timer.stop()
+
+    assert ctrl.stats.get("atomic_channel_swaps", 0) >= 1
+    assert synth_calls == [], (
+        f"the atomic swap built {len(synth_calls)} fallback tiles on the "
+        "GUI thread")
+
+    if ctrl.intermediate_corrected_fallback and 1 < provider.num_levels:
+        fallback_reqs = [
+            r for r, _cb in scheduler.requests
+            if isinstance(r.key, CorrectionKey) and r.key.tile.level == 1
+            and r.key.channel == other
+        ]
+        assert fallback_reqs, (
+            "deferring the synthesis must still request the fallback tiles")
+        assert ctrl.stats.get("fallback_synthesis_deferred", 0) > 0
+
+    ctrl.teardown()
+
+
 def test_cold_switch_never_quantises_against_the_previous_range(app):
     """The record contract is that pixels and the range derived FROM them
     install together. A cold switch must therefore not draw at all while

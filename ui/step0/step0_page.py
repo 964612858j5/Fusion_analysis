@@ -3680,6 +3680,21 @@ class Step0Page(QWidget):
             "channel_params": channel_params,
         }
 
+    def teardown(self):
+        """Explicit cleanup entry point for the page.
+
+        The Explore stack owns worker threads and open file handles; a host
+        that closes or replaces this page must be able to release them
+        deterministically rather than waiting for Python GC. Idempotent.
+        (The tab also tears itself down on the page's `destroyed` signal and
+        on `aboutToQuit`, so a host that forgets this call still does not
+        leak -- this is the deterministic path, not the only one.)
+        """
+        self._stop_bg_workers()
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is not None:
+            explore_tab.teardown()
+
     def _stop_bg_workers(self):
         for worker in self._bg_workers:
             if worker.isRunning():

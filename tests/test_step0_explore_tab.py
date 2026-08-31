@@ -7,7 +7,9 @@ a provider gets closed.
 """
 
 import os
+import time
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PyQt5")
@@ -15,7 +17,8 @@ pytest.importorskip("PyQt5")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from block01.ui.step0.step0_explore_tab import (  # noqa: E402
-    ExploreStack, Step0ExploreTab,
+    ExploreStack, Step0ExploreTab, _cleanup_partial_stack,
+    build_default_stack,
 )
 
 
@@ -40,6 +43,24 @@ class FakeProvider:
 
     def close(self):
         self.closed = True
+
+
+class FakeCache:
+    """Enough of LRUByteCache to prove teardown EMPTIES it. Dropping the
+    tuple reference frees nothing -- the scheduler and the compute layer
+    hold their own references to these same objects."""
+
+    def __init__(self, name):
+        self.name = name
+        self._store = {"tile": np.zeros(16, dtype=np.uint8)}
+        self._bytes = 16
+
+    def stats(self):
+        return {"items": len(self._store), "bytes": self._bytes}
+
+    def clear(self):
+        self._store.clear()
+        self._bytes = 0
 
 
 class FakeScheduler:
@@ -100,8 +121,12 @@ def make_factory(order=None, fail=False):
         controller = FakeController(provider, scheduler, order)
         from PyQt5 import QtWidgets
         view = QtWidgets.QLabel("fake explore view")
-        stack = ExploreStack(provider, scheduler, controller, view,
-                             ("raw_cache", "corrected_cache"))
+        caches = (FakeCache("raw"), FakeCache("corrected"))
+        # A scheduler holds the same cache objects, exactly as the real one
+        # does -- so a test that only checked `stack.caches is None` would
+        # prove nothing about the 2GB actually being released.
+        scheduler.caches = caches
+        stack = ExploreStack(provider, scheduler, controller, view, caches)
         record["built"].append(stack)
         return stack
 
@@ -197,6 +222,7 @@ def test_teardown_order_is_scheduler_then_provider_then_caches(app):
     tab.set_dataset("/data/slide_a.ome.tif")
     tab.activate()
     stack = tab.stack
+    scheduler_caches = stack.scheduler.caches
 
     tab.teardown()
 
@@ -204,6 +230,9 @@ def test_teardown_order_is_scheduler_then_provider_then_caches(app):
         "workers must be joined before the handles they read through are "
         f"closed; got {order}")
     assert stack.caches is None, "caches are dropped last, after teardown"
+    for cache in scheduler_caches:
+        assert cache.stats() == {"items": 0, "bytes": 0}, (
+            f"{cache.name} cache still holds pixels after teardown")
     assert stack.provider.closed is True
     assert stack.scheduler.workers_running is False
 
@@ -275,3 +304,124 @@ def test_the_real_factory_asks_for_no_correction_method(app):
     assert "set_selection" not in src, (
         "P0 must not select a correction method")
     assert "tophat" not in src and "cucim" not in src
+
+
+def test_partial_build_failure_after_the_controller_exists_is_unwound(app):
+    """`load_overview` and the initial `setRange` run AFTER the controller
+    is constructed, so the failure path must unwind a CONTROLLER -- which
+    also stops timers, disconnects signals, joins the floor threads and
+    shuts the overview pool down -- not just the two backend objects."""
+    from PyQt5 import QtWidgets
+
+    order = []
+    provider = FakeProvider("/data/slide_a.ome.tif")
+    scheduler = FakeScheduler(order)
+    controller = FakeController(provider, scheduler, order)
+    view = QtWidgets.QLabel("half-built view")
+    holder = QtWidgets.QWidget()
+    view.setParent(holder)
+
+    _cleanup_partial_stack(controller, scheduler, provider, view)
+
+    assert controller.teardown_calls == 1, (
+        "the controller must own the unwind, or its timers/threads survive")
+    assert order == ["scheduler.shutdown", "provider.close"]
+    assert provider.closed is True
+    assert view.parent() is None, "a half-built view must not stay mounted"
+
+
+def test_partial_build_failure_before_the_controller_exists_is_unwound(app):
+    order = []
+    provider = FakeProvider("/data/slide_a.ome.tif")
+    scheduler = FakeScheduler(order)
+
+    _cleanup_partial_stack(None, scheduler, provider, None)
+
+    assert order == ["scheduler.shutdown"]
+    assert provider.closed is True
+
+
+def test_real_factory_unwinds_when_load_overview_raises(app, tmp_path):
+    """The same failure, through the REAL factory: a real provider is
+    opened, a real scheduler starts its 8+4 worker threads, and then the
+    build fails. Nothing may be left running or open.
+
+    A fake factory that closes its own provider cannot prove this.
+    """
+    import threading
+
+    tifffile = pytest.importorskip("tifffile")
+    from block01.viewer.explore_view import ExploreController
+
+    path = str(tmp_path / "small.ome.tif")
+    data = np.zeros((2, 256, 256), dtype=np.uint16)
+    data[0] = np.arange(256, dtype=np.uint16).reshape(-1, 1)
+    tifffile.imwrite(path, data, ome=True,
+                     metadata={"Channel": {"Name": ["ch0", "ch1"]}})
+
+    captured = {}
+    real_load = ExploreController.load_overview
+
+    def exploding_load(self, *a, **k):
+        captured["controller"] = self
+        raise RuntimeError("boom: overview level unreadable")
+
+    threads_before = threading.active_count()
+    ExploreController.load_overview = exploding_load
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            build_default_stack(path, "ch0", None)
+    finally:
+        ExploreController.load_overview = real_load
+
+    ctrl = captured["controller"]
+    assert ctrl._torn_down is True, "the controller was not torn down"
+    assert ctrl._teardown_order == ["scheduler.shutdown", "provider.close"]
+    assert ctrl.provider._closed is True
+    with pytest.raises(RuntimeError):
+        ctrl.provider.read_region(0, 0, 0, 64, 0, 64)
+
+    deadline = time.time() + 5.0
+    while threading.active_count() > threads_before and time.time() < deadline:
+        time.sleep(0.02)
+    assert threading.active_count() <= threads_before, (
+        "a failed build left worker threads running")
+
+
+def test_page_destruction_tears_the_stack_down_exactly_once(app):
+    """Destroying the Step0 page must release the stack deterministically,
+    not leave 12 worker threads and two open handles to Python GC."""
+    from PyQt5 import QtCore, QtWidgets
+
+    order = []
+    factory, _record = make_factory(order)
+
+    page = QtWidgets.QWidget()          # stands in for Step0Page
+    tab = Step0ExploreTab(page, stack_factory=factory, parent=page)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    stack = tab.stack
+    assert stack is not None
+
+    page.deleteLater()
+    # A deferred delete is only acted on by the event loop that owns it, so
+    # a bare processEvents() here would silently destroy nothing and the
+    # test would pass for the wrong reason.
+    QtCore.QCoreApplication.sendPostedEvents(
+        None, QtCore.QEvent.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
+
+    assert order == ["scheduler.shutdown", "provider.close"]
+    assert stack.provider.closed is True
+    assert stack.controller.teardown_calls == 1, "torn down more than once"
+    assert stack.caches is None
+
+
+def test_page_teardown_entry_point_calls_the_tab(app):
+    """`Step0Page.teardown()` is the deterministic path a host should use."""
+    import inspect
+
+    from block01.ui.step0 import step0_page
+
+    src = inspect.getsource(step0_page.Step0Page.teardown)
+    assert "_explore_tab" in src and "teardown()" in src

@@ -61,15 +61,48 @@ class ExploreStack:
     def teardown(self):
         """Idempotent. `ExploreController.teardown` performs, in order,
         `scheduler.shutdown()` (which joins the worker threads) and then
-        `provider.close()`; the caches are dropped afterwards, once nothing
-        can still be writing into them."""
+        `provider.close()`. Only THEN are the caches emptied: nothing can
+        still be writing into them, and dropping the tuple reference alone
+        would free nothing, since the scheduler and the compute layer hold
+        their own references to the same two cache objects."""
         if self.torn_down:
             return
         self.torn_down = True
         try:
             self.controller.teardown()
         finally:
+            for cache in (self.caches or ()):
+                clear = getattr(cache, "clear", None)
+                if clear is not None:
+                    clear()
             self.caches = None
+
+
+def _cleanup_partial_stack(controller, scheduler, provider, view):
+    """Undo a half-built stack. Order matters and mirrors the normal path.
+
+    If the controller exists it owns the shutdown sequence -- it also stops
+    timers, disconnects signals, joins the floor threads and shuts the
+    overview pool down, none of which a bare `scheduler.shutdown()` +
+    `provider.close()` would do. Only when there is no controller yet do we
+    close the two backend objects directly. The view is dropped either way:
+    a widget left parented to the tab would show a dead stack's canvas.
+    """
+    try:
+        if controller is not None:
+            controller.teardown()
+        else:
+            if scheduler is not None:
+                scheduler.shutdown()
+            if provider is not None:
+                provider.close()
+    finally:
+        if view is not None:
+            try:
+                view.setParent(None)
+                view.deleteLater()
+            except RuntimeError:
+                pass
 
 
 def build_default_stack(path, channel, parent_widget=None):
@@ -100,6 +133,8 @@ def build_default_stack(path, channel, parent_widget=None):
 
     provider = None
     scheduler = None
+    controller = None
+    view = None
     try:
         provider = RawTileProvider(path)
         if not channel or channel not in provider.channel_names:
@@ -124,16 +159,13 @@ def build_default_stack(path, channel, parent_widget=None):
         return ExploreStack(provider, scheduler, controller, view,
                             (raw_cache, corrected_cache))
     except Exception:
-        if scheduler is not None:
-            try:
-                scheduler.shutdown()
-            except Exception:
-                pass
-        if provider is not None:
-            try:
-                provider.close()
-            except Exception:
-                pass
+        # `load_overview` and `setRange` run AFTER the controller exists, so
+        # the failure path must be able to unwind a controller, not just the
+        # two backend objects.
+        try:
+            _cleanup_partial_stack(controller, scheduler, provider, view)
+        except Exception:
+            pass
         raise
 
 
@@ -164,6 +196,15 @@ class Step0ExploreTab(QtWidgets.QWidget):
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.teardown)
+        # Destroying or replacing the Step0 page is a teardown point too --
+        # relying on Python GC to collect a stack that owns 12 worker
+        # threads and two open file handles is not a lifecycle contract.
+        # `QObject.destroyed` is emitted at the start of the page's
+        # destructor, BEFORE its children are deleted, so the stack is still
+        # intact here; `_discard_stack` is defensive about the widget side
+        # regardless.
+        if isinstance(page, QtCore.QObject):
+            page.destroyed.connect(self._on_page_destroyed)
 
     # ── state, readable by tests and by the page ──────────────────────
     @property
@@ -219,8 +260,13 @@ class Step0ExploreTab(QtWidgets.QWidget):
 
     def teardown(self):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from
-        the page, or twice."""
+        the page's destruction, from the page's own cleanup entry point, or
+        twice."""
         self._discard_stack()
+
+    def _on_page_destroyed(self, *_args):
+        self._page = None
+        self.teardown()
 
     # ── internals ─────────────────────────────────────────────────────
     def _discard_stack(self):
@@ -232,9 +278,15 @@ class Step0ExploreTab(QtWidgets.QWidget):
         finally:
             view = getattr(stack, "view", None)
             if view is not None:
-                self._layout.removeWidget(view)
-                view.setParent(None)
-                view.deleteLater()
+                # The C++ side may already be going away when this runs from
+                # the page's destruction; the backend shutdown above is what
+                # matters and has already happened.
+                try:
+                    self._layout.removeWidget(view)
+                    view.setParent(None)
+                    view.deleteLater()
+                except RuntimeError:
+                    pass
 
     def _show_placeholder(self, text):
         self._placeholder.setText(text)

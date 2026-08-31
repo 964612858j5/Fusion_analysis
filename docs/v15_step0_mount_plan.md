@@ -197,3 +197,20 @@ Offscreen Qt tests with fakes (no real WSI in unit tests):
 * a Save (`stage_invalidated`) changes the badge and evicts NOTHING;
 * preview-mode selection maps to the expected `(method, params)` and
   "Selected Final" is unavailable without a decision.
+
+## 8. Known pre-existing failures (NOT caused by this work)
+
+Recorded here as debt so a later run does not mistake them for a
+regression. Both reproduce identically with `ui/step0/step0_page.py`
+restored to its pre-mount version:
+
+* `tests/test_step0_background_correction_outputs.py` — 3 failures
+  (`test_method_change_cucim_to_tophat_overwrites_channel`,
+  `test_method_change_tophat_to_cucim_overwrites_channel`,
+  `test_same_method_param_change_overwrites_channel`);
+* the same file HANGS in `test_roi_context_reused_for_same_full_wsi_region`
+  (still running after 500s).
+
+Not investigated in this round, by decision. Anyone running the Step0
+suites should use `-k "not roi_context"` and expect the 3 failures
+until this debt is paid.

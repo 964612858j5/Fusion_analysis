@@ -127,7 +127,7 @@ class SwitchMonitor(QtCore.QObject):
 
     # -- lifecycle ---------------------------------------------------
     def arm(self, previous, target, hot_neighbourhood, *, t0,
-            overview_before, tile_ready):
+            overview_before, tile_ready, tiles_cached=None):
         """Called immediately after `set_selection(channel=target)`, but with
         state captured BEFORE it.
 
@@ -145,6 +145,7 @@ class SwitchMonitor(QtCore.QObject):
             "class": "near" if target in hot_neighbourhood else "far",
             "overview_before": overview_before,
             "tile_ready": tile_ready,
+            "tiles_cached": tiles_cached,
             "t": {},
             "blank": 0,
             "raw": 0,
@@ -280,10 +281,15 @@ class SwitchMonitor(QtCore.QObject):
             v = rec["t"].get(name)
             return f"{v:.0f}ms" if v is not None else "--"
 
+        cached = rec.get("tiles_cached")
+        cached_txt = ("" if not cached else
+                      " cached=" + ",".join(f"{m} {h}/{n}"
+                                            for m, (h, n) in cached.items()))
         print(f"[switch] {rec['prev']} -> {rec['target']} class={rec['class']} "
               f"level={rec.get('level')} visible_tiles={rec.get('visible_tiles')} "
               f"overview_before={'yes' if rec['overview_before'] else 'no'} "
-              f"tile_ready={'n/a' if rec['tile_ready'] is None else ('yes' if rec['tile_ready'] else 'no')}\n"
+              f"tile_ready={'n/a' if rec['tile_ready'] is None else ('yes' if rec['tile_ready'] else 'no')}"
+              f"{cached_txt}\n"
               f"         overview={ms('overview')} any={ms('any')} "
               f"floor={ms('floor')} first_precise={ms('first_precise')} "
               f"full_precise={ms('full_precise')}\n"
@@ -292,6 +298,35 @@ class SwitchMonitor(QtCore.QObject):
               f"wrong={rec['wrong']} frames={rec['frames']} "
               f"monitor_p95={rec['monitor_p95_ms']:.2f}ms {rec['verdict']}",
               flush=True)
+
+
+
+def _cached_tile_counts(hot, scheduler, snapshot, target):
+    """How many of the viewport's tiles for `target` are ALREADY in the
+    corrected cache, per method, before the switch happens.
+
+    Read-only in the strict sense: it tests membership in the cache's
+    ordered store directly rather than calling `get()`, so it neither
+    reorders the LRU nor pollutes the hit/miss counters. Without this the
+    claim "COVERAGE had the tiles and the overview was the gate" rests on
+    the coincidence of `overview == first_precise`, which is evidence, not
+    proof.
+    """
+    if hot is None:
+        return None
+    spec = hot._spec_by_channel.get(target)
+    if spec is None or not snapshot.visible_tiles:
+        return None
+    store = scheduler.corrected_cache._store
+    counts = {}
+    for method, base in (("tophat", spec.tophat_radius),
+                         ("cucim", spec.cucim_sigma)):
+        hits = 0
+        for tx, ty in snapshot.visible_tiles:
+            if hot._make_key(snapshot, target, tx, ty, method, base) in store:
+                hits += 1
+        counts[method] = (hits, len(snapshot.visible_tiles))
+    return counts
 
 
 def _rect_hits_bbox(rect, bbox):
@@ -534,9 +569,16 @@ def main():
         # synchronous cost is inside the measurement, and the readiness
         # flags, so they describe what was prepared in advance rather than
         # what the switch itself just caused.
+        pre_snapshot = ctrl.snapshot()
         overview_before = ctrl.has_overview_record(name)
-        tile_ready = (hot.is_channel_ready(name, ctrl.snapshot())
+        # `tile_ready` is STRICT channel readiness -- it requires an
+        # installed overview record as well as the tiles, so a channel
+        # COVERAGE fully prepared still reports False. `tiles_cached` is
+        # the tile half on its own, which is what actually says whether
+        # COVERAGE's work was there.
+        tile_ready = (hot.is_channel_ready(name, pre_snapshot)
                       if hot is not None else None)
+        tiles_cached = _cached_tile_counts(hot, scheduler, pre_snapshot, name)
         t0 = time.perf_counter()
         ctrl.set_selection(channel=name)
         view.setWindowTitle(
@@ -545,7 +587,8 @@ def main():
               f"(atomic cached swaps so far: "
               f"{ctrl.stats.get('atomic_channel_swaps', 0)})", flush=True)
         monitor.arm(previous, name, neighbourhood, t0=t0,
-                    overview_before=overview_before, tile_ready=tile_ready)
+                    overview_before=overview_before, tile_ready=tile_ready,
+                    tiles_cached=tiles_cached)
 
     channel_combo.currentTextChanged.connect(_on_channel_picked)
 

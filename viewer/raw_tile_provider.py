@@ -71,6 +71,10 @@ class RawTileProvider:
         self._shared_levels: Dict[int, object] = {}
 
         self._closed = False
+        # Computed on first use and never recomputed -- see
+        # `source_identity`. Threads may race to build it; the value is
+        # identical either way, so no lock is needed.
+        self._source_identity = None
 
         import tifffile
 
@@ -108,13 +112,31 @@ class RawTileProvider:
         return names
 
     def source_identity(self) -> SourceIdentity:
-        st = os.stat(self.path)
-        fingerprint = f"{st.st_size}:{st.st_mtime_ns}"
-        return SourceIdentity(
-            dataset_path=self.path,
-            dataset_fingerprint=fingerprint,
-            stage="raw",
-        )
+        """The dataset's cache identity, computed ONCE per provider.
+
+        Measured on a channel switch: 131 calls per `set_selection`, from
+        every key construction, context comparison and snapshot. Each one
+        re-`stat`ed the file. Caching it is safe for the same reason the
+        provider caches level shapes and channel names: the open `TiffFile`
+        handles are bound to the inode this provider opened, so a file
+        replaced underneath us is not something the read path could follow
+        anyway -- re-stat'ing would only change the identity string while
+        the pixels kept coming from the old inode, which is strictly worse
+        than being consistent.
+
+        The VALUE is unchanged, so every cache key, dedup key and identity
+        comparison behaves exactly as before.
+        """
+        cached = self._source_identity
+        if cached is None:
+            st = os.stat(self.path)
+            cached = SourceIdentity(
+                dataset_path=self.path,
+                dataset_fingerprint=f"{st.st_size}:{st.st_mtime_ns}",
+                stage="raw",
+            )
+            self._source_identity = cached
+        return cached
 
     @property
     def num_levels(self) -> int:

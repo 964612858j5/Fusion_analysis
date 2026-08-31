@@ -1214,6 +1214,49 @@ def test_provider_close_closes_tracked_handles_without_error(small_ome_tiff):
         provider3.read_region(0, 0, 0, 256, 0, 256)
 
 
+def test_provider_source_identity_is_cached_and_value_identical(small_ome_tiff):
+    """`source_identity` is computed once per provider, and the cached value
+    is exactly what the uncached computation produced.
+
+    It is called ~131 times per channel switch (every key construction,
+    context comparison and snapshot), so it must be cheap -- but it is also
+    a CACHE KEY component, so "cheap" must not mean "different". Both halves
+    are asserted here: same value, same hash, and only one stat.
+    """
+    import os as _os
+    path, _data = small_ome_tiff
+
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    try:
+        st = _os.stat(_os.path.abspath(path))
+        expected = SourceIdentity(
+            dataset_path=_os.path.abspath(path),
+            dataset_fingerprint=f"{st.st_size}:{st.st_mtime_ns}",
+            stage="raw",
+        )
+        first = provider.source_identity()
+        assert first == expected
+        assert hash(first) == hash(expected)
+
+        stats = {"n": 0}
+        real_stat = _os.stat
+
+        def counting_stat(*a, **k):
+            stats["n"] += 1
+            return real_stat(*a, **k)
+
+        import block01.viewer.raw_tile_provider as rtp
+        rtp.os.stat = counting_stat
+        try:
+            for _ in range(50):
+                assert provider.source_identity() == expected
+        finally:
+            rtp.os.stat = real_stat
+        assert stats["n"] == 0, "cached identity must not re-stat the file"
+    finally:
+        provider.close()
+
+
 def test_provider_read_after_close_raises_every_mode(small_ome_tiff):
     """Lifecycle contract: stop scheduler -> join workers -> close();
     any read after close() is a hard error, never an undefined re-open of a

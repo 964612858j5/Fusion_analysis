@@ -127,8 +127,14 @@ class FakeScheduler:
         assert not record["done"]
         record["done"] = True
         self.corrected_cache[record["request"].key] = object()
+        # A SUCCESS carries pixels. The real scheduler delivers a TileResult
+        # whose `pixels` is None only on failure, and HOT now distinguishes
+        # the two -- a fake that omitted pixels made every "success" in this
+        # suite count as a failure, i.e. the model would have drifted from
+        # the real scheduler exactly where the new logic reads it.
         record["callback"](SimpleNamespace(
-            request=record["request"], error=error))
+            request=record["request"], error=error,
+            pixels=None if error is not None else object()))
 
 
 @pytest.fixture(scope="module")

@@ -24,6 +24,9 @@ reached SETTLED must not be mistaken for a passing gate; an earlier
 measurement of exactly that kind was invalid and had to be discarded.
 """
 import argparse
+import json
+import os
+import subprocess
 import sys
 import time
 import importlib.util
@@ -63,7 +66,16 @@ from block01.viewer.tile_types import TileGridSpec  # noqa: E402
 
 DEFAULT_PATH = ("/sda1/Fusion/benchmark/tonsil/"
                 "2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif")
-GATE_PP = 1.0
+GATE_PP = 1.0                 # non-inferiority margin, percentage points
+ZOOM_STEPS = 110              # >= 100 frames per rep (see run_arm)
+ZOOM_STEP_FACTOR = 0.985      # 0.985**110 ~ 0.19, i.e. the same ~5x span
+PAIRS = 15                    # locked in advance; not extended on results
+T95_ONE_SIDED = {             # Student t, one-sided 95%, by degrees of freedom
+    4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
+    10: 1.812, 11: 1.796, 12: 1.782, 13: 1.771, 14: 1.761, 15: 1.753,
+    16: 1.746, 17: 1.740, 18: 1.734, 19: 1.729, 20: 1.725, 24: 1.711,
+    29: 1.699,
+}
 IDLE_AFTER_GESTURE_S = 2.0   # 80ms gesture_quiet + 120ms confirm, then work
 
 
@@ -143,7 +155,12 @@ def run_arm(app, args, kind, hot, label):
         time.sleep(0.002)
 
     covs, mixed, frames = [], 0, 0
-    steps = 25 if kind == "drag" else 12
+    # Zoom is sampled finely: at 12 coarse steps the mixed-level fraction can
+    # only take values in steps of 8.3pp, so it structurally cannot resolve a
+    # 1pp gate. A continuous trajectory of ZOOM_STEPS small steps covers the
+    # same span. Each REP still contributes ONE sample to the statistics --
+    # 110 frames are not 110 independent repeats.
+    steps = 25 if kind == "drag" else ZOOM_STEPS
     for _ in range(steps):
         rng = view.view_box.viewRange()
         if kind == "drag":
@@ -151,7 +168,7 @@ def run_arm(app, args, kind, hot, label):
             view.view_box.setRange(xRange=(rng[0][0] + dx, rng[0][1] + dx),
                                    yRange=tuple(rng[1]), padding=0)
         else:
-            f = 0.82
+            f = ZOOM_STEP_FACTOR
             w = (rng[0][1] - rng[0][0]) * f
             h = (rng[1][1] - rng[1][0]) * f
             mx = (rng[0][0] + rng[0][1]) / 2
@@ -186,39 +203,79 @@ def run_arm(app, args, kind, hot, label):
           f"mixed={mixed / max(1, frames) * 100:5.1f}%  "
           f"converge={converged_ms:6.1f}ms  | {note}", flush=True)
 
+    # Full teardown, in order. Closing only the scheduler and provider left
+    # the controller's timers and signal connections alive, so a previous
+    # arm kept running inside the NEXT arm's processEvents() -- contaminating
+    # its measurement and touching an already-closed provider.
+    # `ExploreController.teardown()` shuts the scheduler and provider down
+    # itself, so they are not closed again here.
     if hot_ctl is not None:
         hot_ctl.stop()
-    scheduler.shutdown()
-    provider.close()
+    ctrl.teardown()
+    view.close()
+    view.deleteLater()
+    app.processEvents()
     return {"cov": np.mean(covs) * 100,
             "mixed": mixed / max(1, frames) * 100,
             "converge": converged_ms}
 
 
-def verdict(name, base, hot, lower_is_better, gated=True, unit="pp"):
-    """`gated=False` reports the numbers without a pass/fail. The 1pp gate
-    is defined in PERCENTAGE POINTS; applying it to a millisecond metric
-    would be a category error, so timing metrics are informational."""
-    b = np.array(base, dtype=float)
-    h = np.array(hot, dtype=float)
-    b, h = b[~np.isnan(b)], h[~np.isnan(h)]
-    if b.size == 0 or h.size == 0:
-        return f"{name}: no usable samples -> INCONCLUSIVE"
-    delta = h.mean() - b.mean()
-    if lower_is_better:
-        delta = -delta
-    spread = max(b.max() - b.min(), h.max() - h.min())
+def _t95(df):
+    """One-sided 95% Student t. Falls back to the nearest tabulated df."""
+    if df in T95_ONE_SIDED:
+        return T95_ONE_SIDED[df]
+    keys = sorted(T95_ONE_SIDED)
+    if df < keys[0]:
+        return T95_ONE_SIDED[keys[0]]
+    return T95_ONE_SIDED[min(keys, key=lambda k: abs(k - df))]
+
+
+def paired_noninferiority(name, base, hot, higher_is_better, unit="pp",
+                          gated=True):
+    """Paired non-inferiority test on the per-pair differences.
+
+    The earlier rule compared each arm's raw SPREAD against the margin,
+    which is not a test: spread grows with the number of repeats, so more
+    data made a pass strictly less likely. What must shrink with n is the
+    uncertainty of the MEAN paired difference, which is what this measures.
+    The margin itself is unchanged at -GATE_PP; nothing is relaxed.
+
+        d_i  = HOT_i - BASE_i        (higher-is-better metrics)
+        d_i  = BASE_i - HOT_i        (lower-is-better metrics)
+
+    so a positive d is always "HOT is better". With the one-sided 95%
+    interval on mean(d):
+        lower bound >= -margin  -> PASS  (HOT is non-inferior)
+        upper bound <  -margin  -> FAIL  (HOT is worse by more than the margin)
+        otherwise               -> INCONCLUSIVE
+    """
+    b = np.asarray(base, dtype=float)
+    h = np.asarray(hot, dtype=float)
+    ok = ~(np.isnan(b) | np.isnan(h))
+    b, h = b[ok], h[ok]
+    if b.size < 2:
+        return f"{name}: fewer than 2 usable pairs -> INCONCLUSIVE"
+
+    d = (h - b) if higher_is_better else (b - h)
+    n = d.size
+    mean = float(d.mean())
+    sd = float(d.std(ddof=1))
+    half = _t95(n - 1) * sd / np.sqrt(n) if sd > 0 else 0.0
+    lo, hi = mean - half, mean + half
+    spread_note = (f"BASE {b.mean():6.2f} (range {b.max() - b.min():5.2f}) | "
+                   f"HOT {h.mean():6.2f} (range {h.max() - h.min():5.2f})")
     if not gated:
-        return (f"{name}: BASE {b.mean():6.2f} (spread {b.max() - b.min():5.2f}) | "
-                f"HOT {h.mean():6.2f} (spread {h.max() - h.min():5.2f}) | "
-                f"delta {delta:+6.2f} {unit} -> informational, not gated")
-    if spread > GATE_PP:
-        tag = f"INCONCLUSIVE (arm spread {spread:.2f} > {GATE_PP}pp)"
+        return (f"{name}: {spread_note} | paired mean {mean:+6.2f} {unit} "
+                f"[{lo:+.2f}, {hi:+.2f}] -> informational, not gated")
+    if lo >= -GATE_PP:
+        tag = "PASS (non-inferior)"
+    elif hi < -GATE_PP:
+        tag = "FAIL (worse by more than the margin)"
     else:
-        tag = "PASS" if delta >= -GATE_PP else "FAIL"
-    return (f"{name}: BASE {b.mean():6.2f} (spread {b.max() - b.min():5.2f}) | "
-            f"HOT {h.mean():6.2f} (spread {h.max() - h.min():5.2f}) | "
-            f"delta {delta:+6.2f} -> {tag}")
+        tag = "INCONCLUSIVE"
+    return (f"{name}: {spread_note} | paired mean {mean:+6.2f} {unit}, "
+            f"one-sided 95% CI [{lo:+.2f}, {hi:+.2f}], margin {-GATE_PP:+.1f} "
+            f"-> {tag}")
 
 
 def main():
@@ -226,32 +283,83 @@ def main():
     ap.add_argument("--path", default=DEFAULT_PATH)
     ap.add_argument("--channel-index", type=int, default=1)
     ap.add_argument("--param", type=int, default=25)
-    ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--reps", type=int, default=PAIRS,
+                    help="paired repetitions, locked in advance")
     ap.add_argument("--center-y", type=int, default=25606)
     ap.add_argument("--center-x", type=int, default=15360)
+    ap.add_argument("--single", nargs=2, metavar=("KIND", "HOT"),
+                    help="internal: run ONE arm in this process and print a "
+                         "JSON line. Each arm runs in its own subprocess -- "
+                         "60 arms in one process hit the known cupy/Qt "
+                         "teardown segfault (the same reason the test suites "
+                         "must be run one file per process), and separate "
+                         "processes also isolate the arms more completely "
+                         "than any in-process teardown can.")
     ap.add_argument("--io-workers", type=int, default=DEFAULT_IO_WORKERS)
     ap.add_argument("--compute-workers", type=int, default=DEFAULT_COMPUTE_WORKERS)
     args = ap.parse_args()
 
-    app = QtWidgets.QApplication(sys.argv)
+    if args.single:
+        kind, hot_s = args.single
+        hot = hot_s == "1"
+        app = QtWidgets.QApplication(sys.argv)
+        label = f"{'HOT ' if hot else 'BASE'}"
+        result = run_arm(app, args, kind, hot, label)
+        print("RESULT " + json.dumps(result), flush=True)
+        return
+
+    def one(kind, hot, rep):
+        cmd = [sys.executable, os.path.abspath(__file__),
+               "--single", kind, "1" if hot else "0",
+               "--path", args.path,
+               "--channel-index", str(args.channel_index),
+               "--param", str(args.param),
+               "--center-y", str(args.center_y),
+               "--center-x", str(args.center_x),
+               "--io-workers", str(args.io_workers),
+               "--compute-workers", str(args.compute_workers)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        payload = None
+        for line in proc.stdout.splitlines():
+            if line.startswith("["):
+                print(f"  r{rep} {line}", flush=True)
+            if line.startswith("RESULT "):
+                payload = json.loads(line[len("RESULT "):])
+        if payload is None:
+            print(f"  r{rep} {'HOT ' if hot else 'BASE'} {kind}: ARM FAILED "
+                  f"(rc={proc.returncode})", flush=True)
+            print("    " + (proc.stderr.strip().splitlines() or ["<no stderr>"])[-1],
+                  flush=True)
+        return payload
+
     out = {(k, h): [] for k in ("drag", "zoom") for h in (False, True)}
     for rep in range(args.reps):
+        # Counterbalanced: always running BASE first would hand HOT a warmer
+        # OS page cache in every pair, a systematic advantage rather than a
+        # measurement.
+        order = (False, True) if rep % 2 == 0 else (True, False)
         for kind in ("drag", "zoom"):
-            for hot in (False, True):
-                label = f"{'HOT ' if hot else 'BASE'} r{rep}"
-                out[(kind, hot)].append(run_arm(app, args, kind, hot, label))
+            for hot in order:
+                res = one(kind, hot, rep)
+                out[(kind, hot)].append(res if res else
+                                        {"cov": float("nan"),
+                                         "mixed": float("nan"),
+                                         "converge": float("nan")})
 
     print()
-    print(verdict("drag in-motion coverage %",
-                  [r["cov"] for r in out[("drag", False)]],
-                  [r["cov"] for r in out[("drag", True)]], lower_is_better=False))
-    print(verdict("zoom mixed-level frames %",
-                  [r["mixed"] for r in out[("zoom", False)]],
-                  [r["mixed"] for r in out[("zoom", True)]], lower_is_better=True))
-    print(verdict("zoom converge-after-stop ms",
-                  [r["converge"] for r in out[("zoom", False)]],
-                  [r["converge"] for r in out[("zoom", True)]],
-                  lower_is_better=True, gated=False, unit="ms"))
+    print(paired_noninferiority(
+        "drag in-motion coverage %",
+        [r["cov"] for r in out[("drag", False)]],
+        [r["cov"] for r in out[("drag", True)]], higher_is_better=True))
+    print(paired_noninferiority(
+        "zoom mixed-level frames %",
+        [r["mixed"] for r in out[("zoom", False)]],
+        [r["mixed"] for r in out[("zoom", True)]], higher_is_better=False))
+    print(paired_noninferiority(
+        "zoom converge-after-stop ms",
+        [r["converge"] for r in out[("zoom", False)]],
+        [r["converge"] for r in out[("zoom", True)]],
+        higher_is_better=False, unit="ms", gated=False))
 
 
 if __name__ == "__main__":

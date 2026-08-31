@@ -1,0 +1,125 @@
+[GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  30.1ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [HOT ] drag cov= 96.8%  mixed= 16.0%  converge=  33.0ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE] zoom cov= 95.9%  mixed=  0.9%  converge=  31.3ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [HOT ] zoom cov= 96.2%  mixed=  0.9%  converge=  30.5ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [HOT ] drag cov= 96.4%  mixed= 20.0%  converge=  27.6ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  31.3ms  | HOT off
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  30.6ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE] zoom cov= 96.0%  mixed=  0.9%  converge=  31.2ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE] drag cov= 95.8%  mixed= 20.0%  converge=  27.8ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  28.2ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  30.5ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [HOT ] zoom cov= 97.9%  mixed=  0.9%  converge=  31.1ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.5ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  28.3ms  | HOT off
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  30.5ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  31.7ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE] drag cov= 96.2%  mixed= 20.0%  converge=  27.6ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [HOT ] drag cov= 96.2%  mixed= 20.0%  converge=  28.2ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  30.5ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  30.4ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  28.4ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE] drag cov= 96.6%  mixed= 20.0%  converge=  27.7ms  | HOT off
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.3ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE] zoom cov= 95.9%  mixed=  0.9%  converge=  31.7ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE] drag cov= 96.2%  mixed= 20.0%  converge=  28.0ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [HOT ] drag cov= 95.8%  mixed= 20.0%  converge=  28.0ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE] zoom cov= 96.0%  mixed=  0.9%  converge=  30.7ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [HOT ] zoom cov= 95.7%  mixed=  0.9%  converge=  31.9ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  34.1ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  28.0ms  | HOT off
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.0ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE] zoom cov= 95.9%  mixed=  0.9%  converge=  31.7ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  28.2ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.5ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  31.2ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.0ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.9ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  28.4ms  | HOT off
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.0ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE] zoom cov= 95.9%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE] drag cov= 95.8%  mixed= 20.0%  converge=  27.9ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.8ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  30.5ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [HOT ] zoom cov= 95.9%  mixed=  0.9%  converge=  30.8ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  28.2ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE] drag cov= 95.8%  mixed= 20.0%  converge=  28.3ms  | HOT off
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.4ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE] zoom cov= 96.0%  mixed=  0.9%  converge=  30.6ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE] drag cov= 96.2%  mixed= 20.0%  converge=  27.9ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.9ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  30.5ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  28.2ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  27.7ms  | HOT off
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [HOT ] zoom cov= 95.8%  mixed=  0.9%  converge=  31.4ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  31.5ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  27.5ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  27.9ms  | HOT conf=1 req=120 done=120 fail=0 ovw=3/0 abort=1
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE] zoom cov= 96.0%  mixed=  0.9%  converge=  31.0ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [HOT ] zoom cov= 95.9%  mixed=  0.9%  converge=  31.6ms  | HOT conf=1 req=96 done=96 fail=0 ovw=3/0 abort=2
+
+drag in-motion coverage %: BASE  96.04 (range  0.80) | HOT  96.08 (range  1.00) | paired mean  +0.04 pp, one-sided 95% CI [-0.11, +0.19], margin -1.0 -> PASS (non-inferior)
+zoom mixed-level frames %: BASE   0.91 (range  0.00) | HOT   0.91 (range  0.00) | paired mean  +0.00 pp, one-sided 95% CI [+0.00, +0.00], margin -1.0 -> PASS (non-inferior)
+zoom converge-after-stop ms: BASE  31.04 (range  1.21) | HOT  31.00 (range  1.58) | paired mean  +0.05 ms [-0.25, +0.34] -> informational, not gated

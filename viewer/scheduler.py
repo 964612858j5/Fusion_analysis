@@ -17,6 +17,15 @@ Contract (docs/v15_viewer_foundation_interfaces.md §4):
   stale raw requests (fast zoom/pan) never backs up FIFO behind hundreds of
   queued reads. CorrectionKey requests go onto their own priority
   ready-queue served by exactly `compute_workers` worker thread(s).
+- Delivery and staleness: a waiter whose generation has gone stale is
+  SKIPPED by default -- it gets no callback, because a foreground consumer
+  has nothing to do with a result it can no longer display. A waiter that
+  set `TileRequest.notify_on_stale_completion` instead receives exactly one
+  TERMINAL callback, `error="stale"` with no pixels, when the work
+  physically finishes. That opt-in exists for a consumer that meters its own
+  PHYSICAL concurrency: cancelling a generation stops only work that has not
+  STARTED, so without it such a consumer can never learn that abandoned work
+  is over (see `MultiChannelPrefetchController`).
 - `cancel_generation(gen)` marks `gen` stale. A queued-but-not-started
   compute OR raw entry wanted only by stale generations is dropped without
   running; its callbacks receive error="cancelled". Work already running

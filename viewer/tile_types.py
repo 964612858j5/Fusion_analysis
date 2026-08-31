@@ -138,6 +138,7 @@ class TileRequest:
     key: TileKey
     generation: object
     priority: int  # 0 = visible-center ... higher = prefetch ring
+    deadline_ms: Optional[int] = None
     # Opt-in: deliver a terminal callback even when this request's
     # generation has gone stale. Default False, which is the historical
     # behaviour -- a stale waiter is simply not called back, because a
@@ -151,8 +152,12 @@ class TileRequest:
     # has to be released early -- which lets abandoned tasks and new ones
     # run at the same time, above the intended cap. See
     # `MultiChannelPrefetchController`.
+    #
+    # DECLARED LAST, deliberately. An earlier revision put it before
+    # `deadline_ms`, which silently changed what the fourth POSITIONAL
+    # argument means: `TileRequest(key, gen, prio, 100)` would have set this
+    # flag to 100 instead of a deadline. New fields go at the end.
     notify_on_stale_completion: bool = False
-    deadline_ms: Optional[int] = None
 
 
 @dataclass

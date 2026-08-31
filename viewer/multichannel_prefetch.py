@@ -24,6 +24,14 @@ class MultiChannelPrefetchController(QtCore.QObject):
     completed correction results to ``corrected_cache``.
     """
 
+    # `TileScheduler` fires callbacks on a COMPUTE WORKER thread. Every
+    # other path in this viewer marshals such a callback to the GUI thread
+    # through a queued signal before touching state, and this one must too:
+    # `_on_tile_result` mutates the in-flight map, the stats and the queue,
+    # and re-enters `scheduler.request`. The queued hop can only DELAY a
+    # slot release, never advance it, so the physical cap stays conservative.
+    _tile_delivered = QtCore.pyqtSignal(int, object, object)
+
     def __init__(self, controller, scheduler, specs, grid,
                  settle_confirm_ms=SETTLE_CONFIRM_MS,
                  hot_inflight=HOT_INFLIGHT, parent=None):
@@ -79,6 +87,8 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._pumping_tiles = False
         self._stopped = False
 
+        self._tile_delivered.connect(self._on_tile_result,
+                                     QtCore.Qt.QueuedConnection)
         self.controller.interaction_event.connect(self._on_interaction)
         self.controller.gesture_quiet.connect(self._on_gesture_quiet)
         self.controller.selection_context_changed.connect(
@@ -144,6 +154,10 @@ class MultiChannelPrefetchController(QtCore.QObject):
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
+        try:
+            self._tile_delivered.disconnect(self._on_tile_result)
+        except (TypeError, RuntimeError):
+            pass
 
     # ── signal handlers ─────────────────────────────────────────────────
 
@@ -333,8 +347,10 @@ class MultiChannelPrefetchController(QtCore.QObject):
                                       priority=priority,
                                       notify_on_stale_completion=True)
                 self.stats["hot_tiles_requested"] += 1
+                # Worker thread: emit only. The real handling runs on the
+                # GUI thread (see `_tile_delivered`).
                 callback = lambda result, token=token, generation=generation: \
-                    self._on_tile_result(token, generation, result)
+                    self._tile_delivered.emit(token, generation, result)
                 try:
                     self.scheduler.request(request, callback)
                 except Exception:

@@ -1423,3 +1423,20 @@ def test_stale_waiter_is_not_called_back_by_default():
 
     assert delivered == ["stale"], (
         f"expected only the opt-in waiter to be called back, got {delivered}")
+
+
+def test_tile_request_positional_order_is_stable():
+    """`notify_on_stale_completion` is declared LAST, after `deadline_ms`.
+
+    An earlier revision inserted it before `deadline_ms`, which silently
+    changed what the fourth POSITIONAL argument means: existing code writing
+    `TileRequest(key, gen, prio, 100)` would have set the new boolean flag to
+    100 instead of a deadline. Nothing in this repo passes it positionally
+    today, which is exactly why such a break would have gone unnoticed.
+    """
+    from block01.viewer.tile_types import TileRequest
+
+    req = TileRequest(object(), ("g", 0), 7, 100)
+    assert req.priority == 7
+    assert req.deadline_ms == 100
+    assert req.notify_on_stale_completion is False

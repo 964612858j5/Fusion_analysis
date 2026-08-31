@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtCore, QtTest  # noqa: E402
+from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from viewer.multichannel_prefetch import (  # noqa: E402
     HOT_PRIORITY_BASE,
@@ -15,7 +15,10 @@ from viewer.multichannel_prefetch import (  # noqa: E402
     SETTLE_CONFIRM_MS,
     MultiChannelPrefetchController,
 )
-from viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
+from viewer.prefetch_policy import (  # noqa: E402
+    ChannelCorrectionSpec,
+    _hot_order,
+)
 from viewer.tile_types import (  # noqa: E402
     CorrectionKey,
     QualityLevel,
@@ -196,16 +199,36 @@ def _ready_overviews(controller, channels=None, level=None):
         controller.overviews.add((controller.source, channel, level))
 
 
+def _pump():
+    """Let queued signals run. HOT's tile deliveries arrive on a compute
+    worker thread and are marshalled to the GUI thread through a queued
+    signal, exactly as every other delivery path in this viewer is, so a
+    test that completes a request must pump before asserting."""
+    QtWidgets.QApplication.instance().processEvents()
+
+
+def _deliver(scheduler, index, error=None):
+    """Physically finish a request AND let its queued delivery run."""
+    scheduler.complete(index, error=error)
+    _pump()
+
+
 def _fire_confirm(hot):
     hot._confirm_timer.stop()
     hot._confirm_settle()
 
 
 def _drain_requests(scheduler):
+    # Flush anything already queued first. Deliveries are marshalled to the
+    # GUI thread now, so a callback the fake has already fired (for instance
+    # the "cancelled" it delivers when a generation is cancelled) has not
+    # been HANDLED until the event loop runs -- and until it is handled, the
+    # slot it occupies is still counted.
+    _pump()
     index = 0
     while index < len(scheduler.requests):
         if not scheduler.requests[index]["done"]:
-            scheduler.complete(index)
+            _deliver(scheduler, index)
         index += 1
 
 
@@ -304,7 +327,7 @@ def test_corrected_inflight_cap_refills_one(app):
         assert len(scheduler.requests) == 2
         assert len([r for r in scheduler.requests if not r["done"]]) == 2
 
-        scheduler.complete(0)
+        _deliver(scheduler, 0)
         assert len(scheduler.requests) == 3
         assert len([r for r in scheduler.requests if not r["done"]]) == 2
     finally:
@@ -400,7 +423,7 @@ def test_stale_callback_does_not_change_current_hot_counters(app):
         requested = hot.stats["hot_tiles_requested"]
         completed = hot.stats["hot_tiles_completed"]
         controller.interaction_event.emit("PAN", snapshot)
-        scheduler.complete(0)
+        _deliver(scheduler, 0)
         assert scheduler.requests[0]["request"].key in scheduler.corrected_cache
         assert hot.stats["hot_tiles_requested"] == requested
         assert hot.stats["hot_tiles_completed"] == completed
@@ -423,17 +446,31 @@ def test_rapid_switches_are_latest_wins(app):
         controller.interaction_event.emit("CHANNEL_SWITCH", middle)
         controller.selection_context_changed.emit(newest)
         controller.interaction_event.emit("CHANNEL_SWITCH", newest)
+        # Let the queued cancellations from those switches be handled
+        # before asserting on what the newest plan managed to issue.
+        _pump()
         controller.gesture_quiet.emit(newest)
         _fire_confirm(hot)
         _drain_requests(scheduler)
 
         new_requests = scheduler.requests[old_request_count:]
         assert new_requests
-        assert {record["request"].key.channel for record in new_requests} == {
-            "c2", "c1",
-        }
-        assert all(record["request"].generation == new_requests[0]["request"].generation
-                   for record in new_requests)
+        # Latest-wins means ONE surviving generation. The exact channel set
+        # is not asserted: deliveries are queued now, so draining pumps the
+        # event loop and HOT legitimately refills with further neighbours of
+        # the newest centre as slots free up. What must hold is that every
+        # request belongs to the same, newest generation, and that the
+        # superseded plans contributed none.
+        generations = {record["request"].generation for record in new_requests}
+        assert len(generations) == 1, (
+            f"more than one generation survived rapid switching: {generations}")
+        centre = controller.channels.index("c3")
+        allowed = {controller.channels[i]
+                   for i in _hot_order(centre, len(controller.channels))}
+        got = {record["request"].key.channel for record in new_requests}
+        assert got <= allowed, (
+            f"requests for channels outside the newest centre's HOT order: "
+            f"{got - allowed}")
         # The intermediate centre c2 never reached its own settle confirm.
     finally:
         hot.stop()
@@ -529,14 +566,14 @@ def test_physical_in_flight_never_exceeds_the_cap_across_generations(app):
             f"while {HOT_INFLIGHT} abandoned ones were still running")
 
         # One abandoned task physically finishes -> exactly one new task.
-        scheduler.complete(0)
+        _deliver(scheduler, 0)
         assert hot.stats["hot_abandoned_finished"] == 1
         assert len(scheduler.requests) == issued_before + 1, (
             "finishing one abandoned task should admit exactly one new task")
         assert len(hot._active_requests) <= HOT_INFLIGHT
 
         # And again for the second.
-        scheduler.complete(1)
+        _deliver(scheduler, 1)
         assert len(scheduler.requests) == issued_before + 2
         assert len(hot._active_requests) <= HOT_INFLIGHT
     finally:
@@ -558,7 +595,7 @@ def test_late_stale_callback_is_harmless(app):
 
         done_before = hot.stats["hot_tiles_completed"]
         active_before = len(hot._active_requests)
-        scheduler.complete(0)          # from the abandoned generation
+        _deliver(scheduler, 0)          # from the abandoned generation
 
         assert hot.stats["hot_tiles_completed"] == done_before
         assert len(hot._active_requests) == active_before
@@ -574,7 +611,7 @@ def test_failures_are_not_counted_as_completions(app):
         snapshot = _snapshot(controller)
         controller.gesture_quiet.emit(snapshot)
         _fire_confirm(hot)
-        scheduler.complete(0, error="boom")
+        _deliver(scheduler, 0, error="boom")
 
         assert hot.stats["hot_tiles_completed"] == 0
         assert hot.stats["hot_tiles_failed"] == 1

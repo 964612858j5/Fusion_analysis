@@ -70,6 +70,8 @@ GATE_PP = 1.0                 # non-inferiority margin, percentage points
 ZOOM_STEPS = 110              # >= 100 frames per rep (see run_arm)
 ZOOM_STEP_FACTOR = 0.985      # 0.985**110 ~ 0.19, i.e. the same ~5x span
 PAIRS = 15                    # locked in advance; not extended on results
+PRE_GESTURE_IDLE_S = 3.0      # identical for BOTH arms -- see run_arm
+HOT_SECOND_CONFIRM_TIMEOUT_S = 4.0
 T95_ONE_SIDED = {             # Student t, one-sided 95%, by degrees of freedom
     4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
     10: 1.812, 11: 1.796, 12: 1.782, 13: 1.771, 14: 1.761, 15: 1.753,
@@ -154,6 +156,37 @@ def run_arm(app, args, kind, hot, label):
         app.processEvents()
         time.sleep(0.002)
 
+    # THE POINT OF THIS GATE IS CONTENTION. Starting the gesture while HOT
+    # is idle measures nothing: an earlier run had `conf=1` in every arm,
+    # meaning HOT only ever confirmed AFTER the gesture, in the idle phase,
+    # so the 120 tiles it completed proved only that it runs when the user
+    # has stopped -- never that a user who starts moving WHILE it works is
+    # unaffected. So wait here until HOT has confirmed once AND has work
+    # actually in flight, then move the camera and force it to cancel.
+    # BOTH arms idle for the SAME fixed window before the gesture. An
+    # earlier version let only the HOT arm wait (up to 8s) for HOT to become
+    # active, which handed the HOT arm extra settling time the baseline
+    # never got -- the FOREGROUND finished more work in it. That produced a
+    # consistent +1.45pp in HOT's favour on drag coverage, which is not a
+    # thing background prefetch can do; it was the unequal idle. A result
+    # that favours the feature under test is exactly where a confound has to
+    # be looked for hardest.
+    pre_gesture_hot_active = hot_ctl is None
+    deadline = time.perf_counter() + PRE_GESTURE_IDLE_S
+    while time.perf_counter() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+        if hot_ctl is not None and not pre_gesture_hot_active:
+            st = hot_ctl.stats
+            inflight = (st["hot_tiles_requested"]
+                        - st["hot_tiles_completed"]
+                        - st["hot_tiles_failed"]
+                        - st["hot_cancelled"])
+            if st["settle_confirmations"] >= 1 and inflight > 0:
+                # Mark it, but keep idling: the window must not end early or
+                # the arms stop being comparable.
+                pre_gesture_hot_active = True
+
     covs, mixed, frames = [], 0, 0
     # Zoom is sampled finely: at 12 coarse steps the mixed-level fraction can
     # only take values in steps of 8.3pp, so it structurally cannot resolve a
@@ -193,12 +226,31 @@ def run_arm(app, args, kind, hot, label):
                 and len(levels_on_screen(ctrl)) == 1:
             converged_ms = (time.perf_counter() - t_stop) * 1000.0
 
+    # Second confirmation: the gesture cancelled the first batch, so a valid
+    # arm must show HOT recovering and running again afterwards.
+    if hot_ctl is not None:
+        deadline = time.perf_counter() + HOT_SECOND_CONFIRM_TIMEOUT_S
+        while (time.perf_counter() < deadline
+               and hot_ctl.stats["settle_confirmations"] < 2):
+            app.processEvents()
+            time.sleep(0.005)
+
     stats = dict(hot_ctl.stats) if hot_ctl is not None else None
-    note = ("HOT off" if stats is None else
-            f"HOT conf={stats['settle_confirmations']} req={stats['hot_tiles_requested']} "
-            f"done={stats['hot_tiles_completed']} fail={stats['hot_tiles_failed']} "
-            f"ovw={stats['overviews_requested']}/{stats['overviews_failed']} "
-            f"abort={stats['settle_aborted']}")
+    if stats is None:
+        valid = True
+        note = "HOT off"
+    else:
+        valid = (pre_gesture_hot_active
+                 and stats["settle_confirmations"] >= 2
+                 and stats["hot_tiles_failed"] == 0
+                 and stats["overviews_failed"] == 0)
+        note = (f"HOT pre_active={pre_gesture_hot_active} "
+                f"conf={stats['settle_confirmations']} "
+                f"req={stats['hot_tiles_requested']} "
+                f"done={stats['hot_tiles_completed']} fail={stats['hot_tiles_failed']} "
+                f"ovw={stats['overviews_requested']}/{stats['overviews_failed']} "
+                f"abort={stats['settle_aborted']} "
+                f"{'VALID' if valid else 'INVALID'}")
     print(f"[{label}] {kind:4s} cov={np.mean(covs) * 100:5.1f}%  "
           f"mixed={mixed / max(1, frames) * 100:5.1f}%  "
           f"converge={converged_ms:6.1f}ms  | {note}", flush=True)
@@ -217,7 +269,8 @@ def run_arm(app, args, kind, hot, label):
     app.processEvents()
     return {"cov": np.mean(covs) * 100,
             "mixed": mixed / max(1, frames) * 100,
-            "converge": converged_ms}
+            "converge": converged_ms,
+            "valid": bool(valid)}
 
 
 def _t95(df):
@@ -251,22 +304,34 @@ def paired_noninferiority(name, base, hot, higher_is_better, unit="pp",
     """
     b = np.asarray(base, dtype=float)
     h = np.asarray(hot, dtype=float)
-    ok = ~(np.isnan(b) | np.isnan(h))
-    b, h = b[ok], h[ok]
-    if b.size < 2:
-        return f"{name}: fewer than 2 usable pairs -> INCONCLUSIVE"
+    # No dropping. A gate that discards failed arms and passes on what is
+    # left is not a gate: the arms most likely to fail are the ones under
+    # the most contention, which is exactly what is being measured. Any
+    # incomplete or invalid pair makes the whole run INCONCLUSIVE.
+    if b.size != PAIRS or h.size != PAIRS:
+        return (f"{name}: {min(b.size, h.size)} of {PAIRS} pairs present "
+                f"-> INCONCLUSIVE")
+    bad = int(np.count_nonzero(np.isnan(b) | np.isnan(h)))
+    if bad:
+        return (f"{name}: {bad} of {PAIRS} pairs unusable "
+                f"-> INCONCLUSIVE (no pairs are dropped)")
 
     d = (h - b) if higher_is_better else (b - h)
     n = d.size
     mean = float(d.mean())
     sd = float(d.std(ddof=1))
+    # `lo`/`hi` are the two ONE-SIDED 95% bounds, computed with the
+    # one-sided t. They are deliberately not a two-sided 95% interval, and
+    # are labelled as bounds rather than as an interval so the distinction
+    # is not lost in the output.
     half = _t95(n - 1) * sd / np.sqrt(n) if sd > 0 else 0.0
     lo, hi = mean - half, mean + half
     spread_note = (f"BASE {b.mean():6.2f} (range {b.max() - b.min():5.2f}) | "
                    f"HOT {h.mean():6.2f} (range {h.max() - h.min():5.2f})")
     if not gated:
         return (f"{name}: {spread_note} | paired mean {mean:+6.2f} {unit} "
-                f"[{lo:+.2f}, {hi:+.2f}] -> informational, not gated")
+                f"one-sided 95% bounds lower {lo:+.2f} / upper {hi:+.2f} "
+                f"-> informational, not gated")
     if lo >= -GATE_PP:
         tag = "PASS (non-inferior)"
     elif hi < -GATE_PP:
@@ -274,7 +339,8 @@ def paired_noninferiority(name, base, hot, higher_is_better, unit="pp",
     else:
         tag = "INCONCLUSIVE"
     return (f"{name}: {spread_note} | paired mean {mean:+6.2f} {unit}, "
-            f"one-sided 95% CI [{lo:+.2f}, {hi:+.2f}], margin {-GATE_PP:+.1f} "
+            f"one-sided 95% bounds lower {lo:+.2f} / upper {hi:+.2f}, "
+            f"margin {-GATE_PP:+.1f} "
             f"-> {tag}")
 
 
@@ -320,7 +386,7 @@ def main():
                "--compute-workers", str(args.compute_workers)]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         payload = None
-        for line in proc.stdout.splitlines():
+        for line in proc.stdout.splitlines():  # noqa: E501
             if line.startswith("["):
                 print(f"  r{rep} {line}", flush=True)
             if line.startswith("RESULT "):
@@ -341,10 +407,14 @@ def main():
         for kind in ("drag", "zoom"):
             for hot in order:
                 res = one(kind, hot, rep)
-                out[(kind, hot)].append(res if res else
-                                        {"cov": float("nan"),
-                                         "mixed": float("nan"),
-                                         "converge": float("nan")})
+                if res is None or not res.get("valid", False):
+                    if res is not None:
+                        print(f"  r{rep} arm INVALID (HOT was not genuinely "
+                              f"working before the gesture, or it failed) -- "
+                              f"the run will be INCONCLUSIVE", flush=True)
+                    res = {"cov": float("nan"), "mixed": float("nan"),
+                           "converge": float("nan"), "valid": False}
+                out[(kind, hot)].append(res)
 
     print()
     print(paired_noninferiority(

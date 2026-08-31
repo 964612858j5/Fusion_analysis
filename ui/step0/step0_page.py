@@ -47,6 +47,7 @@ from ...workers.cellpose_worker import (
     CellposeWorker, PreviewLoaderThread, run_cellpose_process,
 )
 from .overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
+from .step0_explore_tab import Step0ExploreTab
 from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
 from .search_ctrl import (
@@ -351,6 +352,14 @@ class Step0Page(QWidget):
         self._cond_tab = self._build_step0_conditioning_tab()
         self._cond_tab_index = self._step0_tabs.addTab(
             self._cond_tab, "Channel Remap")
+        # v15 Explore, mounted as a TRIAL entry point (docs/v15_step0_mount_plan.md
+        # §1): the final shape is a view mode inside Background Correction, not a
+        # third top-level tab. Additive -- neither existing tab is touched -- and
+        # the stack inside it is built lazily, on first activation with a dataset
+        # loaded.
+        self._explore_tab = Step0ExploreTab(self)
+        self._explore_tab_index = self._step0_tabs.addTab(
+            self._explore_tab, "Explore (v15 trial)")
         self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
         # Keep the BG-tab left column (channel list + params) and the Remap-tab left
@@ -1201,6 +1210,11 @@ class Step0Page(QWidget):
     def _on_step0_tab_changed(self, idx):
         if not hasattr(self, "_step0_tabs"):
             return
+        if idx == getattr(self, "_explore_tab_index", -1):
+            # Lazy build: the viewer stack (8 I/O + 4 compute workers, its own
+            # file handles and caches) must not exist until the user actually
+            # opens this tab.
+            self._explore_tab.activate()
         # Key on the tab INDEX, not its title (title was renamed to "Channel
         # Remap"). Entering the remap tab always (re)feeds the workbench from the
         # current patch so it works even when NO background correction was run.
@@ -2070,6 +2084,13 @@ class Step0Page(QWidget):
         self.loader.set_corrected_zarr_store(None, {})
 
         self._stop_bg_workers()
+        # Explore: tear the PREVIOUS dataset's stack down before anything is
+        # bound to the new one, so no pixel and no source identity of the old
+        # dataset can survive the switch. The new stack is built lazily, on
+        # the next activation of the Explore tab.
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is not None:
+            explore_tab.set_dataset(self.ome_path)
         self.current_patch_idx = 0
         self.current_channel = None
         self._preview_req_id = 0

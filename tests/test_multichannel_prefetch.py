@@ -11,6 +11,7 @@ from PyQt5 import QtCore, QtTest  # noqa: E402
 
 from viewer.multichannel_prefetch import (  # noqa: E402
     HOT_PRIORITY_BASE,
+    HOT_INFLIGHT,
     SETTLE_CONFIRM_MS,
     MultiChannelPrefetchController,
 )
@@ -474,28 +475,61 @@ def test_overview_is_queried_at_the_hosts_level_not_the_display_level(app):
         hot.stop()
 
 
-def test_stale_tile_callback_refills_the_freed_slot(app):
-    """A callback from a superseded generation frees its in-flight slot. If
-    it returns without pumping, a newer plan sits stalled with capacity
-    available and nobody to use it."""
+def test_cancellation_releases_in_flight_capacity(app):
+    """The in-flight accounting must not outlive the generation it belongs to.
+
+    `TileScheduler._deliver` SKIPS a waiter whose generation has gone stale
+    -- it does not call back at all -- so a request that was already running
+    when a cancellation happened never reports in. Leaving its slot occupied
+    leaked capacity permanently: after the first interaction that cancelled
+    HOT while `hot_inflight` tiles were running, `_pump_tiles` saw the cap
+    reached for the rest of the session and HOT never issued another tile
+    again. This models the real scheduler by never delivering those
+    callbacks.
+    """
     controller, scheduler, hot = _make(cancel_callbacks=False)
     try:
         _ready_overviews(controller)
         snapshot = _snapshot(controller)
         controller.gesture_quiet.emit(snapshot)
         _fire_confirm(hot)
-        assert scheduler.requests, "test setup: nothing was requested"
+        assert len(hot._active_requests) == HOT_INFLIGHT, "test setup"
+        issued_before = len(scheduler.requests)
 
+        # Interaction cancels the batch. The real scheduler will never call
+        # back for the two running requests, so nothing else can free them.
+        controller.interaction_event.emit("PAN", snapshot)
+        assert hot._active_requests == {}, (
+            "capacity stayed occupied by a generation that no longer exists")
+        assert hot.stats["hot_slots_released_on_abort"] == HOT_INFLIGHT
+
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        assert len(scheduler.requests) > issued_before, (
+            "HOT never issued another tile after a cancellation")
+    finally:
+        hot.stop()
+
+
+def test_late_stale_callback_is_harmless(app):
+    """A callback that does arrive for a superseded request must neither
+    double-release capacity nor touch the current generation's counters."""
+    controller, scheduler, hot = _make(cancel_callbacks=False)
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller)
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
         controller.interaction_event.emit("PAN", snapshot)
         controller.gesture_quiet.emit(snapshot)
         _fire_confirm(hot)
-        issued_before = len(scheduler.requests)
 
-        # A callback from the OLD generation now arrives.
-        scheduler.complete(0)
+        done_before = hot.stats["hot_tiles_completed"]
+        active_before = len(hot._active_requests)
+        scheduler.complete(0)          # from the abandoned generation
 
-        assert len(scheduler.requests) > issued_before, (
-            "a stale callback freed a slot but nothing refilled it")
+        assert hot.stats["hot_tiles_completed"] == done_before
+        assert len(hot._active_requests) == active_before
     finally:
         hot.stop()
 

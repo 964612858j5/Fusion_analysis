@@ -57,7 +57,8 @@ pg.setConfigOptions(imageAxisOrder="row-major")
 from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import ExploreController, ExploreView  # noqa: E402
-from block01.viewer.multichannel_prefetch import MultiChannelPrefetchController  # noqa: E402
+from block01.viewer.multichannel_prefetch import (  # noqa: E402
+    HOT_INFLIGHT, MultiChannelPrefetchController)
 from block01.viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import (  # noqa: E402
@@ -70,8 +71,10 @@ GATE_PP = 1.0                 # non-inferiority margin, percentage points
 ZOOM_STEPS = 110              # >= 100 frames per rep (see run_arm)
 ZOOM_STEP_FACTOR = 0.985      # 0.985**110 ~ 0.19, i.e. the same ~5x span
 PAIRS = 15                    # locked in advance; not extended on results
-PRE_GESTURE_IDLE_S = 3.0      # identical for BOTH arms -- see run_arm
-HOT_SECOND_CONFIRM_TIMEOUT_S = 4.0
+# Identical for BOTH arms. Chosen from a pilot: HOT holds exactly
+# HOT_INFLIGHT in flight from ~110ms to ~617ms after the foreground settles.
+PRE_GESTURE_IDLE_S = 0.35
+HOT_DRAIN_TIMEOUT_S = 20.0
 T95_ONE_SIDED = {             # Student t, one-sided 95%, by degrees of freedom
     4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
     10: 1.812, 11: 1.796, 12: 1.782, 13: 1.771, 14: 1.761, 15: 1.753,
@@ -163,29 +166,44 @@ def run_arm(app, args, kind, hot, label):
     # has stopped -- never that a user who starts moving WHILE it works is
     # unaffected. So wait here until HOT has confirmed once AND has work
     # actually in flight, then move the camera and force it to cancel.
-    # BOTH arms idle for the SAME fixed window before the gesture. An
-    # earlier version let only the HOT arm wait (up to 8s) for HOT to become
-    # active, which handed the HOT arm extra settling time the baseline
-    # never got -- the FOREGROUND finished more work in it. That produced a
-    # consistent +1.45pp in HOT's favour on drag coverage, which is not a
-    # thing background prefetch can do; it was the unequal idle. A result
-    # that favours the feature under test is exactly where a confound has to
-    # be looked for hardest.
-    pre_gesture_hot_active = hot_ctl is None
+    # BOTH arms idle for the SAME fixed window before the gesture, and the
+    # HOT arm must be at FULL in-flight capacity at the instant the camera
+    # moves. Two earlier versions of this got it wrong:
+    #
+    #   - waiting only in the HOT arm gave it extra settling time the
+    #     baseline never got, and produced a +1.45pp result in the feature's
+    #     favour that was entirely the unequal idle;
+    #   - then a 3s equal window let HOT finish and go idle long before the
+    #     gesture. "Was active at some point during the idle" is not
+    #     contention. The tell was in the log: 216 tiles per drag arm, i.e.
+    #     one whole batch before the gesture and another after, not a batch
+    #     interrupted at a cap of 2.
+    #
+    # Pilot measurement (scratch, informal): after the foreground settles,
+    # HOT holds exactly HOT_INFLIGHT in flight from about 110ms to about
+    # 617ms, then drains to zero by about 1185ms. PRE_GESTURE_IDLE_S sits in
+    # the middle of that window. An arm that is not at full capacity at the
+    # gesture is INVALID -- it is not evidence about contention, so it is
+    # not allowed to contribute.
+    active_seen_during_idle = hot_ctl is None
     deadline = time.perf_counter() + PRE_GESTURE_IDLE_S
     while time.perf_counter() < deadline:
         app.processEvents()
-        time.sleep(0.005)
-        if hot_ctl is not None and not pre_gesture_hot_active:
-            st = hot_ctl.stats
-            inflight = (st["hot_tiles_requested"]
-                        - st["hot_tiles_completed"]
-                        - st["hot_tiles_failed"]
-                        - st["hot_cancelled"])
-            if st["settle_confirmations"] >= 1 and inflight > 0:
-                # Mark it, but keep idling: the window must not end early or
-                # the arms stop being comparable.
-                pre_gesture_hot_active = True
+        time.sleep(0.002)
+        if hot_ctl is not None and len(hot_ctl._active_requests) > 0:
+            active_seen_during_idle = True
+
+    # Read the REAL state one line before the camera moves.
+    if hot_ctl is None:
+        active_at_gesture = None
+        at_gesture_note = ""
+    else:
+        st = hot_ctl.stats
+        active_at_gesture = len(hot_ctl._active_requests)
+        at_gesture_note = (f"at_gesture: active={active_at_gesture} "
+                           f"req={st['hot_tiles_requested']} "
+                           f"done={st['hot_tiles_completed']} | ")
+        req_gt_done = st["hot_tiles_requested"] > st["hot_tiles_completed"]
 
     covs, mixed, frames = [], 0, 0
     # Zoom is sampled finely: at 12 coarse steps the mixed-level fraction can
@@ -226,30 +244,42 @@ def run_arm(app, args, kind, hot, label):
                 and len(levels_on_screen(ctrl)) == 1:
             converged_ms = (time.perf_counter() - t_stop) * 1000.0
 
-    # Second confirmation: the gesture cancelled the first batch, so a valid
-    # arm must show HOT recovering and running again afterwards.
+    # Second confirmation and a drained queue: the gesture cancelled the
+    # first batch, so a valid arm must show HOT recovering, running again and
+    # finishing. This wait comes AFTER the equal-length idle above, so it
+    # cannot bias any measured value -- coverage was sampled during the
+    # gesture and convergence inside that equal window; this is validity
+    # bookkeeping only, and it is why it may run longer in the HOT arm.
     if hot_ctl is not None:
-        deadline = time.perf_counter() + HOT_SECOND_CONFIRM_TIMEOUT_S
-        while (time.perf_counter() < deadline
-               and hot_ctl.stats["settle_confirmations"] < 2):
+        deadline = time.perf_counter() + HOT_DRAIN_TIMEOUT_S
+        while time.perf_counter() < deadline:
             app.processEvents()
             time.sleep(0.005)
+            if (hot_ctl.stats["settle_confirmations"] >= 2
+                    and not hot_ctl._active_requests
+                    and not hot_ctl._tile_queue):
+                break
 
     stats = dict(hot_ctl.stats) if hot_ctl is not None else None
     if stats is None:
         valid = True
         note = "HOT off"
     else:
-        valid = (pre_gesture_hot_active
+        drained = (len(hot_ctl._active_requests) == 0
+                   and len(hot_ctl._tile_queue) == 0)
+        valid = (active_at_gesture == HOT_INFLIGHT
+                 and req_gt_done
                  and stats["settle_confirmations"] >= 2
                  and stats["hot_tiles_failed"] == 0
-                 and stats["overviews_failed"] == 0)
-        note = (f"HOT pre_active={pre_gesture_hot_active} "
+                 and stats["overviews_failed"] == 0
+                 and drained)
+        note = (f"{at_gesture_note}"
+                f"seen_idle={active_seen_during_idle} "
                 f"conf={stats['settle_confirmations']} "
                 f"req={stats['hot_tiles_requested']} "
                 f"done={stats['hot_tiles_completed']} fail={stats['hot_tiles_failed']} "
                 f"ovw={stats['overviews_requested']}/{stats['overviews_failed']} "
-                f"abort={stats['settle_aborted']} "
+                f"abort={stats['settle_aborted']} drained={drained} "
                 f"{'VALID' if valid else 'INVALID'}")
     print(f"[{label}] {kind:4s} cov={np.mean(covs) * 100:5.1f}%  "
           f"mixed={mixed / max(1, frames) * 100:5.1f}%  "

@@ -45,6 +45,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
             "hot_tiles_failed": 0,
             "settle_confirmations": 0,
             "settle_aborted": 0,
+            "hot_slots_released_on_abort": 0,
         }
 
         self._spec_by_channel = {spec.channel: spec for spec in self.specs}
@@ -129,6 +130,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._settled = False
         self._overview_plan.clear()
         self._overview_position = 0
+        self._active_requests.clear()
         self.scheduler.cancel_generation(self._hot_generation)
 
         connections = (
@@ -219,6 +221,23 @@ class MultiChannelPrefetchController(QtCore.QObject):
         if self._tile_queue:
             self.stats["hot_cancelled"] += len(self._tile_queue)
             self._tile_queue.clear()
+
+        # Release the in-flight ACCOUNTING for the generation being
+        # abandoned. `TileScheduler._deliver` skips a waiter whose
+        # generation has gone stale -- it does not call back at all -- so a
+        # request that was already RUNNING when this cancellation happened
+        # never reports in. Leaving its slot occupied leaked capacity
+        # permanently: after the first interaction that cancelled HOT with
+        # `hot_inflight` tiles running, `_pump_tiles` saw the cap reached
+        # for the rest of the session and HOT never issued another tile.
+        #
+        # The work itself is untouched and still lands in the scheduler's
+        # cache, which is the whole point of it. Only this object's capacity
+        # bookkeeping is reset, and it must not outlive the generation it
+        # belonged to.
+        if self._active_requests:
+            self.stats["hot_slots_released_on_abort"] += len(self._active_requests)
+            self._active_requests.clear()
 
         old_generation = self._hot_generation
         self._hot_generation += 1

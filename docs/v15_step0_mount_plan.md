@@ -48,7 +48,20 @@ show only what has already been decided. Four explicit display states:
 | Original | raw, no correction | — |
 | Top-hat Preview | top-hat at the CURRENT slider radius | `Preview · unsaved` |
 | cuCIM Preview | cuCIM at the CURRENT slider sigma | `Preview · unsaved` |
-| Selected Final | the channel's decided method + params | `Saved · <method> <param>` |
+| Selected Final | the channel's SELECTED method + params, still computed from raw | `Selected · <method> <param> · Unsaved` / `· Saved` |
+
+**The preview MODE and the SAVE STATE are two independent facts and must be
+displayed as such.** A user can have settled on a method without having
+pressed Save. So "Selected Final" is not "Saved":
+
+```
+Selected · Top-hat radius 25 · Unsaved
+Selected · Top-hat radius 25 · Saved
+```
+
+And in this phase "Selected Final" still means *raw pixels corrected in the
+viewport with the selected parameters* — it does NOT read the saved
+artifact (see §3).
 
 Rules:
 
@@ -90,9 +103,22 @@ now.
 
 Discipline, in order of strictness:
 
-1. When Step0 starts a real batch background-correction run, Explore
-   **stops issuing new work**. Already-started physical tasks are allowed to
-   finish quickly — we do NOT claim a GPU kernel can be force-cancelled.
+1. When a Step0 batch background-correction run is REQUESTED, Explore
+   immediately stops issuing new work AND cancels what is still queued.
+   Tasks that have already started are allowed to finish — a running GPU
+   kernel cannot be force-cancelled and this plan does not pretend
+   otherwise. The production BG worker starts once Explore's PHYSICALLY
+   in-flight work has drained, and the drain duration is recorded.
+   **An empty local queue is not proof of quiescence** and must never be
+   reported as such.
+
+   Contract debt, stated rather than assumed: `TileScheduler` today exposes
+   `request` / `cancel_generation` / `shutdown` and no physical in-flight
+   count, so this hand-off cannot be implemented honestly yet. Providing
+   that drain interface (the same physical metering
+   `notify_on_stale_completion` already gives the multi-channel prefetch
+   controller) is a **P2 deliverable**. Until it exists, no claim of
+   isolation from production runs may be made.
 2. On returning to Explore, work resumes from the CURRENT viewport, not the
    one that was live when it paused.
 3. Hiding the tab pauses HOT/COVERAGE but KEEPS the caches.
@@ -103,8 +129,10 @@ Discipline, in order of strictness:
 Explore opens its OWN `RawTileProvider` rather than reusing
 `OMETIFFLoader`: the loader is GUI-thread single-handle, and
 `set_corrected_zarr_store` changes which pixels it returns. Cost to state
-plainly in review: a second set of file handles and page cache for the same
-file.
+plainly in review: a second set of file handles, a second copy of the
+TIFF/Zarr metadata and decoder state, and a second application-level tile
+cache. The OS page cache is shared between the two readers, so that is NOT
+duplicated.
 
 ## 5. Phases
 
@@ -112,7 +140,11 @@ file.
   stack, built LAZILY on first activation of the tab, with a placeholder
   until a dataset is loaded. Wire build/teardown to the dataset load path
   (`step0_page.py:~2028`, where `OMETIFFLoader` is constructed and
-  `_stop_bg_workers()` runs). No prefetch, no mode switching yet.
+  `_stop_bg_workers()` runs). No prefetch, no mode switching.
+  **What P0 displays, stated so the implementer is not left guessing:**
+  mode `Original` only, on a SNAPSHOT of `current_channel` taken when the
+  stack is built. Channel sync in both directions, and the correction
+  preview modes, start at P1.
 * **P1 — selection adapter.** Two-way sync of `current_channel` and the
   preview mode / sliders, with a re-entrancy guard so an Explore-side
   channel change never triggers Step0's patch preview recompute. Modelled on
@@ -127,17 +159,30 @@ Explicit non-goals for P0: Compare, the final view-mode re-layout, browsing
 saved-corrected pixels, replacing the existing patch preview, OpenGL, and
 any change to Save, configs or correction numerics.
 
-## 6. Acceptance gate
+## 6. Acceptance gates, per phase
 
-* `wrong = 0` — hard gate (no frame may show another channel's pixels).
-* Near channel switch `full_precise`: **median ≤ 50ms, p95 ≤ 100ms**.
-* Level-0 switch to an already-cached channel: `raw = 0`, `blank = 0`.
-* While a real Step0 BG worker run is in progress, Explore issues no new
-  work and does not compete with the production task.
-* After a dataset switch, not one pixel of the previous dataset is
-  displayed.
-* The first drag after a switch shows no obvious floor exposure, block
-  boundary or brightness jump.
+P0 cannot be judged on behaviour it does not yet have, so the gate is
+split.
+
+**P0 (skeleton):**
+
+* the stack builds lazily on first tab activation, and shows a placeholder
+  while no dataset is loaded;
+* after a dataset switch, not one pixel of the previous dataset is
+  displayed;
+* teardown happens in the pinned order (`scheduler.shutdown()` →
+  `provider.close()` → drop caches), on dataset switch and on destruction;
+* only mode `Original` is offered;
+* nothing writes to Save, to any config, or to correction numerics.
+
+**P1–P3 (sync, prefetch, measurement):**
+
+* `wrong = 0` — hard gate (no frame may show another channel's pixels);
+* near channel switch `full_precise`: **median ≤ 50ms, p95 ≤ 100ms**;
+* level-0 switch to an already-cached channel: `raw = 0`, `blank = 0`;
+* the first drag after a switch shows no obvious floor exposure, block
+  boundary or brightness jump;
+* resource isolation from a real Step0 BG run, per §4.
 
 ## 7. Test plan
 

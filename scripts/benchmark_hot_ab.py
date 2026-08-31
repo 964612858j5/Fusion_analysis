@@ -58,7 +58,7 @@ from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import ExploreController, ExploreView  # noqa: E402
 from block01.viewer.multichannel_prefetch import (  # noqa: E402
-    HOT_INFLIGHT, MultiChannelPrefetchController)
+    COVERAGE_INFLIGHT, HOT_INFLIGHT, MultiChannelPrefetchController)
 from block01.viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import (  # noqa: E402
@@ -74,6 +74,22 @@ PAIRS = 15                    # locked in advance; not extended on results
 # Identical for BOTH arms. Chosen from a pilot: HOT holds exactly
 # HOT_INFLIGHT in flight from ~110ms to ~617ms after the foreground settles.
 PRE_GESTURE_IDLE_S = 0.35
+# COVERAGE only ever runs when HOT is idle (strict priority), so "HOT at its
+# cap" and "COVERAGE at its cap" can never hold at the same instant -- they
+# are mutually exclusive BY DESIGN, not by timing. One arm therefore cannot
+# verify both, and "COVERAGE was at its cap at some point" is the same
+# ever-active weakening that was rejected for HOT. So COVERAGE gets its OWN
+# arm, gated on COVERAGE being at its cap at the gesture instant, paired
+# against a BASE arm that waits exactly as long. Pilot: COVERAGE holds its
+# cap continuously from about 871ms (once HOT has drained) out past 6s.
+PRE_GESTURE_IDLE_COVERAGE_S = 1.5
+MODE_BASE_SHORT, MODE_HOT, MODE_BASE_LONG, MODE_COVERAGE = "0", "1", "2", "3"
+MODE_LABELS = {MODE_BASE_SHORT: "BASE", MODE_HOT: "HOT ",
+               MODE_BASE_LONG: "BASE-long", MODE_COVERAGE: "COVERAGE"}
+MODE_IDLE_S = {MODE_BASE_SHORT: PRE_GESTURE_IDLE_S,
+               MODE_HOT: PRE_GESTURE_IDLE_S,
+               MODE_BASE_LONG: PRE_GESTURE_IDLE_COVERAGE_S,
+               MODE_COVERAGE: PRE_GESTURE_IDLE_COVERAGE_S}
 HOT_DRAIN_TIMEOUT_S = 20.0
 T95_ONE_SIDED = {             # Student t, one-sided 95%, by degrees of freedom
     4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
@@ -84,7 +100,7 @@ T95_ONE_SIDED = {             # Student t, one-sided 95%, by degrees of freedom
 IDLE_AFTER_GESTURE_S = 2.0   # 80ms gesture_quiet + 120ms confirm, then work
 
 
-def build(app, args, hot):
+def build(app, args, hot, coverage_prefetch=False):
     provider = RawTileProvider(args.path)
     channel = provider.channel_names[args.channel_index]
     grid = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
@@ -111,7 +127,13 @@ def build(app, args, hot):
                                        tophat_radius=args.param,
                                        cucim_sigma=args.param)
                  for name in provider.channel_names]
-        hot_ctl = MultiChannelPrefetchController(ctrl, scheduler, specs, grid)
+        # `coverage=coverage_prefetch` explicitly, rather than relying on
+        # the constructor's own default (True): this keeps the existing
+        # BASE/HOT arms' behaviour exactly as measured before COVERAGE
+        # existed -- only the new HOT+COVERAGE arm passes
+        # `coverage_prefetch=True`.
+        hot_ctl = MultiChannelPrefetchController(ctrl, scheduler, specs, grid,
+                                                 coverage=coverage_prefetch)
     return provider, scheduler, view, ctrl, hot_ctl
 
 
@@ -148,8 +170,10 @@ def levels_on_screen(ctrl):
     return seen
 
 
-def run_arm(app, args, kind, hot, label):
-    provider, scheduler, view, ctrl, hot_ctl = build(app, args, hot)
+def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
+            idle_s=PRE_GESTURE_IDLE_S, require_coverage_at_gesture=False):
+    provider, scheduler, view, ctrl, hot_ctl = build(
+        app, args, hot, coverage_prefetch=coverage_prefetch)
     cy, cx = args.center_y, args.center_x
     span = 1400.0 if kind == "drag" else 6000.0
     view.view_box.setRange(xRange=(cx - span / 2, cx + span / 2),
@@ -186,12 +210,15 @@ def run_arm(app, args, kind, hot, label):
     # gesture is INVALID -- it is not evidence about contention, so it is
     # not allowed to contribute.
     active_seen_during_idle = hot_ctl is None
-    deadline = time.perf_counter() + PRE_GESTURE_IDLE_S
+    deadline = time.perf_counter() + idle_s
     while time.perf_counter() < deadline:
         app.processEvents()
         time.sleep(0.002)
         if hot_ctl is not None and len(hot_ctl._active_requests) > 0:
             active_seen_during_idle = True
+
+    coverage_at_gesture = (None if hot_ctl is None or not coverage_prefetch
+                           else len(hot_ctl._coverage_active_requests))
 
     # Read the REAL state one line before the camera moves.
     if hot_ctl is None:
@@ -204,6 +231,16 @@ def run_arm(app, args, kind, hot, label):
                            f"req={st['hot_tiles_requested']} "
                            f"done={st['hot_tiles_completed']} | ")
         req_gt_done = st["hot_tiles_requested"] > st["hot_tiles_completed"]
+        if coverage_prefetch:
+            # Informational only here (COVERAGE's own gate is
+            # `cov_at_gesture`, checked on the line before the camera moves
+            # above for why COVERAGE is essentially always 0 at this exact
+            # instant when HOT is genuinely still busy, by design).
+            coverage_active_at_gesture = len(hot_ctl._coverage_active_requests)
+            at_gesture_note += (
+                f"cov_active={coverage_active_at_gesture} "
+                f"cov_req={st['coverage_tiles_requested']} "
+                f"cov_done={st['coverage_tiles_completed']} | ")
 
     covs, mixed, frames = [], 0, 0
     # Zoom is sampled finely: at 12 coarse steps the mixed-level fraction can
@@ -262,9 +299,17 @@ def run_arm(app, args, kind, hot, label):
         while time.perf_counter() < deadline:
             app.processEvents()
             time.sleep(0.005)
-            if (hot_ctl.stats["settle_confirmations"] >= 2
-                    and not hot_ctl._active_requests
-                    and not hot_ctl._tile_queue):
+            drained_now = (hot_ctl.stats["settle_confirmations"] >= 2
+                           and not hot_ctl._active_requests
+                           and not hot_ctl._tile_queue)
+            if coverage_prefetch:
+                # Both queues drained, not just HOT's -- COVERAGE's own
+                # in-flight/queued work must also be empty before this arm
+                # can claim it observed COVERAGE recover and finish.
+                drained_now = (drained_now
+                               and not hot_ctl._coverage_active_requests
+                               and not hot_ctl._coverage_queue)
+            if drained_now:
                 break
 
     stats = dict(hot_ctl.stats) if hot_ctl is not None else None
@@ -274,12 +319,31 @@ def run_arm(app, args, kind, hot, label):
     else:
         drained = (len(hot_ctl._active_requests) == 0
                    and len(hot_ctl._tile_queue) == 0)
-        valid = (active_at_gesture == HOT_INFLIGHT
-                 and req_gt_done
+        if coverage_prefetch:
+            drained = (drained
+                       and len(hot_ctl._coverage_active_requests) == 0
+                       and len(hot_ctl._coverage_queue) == 0)
+        # In the COVERAGE arm the requirement moves: COVERAGE must be at ITS
+        # cap at the gesture instant, and HOT is idle then by construction.
+        if require_coverage_at_gesture:
+            gesture_ok = (coverage_at_gesture == COVERAGE_INFLIGHT
+                          and active_at_gesture == 0)
+        else:
+            gesture_ok = (active_at_gesture == HOT_INFLIGHT and req_gt_done)
+        valid = (gesture_ok
                  and stats["settle_confirmations"] >= 2
                  and stats["hot_tiles_failed"] == 0
                  and stats["overviews_failed"] == 0
                  and drained)
+        if coverage_prefetch:
+            # See PRE_GESTURE_IDLE_COVERAGE_S for why COVERAGE has its own arm
+            # for why this is "reached cap at some point in the run", not
+            # "at the same instant as HOT's own gesture check" -- the two
+            # are mutually exclusive under strict HOT priority.
+            valid = (valid
+                     and stats["coverage_batches"] > 0
+                     and stats["coverage_tiles_requested"] > 0
+                     and stats["coverage_tiles_failed"] == 0)
         note = (f"{at_gesture_note}"
                 f"seen_idle={active_seen_during_idle} "
                 f"conf={stats['settle_confirmations']} "
@@ -288,8 +352,17 @@ def run_arm(app, args, kind, hot, label):
                 f"ovw={stats['overviews_requested']}/{stats['overviews_failed']} "
                 f"abort={stats['settle_aborted']} "
                 f"abandoned_done={stats['hot_abandoned_finished']} "
-                f"drained={drained} "
-                f"{'VALID' if valid else 'INVALID'}")
+                f"drained={drained} ")
+        if coverage_prefetch:
+            note += (
+                     f"cov_at_gesture={coverage_at_gesture} "
+                f"cov_batches={stats['coverage_batches']} "
+                     f"cov_req={stats['coverage_tiles_requested']} "
+                     f"cov_done={stats['coverage_tiles_completed']} "
+                     f"cov_fail={stats['coverage_tiles_failed']} "
+                     f"cov_cancelled={stats['coverage_cancelled']} "
+                     f"cov_abandoned_done={stats['coverage_abandoned_finished']} ")
+        note += f"{'VALID' if valid else 'INVALID'}"
     print(f"[{label}] {kind:4s} cov={np.mean(covs) * 100:5.1f}%  "
           f"mixed={mixed / max(1, frames) * 100:5.1f}%  "
           f"converge={converged_ms:6.1f}ms  | {note}", flush=True)
@@ -323,7 +396,7 @@ def _t95(df):
 
 
 def paired_noninferiority(name, base, hot, higher_is_better, unit="pp",
-                          gated=True):
+                          gated=True, hot_label="HOT"):
     """Paired non-inferiority test on the per-pair differences.
 
     The earlier rule compared each arm's raw SPREAD against the margin,
@@ -366,7 +439,7 @@ def paired_noninferiority(name, base, hot, higher_is_better, unit="pp",
     half = _t95(n - 1) * sd / np.sqrt(n) if sd > 0 else 0.0
     lo, hi = mean - half, mean + half
     spread_note = (f"BASE {b.mean():6.2f} (range {b.max() - b.min():5.2f}) | "
-                   f"HOT {h.mean():6.2f} (range {h.max() - h.min():5.2f})")
+                   f"{hot_label} {h.mean():6.2f} (range {h.max() - h.min():5.2f})")
     if not gated:
         return (f"{name}: {spread_note} | paired mean {mean:+6.2f} {unit} "
                 f"one-sided 95% bounds lower {lo:+.2f} / upper {hi:+.2f} "
@@ -392,30 +465,38 @@ def main():
                     help="paired repetitions, locked in advance")
     ap.add_argument("--center-y", type=int, default=25606)
     ap.add_argument("--center-x", type=int, default=15360)
-    ap.add_argument("--single", nargs=2, metavar=("KIND", "HOT"),
+    ap.add_argument("--single", nargs=2, metavar=("KIND", "MODE"),
                     help="internal: run ONE arm in this process and print a "
-                         "JSON line. Each arm runs in its own subprocess -- "
-                         "60 arms in one process hit the known cupy/Qt "
-                         "teardown segfault (the same reason the test suites "
-                         "must be run one file per process), and separate "
-                         "processes also isolate the arms more completely "
-                         "than any in-process teardown can.")
+                         "JSON line. MODE is '0' (BASE), '1' (HOT) or '2' "
+                         "(HOT+COVERAGE). Each arm runs in its own "
+                         "subprocess -- 60+ arms in one process hit the "
+                         "known cupy/Qt teardown segfault (the same reason "
+                         "the test suites must be run one file per "
+                         "process), and separate processes also isolate the "
+                         "arms more completely than any in-process teardown "
+                         "can.")
     ap.add_argument("--io-workers", type=int, default=DEFAULT_IO_WORKERS)
     ap.add_argument("--compute-workers", type=int, default=DEFAULT_COMPUTE_WORKERS)
     args = ap.parse_args()
 
+    # MODE -> (label, hot, coverage_prefetch). "0"/"1" are the pre-existing
+    # BASE/HOT arms, completely unchanged. "2" is the new HOT+COVERAGE arm.
     if args.single:
-        kind, hot_s = args.single
-        hot = hot_s == "1"
+        kind, mode = args.single
+        hot = mode in (MODE_HOT, MODE_COVERAGE)
+        coverage_prefetch = mode == MODE_COVERAGE
         app = QtWidgets.QApplication(sys.argv)
-        label = f"{'HOT ' if hot else 'BASE'}"
-        result = run_arm(app, args, kind, hot, label)
+        result = run_arm(app, args, kind, hot, MODE_LABELS[mode],
+                         coverage_prefetch=coverage_prefetch,
+                         idle_s=MODE_IDLE_S[mode],
+                         require_coverage_at_gesture=coverage_prefetch)
         print("RESULT " + json.dumps(result), flush=True)
         return
 
-    def one(kind, hot, rep):
+    def one(kind, mode, rep):
+        label = MODE_LABELS[mode]
         cmd = [sys.executable, os.path.abspath(__file__),
-               "--single", kind, "1" if hot else "0",
+               "--single", kind, mode,
                "--path", args.path,
                "--channel-index", str(args.channel_index),
                "--param", str(args.param),
@@ -431,21 +512,25 @@ def main():
             if line.startswith("RESULT "):
                 payload = json.loads(line[len("RESULT "):])
         if payload is None:
-            print(f"  r{rep} {'HOT ' if hot else 'BASE'} {kind}: ARM FAILED "
+            print(f"  r{rep} {label} {kind}: ARM FAILED "
                   f"(rc={proc.returncode})", flush=True)
             print("    " + (proc.stderr.strip().splitlines() or ["<no stderr>"])[-1],
                   flush=True)
         return payload
 
-    out = {(k, h): [] for k in ("drag", "zoom") for h in (False, True)}
+    modes = (MODE_BASE_SHORT, MODE_HOT, MODE_BASE_LONG, MODE_COVERAGE)
+    out = {(k, m): [] for k in ("drag", "zoom") for m in modes}
     for rep in range(args.reps):
-        # Counterbalanced: always running BASE first would hand HOT a warmer
-        # OS page cache in every pair, a systematic advantage rather than a
-        # measurement.
-        order = (False, True) if rep % 2 == 0 else (True, False)
+        # Counterbalanced: always running the same arm first would hand it
+        # a warmer OS page cache in every pair/triple, a systematic
+        # advantage rather than a measurement. A simple rotation gives each
+        # of the three arms an equal share of "goes first" across reps
+        # (the original two-arm alternation is the rep%2 case of exactly
+        # this rotation).
+        order = modes[rep % len(modes):] + modes[:rep % len(modes)]
         for kind in ("drag", "zoom"):
-            for hot in order:
-                res = one(kind, hot, rep)
+            for mode in order:
+                res = one(kind, mode, rep)
                 if res is None or not res.get("valid", False):
                     if res is not None:
                         print(f"  r{rep} arm INVALID (HOT was not genuinely "
@@ -453,22 +538,28 @@ def main():
                               f"the run will be INCONCLUSIVE", flush=True)
                     res = {"cov": float("nan"), "mixed": float("nan"),
                            "converge": float("nan"), "valid": False}
-                out[(kind, hot)].append(res)
+                out[(kind, mode)].append(res)
 
     print()
-    print(paired_noninferiority(
-        "drag in-motion coverage %",
-        [r["cov"] for r in out[("drag", False)]],
-        [r["cov"] for r in out[("drag", True)]], higher_is_better=True))
-    print(paired_noninferiority(
-        "zoom mixed-level frames %",
-        [r["mixed"] for r in out[("zoom", False)]],
-        [r["mixed"] for r in out[("zoom", True)]], higher_is_better=False))
-    print(paired_noninferiority(
-        "zoom converge-after-stop ms",
-        [r["converge"] for r in out[("zoom", False)]],
-        [r["converge"] for r in out[("zoom", True)]],
-        higher_is_better=False, unit="ms", gated=False))
+    # Two comparisons, each between arms that waited EXACTLY as long. Mixing
+    # the 0.35s and 1.5s arms would compare different amounts of foreground
+    # settling, not the feature.
+    for label, base_mode, test_mode in (
+            ("HOT", MODE_BASE_SHORT, MODE_HOT),
+            ("COVERAGE", MODE_BASE_LONG, MODE_COVERAGE)):
+        print(paired_noninferiority(
+            f"[{label}] drag in-motion coverage %",
+            [r["cov"] for r in out[("drag", base_mode)]],
+            [r["cov"] for r in out[("drag", test_mode)]], higher_is_better=True))
+        print(paired_noninferiority(
+            f"[{label}] zoom mixed-level frames %",
+            [r["mixed"] for r in out[("zoom", base_mode)]],
+            [r["mixed"] for r in out[("zoom", test_mode)]], higher_is_better=False))
+        print(paired_noninferiority(
+            f"[{label}] zoom converge-after-stop ms",
+            [r["converge"] for r in out[("zoom", base_mode)]],
+            [r["converge"] for r in out[("zoom", test_mode)]],
+            higher_is_better=False, unit="ms", gated=False))
 
 
 if __name__ == "__main__":

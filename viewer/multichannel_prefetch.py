@@ -6,7 +6,7 @@ from collections import deque
 
 from PyQt5 import QtCore
 
-from .prefetch_policy import ChannelCorrectionSpec, _hot_order
+from .prefetch_policy import ChannelCorrectionSpec, _coverage_order, _hot_order
 from .tile_types import CorrectionKey, TileAddress, TileRequest, effective_param
 
 
@@ -15,6 +15,19 @@ HOT_INFLIGHT = 2
 HOT_PRIORITY_BASE = 5000
 HOT_METHODS = ("tophat", "cucim")
 
+# ── COVERAGE (P3) ────────────────────────────────────────────────────────────
+#
+# Above HOT_PRIORITY_BASE=5000, i.e. strictly LOWER priority than every HOT
+# request (HOT's own priorities top out at HOT_PRIORITY_BASE + 3 for a
+# 4-neighbour order).
+COVERAGE_PRIORITY_BASE = 6000
+# Physical cap, same meaning as HOT_INFLIGHT: a slot is released only when a
+# terminal callback (ordinary or stale) arrives, never at cancellation time.
+COVERAGE_INFLIGHT = 1
+# Channels planned per batch, so a cancellation never has to discard a queue
+# sized to the whole remaining channel list.
+COVERAGE_BATCH_CHANNELS = 4
+
 
 class MultiChannelPrefetchController(QtCore.QObject):
     """Prepare neighbouring channels after the display has really settled.
@@ -22,6 +35,21 @@ class MultiChannelPrefetchController(QtCore.QObject):
     This object is deliberately a cache-only consumer.  It never touches an
     ``ExploreView`` or either of the view's pools: the scheduler writes
     completed correction results to ``corrected_cache``.
+
+    In addition to HOT (P2, the i-1/i+1/i-2/i+2 neighbourhood), this object
+    also runs COVERAGE (P3): every remaining channel's current viewport,
+    walked from both ends of the channel list toward the middle via
+    ``_coverage_order`` (reused from ``prefetch_policy``, not reimplemented
+    here), planned in batches of ``COVERAGE_BATCH_CHANNELS`` channels.
+
+    NOTE ON THE INTERLEAVE RATIO: ``prefetch_policy``'s design document
+    describes a deterministic 3:1 HOT:COVERAGE interleave
+    (``HOT_PER_COVERAGE``). That is deliberately NOT implemented here. The
+    operative instruction for this round is strict HOT priority with a
+    physical COVERAGE cap of 1 -- COVERAGE issues a request only when HOT
+    has nothing queued and nothing in flight (including its one-at-a-time
+    overview fetch) -- which is simpler and strictly safer than interleaving
+    the two. The ratio can be revisited once this is measured.
     """
 
     # `TileScheduler` fires callbacks on a COMPUTE WORKER thread. Every
@@ -32,9 +60,20 @@ class MultiChannelPrefetchController(QtCore.QObject):
     # slot release, never advance it, so the physical cap stays conservative.
     _tile_delivered = QtCore.pyqtSignal(int, object, object)
 
+    # COVERAGE gets its own signal rather than reusing `_tile_delivered`:
+    # the two consumers keep entirely separate in-flight maps, generation
+    # counters and stats, and sharing one signal would force every handler
+    # to first disambiguate HOT vs COVERAGE deliveries from the same
+    # (token, generation) namespace. Two signals keep that separation at the
+    # Qt layer instead of re-deriving it in a shared slot.
+    _coverage_tile_delivered = QtCore.pyqtSignal(int, object, object)
+
     def __init__(self, controller, scheduler, specs, grid,
                  settle_confirm_ms=SETTLE_CONFIRM_MS,
-                 hot_inflight=HOT_INFLIGHT, parent=None):
+                 hot_inflight=HOT_INFLIGHT,
+                 coverage: bool = True,
+                 coverage_inflight=COVERAGE_INFLIGHT,
+                 parent=None):
         super().__init__(parent)
         self.controller = controller
         self.scheduler = scheduler
@@ -42,6 +81,8 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self.grid = grid
         self.settle_confirm_ms = settle_confirm_ms
         self.hot_inflight = hot_inflight
+        self.coverage_enabled = coverage
+        self.coverage_inflight = coverage_inflight
 
         self.stats = {
             "hot_batches": 0,
@@ -54,6 +95,12 @@ class MultiChannelPrefetchController(QtCore.QObject):
             "settle_confirmations": 0,
             "settle_aborted": 0,
             "hot_abandoned_finished": 0,
+            "coverage_batches": 0,
+            "coverage_tiles_requested": 0,
+            "coverage_tiles_completed": 0,
+            "coverage_tiles_failed": 0,
+            "coverage_cancelled": 0,
+            "coverage_abandoned_finished": 0,
         }
 
         self._spec_by_channel = {spec.channel: spec for spec in self.specs}
@@ -87,8 +134,27 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._pumping_tiles = False
         self._stopped = False
 
+        # COVERAGE state -- entirely separate bookkeeping from HOT's above,
+        # on purpose (see class docstring).
+        self._coverage_generation = 0
+        self._coverage_full_order = []
+        self._coverage_order_position = 0
+        self._coverage_queue = deque()
+        self._coverage_active_requests = {}
+        self._coverage_request_serial = 0
+        self._coverage_pumping = False
+        # Tiles queued or in flight for the CURRENT batch, in the CURRENT
+        # generation only. Reaching zero is what triggers planning the next
+        # batch -- it deliberately does not span generations the way the
+        # physical in-flight cap does (see `_coverage_active_requests`),
+        # because an abandoned generation's still-running task must not
+        # block planning fresh work for a new one.
+        self._coverage_batch_remaining = 0
+
         self._tile_delivered.connect(self._on_tile_result,
                                      QtCore.Qt.QueuedConnection)
+        self._coverage_tile_delivered.connect(self._on_coverage_tile_result,
+                                              QtCore.Qt.QueuedConnection)
         self.controller.interaction_event.connect(self._on_interaction)
         self.controller.gesture_quiet.connect(self._on_gesture_quiet)
         self.controller.selection_context_changed.connect(
@@ -111,6 +177,11 @@ class MultiChannelPrefetchController(QtCore.QObject):
         # that was already cached, which returns without emitting, leaving
         # the one-at-a-time overview gate stuck for good. Passing None lets
         # the host resolve its own level.
+        #
+        # This overview requirement is why a COVERAGE-only channel (tiles
+        # cached, but COVERAGE never touches overviews -- HOT owns the
+        # one-at-a-time overview channel) is correctly never reported ready
+        # here.
         if not self.controller.has_overview_record(
                 channel, source=snapshot.source):
             return False
@@ -128,7 +199,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         return True
 
     def stop(self):
-        """Disconnect from the host and cancel queued HOT work."""
+        """Disconnect from the host and cancel queued HOT/COVERAGE work."""
         if self._stopped:
             return
         self._stopped = True
@@ -141,6 +212,14 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._overview_plan.clear()
         self._overview_position = 0
         self.scheduler.cancel_generation(self._hot_generation)
+
+        if self.coverage_enabled:
+            self.stats["coverage_cancelled"] += len(self._coverage_queue)
+            self._coverage_queue.clear()
+            self._coverage_full_order = []
+            self._coverage_order_position = 0
+            self._coverage_batch_remaining = 0
+            self.scheduler.cancel_generation(self._coverage_generation)
 
         connections = (
             (self.controller.interaction_event, self._on_interaction),
@@ -156,6 +235,11 @@ class MultiChannelPrefetchController(QtCore.QObject):
                 pass
         try:
             self._tile_delivered.disconnect(self._on_tile_result)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._coverage_tile_delivered.disconnect(
+                self._on_coverage_tile_result)
         except (TypeError, RuntimeError):
             pass
 
@@ -207,14 +291,15 @@ class MultiChannelPrefetchController(QtCore.QObject):
         center = self._index_by_channel.get(snapshot.channel)
         if center is None:
             self._overview_plan = []
-            return
-        order = _hot_order(center, len(self.specs))
-        self._overview_plan = [
-            (self.specs[index].channel, hot_index)
-            for hot_index, index in enumerate(order)
-        ]
+        else:
+            order = _hot_order(center, len(self.specs))
+            self._overview_plan = [
+                (self.specs[index].channel, hot_index)
+                for hot_index, index in enumerate(order)
+            ]
         self._overview_position = 0
         self._pump_overviews()
+        self._start_coverage_plan(snapshot)
 
     # ── generation / overview sequencing ────────────────────────────────
 
@@ -254,6 +339,13 @@ class MultiChannelPrefetchController(QtCore.QObject):
         old_generation = self._hot_generation
         self._hot_generation += 1
         self.scheduler.cancel_generation(old_generation)
+
+        # Any interaction that aborts HOT aborts COVERAGE the same way --
+        # both existing call sites (`_on_interaction`,
+        # `_on_selection_context_changed`) reach this method already, so
+        # this is the one place that needs to know about COVERAGE too.
+        if self.coverage_enabled:
+            self._abort_coverage()
 
     def _pump_overviews(self):
         if (self._stopped or not self._settled
@@ -358,6 +450,10 @@ class MultiChannelPrefetchController(QtCore.QObject):
                     self.stats["hot_cancelled"] += 1
         finally:
             self._pumping_tiles = False
+        # HOT's queue/in-flight state may just have gone idle (or become
+        # busy) -- either way COVERAGE's strict-priority gate depends on it,
+        # so give it a chance to react every time HOT's pump runs.
+        self._pump_coverage()
 
     def _on_tile_result(self, token, generation, result):
         if self._active_requests.pop(token, None) is None:
@@ -371,6 +467,8 @@ class MultiChannelPrefetchController(QtCore.QObject):
             self.stats["hot_abandoned_finished"] += 1
             if not self._stopped and self._settled:
                 self._pump_tiles()
+            else:
+                self._pump_coverage()
             return
 
         error = getattr(result, "error", None)
@@ -429,3 +527,178 @@ class MultiChannelPrefetchController(QtCore.QObject):
             algorithm_version=snapshot.algorithm_version,
             quality=snapshot.quality,
         )
+
+    # ── COVERAGE (P3): every remaining channel's current viewport ────────
+
+    def _hot_idle(self):
+        """True iff HOT has nothing queued and nothing in flight.
+
+        Includes the one-at-a-time overview fetch (`_overview_inflight`):
+        that fetch is part of HOT's own settle sequence, so a COVERAGE
+        request issued while it is outstanding would still be competing
+        with HOT for the same I/O, which is exactly what strict priority is
+        meant to prevent.
+        """
+        return (not self._tile_queue and not self._active_requests
+                and self._overview_inflight is None)
+
+    def _tiles_cached_for_channel(self, channel, snapshot):
+        """Whether every HOT-identity tile for `channel` is already cached.
+
+        Unlike `is_channel_ready`, this deliberately does NOT require an
+        overview record -- COVERAGE must not request overviews (HOT owns
+        the one-at-a-time overview channel), so a COVERAGE channel can only
+        ever be judged "already complete" (and so skipped from a fresh
+        plan) by its tiles, never by an overview it was never asked to
+        fetch.
+        """
+        spec = self._spec_by_channel.get(channel)
+        if spec is None:
+            return True
+        cache = getattr(self.scheduler, "corrected_cache", None)
+        if cache is None:
+            return False
+        for tx, ty in self._tiles(snapshot):
+            for method, base_param in self._method_params(spec):
+                key = self._make_key(snapshot, channel, tx, ty, method,
+                                     base_param)
+                if cache.get(key) is None:
+                    return False
+        return True
+
+    def _compute_coverage_order(self, snapshot):
+        """`_coverage_order` minus the HOT neighbourhood minus completed
+        channels -- reusing both policy functions verbatim, never
+        reimplementing either."""
+        center = self._index_by_channel.get(snapshot.channel)
+        n = len(self.specs)
+        if center is None:
+            return []
+        hot_idx = set(_hot_order(center, n))
+        order = []
+        for idx in _coverage_order(n, center):
+            if idx in hot_idx:
+                continue
+            channel = self.specs[idx].channel
+            if self._tiles_cached_for_channel(channel, snapshot):
+                continue
+            order.append(channel)
+        return order
+
+    def _abort_coverage(self):
+        if self._coverage_queue:
+            self.stats["coverage_cancelled"] += len(self._coverage_queue)
+            self._coverage_queue.clear()
+        self._coverage_full_order = []
+        self._coverage_order_position = 0
+        self._coverage_batch_remaining = 0
+
+        # Physical in-flight accounting mirrors HOT exactly (see
+        # `_abort_hot`'s comment): `_coverage_active_requests` is NOT
+        # cleared here. A slot is released only by a terminal callback --
+        # ordinary or the opt-in stale one -- never by cancellation, or the
+        # physical concurrency could exceed `coverage_inflight`.
+        old_generation = self._coverage_generation
+        self._coverage_generation += 1
+        self.scheduler.cancel_generation(old_generation)
+
+    def _start_coverage_plan(self, snapshot):
+        if not self.coverage_enabled or self._stopped or not self._settled:
+            return
+        self._coverage_full_order = self._compute_coverage_order(snapshot)
+        self._coverage_order_position = 0
+        self._coverage_queue.clear()
+        self._coverage_batch_remaining = 0
+        self._plan_next_coverage_batch()
+        self._pump_coverage()
+
+    def _plan_next_coverage_batch(self):
+        if (not self.coverage_enabled or self._stopped or not self._settled):
+            return
+        # Never plan a new batch while the previous one still has queued or
+        # in-flight (current-generation) work -- see `_coverage_batch_remaining`.
+        if self._coverage_queue or self._coverage_batch_remaining > 0:
+            return
+        if self._coverage_order_position >= len(self._coverage_full_order):
+            return
+
+        start = self._coverage_order_position
+        batch = self._coverage_full_order[start:start + COVERAGE_BATCH_CHANNELS]
+        self._coverage_order_position = start + len(batch)
+        if not batch:
+            return
+        self.stats["coverage_batches"] += 1
+
+        snapshot = self._hot_snapshot
+        generation = self._coverage_generation
+        for channel in batch:
+            spec = self._spec_by_channel[channel]
+            for tx, ty in self._tiles(snapshot):
+                for method, base_param in self._method_params(spec):
+                    key = self._make_key(snapshot, channel, tx, ty, method,
+                                         base_param)
+                    self._coverage_queue.append(
+                        (generation, COVERAGE_PRIORITY_BASE, key))
+                    self._coverage_batch_remaining += 1
+
+    def _pump_coverage(self):
+        if (not self.coverage_enabled or self._stopped or not self._settled
+                or self._coverage_pumping):
+            return
+        # Strict HOT priority: COVERAGE issues a request only when HOT has
+        # nothing queued AND nothing in flight (see class docstring for why
+        # the 3:1 interleave is not implemented here).
+        if not self._hot_idle():
+            return
+        self._coverage_pumping = True
+        try:
+            while (self._coverage_queue
+                   and len(self._coverage_active_requests) < self.coverage_inflight):
+                generation, priority, key = self._coverage_queue.popleft()
+                if generation != self._coverage_generation:
+                    continue
+                token = self._coverage_request_serial
+                self._coverage_request_serial += 1
+                self._coverage_active_requests[token] = generation
+                # Same reasoning as HOT's `notify_on_stale_completion`: the
+                # physical cap can only be metered with a terminal callback.
+                request = TileRequest(key=key, generation=generation,
+                                      priority=priority,
+                                      notify_on_stale_completion=True)
+                self.stats["coverage_tiles_requested"] += 1
+                callback = lambda result, token=token, generation=generation: \
+                    self._coverage_tile_delivered.emit(token, generation, result)
+                try:
+                    self.scheduler.request(request, callback)
+                except Exception:
+                    self._coverage_active_requests.pop(token, None)
+                    self.stats["coverage_cancelled"] += 1
+        finally:
+            self._coverage_pumping = False
+
+    def _on_coverage_tile_result(self, token, generation, result):
+        if self._coverage_active_requests.pop(token, None) is None:
+            return
+        if self._stopped or generation != self._coverage_generation:
+            # A terminal callback for an ABANDONED generation -- see
+            # `_on_tile_result`'s identical reasoning. The slot is free (the
+            # pop above did that); a newer plan may be waiting on exactly
+            # that capacity.
+            self.stats["coverage_abandoned_finished"] += 1
+            if not self._stopped and self._settled:
+                self._pump_coverage()
+            return
+
+        error = getattr(result, "error", None)
+        if error == "cancelled":
+            self.stats["coverage_cancelled"] += 1
+        elif error is not None or getattr(result, "pixels", None) is None:
+            self.stats["coverage_tiles_failed"] += 1
+        else:
+            self.stats["coverage_tiles_completed"] += 1
+
+        self._coverage_batch_remaining -= 1
+        if self._coverage_batch_remaining <= 0:
+            self._coverage_batch_remaining = 0
+            self._plan_next_coverage_batch()
+        self._pump_coverage()

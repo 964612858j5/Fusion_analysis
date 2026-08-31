@@ -104,6 +104,15 @@ def main():
                     help="enable multi-channel HOT prefetch (default: on)")
     ap.add_argument("--no-hot", dest="hot", action="store_false",
                     help="disable multi-channel HOT prefetch")
+    ap.add_argument("--coverage", dest="coverage", action="store_true",
+                    default=True,
+                    help="enable multi-channel COVERAGE prefetch, cache-only "
+                         "background preparation of every remaining "
+                         "channel's current viewport once HOT is idle "
+                         "(default: on; only meaningful with --hot)")
+    ap.add_argument("--no-coverage", dest="coverage", action="store_false",
+                    help="disable multi-channel COVERAGE prefetch (for A/B "
+                         "comparison against HOT alone)")
     args = ap.parse_args()
 
     # Crash diagnosis: native faults AND Python exceptions land in the log.
@@ -174,7 +183,8 @@ def main():
             )
             for name in provider.channel_names
         ]
-        hot = MultiChannelPrefetchController(ctrl, scheduler, hot_specs, grid)
+        hot = MultiChannelPrefetchController(ctrl, scheduler, hot_specs, grid,
+                                             coverage=args.coverage)
 
     def _on_floor_preparing_changed(preparing):
         suffix = " — Preparing corrected preview…" if preparing else ""

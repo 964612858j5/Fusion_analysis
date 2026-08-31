@@ -1,0 +1,248 @@
+[GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  72.6ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  26.9ms  | at_gesture: active=2 req=27 done=25 | seen_idle=True conf=2 req=147 done=145 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  34.9ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.5ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=86 cov_done=85 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1086 cov_done=1085 cov_fail=0 cov_cancelled=42 cov_abandoned_done=1 VALID
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE] zoom cov= 96.9%  mixed=  0.9%  converge=  31.4ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [HOT ] zoom cov= 96.9%  mixed=  0.9%  converge=  31.6ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [BASE-long] zoom cov= 96.9%  mixed=  0.9%  converge=  31.2ms  | HOT off
+  r0 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r0 [COVERAGE] zoom cov= 96.8%  mixed=  0.9%  converge=  30.7ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=111 cov_done=110 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=911 cov_done=910 cov_fail=0 cov_cancelled=9 cov_abandoned_done=1 VALID
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.7ms  | at_gesture: active=2 req=22 done=20 | seen_idle=True conf=2 req=142 done=140 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  33.3ms  | HOT off
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  34.2ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=84 cov_done=83 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1084 cov_done=1083 cov_fail=0 cov_cancelled=44 cov_abandoned_done=1 VALID
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  27.3ms  | HOT off
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [HOT ] zoom cov= 97.1%  mixed=  0.9%  converge=  31.2ms  | at_gesture: active=2 req=34 done=32 | seen_idle=True conf=2 req=130 done=128 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE-long] zoom cov= 97.1%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.6ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=119 cov_done=118 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=919 cov_done=918 cov_fail=0 cov_cancelled=1 cov_abandoned_done=1 VALID
+  r1 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r1 [BASE] zoom cov= 97.1%  mixed=  0.9%  converge=  30.3ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  37.1ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  33.9ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=91 cov_done=90 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1091 cov_done=1090 cov_fail=0 cov_cancelled=37 cov_abandoned_done=1 VALID
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.6ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.2ms  | at_gesture: active=2 req=24 done=22 | seen_idle=True conf=2 req=144 done=142 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE-long] zoom cov= 95.8%  mixed=  0.9%  converge=  31.0ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.5ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=116 cov_done=115 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=916 cov_done=915 cov_fail=0 cov_cancelled=4 cov_abandoned_done=1 VALID
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [BASE] zoom cov= 97.2%  mixed=  1.8%  converge=  30.4ms  | HOT off
+  r2 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r2 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  31.0ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.0ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=95 cov_done=94 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1095 cov_done=1094 cov_fail=0 cov_cancelled=33 cov_abandoned_done=1 VALID
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  28.1ms  | HOT off
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [HOT ] drag cov= 96.2%  mixed= 20.0%  converge=  27.7ms  | at_gesture: active=2 req=31 done=29 | seen_idle=True conf=2 req=151 done=149 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.8ms  | HOT off
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.9ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=115 cov_done=114 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=915 cov_done=914 cov_fail=0 cov_cancelled=5 cov_abandoned_done=1 VALID
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  31.2ms  | HOT off
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  30.6ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r3 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r3 [BASE-long] zoom cov= 96.8%  mixed=  0.9%  converge=  30.6ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE] drag cov= 96.0%  mixed= 20.0%  converge=  27.9ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.8ms  | at_gesture: active=2 req=28 done=26 | seen_idle=True conf=2 req=148 done=146 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE-long] drag cov= 95.6%  mixed= 24.0%  converge=  26.8ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  33.8ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=97 cov_done=96 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1097 cov_done=1096 cov_fail=0 cov_cancelled=31 cov_abandoned_done=1 VALID
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE] zoom cov= 97.7%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  31.0ms  | at_gesture: active=2 req=31 done=29 | seen_idle=True conf=2 req=127 done=125 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [BASE-long] zoom cov= 95.9%  mixed=  0.9%  converge=  30.9ms  | HOT off
+  r4 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r4 [COVERAGE] zoom cov= 96.8%  mixed=  0.9%  converge=  31.8ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=119 cov_done=118 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=919 cov_done=918 cov_fail=0 cov_cancelled=1 cov_abandoned_done=1 VALID
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  30.1ms  | at_gesture: active=2 req=28 done=26 | seen_idle=True conf=2 req=148 done=146 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.2ms  | HOT off
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.8ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=84 cov_done=83 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1084 cov_done=1083 cov_fail=0 cov_cancelled=44 cov_abandoned_done=1 VALID
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.4ms  | HOT off
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [HOT ] zoom cov= 96.9%  mixed=  0.9%  converge=  31.0ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE-long] zoom cov= 97.2%  mixed=  0.9%  converge=  30.9ms  | HOT off
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [COVERAGE] zoom cov= 96.6%  mixed=  0.9%  converge=  30.5ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=113 cov_done=112 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=2 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=913 cov_done=912 cov_fail=0 cov_cancelled=7 cov_abandoned_done=1 VALID
+  r5 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r5 [BASE] zoom cov= 97.8%  mixed=  0.9%  converge=  31.6ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.3ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  28.5ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=83 cov_done=82 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1083 cov_done=1082 cov_fail=0 cov_cancelled=45 cov_abandoned_done=1 VALID
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  30.9ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.6ms  | at_gesture: active=2 req=31 done=29 | seen_idle=True conf=2 req=151 done=149 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE-long] zoom cov= 97.9%  mixed=  0.9%  converge=  31.2ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [COVERAGE] zoom cov= 96.9%  mixed=  0.9%  converge=  31.0ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=106 cov_done=105 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=906 cov_done=905 cov_fail=0 cov_cancelled=14 cov_abandoned_done=1 VALID
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [BASE] zoom cov= 98.0%  mixed=  0.9%  converge=  30.6ms  | HOT off
+  r6 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r6 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  30.5ms  | at_gesture: active=2 req=29 done=27 | seen_idle=True conf=2 req=125 done=123 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.6ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=83 cov_done=82 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1083 cov_done=1082 cov_fail=0 cov_cancelled=45 cov_abandoned_done=1 VALID
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.3ms  | HOT off
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.4ms  | at_gesture: active=2 req=25 done=23 | seen_idle=True conf=2 req=145 done=143 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  36.1ms  | HOT off
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.6ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=123 cov_done=122 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=9 cov_req=923 cov_done=922 cov_fail=0 cov_cancelled=117 cov_abandoned_done=1 VALID
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [HOT ] zoom cov= 96.8%  mixed=  0.9%  converge=  30.8ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r7 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r7 [BASE-long] zoom cov= 96.9%  mixed=  0.9%  converge=  30.9ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  28.8ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  27.4ms  | at_gesture: active=2 req=26 done=24 | seen_idle=True conf=2 req=146 done=144 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.9ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.3ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=83 cov_done=82 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1083 cov_done=1082 cov_fail=0 cov_cancelled=45 cov_abandoned_done=1 VALID
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.5ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [HOT ] zoom cov= 96.9%  mixed=  0.9%  converge=  30.8ms  | at_gesture: active=2 req=29 done=27 | seen_idle=True conf=2 req=125 done=123 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [BASE-long] zoom cov= 97.0%  mixed=  0.9%  converge=  31.7ms  | HOT off
+  r8 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r8 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.7ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=121 cov_done=120 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=9 cov_req=921 cov_done=920 cov_fail=0 cov_cancelled=119 cov_abandoned_done=1 VALID
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  32.5ms  | at_gesture: active=2 req=28 done=26 | seen_idle=True conf=2 req=148 done=146 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  34.0ms  | HOT off
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.3ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=88 cov_done=87 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1088 cov_done=1087 cov_fail=0 cov_cancelled=40 cov_abandoned_done=1 VALID
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.5ms  | HOT off
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  30.8ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE-long] zoom cov= 97.0%  mixed=  0.9%  converge=  30.7ms  | HOT off
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [COVERAGE] zoom cov= 96.9%  mixed=  0.9%  converge=  30.9ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=113 cov_done=112 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=913 cov_done=912 cov_fail=0 cov_cancelled=7 cov_abandoned_done=1 VALID
+  r9 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r9 [BASE] zoom cov= 97.7%  mixed=  0.9%  converge=  31.3ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.4ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  32.2ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=86 cov_done=85 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1086 cov_done=1085 cov_fail=0 cov_cancelled=42 cov_abandoned_done=1 VALID
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  35.0ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [HOT ] drag cov= 96.0%  mixed= 20.0%  converge=  29.7ms  | at_gesture: active=2 req=30 done=28 | seen_idle=True conf=2 req=150 done=148 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE-long] zoom cov= 97.9%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [COVERAGE] zoom cov= 96.8%  mixed=  0.9%  converge=  31.1ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=106 cov_done=105 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=906 cov_done=905 cov_fail=0 cov_cancelled=14 cov_abandoned_done=1 VALID
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  30.9ms  | HOT off
+  r10 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r10 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  31.9ms  | at_gesture: active=2 req=34 done=32 | seen_idle=True conf=2 req=130 done=128 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.1ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=89 cov_done=88 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1089 cov_done=1088 cov_fail=0 cov_cancelled=39 cov_abandoned_done=1 VALID
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.2ms  | HOT off
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  30.8ms  | at_gesture: active=2 req=22 done=20 | seen_idle=True conf=2 req=142 done=140 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.3ms  | HOT off
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [COVERAGE] zoom cov= 96.9%  mixed=  0.9%  converge=  31.1ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=114 cov_done=113 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=914 cov_done=913 cov_fail=0 cov_cancelled=6 cov_abandoned_done=1 VALID
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE] zoom cov= 97.0%  mixed=  0.9%  converge=  31.0ms  | HOT off
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [HOT ] zoom cov= 96.0%  mixed=  0.9%  converge=  32.2ms  | at_gesture: active=2 req=35 done=33 | seen_idle=True conf=2 req=131 done=129 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r11 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r11 [BASE-long] zoom cov= 96.8%  mixed=  0.9%  converge=  32.5ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  30.1ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  31.6ms  | at_gesture: active=2 req=30 done=28 | seen_idle=True conf=2 req=150 done=148 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  35.4ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [COVERAGE] drag cov= 96.0%  mixed= 20.0%  converge=  27.8ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=88 cov_done=87 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1088 cov_done=1087 cov_fail=0 cov_cancelled=40 cov_abandoned_done=1 VALID
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE] zoom cov= 96.8%  mixed=  0.9%  converge=  30.8ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  30.4ms  | at_gesture: active=2 req=34 done=32 | seen_idle=True conf=2 req=130 done=128 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [BASE-long] zoom cov= 97.9%  mixed=  0.9%  converge=  31.0ms  | HOT off
+  r12 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r12 [COVERAGE] zoom cov= 96.8%  mixed=  0.9%  converge=  31.1ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=103 cov_done=102 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=903 cov_done=902 cov_fail=0 cov_cancelled=17 cov_abandoned_done=1 VALID
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  33.1ms  | at_gesture: active=2 req=26 done=24 | seen_idle=True conf=2 req=146 done=144 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  27.2ms  | HOT off
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  27.4ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=85 cov_done=84 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1085 cov_done=1084 cov_fail=0 cov_cancelled=43 cov_abandoned_done=1 VALID
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  29.7ms  | HOT off
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [HOT ] zoom cov= 97.0%  mixed=  0.9%  converge=  31.7ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE-long] zoom cov= 97.8%  mixed=  0.9%  converge=  32.2ms  | HOT off
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [COVERAGE] zoom cov= 97.0%  mixed=  0.9%  converge=  30.5ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=127 cov_done=126 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=9 cov_req=927 cov_done=926 cov_fail=0 cov_cancelled=113 cov_abandoned_done=1 VALID
+  r13 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r13 [BASE] zoom cov= 95.8%  mixed=  0.9%  converge=  31.8ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE-long] drag cov= 97.6%  mixed= 12.0%  converge=  33.6ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [COVERAGE] drag cov= 97.6%  mixed= 12.0%  converge=  33.7ms  | at_gesture: active=0 req=96 done=96 | cov_active=1 cov_req=83 cov_done=82 | seen_idle=True conf=2 req=216 done=216 fail=0 ovw=3/0 abort=0 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=1083 cov_done=1082 cov_fail=0 cov_cancelled=45 cov_abandoned_done=1 VALID
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE] drag cov= 97.6%  mixed= 12.0%  converge=  27.5ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [HOT ] drag cov= 97.6%  mixed= 12.0%  converge=  29.6ms  | at_gesture: active=2 req=29 done=27 | seen_idle=True conf=2 req=149 done=147 fail=0 ovw=3/0 abort=0 abandoned_done=2 drained=True VALID
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE-long] zoom cov= 97.8%  mixed=  0.9%  converge=  30.5ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [COVERAGE] zoom cov= 97.9%  mixed=  0.9%  converge=  31.3ms  | at_gesture: active=0 req=90 done=90 | cov_active=1 cov_req=117 cov_done=116 | seen_idle=True conf=2 req=186 done=186 fail=0 ovw=3/0 abort=1 abandoned_done=0 drained=True cov_at_gesture=1 cov_batches=8 cov_req=917 cov_done=916 cov_fail=0 cov_cancelled=3 cov_abandoned_done=1 VALID
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [BASE] zoom cov= 97.9%  mixed=  0.9%  converge=  31.5ms  | HOT off
+  r14 [GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+  r14 [HOT ] zoom cov= 95.9%  mixed=  0.9%  converge=  31.2ms  | at_gesture: active=2 req=32 done=30 | seen_idle=True conf=2 req=128 done=126 fail=0 ovw=3/0 abort=1 abandoned_done=2 drained=True VALID
+
+[HOT] drag in-motion coverage %: BASE  97.39 (range  1.60) | HOT  97.40 (range  1.60) | paired mean  +0.01 pp, one-sided 95% bounds lower -0.36 / upper +0.39, margin -1.0 -> PASS (non-inferior)
+[HOT] zoom mixed-level frames %: BASE   0.97 (range  0.91) | HOT   0.91 (range  0.00) | paired mean  +0.06 pp, one-sided 95% bounds lower -0.05 / upper +0.17, margin -1.0 -> PASS (non-inferior)
+[HOT] zoom converge-after-stop ms: BASE  31.00 (range  1.48) | HOT  31.11 (range  1.75) | paired mean  -0.11 ms one-sided 95% bounds lower -0.38 / upper +0.15 -> informational, not gated
+[COVERAGE] drag in-motion coverage %: BASE  97.47 (range  2.00) | HOT  97.49 (range  1.60) | paired mean  +0.03 pp, one-sided 95% bounds lower -0.28 / upper +0.34, margin -1.0 -> PASS (non-inferior)
+[COVERAGE] zoom mixed-level frames %: BASE   0.91 (range  0.00) | HOT   0.91 (range  0.00) | paired mean  +0.00 pp, one-sided 95% bounds lower +0.00 / upper +0.00, margin -1.0 -> PASS (non-inferior)
+[COVERAGE] zoom converge-after-stop ms: BASE  31.13 (range  2.01) | HOT  30.90 (range  1.31) | paired mean  +0.23 ms one-sided 95% bounds lower -0.10 / upper +0.56 -> informational, not gated

@@ -306,9 +306,15 @@ def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
                 # Both queues drained, not just HOT's -- COVERAGE's own
                 # in-flight/queued work must also be empty before this arm
                 # can claim it observed COVERAGE recover and finish.
+                # Batch accounting too, not just the visible queues. A
+                # request that never reached the scheduler leaves
+                # `_coverage_batch_remaining` above zero with an empty queue
+                # and nothing in flight -- a stuck plan that looks exactly
+                # like a drained one from the outside.
                 drained_now = (drained_now
                                and not hot_ctl._coverage_active_requests
-                               and not hot_ctl._coverage_queue)
+                               and not hot_ctl._coverage_queue
+                               and hot_ctl._coverage_batch_remaining == 0)
             if drained_now:
                 break
 
@@ -319,6 +325,11 @@ def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
     else:
         drained = (len(hot_ctl._active_requests) == 0
                    and len(hot_ctl._tile_queue) == 0)
+        if coverage_prefetch:
+            drained = (drained
+                       and not hot_ctl._coverage_active_requests
+                       and not hot_ctl._coverage_queue
+                       and hot_ctl._coverage_batch_remaining == 0)
         if coverage_prefetch:
             drained = (drained
                        and len(hot_ctl._coverage_active_requests) == 0

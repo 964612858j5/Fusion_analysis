@@ -71,7 +71,14 @@ class MultiChannelPrefetchController(QtCore.QObject):
     def __init__(self, controller, scheduler, specs, grid,
                  settle_confirm_ms=SETTLE_CONFIRM_MS,
                  hot_inflight=HOT_INFLIGHT,
-                 coverage: bool = True,
+                 # OFF by default. COVERAGE only pays off if what it
+                 # prepares survives in the corrected cache, and at the
+                 # 512MB the demo still uses, a long dwell on the real
+                 # 57-channel slide evicted 1305 of the 1817 tiles it
+                 # produced -- most of the background work is thrown away
+                 # again. It is enabled explicitly (`--coverage`) until a
+                 # cache budget is chosen for the host that mounts it.
+                 coverage: bool = False,
                  coverage_inflight=COVERAGE_INFLIGHT,
                  parent=None):
         super().__init__(parent)
@@ -671,8 +678,17 @@ class MultiChannelPrefetchController(QtCore.QObject):
                 try:
                     self.scheduler.request(request, callback)
                 except Exception:
+                    # The slot is not the only thing to release. A request
+                    # that never reached the scheduler will never deliver a
+                    # callback, so its share of the batch has to be settled
+                    # HERE -- otherwise the batch counter never reaches zero,
+                    # the next batch is never planned, and COVERAGE stops for
+                    # good while looking idle: queue empty, nothing in
+                    # flight, batch_remaining stuck above zero. A benchmark
+                    # would report that state as "drained".
                     self._coverage_active_requests.pop(token, None)
                     self.stats["coverage_cancelled"] += 1
+                    self._settle_coverage_batch_slot()
         finally:
             self._coverage_pumping = False
 
@@ -697,8 +713,15 @@ class MultiChannelPrefetchController(QtCore.QObject):
         else:
             self.stats["coverage_tiles_completed"] += 1
 
+        self._settle_coverage_batch_slot()
+        self._pump_coverage()
+
+    def _settle_coverage_batch_slot(self):
+        """Account for one tile of the current batch being finished with,
+        however it ended -- delivered, failed, abandoned, or never accepted
+        by the scheduler at all. Plans the next batch when the current one
+        is fully accounted for."""
         self._coverage_batch_remaining -= 1
         if self._coverage_batch_remaining <= 0:
             self._coverage_batch_remaining = 0
             self._plan_next_coverage_batch()
-        self._pump_coverage()

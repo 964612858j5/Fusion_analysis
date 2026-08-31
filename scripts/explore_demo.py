@@ -105,11 +105,15 @@ def main():
     ap.add_argument("--no-hot", dest="hot", action="store_false",
                     help="disable multi-channel HOT prefetch")
     ap.add_argument("--coverage", dest="coverage", action="store_true",
-                    default=True,
+                    default=False,
                     help="enable multi-channel COVERAGE prefetch, cache-only "
                          "background preparation of every remaining "
                          "channel's current viewport once HOT is idle "
-                         "(default: on; only meaningful with --hot)")
+                         "(default: OFF -- this demo's corrected cache is "
+                         "512MB, and a long dwell on the real 57-channel "
+                         "slide evicted 1305 of the 1817 tiles COVERAGE "
+                         "produced, so most of the background work is "
+                         "discarded again; only meaningful with --hot)")
     ap.add_argument("--no-coverage", dest="coverage", action="store_false",
                     help="disable multi-channel COVERAGE prefetch (for A/B "
                          "comparison against HOT alone)")

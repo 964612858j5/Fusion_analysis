@@ -985,3 +985,57 @@ def test_stop_twice_is_safe_with_coverage_running(app):
     assert hot._hot_generation in scheduler.cancelled_generations
     assert hot._coverage_generation - 1 in scheduler.cancelled_generations or \
         hot._coverage_generation in scheduler.cancelled_generations
+
+
+def test_coverage_survives_a_request_that_the_scheduler_rejects(app):
+    """A request that never reaches the scheduler will never deliver a
+    callback, so its share of the batch has to be settled where it failed.
+
+    Without that, `_coverage_batch_remaining` never reaches zero, the next
+    batch is never planned, and COVERAGE stops for good while looking idle
+    from the outside -- empty queue, nothing in flight -- which a benchmark
+    would happily report as "drained".
+    """
+    controller, scheduler, hot = _make_coverage()
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller, channel=_COVERAGE_CENTER,
+                             visible=((0, 0),))
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        assert hot.stats["coverage_batches"] == 1
+
+        # The FIRST tile of batch 1 is never accepted by the scheduler.
+        real_request = scheduler.request
+        blown = {"n": 0}
+
+        def exploding_request(request, callback):
+            if (request.priority >= COVERAGE_PRIORITY_BASE
+                    and blown["n"] == 0):
+                blown["n"] += 1
+                raise RuntimeError("scheduler refused")
+            return real_request(request, callback)
+
+        scheduler.request = exploding_request
+        try:
+            _drain_requests(scheduler)
+        finally:
+            scheduler.request = real_request
+        _drain_requests(scheduler)
+
+        assert blown["n"] == 1, "test setup: the failure never happened"
+        assert hot.stats["coverage_cancelled"] >= 1
+
+        # The rejected tile must not wedge the plan: batch 2 is still
+        # planned, the whole remaining order is consumed, and the batch
+        # counter settles back to zero with nothing left in flight.
+        assert hot.stats["coverage_batches"] == 2
+        assert hot._coverage_order_position == len(_COVERAGE_REMAINING_ORDER)
+        assert hot._coverage_batch_remaining == 0
+        assert not hot._coverage_queue
+        assert not hot._coverage_active_requests
+        # Everything except the one rejected tile still completed.
+        assert (hot.stats["coverage_tiles_completed"]
+                == len(_COVERAGE_REMAINING_ORDER) * 2 - 1)
+    finally:
+        hot.stop()

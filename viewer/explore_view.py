@@ -1426,7 +1426,10 @@ class ExploreController(QtCore.QObject):
         # Withheld on a cold switch (see above): the floor and every tile
         # request would quantise against a display range that does not
         # belong to this channel.
-        withhold = channel_changed and not overview_ready
+        # Readiness, not "did the channel change": a method or param change
+        # arriving while a cold switch is still waiting for its record must
+        # be withheld too, for exactly the same reason.
+        withhold = not self._overview_matches_selection()
         if self._wants_precise() and not withhold:
             self._ensure_corrected_floor()
         if self._current_bbox is not None and not withhold:
@@ -1490,6 +1493,10 @@ class ExploreController(QtCore.QObject):
         acceptance run that exercises coarser levels must say so.
         """
         if not self._wants_precise() or self.level != 0:
+            return False
+        if not self._overview_matches_selection():
+            # The range these would be quantised against is not this
+            # channel's; see `_blocked_on_overview`.
             return False
         if not self._visible_tiles or self._current_bbox is None:
             return False
@@ -1787,6 +1794,31 @@ class ExploreController(QtCore.QObject):
     def _overview_ready_for_current(self) -> bool:
         return self._overview_matches_selection()
 
+    def _blocked_on_overview(self) -> bool:
+        """THE invariant: while the live channel's overview record is not
+        installed, its display range is unknown, so NOTHING may be drawn or
+        requested.
+
+        This is a global guard, not a decision taken once inside
+        `set_selection`. During the tens of milliseconds a cold switch waits
+        for its record, a pan, a zoom, a navigator jump, a method or param
+        change, or simply the 30ms motion timer would otherwise reach
+        `_issue_raw_requests` / `_issue_settled_request` / the range
+        handler's cache-serve path and quantise tiles against the PREVIOUS
+        channel's range -- and quantisation happens once, at arrival, so a
+        pooled tile keeps it for good.
+
+        Also cancels the live generations, so work already queued for the
+        old range is dropped rather than left to land.
+        """
+        if self._overview_matches_selection():
+            return False
+        self.scheduler.cancel_generation(self.view_generation)
+        self.scheduler.cancel_generation(self._settled_generation)
+        self._cancel_directional_prefetch()
+        self.stats["blocked_on_overview"] = self.stats.get("blocked_on_overview", 0) + 1
+        return True
+
     def prepare_overview_async(self, channel: str):
         """Read `channel`'s overview record on the single overview worker
         and cache it.
@@ -1858,12 +1890,16 @@ class ExploreController(QtCore.QObject):
         self._install_overview_record(rec)
 
         # The display range is known now, so the withheld work can start.
-        if not self._try_atomic_cached_channel_swap():
-            if self._wants_precise():
-                self._ensure_corrected_floor()
-            if self._current_bbox is not None:
-                self._issue_settled_request()
-                self._issue_raw_requests()
+        atomic_swapped = self._try_atomic_cached_channel_swap()
+        # ALWAYS, not only when the swap failed. A successful swap fills the
+        # CURRENT level-0 viewport and nothing else; without a floor and a
+        # gain table for this channel, the first zoom-out has no
+        # corrected-stage fallback at all.
+        if self._wants_precise():
+            self._ensure_corrected_floor()
+        if not atomic_swapped and self._current_bbox is not None:
+            self._issue_settled_request()
+            self._issue_raw_requests()
         self._maybe_exit_provisional()
         self._update_layer_visibility()
         self.selection_context_changed.emit(self.snapshot())
@@ -2338,7 +2374,7 @@ class ExploreController(QtCore.QObject):
         # precisely the moment it is most useful: measured, coverage of the
         # new level was 0.0% at the instant of a switch even for tiles
         # already computed and resident in the corrected cache.
-        if self._wants_precise():
+        if self._wants_precise() and not self._blocked_on_overview():
             level_switched = prev_level is not None and prev_level != self.level
             newly = (set(self._visible_tiles) if level_switched
                      else self._visible_tiles - prev_visible)
@@ -2419,6 +2455,9 @@ class ExploreController(QtCore.QObject):
         the name (kept for the timer connection / existing call sites),
         this is no longer raw-only."""
         t0 = time.perf_counter() if self.probe else None
+
+        if self._blocked_on_overview():
+            return
 
         self.scheduler.cancel_generation(self.view_generation)
         self._raw_gen_n += 1
@@ -2574,6 +2613,8 @@ class ExploreController(QtCore.QObject):
 
         Skips entirely (after bumping/cancelling the generation) when no
         method is selected or there is no current viewport yet."""
+        if self._blocked_on_overview():
+            return
         self.scheduler.cancel_generation(self._settled_generation)
         self._settled_gen_n += 1
         self._settled_generation = ("precise", self._settled_gen_n)
@@ -3074,6 +3115,13 @@ class ExploreController(QtCore.QObject):
         key = req.key
         if not isinstance(key, RawKey):
             return
+        if not self._overview_matches_selection():
+            # Defence in depth behind `_blocked_on_overview`: a result that
+            # was already in flight when the channel changed would be
+            # quantised against a range that is not this channel's, and a
+            # pooled tile keeps its quantisation.
+            self.stats["mismatched_raw_dropped"] += 1
+            return
         if req.generation != self.view_generation:
             self.stats["late_raw_rejected"] += 1
             return
@@ -3142,6 +3190,11 @@ class ExploreController(QtCore.QObject):
             self.stats["stale_precise_dropped"] += 1
             return
         if result.error is not None or result.pixels is None:
+            return
+        if not self._overview_matches_selection():
+            # Same defence as the raw path: this channel's display range is
+            # not installed, so nothing may be quantised yet.
+            self.stats["mismatched_key_dropped"] += 1
             return
         key = req.key
         if not isinstance(key, CorrectionKey):

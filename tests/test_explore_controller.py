@@ -1013,12 +1013,17 @@ def test_floor_deferred_until_display_levels_fixed(app):
     real_start = ctrl._start_floor_job
     ctrl._start_floor_job = lambda gen: started.append(gen)
 
-    # No overview yet -> deferred, but honestly reported as "preparing".
+    # No overview at all yet, so no display range: the global invariant
+    # (`_blocked_on_overview`) withholds the floor entirely rather than
+    # starting one that would quantise against a range it does not have.
+    # An earlier revision emitted "preparing" here; it no longer does,
+    # because nothing is in fact pending -- `load_overview()` is what
+    # starts it.
     preparing = []
     ctrl.floor_preparing_changed.connect(preparing.append)
     ctrl.set_selection(method="tophat", params=(10,))
     assert started == []
-    assert preparing[-1] is True
+    assert preparing == []
     assert ctrl._floor_ready is False
     assert view.corrected_floor_item.isVisible() is False
 
@@ -3165,5 +3170,109 @@ def test_overview_prepared_signal_is_the_public_readiness_api(app):
 
     assert seen and seen[-1][0] == other and seen[-1][2] is True
     assert ctrl.has_overview_record(other) is True
+
+    ctrl.teardown()
+
+
+def test_nothing_is_drawn_or_requested_while_waiting_for_an_overview(app):
+    """The withhold is a GLOBAL invariant, not a decision taken once inside
+    `set_selection`. During the tens of milliseconds a cold switch waits for
+    its overview record, a pan, a zoom, a navigator jump, a method change or
+    just the 30ms motion tick must all still draw nothing and request
+    nothing -- each of those paths could otherwise quantise tiles against
+    the previous channel's display range, and a pooled tile keeps its
+    quantisation for good."""
+    import block01.viewer.explore_view as ev_mod
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+
+    gate = threading.Event()
+    real_reader = ev_mod.ExploreController._read_overview_record
+
+    def gated_reader(provider_, source_, channel_, level_):
+        gate.wait(timeout=10.0)
+        return real_reader(provider_, source_, channel_, level_)
+
+    ev_mod.ExploreController._read_overview_record = staticmethod(gated_reader)
+    try:
+        other = [c for c in provider.channel_names if c != ctrl.channel][0]
+        ctrl.set_selection(channel=other)
+        assert ctrl._overview_matches_selection() is False
+        scheduler.requests.clear()
+
+        # Everything a user could do while the record is still being read.
+        view.view_box.setRange(xRange=(200, 1224), yRange=(200, 1224), padding=0)
+        _pump(20)
+        view.view_box.setRange(xRange=(0, 4096), yRange=(0, 4096), padding=0)
+        _pump(20)
+        ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+        ctrl.set_selection(params=(20,))
+        ctrl._issue_raw_requests()          # the motion tick itself
+        ctrl._issue_settled_request()
+        _pump(40)
+
+        assert not scheduler.requests, (
+            f"{len(scheduler.requests)} requests were issued while this "
+            f"channel's display range was unknown")
+        assert not ctrl._raw_pool.entries and not ctrl._precise_pool.entries
+        assert ctrl.stats.get("blocked_on_overview", 0) > 0
+
+        gate.set()
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not ctrl._overview_matches_selection():
+            _pump(10)
+        assert ctrl._overview_matches_selection() is True
+        assert scheduler.requests, "work never resumed once the record landed"
+    finally:
+        gate.set()
+        ev_mod.ExploreController._read_overview_record = staticmethod(real_reader)
+
+    ctrl.teardown()
+
+
+def test_atomic_swap_still_prepares_the_new_channels_floor(app):
+    """A successful swap fills the CURRENT level-0 viewport and nothing
+    else. Without a floor and gain table for the new channel, the first
+    zoom-out would have no corrected-stage fallback, so the floor must be
+    ensured whether or not the swap succeeded."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=80)
+    ctrl.level = 0
+    ctrl._motion_timer.stop()
+
+    other = [c for c in provider.channel_names if c != ctrl.channel][0]
+
+    class _Cache:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, k):
+            return self.d.get(k)
+
+    cache = _Cache()
+    scheduler.corrected_cache = cache
+    saved = ctrl.channel
+    ctrl.channel = other
+    ts = ctrl.grid.tile_size
+    for tx, ty in ctrl._visible_tiles:
+        cache.d[ctrl._make_correction_key(tx, ty)] = np.full((ts, ts), 5.0, dtype=np.float32)
+    ctrl.channel = saved
+
+    starts = []
+    real_start = ctrl._start_floor_job
+    ctrl._start_floor_job = lambda gen: (starts.append(gen), real_start(gen))[1]
+
+    ctrl.set_selection(channel=other)
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._overview_matches_selection():
+        _pump(10)
+    _pump(30)
+
+    assert ctrl.stats.get("atomic_channel_swaps", 0) >= 1
+    assert starts, "a successful atomic swap left the new channel with no floor"
 
     ctrl.teardown()

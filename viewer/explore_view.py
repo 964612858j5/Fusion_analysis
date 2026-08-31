@@ -1380,14 +1380,15 @@ class ExploreController(QtCore.QObject):
 
         if channel_changed:
             # ORDER MATTERS, and it is a correctness order, not a cosmetic
-            # one. The overview is reloaded FIRST, synchronously, because
-            # everything after it either displays or consumes overview
-            # pixels: leaving the old channel's overview up would show one
-            # channel's pixels while the UI claims another, and it would
-            # also feed the corrected floor and the gain calibration (see
-            # `_overview_matches_selection`). Reloading also refreshes
+            # one. The overview is dealt with FIRST, because everything
+            # after it either displays or consumes overview pixels: leaving
+            # the old channel's overview up would show one channel's pixels
+            # while the UI claims another, and it would also feed the
+            # corrected floor and the gain calibration (see
+            # `_overview_matches_selection`). The record also carries
             # `_display_lo`/`_display_hi` for the new channel, which the
             # quantisation in the swap below depends on.
+            #
             # Never a synchronous read here: it costs p95 292.9ms on the
             # real 57-channel slide. A resident record installs as a
             # memcpy; otherwise the old pixels are cleared at once and the
@@ -1433,8 +1434,13 @@ class ExploreController(QtCore.QObject):
         if self._wants_precise() and not withhold:
             self._ensure_corrected_floor()
         if self._current_bbox is not None and not withhold:
-            self._issue_settled_request()
-            if channel_changed and not atomic_swapped:
+            # `_issue_raw_requests` issues the precise batch itself, at the
+            # end, so calling both would bump and cancel the precise
+            # generation twice and register duplicate waiters for the same
+            # keys. Harmless -- the scheduler is single-flight -- but it
+            # muddles the raw-before-precise ordering the tick relies on.
+            need_raw = channel_changed and not atomic_swapped
+            if need_raw:
                 # Do not wait for the next motion tick: the new channel has
                 # nothing pooled, so its raw tiles must be asked for now.
                 # This does not make them arrive instantly; until they do,
@@ -1446,6 +1452,8 @@ class ExploreController(QtCore.QObject):
                 # so these reads could never be seen. They would only burn
                 # I/O and contend with background channel preparation.
                 self._issue_raw_requests()
+            else:
+                self._issue_settled_request()
 
         # The atomic cached swap fills the pool BEFORE `_enter_provisional`
         # above, so no later delivery arrives to clear the flag: without
@@ -1898,7 +1906,7 @@ class ExploreController(QtCore.QObject):
         if self._wants_precise():
             self._ensure_corrected_floor()
         if not atomic_swapped and self._current_bbox is not None:
-            self._issue_settled_request()
+            # Raw only: it issues the precise batch itself (see above).
             self._issue_raw_requests()
         self._maybe_exit_provisional()
         self._update_layer_visibility()

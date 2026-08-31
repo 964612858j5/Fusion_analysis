@@ -288,6 +288,21 @@ def _coverage_order(n: int, center: int) -> List[int]:
     return order
 
 
+@dataclass(frozen=True)
+class ChannelCorrectionSpec:
+    """Per-channel parameters for the two HOT correction methods.
+
+    ``PrefetchSnapshot`` describes the CURRENT method only and cannot
+    express that both tophat and cuCIM are prepared for this channel.  The
+    per-channel parameters for BOTH methods therefore have to be supplied
+    explicitly by the host rather than inferred.
+    """
+
+    channel: str
+    tophat_radius: int
+    cucim_sigma: int
+
+
 # ── Per-(channel, region) completion bookkeeping ─────────────────────────────
 
 CompletionKey = Tuple[int, Region]

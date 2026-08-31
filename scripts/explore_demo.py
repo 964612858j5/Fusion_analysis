@@ -59,6 +59,10 @@ from block01.core import bg_correction  # noqa: E402
 from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import ExploreController, ExploreView  # noqa: E402
+from block01.viewer.multichannel_prefetch import (  # noqa: E402
+    MultiChannelPrefetchController,
+)
+from block01.viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import (  # noqa: E402
     DEFAULT_COMPUTE_WORKERS,
@@ -96,6 +100,10 @@ def main():
     ap.add_argument("--no-directional-prefetch", dest="directional_prefetch",
                     action="store_false",
                     help="disable directional prefetch (for A/B comparison)")
+    ap.add_argument("--hot", dest="hot", action="store_true", default=True,
+                    help="enable multi-channel HOT prefetch (default: on)")
+    ap.add_argument("--no-hot", dest="hot", action="store_false",
+                    help="disable multi-channel HOT prefetch")
     args = ap.parse_args()
 
     # Crash diagnosis: native faults AND Python exceptions land in the log.
@@ -153,8 +161,20 @@ def main():
     view.resize(1400, 1000)
 
     ctrl = ExploreController(provider, scheduler, compute, grid, view, channel,
-                              intermediate_corrected_fallback=args.intermediate_fallback,
-                              directional_prefetch=args.directional_prefetch)
+                             intermediate_corrected_fallback=args.intermediate_fallback,
+                             directional_prefetch=args.directional_prefetch)
+
+    hot = None
+    if args.hot:
+        hot_specs = [
+            ChannelCorrectionSpec(
+                channel=name,
+                tophat_radius=args.param,
+                cucim_sigma=args.param,
+            )
+            for name in provider.channel_names
+        ]
+        hot = MultiChannelPrefetchController(ctrl, scheduler, hot_specs, grid)
 
     def _on_floor_preparing_changed(preparing):
         suffix = " — Preparing corrected preview…" if preparing else ""
@@ -243,6 +263,11 @@ def main():
     print(f"[explore_demo] drag = pan, wheel = zoom; crash log -> {args.log}")
 
     code = app.exec_()
+    if hot is not None:
+        hot.stop()
+        print(f"[hot] {hot.stats}")
+    else:
+        print("[hot] disabled")
     ctrl.teardown()
     print(f"[floor] at exit: failed={ctrl.stats['floor_compute_failed']} "
           f"level={ctrl.stats['floor_level']} stride={ctrl.stats['floor_stride']}")

@@ -4,12 +4,17 @@ Date: 2026-09-01 (re-run of the 2026-08-31 measurement, for the record)
 Host: this workstation, cupy 13.3.0 GPU morphology available
 Dataset: `/sda1/Albert/fusion/20260210/20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif`
 — 57 channels, OME-TIFF pyramid, real slide (not synthetic)
-Harness: `scratchpad/coverage_dwell.py <cache_GB> <dwell_s>`, `QT_QPA_PLATFORM=offscreen`
+Harness: `scripts/benchmark_coverage_dwell.py`, run as
+`QT_QPA_PLATFORM=offscreen python scripts/benchmark_coverage_dwell.py --corrected-cache-gb 8 --dwell 90`
+and again with `--corrected-cache-gb 0.5` (defaults supply path, centre and span)
 Setup: camera parked at (y=25606, x=15360), span 1400 px, `method=tophat params=(25,)`,
 `MultiChannelPrefetchController(..., coverage=True)`, raw cache 2 GB, HOT defaults
-Definition of drained: HOT and COVERAGE queues empty **and** no physically
-in-flight request — a slot is released only by a callback (ordinary or the
-opt-in terminal stale one), so this is physical, not generation-based.
+Definition of drained: HOT and COVERAGE queues empty, no physically in-flight
+request (a slot is released only by a callback — ordinary, or the opt-in
+terminal one for a stale generation — so this is physical, not
+generation-based), the batch counter at zero, **and** the whole channel order
+consumed. The last condition matters: between two batches the queues are
+momentarily empty while channels still wait to be planned.
 
 ## What was measured
 

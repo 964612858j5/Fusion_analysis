@@ -717,10 +717,19 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._pump_coverage()
 
     def _settle_coverage_batch_slot(self):
-        """Account for one tile of the current batch being finished with,
-        however it ended -- delivered, failed, abandoned, or never accepted
-        by the scheduler at all. Plans the next batch when the current one
-        is fully accounted for."""
+        """Account for one tile of the CURRENT batch being finished with,
+        however it ended -- delivered, failed, or never accepted by the
+        scheduler at all. Plans the next batch once the current one is fully
+        accounted for.
+
+        Deliberately NOT called for a terminal callback belonging to an
+        abandoned generation: that tile was part of an older batch, and the
+        abort already zeroed that batch's accounting, so decrementing here
+        would steal a tile from the batch now in flight and plan the next
+        one early. `_on_coverage_tile_result` returns before reaching this
+        point in that case; it still frees the in-flight slot, which is
+        physical and generation-independent.
+        """
         self._coverage_batch_remaining -= 1
         if self._coverage_batch_remaining <= 0:
             self._coverage_batch_remaining = 0

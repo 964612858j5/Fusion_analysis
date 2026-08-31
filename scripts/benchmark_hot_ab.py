@@ -170,6 +170,32 @@ def levels_on_screen(ctrl):
     return seen
 
 
+def _coverage_drained(hot_ctl):
+    """True only when COVERAGE has genuinely finished, by all four measures.
+
+    Empty queues alone are not enough, and neither is batch accounting:
+
+    * `_coverage_active_requests` -- physically in flight. A slot is released
+      only by a callback (ordinary or the opt-in terminal stale one), so this
+      is real concurrency, not a generation count.
+    * `_coverage_queue` -- issued-but-not-yet-requested tiles.
+    * `_coverage_batch_remaining == 0` -- a request the scheduler never
+      accepted delivers no callback, so a batch can sit above zero with an
+      empty queue and nothing in flight: a stuck plan that looks exactly
+      like a drained one from the outside.
+    * the whole plan consumed -- `_coverage_order_position` has reached the
+      end of `_coverage_full_order`. Between two batches every one of the
+      three conditions above holds momentarily while channels are still
+      waiting to be planned, so without this an arm could claim COVERAGE
+      finished after the first batch of four channels out of fifty-seven.
+    """
+    return (not hot_ctl._coverage_active_requests
+            and not hot_ctl._coverage_queue
+            and hot_ctl._coverage_batch_remaining == 0
+            and (hot_ctl._coverage_order_position
+                 >= len(hot_ctl._coverage_full_order)))
+
+
 def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
             idle_s=PRE_GESTURE_IDLE_S, require_coverage_at_gesture=False):
     provider, scheduler, view, ctrl, hot_ctl = build(
@@ -303,18 +329,7 @@ def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
                            and not hot_ctl._active_requests
                            and not hot_ctl._tile_queue)
             if coverage_prefetch:
-                # Both queues drained, not just HOT's -- COVERAGE's own
-                # in-flight/queued work must also be empty before this arm
-                # can claim it observed COVERAGE recover and finish.
-                # Batch accounting too, not just the visible queues. A
-                # request that never reached the scheduler leaves
-                # `_coverage_batch_remaining` above zero with an empty queue
-                # and nothing in flight -- a stuck plan that looks exactly
-                # like a drained one from the outside.
-                drained_now = (drained_now
-                               and not hot_ctl._coverage_active_requests
-                               and not hot_ctl._coverage_queue
-                               and hot_ctl._coverage_batch_remaining == 0)
+                drained_now = drained_now and _coverage_drained(hot_ctl)
             if drained_now:
                 break
 
@@ -326,14 +341,7 @@ def run_arm(app, args, kind, hot, label, coverage_prefetch=False,
         drained = (len(hot_ctl._active_requests) == 0
                    and len(hot_ctl._tile_queue) == 0)
         if coverage_prefetch:
-            drained = (drained
-                       and not hot_ctl._coverage_active_requests
-                       and not hot_ctl._coverage_queue
-                       and hot_ctl._coverage_batch_remaining == 0)
-        if coverage_prefetch:
-            drained = (drained
-                       and len(hot_ctl._coverage_active_requests) == 0
-                       and len(hot_ctl._coverage_queue) == 0)
+            drained = drained and _coverage_drained(hot_ctl)
         # In the COVERAGE arm the requirement moves: COVERAGE must be at ITS
         # cap at the gesture instant, and HOT is idle then by construction.
         if require_coverage_at_gesture:

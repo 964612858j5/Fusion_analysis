@@ -81,3 +81,49 @@ later revision:
 * `overview_ready`
 * `tiles_ready`
 * `channel_ready = overview_ready and tiles_ready`
+
+## After the switch-path optimisation (same day, real machine)
+
+Three commits, none of which changes an output pixel: `source_identity`
+cached per provider; the atomic swap defers the local fallback synthesis to
+the scheduler; fewer allocations per quantised tile plus no autoLevels scan
+on item creation.
+
+Profiled cost of `set_selection` to a fully-cached channel (offscreen,
+background prefetch quiesced, 3 runs each, medians):
+
+| | set_selection |
+|---|---|
+| baseline | 91.2ms |
+| + identity cache | 78.0ms |
+| + deferred fallback synthesis | 38.4ms |
+| + allocation/autoLevels cuts | **30.1ms** |
+
+Manual re-test on the desktop, same slide, same viewport, level 0, 24
+tiles, `wrong=0` on every row:
+
+| | n | median | min | max |
+|---|---|---|---|---|
+| near switch `full_precise` (before) | 2 | 110ms | 107 | 114 |
+| near switch `full_precise` (after) | 11 | **35ms** | 17 | 43 |
+| far switch `full_precise` (after) | 6 | 160ms | 128 | 245 |
+
+Near switches show `blank=0 raw=0` throughout. Far switches are unchanged
+in kind — they wait on the overview (`blank` 4–6 frames, 48–81ms) — which
+is the behaviour this document's earlier section decided to keep.
+
+**Qt painting is NOT the bottleneck**, contrary to what the offscreen
+measurement suggested. On the real machine `[channel] -> X in NN ms` (the
+synchronous return) and `full_precise` (sampled from the actual scene,
+timed from before the call) differ by ~1ms — 42.5/43, 18.2/23, 39.1/40,
+34.2/35, 33.7/34. The 79–203ms `processEvents` seen offscreen is a
+software-rasteriser artifact. So the planned fallback of "reuse tile items
+/ texture slots" is not warranted by evidence.
+
+Operator's verdict: the remaining interval is acceptable. Post-switch drag
+shows no floor exposure, block boundaries or brightness jumps; zoom
+regression clean.
+
+Remaining synchronous cost, if it is ever worth attacking: ~9.6ms
+quantisation (memory-bandwidth bound at identical rounding), ~9.6ms Qt item
+creation (this is the deferred ItemPool-reuse idea), ~11ms elsewhere.

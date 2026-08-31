@@ -45,7 +45,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
             "hot_tiles_failed": 0,
             "settle_confirmations": 0,
             "settle_aborted": 0,
-            "hot_slots_released_on_abort": 0,
+            "hot_abandoned_finished": 0,
         }
 
         self._spec_by_channel = {spec.channel: spec for spec in self.specs}
@@ -130,7 +130,6 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._settled = False
         self._overview_plan.clear()
         self._overview_position = 0
-        self._active_requests.clear()
         self.scheduler.cancel_generation(self._hot_generation)
 
         connections = (
@@ -222,23 +221,22 @@ class MultiChannelPrefetchController(QtCore.QObject):
             self.stats["hot_cancelled"] += len(self._tile_queue)
             self._tile_queue.clear()
 
-        # Release the in-flight ACCOUNTING for the generation being
-        # abandoned. `TileScheduler._deliver` skips a waiter whose
-        # generation has gone stale -- it does not call back at all -- so a
-        # request that was already RUNNING when this cancellation happened
-        # never reports in. Leaving its slot occupied leaked capacity
-        # permanently: after the first interaction that cancelled HOT with
-        # `hot_inflight` tiles running, `_pump_tiles` saw the cap reached
-        # for the rest of the session and HOT never issued another tile.
+        # `_active_requests` is deliberately NOT cleared here. Cancelling a
+        # generation stops only work that has not STARTED; anything already
+        # running keeps consuming the same I/O and GPU. Releasing its slot
+        # now would let the abandoned task and a freshly issued one run at
+        # the same time, so the physical concurrency could reach
+        # 2 * hot_inflight instead of hot_inflight -- the opposite of what
+        # the cap is for.
         #
-        # The work itself is untouched and still lands in the scheduler's
-        # cache, which is the whole point of it. Only this object's capacity
-        # bookkeeping is reset, and it must not outlive the generation it
-        # belonged to.
-        if self._active_requests:
-            self.stats["hot_slots_released_on_abort"] += len(self._active_requests)
-            self._active_requests.clear()
-
+        # An earlier revision did exactly that, to work around the fact that
+        # `TileScheduler._deliver` does not call back a stale waiter at all
+        # (which otherwise leaks the slot forever). The real fix is the
+        # scheduler contract: HOT's requests set
+        # `notify_on_stale_completion`, so an abandoned task still delivers
+        # ONE terminal callback when it physically finishes, and the slot is
+        # released there. The count therefore spans generations on purpose --
+        # it meters physical work, not the current plan's work.
         old_generation = self._hot_generation
         self._hot_generation += 1
         self.scheduler.cancel_generation(old_generation)
@@ -326,8 +324,14 @@ class MultiChannelPrefetchController(QtCore.QObject):
                 token = self._request_serial
                 self._request_serial += 1
                 self._active_requests[token] = generation
+                # `notify_on_stale_completion` is what makes the in-flight
+                # accounting PHYSICAL rather than notional: cancelling a
+                # generation does not stop work that has already started, so
+                # without a terminal callback this object can never learn
+                # that the work is over.
                 request = TileRequest(key=key, generation=generation,
-                                      priority=priority)
+                                      priority=priority,
+                                      notify_on_stale_completion=True)
                 self.stats["hot_tiles_requested"] += 1
                 callback = lambda result, token=token, generation=generation: \
                     self._on_tile_result(token, generation, result)
@@ -343,11 +347,12 @@ class MultiChannelPrefetchController(QtCore.QObject):
         if self._active_requests.pop(token, None) is None:
             return
         if self._stopped or generation != self._hot_generation:
-            # TileScheduler has already put a completed result in its cache;
-            # HOT never consumes the callback payload or blits it. But the
-            # slot this occupied has just been freed, and a NEWER plan may
-            # be waiting on it -- returning here left the new queue stalled
-            # with capacity available and nobody pumping.
+            # A terminal callback for an ABANDONED generation. Its result (if
+            # any) is already in the scheduler's cache; HOT never consumes
+            # the payload. What matters here is that the physical work is now
+            # over, so its slot is genuinely free -- the pop above did that --
+            # and a newer plan may be waiting on exactly that capacity.
+            self.stats["hot_abandoned_finished"] += 1
             if not self._stopped and self._settled:
                 self._pump_tiles()
             return

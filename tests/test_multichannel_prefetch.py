@@ -124,10 +124,25 @@ class FakeScheduler:
                 request=record["request"], error="cancelled"))
 
     def complete(self, index, error=None):
+        """Physically finish a request.
+
+        Models `TileScheduler._deliver`: if this request's generation has
+        been cancelled, a waiter is called back ONLY when it opted in with
+        `notify_on_stale_completion`, and then with a terminal
+        `error="stale"` and no pixels. That terminal callback is how a
+        consumer metering PHYSICAL concurrency learns the work is over --
+        cancelling a generation never stopped work that had already started.
+        """
         record = self.requests[index]
         assert not record["done"]
         record["done"] = True
         self.corrected_cache[record["request"].key] = object()
+        req = record["request"]
+        if req.generation in self.cancelled_generations:
+            if getattr(req, "notify_on_stale_completion", False):
+                record["callback"](SimpleNamespace(
+                    request=req, error="stale", pixels=None))
+            return
         # A SUCCESS carries pixels. The real scheduler delivers a TileResult
         # whose `pixels` is None only on failure, and HOT now distinguishes
         # the two -- a fake that omitted pixels made every "success" in this
@@ -475,17 +490,17 @@ def test_overview_is_queried_at_the_hosts_level_not_the_display_level(app):
         hot.stop()
 
 
-def test_cancellation_releases_in_flight_capacity(app):
-    """The in-flight accounting must not outlive the generation it belongs to.
+def test_physical_in_flight_never_exceeds_the_cap_across_generations(app):
+    """The cap must meter PHYSICAL work, not the current plan's work.
 
-    `TileScheduler._deliver` SKIPS a waiter whose generation has gone stale
-    -- it does not call back at all -- so a request that was already running
-    when a cancellation happened never reports in. Leaving its slot occupied
-    leaked capacity permanently: after the first interaction that cancelled
-    HOT while `hot_inflight` tiles were running, `_pump_tiles` saw the cap
-    reached for the rest of the session and HOT never issued another tile
-    again. This models the real scheduler by never delivering those
-    callbacks.
+    Cancelling a generation stops only what has not started; anything
+    already running keeps consuming the same I/O and GPU. An earlier
+    revision released those slots at abort time, so an abandoned task and a
+    freshly issued one could run together and the real concurrency could
+    reach 2 * hot_inflight -- the opposite of what the cap is for. (That
+    revision existed because `TileScheduler` did not call back a stale
+    waiter at all, which leaks the slot forever; the fix is the opt-in
+    terminal callback, not early release.)
     """
     controller, scheduler, hot = _make(cancel_callbacks=False)
     try:
@@ -494,19 +509,36 @@ def test_cancellation_releases_in_flight_capacity(app):
         controller.gesture_quiet.emit(snapshot)
         _fire_confirm(hot)
         assert len(hot._active_requests) == HOT_INFLIGHT, "test setup"
+        assert all(r["request"].notify_on_stale_completion
+                   for r in scheduler.requests), (
+            "HOT must opt in to the terminal stale callback or it can never "
+            "learn that abandoned work finished")
         issued_before = len(scheduler.requests)
 
-        # Interaction cancels the batch. The real scheduler will never call
-        # back for the two running requests, so nothing else can free them.
+        # Abort: the two running tasks are abandoned but NOT stopped.
         controller.interaction_event.emit("PAN", snapshot)
-        assert hot._active_requests == {}, (
-            "capacity stayed occupied by a generation that no longer exists")
-        assert hot.stats["hot_slots_released_on_abort"] == HOT_INFLIGHT
+        assert len(hot._active_requests) == HOT_INFLIGHT, (
+            "slots were released while the physical work was still running")
 
+        # A new plan settles, and must issue NOTHING: the capacity is still
+        # genuinely occupied.
         controller.gesture_quiet.emit(snapshot)
         _fire_confirm(hot)
-        assert len(scheduler.requests) > issued_before, (
-            "HOT never issued another tile after a cancellation")
+        assert len(scheduler.requests) == issued_before, (
+            f"{len(scheduler.requests) - issued_before} tasks were issued "
+            f"while {HOT_INFLIGHT} abandoned ones were still running")
+
+        # One abandoned task physically finishes -> exactly one new task.
+        scheduler.complete(0)
+        assert hot.stats["hot_abandoned_finished"] == 1
+        assert len(scheduler.requests) == issued_before + 1, (
+            "finishing one abandoned task should admit exactly one new task")
+        assert len(hot._active_requests) <= HOT_INFLIGHT
+
+        # And again for the second.
+        scheduler.complete(1)
+        assert len(scheduler.requests) == issued_before + 2
+        assert len(hot._active_requests) <= HOT_INFLIGHT
     finally:
         hot.stop()
 

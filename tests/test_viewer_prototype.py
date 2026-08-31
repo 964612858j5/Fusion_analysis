@@ -1388,3 +1388,38 @@ def test_shutdown_during_warm_terminates(small_ome_tiff):
     provider.close()
     with provider._registry_lock:
         assert provider._thread_registry == []
+
+
+def test_stale_waiter_is_not_called_back_by_default():
+    """The historical contract, kept as the DEFAULT: a waiter whose
+    generation has gone stale gets no callback at all. A foreground consumer
+    has nothing to do with a result it can no longer display.
+
+    Only a consumer that meters its own PHYSICAL concurrency needs the
+    opposite, and it must ask for it explicitly via
+    `TileRequest.notify_on_stale_completion` (covered separately). This test
+    exists so that opt-in can never quietly become the default.
+    """
+    from block01.viewer.tile_types import TileRequest
+
+    default_req = TileRequest(key=object(), generation=("g", 0), priority=0)
+    assert default_req.notify_on_stale_completion is False
+
+    delivered = []
+
+    class _Sched(TileScheduler):
+        def __init__(self):
+            # No worker threads: this exercises _deliver directly.
+            self._lock = threading.RLock()
+            self._stale_gens = {("g", 0)}
+
+    sched = _Sched()
+    stale_default = TileRequest(key=object(), generation=("g", 0), priority=0)
+    stale_optin = TileRequest(key=object(), generation=("g", 0), priority=0,
+                              notify_on_stale_completion=True)
+    sched._deliver([(stale_default, lambda r: delivered.append("default")),
+                    (stale_optin, lambda r: delivered.append(r.error))],
+                   lambda req: None)
+
+    assert delivered == ["stale"], (
+        f"expected only the opt-in waiter to be called back, got {delivered}")

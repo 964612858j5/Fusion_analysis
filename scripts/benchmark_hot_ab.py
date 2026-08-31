@@ -250,6 +250,13 @@ def run_arm(app, args, kind, hot, label):
     # cannot bias any measured value -- coverage was sampled during the
     # gesture and convergence inside that equal window; this is validity
     # bookkeeping only, and it is why it may run longer in the HOT arm.
+    #
+    # `drained` is now a PHYSICAL guarantee, not a local one: a slot is
+    # released only when a callback arrives, and an abandoned task delivers a
+    # terminal one (`notify_on_stale_completion`). An empty
+    # `_active_requests` therefore means every task HOT started has actually
+    # finished -- which an earlier version could not claim, since it released
+    # abandoned slots without knowing whether the work had stopped.
     if hot_ctl is not None:
         deadline = time.perf_counter() + HOT_DRAIN_TIMEOUT_S
         while time.perf_counter() < deadline:
@@ -279,7 +286,9 @@ def run_arm(app, args, kind, hot, label):
                 f"req={stats['hot_tiles_requested']} "
                 f"done={stats['hot_tiles_completed']} fail={stats['hot_tiles_failed']} "
                 f"ovw={stats['overviews_requested']}/{stats['overviews_failed']} "
-                f"abort={stats['settle_aborted']} drained={drained} "
+                f"abort={stats['settle_aborted']} "
+                f"abandoned_done={stats['hot_abandoned_finished']} "
+                f"drained={drained} "
                 f"{'VALID' if valid else 'INVALID'}")
     print(f"[{label}] {kind:4s} cov={np.mean(covs) * 100:5.1f}%  "
           f"mixed={mixed / max(1, frames) * 100:5.1f}%  "

@@ -138,6 +138,20 @@ class TileRequest:
     key: TileKey
     generation: object
     priority: int  # 0 = visible-center ... higher = prefetch ring
+    # Opt-in: deliver a terminal callback even when this request's
+    # generation has gone stale. Default False, which is the historical
+    # behaviour -- a stale waiter is simply not called back, because a
+    # foreground consumer has nothing to do with a result it can no longer
+    # display.
+    #
+    # A consumer that meters its own PHYSICAL concurrency needs the opposite:
+    # cancelling a generation does not stop work that has already started,
+    # so without a terminal callback it can never learn that the work
+    # finished, and its in-flight accounting either leaks a slot forever or
+    # has to be released early -- which lets abandoned tasks and new ones
+    # run at the same time, above the intended cap. See
+    # `MultiChannelPrefetchController`.
+    notify_on_stale_completion: bool = False
     deadline_ms: Optional[int] = None
 
 

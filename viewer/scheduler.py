@@ -243,9 +243,24 @@ class TileScheduler:
             return req.generation in self._stale_gens
 
     def _deliver(self, waiters, build_result):
-        """Call each waiter's callback with its own TileResult, skipping stale ones."""
+        """Call each waiter's callback with its own TileResult.
+
+        A stale waiter is skipped -- a consumer that can no longer display a
+        result has nothing to do with it -- UNLESS it opted in with
+        `TileRequest.notify_on_stale_completion`, in which case it gets one
+        TERMINAL callback carrying `error="stale"` when the work physically
+        finishes. Cancelling a generation does not stop work that has
+        already started; a consumer metering its own physical concurrency
+        has no other way to learn that such work is over. See that field's
+        docstring for why releasing the slot early is not equivalent.
+        """
         for req, cb in waiters:
             if self._is_stale(req):
+                if getattr(req, "notify_on_stale_completion", False):
+                    cb(TileResult(
+                        request=req, pixels=None,
+                        quality=getattr(req.key, "quality", QualityLevel.NATIVE),
+                        provisional=False, timing={}, error="stale"))
                 continue
             cb(build_result(req))
 

@@ -1,0 +1,469 @@
+{
+ "c0": {
+  "cancels": [],
+  "requests": [
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   }
+  ],
+  "stats": {
+   "hot_abandoned_finished": 0,
+   "hot_batches": 1,
+   "hot_cancelled": 0,
+   "hot_tiles_completed": 8,
+   "hot_tiles_failed": 0,
+   "hot_tiles_requested": 8,
+   "overviews_failed": 0,
+   "overviews_requested": 0,
+   "settle_aborted": 0,
+   "settle_confirmations": 1
+  }
+ },
+ "c2": {
+  "cancels": [],
+  "requests": [
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c1",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c0",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5002,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c0",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5002,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c0",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5002,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c0",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5002,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c4",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5003,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c4",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5003,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c4",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5003,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c4",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5003,
+    "tx": 1,
+    "ty": 0
+   }
+  ],
+  "stats": {
+   "hot_abandoned_finished": 0,
+   "hot_batches": 1,
+   "hot_cancelled": 0,
+   "hot_tiles_completed": 16,
+   "hot_tiles_failed": 0,
+   "hot_tiles_requested": 16,
+   "overviews_failed": 0,
+   "overviews_requested": 0,
+   "settle_aborted": 0,
+   "settle_confirmations": 1
+  }
+ },
+ "c4": {
+  "cancels": [],
+  "requests": [
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c3",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5000,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 0,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "tophat",
+    "notify_stale": true,
+    "params": [
+     2
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   },
+   {
+    "channel": "c2",
+    "generation": 0,
+    "level": 1,
+    "method": "cucim",
+    "notify_stale": true,
+    "params": [
+     3
+    ],
+    "priority": 5001,
+    "tx": 1,
+    "ty": 0
+   }
+  ],
+  "stats": {
+   "hot_abandoned_finished": 0,
+   "hot_batches": 1,
+   "hot_cancelled": 0,
+   "hot_tiles_completed": 8,
+   "hot_tiles_failed": 0,
+   "hot_tiles_requested": 8,
+   "overviews_failed": 0,
+   "overviews_requested": 0,
+   "settle_aborted": 0,
+   "settle_confirmations": 1
+  }
+ }
+}

@@ -57,8 +57,10 @@ pg.setConfigOptions(imageAxisOrder="row-major")
 from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import ExploreController, ExploreView  # noqa: E402
+from block01.viewer.experimental.coverage_prefetch import (  # noqa: E402
+    COVERAGE_INFLIGHT, CoverageMultiChannelPrefetchController)
 from block01.viewer.multichannel_prefetch import (  # noqa: E402
-    COVERAGE_INFLIGHT, HOT_INFLIGHT, MultiChannelPrefetchController)
+    HOT_INFLIGHT, MultiChannelPrefetchController)
 from block01.viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import (  # noqa: E402
@@ -127,13 +129,13 @@ def build(app, args, hot, coverage_prefetch=False):
                                        tophat_radius=args.param,
                                        cucim_sigma=args.param)
                  for name in provider.channel_names]
-        # `coverage=coverage_prefetch` explicitly, rather than relying on
-        # the constructor's own default (True): this keeps the existing
-        # BASE/HOT arms' behaviour exactly as measured before COVERAGE
-        # existed -- only the new HOT+COVERAGE arm passes
-        # `coverage_prefetch=True`.
-        hot_ctl = MultiChannelPrefetchController(ctrl, scheduler, specs, grid,
-                                                 coverage=coverage_prefetch)
+        # The COVERAGE arm instantiates the EXPERIMENTAL subclass; the
+        # BASE/HOT arms use the production controller, which has no
+        # COVERAGE at all. That keeps those arms exactly as measured before
+        # COVERAGE existed -- now by construction rather than by a flag.
+        cls = (CoverageMultiChannelPrefetchController if coverage_prefetch
+               else MultiChannelPrefetchController)
+        hot_ctl = cls(ctrl, scheduler, specs, grid)
     return provider, scheduler, view, ctrl, hot_ctl
 
 

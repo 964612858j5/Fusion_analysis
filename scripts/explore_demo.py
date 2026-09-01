@@ -483,8 +483,17 @@ def main():
             )
             for name in provider.channel_names
         ]
-        hot = MultiChannelPrefetchController(ctrl, scheduler, hot_specs, grid,
-                                             coverage=args.coverage)
+        if args.coverage:
+            # Imported HERE, not at module scope: the ordinary demo path
+            # must not pull `viewer.experimental` in at all.
+            from block01.viewer.experimental.coverage_prefetch import (  # noqa: E402
+                CoverageMultiChannelPrefetchController,
+            )
+            hot = CoverageMultiChannelPrefetchController(
+                ctrl, scheduler, hot_specs, grid)
+        else:
+            hot = MultiChannelPrefetchController(ctrl, scheduler, hot_specs,
+                                                 grid)
 
     def _on_floor_preparing_changed(preparing):
         suffix = " — Preparing corrected preview…" if preparing else ""

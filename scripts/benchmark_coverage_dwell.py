@@ -62,8 +62,8 @@ from block01.viewer.caches import LRUByteCache  # noqa: E402
 from block01.viewer.correction_compute import CorrectionCompute  # noqa: E402
 from block01.viewer.explore_view import (  # noqa: E402
     ExploreController, ExploreView)
-from block01.viewer.multichannel_prefetch import (  # noqa: E402
-    MultiChannelPrefetchController)
+from block01.viewer.experimental.coverage_prefetch import (  # noqa: E402
+    CoverageMultiChannelPrefetchController)
 from block01.viewer.prefetch_policy import ChannelCorrectionSpec  # noqa: E402
 from block01.viewer.raw_tile_provider import RawTileProvider  # noqa: E402
 from block01.viewer.scheduler import TileScheduler  # noqa: E402
@@ -137,8 +137,10 @@ def main():
 
     specs = [ChannelCorrectionSpec(channel=n, tophat_radius=args.param,
                                    cucim_sigma=args.param) for n in names]
-    hot = MultiChannelPrefetchController(controller, scheduler, specs, grid,
-                                         coverage=True)
+    # COVERAGE is the subject of this benchmark, so it instantiates the
+    # experimental controller directly -- that IS the opt-in.
+    hot = CoverageMultiChannelPrefetchController(controller, scheduler,
+                                                 specs, grid)
 
     cy, cx = args.center
     half = args.span / 2.0

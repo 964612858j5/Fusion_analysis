@@ -9,9 +9,13 @@ the pools -- and calls these to decide WHAT the answer is.
 
 Where the "already covered / still missing" questions come in, the
 controller computes those SETS from its pools and passes them here; these
-functions never look at a pool. The timing of that snapshot is part of the
-controller's contract (it happens after fallback synthesis, not before) and
-deliberately stays there.
+functions never look at a pool. WHEN each set is snapshotted is part of the
+controller's contract and stays there, and the two layers differ: the
+fallback layer's candidate and missing sets are formed BEFORE local
+synthesis is attempted, and the synthesis result then filters which of them
+are actually requested; the current level's missing set is computed AFTER
+fallback synthesis has run. Getting either side of that wrong changes what
+is requested, not just when.
 
 This first round covers only the geometry-and-scale half of planning:
 display-level choice with hysteresis, viewport clamping, level-0 → level

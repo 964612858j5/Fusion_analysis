@@ -77,11 +77,19 @@ class FakeController:
     """Mirrors `ExploreController.teardown`'s contract: scheduler first
     (which joins the workers), provider second."""
 
-    def __init__(self, provider, scheduler, order):
+    def __init__(self, provider, scheduler, order, channel=None):
         self.provider = provider
         self.scheduler = scheduler
         self._order = order
         self.teardown_calls = 0
+        # The selection surface the tab pulls into on re-activation.
+        self.channel = channel
+        self.selection_calls = []
+
+    def set_selection(self, channel=None, **_kwargs):
+        self.selection_calls.append(channel)
+        if channel is not None:
+            self.channel = channel
 
     def teardown(self):
         self.teardown_calls += 1
@@ -119,7 +127,8 @@ def make_factory(order=None, fail=False):
             provider.close()
             raise RuntimeError("boom: could not read pyramid")
         scheduler = FakeScheduler(order)
-        controller = FakeController(provider, scheduler, order)
+        controller = FakeController(provider, scheduler, order,
+                                    channel=channel)
         from PyQt5 import QtWidgets
         # Parented to the tab, exactly as the real `ExploreView(parent)` is:
         # the bug this models is that a parented widget still has to be put
@@ -174,7 +183,7 @@ def test_stack_is_built_lazily_exactly_once(app):
     tab.teardown()
 
 
-def test_initial_channel_is_a_snapshot_of_the_pages_current_channel(app):
+def test_the_stack_is_built_with_the_pages_channel_at_that_moment(app):
     factory, record = make_factory()
     page = FakePage("CD8")
     tab = Step0ExploreTab(page, stack_factory=factory)
@@ -182,13 +191,95 @@ def test_initial_channel_is_a_snapshot_of_the_pages_current_channel(app):
     tab.activate()
 
     assert record["channels"] == ["CD8"]
+    assert tab.stack.controller.channel == "CD8"
+    # The build is the switch: nothing extra is asked of the controller.
+    assert tab.stack.controller.selection_calls == []
+    tab.teardown()
 
-    # P0 has no two-way sync: a later page-side change does not reach the
-    # stack, and must not silently rebuild it.
-    page.current_channel = "DAPI"
+
+def test_re_activation_follows_the_pages_channel_once(app):
+    """The user picks channels on the Background Correction tab and comes
+    back: Explore follows the FINAL choice, with one switch, not one per
+    intermediate selection."""
+    factory, _record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
     tab.activate()
-    assert record["channels"] == ["CD8"]
-    assert tab.build_attempts == 1
+    controller = tab.stack.controller
+
+    # Away from the tab, the page's selection moves several times.
+    for channel in ("DAPI", "CD3", "Ki67"):
+        page.current_channel = channel
+    assert controller.selection_calls == [], (
+        "the tab must not follow while it is not being entered")
+
+    tab.activate()
+
+    assert controller.selection_calls == ["Ki67"]
+    assert controller.channel == "Ki67"
+    assert tab.build_attempts == 1, "following a channel must not rebuild"
+    tab.teardown()
+
+
+def test_re_activation_on_the_same_channel_switches_nothing(app):
+    """`set_selection` is not free even for the channel already shown: it
+    cancels the directional prefetch and re-enters the provisional state.
+    Re-entering the tab repeatedly must therefore cost nothing."""
+    factory, _record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    controller = tab.stack.controller
+
+    for _ in range(5):
+        tab.activate()
+
+    assert controller.selection_calls == []
+    assert controller.channel == "CD8"
+    tab.teardown()
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_an_empty_page_selection_leaves_the_view_alone(app, empty):
+    """The page holds None between datasets and while nothing is selected.
+    Following that would switch the view to nothing."""
+    factory, _record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    controller = tab.stack.controller
+
+    page.current_channel = empty
+    tab.activate()
+
+    assert controller.selection_calls == []
+    assert controller.channel == "CD8"
+    tab.teardown()
+
+
+def test_after_a_dataset_switch_the_new_stack_uses_the_new_channel(app):
+    factory, record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    first = tab.stack
+
+    # A dataset load resets the page's selection and then picks a channel
+    # of the NEW dataset; the old stack is gone before either happens.
+    page.current_channel = None
+    tab.set_dataset("/data/slide_b.ome.tif")
+    assert tab.stack is None and first.provider.closed is True
+    page.current_channel = "CD20"
+
+    tab.activate()
+
+    assert record["channels"] == ["CD8", "CD20"]
+    assert tab.stack.controller.channel == "CD20"
+    assert tab.stack.controller.selection_calls == []
     tab.teardown()
 
 

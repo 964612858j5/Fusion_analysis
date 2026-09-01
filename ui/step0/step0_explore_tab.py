@@ -12,8 +12,11 @@ P0 scope, deliberately narrow:
   with a dataset loaded, and never twice;
 * mode is `Original` only -- no correction is selected, so the controller
   serves raw pixels (`ExploreController.method` stays None);
-* the channel is a SNAPSHOT of the page's `current_channel` taken when the
-  stack is built; two-way channel sync arrives in P1;
+* the channel FOLLOWS the page: the stack is built with whatever
+  `current_channel` the Background Correction tab holds at build time, and
+  every later activation of this tab re-reads it and switches if it
+  changed. There is no reverse direction -- Explore has no channel control
+  of its own to change it with;
 * a dataset switch tears the old stack down COMPLETELY before anything is
   bound to the new dataset, so no pixel and no source identity of the
   previous dataset can survive;
@@ -21,10 +24,12 @@ P0 scope, deliberately narrow:
   workers) then `provider.close()`, then the caches are dropped -- and is
   idempotent.
 
-NOT in P0 (later phases): HOT/COVERAGE prefetch, the four preview modes,
-two-way channel sync, and the BG-worker drain hand-off. Nothing here
-writes to Save, to any config, or to the correction numerics, and nothing
-here touches the existing patch preview.
+Still NOT here (later phases): HOT/COVERAGE prefetch, the four preview
+modes (the method stays None, so this shows Original only), a channel
+control inside Explore and the reverse sync that would need, and the
+BG-worker drain hand-off. Nothing here writes to Save, to any config, or to
+the correction numerics, and nothing here touches the existing patch
+preview.
 """
 
 import time
@@ -235,10 +240,30 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._show_placeholder(PLACEHOLDER_NO_DATASET)
 
     def activate(self):
-        """Called when this tab becomes the current one. Builds the stack
-        on first activation with a dataset loaded, and never again for the
-        same dataset."""
-        if self._stack is not None or self._dataset_path is None:
+        """Called when this tab becomes the current one.
+
+        Two jobs. The first activation with a dataset loaded BUILDS the
+        stack, using whatever channel the Background Correction tab has
+        selected right then, and never builds again for the same dataset.
+        Every later activation PULLS that selection again: the user picks a
+        channel over there, comes back here, and sees it.
+
+        Pull rather than subscribe, deliberately. A signal connection would
+        have to decide what to do while this tab is hidden -- switching an
+        invisible view costs a synchronous overview read for nothing -- and
+        would fire once per intermediate selection on the way to the one the
+        user actually wants. Reading on entry answers both by construction:
+        it happens only when the view is about to be seen, and it sees only
+        the final choice.
+
+        The channel is compared before switching. `set_selection` is not
+        free even for the channel already displayed: it cancels the
+        directional prefetch and re-enters the provisional state.
+        """
+        if self._dataset_path is None:
+            return
+        if self._stack is not None:
+            self._pull_channel_from_page()
             return
         if self._build_error is not None:
             # A failed build is not retried silently on every tab click;
@@ -270,6 +295,23 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
+
+    def _pull_channel_from_page(self):
+        """Re-read the page's channel and switch to it if it changed.
+
+        Only on a real change, and only for a real channel: None (no
+        selection, or the page between datasets) and the empty string leave
+        the view alone rather than switching it to nothing.
+        """
+        channel = getattr(self._page, "current_channel", None)
+        if not channel:
+            return
+        controller = self._stack.controller
+        if channel == controller.channel:
+            return
+        print(f"[explore] following the page's channel: "
+              f"{controller.channel!r} -> {channel!r}", flush=True)
+        controller.set_selection(channel=channel)
 
     def teardown(self):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from

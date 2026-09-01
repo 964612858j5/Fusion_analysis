@@ -52,14 +52,14 @@ class MultiChannelPrefetchController(QtCore.QObject):
     ``prefetch_policy``, called through the module and not reimplemented
     here), planned in batches of ``COVERAGE_BATCH_CHANNELS`` channels.
 
-    NOTE ON THE INTERLEAVE RATIO: ``prefetch_policy``'s design document
-    describes a deterministic 3:1 HOT:COVERAGE interleave
-    (``HOT_PER_COVERAGE``). That is deliberately NOT implemented here. The
-    operative instruction for this round is strict HOT priority with a
-    physical COVERAGE cap of 1 -- COVERAGE issues a request only when HOT
-    has nothing queued and nothing in flight (including its one-at-a-time
-    overview fetch) -- which is simpler and strictly safer than interleaving
-    the two. The ratio can be revisited once this is measured.
+    STRICT HOT PRIORITY, not an interleave: COVERAGE issues a request only
+    when HOT has nothing queued and nothing in flight (including its
+    one-at-a-time overview fetch), with a physical COVERAGE cap of 1
+    (``COVERAGE_INFLIGHT``). An earlier design described a
+    deterministic 3:1 HOT:COVERAGE interleave; that rule had no
+    implementation here and was removed from ``prefetch_policy`` rather than
+    left standing as a second, contradictory contract. It is recoverable
+    from git history if it is ever measured to be worth building.
     """
 
     # `TileScheduler` fires callbacks on a COMPUTE WORKER thread. Every

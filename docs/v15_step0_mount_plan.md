@@ -112,13 +112,38 @@ Discipline, in order of strictness:
    **An empty local queue is not proof of quiescence** and must never be
    reported as such.
 
-   Contract debt, stated rather than assumed: `TileScheduler` today exposes
-   `request` / `cancel_generation` / `shutdown` and no physical in-flight
-   count, so this hand-off cannot be implemented honestly yet. Providing
-   that drain interface (the same physical metering
-   `notify_on_stale_completion` already gives the multi-channel prefetch
-   controller) is a **P2 deliverable**. Until it exists, no claim of
-   isolation from production runs may be made.
+   **Scheduler primitive delivered** (`507db84`): `TileScheduler` now has
+   `activity_snapshot()`, `idle()` and `notify_when_idle(callback)` — a
+   one-shot, non-blocking notification that fires the first time that
+   scheduler reaches idle, plus the refusal of any `request()` after
+   `shutdown()`. That is a building block, **not the BG hand-off**, and
+   this section still describes work that does not exist yet.
+
+   What `notify_when_idle()` covers, exactly: that ONE scheduler's
+   `_warming_workers` and `_pending` — every queued and physically running
+   entry, external raw, corrected and internal raw staging alike. It knows
+   nothing about the controller's overview pool, its floor threads, any
+   other scheduler, or whether a producer is about to enqueue more work.
+   It reports "this scheduler REACHED idle", not "the Explore stack is
+   quiescent", and the caller must therefore stop its producers BEFORE
+   registering.
+
+   Still missing for real isolation from a production BG run, all six:
+
+   1. stop every Explore request producer (`ExploreController`'s
+      motion/settle issuing, the directional prefetch, HOT and COVERAGE);
+   2. cancel the outstanding generations so queued-not-started work is
+      dropped rather than run;
+   3. drain the controller's overview pool;
+   4. drain the floor threads;
+   5. drain the scheduler — the one piece that now exists;
+   6. aggregate 1–5 into a single completion signal on the
+      controller / `ExploreStack`, and record how long the drain took.
+
+   The production BG worker may start **only after that aggregate reports
+   done**. Until every one of the six is in place, no claim of isolation
+   from production runs may be made — a scheduler that reports idle is not
+   an Explore stack that has stopped.
 2. On returning to Explore, work resumes from the CURRENT viewport, not the
    one that was live when it paused.
 3. Hiding the tab pauses HOT/COVERAGE but KEEPS the caches.

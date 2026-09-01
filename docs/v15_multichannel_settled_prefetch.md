@@ -1,10 +1,40 @@
+> **PARTIALLY SUPERSEDED (2026-09-01).** Kept in full as the design record;
+> read this note before treating any of it as current guidance.
+>
+> What survived into the running viewer: the HOT neighbour order
+> (`i-1, i+1, i-2, i+2`) and the COVERAGE both-ends-inward order
+> (`0, N-1, 1, N-2, …`), now the public `hot_order` / `coverage_order` in
+> `viewer/prefetch_policy.py`, plus `ChannelCorrectionSpec`. The live
+> `MultiChannelPrefetchController` calls them through that module, and a
+> test proves it (see `3cb6a8f`).
+>
+> What did NOT: the three camera states (§2), the `P0`–`P4` tiers and the
+> deterministic 3:1 HOT:COVERAGE interleave (§3). Those were implemented as
+> an experimental policy layer that no runtime code ever called, and they
+> had drifted into a second contract contradicting the one that actually
+> ships — the live rule is **strict HOT priority**: COVERAGE issues a
+> request only while HOT has nothing queued and nothing physically in
+> flight (including its one-at-a-time overview fetch), capped at one
+> in-flight COVERAGE request, with integer priority bands
+> (`HOT_PRIORITY_BASE` 5000, `COVERAGE_PRIORITY_BASE` 6000), a single
+> settled flag rather than a state machine, and per-channel batching rather
+> than an item interleave. The unused code and its tests were deleted in
+> `23317b0`; both are recoverable from git history if the interleave, `P1`
+> (movement buffer) or `P4` (long-dwell surroundings) ever become real work.
+>
+> The measurements in this document stand — they were taken on real data and
+> are not affected by the deletion.
+
 # v15 — Movement-driven multi-channel precompute (design contract)
 
-Status: **design only.** Nothing in this document is wired into the live
-viewer. No Save path, no production correction maths, and no worker-count
-default is changed by it. The policy layer it specifies lives in
-`viewer/prefetch_policy.py` as pure logic with its own tests, imported by
-nothing yet; the numbers it needs come from
+Status: **design only, at the time of writing** (see the supersede note
+above for what is live now). Nothing in this document was wired into the
+live viewer when it was written. No Save path, no production correction
+maths, and no worker-count default is changed by it. The policy layer it
+specified then lived in `viewer/prefetch_policy.py` as pure logic with its
+own tests and had no runtime importer; its unused state machine was removed
+in `23317b0`, leaving only the live ordering rules and
+`ChannelCorrectionSpec`. The numbers it needs come from
 `scripts/benchmark_multichannel_prefetch.py`.
 
 Every claim below is tagged **measured** (observed on real data in this
@@ -22,6 +52,13 @@ like Odon and would do nothing for the workflow that actually hurts. It
 stays on the roadmap; it is not this.
 
 ## 2. Three camera states
+
+> **SUPERSEDED — never implemented in the runtime** (see the note at the top
+> of this file). The live controller has no camera state machine: a single
+> `_settled` flag, set when `ExploreController.gesture_quiet` is followed by
+> a further quiet `SETTLE_CONFIRM_MS`, and cleared by any
+> `interaction_event`. `CameraState` / `next_state` were deleted in
+> `23317b0`.
 
 The scheduler's behaviour is driven by what the camera is doing, not by a
 timer alone.
@@ -54,6 +91,12 @@ events, and `viewer/explore_view.py::_clear_zoom_gesture_state` is the
 existing precedent.
 
 ## 3. Priority classes (produced only in `SETTLED`)
+
+> **PARTIALLY SUPERSEDED.** The two ORDERS below are live (`P2_HOT`'s
+> neighbour sequence and `P3_COVERAGE`'s both-ends-inward sequence) and are
+> the public `hot_order` / `coverage_order`. The tier ENUM, `P0`/`P1`/`P4`,
+> and the 3:1 interleave budget split are not: the runtime uses strict HOT
+> priority and integer priority bands instead. Deleted in `23317b0`.
 
 | Class | Content |
 |---|---|

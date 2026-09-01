@@ -18,10 +18,11 @@ from viewer.multichannel_prefetch import (  # noqa: E402
     SETTLE_CONFIRM_MS,
     MultiChannelPrefetchController,
 )
+from viewer import prefetch_policy as prefetch_rules  # noqa: E402
 from viewer.prefetch_policy import (  # noqa: E402
     ChannelCorrectionSpec,
-    _coverage_order,
-    _hot_order,
+    coverage_order,
+    hot_order,
 )
 from viewer.tile_types import (  # noqa: E402
     CorrectionKey,
@@ -480,7 +481,7 @@ def test_rapid_switches_are_latest_wins(app):
             f"more than one generation survived rapid switching: {generations}")
         centre = controller.channels.index("c3")
         allowed = {controller.channels[i]
-                   for i in _hot_order(centre, len(controller.channels))}
+                   for i in hot_order(centre, len(controller.channels))}
         got = {record["request"].key.channel for record in new_requests}
         assert got <= allowed, (
             f"requests for channels outside the newest centre's HOT order: "
@@ -659,8 +660,8 @@ def test_failed_overview_does_not_make_a_channel_ready(app):
 # ── COVERAGE (P3) ────────────────────────────────────────────────────────────
 #
 # A 10-channel list, centred on "c4", is used throughout so HOT's 4-neighbour
-# order (_hot_order(4, 10) == [3, 5, 2, 6]) and COVERAGE's remainder
-# (_coverage_order(10, 4) minus that neighbourhood == [c0, c9, c1, c8, c7])
+# order (hot_order(4, 10) == [3, 5, 2, 6]) and COVERAGE's remainder
+# (coverage_order(10, 4) minus that neighbourhood == [c0, c9, c1, c8, c7])
 # are both non-trivial and disjoint -- a 5-channel list (as `_make`'s default)
 # leaves HOT's neighbourhood covering everyone else, so COVERAGE would never
 # have anything to do.
@@ -1037,5 +1038,52 @@ def test_coverage_survives_a_request_that_the_scheduler_rejects(app):
         # Everything except the one rejected tile still completed.
         assert (hot.stats["coverage_tiles_completed"]
                 == len(_COVERAGE_REMAINING_ORDER) * 2 - 1)
+    finally:
+        hot.stop()
+
+
+def test_runtime_hot_order_comes_from_the_policy_module_not_a_copy(app):
+    """Proof of WIRING, not of ordering.
+
+    `prefetch_policy.hot_order` is patched to a different but legal order.
+    If the controller consults the rule source, its request order changes
+    with it; if it carried its own copy of "i-1, i+1, i-2, i+2", the patch
+    would have no effect and this test fails. A bound
+    `from ... import hot_order` inside the controller would also fail here,
+    which is exactly why the call goes through the module.
+    """
+    controller, scheduler, hot = _make()
+    real_hot_order = prefetch_rules.hot_order
+
+    def reversed_hot_order(center, n):
+        return list(reversed(real_hot_order(center, n)))
+
+    try:
+        _ready_overviews(controller)
+        prefetch_rules.hot_order = reversed_hot_order
+        try:
+            controller.gesture_quiet.emit(
+                _snapshot(controller, channel="c2", visible=((0, 0),)))
+            _fire_confirm(hot)
+            _drain_requests(scheduler)
+        finally:
+            prefetch_rules.hot_order = real_hot_order
+
+        actual = []
+        for record in scheduler.requests:
+            channel = record["request"].key.channel
+            if not actual or actual[-1] != channel:
+                actual.append(channel)
+
+        centre_index = controller.channels.index("c2")
+        n = len(controller.channels)
+        patched = [controller.channels[i]
+                   for i in reversed_hot_order(centre_index, n)]
+        unpatched = [controller.channels[i]
+                     for i in real_hot_order(centre_index, n)]
+        assert patched != unpatched, "test setup: the patch changed nothing"
+        assert actual == patched, (
+            "the runtime did not follow the patched rule source -- it is "
+            f"using its own copy of the order: {actual}")
     finally:
         hot.stop()

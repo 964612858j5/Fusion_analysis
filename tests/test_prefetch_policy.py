@@ -5,6 +5,8 @@ isolation, per the contract documented in prefetch_policy.py's module
 docstring.
 """
 
+import pytest
+
 from viewer.prefetch_policy import (
     CameraState,
     MovementObservation,
@@ -13,6 +15,8 @@ from viewer.prefetch_policy import (
     PrefetchPolicy,
     RELOCATE_VIEWPORT_FRACTION,
     SETTLE_MS,
+    coverage_order,
+    hot_order,
     next_state,
 )
 
@@ -78,37 +82,67 @@ def test_zoom_area_change_counts_as_moving():
 
 # ── 2. P2_HOT order ──────────────────────────────────────────────────────────
 
-def test_hot_order_middle():
+# `hot_order` / `coverage_order` are the PUBLIC rule source the live
+# `MultiChannelPrefetchController` calls (through the module, so a test can
+# monkeypatch them -- see tests/test_multichannel_prefetch.py). They are
+# therefore tested directly here, not through `PrefetchPolicy`, which no
+# runtime code calls.
+@pytest.mark.parametrize(
+    ("center", "n", "expected"),
+    [(5, 10, [4, 6, 3, 7]),          # middle: i-1, i+1, i-2, i+2
+     (0, 10, [1, 2]),                # low end: out-of-range offsets dropped
+     (9, 10, [8, 7]),                # high end: same, mirrored
+     (1, 10, [0, 2, 3]),             # one in from the end
+     (28, 57, [27, 29, 26, 30]),     # 57-channel slide, middle
+     (0, 57, [1, 2]),
+     (56, 57, [55, 54]),
+     (0, 1, []),                     # a single channel has no neighbour
+     (0, 2, [1]),
+     (1, 2, [0])],
+)
+def test_hot_order_is_the_neighbour_sequence(center, n, expected):
+    assert hot_order(center, n) == expected
+
+
+def test_hot_order_on_a_57_channel_list_by_name():
+    """Stable fake channel list -- no real WSI, no real channel names."""
+    names = [f"ch{i:02d}" for i in range(57)]
+    got = [names[i] for i in hot_order(28, len(names))]
+    assert got == ["ch27", "ch29", "ch26", "ch30"]
+
+
+def test_hot_order_still_drives_the_policys_own_p2_tier():
+    """`PrefetchPolicy` is not wired into the runtime, but while it exists
+    its HOT tier must come from the same function, not a second copy."""
     policy = make_policy(n_channels=10, current_index=5)
     policy.on_state_change(CameraState.SETTLED)
     hot = [w for w in policy.next_batch(100) if w.priority == Priority.P2_HOT]
-    assert [w.channel for w in hot] == [4, 6, 3, 7]
-
-
-def test_hot_order_clamps_at_low_end():
-    policy = make_policy(n_channels=10, current_index=0)
-    policy.on_state_change(CameraState.SETTLED)
-    hot = [w for w in policy.next_batch(100) if w.priority == Priority.P2_HOT]
-    assert [w.channel for w in hot] == [1, 2]
-
-
-def test_hot_order_clamps_at_high_end():
-    policy = make_policy(n_channels=10, current_index=9)
-    policy.on_state_change(CameraState.SETTLED)
-    hot = [w for w in policy.next_batch(100) if w.priority == Priority.P2_HOT]
-    assert [w.channel for w in hot] == [8, 7]
+    assert [w.channel for w in hot] == hot_order(5, 10)
 
 
 # ── 3. P3_COVERAGE order ─────────────────────────────────────────────────────
 
-def test_coverage_order_walks_from_both_ends():
-    # Pure order-generation test, using the private helper directly so HOT's
-    # own exclusion (tested separately below) doesn't interact here.
-    from viewer.prefetch_policy import _coverage_order
+@pytest.mark.parametrize(
+    ("n", "center", "expected"),
+    [(8, 0, [7, 1, 6, 2, 5, 3, 4]),
+     (10, 4, [0, 9, 1, 8, 2, 7, 3, 6, 5]),
+     (10, 0, [9, 1, 8, 2, 7, 3, 6, 4, 5]),
+     (10, 9, [0, 1, 8, 2, 7, 3, 6, 4, 5]),
+     (2, 0, [1]),
+     (1, 0, [])],
+)
+def test_coverage_order_walks_from_both_ends(n, center, expected):
+    """Pure order generation, straight through the public function so HOT's
+    own exclusion (tested separately below) does not interact here."""
+    assert coverage_order(n, center) == expected
 
-    got = _coverage_order(8, center=0)
-    expected = [c for c in [0, 7, 1, 6, 2, 5, 3, 4] if c != 0]
-    assert got == expected
+
+def test_coverage_order_on_a_57_channel_list_by_name():
+    names = [f"ch{i:02d}" for i in range(57)]
+    got = [names[i] for i in coverage_order(len(names), 28)]
+    assert got[:12] == ["ch00", "ch56", "ch01", "ch55", "ch02", "ch54",
+                        "ch03", "ch53", "ch04", "ch52", "ch05", "ch51"]
+    assert len(got) == 56 and "ch28" not in got
 
 
 def test_coverage_skips_completed_and_hot_owned_channels():

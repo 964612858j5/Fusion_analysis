@@ -552,7 +552,7 @@ def main():
     names_list = list(provider.channel_names)
 
     def _hot_neighbourhood(of_channel):
-        """HOT prefetches i-1, i+1, i-2, i+2 (prefetch_policy._hot_order), so
+        """HOT prefetches i-1, i+1, i-2, i+2 (prefetch_policy.hot_order), so
         a switch within +/-2 of where the camera settled is a NEAR switch --
         the one HOT was built to make instant. Anything else is FAR."""
         try:

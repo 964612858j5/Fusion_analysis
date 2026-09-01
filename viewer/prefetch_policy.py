@@ -1,15 +1,33 @@
-"""Multi-channel prefetch decision policy (NOT wired into the live viewer).
+"""Multi-channel prefetch decision policy — pure rules, no Qt, no I/O.
 
 This module is a POLICY LAYER ONLY. It decides WHAT to compute next and in
 WHAT ORDER for a multi-channel (50+), movement-driven precompute scheduler.
 It never computes a tile, never touches Qt, never touches numpy image data,
 and never spawns a thread -- it is pure Python (dataclasses + typing) so it
-can be unit-tested in isolation from `TileScheduler` and `ExploreView`. A
-later round is expected to wire this into `viewer.scheduler.TileScheduler`;
-until then nothing in live code imports it, and this module imports nothing
-from `viewer.explore_view` or `viewer.scheduler` (independence is deliberate
-so this file can be reasoned about, and tested, without pulling in Qt or the
-threaded scheduler's runtime state).
+can be unit-tested in isolation from `TileScheduler` and `ExploreView`, and
+it imports nothing from `viewer.explore_view` or `viewer.scheduler`.
+
+## What is LIVE and what is not (read this before editing)
+
+LIVE -- the single source of these rules for the running viewer:
+
+* `hot_order(center, n)` -- HOT's neighbour order.
+* `coverage_order(n, center)` -- COVERAGE's both-ends-inward order.
+* `ChannelCorrectionSpec` -- per-channel parameters for both methods.
+
+`MultiChannelPrefetchController` calls the two ordering functions THROUGH
+this module (`prefetch_rules.hot_order(...)`), not through a bound import,
+so a test can monkeypatch them and prove the runtime consults this module
+rather than carrying a copy of the same logic.
+
+NOT LIVE -- `PrefetchPolicy` and its state machine (`CameraState`,
+`MovementObservation`, `next_state`, `Priority`, `WorkItem`, the P0-P4
+tiers, the `HOT_PER_COVERAGE` 3:1 interleave and their constants) have no
+caller outside `tests/test_prefetch_policy.py`. The live controller
+implements strict HOT priority instead of the 3:1 interleave, and has no
+camera state machine. That divergence is deliberate for now and is
+scheduled for removal in the next commit of this clean-up; do not build on
+it, and do not "fix" the runtime to match it.
 
 ## Contract
 
@@ -246,7 +264,7 @@ def _clamp(i: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, i))
 
 
-def _hot_order(center: int, n: int) -> List[int]:
+def hot_order(center: int, n: int) -> List[int]:
     """i-1, i+1, i-2, i+2 ... clamped at both ends, each channel only once.
 
     Clamping means an out-of-range offset is dropped rather than folded
@@ -265,7 +283,7 @@ def _hot_order(center: int, n: int) -> List[int]:
     return order
 
 
-def _coverage_order(n: int, center: int) -> List[int]:
+def coverage_order(n: int, center: int) -> List[int]:
     """0, N-1, 1, N-2, ... skipping `center` (HOT/P0 already own it).
 
     Walking from both ends toward the middle means coverage reaches the
@@ -436,7 +454,7 @@ class PrefetchPolicy:
     def _hot_items(self) -> List[WorkItem]:
         n = len(self.channels)
         items = []
-        for idx in _hot_order(self.current_index, n):
+        for idx in hot_order(self.current_index, n):
             channel = self.channels[idx]
             if not self._is_complete(channel, self.viewport):
                 items.append(WorkItem(channel, Priority.P2_HOT, self._generation, self.viewport))
@@ -448,9 +466,9 @@ class PrefetchPolicy:
         # the current viewport for i-1/i+1/i-2/i+2, so coverage skips those
         # too; otherwise the same (channel, viewport) pair would be queued
         # twice under two different priorities for no benefit.
-        hot_idx = set(_hot_order(self.current_index, n))
+        hot_idx = set(hot_order(self.current_index, n))
         items = []
-        for idx in _coverage_order(n, self.current_index):
+        for idx in coverage_order(n, self.current_index):
             if idx in hot_idx:
                 continue
             channel = self.channels[idx]

@@ -6,7 +6,15 @@ from collections import deque
 
 from PyQt5 import QtCore
 
-from .prefetch_policy import ChannelCorrectionSpec, _coverage_order, _hot_order
+# The ordering rules are called THROUGH the module, never bound at import
+# time: `prefetch_rules.hot_order(...)`, not `hot_order(...)`. That is what
+# lets a test monkeypatch `prefetch_policy.hot_order` and observe the
+# runtime's request order change -- i.e. prove this controller consults the
+# single rule source instead of carrying its own copy of the same logic. A
+# bound `from ... import hot_order` would silently keep working against a
+# stale function object and make that proof impossible.
+from . import prefetch_policy as prefetch_rules
+from .prefetch_policy import ChannelCorrectionSpec
 from .tile_types import CorrectionKey, TileAddress, TileRequest, effective_param
 
 
@@ -36,10 +44,12 @@ class MultiChannelPrefetchController(QtCore.QObject):
     ``ExploreView`` or either of the view's pools: the scheduler writes
     completed correction results to ``corrected_cache``.
 
-    In addition to HOT (P2, the i-1/i+1/i-2/i+2 neighbourhood), this object
+    In addition to HOT (P2, the i-1/i+1/i-2/i+2 neighbourhood given by
+    ``prefetch_rules.hot_order``), this object
     also runs COVERAGE (P3): every remaining channel's current viewport,
     walked from both ends of the channel list toward the middle via
-    ``_coverage_order`` (reused from ``prefetch_policy``, not reimplemented
+    ``prefetch_rules.coverage_order`` (the single rule source in
+    ``prefetch_policy``, called through the module and not reimplemented
     here), planned in batches of ``COVERAGE_BATCH_CHANNELS`` channels.
 
     NOTE ON THE INTERLEAVE RATIO: ``prefetch_policy``'s design document
@@ -299,7 +309,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         if center is None:
             self._overview_plan = []
         else:
-            order = _hot_order(center, len(self.specs))
+            order = prefetch_rules.hot_order(center, len(self.specs))
             self._overview_plan = [
                 (self.specs[index].channel, hot_index)
                 for hot_index, index in enumerate(order)
@@ -574,16 +584,16 @@ class MultiChannelPrefetchController(QtCore.QObject):
         return True
 
     def _compute_coverage_order(self, snapshot):
-        """`_coverage_order` minus the HOT neighbourhood minus completed
+        """`prefetch_rules.coverage_order` minus the HOT neighbourhood minus completed
         channels -- reusing both policy functions verbatim, never
         reimplementing either."""
         center = self._index_by_channel.get(snapshot.channel)
         n = len(self.specs)
         if center is None:
             return []
-        hot_idx = set(_hot_order(center, n))
+        hot_idx = set(prefetch_rules.hot_order(center, n))
         order = []
-        for idx in _coverage_order(n, center):
+        for idx in prefetch_rules.coverage_order(n, center):
             if idx in hot_idx:
                 continue
             channel = self.specs[idx].channel

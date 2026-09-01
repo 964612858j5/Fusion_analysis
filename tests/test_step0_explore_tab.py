@@ -111,6 +111,7 @@ def make_factory(order=None, fail=False):
 
     def factory(path, channel, parent_widget=None):
         record["channels"].append(channel)
+        record["parent"] = parent_widget
         provider = FakeProvider(path)
         if fail:
             # A factory that fails AFTER opening the provider is the case
@@ -120,7 +121,10 @@ def make_factory(order=None, fail=False):
         scheduler = FakeScheduler(order)
         controller = FakeController(provider, scheduler, order)
         from PyQt5 import QtWidgets
-        view = QtWidgets.QLabel("fake explore view")
+        # Parented to the tab, exactly as the real `ExploreView(parent)` is:
+        # the bug this models is that a parented widget still has to be put
+        # into the layout, or it gets no geometry and shows nothing.
+        view = QtWidgets.QLabel("fake explore view", parent_widget)
         caches = (FakeCache("raw"), FakeCache("corrected"))
         # A scheduler holds the same cache objects, exactly as the real one
         # does -- so a test that only checked `stack.caches is None` would
@@ -425,3 +429,38 @@ def test_page_teardown_entry_point_calls_the_tab(app):
 
     src = inspect.getsource(step0_page.Step0Page.teardown)
     assert "_explore_tab" in src and "teardown()" in src
+
+
+def test_the_view_is_actually_laid_out_and_visible_after_activation(app):
+    """Regression: the view was created with the tab as its Qt PARENT, and
+    `_show_widget` tested parenthood before calling `addWidget` -- so the
+    view was never added to the layout, got no geometry, and the tab came up
+    BLANK while the stack behind it was healthy. A manual test saw nothing
+    for two minutes; every existing test still passed, because none of them
+    looked at the widget.
+    """
+    from PyQt5 import QtWidgets
+
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD3"), stack_factory=factory)
+    tab.resize(640, 480)
+    tab.show()
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    QtWidgets.QApplication.processEvents()
+
+    view = tab.stack.view
+    assert record["parent"] is tab, "test setup: the view must be parented"
+    assert tab._layout.indexOf(view) >= 0, (
+        "the view is not in the tab's layout, so it can never be shown")
+    assert view.isVisible() is True
+    assert view.width() > 0 and view.height() > 0, (
+        f"the view has no geometry: {view.size()}")
+    assert tab._placeholder.isVisible() is False
+
+    # And the placeholder comes back, laid out, once the dataset goes away.
+    tab.set_dataset(None)
+    QtWidgets.QApplication.processEvents()
+    assert tab._placeholder.isVisible() is True
+    assert tab._placeholder.width() > 0
+    tab.teardown()

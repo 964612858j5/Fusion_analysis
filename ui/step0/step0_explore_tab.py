@@ -27,6 +27,7 @@ writes to Save, to any config, or to the correction numerics, and nothing
 here touches the existing patch preview.
 """
 
+import time
 import traceback
 
 from PyQt5 import QtCore, QtWidgets
@@ -245,10 +246,20 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return
         self._build_attempts += 1
         channel = getattr(self._page, "current_channel", None)
+        # Lifecycle logging, deliberately kept: building this stack blocks
+        # the GUI thread (a synchronous overview read), so when a manual test
+        # reports "nothing appeared" the log has to be able to say whether
+        # the build ran at all, and how long it took.
+        print(f"[explore] building stack: {self._dataset_path} "
+              f"channel={channel!r}", flush=True)
+        t0 = time.perf_counter()
         try:
             stack = self._stack_factory(self._dataset_path, channel, self)
         except Exception as exc:
             self._build_error = exc
+            print(f"[explore] build FAILED after "
+                  f"{(time.perf_counter() - t0) * 1000:.0f} ms: {exc}",
+                  flush=True)
             self._show_placeholder(
                 "Explore could not open this dataset:\n\n"
                 f"{exc}\n\n"
@@ -257,6 +268,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return
         self._stack = stack
         self._show_widget(stack.view)
+        print(f"[explore] stack ready in "
+              f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
     def teardown(self):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from
@@ -273,6 +286,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         stack, self._stack = self._stack, None
         if stack is None:
             return
+        print("[explore] tearing stack down", flush=True)
         try:
             stack.teardown()
         finally:
@@ -293,7 +307,12 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._show_widget(self._placeholder)
 
     def _show_widget(self, widget):
-        if widget.parent() is not self:
+        # Membership in the LAYOUT, not parenthood. `ExploreView` is built
+        # with this tab as its Qt parent, so a parenthood test skipped
+        # `addWidget` entirely: the view was a child of the tab but under no
+        # layout, so it got no geometry and the tab came up blank while the
+        # stack behind it was perfectly healthy.
+        if self._layout.indexOf(widget) < 0:
             self._layout.addWidget(widget)
         for i in range(self._layout.count()):
             item = self._layout.itemAt(i).widget()

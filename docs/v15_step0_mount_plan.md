@@ -101,6 +101,31 @@ produced and left 0/57 channels ready). 2 GB covers the current channel plus
 its ±2 neighbourhood in both methods. No hardware-adaptive cache policy for
 now.
 
+**COVERAGE implementation moved to experimental** (`68cb1ed`). "COVERAGE
+off" is no longer a flag on the production controller: the implementation
+now lives in `viewer/experimental/coverage_prefetch.py` as
+`CoverageMultiChannelPrefetchController`, a subclass of the production
+`MultiChannelPrefetchController`, and instantiating that subclass is the
+opt-in. Consequences for this plan:
+
+* the production viewer and the Step0 Explore tab neither import nor
+  instantiate COVERAGE — an AST test enforces that no module under `ui/`,
+  `main.py` or `viewer/` (outside `viewer/experimental/`) imports the
+  experimental package;
+* `scripts/explore_demo.py` enables it explicitly with `--coverage`, which
+  imports the experimental controller inside that branch; without the flag
+  the demo uses the production controller and loads nothing from
+  `viewer.experimental`;
+* `scripts/benchmark_coverage_dwell.py` instantiates the experimental
+  controller directly — that is its opt-in;
+* `scripts/benchmark_hot_ab.py` picks per arm: the COVERAGE arm builds the
+  experimental controller, the BASE and HOT arms build the production one;
+* the ordinary HOT path everywhere else continues to use the production
+  controller.
+
+The move is a relocation, not a change of behaviour or a re-validation: the
+measurements this section cites stand exactly as recorded.
+
 Discipline, in order of strictness:
 
 1. When a Step0 batch background-correction run is REQUESTED, Explore

@@ -1,3 +1,16 @@
+> **COVERAGE implementation moved to experimental (`68cb1ed`).** The
+> numbers, conclusions and dates below are unchanged and were not re-run.
+> Only WHERE the implementation lives changed: it is now
+> `CoverageMultiChannelPrefetchController` in
+> `viewer/experimental/coverage_prefetch.py`, a subclass of the production
+> `MultiChannelPrefetchController`, and instantiating it is the opt-in —
+> the `coverage=True` constructor flag this document's Setup line names no
+> longer exists. `scripts/benchmark_coverage_dwell.py` builds the
+> experimental controller directly, so this benchmark reproduces as
+> written; `scripts/explore_demo.py` enables it with `--coverage`; the
+> production viewer and the Step0 Explore tab neither import nor
+> instantiate COVERAGE.
+
 # COVERAGE long dwell — 57 channels, cache budget decides the payoff
 
 Date: 2026-09-01 (re-run of the 2026-08-31 measurement, for the record)
@@ -8,7 +21,9 @@ Harness: `scripts/benchmark_coverage_dwell.py`, run as
 `QT_QPA_PLATFORM=offscreen python scripts/benchmark_coverage_dwell.py --corrected-cache-gb 8 --dwell 90`
 and again with `--corrected-cache-gb 0.5` (defaults supply path, centre and span)
 Setup: camera parked at (y=25606, x=15360), span 1400 px, `method=tophat params=(25,)`,
-`MultiChannelPrefetchController(..., coverage=True)`, raw cache 2 GB, HOT defaults
+`MultiChannelPrefetchController(..., coverage=True)` as it was at the time of
+the run — today's equivalent is `CoverageMultiChannelPrefetchController(...)`,
+see the note at the top — raw cache 2 GB, HOT defaults
 Definition of drained: HOT and COVERAGE queues empty, no physically in-flight
 request (a slot is released only by a callback — ordinary, or the opt-in
 terminal one for a stale generation — so this is physical, not

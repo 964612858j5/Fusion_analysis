@@ -214,3 +214,45 @@ restored to its pre-mount version:
 Not investigated in this round, by decision. Anyone running the Step0
 suites should use `-k "not roi_context"` and expect the 3 failures
 until this debt is paid.
+
+## 9. P0 manual acceptance — PASSED 2026-09-01
+
+Run: `python -m block01_v14.main`, real Step0 page, two real slides
+(`.../20260210_Ming_Albert_HCC_test_01_Scan1.tiff.ome.tif`, 31680x26880,
+57 channels; `.../2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif`,
+31416x28800, 29 channels).
+
+| step | result | evidence |
+|---|---|---|
+| Explore opened with no dataset | pass | placeholder shown, no `[explore]` line at all — the stack is not built |
+| dataset loaded, Explore not opened | pass | `[Loader] …57 channels` with no `building stack` after it |
+| first activation | pass | `building stack … channel='CD15'` → `stack ready in 1075 ms`, image present immediately |
+| 8–10 tab switches | pass | exactly ONE `building stack` in the whole sequence |
+| 3 dataset switches (HCC → tonsil → tonsil → HCC) | pass | every switch logged `tearing stack down` then `building stack: <new path>`, paired one-to-one |
+| application close | pass | final line `tearing stack down`; no `QThread: Destroyed while thread is still running`, no fatal error, no read-after-close |
+
+First-build cost: **694–1459 ms** across the runs (well under the ~3.4s the
+offscreen smoke measured — the OS page cache is warm by then). The operator
+described it as appearing "instantly, faster than the navigator window", so
+the synchronous overview read inside the build is acceptable at P0.
+
+The channel snapshot behaved as designed: the two builds took `'CD15'` and
+`'TOX'`, the live `current_channel` at build time. P0 has no two-way sync.
+
+**Honest limit:** the log proves the old stack is torn down BEFORE the new
+path is bound, and that its provider is closed. Whether a single frame of
+the previous dataset ever flashed on screen was **not observed by the
+operator** — that is "not seen", not "proven absent". A frame-level check
+belongs with the P1–P3 gate, where the `[switch]` diagnostics can assert it.
+
+### Bug found by this acceptance run
+
+`c5890a5`: the Explore view was constructed with the tab as its Qt PARENT,
+and `_show_widget` tested parenthood before calling `addWidget` — so the
+view was never added to the layout, received no geometry, and the tab came
+up BLANK for two minutes while the stack behind it was healthy. All 14
+lifecycle tests passed through it, because none of them looked at the
+widget. The fix tests layout membership; the new test checks the view is in
+the layout, visible, with non-zero geometry, and that the placeholder hides
+and comes back. Deliberate lifecycle logging was added in the same commit:
+this session had no way to tell whether the build had even started.

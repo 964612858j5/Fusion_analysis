@@ -1,16 +1,12 @@
-"""Unit tests for the pure viewport-planning functions.
+"""Contract tests for the pure viewport-planning functions.
 
-Two kinds of case here, and the second is the one that matters:
+`ExploreController` calls these through the module, so they define the
+display level, the visible tile set and the pan/zoom classification the
+viewer actually uses. The controller's own externally visible behaviour is
+pinned separately, in test_controller_trajectory.py.
 
-* direct tests of each function's contract, including the corners the
-  controller's arithmetic has always had (truncation, the `<= 0` guards,
-  the hysteresis band);
-* DIFFERENTIAL tests against `ExploreController`'s own private methods,
-  swept over many inputs. Those are what license the migration: they prove
-  the pure function answers identically to the code still in the
-  controller, before a single call site moves.
-
-Nothing here is wired into the controller yet.
+Numbers that pin a comparison are chosen to be exact in binary, so a test
+about `>` versus `>=` is about the operator and not about float error.
 """
 
 import os
@@ -21,7 +17,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from viewer.request_planning import (  # noqa: E402
+# `block01.viewer...`, NOT `viewer...`: this repo can be imported under
+# both spellings, and they produce SEPARATE module objects. The controller
+# imports through `block01.viewer`, so patching `viewer.request_planning`
+# would patch a copy nothing calls -- a wiring test that passes while
+# proving nothing. (Observed: the first version of the wiring tests below
+# failed for exactly this reason.)
+from block01.viewer.request_planning import (  # noqa: E402
     ZOOM_AREA_TOLERANCE,
     apply_level_hysteresis,
     bbox_to_level,
@@ -30,7 +32,7 @@ from viewer.request_planning import (  # noqa: E402
     pick_display_level,
     visible_tiles_for_viewport,
 )
-from viewer.tile_types import tiles_covering  # noqa: E402
+from block01.viewer.tile_types import tiles_covering  # noqa: E402
 
 
 # ── display level ────────────────────────────────────────────────────────────
@@ -224,117 +226,33 @@ def test_a_zero_previous_area_is_neither():
     assert classify_zoom(0.0, 1000.0) == (False, False)
 
 
-# ── differential: the pure functions vs the controller still in place ────────
-#
-# These are the evidence that migrating a call site is safe. They sweep the
-# same inputs through `ExploreController`'s own private methods and through
-# the pure functions and require identical answers -- so a divergence shows
-# up here, BEFORE any call site moves, rather than as a rendering change.
+# ── wiring ───────────────────────────────────────────────────────────────────
 
 from test_explore_controller import (  # noqa: E402
-    _pump,
     app,            # noqa: F401  (pytest fixture)
     make_controller,
 )
 
 
-SPP_SWEEP = [4.0, 2.0, 1.5, 1.0, 0.9, 0.75, 0.5, 0.4, 0.3, 0.26, 0.25, 0.24,
-             0.2, 0.15, 0.125, 0.1, 0.05, 0.01, 0.001, 0.0, -1.0]
+def test_controller_level_choice_follows_the_patched_rule(app, monkeypatch):
+    """Proof of WIRING, not of arithmetic: the controller must CALL this
+    module rather than carry a copy of the nearest-below scan.
 
+    `block01.viewer...`, NOT `viewer...`: this repo can be imported under
+    both spellings and they produce SEPARATE module objects. Patching the
+    wrong one gives a test that passes while proving nothing -- the first
+    version of this test did exactly that.
+    """
+    from block01.viewer import request_planning as planning
 
-def _downsamples(provider):
-    return [provider.level_downsample(i) for i in range(provider.num_levels)]
-
-
-def test_pure_level_pick_matches_the_controller_over_a_zoom_sweep(app):
     ctrl, provider, _scheduler, _view = make_controller(app)
     try:
-        downsamples = _downsamples(provider)
-        for spp in SPP_SWEEP:
-            assert (pick_display_level(downsamples, spp)
-                    == ctrl._pick_display_level(spp)), spp
-    finally:
-        ctrl.teardown()
+        unpatched = ctrl._pick_display_level(1.0)
+        monkeypatch.setattr(planning, "pick_display_level",
+                            lambda downsamples, spp: len(downsamples) - 1)
+        patched = ctrl._pick_display_level(1.0)
 
-
-def test_pure_hysteresis_matches_the_controller_from_every_level(app):
-    ctrl, provider, _scheduler, _view = make_controller(app)
-    try:
-        downsamples = _downsamples(provider)
-        for current in range(provider.num_levels):
-            ctrl.level = current
-            for spp in SPP_SWEEP:
-                ideal = ctrl._pick_display_level(spp)
-                expected = ctrl._pick_display_level_with_hysteresis(spp)
-                got = apply_level_hysteresis(
-                    ideal_level=ideal, current_level=current,
-                    current_downsample=provider.level_downsample(current),
-                    screen_px_per_world_px=spp,
-                    threshold=ctrl.LEVEL_HYSTERESIS)
-                assert got == expected, (current, spp)
-    finally:
-        ctrl.teardown()
-
-
-VIEWPORT_SWEEP = [
-    (0.0, 0.0, 4096.0, 4096.0),          # whole slide
-    (-100.0, -100.0, 500.0, 500.0),      # off the top-left corner
-    (3900.0, 3900.0, 4500.0, 4500.0),    # off the bottom-right corner
-    (1000.4, 2000.6, 1512.9, 2512.1),    # interior, fractional edges
-    (-500.0, -500.0, -100.0, -100.0),    # entirely outside
-    (2048.0, 2048.0, 2048.0, 2048.0),    # degenerate, zero area
-]
-
-
-def test_pure_clamp_and_visible_tiles_match_the_controller(app):
-    """Drives the controller's real range handler and compares its
-    `_current_bbox` / `_visible_tiles` against the pure functions."""
-    ctrl, provider, _scheduler, view = make_controller(app)
-    try:
-        level0_h, level0_w = provider.level_shape(0)
-        for (y0, x0, y1, x1) in VIEWPORT_SWEEP:
-            view.view_box.setRange(xRange=(x0, x1), yRange=(y0, y1),
-                                   padding=0)
-            _pump(30)
-
-            # Read back what the ViewBox actually settled on -- it applies
-            # its own limits, so the requested range is not necessarily the
-            # live one.
-            (vx0, vx1), (vy0, vy1) = view.view_box.viewRange()
-            expected_bbox = clamp_viewport_to_level0(
-                vy0, vx0, vy1, vx1, level0_h, level0_w)
-            assert ctrl._current_bbox == expected_bbox, (y0, x0, y1, x1)
-
-            ds = provider.level_downsample(ctrl.level)
-            assert ctrl._visible_tiles == visible_tiles_for_viewport(
-                ctrl._current_bbox, ds, ctrl.grid.tile_size)
-    finally:
-        ctrl.teardown()
-
-
-def test_pure_zoom_classification_matches_the_controller(app):
-    """Replays a pan-then-zoom sequence and compares the controller's
-    `_viewport_shrinking` / `_viewport_zooming` with `classify_zoom`."""
-    ctrl, provider, _scheduler, view = make_controller(app)
-    try:
-        sequence = [
-            (0.0, 0.0, 1024.0, 1024.0),      # first frame: neither
-            (100.0, 0.0, 1124.0, 1024.0),    # pure pan, same area
-            (0.0, 0.0, 512.0, 512.0),        # zoom in
-            (0.0, 0.0, 2048.0, 2048.0),      # zoom out
-            (10.0, 10.0, 2058.0, 2058.0),    # pan at the new scale
-        ]
-        prev_area = None
-        for (y0, x0, y1, x1) in sequence:
-            view.view_box.setRange(xRange=(x0, x1), yRange=(y0, y1),
-                                   padding=0)
-            _pump(30)
-            (vx0, vx1), (vy0, vy1) = view.view_box.viewRange()
-            area = max(0.0, vx1 - vx0) * max(0.0, vy1 - vy0)
-
-            expected = classify_zoom(prev_area, area)
-            assert (ctrl._viewport_shrinking, ctrl._viewport_zooming) == expected, (
-                (y0, x0, y1, x1), prev_area, area)
-            prev_area = area
+        assert unpatched != patched, "test setup: the patch changed nothing"
+        assert patched == provider.num_levels - 1
     finally:
         ctrl.teardown()

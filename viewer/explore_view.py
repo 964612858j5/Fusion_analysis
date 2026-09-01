@@ -600,6 +600,10 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import QRectF
 
+# Called through the module, never bound at import time, so a test can
+# patch a rule and watch the controller's output follow -- the same
+# discipline `multichannel_prefetch` uses for `prefetch_policy`.
+from . import request_planning as planning
 from .tile_types import (
     CorrectionKey,
     QualityLevel,
@@ -2282,17 +2286,12 @@ class ExploreController(QtCore.QObject):
     # ── level selection ───────────────────────────────────────────────────
 
     def _pick_display_level_with_hysteresis(self, screen_px_per_world_px: float) -> int:
-        ideal_level = self._pick_display_level(screen_px_per_world_px)
-        if ideal_level == self.level:
-            return self.level
-        if screen_px_per_world_px <= 0:
-            return ideal_level
-        ideal_ds = 1.0 / screen_px_per_world_px
-        cur_ds = self.provider.level_downsample(self.level)
-        ratio = ideal_ds / cur_ds if cur_ds else 1.0
-        if abs(ratio - 1.0) > self.LEVEL_HYSTERESIS:
-            return ideal_level
-        return self.level
+        return planning.apply_level_hysteresis(
+            ideal_level=self._pick_display_level(screen_px_per_world_px),
+            current_level=self.level,
+            current_downsample=self.provider.level_downsample(self.level),
+            screen_px_per_world_px=screen_px_per_world_px,
+            threshold=self.LEVEL_HYSTERESIS)
 
     def _pick_display_level(self, screen_px_per_world_px: float) -> int:
         """Nearest-below choice: for a given zoom (screen pixels per WORLD
@@ -2301,17 +2300,9 @@ class ExploreController(QtCore.QObject):
         largest one that does not exceed that ideal ratio, falling back to
         the finest level if none qualifies, and the coarsest if the ideal
         ratio is smaller than every available downsample."""
-        if screen_px_per_world_px <= 0:
-            return 0
-        ideal_ds = 1.0 / screen_px_per_world_px
-        best_level = 0
-        best_ds = self.provider.level_downsample(0)
-        for level in range(self.provider.num_levels):
-            ds = self.provider.level_downsample(level)
-            if ds <= ideal_ds and ds >= best_ds:
-                best_level = level
-                best_ds = ds
-        return best_level
+        downsamples = [self.provider.level_downsample(level)
+                       for level in range(self.provider.num_levels)]
+        return planning.pick_display_level(downsamples, screen_px_per_world_px)
 
     # ── viewport / range-change handling ─────────────────────────────────
 
@@ -2335,9 +2326,7 @@ class ExploreController(QtCore.QObject):
         self._viewport_center_l0 = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
         h0, w0 = self.provider.level_shape(0)
-        wy0, wy1 = max(0, min(y0, h0)), max(0, min(y1, h0))
-        wx0, wx1 = max(0, min(x0, w0)), max(0, min(x1, w0))
-        bbox_l0 = (int(wy0), int(wx0), int(wy1), int(wx1))
+        bbox_l0 = planning.clamp_viewport_to_level0(y0, x0, y1, x1, h0, w0)
         self._current_bbox = bbox_l0
 
         old_level = self.level
@@ -2349,28 +2338,19 @@ class ExploreController(QtCore.QObject):
             # level.
             self._cancel_directional_prefetch()
         ds = self.provider.level_downsample(self.level)
-        bbox_level = (
-            int(bbox_l0[0] / ds), int(bbox_l0[1] / ds),
-            int(bbox_l0[2] / ds), int(bbox_l0[3] / ds),
-        )
-        # Cheap zoom-direction signal for the fallback look-ahead ring
-        # (see `_issue_settled_request`): world-area shrinking == zoom-in.
+        # `_viewport_shrinking` is the cheap zoom-direction signal for the
+        # fallback look-ahead ring (see `_issue_settled_request`);
+        # `_viewport_zooming` disqualifies the tick from directional
+        # prefetch, which is pan-only.
         world_area = max(0.0, (x1 - x0)) * max(0.0, (y1 - y0))
-        prev_area = self._prev_world_area
-        self._viewport_shrinking = (
-            prev_area is not None and world_area < prev_area * 0.995)
-        # Directional prefetch (module docstring "pan only"): a zoom in
-        # EITHER direction (in, or out) disqualifies this tick from
-        # directional prefetch -- world area changed by more than 0.5% in
-        # either direction since the previous range event.
-        self._viewport_zooming = (
-            prev_area is not None and prev_area > 0.0
-            and (world_area < prev_area * 0.995 or world_area > prev_area * 1.005))
+        self._viewport_shrinking, self._viewport_zooming = (
+            planning.classify_zoom(self._prev_world_area, world_area))
         self._prev_world_area = world_area
 
         prev_visible = self._visible_tiles
         prev_level = getattr(self, "_prev_level_for_serve", None)
-        self._visible_tiles = tiles_covering(bbox_level, self.grid.tile_size)
+        self._visible_tiles = planning.visible_tiles_for_viewport(
+            bbox_l0, ds, self.grid.tile_size)
         # Serve a newly-visible tile IMMEDIATELY when its corrected result
         # is already in the cache, instead of waiting for the next 30ms
         # motion tick to issue the request (module docstring "Serving
@@ -2487,10 +2467,7 @@ class ExploreController(QtCore.QObject):
         if bbox_l0 is None:
             return
         ds = self.provider.level_downsample(self.level)
-        bbox_level = (
-            int(bbox_l0[0] / ds), int(bbox_l0[1] / ds),
-            int(bbox_l0[2] / ds), int(bbox_l0[3] / ds),
-        )
+        bbox_level = planning.bbox_to_level(bbox_l0, ds)
         visible = self._visible_tiles
 
         if self.probe:
@@ -2661,10 +2638,7 @@ class ExploreController(QtCore.QObject):
             return
 
         ds = self.provider.level_downsample(self.level)
-        bbox_level = (
-            int(self._current_bbox[0] / ds), int(self._current_bbox[1] / ds),
-            int(self._current_bbox[2] / ds), int(self._current_bbox[3] / ds),
-        )
+        bbox_level = planning.bbox_to_level(self._current_bbox, ds)
         tile_size = self.grid.tile_size
         visible = tiles_covering(bbox_level, tile_size)
 

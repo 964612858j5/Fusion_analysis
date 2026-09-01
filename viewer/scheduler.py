@@ -175,6 +175,18 @@ class TileScheduler:
         self._warmed_workers_lock = threading.Lock()
         self.warmed_workers = 0
 
+        # Raw workers still running their one-off initialisation (see
+        # `_raw_worker`). Distinct from `warmed_workers`, which counts
+        # SUCCESSES and never decreases: this counts work still OUTSTANDING,
+        # so it reaches zero whether a warm-up succeeded, failed or was cut
+        # short by shutdown. `idle()` includes it because a scheduler whose
+        # I/O threads have not finished starting is not idle -- it simply
+        # has not begun.
+        self._warming_workers = io_workers
+        # One-shot callbacks registered through `notify_when_idle`. Taken
+        # and cleared under `_lock`, always invoked OUTSIDE it.
+        self._idle_callbacks = []
+
         self._compute_threads = [
             threading.Thread(target=self._compute_worker, daemon=True, name=f"tile-compute-{i}")
             for i in range(compute_workers)
@@ -192,27 +204,138 @@ class TileScheduler:
     # ── public API ───────────────────────────────────────────────────────
 
     def request(self, req, callback):
-        """Ask for `req.key`; `callback(TileResult)` fires once (sync on hit)."""
+        """Ask for `req.key`; `callback(TileResult)` fires once (sync on hit).
+
+        After `shutdown()` no request is accepted -- not even one the cache
+        could serve -- and the callback fires SYNCHRONOUSLY with
+        `error="shutdown"`. Callers already have to handle a synchronous
+        callback (that is the cache-hit path), and they already treat a
+        non-None error as "no pixels", so this needs no call-site change.
+        It deliberately does not raise: a request racing teardown is normal
+        (a queued Qt signal delivered after the stack was torn down), and an
+        exception there would surface as a GUI crash. The string is
+        "shutdown" rather than "cancelled" so a teardown is distinguishable
+        from a generation cancellation; the only consumer that inspects the
+        string is `MultiChannelPrefetchController`, which buckets anything
+        else as a failure -- acceptable, since these arrive only while the
+        stack is being destroyed.
+        """
         key = req.key
+        # The cache is consulted OUTSIDE the lock (it has its own), but the
+        # DECISION -- refuse / serve the hit / join an existing entry /
+        # enqueue -- is taken in one `_cv` critical section, together with
+        # the `_shutdown` check. Checking shutdown before that section and
+        # enqueuing after it is a race: `shutdown()` can complete in the
+        # gap, the workers exit, and the entry queued afterwards is never
+        # run, never called back, and keeps `idle()` false for good.
         cache = self._cache_for(key)
         cached = cache.get(key)
-        if cached is not None:
-            callback(self._wrap_cache_hit(req, cached))
-            return
 
-        with self._lock:
-            entry = self._pending.get(key)
-            if entry is not None:
-                entry.waiters.append((req, callback))
-                return
-            entry = _Entry()
-            entry.waiters.append((req, callback))
-            self._pending[key] = entry
-            if isinstance(key, RawKey):
-                heapq.heappush(self._raw_heap, (req.priority, next(self._seq), key))
+        with self._cv:
+            if self._shutdown:
+                outcome = "shutdown"
+            elif cached is not None:
+                outcome = "hit"
             else:
-                heapq.heappush(self._heap, (req.priority, next(self._seq), key))
-            self._cv.notify_all()
+                entry = self._pending.get(key)
+                if entry is not None:
+                    entry.waiters.append((req, callback))
+                    outcome = "joined"
+                else:
+                    entry = _Entry()
+                    entry.waiters.append((req, callback))
+                    self._pending[key] = entry
+                    if isinstance(key, RawKey):
+                        heapq.heappush(self._raw_heap,
+                                       (req.priority, next(self._seq), key))
+                    else:
+                        heapq.heappush(self._heap,
+                                       (req.priority, next(self._seq), key))
+                    self._cv.notify_all()
+                    outcome = "queued"
+
+        # Callbacks outside the lock, as everywhere else in this class.
+        if outcome == "shutdown":
+            callback(TileResult(
+                request=req, pixels=None,
+                quality=getattr(key, "quality", QualityLevel.NATIVE),
+                provisional=False, timing={}, error="shutdown"))
+        elif outcome == "hit":
+            callback(self._wrap_cache_hit(req, cached))
+
+    def activity_snapshot(self) -> dict:
+        """A point-in-time count of PHYSICAL scheduler work, derived from
+        `_pending` -- the single source of truth -- not from a parallel
+        ledger that could drift out of step with it.
+
+        Keys:
+
+        * ``queued``  -- entries no worker has started yet.
+        * ``running`` -- entries a worker has started and not yet finished.
+        * ``total``   -- ``len(_pending)``, i.e. ``queued + running``.
+        * ``warming`` -- raw workers still initialising.
+
+        Counted as ENTRIES, not waiters: requests are deduped by key, so N
+        callers waiting on one key are one unit of physical work (`total`
+        == 1). External raw requests, corrected requests and the internal
+        raw staging a corrected tile needs all live in `_pending`, so all
+        three are included; a cache hit never enters `_pending` and is
+        therefore invisible here, which is correct -- it costs no worker.
+
+        Describes THIS scheduler only. The controller's overview pool and
+        floor threads are separate and not represented.
+        """
+        with self._lock:
+            queued = sum(1 for e in self._pending.values() if not e.started)
+            running = sum(1 for e in self._pending.values() if e.started)
+            return {
+                "queued": queued,
+                "running": running,
+                "total": len(self._pending),
+                "warming": self._warming_workers,
+            }
+
+    def idle(self) -> bool:
+        """No pending entries and no raw worker still initialising.
+
+        An idle worker THREAD is not activity -- what matters is whether any
+        work exists, not whether threads are alive.
+        """
+        with self._lock:
+            return self._warming_workers == 0 and not self._pending
+
+    def notify_when_idle(self, callback) -> None:
+        """Call `callback()` once, the first time this scheduler is idle.
+
+        Non-blocking by construction: there is deliberately no
+        `wait_for_idle()`. If the scheduler is already idle the callback
+        runs synchronously, on the calling thread, before returning;
+        otherwise it runs on whichever raw/compute worker thread finishes
+        the last unit of work. Never invoked while `_lock` is held, so a
+        callback may safely call back into `request()`.
+
+        The guarantee is "this scheduler REACHED idle", not "it is idle now":
+        by the time the callback runs, new work may already have been queued.
+        A caller that needs quiescence must therefore stop its producers
+        FIRST and only then register.
+
+        An exception raised by a callback is caught and swallowed -- these
+        run on worker threads, and a raising callback must not kill a worker
+        or prevent the other callbacks from running.
+
+        `shutdown()` discards registered callbacks WITHOUT calling them:
+        draining and tearing down are different things, and nothing should
+        start follow-up work because the scheduler is going away.
+        """
+        with self._lock:
+            if self._shutdown:
+                return
+            if self._warming_workers == 0 and not self._pending:
+                to_run = [callback]
+            else:
+                self._idle_callbacks.append(callback)
+                to_run = []
+        self._run_idle_callbacks(to_run)
 
     def cancel_generation(self, gen):
         """Mark opaque token `gen` stale; drop queued work wanted only by it.
@@ -225,9 +348,17 @@ class TileScheduler:
             self._cv.notify_all()
 
     def shutdown(self):
-        """Stop worker threads and the I/O pool, draining in-flight work."""
+        """Stop worker threads and the I/O pool, draining in-flight work.
+
+        Registered `notify_when_idle` callbacks are DISCARDED, not called:
+        draining ("the work I asked for is finished") and tearing down
+        ("this scheduler is going away") are different events, and nothing
+        should kick off follow-up work because the scheduler is being
+        destroyed.
+        """
         with self._lock:
             self._shutdown = True
+            self._idle_callbacks = []
             self._cv.notify_all()
         for t in self._compute_threads:
             t.join()
@@ -235,6 +366,35 @@ class TileScheduler:
             t.join()
 
     # ── internals ────────────────────────────────────────────────────────
+
+    def _take_idle_callbacks_locked(self):
+        """Caller MUST hold `_lock`. Returns the callbacks to run (and
+        clears them) iff the scheduler is idle right now, else [].
+
+        The single place "am I idle?" is decided, so every path that can
+        empty `_pending` -- warm-up finishing, a queued stale entry being
+        dropped, a raw entry completing, a compute entry completing --
+        agrees by construction rather than by four similar conditions.
+        """
+        if self._warming_workers != 0 or self._pending:
+            return []
+        callbacks, self._idle_callbacks = self._idle_callbacks, []
+        return callbacks
+
+    def _run_idle_callbacks(self, callbacks):
+        """Run callbacks with `_lock` RELEASED. Never let one failure take
+        out the worker thread or the callbacks after it."""
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:  # pragma: no cover - defensive by contract
+                pass
+
+    def _maybe_notify_idle(self):
+        """Take-then-run, for the paths that just removed pending work."""
+        with self._lock:
+            callbacks = self._take_idle_callbacks_locked()
+        self._run_idle_callbacks(callbacks)
 
     def _cache_for(self, key):
         return self.raw_cache if isinstance(key, RawKey) else self.corrected_cache
@@ -296,6 +456,15 @@ class TileScheduler:
         except Exception:  # pragma: no cover - warm_thread_handle already
             # catches everything internally; this is belt-and-suspenders.
             warmed = False
+        finally:
+            # `_warming_workers` counts OUTSTANDING initialisation, so it
+            # must fall by exactly one however this ended -- success,
+            # failure, or an exception. In a `finally` precisely so a warm-up
+            # that throws cannot leave the scheduler permanently non-idle.
+            with self._lock:
+                self._warming_workers -= 1
+                idle_callbacks = self._take_idle_callbacks_locked()
+            self._run_idle_callbacks(idle_callbacks)
         if warmed:
             with self._warmed_workers_lock:
                 self.warmed_workers += 1
@@ -326,6 +495,9 @@ class TileScheduler:
                                 provisional=False, timing={}, error="cancelled"))
                         for icb in entry.internal_waiters:
                             icb()
+                    # No idle notification here by contract: `shutdown()`
+                    # discarded the callbacks, and teardown must not be
+                    # mistaken for a drain.
                     return
                 _priority, _seq, key = heapq.heappop(self._raw_heap)
                 entry = self._pending.get(key)
@@ -350,6 +522,9 @@ class TileScheduler:
                         request=req, pixels=None, quality=QualityLevel.NATIVE,
                         provisional=False, timing={}, error="cancelled",
                     ))
+                # Dropping a queued stale entry removed pending work, so
+                # this is one of the ways the scheduler can reach idle.
+                self._maybe_notify_idle()
                 continue
 
             self._run_raw(key)
@@ -371,11 +546,15 @@ class TileScheduler:
         for iw in internal_waiters:
             iw()
 
+        # Idle is checked AFTER delivery in both exits below: a waiter's
+        # callback may itself request more work, and the honest answer to
+        # "did this scheduler reach idle" has to account for that.
         if error is not None:
             self._deliver(waiters, lambda req: TileResult(
                 request=req, pixels=None, quality=QualityLevel.NATIVE,
                 provisional=False, timing={}, error=error,
             ))
+            self._maybe_notify_idle()
             return
 
         pixels = PixelBuffer(residency="cpu", dtype=str(arr.dtype), shape=tuple(arr.shape), handle=arr)
@@ -384,6 +563,7 @@ class TileScheduler:
             request=req, pixels=pixels, quality=QualityLevel.NATIVE,
             provisional=False, timing=timing, error=None,
         ))
+        self._maybe_notify_idle()
 
     # -- compute path --
 
@@ -430,6 +610,7 @@ class TileScheduler:
                         request=req, pixels=None, quality=req.key.quality,
                         provisional=False, timing={}, error="cancelled",
                     ))
+                self._maybe_notify_idle()
                 continue
 
             self._run_compute(key, entry)
@@ -443,19 +624,33 @@ class TileScheduler:
             on_done()
             return
 
+        # Shutdown is checked INSIDE the enqueue critical section for the
+        # same reason `request()` does it: a compute task already running
+        # can reach here after the raw workers have exited, and an entry
+        # added then would sit in `_pending` for ever -- nothing left to
+        # serve it, so `idle()` could never become true again. On shutdown
+        # the staging simply reports done (the assembler falls back to
+        # direct reads, which is the existing timeout behaviour).
+        stage = True
         with self._lock:
-            entry = self._pending.get(raw_key)
-            if entry is not None:
-                entry.internal_waiters.append(on_done)
+            if self._shutdown:
+                stage = False
             else:
-                entry = _Entry()
-                entry.internal_waiters.append(on_done)
-                self._pending[raw_key] = entry
-                # Staging has no per-request priority of its own; queue it
-                # at the highest priority tier (0) so it is never starved
-                # behind a backlog of lower-priority external raw requests.
-                heapq.heappush(self._raw_heap, (0, next(self._seq), raw_key))
-            self._cv.notify_all()
+                entry = self._pending.get(raw_key)
+                if entry is not None:
+                    entry.internal_waiters.append(on_done)
+                else:
+                    entry = _Entry()
+                    entry.internal_waiters.append(on_done)
+                    self._pending[raw_key] = entry
+                    # Staging has no per-request priority of its own; queue
+                    # it at the highest priority tier (0) so it is never
+                    # starved behind a backlog of lower-priority external
+                    # raw requests.
+                    heapq.heappush(self._raw_heap, (0, next(self._seq), raw_key))
+                self._cv.notify_all()
+        if not stage:
+            on_done()
 
     def _stage_raw_for(self, key: CorrectionKey):
         """Stage every raw tile `key`'s halo needs (parallel, single-flight),
@@ -511,6 +706,8 @@ class TileScheduler:
                 request=req, pixels=None, quality=key.quality,
                 provisional=False, timing={}, error=error,
             ))
+            self._maybe_notify_idle()
             return
 
         self._deliver(waiters, lambda req: dataclasses.replace(result, request=req))
+        self._maybe_notify_idle()

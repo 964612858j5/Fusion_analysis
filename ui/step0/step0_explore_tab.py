@@ -1,22 +1,26 @@
-"""Step0 Explore tab — P0 skeleton mount of the v15 viewer stack.
+"""The full-image view of the v15 viewer stack, inside Step0.
 
-See `docs/v15_step0_mount_plan.md`. This tab is a v15 INTEGRATION TRIAL
-entry point, not the final UI: the final shape is Explore as a view mode
-inside the Background Correction workspace (Explore / Compare / Pinned
-patches). It exists first as a separate tab to prove lifecycle, dataset
-switching and behaviour under real Step0 load at the lowest risk.
+See `docs/v15_step0_mount_plan.md`. This is no longer a separate trial
+tab: it is the Full Image page of the Background Correction workspace's
+preview stack, reached by the ⤢ button on a compare panel and left with
+"Back to compare". The class keeps its `Step0ExploreTab` name -- it is
+still the owner of the viewer stack's lifecycle -- but nothing here is a
+top-level tab any more, and the placeholder texts say so.
 
-P0 scope, deliberately narrow:
+Scope, deliberately narrow:
 
-* the viewer stack is built LAZILY, on the first activation of the tab
+* the viewer stack is built LAZILY, on the first opening of the view
   with a dataset loaded, and never twice;
-* mode is `Original` only -- no correction is selected, so the controller
-  serves raw pixels (`ExploreController.method` stays None);
+* the SELECTION comes from the caller: each compare panel's ⤢ button asks
+  for one result -- Original (`method=None`, so the controller serves raw
+  pixels), TopHat or cuCIM -- and the stack is built with that selection
+  rather than built as Original and switched afterwards. The parameters
+  come from the page's preview provider, never from this file;
 * the channel FOLLOWS the page: the stack is built with whatever
-  `current_channel` the Background Correction tab holds at build time, and
-  every later activation of this tab re-reads it and switches if it
-  changed. There is no reverse direction -- Explore has no channel control
-  of its own to change it with;
+  `current_channel` the compare panels hold at build time, and every later
+  opening of this view re-reads it and switches if it changed. There is no
+  reverse direction -- this view has no channel control of its own to
+  change it with;
 * a dataset switch tears the old stack down COMPLETELY before anything is
   bound to the new dataset, so no pixel and no source identity of the
   previous dataset can survive;
@@ -24,12 +28,17 @@ P0 scope, deliberately narrow:
   workers) then `provider.close()`, then the caches are dropped -- and is
   idempotent.
 
-Still NOT here (later phases): HOT/COVERAGE prefetch, the four preview
-modes (the method stays None, so this shows Original only), a channel
-control inside Explore and the reverse sync that would need, and the
-BG-worker drain hand-off. Nothing here writes to Save, to any config, or to
-the correction numerics, and nothing here touches the existing patch
-preview.
+The GPU hand-off IS here, in both directions: a production correction run
+releases this view first (`release_for_production` -> teardown with
+`wait_for_floor=True`, which blocks until a floor computation is off the
+GPU), and a build is refused while such a run is going (`busy_probe`).
+
+Still NOT here (later phases): HOT/COVERAGE prefetch, a multi-channel
+overlay, a channel control inside this view and the reverse sync that
+would need, and the viewport mapping that would open the full image on the
+region the compare panels are showing. Nothing here writes to Save, to any
+config, or to the correction numerics, and nothing here touches the
+existing patch preview.
 """
 
 import time
@@ -54,10 +63,25 @@ PLACEHOLDER_BUSY = (
     "finishes. Try again then."
 )
 
+# Three distinct reasons the full image is not on screen. They were one
+# constant, which meant a dataset that WAS loaded still got told to load
+# one -- the states are separated here so each says something true.
 PLACEHOLDER_NO_DATASET = (
-    "Explore (v15 trial)\n\n"
-    "Load an OME-TIFF in the Background Correction tab first.\n"
-    "This view then shows the whole slide at full resolution."
+    "No image loaded\n\n"
+    "Load an OME-TIFF in the Data & Paths box above.\n"
+    "The full image then shows the whole slide at full resolution."
+)
+
+PLACEHOLDER_NOT_OPEN = (
+    "Full image not open\n\n"
+    "Use the ⤢ button on a compare panel to open that result -- Original, "
+    "TopHat or cuCIM -- at full resolution."
+)
+
+PLACEHOLDER_BUILD_FAILED = (
+    "Full image could not be opened\n\n"
+    "{error}\n\n"
+    "The compare panels are unaffected."
 )
 
 
@@ -290,19 +314,32 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._discard_stack()
         self._dataset_path = path or None
         self._build_error = None
-        self._show_placeholder(PLACEHOLDER_NO_DATASET)
+        # A bound dataset is NOT the "load something" state: the view simply
+        # has not been opened yet, and it is opened from a compare panel.
+        self._show_placeholder(PLACEHOLDER_NO_DATASET
+                               if self._dataset_path is None
+                               else PLACEHOLDER_NOT_OPEN)
 
     def activate(self):
-        """Called when this tab becomes the current one.
+        """Open-the-view lifecycle entry: build if needed, else re-sync.
 
-        Two jobs. The first activation with a dataset loaded BUILDS the
-        stack, using whatever channel the Background Correction tab has
-        selected right then, and never builds again for the same dataset.
-        Every later activation PULLS that selection again: the user picks a
-        channel over there, comes back here, and sees it.
+        No production caller since the full image became a page of the
+        preview stack -- `show_source` is the live entry point, because
+        every real way in names a result. This is kept as the
+        selection-free form of the same lifecycle: build on first open with
+        whatever channel the compare panels hold, re-read that channel on
+        every later open. It stays because a host that reopens the view
+        without naming a method needs exactly this, and because the pull
+        semantics below are the contract `show_source` builds on.
+
+        Two jobs. The first call with a dataset loaded BUILDS the stack,
+        using whatever channel the compare panels have selected right then,
+        and never builds again for the same dataset. Every later call PULLS
+        that selection again: the user picks a channel over there, comes
+        back here, and sees it.
 
         Pull rather than subscribe, deliberately. A signal connection would
-        have to decide what to do while this tab is hidden -- switching an
+        have to decide what to do while this view is hidden -- switching an
         invisible view costs a synchronous overview read for nothing -- and
         would fire once per intermediate selection on the way to the one the
         user actually wants. Reading on entry answers both by construction:
@@ -358,9 +395,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
                   f"{(time.perf_counter() - t0) * 1000:.0f} ms: {exc}",
                   flush=True)
             self._show_placeholder(
-                "Explore could not open this dataset:\n\n"
-                f"{exc}\n\n"
-                "The Background Correction tab is unaffected.")
+                PLACEHOLDER_BUILD_FAILED.format(error=exc))
             traceback.print_exc()
             return
         self._stack = stack

@@ -669,7 +669,7 @@ def test_a_forced_channel_source_does_not_survive_into_the_next_dataset(
             ["actual_source_kind"]) == "corrected_zarr"   # auto again
 
 
-def test_the_next_dataset_mints_its_own_roi_context_at_the_same_bbox(
+def test_the_next_dataset_cannot_reuse_the_previous_roi_context_at_the_same_bbox(
         app, tmp_path, monkeypatch):
     """The reuse signature is (mode, first ROI bbox) -- it does not mention
     the dataset. B drawing an ROI where A had one must not reuse A's

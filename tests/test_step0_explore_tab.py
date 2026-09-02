@@ -7,6 +7,7 @@ a provider gets closed.
 """
 
 import os
+import re
 import time
 
 import numpy as np
@@ -16,6 +17,7 @@ pytest.importorskip("PyQt5")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from block01.ui.step0 import step0_explore_tab as _et  # noqa: E402
 from block01.ui.step0.step0_explore_tab import (  # noqa: E402
     ExploreStack, Step0ExploreTab, _cleanup_partial_stack,
     build_default_stack,
@@ -995,3 +997,76 @@ def test_a_released_stack_can_be_rebuilt(app):
                                     ("CD3", "cucim", (50,))]
     assert tab.build_attempts == 2
     tab.teardown()
+
+
+# ── placeholder states ───────────────────────────────────────────────────────
+#
+# The full image is not on screen for four different reasons, and each has
+# to say something true. They used to share one constant, so a dataset
+# that WAS loaded was still told to load one -- and that constant still
+# called itself "Explore (v15 trial)" and pointed at a tab that no longer
+# exists.
+
+def test_no_dataset_says_load_one(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage(), stack_factory=factory)
+
+    text = tab._placeholder.text()
+
+    assert "Load an OME-TIFF" in text
+    tab.teardown()
+
+
+def test_a_bound_dataset_is_not_told_to_load_one(app):
+    """The state that was wrong: a dataset IS loaded, the view just has not
+    been opened, and the placeholder has to say how to open it."""
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+
+    tab.set_dataset("/data/slide_a.ome.tif")
+    text = tab._placeholder.text()
+
+    assert "Load an OME-TIFF" not in text
+    assert "⤢" in text                       # how it is actually opened
+    assert tab.stack is None                 # still not built -- just a message
+    tab.teardown()
+
+
+def test_the_load_prompt_comes_back_when_the_dataset_goes_away(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    tab.set_dataset(None)
+    text = tab._placeholder.text()
+
+    assert "Load an OME-TIFF" in text
+    assert "⤢" not in text
+    tab.teardown()
+
+
+def test_a_failed_build_names_the_error_and_does_not_say_load(app):
+    factory, _record = make_factory(fail=True)
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    tab.activate()
+    text = tab._placeholder.text()
+
+    assert "boom: could not read pyramid" in text
+    assert "Load an OME-TIFF" not in text
+    # It must also not blame the part of the workspace that still works.
+    assert "compare panels are unaffected" in text
+    tab.teardown()
+
+
+def test_no_placeholder_still_calls_this_a_trial_tab(app):
+    """The view lives inside Background Correction now. No text may promise a
+    tab, and none may carry the v15 trial label."""
+    texts = [_et.PLACEHOLDER_NO_DATASET, _et.PLACEHOLDER_NOT_OPEN,
+             _et.PLACEHOLDER_BUILD_FAILED, _et.PLACEHOLDER_BUSY,
+             _et.PLACEHOLDER_RELEASED]
+    for text in texts:
+        assert "trial" not in text.lower(), text
+        # Whole word: "stable"/"table" are not claims about a tab.
+        assert not re.search(r"\btabs?\b", text, re.I), text

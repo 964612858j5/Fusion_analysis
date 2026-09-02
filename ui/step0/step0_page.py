@@ -151,6 +151,17 @@ class PreloadWorker(QThread):
             self.finished_gen.emit(self._gen)
 
 
+# Patch Preview pages. `QStackedWidget.currentIndex()` is the only page
+# state there is -- no parallel enum to keep in step with it.
+PREVIEW_PAGE_COMPARE = 0
+PREVIEW_PAGE_FULL_IMAGE = 1
+
+# Which of the three compare results the full image shows. Ordered to match
+# the compare panels left to right.
+FULL_IMAGE_SOURCES = ("original", "tophat", "cucim")
+FULL_IMAGE_METHOD = {"original": None, "tophat": "tophat", "cucim": "cucim"}
+
+
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
 
@@ -169,6 +180,10 @@ class Step0Page(QWidget):
         self.rois = []
         self.current_patch_idx = 0
         self.current_channel = None
+        # Which compare result the full image shows. The user's choice
+        # survives a move to the nucleus channel (shown as Original) and is
+        # restored on the way back.
+        self._full_image_source = "original"
         # Conditioning preload: background QThread caches ALL patches × ALL
         # channels so patch-switch / All-toggle are zero-IO. _preload_gen tags the
         # active worker so a cancelled (stale) worker's late signals are ignored.
@@ -353,15 +368,10 @@ class Step0Page(QWidget):
         self._cond_tab = self._build_step0_conditioning_tab()
         self._cond_tab_index = self._step0_tabs.addTab(
             self._cond_tab, "Channel Remap")
-        # v15 Explore, mounted as a TRIAL entry point (docs/v15_step0_mount_plan.md
-        # §1): the final shape is a view mode inside Background Correction, not a
-        # third top-level tab. Additive -- neither existing tab is touched -- and
-        # the stack inside it is built lazily, on first activation with a dataset
-        # loaded.
-        self._explore_tab = Step0ExploreTab(
-            self, busy_probe=self.production_correction_busy)
-        self._explore_tab_index = self._step0_tabs.addTab(
-            self._explore_tab, "Explore (v15 trial)")
+        # The full-image viewer is NOT a top-level tab. It lives inside
+        # Background Correction, as the second page of the Patch Preview
+        # area, and is built there (Section C) -- one instance, owned by
+        # that stack. The trial third tab it replaced is gone.
         self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
         # Keep the BG-tab left column (channel list + params) and the Remap-tab left
@@ -928,6 +938,28 @@ class Step0Page(QWidget):
             reset_row.addWidget(btn_r, stretch=1)
         pvl.addLayout(reset_row)
 
+        # "Full image" row: one button per panel, each naming the ONE result
+        # it enlarges. Three buttons rather than a mode selector because the
+        # user is already looking at the three results and points at one --
+        # there is nothing to choose from a list.
+        full_row = QHBoxLayout()
+        self._full_image_buttons = {}
+        for source, lbl_text in zip(FULL_IMAGE_SOURCES, TITLES):
+            btn_f = QPushButton(f"⤢ {lbl_text}")
+            btn_f.setFixedHeight(20)
+            btn_f.setToolTip(f"View the whole slide with {lbl_text}")
+            btn_f.setStyleSheet(
+                "QPushButton{color:#61afef;border:1px solid #3a5f7d;"
+                "border-radius:3px;font-size:10px;background:#1a1a1a;}"
+                "QPushButton:hover{color:#fff;border-color:#61afef;}"
+                "QPushButton:disabled{color:#555;border-color:#333;}"
+            )
+            btn_f.clicked.connect(
+                lambda _, src=source: self._enter_full_image(src))
+            self._full_image_buttons[source] = btn_f
+            full_row.addWidget(btn_f, stretch=1)
+        pvl.addLayout(full_row)
+
         # 别名兼容
         self._orig_vb,  self._orig_img  = self._preview_vbs[0], self._preview_imgs[0]
         self._top_vb,   self._top_img   = self._preview_vbs[1], self._preview_imgs[1]
@@ -940,7 +972,18 @@ class Step0Page(QWidget):
         self._preview_status.setWordWrap(True)
         self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
         pvl.addWidget(self._preview_status)
-        crl.addWidget(prev_box, stretch=3)
+
+        # ── Patch Preview area = two pages ──────────────────────────────
+        # A QStackedWidget, not show/hide on siblings: hiding a page leaves
+        # its widgets' state alone (the three compare ViewBoxes keep their
+        # ranges, so returning needs nothing saved and restored), and the
+        # full-image page keeps its own toolbar visible because the toolbar
+        # is INSIDE that page.
+        self._preview_stack = QtWidgets.QStackedWidget()
+        self._preview_stack.addWidget(prev_box)                 # page 0
+        self._preview_stack.addWidget(self._build_full_image_page())  # page 1
+        self._preview_stack.setCurrentIndex(PREVIEW_PAGE_COMPARE)
+        crl.addWidget(self._preview_stack, stretch=3)
 
         # Metrics + Decision 横排（都在右侧底部）
         bottom_row = QHBoxLayout()
@@ -1224,6 +1267,223 @@ class Step0Page(QWidget):
     # `_queue_preview`, has no caller anywhere in the repo. Whoever
     # reconnects it must add it here in the same change.
 
+    # ── full image (Patch Preview page 1) ───────────────────────────────
+
+    def _build_full_image_page(self):
+        """The full-image page: a fixed toolbar plus the ONE Explore tab.
+
+        The Explore tab is created here and nowhere else -- this page owns
+        it. The toolbar lives inside the page, so it is visible exactly when
+        the page is, and "back to compare" can never be hidden by the
+        viewer's own placeholder swapping.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        btn_style = (
+            "QPushButton{color:#ddd;border:1px solid #555;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;background:#1a1a1a;}"
+            "QPushButton:hover{border-color:#aaa;}"
+            "QPushButton:disabled{color:#555;border-color:#333;}"
+        )
+        back = QPushButton("← Back to compare")
+        back.setToolTip("Return to the three-panel comparison. Nothing is "
+                        "recomputed and the viewer stays loaded.")
+        back.setStyleSheet(btn_style)
+        back.clicked.connect(self._return_to_compare)
+        bar.addWidget(back)
+
+        self._btn_full_reopen = QPushButton("Reopen full image")
+        self._btn_full_reopen.setToolTip(
+            "Rebuild the full image for the current channel and the current "
+            "parameters. Needed after a correction run released it.")
+        self._btn_full_reopen.setStyleSheet(btn_style)
+        self._btn_full_reopen.clicked.connect(self._reopen_full_image)
+        bar.addWidget(self._btn_full_reopen)
+
+        self._btn_full_fit = QPushButton("⤢ Fit whole slide")
+        self._btn_full_fit.setToolTip(
+            "Reset THIS view to the whole slide. Separate from going back "
+            "to the comparison.")
+        self._btn_full_fit.setStyleSheet(btn_style)
+        self._btn_full_fit.clicked.connect(self._fit_full_image)
+        bar.addWidget(self._btn_full_fit)
+
+        self._full_source_lbl = QLabel("—")
+        self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
+        bar.addWidget(self._full_source_lbl)
+        bar.addStretch(1)
+        layout.addLayout(bar)
+
+        # The viewer widget itself is created on FIRST USE, not here.
+        # Constructing this page is on the critical path of building
+        # Step0 -- every construction of the page would otherwise also
+        # construct the viewer widget, for a user who may never open the
+        # full image. (It also measurably worsened an existing
+        # pyqtgraph/offscreen crash in the Step0 test suite, which builds
+        # 32 pages in one process.) No new state is needed to defer it:
+        # the dataset path it needs already lives in `self.ome_path`.
+        self._explore_tab = None
+        self._full_image_host = layout
+        return page
+
+    def _ensure_explore_tab(self):
+        """Create the ONE Explore tab, on first use."""
+        if self._explore_tab is not None:
+            return self._explore_tab
+        self._explore_tab = Step0ExploreTab(
+            self, busy_probe=self.production_correction_busy)
+        self._full_image_host.addWidget(self._explore_tab, stretch=1)
+        # Catch up on the dataset: `set_dataset` may have run before this
+        # existed. `ome_path` is None until a slide is loaded, which is
+        # exactly the placeholder state the tab starts in anyway.
+        if getattr(self, "ome_path", None):
+            self._explore_tab.set_dataset(self.ome_path)
+        return self._explore_tab
+
+    def _full_image_selection(self, channel=None):
+        """`(source, method, params)` for the full image right now.
+
+        The parameters come from the provider's `effective_*` fields -- what
+        a preview of that channel would actually use -- never from
+        `_channel_params` or a default constant, so there is one answer to
+        "what radius is this".
+
+        The nucleus channel is excluded from correction, so it is SHOWN as
+        Original whatever the chosen source is; `_full_image_source` keeps
+        the user's choice, and moving to an ordinary channel goes back to
+        it.
+        """
+        channel = channel or self.current_channel
+        source = self._full_image_source
+        if channel and channel == self.nucleus_channel:
+            source = "original"
+        method = FULL_IMAGE_METHOD[source]
+        if method is None:
+            return source, None, ()
+
+        provider = self.preview_source_provider
+        correction = provider.describe(channel)["correction"] if provider else {}
+        key = ("effective_tophat_radius" if method == "tophat"
+               else "effective_cucim_sigma")
+        value = correction.get(key)
+        if value is None:
+            # No provider (a half-built page) -- show Original rather than
+            # inventing a radius.
+            return "original", None, ()
+        return source, method, (int(value),)
+
+    def _describe_full_source(self, source, method, params):
+        if method is None:
+            label = "Original"
+        elif method == "tophat":
+            label = f"Top-hat radius {params[0]}"
+        else:
+            label = f"cuCIM sigma {params[0]}"
+        if (self.current_channel
+                and self.current_channel == self.nucleus_channel
+                and self._full_image_source != "original"):
+            label += "  (nucleus is excluded from correction)"
+        return f"{self.current_channel or '—'} · {label}"
+
+    def _enter_full_image(self, source):
+        """A compare panel's "full image" button."""
+        if source not in FULL_IMAGE_METHOD:
+            return
+        self._full_image_source = source
+        self._preview_stack.setCurrentIndex(PREVIEW_PAGE_FULL_IMAGE)
+        self._show_full_image()
+
+    def _return_to_compare(self):
+        """Back to the three panels. Deliberately does nothing else.
+
+        No teardown, no `set_selection`, no recompute: coming back should be
+        instant, and the compare panels kept their own ranges while hidden.
+        """
+        self._preview_stack.setCurrentIndex(PREVIEW_PAGE_COMPARE)
+
+    def _reopen_full_image(self):
+        """Rebuild after a production run released the viewer.
+
+        Recovery is a user action on purpose: the run may have changed the
+        parameters, and this reads them fresh rather than restoring what was
+        on screen before.
+        """
+        self._show_full_image()
+
+    def _fit_full_image(self):
+        """Reset the full-image view to the whole slide.
+
+        Only this view, and only when there is one -- it is not "back to
+        compare" under another name.
+        """
+        explore_tab = self._explore_tab
+        stack = explore_tab.stack if explore_tab is not None else None
+        if stack is None:
+            return
+        h0, w0 = stack.provider.level_shape(0)
+        stack.view.view_box.setRange(xRange=(0, w0), yRange=(0, h0),
+                                     padding=0)
+
+    def _full_image_visible(self):
+        stack_widget = getattr(self, "_preview_stack", None)
+        return (stack_widget is not None
+                and stack_widget.currentIndex() == PREVIEW_PAGE_FULL_IMAGE)
+
+    def _show_full_image(self):
+        """Ask the viewer for the current selection, if it may be asked.
+
+        While a production correction is running the viewer has been
+        released and must not be rebuilt; its placeholder already says so,
+        and `busy_probe` would refuse anyway. Returning early keeps that
+        message rather than replacing it with a second refusal.
+        """
+        if not self.current_channel:
+            return
+        source, method, params = self._full_image_selection()
+        self._full_source_lbl.setText(
+            self._describe_full_source(source, method, params))
+        if self.production_correction_busy():
+            return
+        self._ensure_explore_tab().show_source(self.current_channel, method,
+                                               params)
+
+    def _sync_full_image_to_channel(self):
+        """Called at the END of a channel change.
+
+        Only when the full image is actually on screen: switching a hidden
+        viewer costs a synchronous overview read for something nobody is
+        looking at. And never when a correction run is going -- a channel
+        change can itself start an on-demand run, whose resource gate has
+        just released the viewer; rebuilding here would undo that release
+        immediately.
+        """
+        if not self._full_image_visible():
+            return
+        self._show_full_image()
+
+    def _update_full_image_buttons(self):
+        """The nucleus channel is excluded from correction, so its
+        corrected panels have nothing to enlarge."""
+        buttons = getattr(self, "_full_image_buttons", None)
+        if not buttons:
+            return
+        ch = self.current_channel
+        is_nucleus = bool(ch) and ch == self.nucleus_channel
+        for source, button in buttons.items():
+            if source == "original":
+                button.setEnabled(bool(ch))
+                continue
+            button.setEnabled(bool(ch) and not is_nucleus)
+            button.setToolTip(
+                "The nucleus channel is excluded from background correction."
+                if is_nucleus else
+                f"View the whole slide with {source}")
+
     def production_correction_busy(self):
         """Name of the production correction task now running, else None.
 
@@ -1288,11 +1548,6 @@ class Step0Page(QWidget):
     def _on_step0_tab_changed(self, idx):
         if not hasattr(self, "_step0_tabs"):
             return
-        if idx == getattr(self, "_explore_tab_index", -1):
-            # Lazy build: the viewer stack (8 I/O + 4 compute workers, its own
-            # file handles and caches) must not exist until the user actually
-            # opens this tab.
-            self._explore_tab.activate()
         # Key on the tab INDEX, not its title (title was renamed to "Channel
         # Remap"). Entering the remap tab always (re)feeds the workbench from the
         # current patch so it works even when NO background correction was run.
@@ -3276,9 +3531,16 @@ class Step0Page(QWidget):
         if row < 0 or row >= len(self._channel_order):
             self.current_channel = None
             self._apply_btn.setEnabled(False)
+            self._update_full_image_buttons()
             return
         self.current_channel = self._channel_order[row]
         self._update_decision_ui()
+        self._update_full_image_buttons()
+        # The full image follows the channel, but only when it is on screen
+        # and only when the GPU is free -- see `_sync_full_image_to_channel`.
+        # Placed BEFORE the on-demand path below on purpose: that path's
+        # resource gate releases the viewer, and this must not race it.
+        self._sync_full_image_to_channel()
 
         if not self.patches:
             self._preview_status.setText(

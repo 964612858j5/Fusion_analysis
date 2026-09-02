@@ -41,6 +41,19 @@ RAW_CACHE_BYTES = 512 * 1024 * 1024
 CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 TILE_SIZE = 512
 
+PLACEHOLDER_RELEASED = (
+    "Full image released\n\n"
+    "Background correction is running ({reason}).\n"
+    "Open this view again when it finishes -- it will be rebuilt with the "
+    "parameters current at that time."
+)
+
+PLACEHOLDER_BUSY = (
+    "Background correction is running ({reason}).\n\n"
+    "The full image shares the GPU with it, so it cannot open until that "
+    "finishes. Try again then."
+)
+
 PLACEHOLDER_NO_DATASET = (
     "Explore (v15 trial)\n\n"
     "Load an OME-TIFF in the Background Correction tab first.\n"
@@ -212,10 +225,17 @@ class Step0ExploreTab(QtWidgets.QWidget):
     """Hosts the Explore stack for the currently loaded dataset."""
 
     def __init__(self, page=None, stack_factory=build_default_stack,
-                 parent=None):
+                 parent=None, busy_probe=None):
+        """`busy_probe` is an optional read-only callable returning the name
+        of a production correction run in progress, or None when the GPU is
+        free. The host owns that judgement -- this tab asks, and never
+        inspects the host's worker handles itself. Default None means
+        "never busy", which is what every existing caller gets.
+        """
         super().__init__(parent)
         self._page = page
         self._stack_factory = stack_factory
+        self._busy_probe = busy_probe
         self._stack = None
         self._dataset_path = None
         self._build_attempts = 0
@@ -309,7 +329,17 @@ class Step0ExploreTab(QtWidgets.QWidget):
 
         Kept single deliberately: a second construction site is how the
         failure handling, the logging and the placeholder state drift apart.
+        It is also the single place the production-run gate is checked: a
+        stack built while a correction run is going would put a second user
+        on the GPU, which is exactly what the release on the other side
+        exists to prevent.
         """
+        busy = self._busy_probe() if self._busy_probe is not None else None
+        if busy:
+            print(f"[explore] refusing to build: {busy} is running",
+                  flush=True)
+            self._show_placeholder(PLACEHOLDER_BUSY.format(reason=busy))
+            return
         self._build_attempts += 1
         # Lifecycle logging, deliberately kept: building this stack blocks
         # the GUI thread (a synchronous overview read), so when a manual test
@@ -403,6 +433,25 @@ class Step0ExploreTab(QtWidgets.QWidget):
         print(f"[explore] following the page's channel: "
               f"{controller.channel!r} -> {channel!r}", flush=True)
         controller.set_selection(channel=channel)
+
+    def release_for_production(self, reason):
+        """Give the GPU up to a production correction run.
+
+        The same physical teardown as `teardown(wait_for_floor=True)` -- it
+        blocks until a running floor computation has actually finished --
+        but a DIFFERENT user-facing state: this is recoverable. The view
+        says why it went away and that reopening will rebuild it, where a
+        real teardown either says nothing (destruction) or asks for a
+        dataset. Without a placeholder here the tab would simply go blank:
+        `_discard_stack` removes the view and puts nothing in its place.
+
+        Idempotent; a no-op when no stack exists (the placeholder is left
+        alone in that case, so a "no dataset" message is not overwritten).
+        """
+        if self._stack is None:
+            return
+        self._discard_stack(wait_for_floor=True)
+        self._show_placeholder(PLACEHOLDER_RELEASED.format(reason=reason))
 
     def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from

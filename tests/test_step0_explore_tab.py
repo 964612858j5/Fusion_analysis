@@ -876,3 +876,122 @@ def test_show_source_normalises_original_params(app, stray):
     assert tab.show_source("CD8", None, (1234,)) is True
     assert controller.selection_calls == []
     tab.teardown()
+
+
+# ── the production-correction gate ───────────────────────────────────────────
+#
+# Explore and Step0's correction workers both drive the GPU, and cupy is not
+# safe to use from two places at once. The gate is two-directional: a
+# production run releases Explore before starting, and Explore refuses to
+# build while one is running.
+
+def test_a_busy_probe_blocks_the_build_and_says_why(app):
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory,
+                          busy_probe=lambda: "whole-slide correction (Save)")
+    tab.resize(640, 480)
+    tab.show()
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    tab.activate()
+
+    assert tab.stack is None
+    assert record["built"] == []
+    assert tab.build_attempts == 0, (
+        "a refused build must not count as an attempt -- it is retryable")
+    assert tab._placeholder.isVisible()
+    text = tab._placeholder.text()
+    assert "whole-slide correction (Save)" in text and "GPU" in text
+    tab.teardown()
+
+
+def test_show_source_is_gated_too_and_recovers_when_free(app):
+    """The drill-down buttons go through the same gate, and it is not
+    sticky: once the run finishes, the next attempt builds."""
+    factory, _record = make_factory()
+    busy = {"reason": "patch background correction"}
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory,
+                          busy_probe=lambda: busy["reason"])
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    assert tab.show_source("CD8", "tophat", (15,)) is False
+    assert tab.stack is None and tab.build_attempts == 0
+
+    busy["reason"] = None
+    assert tab.show_source("CD8", "tophat", (15,)) is True
+    assert tab.stack is not None
+    assert tab.stack.controller.method == "tophat"
+    tab.teardown()
+
+
+def test_no_probe_means_never_busy(app):
+    """Every existing caller passes no probe and must be unaffected."""
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    tab.activate()
+
+    assert tab.stack is not None
+    tab.teardown()
+
+
+def test_release_for_production_waits_for_the_floor_and_says_why(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.resize(640, 480)
+    tab.show()
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    stack = tab.stack
+
+    tab.release_for_production("patch background correction")
+
+    assert tab.stack is None
+    assert stack.provider.closed is True
+    assert stack.controller.teardown_waits == [True], (
+        "the release must be the hand-off form, or a floor job keeps the GPU")
+    # Not blank: the view is gone, so something has to be in its place.
+    assert tab._placeholder.isVisible()
+    text = tab._placeholder.text()
+    assert "patch background correction" in text
+    assert "released" in text.lower()
+
+
+def test_release_is_idempotent_and_a_no_op_without_a_stack(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    # No stack yet: the release must not overwrite the "load a dataset"
+    # style placeholder with a "released" message for something that was
+    # never there.
+    before = tab._placeholder.text()
+    tab.release_for_production("patch background correction")
+    assert tab._placeholder.text() == before
+
+    tab.activate()
+    tab.release_for_production("patch background correction")
+    released = tab._placeholder.text()
+    tab.release_for_production("patch background correction")
+    assert tab._placeholder.text() == released
+    assert tab.stack is None
+
+
+def test_a_released_stack_can_be_rebuilt(app):
+    """Releasing is recoverable -- that is what distinguishes it from a
+    teardown. The rebuild uses whatever is current at that point."""
+    factory, record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.show_source("CD8", "tophat", (15,))
+    tab.release_for_production("whole-slide correction (Save)")
+
+    page.current_channel = "CD3"
+    assert tab.show_source("CD3", "cucim", (50,)) is True
+
+    assert record["built_with"] == [("CD8", "tophat", (15,)),
+                                    ("CD3", "cucim", (50,))]
+    assert tab.build_attempts == 2
+    tab.teardown()

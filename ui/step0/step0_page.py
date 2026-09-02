@@ -6,6 +6,7 @@ import os
 import gc
 import json
 import shutil
+import time
 import traceback
 import multiprocessing as mp
 from queue import Empty
@@ -357,7 +358,8 @@ class Step0Page(QWidget):
         # third top-level tab. Additive -- neither existing tab is touched -- and
         # the stack inside it is built lazily, on first activation with a dataset
         # loaded.
-        self._explore_tab = Step0ExploreTab(self)
+        self._explore_tab = Step0ExploreTab(
+            self, busy_probe=self.production_correction_busy)
         self._explore_tab_index = self._step0_tabs.addTab(
             self._explore_tab, "Explore (v15 trial)")
         self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
@@ -1206,6 +1208,65 @@ class Step0Page(QWidget):
         bar.addWidget(btn_save)
         lay.addLayout(bar)
         return w
+
+    # ── production correction vs the Explore stack ──────────────────────
+    #
+    # Both run background correction on the GPU, and cupy is not safe to
+    # drive from two places at once (see BatchProcessWorker's own note).
+    # So the two are kept apart by a gate in both directions: a production
+    # run releases Explore before it starts, and Explore refuses to build
+    # while a production run is going.
+    #
+    # Only the paths that actually reach a GPU worker today are listed.
+    # `PreloadWorker` is excluded on purpose -- it is a plain reader (its
+    # docstring: "background reader"), no correction. `BackgroundPreviewWorker`
+    # is excluded because it is currently UNREACHABLE: its only trigger,
+    # `_queue_preview`, has no caller anywhere in the repo. Whoever
+    # reconnects it must add it here in the same change.
+
+    def production_correction_busy(self):
+        """Name of the production correction task now running, else None.
+
+        Read-only; starts nothing and cancels nothing. Checked per worker
+        with `isRunning()` rather than by the presence of a handle:
+        `_ondemand_workers` only ever grows (nothing removes finished
+        entries), so its length says nothing about whether work is live.
+        """
+        worker = getattr(self, "_batch_worker", None)
+        if worker is not None and worker.isRunning():
+            return "patch background correction"
+        for worker in getattr(self, "_ondemand_workers", ()) or ():
+            if worker.isRunning():
+                return "on-demand background correction"
+        worker = getattr(self, "_wsi_worker", None)
+        if worker is not None and worker.isRunning():
+            return "whole-slide correction (Save)"
+        return None
+
+    def _release_explore_for_production(self, reason):
+        """Tear the Explore stack down and WAIT for it, before a GPU run.
+
+        `wait_for_floor=True`: this must not return while a corrected-floor
+        computation is still on the GPU, which is the whole point of the
+        hand-off (see `ExploreController.teardown`). It therefore blocks the
+        GUI thread -- measured 2ms with nothing in flight and 0.35s with a
+        floor job running, and a floor job takes 0.4-1.1s, so a hand-off
+        landing early in one blocks for most of it. No progress UI is
+        attempted: repainting during a synchronous block would need event
+        re-entry, and re-entering the event loop here is how a "release"
+        turns into a second Explore being built underneath it.
+
+        Idempotent, and a no-op when no stack exists. The user can enter the
+        full image again once the run finishes; it is rebuilt then with
+        whatever parameters are current.
+        """
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is None or explore_tab.stack is None:
+            return
+        t0 = time.perf_counter()
+        explore_tab.release_for_production(reason)
+        print(f"[step0] released Explore for {reason} in "
+              f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
     @property
     def preview_source_provider(self):
@@ -3304,6 +3365,7 @@ class Step0Page(QWidget):
         self._batch_worker.progress.connect(self._on_batch_progress)
         self._batch_worker.error_signal.connect(self._on_batch_error)
         self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._release_explore_for_production("patch background correction")
         self._batch_worker.start()
 
     def _on_stop_process(self):
@@ -3409,6 +3471,7 @@ class Step0Page(QWidget):
         worker.error_signal.connect(self._on_batch_error)
         worker.canceled.connect(lambda: None)
         self._ondemand_workers.append(worker)
+        self._release_explore_for_production("on-demand background correction")
         worker.start()
 
     # ══ 从缓存显示结果 ════════════════════════════════════════════════
@@ -3669,6 +3732,7 @@ class Step0Page(QWidget):
         self._batch_worker.progress.connect(self._on_batch_progress)
         self._batch_worker.error_signal.connect(self._on_batch_error)
         self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._release_explore_for_production("patch background correction")
         self._batch_worker.start()
 
     def _build_config(self):
@@ -3855,6 +3919,7 @@ class Step0Page(QWidget):
         self._wsi_worker.canceled.connect(self._on_wsi_canceled)
         self._wsi_worker.error.connect(self._on_wsi_error)
         self._wsi_dialog.cancel_requested.connect(self._wsi_worker.stop_after_current_channel)
+        self._release_explore_for_production("whole-slide correction (Save)")
         self._wsi_worker.start()
         self._wsi_dialog.exec_()
 

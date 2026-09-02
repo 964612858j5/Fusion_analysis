@@ -484,3 +484,309 @@ def test_navigator_drawing_and_controls_intact_after_reorder(app):
     assert pop.overview._mode == "roi"
     assert _under(pop, s._roi_list) and _under(pop, s._patch_list)
     assert _under(pop, s._btn_mode_roi) and _under(pop, s._btn_mode_patch)
+
+
+# ── production correction vs the Explore stack ───────────────────────────────
+
+def test_busy_probe_checks_running_not_presence(app, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page.__new__(Step0Page)          # attributes only, no Qt init
+
+    class _W:
+        def __init__(self, running):
+            self._running = running
+
+        def isRunning(self):
+            return self._running
+
+    page._batch_worker = None
+    page._ondemand_workers = []
+    page._wsi_worker = None
+    assert Step0Page.production_correction_busy(page) is None
+
+    page._batch_worker = _W(True)
+    assert Step0Page.production_correction_busy(page) == (
+        "patch background correction")
+
+    page._batch_worker = _W(False)
+    page._ondemand_workers = [_W(False), _W(False)]
+    assert Step0Page.production_correction_busy(page) is None, (
+        "finished on-demand workers are never removed from the list, so "
+        "their presence must not read as busy"
+    )
+    page._ondemand_workers = [_W(False), _W(True), _W(False)]
+    assert Step0Page.production_correction_busy(page) == (
+        "on-demand background correction")
+
+    page._ondemand_workers = []
+    page._wsi_worker = _W(True)
+    assert Step0Page.production_correction_busy(page) == (
+        "whole-slide correction (Save)")
+
+
+def test_a_running_preview_or_preload_worker_does_not_read_as_busy(app):
+    """The contract, not the source text.
+
+    `PreloadWorker` only reads -- it corrects nothing, so it must not block
+    the full image. `BackgroundPreviewWorker` is unreachable today (its only
+    trigger, `_queue_preview`, has no caller anywhere in the repo), so
+    guarding it would be code for a path that cannot run; whoever
+    reconnects `_queue_preview` must add it to the probe in that change.
+    Both are installed here as RUNNING and the probe must still say free.
+    """
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page.__new__(Step0Page)          # attributes only, no Qt init
+
+    class _Running:
+        def isRunning(self):
+            return True
+
+    page._batch_worker = None
+    page._ondemand_workers = []
+    page._wsi_worker = None
+    page._preview_worker = _Running()
+    page._preload_worker = _Running()
+
+    assert Step0Page.production_correction_busy(page) is None
+
+
+# ── the four GPU paths actually release before starting ──────────────────────
+#
+# Behaviour, not source order: each path is DRIVEN, with the worker classes
+# replaced by recorders and the release patched to record too, both onto one
+# shared timeline. A source scan could not see an early return, an
+# exception, or a release aimed at the wrong object.
+
+@pytest.fixture(scope="module")
+def gpu_path_page(app, tmp_path_factory):
+    """ONE page for every GPU-path case in this section.
+
+    Deliberately module-scoped: this file already builds 32 `Step0Page`
+    instances, and adding one per parametrised case tipped a whole-file run
+    into the known pyqtgraph/offscreen segfault. Each test re-patches the
+    worker classes and gets a fresh timeline, so sharing the page costs
+    nothing in isolation.
+    """
+    return _build_gpu_path_page(app, tmp_path_factory.mktemp("gpu_paths"))
+
+
+def _install_gpu_path_recorders(monkeypatch, timeline):
+    """Replace the worker classes and the release with recorders."""
+    from block01.ui.step0 import step0_page as mod
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _RecordingWorker:
+        def __init__(self, *a, **k):
+            pass
+
+        def __getattr__(self, name):
+            # progress/finished/error/... are all connected before start();
+            # hand back something connectable for each.
+            return _Signal()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            timeline.append("worker.start")
+
+        def stop(self):
+            pass
+
+        def stop_after_current_channel(self):
+            pass
+
+    class _Signal:
+        def connect(self, *_a, **_k):
+            pass
+
+    class _Dialog:
+        cancel_requested = _Signal()
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        def exec_(self):
+            timeline.append("dialog.exec_")
+
+        def set_progress(self, *_a, **_k):
+            pass
+
+        def allow_close(self):
+            pass
+
+        def accept(self):
+            pass
+
+    # Modal dialogs would block forever with nobody to click them, and
+    # several of these paths pop one on a validation miss. Silence them and
+    # keep a record, so a path that bailed out early is visible rather than
+    # looking like a pass.
+    class _Msg:
+        @staticmethod
+        def information(*a, **k):
+            timeline.append(f"dialog:information:{a[2] if len(a) > 2 else ''}")
+
+        @staticmethod
+        def warning(*a, **k):
+            timeline.append(f"dialog:warning:{a[2] if len(a) > 2 else ''}")
+
+        @staticmethod
+        def critical(*a, **k):
+            timeline.append(f"dialog:critical:{a[2] if len(a) > 2 else ''}")
+
+        @staticmethod
+        def question(*a, **k):
+            timeline.append("dialog:question")
+            return getattr(mod.QMessageBox, "Yes", 16384)
+
+    monkeypatch.setattr(mod, "QMessageBox", _Msg)
+    monkeypatch.setattr(mod, "BatchProcessWorker", _RecordingWorker)
+    monkeypatch.setattr(mod, "WsiCorrectionWorker", _RecordingWorker)
+    monkeypatch.setattr(mod, "_WsiCorrectionProgressDialog", _Dialog)
+    monkeypatch.setattr(
+        Step0Page, "_release_explore_for_production",
+        lambda self, reason: timeline.append(f"release:{reason}"))
+    return mod
+
+
+def _build_gpu_path_page(app, tmp_path):
+    """A page prepared just enough for the four GPU paths to reach start()."""
+    import numpy as np
+
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page()
+    page.loader = _GpuPathLoader()
+    page.ome_path = str(tmp_path / "fake.ome.tif")
+    page.output_dir = str(tmp_path)
+    page.patches = [(0, 32, 0, 32)]
+    page.current_patch_idx = 0
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page.current_channel = "CD3"
+    page._process_completed = True
+    # `_save_and_continue` needs a region to work on; full-WSI mode supplies
+    # one from the loader's shape without a drawn ROI.
+    page._analysis_region_mode = "full_wsi"
+    page._preload_cache = {0: {ch: np.zeros((32, 32), np.float32)
+                               for ch in ("DAPI", "CD3", "CD20")}}
+    row = page._channel_rows.get("CD3")
+    if row is not None:
+        row["checkbox"].setChecked(True)
+        row["method_cb"].setCurrentText("TopHat")
+    return page
+
+
+class _GpuPathLoader:
+    _CHANNELS = ["DAPI", "CD3", "CD20"]
+
+    def __init__(self):
+        self._corrected_zarr_path = None
+        self._corrected_decisions = {}
+
+    def channel_names(self):
+        return list(self._CHANNELS)
+
+    @property
+    def ch_map(self):
+        return {c: i for i, c in enumerate(self._CHANNELS)}
+
+    def set_corrected_zarr_store(self, path, decisions):
+        self._corrected_zarr_path = path
+        self._corrected_decisions = dict(decisions or {})
+
+    def set_correction_config(self, _cfg):
+        pass
+
+    shape = (256, 256)
+
+    def read_region(self, ch, y0, y1, x0, x1, **_kw):
+        import numpy as np
+        return np.zeros((y1 - y0, x1 - x0), np.float32)
+
+
+@pytest.mark.parametrize(
+    ("path_name", "driver"),
+    [("_on_process_clicked", lambda p: p._on_process_clicked()),
+     ("_start_ondemand", lambda p: p._start_ondemand("CD3")),
+     ("_process_current_channel", lambda p: p._process_current_channel()),
+     ("_save_and_continue", lambda p: p._save_and_continue())],
+)
+def test_a_gpu_path_releases_explore_before_starting(gpu_path_page,
+                                                     monkeypatch, path_name,
+                                                     driver):
+    timeline = []
+    _install_gpu_path_recorders(monkeypatch, timeline)
+    page = gpu_path_page
+
+    driver(page)
+
+    assert "worker.start" in timeline, (
+        f"{path_name} never reached the worker -- this test proves nothing "
+        f"about it; timeline={timeline}")
+    releases = [i for i, e in enumerate(timeline) if e.startswith("release:")]
+    assert releases, f"{path_name} did not release Explore: {timeline}"
+    assert releases[0] < timeline.index("worker.start"), (
+        f"{path_name} released Explore AFTER starting the worker: {timeline}")
+
+
+def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
+                                                          monkeypatch):
+    """If the hand-off cannot be completed, production must NOT run: two
+    users on the GPU is the outcome the gate exists to prevent, and a
+    half-released Explore is exactly that."""
+    from block01.ui.step0.step0_page import Step0Page
+
+    timeline = []
+    _install_gpu_path_recorders(monkeypatch, timeline)
+    page = gpu_path_page
+    monkeypatch.setattr(
+        Step0Page, "_release_explore_for_production",
+        lambda self, reason: (_ for _ in ()).throw(RuntimeError("release failed")))
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        page._on_process_clicked()
+
+    assert "worker.start" not in timeline, (
+        "the worker started even though releasing Explore failed")
+
+
+def test_the_reader_path_does_not_release_explore(gpu_path_page, monkeypatch):
+    """`PreloadWorker` corrects nothing, so preloading must not cost the
+    user their full-image view."""
+    timeline = []
+    mod = _install_gpu_path_recorders(monkeypatch, timeline)
+    page = gpu_path_page
+    monkeypatch.setattr(mod, "PreloadWorker", _preload_recorder(timeline))
+
+    page._start_preload()
+
+    assert "preload.start" in timeline, "the preload path never ran"
+    assert not [e for e in timeline if e.startswith("release:")], (
+        f"preloading released Explore: {timeline}")
+
+
+def _preload_recorder(timeline):
+    class _Preload:
+        def __init__(self, *a, **k):
+            pass
+
+        def __getattr__(self, name):
+            class _S:
+                def connect(self, *_a, **_k):
+                    pass
+            return _S()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            timeline.append("preload.start")
+
+        def stop(self):
+            pass
+
+    return _Preload

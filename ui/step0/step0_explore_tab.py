@@ -57,6 +57,16 @@ PLACEHOLDER_RELEASED = (
     "parameters current at that time."
 )
 
+# After the run that released the view has ENDED. The "released" text
+# above says the run is going; once it is not, keeping that text up says
+# something false, and the user has no way to tell it from a run that hangs.
+PLACEHOLDER_RUN_FINISHED = (
+    "Full image released\n\n"
+    "Background correction has finished.\n"
+    "Click \"Reopen full image\" to rebuild it with the parameters current "
+    "now; it opens where you were."
+)
+
 PLACEHOLDER_BUSY = (
     "Background correction is running ({reason}).\n\n"
     "The full image shares the GPU with it, so it cannot open until that "
@@ -310,6 +320,10 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._dataset_path = None
         self._build_attempts = 0
         self._build_error = None
+        # Set by `release_for_production`, cleared by a rebuild or a dataset
+        # change: the view is gone RECOVERABLY, and here is where it was.
+        self._released = False
+        self._released_viewport_l0 = None
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -348,6 +362,20 @@ class Step0ExploreTab(QtWidgets.QWidget):
     def build_attempts(self):
         return self._build_attempts
 
+    @property
+    def released(self):
+        """True between `release_for_production` and the next rebuild or
+        dataset change: the placeholder is up because a production run
+        asked for the GPU, not because nothing was ever opened."""
+        return self._released
+
+    @property
+    def released_viewport_l0(self):
+        """Where the view was when it was released -- `(y0, x0, w, h)` in
+        level-0 pixels -- or None when nothing is known. Read by the host to
+        reopen the view in the same place instead of on the whole slide."""
+        return self._released_viewport_l0
+
     # ── lifecycle ─────────────────────────────────────────────────────
     def set_dataset(self, path):
         """Bind a dataset (or None). Tears the previous stack down FIRST.
@@ -360,6 +388,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._discard_stack()
         self._dataset_path = path or None
         self._build_error = None
+        # A release belongs to the dataset it happened on.
+        self._released = False
+        self._released_viewport_l0 = None
         # A bound dataset is NOT the "load something" state: the view simply
         # has not been opened yet, and it is opened from a compare panel.
         self._show_placeholder(PLACEHOLDER_NO_DATASET
@@ -449,6 +480,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
             traceback.print_exc()
             return
         self._stack = stack
+        self._released = False
+        self._released_viewport_l0 = None
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
@@ -568,8 +601,36 @@ class Step0ExploreTab(QtWidgets.QWidget):
         """
         if self._stack is None:
             return
+        self._released_viewport_l0 = self._current_viewport_l0()
         self._discard_stack(wait_for_floor=True)
+        self._released = True
         self._show_placeholder(PLACEHOLDER_RELEASED.format(reason=reason))
+
+    def _current_viewport_l0(self):
+        """The live controller's viewport as `(y0, x0, w, h)`, or None.
+
+        Read from `_current_bbox` -- `(y0, x0, y1, x1)` in level-0 pixels,
+        already clamped to the slide -- which is None until the first range
+        event. Best effort: a stack fake without the attribute yields None,
+        and the caller then opens on the whole slide as before.
+        """
+        controller = getattr(self._stack, "controller", None)
+        bbox = getattr(controller, "_current_bbox", None)
+        if bbox is None:
+            return None
+        y0, x0, y1, x1 = (int(v) for v in bbox)
+        if y1 <= y0 or x1 <= x0:
+            return None
+        return (y0, x0, x1 - x0, y1 - y0)
+
+    def production_finished(self):
+        """The run that released the view has ended, and the host has
+        decided NOT to rebuild right now (the view is not on screen). Tell
+        the truth in the placeholder instead of leaving "is running" up.
+        No-op unless the view is actually in the released state."""
+        if not self._released or self._stack is not None:
+            return
+        self._show_placeholder(PLACEHOLDER_RUN_FINISHED)
 
     def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from

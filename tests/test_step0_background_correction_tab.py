@@ -7,6 +7,7 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 import os
 
 import pytest
+from PyQt5 import QtCore
 
 pytest.importorskip("PyQt5")
 
@@ -577,20 +578,30 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
     from block01.ui.step0 import step0_page as mod
     from block01.ui.step0.step0_page import Step0Page
 
-    class _RecordingWorker:
+    class _RecordingWorker(QtCore.QThread):
+        """A REAL QThread, never started.
+
+        `_watch_production_worker` binds `QThread.finished` off the base
+        class explicitly (the whole-slide worker shadows that name with a
+        business signal), so a plain stand-in cannot be connected to any
+        more -- and every production worker really is a QThread.
+        """
+
         def __init__(self, *a, **k):
-            pass
+            super().__init__()
 
         def __getattr__(self, name):
-            # progress/finished/error/... are all connected before start();
-            # hand back something connectable for each.
+            # progress/error/all_done/... are all connected before start();
+            # hand back something connectable for each. `finished` is NOT
+            # routed here: QThread defines it, so it never reaches
+            # __getattr__.
             return _Signal()
 
         def isRunning(self):
             return False
 
         def start(self):
-            timeline.append("worker.start")
+            timeline.append(("worker.start", id(self)))
 
         def stop(self):
             pass
@@ -649,6 +660,14 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
     monkeypatch.setattr(
         Step0Page, "_release_explore_for_production",
         lambda self, reason: timeline.append(f"release:{reason}"))
+    # The watcher records the OBJECT it was handed, so a path that watched
+    # a different worker than the one it started -- or watched after
+    # starting -- is visible rather than merely absent.
+    real_watch = Step0Page._watch_production_worker
+    monkeypatch.setattr(
+        Step0Page, "_watch_production_worker",
+        lambda self, worker: (timeline.append(("watch", id(worker))),
+                              real_watch(self, worker))[0])
     return mod
 
 
@@ -724,13 +743,31 @@ def test_a_gpu_path_releases_explore_before_starting(gpu_path_page,
 
     driver(page)
 
-    assert "worker.start" in timeline, (
+    starts = [i for i, e in enumerate(timeline)
+              if isinstance(e, tuple) and e[0] == "worker.start"]
+    assert starts, (
         f"{path_name} never reached the worker -- this test proves nothing "
         f"about it; timeline={timeline}")
-    releases = [i for i, e in enumerate(timeline) if e.startswith("release:")]
+    releases = [i for i, e in enumerate(timeline)
+                if isinstance(e, str) and e.startswith("release:")]
     assert releases, f"{path_name} did not release Explore: {timeline}"
-    assert releases[0] < timeline.index("worker.start"), (
+    assert releases[0] < starts[0], (
         f"{path_name} released Explore AFTER starting the worker: {timeline}")
+
+    # ── and the SAME worker is watched, before it is started ──
+    watches = [i for i, e in enumerate(timeline)
+               if isinstance(e, tuple) and e[0] == "watch"]
+    assert watches, (
+        f"{path_name} started a production worker without watching it -- "
+        f"the full image would stay released for good; timeline={timeline}")
+    assert watches[0] < starts[0], (
+        f"{path_name} watched the worker AFTER starting it: a worker that "
+        f"finished first would never announce it; timeline={timeline}")
+    assert releases[0] < watches[0] < starts[0], (
+        f"{path_name}: expected release -> watch -> start; timeline={timeline}")
+    assert timeline[watches[0]][1] == timeline[starts[0]][1], (
+        f"{path_name} watched a different object than it started; "
+        f"timeline={timeline}")
 
 
 def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
@@ -750,8 +787,13 @@ def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
     with pytest.raises(RuntimeError, match="release failed"):
         page._on_process_clicked()
 
-    assert "worker.start" not in timeline, (
+    assert not [e for e in timeline
+                if isinstance(e, tuple) and e[0] == "worker.start"], (
         "the worker started even though releasing Explore failed")
+    assert not [e for e in timeline
+                if isinstance(e, tuple) and e[0] == "watch"], (
+        "the worker was watched even though releasing Explore failed -- "
+        "nothing past the failure point may run")
 
 
 def test_the_reader_path_does_not_release_explore(gpu_path_page, monkeypatch):

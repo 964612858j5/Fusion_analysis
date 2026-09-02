@@ -1110,18 +1110,23 @@ class ExploreView(QtWidgets.QWidget):
 
 # ── RawOverlayLayer ──────────────────────────────────────────────────────────
 
-# Priority base for overlay raw requests. Requests are served from the
-# scheduler's RAW min-heap, so within THAT heap an overlay tile sorts after
-# every marker raw request (those start at 0 and there are at most a
-# viewport's worth) and ahead of the marker's two speculative classes
-# (FALLBACK_RING_BASE_PRIORITY, DIRECTIONAL_PREFETCH_BASE_PRIORITY): what the
-# user is looking at should not queue behind what the viewer is guessing.
+# Priority base for overlay raw requests. What this does and does not
+# guarantee, stated exactly:
 #
-# NOT a global ordering. The scheduler keeps a SECOND heap for CorrectionKey
-# work, and the raw staging a corrected tile needs is enqueued at priority 0
-# on the raw heap regardless of what asked for it -- so marker correction
-# work can and does overtake overlay tiles. This constant orders the raw heap
-# and nothing else.
+# The scheduler keeps TWO heaps -- one for RawKey work and one for
+# CorrectionKey work -- and this value orders the raw heap only. Marker
+# visible-raw requests start at 0 and there are as many of them as the
+# viewport holds tiles, which in practice is far fewer than 500, so a marker
+# tile the user is looking at normally sorts ahead of an overlay tile. That
+# is a consequence of the numbers, not a guarantee: nothing enforces the
+# viewport tile count, and priority cannot preempt work already started.
+#
+# It says nothing at all about corrected work. CorrectionKey requests live
+# in the other heap and are not comparable with this number, and the raw
+# STAGING a corrected tile needs is enqueued at raw priority 0 whatever
+# asked for it -- so marker correction work can and does overtake overlay
+# tiles. Do not describe this as DAPI being strictly below (or above) all
+# marker work.
 OVERLAY_RAW_BASE_PRIORITY = 500
 
 # Z base for the overlay's tile pool. Above PRECISE_BASE_Z plus the largest
@@ -1155,6 +1160,11 @@ class RawOverlayLayer(QtCore.QObject):
     tokens by value in one global stale-set -- so a bare integer, or the
     marker's own `("raw", n)`, would let either side's cancel drop the
     other side's in-flight work.
+
+    Priority: overlay requests start at `OVERLAY_RAW_BASE_PRIORITY`, which
+    orders the scheduler's RAW heap only -- see that constant for what it
+    does and does not guarantee. It is not a claim about corrected work,
+    which lives in a different heap.
 
     Composition is ADDITIVE (`CompositionMode_Plus`), which is what makes
     this an overlay rather than an occluder: a dark overlay pixel adds zero
@@ -1207,7 +1217,6 @@ class RawOverlayLayer(QtCore.QObject):
         self._generation_n = 0
         self._generation = ("dapi_raw", 0)
         self._torn_down = False
-        self._last_sync = None      # (level, bbox_l0, frozenset(tiles))
 
         self.stats = {
             "requests_issued": 0,
@@ -1357,26 +1366,26 @@ class RawOverlayLayer(QtCore.QObject):
             coarser_visible=False,
         )
 
-    def sync(self, level: int, bbox_l0, visible_tiles):
+    def sync(self, level: int, ordered_visible_tiles):
         """Request this channel's missing tiles for the viewport the HOST
         has already planned.
 
-        `level`, `bbox_l0` and `visible_tiles` come from the marker
-        controller; nothing here recomputes them. Called after the marker's
-        own requests have been submitted, so those are already in the heap
-        ahead of these.
+        `level` and the ORDER of `ordered_visible_tiles` both come from the
+        marker controller (`_visible_tiles_center_out`); nothing here
+        recomputes either, and no bbox is passed because nothing here needs
+        one. The overlay filters that sequence down to what its OWN pool is
+        missing and preserves the order. Called after the marker's own
+        requests have been submitted.
         """
         if self._torn_down or not self.effective_enabled:
             return
         if not self.calibrated:
             # Not an error: the calibration callback resyncs when it lands.
             return
-        self._last_sync = (level, tuple(bbox_l0), frozenset(visible_tiles))
         self._bump_generation()
         gen = self._generation
         source = self.provider.source_identity()
-        missing = [coord for coord in self._order_tiles(bbox_l0, level,
-                                                        visible_tiles)
+        missing = [coord for coord in ordered_visible_tiles
                    if self._pool.get(level, *coord) is None]
         for i, (tx, ty) in enumerate(missing):
             addr = TileAddress(grid=self.grid, level=level, tx=tx, ty=ty)
@@ -1387,27 +1396,20 @@ class RawOverlayLayer(QtCore.QObject):
             self.scheduler.request(req, self._on_result)
             self.stats["requests_issued"] += 1
 
-    def _order_tiles(self, bbox_l0, level, visible_tiles):
-        """Centre-out, by the same arithmetic the host uses for its own raw
-        batch. Ordering only -- the SET is the host's, unmodified."""
-        ds = self.provider.level_downsample(level)
-        y0, x0, y1, x1 = planning.bbox_to_level(tuple(bbox_l0), ds)
-        cy, cx = (y0 + y1) / 2.0, (x0 + x1) / 2.0
-        ts = self.grid.tile_size
-
-        def dist(coord):
-            tx, ty = coord
-            return ((ty * ts + ts / 2.0 - cy) ** 2
-                    + (tx * ts + ts / 2.0 - cx) ** 2)
-
-        return sorted(visible_tiles, key=dist)
-
     def _resync_from(self, host):
         """Re-issue for the host's CURRENT viewport, without waiting for the
-        user to move the camera."""
-        if host is None or getattr(host, "_current_bbox", None) is None:
+        user to move the camera.
+
+        Goes through the host's ordering entry point, exactly like the
+        range-driven path -- the two must not be able to drift into
+        different orders.
+        """
+        if host is None:
             return
-        self.sync(host.level, host._current_bbox, host._visible_tiles)
+        ordered = host._visible_tiles_center_out()
+        if not ordered:
+            return
+        self.sync(host.level, ordered)
         self.apply_visibility(host.level)
 
     def _bump_generation(self):
@@ -1813,6 +1815,37 @@ class ExploreController(QtCore.QObject):
             params=eff_params, algorithm_version=BG_CORRECTION_ALGO_VERSION,
             quality=self.quality,
         )
+
+    def _visible_tiles_center_out(self):
+        """The LIVE visible tiles, in centre-out order.
+
+        The single source of that order. It sorts `self._visible_tiles` --
+        it does not recompute which tiles are visible -- using the viewport
+        this controller has already settled, and both the marker's own raw
+        batch and the overlay's read it, so the two channels can never end
+        up fetching the same viewport in different orders.
+
+        Returns an empty tuple when there is no viewport yet.
+        """
+        bbox_l0 = self._current_bbox
+        if bbox_l0 is None:
+            return ()
+        ds = self.provider.level_downsample(self.level)
+        bbox_level = planning.bbox_to_level(bbox_l0, ds)
+        cy = (bbox_level[0] + bbox_level[2]) / 2.0
+        cx = (bbox_level[1] + bbox_level[3]) / 2.0
+        tile_size = self.grid.tile_size
+
+        def dist(coord):
+            tx, ty = coord
+            tcy = ty * tile_size + tile_size / 2.0
+            tcx = tx * tile_size + tile_size / 2.0
+            return (tcy - cy) ** 2 + (tcx - cx) ** 2
+
+        # `sorted` is stable and the distance formula is unchanged, so the
+        # order -- ties included -- is exactly what the marker batch had
+        # before this was factored out.
+        return sorted(self._visible_tiles, key=dist)
 
     def _make_raw_key(self, tx: int, ty: int) -> RawKey:
         source = self.provider.source_identity()
@@ -3008,21 +3041,12 @@ class ExploreController(QtCore.QObject):
                 "first": False, "full": False,
             }
 
-        cy = (bbox_level[0] + bbox_level[2]) / 2.0
-        cx = (bbox_level[1] + bbox_level[3]) / 2.0
-        tile_size = self.grid.tile_size
-
-        def dist(coord):
-            tx, ty = coord
-            tcy = ty * tile_size + tile_size / 2.0
-            tcx = tx * tile_size + tile_size / 2.0
-            return (tcy - cy) ** 2 + (tcx - cx) ** 2
-
-        missing = sorted(
-            (coord for coord in visible
-             if self._raw_pool.get(self.level, *coord) is None),
-            key=dist,
-        )
+        # ONE centre-out ordering, computed here and reused by the overlay
+        # (module docstring "RawOverlayLayer"): two copies of this sort is
+        # how the two channels would end up fetching in different orders.
+        ordered = self._visible_tiles_center_out()
+        missing = [coord for coord in ordered
+                   if self._raw_pool.get(self.level, *coord) is None]
         gen = self.view_generation
         for i, (tx, ty) in enumerate(missing):
             key = self._make_raw_key(tx, ty)
@@ -3030,11 +3054,11 @@ class ExploreController(QtCore.QObject):
             self.scheduler.request(req, self._on_raw_result)
 
         # Mount point 2 (module docstring "RawOverlayLayer"): AFTER the
-        # marker batch is submitted, and using only the level / bbox /
-        # visible-tile set already computed above -- the overlay never runs
-        # request planning of its own.
+        # marker batch is submitted, and handed the SAME ordered sequence
+        # the marker just filtered its own missing set out of -- the overlay
+        # runs no request planning and no ordering of its own.
         if self._overlay is not None:
-            self._overlay.sync(self.level, bbox_l0, visible)
+            self._overlay.sync(self.level, ordered)
 
         self._maybe_exit_provisional()
 

@@ -1328,6 +1328,21 @@ class Step0Page(QWidget):
         self._btn_full_fit.clicked.connect(self._fit_full_image)
         bar.addWidget(self._btn_full_fit)
 
+        # The two LAYER toggles share one style with an explicit :checked
+        # rule. `btn_style` has none, and under it a checked and an
+        # unchecked button were pixel-identical -- measured on a live
+        # session where both layers had been switched off and the viewer
+        # was a black canvas with two buttons that looked switched on. The
+        # glyph changes too (● on / ○ off, see `_set_layer_toggle_text`),
+        # so the state is readable without relying on colour alone.
+        toggle_style = (
+            "QPushButton{color:#777;border:1px solid #444;border-radius:3px;"
+            "padding:2px 8px;font-size:10px;background:#1a1a1a;}"
+            "QPushButton:hover{border-color:#aaa;}"
+            "QPushButton:checked{color:#eee;background:#264d26;"
+            "border-color:#6bffa0;font-weight:bold;}"
+            "QPushButton:disabled{color:#555;border-color:#333;}"
+        )
         # Marker on/off. A checkable button rather than a menu entry: it is
         # a two-state thing the user flips while looking at the image.
         self._btn_full_marker = QPushButton("● Marker")
@@ -1337,7 +1352,7 @@ class Step0Page(QWidget):
             "Show or hide the marker channel in the full image. Hiding is "
             "display-only: the tiles stay loaded, so turning it back on is "
             "instant and reads nothing.")
-        self._btn_full_marker.setStyleSheet(btn_style)
+        self._btn_full_marker.setStyleSheet(toggle_style)
         self._btn_full_marker.toggled.connect(self._on_full_marker_toggled)
         bar.addWidget(self._btn_full_marker)
 
@@ -1352,12 +1367,15 @@ class Step0Page(QWidget):
             "ON TOP of the marker and ADDED to it, the same way the compare "
             "panels combine the two. Hiding it also stops requesting its "
             "tiles; showing it again resumes from the current view.")
-        self._btn_full_nucleus.setStyleSheet(btn_style)
+        self._btn_full_nucleus.setStyleSheet(toggle_style)
         self._btn_full_nucleus.toggled.connect(self._on_full_nucleus_toggled)
         bar.addWidget(self._btn_full_nucleus)
 
         self._full_source_lbl = QLabel("—")
         self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
+        # What the label says about the SOURCE, kept apart from the hidden-
+        # layer hint that `_update_full_source_label` may append to it.
+        self._full_source_base_text = "—"
         bar.addWidget(self._full_source_lbl)
         bar.addStretch(1)
         layout.addLayout(bar)
@@ -1454,11 +1472,55 @@ class Step0Page(QWidget):
         its layers, the tiles stay pooled and cached. If no stack exists
         the button state is simply remembered for the next build.
         """
+        self._set_layer_toggle_text(self._btn_full_marker, "Marker", checked)
+        self._update_full_source_label()
         explore_tab = getattr(self, "_explore_tab", None)
         stack = explore_tab.stack if explore_tab is not None else None
         if stack is None:
             return
         stack.controller.set_marker_visible(bool(checked))
+
+    @staticmethod
+    def _set_layer_toggle_text(button, name, checked):
+        """● when the layer is on, ○ when it is off. The stylesheet's
+        :checked rule carries the same information in colour; the glyph
+        makes it legible without it."""
+        button.setText(("● " if checked else "○ ") + name)
+
+    def _hidden_full_layers(self):
+        """Names of the full-image layers whose toggle is OFF."""
+        hidden = []
+        marker = getattr(self, "_btn_full_marker", None)
+        if marker is not None and not marker.isChecked():
+            hidden.append("Marker")
+        nucleus = getattr(self, "_btn_full_nucleus", None)
+        if nucleus is not None and not nucleus.isChecked():
+            hidden.append("DAPI")
+        return hidden
+
+    def _update_full_source_label(self, source=None, method=None, params=()):
+        """The toolbar label: what is shown, and -- when a layer toggle is
+        off -- which layers are hidden.
+
+        The second part exists because of what a viewer with both layers
+        off looks like: a black canvas. Without a word about it that reads
+        as "nothing loaded", and the user reaches for Reopen, which
+        rebuilds the stack and shows the same black canvas again.
+        """
+        lbl = getattr(self, "_full_source_lbl", None)
+        if lbl is None:
+            return
+        if method is None and params == () and source is None:
+            base = self._full_source_base_text
+        else:
+            base = self._describe_full_source(source, method, params)
+            self._full_source_base_text = base
+        hidden = self._hidden_full_layers()
+        if len(hidden) == 2:
+            base += "   ⚠ both layers hidden -- switch Marker or DAPI on"
+        elif hidden:
+            base += f"   ({hidden[0]} hidden)"
+        lbl.setText(base)
 
     def _full_image_nucleus_args(self):
         """The nucleus overlay's construction arguments, or `{}` when this
@@ -1492,6 +1554,8 @@ class Step0Page(QWidget):
         ON resumes from the viewer's CURRENT viewport, so no pan is needed
         to get pixels back.
         """
+        self._set_layer_toggle_text(self._btn_full_nucleus, "DAPI", checked)
+        self._update_full_source_label()
         overlay = self._full_image_overlay()
         if overlay is None:
             return
@@ -1619,11 +1683,75 @@ class Step0Page(QWidget):
     def _reopen_full_image(self):
         """Rebuild after a production run released the viewer.
 
-        Recovery is a user action on purpose: the run may have changed the
-        parameters, and this reads them fresh rather than restoring what was
-        on screen before.
+        The parameters are read fresh -- the run may have changed them --
+        but the CAMERA goes back to where the user was when the release
+        happened, if the viewer recorded that. A rebuild that opened on the
+        whole slide after every Apply threw the user's position away each
+        time they changed a parameter.
         """
-        self._show_full_image()
+        self._show_full_image(viewport_l0=self._released_full_viewport())
+
+    def _released_full_viewport(self):
+        """The viewport the full image had when a production run released
+        it, as `(y0, x0, w, h)` in level-0 pixels -- or None."""
+        explore_tab = getattr(self, "_explore_tab", None)
+        return getattr(explore_tab, "released_viewport_l0", None)
+
+    def _watch_production_worker(self, worker):
+        """Bring the full image back when `worker` -- a production run that
+        released it -- has finished, whichever way it finished.
+
+        The PHYSICAL end of the thread, not the worker's own
+        all_done/canceled/error trio: those are emitted from INSIDE `run()`,
+        while `isRunning()` is still true, so a rebuild started from them
+        would be refused by the busy gate. `QThread.finished` is emitted as
+        the thread winds down, after `isRunning()` has gone false, and it
+        fires exactly once whether the run completed, was stopped or failed.
+
+        Bound off `QtCore.QThread` EXPLICITLY rather than as
+        `worker.finished`. `WsiCorrectionWorker` declares a business signal
+        of its own called `finished(str, dict)`, which shadows the base
+        class's: `worker.finished` on that worker is the business signal,
+        emitted from inside `run()` with `isRunning()` still true, so
+        connecting to it would rebuild into the busy gate's refusal and
+        never get another chance. Reaching past the subclass attribute is
+        the whole point of this helper, and it costs the other workers
+        nothing -- they do not shadow it, and the bound base signal is the
+        same object they would have given anyway.
+        """
+        physical_finished = QtCore.QThread.finished.__get__(
+            worker, type(worker))
+        physical_finished.connect(
+            self._gen_slot(self._on_production_worker_finished))
+
+    def _on_production_worker_finished(self):
+        """A production run that released the viewer is over.
+
+        Two outcomes, both decided here rather than left to the user:
+
+        * the full-image page is ON SCREEN -> rebuild now, with the fresh
+          parameters, at the viewport the user had. Leaving the "running"
+          placeholder up after the run has ended told the user something
+          false, and the fix used to be a button they had to know about;
+        * it is not -> the placeholder is changed to say the run has
+          finished and how to get the view back. Rebuilding a hidden view
+          would spend a synchronous overview read on something nobody is
+          looking at.
+
+        Nothing happens while ANOTHER production run is still going -- the
+        gate that released the viewer still holds -- or when the viewer was
+        not released in the first place (never opened, or torn down for a
+        dataset switch).
+        """
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is None or not getattr(explore_tab, "released", False):
+            return
+        if self.production_correction_busy():
+            return
+        if self._full_image_visible():
+            self._show_full_image(viewport_l0=self._released_full_viewport())
+        else:
+            explore_tab.production_finished()
 
     def _fit_full_image(self):
         """Reset the full-image view to the whole slide.
@@ -1661,8 +1789,7 @@ class Step0Page(QWidget):
         if not self.current_channel:
             return
         source, method, params = self._full_image_selection()
-        self._full_source_lbl.setText(
-            self._describe_full_source(source, method, params))
+        self._update_full_source_label(source, method, params)
         if self.production_correction_busy():
             return
         explore_tab = self._ensure_explore_tab()
@@ -3935,6 +4062,7 @@ class Step0Page(QWidget):
         self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
         self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
         self._release_explore_for_production("patch background correction")
+        self._watch_production_worker(self._batch_worker)
         self._batch_worker.start()
 
     def _on_stop_process(self):
@@ -4041,6 +4169,7 @@ class Step0Page(QWidget):
         worker.canceled.connect(self._gen_slot(lambda: None))
         self._ondemand_workers.append(worker)
         self._release_explore_for_production("on-demand background correction")
+        self._watch_production_worker(worker)
         worker.start()
 
     # ══ 从缓存显示结果 ════════════════════════════════════════════════
@@ -4302,6 +4431,7 @@ class Step0Page(QWidget):
         self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
         self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
         self._release_explore_for_production("patch background correction")
+        self._watch_production_worker(self._batch_worker)
         self._batch_worker.start()
 
     def _build_config(self):
@@ -4646,6 +4776,10 @@ class Step0Page(QWidget):
         self._wsi_worker.error.connect(self._gen_slot(self._on_wsi_error))
         self._wsi_dialog.cancel_requested.connect(self._wsi_worker.stop_after_current_channel)
         self._release_explore_for_production("whole-slide correction (Save)")
+        # Before start(), like the other three production paths: a worker
+        # that finished before the connection was made would never announce
+        # it, and the full image would stay released for good.
+        self._watch_production_worker(self._wsi_worker)
         self._wsi_worker.start()
         self._wsi_dialog.exec_()
 

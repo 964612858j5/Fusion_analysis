@@ -138,22 +138,6 @@ def test_overlay_priorities_start_at_the_overlay_base(app):
     ctrl.teardown()
 
 
-def test_the_base_priority_orders_the_raw_heap_only(app):
-    """Not a global ordering, and the code must not claim one: the
-    scheduler keeps a SECOND heap for CorrectionKey work, and the raw
-    staging a corrected tile needs is enqueued at priority 0 whatever asked
-    for it."""
-    import inspect
-
-    from block01.viewer import explore_view as ev
-
-    src = inspect.getsource(ev)
-    idx = src.index("OVERLAY_RAW_BASE_PRIORITY = 500")
-    preamble = src[max(0, idx - 1200):idx].lower()
-    assert "not a global ordering" in preamble
-    assert "second heap" in preamble
-
-
 # ── 4. the overlay does not plan ─────────────────────────────────────────
 
 def test_the_overlay_requests_exactly_the_hosts_visible_tiles(app):
@@ -717,4 +701,113 @@ def test_the_handler_refuses_a_matching_result_once_disabled(app):
     _deliver(scheduler, layer, req)
 
     assert len(layer._pool.entries) == before
+    ctrl.teardown()
+
+
+# ── one centre-out ordering, owned by the marker controller ──────────────
+#
+# The overlay used to sort the visible tiles itself, with a copy of the
+# host's distance formula. Two copies is how the two channels end up
+# fetching the same viewport in different orders.
+
+def _marker_request_order(scheduler):
+    return [(r.key.tile.tx, r.key.tile.ty) for r, _cb in scheduler.requests
+            if isinstance(r.key, RawKey) and r.generation[0] == "raw"]
+
+
+def test_the_marker_request_order_is_the_controllers_ordering(app):
+    """The order the marker issues in IS `_visible_tiles_center_out`
+    filtered by its own pool -- item for item, ties included."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    scheduler.requests.clear()
+    set_view_and_pump(view, 0, 0, 1024, 1024)
+
+    ordered = list(ctrl._visible_tiles_center_out())
+    issued = _marker_request_order(scheduler)
+    expected = [c for c in ordered if c in set(issued)]
+    assert issued[-len(expected):] == expected
+    assert set(ordered) == set(ctrl._visible_tiles)
+    ctrl.teardown()
+
+
+def test_the_ordering_entry_point_sorts_but_never_recomputes_the_set(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    set_view_and_pump(view, 0, 0, 1024, 1024)
+
+    ctrl._visible_tiles = {(5, 5), (0, 0), (9, 9)}
+    ordered = ctrl._visible_tiles_center_out()
+
+    assert set(ordered) == {(5, 5), (0, 0), (9, 9)}
+    assert len(ordered) == 3
+    ctrl.teardown()
+
+
+def test_the_ordering_entry_point_is_empty_without_a_viewport(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl._current_bbox = None
+
+    assert tuple(ctrl._visible_tiles_center_out()) == ()
+    ctrl.teardown()
+
+
+def test_the_overlay_follows_the_controllers_order(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    layer = _overlay(ctrl, provider, scheduler, view)
+    scheduler.requests.clear()
+    set_view_and_pump(view, 0, 0, 1024, 1024)
+
+    ordered = list(ctrl._visible_tiles_center_out())
+    got = [(r.key.tile.tx, r.key.tile.ty)
+           for r in _live_overlay_requests(scheduler, layer)]
+    assert got == [c for c in ordered if c in set(got)]
+    # Priorities follow that same sequence.
+    prios = [r.priority for r in _live_overlay_requests(scheduler, layer)]
+    assert prios == list(range(OVERLAY_RAW_BASE_PRIORITY,
+                               OVERLAY_RAW_BASE_PRIORITY + len(prios)))
+    ctrl.teardown()
+
+
+def test_the_overlay_has_no_ordering_or_viewport_state_of_its_own(app):
+    """`_order_tiles` and `_last_sync` are both gone: the overlay stores no
+    bbox, no viewport and no tile set."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    layer = _overlay(ctrl, provider, scheduler, view)
+    set_view_and_pump(view, 0, 0, 1024, 1024)
+
+    assert not hasattr(layer, "_order_tiles")
+    assert not hasattr(layer, "_last_sync")
+    ctrl.teardown()
+
+
+@pytest.mark.parametrize("path", ["enable", "calibration"])
+def test_both_resync_paths_go_through_the_controllers_ordering(app, path):
+    """Enabling the layer and finishing its calibration both resync from
+    the host's CURRENT viewport, and both must ask the host for the order
+    rather than deriving one."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    layer = _overlay(ctrl, provider, scheduler, view, calibrate=False,
+                     enabled=False)
+    set_view_and_pump(view, 0, 0, 1024, 1024)
+
+    calls = []
+    real = ctrl._visible_tiles_center_out
+    ctrl._visible_tiles_center_out = lambda: (calls.append(1), real())[1]
+    scheduler.requests.clear()
+
+    if path == "enable":
+        layer._display_lo, layer._display_hi = 0.0, 1000.0
+        layer.set_enabled(True, host=ctrl)
+    else:
+        layer._enabled = True
+        layer.start_calibration(ctrl)
+        _pump(200)
+
+    assert calls, "the resync did not go through the controller's ordering"
+    got = {(r.key.tile.tx, r.key.tile.ty)
+           for r in _live_overlay_requests(scheduler, layer)}
+    assert got == set(ctrl._visible_tiles)
     ctrl.teardown()

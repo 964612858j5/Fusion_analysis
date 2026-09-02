@@ -1328,6 +1328,19 @@ class Step0Page(QWidget):
         self._btn_full_fit.clicked.connect(self._fit_full_image)
         bar.addWidget(self._btn_full_fit)
 
+        # Marker on/off. A checkable button rather than a menu entry: it is
+        # a two-state thing the user flips while looking at the image.
+        self._btn_full_marker = QPushButton("● Marker")
+        self._btn_full_marker.setCheckable(True)
+        self._btn_full_marker.setChecked(True)
+        self._btn_full_marker.setToolTip(
+            "Show or hide the marker channel in the full image. Hiding is "
+            "display-only: the tiles stay loaded, so turning it back on is "
+            "instant and reads nothing.")
+        self._btn_full_marker.setStyleSheet(btn_style)
+        self._btn_full_marker.toggled.connect(self._on_full_marker_toggled)
+        bar.addWidget(self._btn_full_marker)
+
         self._full_source_lbl = QLabel("—")
         self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
         bar.addWidget(self._full_source_lbl)
@@ -1404,6 +1417,33 @@ class Step0Page(QWidget):
                 and self._full_image_source != "original"):
             label += "  (nucleus is excluded from correction)"
         return f"{self.current_channel or '—'} · {label}"
+
+    def _full_image_tint(self, channel=None):
+        """The colour the full image should draw `channel` in.
+
+        THE SAME source the compare panels use -- `_channel_colors`, with
+        `_marker_color` as the fallback -- so a channel looks the same in
+        both places and there is one answer to "what colour is this
+        channel". Returns None when there is no channel to colour.
+        """
+        channel = channel or self.current_channel
+        if not channel:
+            return None
+        return self._channel_colors.get(
+            channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
+
+    def _on_full_marker_toggled(self, checked):
+        """Marker layer on/off, applied to the live stack only.
+
+        Nothing is rebuilt and nothing is requested: the controller fades
+        its layers, the tiles stay pooled and cached. If no stack exists
+        the button state is simply remembered for the next build.
+        """
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        if stack is None:
+            return
+        stack.controller.set_marker_visible(bool(checked))
 
     def _compare_viewport_l0(self, source):
         """The region the `source` compare panel is showing, in level-0
@@ -1571,9 +1611,17 @@ class Step0Page(QWidget):
             self._describe_full_source(source, method, params))
         if self.production_correction_busy():
             return
-        self._ensure_explore_tab().show_source(self.current_channel, method,
-                                               params,
-                                               viewport_l0=viewport_l0)
+        explore_tab = self._ensure_explore_tab()
+        accepted = explore_tab.show_source(self.current_channel, method,
+                                           params,
+                                           viewport_l0=viewport_l0,
+                                           tint=self._full_image_tint())
+        # The marker toggle is page state, so a freshly built stack has to
+        # be told about it -- a build always comes up visible.
+        stack = explore_tab.stack if accepted else None
+        if stack is not None and hasattr(self, "_btn_full_marker"):
+            stack.controller.set_marker_visible(
+                self._btn_full_marker.isChecked())
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.

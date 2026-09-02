@@ -56,12 +56,15 @@ class _RecordingExploreTab:
     def __init__(self):
         self.calls = []
         self.viewports = []
+        self.tints = []
         self.stack = None
         self.build_attempts = 0
         self.released = []
 
-    def show_source(self, channel, method, params=(), *, viewport_l0=None):
+    def show_source(self, channel, method, params=(), *, viewport_l0=None,
+                    tint=None):
         self.calls.append((channel, method, tuple(params)))
+        self.tints.append(tint)
         # Recorded separately: most cases here are about the selection, and
         # the viewport is asserted in test_step0_full_image_viewport.py.
         self.viewports.append(viewport_l0)
@@ -332,6 +335,11 @@ def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
             self.view = type("V", (), {"view_box": _ViewBox()})()
             self.provider = type("P", (), {
                 "level_shape": staticmethod(lambda _l: (4096, 2048))})()
+            # The page pushes the marker-toggle state into a live stack.
+            self.marker_visible = []
+            self.controller = type("C", (), {
+                "set_marker_visible": lambda _s, v:
+                    self.marker_visible.append(bool(v))})()
 
     tab = _RecordingExploreTab()
     tab.stack = _Stack()

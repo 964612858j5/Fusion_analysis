@@ -63,10 +63,15 @@ def _row_major():
 class _RecordingTab:
     def __init__(self):
         self.calls = []
+        # The page consults this after a successful show_source, to push the
+        # marker-toggle state into a freshly built stack.
+        self.stack = None
 
-    def show_source(self, channel, method, params=(), *, viewport_l0=None):
+    def show_source(self, channel, method, params=(), *, viewport_l0=None,
+                    tint=None):
         self.calls.append({"channel": channel, "method": method,
-                           "params": tuple(params), "viewport": viewport_l0})
+                           "params": tuple(params), "viewport": viewport_l0,
+                           "tint": tint})
         return True
 
     def set_dataset(self, _path):
@@ -357,6 +362,8 @@ class _FakeController:
         self.order = []
         self.jump_calls = []
         self.selection_calls = []
+        self.tints = []
+        self.marker_visible = []
         self.channel, self.method, self.params = "CD3", None, ()
 
     def set_selection(self, channel=None, method=None, params=None):
@@ -366,6 +373,13 @@ class _FakeController:
             self.channel = channel
         self.method = method
         self.params = tuple(params or ())
+
+    def set_tint(self, rgb):
+        self.tints.append(rgb)
+        self.order.append("set_tint")
+
+    def set_marker_visible(self, visible):
+        self.marker_visible.append(bool(visible))
 
     def jump_to(self, y0, x0, w, h):
         self.jump_calls.append((y0, x0, w, h))
@@ -400,8 +414,9 @@ def _tab_with_factory(app, order):
     made = {}
 
     def factory(path, channel, parent_widget=None, *, method=None, params=(),
-                initial_viewport_l0=None):
+                initial_viewport_l0=None, tint=None):
         ctl = _FakeController()
+        ctl.tints.append(tint)
         ctl.order = order
         ctl.channel, ctl.method, ctl.params = channel, method, tuple(params)
         order.append("load_overview")

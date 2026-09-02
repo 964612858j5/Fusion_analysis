@@ -880,6 +880,29 @@ class TileItemPool:
         self.entries: Dict[Tuple[int, int, int], _PoolEntry] = {}
         self.items_created = 0
         self.items_pruned = 0
+        # The pool owns the colour table, not the caller: items are created
+        # lazily as tiles arrive, so a caller that only walked `entries`
+        # would leave every tile that lands afterwards grey.
+        self._lut = None
+        # Layer opacity, owned here for the same reason as the LUT: items
+        # created after the switch must come up in the same state.
+        self._layer_opacity = 1.0
+
+    def set_layer_opacity(self, alpha: float) -> None:
+        """Fade the whole layer in/out without touching `setVisible`, which
+        the per-level visibility policy owns and rewrites on every range
+        change."""
+        self._layer_opacity = float(alpha)
+        for entry in self.entries.values():
+            entry.item.setOpacity(self._layer_opacity)
+
+    def set_lookup_table(self, lut) -> None:
+        """Apply `lut` (or None for greyscale) to every item, now and on
+        every item created later. Pure display: the stored uint8 pixels are
+        untouched, so this costs no re-quantisation and no re-read."""
+        self._lut = lut
+        for entry in self.entries.values():
+            entry.item.setLookupTable(lut)
 
     def _z_for_level(self, level: int) -> float:
         return self.base_z + (self.num_levels - level)
@@ -901,6 +924,10 @@ class TileItemPool:
             item = pg.ImageItem(axisOrder="row-major")
             item.setZValue(self._z_for_level(level))
             item.setImage(arr_uint8, autoLevels=False, levels=(0, 255))
+            if self._lut is not None:
+                item.setLookupTable(self._lut)
+            if self._layer_opacity != 1.0:
+                item.setOpacity(self._layer_opacity)
             item.setRect(rect)
             self.view_box.addItem(item)
             entry = _PoolEntry(item, level, tx, ty, rect)
@@ -1245,6 +1272,13 @@ class ExploreController(QtCore.QObject):
         self._display_hi = 1.0
         self._overview_arr: Optional[np.ndarray] = None
 
+        # ── display tint (module docstring "Channel tint") ──
+        # None = greyscale, which is what every layer draws as until a host
+        # sets a colour. Kept as controller state so a channel switch, a
+        # newly pooled tile and a floor rebuild all pick up the same table.
+        self._tint = None
+        self._marker_visible = True
+
         # ── teardown bookkeeping ──
         self._teardown_order = []
         self._torn_down = False
@@ -1369,6 +1403,58 @@ class ExploreController(QtCore.QObject):
         return RawKey(source=source, channel=self.channel, tile=addr)
 
     # ── selection ─────────────────────────────────────────────────────────
+
+    # ── channel tint / layer visibility ─────────────────────────────────
+
+    @staticmethod
+    def build_tint_lut(rgb):
+        """A 256-entry uint8 RGB colour table for `rgb` (floats 0..1).
+
+        Entry i is `i * rgb`, i.e. the same "grey value scales one colour"
+        mapping the compare panels use (`Step0Page._make_colored_rgb`), so
+        the full image and the patch preview agree on what a channel looks
+        like. No alpha: at this stage there is nothing underneath to show
+        through, and a transparent dark end would only reveal the ViewBox
+        background.
+        """
+        ramp = np.arange(256, dtype=np.float32)
+        scaled = ramp[:, None] * np.asarray(rgb, dtype=np.float32)[None, :3]
+        return np.clip(scaled, 0, 255).astype(np.uint8)
+
+    def set_tint(self, rgb):
+        """Colour every layer this controller owns. `None` = greyscale.
+
+        Display only: the stored uint8 pixels are unchanged, so this is a
+        lookup-table swap -- no re-read, no re-quantisation, no scheduler
+        traffic. Applied to the overview, the corrected floor and BOTH tile
+        pools, and remembered so tiles that arrive later are coloured too.
+        """
+        lut = None if rgb is None else self.build_tint_lut(rgb)
+        self._tint = lut
+        self.view.overview_item.setLookupTable(lut)
+        self.view.corrected_floor_item.setLookupTable(lut)
+        self._raw_pool.set_lookup_table(lut)
+        self._precise_pool.set_lookup_table(lut)
+
+    def set_marker_visible(self, visible: bool):
+        """Show/hide every layer this controller owns.
+
+        Visibility only -- the tiles stay pooled and cached, so toggling
+        back is instant and issues no request. Per-level and per-key
+        visibility inside the pools is unaffected: this gates on top of it,
+        so re-showing does not resurrect a tile the level policy hides.
+        """
+        self._marker_visible = bool(visible)
+        alpha = 1.0 if self._marker_visible else 0.0
+        # OPACITY, not `setVisible`: the pools' per-level and per-key
+        # visibility policy owns `setVisible` and rewrites it on every range
+        # change, so a layer switch expressed that way would be undone by
+        # the next pan. Opacity is written by nobody else, so the two
+        # mechanisms compose instead of fighting.
+        self.view.overview_item.setOpacity(alpha)
+        self.view.corrected_floor_item.setOpacity(alpha)
+        self._raw_pool.set_layer_opacity(alpha)
+        self._precise_pool.set_layer_opacity(alpha)
 
     def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Change channel/method/params. Marks the precise layer

@@ -153,8 +153,13 @@ def _cleanup_partial_stack(controller, scheduler, provider, view):
 
 
 def build_default_stack(path, channel, parent_widget=None, *,
-                        method=None, params=(), initial_viewport_l0=None):
+                        method=None, params=(), initial_viewport_l0=None,
+                        tint=None):
     """Construct the real viewer stack for `path`.
+
+    `tint` is the channel's display colour as floats `(r, g, b)` in 0..1,
+    or None for greyscale. It is applied to the built stack, not passed
+    into the controller's constructor: it is display state, not identity.
 
     `initial_viewport_l0` is `(y0, x0, w, h)` in level-0 pixels: where the
     view should OPEN. None means the whole slide. It is applied at the very
@@ -232,6 +237,10 @@ def build_default_stack(path, channel, parent_widget=None, *,
             controller.set_selection(method=method, params=tuple(params))
         # `ensure_floor` only where there is a method to compute a floor
         # for; Original needs none.
+        # Before the camera move, so the first painted frame is already the
+        # right colour rather than a grey flash.
+        if tint is not None:
+            controller.set_tint(tint)
         controller.load_overview(ensure_floor=method is not None)
         # Open where the caller asked, else on the whole slide. Without an
         # explicit range the ViewBox keeps its default one, no tile is
@@ -376,7 +385,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._build(getattr(self._page, "current_channel", None))
 
     def _build(self, channel, *, method=None, params=(),
-              viewport_l0=None):
+              viewport_l0=None, tint=None):
         """The one build path, used by `activate` and by `show_source`.
 
         Kept single deliberately: a second construction site is how the
@@ -405,7 +414,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
         try:
             stack = self._stack_factory(self._dataset_path, channel, self,
                                         method=method, params=tuple(params),
-                                        initial_viewport_l0=viewport_l0)
+                                        initial_viewport_l0=viewport_l0,
+                                        tint=tint)
         except Exception as exc:
             self._build_error = exc
             print(f"[explore] build FAILED after "
@@ -420,7 +430,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
-    def show_source(self, channel, method, params=(), *, viewport_l0=None):
+    def show_source(self, channel, method, params=(), *, viewport_l0=None,
+                    tint=None):
         """Show `(channel, method, params)`, building the stack if needed.
 
         The drill-down entry point: the compare panels' "full image" buttons
@@ -438,6 +449,11 @@ class Step0ExploreTab(QtWidgets.QWidget):
           `set_selection` is not free even for an identical selection: it
           cancels the directional prefetch and re-enters the provisional
           state.
+
+        `tint` is the channel's display colour, applied on both paths and
+        before any camera move so no frame is painted in the previous
+        channel's colour. None leaves the colour alone on the warm path and
+        means greyscale on the cold one.
 
         `viewport_l0` -- `(y0, x0, w, h)` in level-0 pixels -- is where to
         OPEN or MOVE the view. It is honoured on both paths, and on the warm
@@ -468,7 +484,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
             if self._build_error is not None:
                 return False
             self._build(channel, method=method, params=params,
-                        viewport_l0=viewport_l0)
+                        viewport_l0=viewport_l0, tint=tint)
             return self._stack is not None
 
         controller = self._stack.controller
@@ -479,6 +495,11 @@ class Step0ExploreTab(QtWidgets.QWidget):
                   flush=True)
             controller.set_selection(channel=channel, method=method,
                                      params=params)
+        # Colour BEFORE the camera move: a channel switch changes the tint
+        # too, and setting it after would paint one frame of the new
+        # channel in the old channel's colour.
+        if tint is not None:
+            controller.set_tint(tint)
         if viewport_l0 is not None:
             controller.jump_to(*(int(v) for v in viewport_l0))
         return True

@@ -101,6 +101,8 @@ class FakeController:
         # `_order` with the teardown steps so a test can assert that a
         # selection change lands BEFORE the camera move.
         self.jump_calls = []
+        self.tints = []
+        self.marker_visible = []
 
     def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Mirrors `ExploreController.set_selection`'s sentinel semantics.
@@ -122,6 +124,16 @@ class FakeController:
             passed["params"] = tuple(params) if params is not None else ()
             self.params = passed["params"]
         self.selection_calls.append(passed)
+
+    def set_tint(self, rgb):
+        """Mirrors `ExploreController.set_tint`: display-only, recorded in
+        the shared order list so 'coloured before the camera moved' is
+        checkable."""
+        self.tints.append(rgb)
+        self._order.append("controller.set_tint")
+
+    def set_marker_visible(self, visible):
+        self.marker_visible.append(bool(visible))
 
     def jump_to(self, y0, x0, w, h):
         """Mirrors `ExploreController.jump_to`: level-0 coordinates, and
@@ -157,14 +169,15 @@ def make_factory(order=None, fail=False):
     """Returns (factory, record) where `record` sees every stack built."""
     order = order if order is not None else []
     record = {"built": [], "order": order, "channels": [], "built_with": [],
-              "viewports": []}
+              "viewports": [], "tints": []}
 
     def factory(path, channel, parent_widget=None, *, method=None, params=(),
-                initial_viewport_l0=None):
+                initial_viewport_l0=None, tint=None):
         record["channels"].append(channel)
         record["parent"] = parent_widget
         # Where the stack was asked to OPEN. None = whole slide.
         record["viewports"].append(initial_viewport_l0)
+        record["tints"].append(tint)
         # The selection the stack is asked to come up WITH -- the drill-down
         # must not build Original and switch afterwards.
         record["built_with"].append((channel, method, tuple(params)))

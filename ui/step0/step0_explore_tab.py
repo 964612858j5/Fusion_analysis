@@ -153,8 +153,14 @@ def _cleanup_partial_stack(controller, scheduler, provider, view):
 
 
 def build_default_stack(path, channel, parent_widget=None, *,
-                        method=None, params=()):
+                        method=None, params=(), initial_viewport_l0=None):
     """Construct the real viewer stack for `path`.
+
+    `initial_viewport_l0` is `(y0, x0, w, h)` in level-0 pixels: where the
+    view should OPEN. None means the whole slide. It is applied at the very
+    end, after `load_overview` has installed the record synchronously --
+    before that, `_blocked_on_overview()` is true and the camera move would
+    issue nothing.
 
     `method` / `params` are the selection the stack should come up WITH --
     `None` / `()` for Original, or `"tophat"` / `"cucim"` with that
@@ -227,11 +233,19 @@ def build_default_stack(path, channel, parent_widget=None, *,
         # `ensure_floor` only where there is a method to compute a floor
         # for; Original needs none.
         controller.load_overview(ensure_floor=method is not None)
-        # Open on the whole slide. Without an explicit range the ViewBox
-        # keeps its default one, no tile is visible, and the tab would come
-        # up empty even though the stack is healthy.
-        h0, w0 = provider.level_shape(0)
-        view.view_box.setRange(xRange=(0, w0), yRange=(0, h0), padding=0)
+        # Open where the caller asked, else on the whole slide. Without an
+        # explicit range the ViewBox keeps its default one, no tile is
+        # visible, and the view would come up empty even though the stack is
+        # healthy.
+        if initial_viewport_l0 is not None:
+            # `jump_to` and not a bare `setRange`: it moves the camera
+            # through the real range-changed path and then issues both
+            # request batches at once, instead of waiting out the 30ms
+            # motion timer for pixels the user is already looking at.
+            controller.jump_to(*(int(v) for v in initial_viewport_l0))
+        else:
+            h0, w0 = provider.level_shape(0)
+            view.view_box.setRange(xRange=(0, w0), yRange=(0, h0), padding=0)
         return ExploreStack(provider, scheduler, controller, view,
                             (raw_cache, corrected_cache))
     except Exception:
@@ -361,7 +375,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return
         self._build(getattr(self._page, "current_channel", None))
 
-    def _build(self, channel, *, method=None, params=()):
+    def _build(self, channel, *, method=None, params=(),
+              viewport_l0=None):
         """The one build path, used by `activate` and by `show_source`.
 
         Kept single deliberately: a second construction site is how the
@@ -383,12 +398,14 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # reports "nothing appeared" the log has to be able to say whether
         # the build ran at all, and how long it took.
         print(f"[explore] building stack: {self._dataset_path} "
-              f"channel={channel!r} method={method!r} params={tuple(params)!r}",
+              f"channel={channel!r} method={method!r} params={tuple(params)!r} "
+              f"viewport_l0={viewport_l0!r}",
               flush=True)
         t0 = time.perf_counter()
         try:
             stack = self._stack_factory(self._dataset_path, channel, self,
-                                        method=method, params=tuple(params))
+                                        method=method, params=tuple(params),
+                                        initial_viewport_l0=viewport_l0)
         except Exception as exc:
             self._build_error = exc
             print(f"[explore] build FAILED after "
@@ -403,7 +420,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
-    def show_source(self, channel, method, params=()):
+    def show_source(self, channel, method, params=(), *, viewport_l0=None):
         """Show `(channel, method, params)`, building the stack if needed.
 
         The drill-down entry point: the compare panels' "full image" buttons
@@ -422,6 +439,17 @@ class Step0ExploreTab(QtWidgets.QWidget):
           cancels the directional prefetch and re-enters the provisional
           state.
 
+        `viewport_l0` -- `(y0, x0, w, h)` in level-0 pixels -- is where to
+        OPEN or MOVE the view. It is honoured on both paths, and on the warm
+        path it is honoured EVEN WHEN the triple is unchanged: the same ⤢
+        button clicked again is the user asking to see this region, and the
+        region is whatever the compare panel shows now. It is applied AFTER
+        `set_selection` so the camera move issues requests for the selection
+        already in force, rather than for the one being replaced. None means
+        "leave the view where it is" on the warm path and "whole slide" on
+        the cold one -- nothing is remembered either way, so a refused or
+        failed build leaves no stale target behind.
+
         `method=None` (Original) always means `params=()`: the parameters
         are not read in that case, and accepting them would let this report
         success for a triple the controller does not actually hold.
@@ -439,17 +467,20 @@ class Step0ExploreTab(QtWidgets.QWidget):
         if self._stack is None:
             if self._build_error is not None:
                 return False
-            self._build(channel, method=method, params=params)
+            self._build(channel, method=method, params=params,
+                        viewport_l0=viewport_l0)
             return self._stack is not None
 
         controller = self._stack.controller
         current = (controller.channel, controller.method,
                    tuple(controller.params))
-        if current == wanted:
-            return True
-        print(f"[explore] switching source: {current} -> {wanted}", flush=True)
-        controller.set_selection(channel=channel, method=method,
-                                 params=params)
+        if current != wanted:
+            print(f"[explore] switching source: {current} -> {wanted}",
+                  flush=True)
+            controller.set_selection(channel=channel, method=method,
+                                     params=params)
+        if viewport_l0 is not None:
+            controller.jump_to(*(int(v) for v in viewport_l0))
         return True
 
     def _pull_channel_from_page(self):

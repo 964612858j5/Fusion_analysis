@@ -97,6 +97,10 @@ class FakeController:
         # state. An omitted argument and an argument set to None are
         # different things here (see `set_selection`).
         self.selection_calls = []
+        # Camera moves, in order, as (y0, x0, w, h) level-0 tuples. Shares
+        # `_order` with the teardown steps so a test can assert that a
+        # selection change lands BEFORE the camera move.
+        self.jump_calls = []
 
     def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Mirrors `ExploreController.set_selection`'s sentinel semantics.
@@ -118,6 +122,12 @@ class FakeController:
             passed["params"] = tuple(params) if params is not None else ()
             self.params = passed["params"]
         self.selection_calls.append(passed)
+
+    def jump_to(self, y0, x0, w, h):
+        """Mirrors `ExploreController.jump_to`: level-0 coordinates, and
+        the ONLY camera entry the tab is allowed to use."""
+        self.jump_calls.append((y0, x0, w, h))
+        self._order.append("controller.jump_to")
 
     def teardown(self, *, wait_for_floor=False):
         self.teardown_calls += 1
@@ -146,11 +156,15 @@ class FakeView:
 def make_factory(order=None, fail=False):
     """Returns (factory, record) where `record` sees every stack built."""
     order = order if order is not None else []
-    record = {"built": [], "order": order, "channels": [], "built_with": []}
+    record = {"built": [], "order": order, "channels": [], "built_with": [],
+              "viewports": []}
 
-    def factory(path, channel, parent_widget=None, *, method=None, params=()):
+    def factory(path, channel, parent_widget=None, *, method=None, params=(),
+                initial_viewport_l0=None):
         record["channels"].append(channel)
         record["parent"] = parent_widget
+        # Where the stack was asked to OPEN. None = whole slide.
+        record["viewports"].append(initial_viewport_l0)
         # The selection the stack is asked to come up WITH -- the drill-down
         # must not build Original and switch afterwards.
         record["built_with"].append((channel, method, tuple(params)))

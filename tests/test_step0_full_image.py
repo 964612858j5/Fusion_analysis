@@ -55,12 +55,16 @@ class _RecordingExploreTab:
 
     def __init__(self):
         self.calls = []
+        self.viewports = []
         self.stack = None
         self.build_attempts = 0
         self.released = []
 
-    def show_source(self, channel, method, params=()):
+    def show_source(self, channel, method, params=(), *, viewport_l0=None):
         self.calls.append((channel, method, tuple(params)))
+        # Recorded separately: most cases here are about the selection, and
+        # the viewport is asserted in test_step0_full_image_viewport.py.
+        self.viewports.append(viewport_l0)
         self.build_attempts += 1
         return True
 

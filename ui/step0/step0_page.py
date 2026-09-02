@@ -4,6 +4,7 @@ block01/ui/step0/step0_page.py — Step0Page (main Step 0 QWidget).
 
 import os
 import gc
+import math
 import json
 import shutil
 import time
@@ -917,7 +918,17 @@ class Step0Page(QWidget):
             vb.setAspectLocked(True)
             vb.invertY(True)
             vb.setMenuEnabled(False)
-            item = pg.ImageItem()
+            # axisOrder EXPLICITLY, never the process-global
+            # `pg.setConfigOptions(imageAxisOrder=...)`: pyqtgraph captures it
+            # once, in ImageItem.__init__, and its library default is
+            # col-major. Inheriting the global would make this panel's world
+            # coordinates x=row / y=column for any entry point that does not
+            # run main.py's setConfigOptions first -- and the full-image
+            # drill-down converts those coordinates to level-0, so a silent
+            # transposition would land the user in the wrong part of the
+            # slide. viewer/explore_view.py sets it per item for the same
+            # reason.
+            item = pg.ImageItem(axisOrder="row-major")
             vb.addItem(item)
             self._preview_vbs.append(vb)
             self._preview_imgs.append(item)
@@ -1394,13 +1405,114 @@ class Step0Page(QWidget):
             label += "  (nucleus is excluded from correction)"
         return f"{self.current_channel or '—'} · {label}"
 
+    def _compare_viewport_l0(self, source):
+        """The region the `source` compare panel is showing, in level-0
+        pixels, as `(y0, x0, w, h)` -- or None when there is nothing
+        trustworthy to convert.
+
+        THE panel, not a panel: with zoom lock off the three panels hold
+        three different ranges, so the button that was clicked decides which
+        ViewBox is read. `FULL_IMAGE_SOURCES` is in the same order as
+        `_preview_vbs`.
+
+        The conversion is a pure offset. A patch bbox is `(y0, y1, x0, x1)`
+        in level-0, half-open (`overview_panel._patch_coords`, consumed as
+        `read_region(ch, y0, y1, x0, x1)` -> `arr[y0:y1, x0:x1]`), and the
+        payload is exactly that slice with no crop, pad, transpose or
+        display downsample -- so with `axisOrder="row-major"` a panel's
+        world x IS the patch column and world y IS the patch row:
+
+            level0_x = patch_x0 + local_x
+            level0_y = patch_y0 + local_y
+
+        Near edge floors, FAR edge CEILS. The visible rect is what the user
+        can see, so the answer must CONTAIN it: a range of y=[-0.25, 20.25]
+        over a 30-row patch covers rows 0..20 inclusive, i.e. h=21. Flooring
+        both ends (as the scheduler's own viewport clamp does, deliberately,
+        to avoid pulling in an extra tile row) would return h=20 and clip
+        the bottom row off the drill-down.
+
+        The rect is clipped to the SLIDE, not to the patch. An aspect-locked
+        panel routinely shows blank margin around the patch -- measured
+        y=[-70, 100] for a patch at y=1000..1030 -- and that margin is not
+        nothing: the same offset relation maps it to real slide rows
+        930..1100, which is exactly the surrounding tissue the full image
+        exists to fill in. Clipping to the patch would throw it away and
+        open on the patch alone. Only the slide's own extent is a real
+        boundary, and `loader.shape` is where it comes from.
+
+        A sub-pixel but non-empty view still yields one pixel: it is a real
+        place in the slide, and falling back to the whole slide would throw
+        the user's position away precisely when they are most zoomed in. A
+        view that lands wholly OUTSIDE the slide has no such place, so it
+        returns None and the caller opens on the whole slide.
+        """
+        try:
+            idx = FULL_IMAGE_SOURCES.index(source)
+        except ValueError:
+            return None
+        vbs = getattr(self, "_preview_vbs", None)
+        if not vbs or not (0 <= idx < len(vbs)):
+            return None
+        if not self.patches or not (0 <= self.current_patch_idx
+                                    < len(self.patches)):
+            return None
+        # The payload on screen must be THIS (channel, patch): a payload left
+        # over from another patch would be given this patch's origin, which
+        # is a wrong position rather than a missing one. Identity, not
+        # emptiness -- all three writers (`_on_batch_patch_done`,
+        # `_show_channel_from_cache`, `_on_preview_ready`) store the very
+        # object they display under that key.
+        key = (self.current_channel, self.current_patch_idx)
+        if (self._last_payload is None
+                or self._preview_cache.get(key) is not self._last_payload):
+            return None
+        py0, py1, px0, px1 = (int(v) for v in self.patches[self.current_patch_idx])
+        if py1 <= py0 or px1 <= px0:
+            return None
+        shape = getattr(self.loader, "shape", None) if self.loader else None
+        if not shape or len(shape) < 2:
+            return None
+        slide_h, slide_w = int(shape[0]), int(shape[1])
+        if slide_h <= 0 or slide_w <= 0:
+            return None
+        try:
+            (vx0, vx1), (vy0, vy1) = vbs[idx].viewRange()
+        except Exception:
+            return None
+        if not all(math.isfinite(float(v)) for v in (vx0, vx1, vy0, vy1)):
+            return None
+        if vx1 <= vx0 or vy1 <= vy0:
+            return None
+        # floor/ceil on the FULL range first, offset by the patch origin,
+        # and only then clipped -- to the slide.
+        lx0 = px0 + math.floor(vx0)
+        lx1 = px0 + math.ceil(vx1)
+        ly0 = py0 + math.floor(vy0)
+        ly1 = py0 + math.ceil(vy1)
+        lx0, lx1 = max(0, min(slide_w, lx0)), max(0, min(slide_w, lx1))
+        ly0, ly1 = max(0, min(slide_h, ly0)), max(0, min(slide_h, ly1))
+        # Wholly outside the slide (or collapsed onto its edge by the clip):
+        # no real place to go, so the caller opens on the whole slide.
+        if lx1 <= lx0 or ly1 <= ly0:
+            return None
+        return (ly0, lx0, lx1 - lx0, ly1 - ly0)
+
     def _enter_full_image(self, source):
-        """A compare panel's "full image" button."""
+        """A compare panel's "full image" button.
+
+        The viewport is converted HERE, once, from the panel that was
+        clicked -- the click is the whole intent, so it is also the only
+        moment the full image is repositioned. Nothing is stored: a refused
+        or failed build simply drops it, and the next click recomputes from
+        whatever the panels hold then.
+        """
         if source not in FULL_IMAGE_METHOD:
             return
+        viewport_l0 = self._compare_viewport_l0(source)
         self._full_image_source = source
         self._preview_stack.setCurrentIndex(PREVIEW_PAGE_FULL_IMAGE)
-        self._show_full_image()
+        self._show_full_image(viewport_l0=viewport_l0)
 
     def _return_to_compare(self):
         """Back to the three panels. Deliberately does nothing else.
@@ -1438,8 +1550,14 @@ class Step0Page(QWidget):
         return (stack_widget is not None
                 and stack_widget.currentIndex() == PREVIEW_PAGE_FULL_IMAGE)
 
-    def _show_full_image(self):
+    def _show_full_image(self, viewport_l0=None):
         """Ask the viewer for the current selection, if it may be asked.
+
+        `viewport_l0` is passed ONLY by the ⤢ button (see
+        `_enter_full_image`). The channel-sync and reopen callers leave it
+        None on purpose: the user may have panned somewhere inside the full
+        image, and a channel change or a post-run rebuild must not yank
+        them back to the compare patch.
 
         While a production correction is running the viewer has been
         released and must not be rebuilt; its placeholder already says so,
@@ -1454,7 +1572,8 @@ class Step0Page(QWidget):
         if self.production_correction_busy():
             return
         self._ensure_explore_tab().show_source(self.current_channel, method,
-                                               params)
+                                               params,
+                                               viewport_l0=viewport_l0)
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.

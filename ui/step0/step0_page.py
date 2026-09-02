@@ -233,7 +233,11 @@ class Step0Page(QWidget):
         self._bg_n_cucim = 0
         self._bg_n_orig = 0
         self._bg_n_total = 0
-        self._bg_workers = []
+        # Dataset generation ("epoch"). Bumped once per COMMITTED dataset switch.
+        # Every worker callback is bound to the generation that was current when
+        # the worker was created (see _gen_slot), so a worker started for the
+        # previous dataset can never write this page's state after the switch.
+        self._dataset_gen = 0
         # 预览结果缓存（供toggle复用）和zoom联动防循环flag
         self._last_payload = None
         self._zoom_lock_active = False
@@ -1712,8 +1716,11 @@ class Step0Page(QWidget):
         gen = self._preload_gen
         worker = PreloadWorker(self.loader, list(self.patches), channels, gen,
                                parent=self)
-        worker.channel_loaded.connect(self._on_preload_channel)
-        worker.finished_gen.connect(self._on_preload_finished)
+        # Generation is captured HERE, at connection time (see _gen_slot); the
+        # worker's own `gen` argument only guards a preload restart within the
+        # SAME dataset, not a dataset switch.
+        worker.channel_loaded.connect(self._gen_slot(self._on_preload_channel))
+        worker.finished_gen.connect(self._gen_slot(self._on_preload_finished))
         self._preload_worker = worker
         worker.start()
 
@@ -2354,11 +2361,24 @@ class Step0Page(QWidget):
             self._out_path_edit.setText(path)
 
     def _reload_from_paths(self):
+        """Load a dataset, transactionally.
+
+        Nothing that belongs to the CURRENT dataset is touched until (a) the
+        new loader has been built successfully and (b) the current dataset's
+        background workers are confirmed finished. The switch is committed in
+        one block after both checks, and only then does the dataset
+        generation move.
+
+        What a pre-commit failure guarantees, precisely: the current
+        dataset's IDENTITY (loader, ome_path, output dir), its on-screen
+        PIXELS and metrics, and the dataset GENERATION are unchanged. It is
+        not a full rollback -- reaching check (b) already asked the running
+        background workers to stop, and a stop cannot be un-asked, so an
+        in-flight batch / on-demand / preload run may have to be restarted
+        by the user.
+        """
         global OME_TIFF_FILE, OUTPUT_DIR
 
-        # Re-arm the per-load auto-open guard: each genuine load may open the
-        # navigator once; ROI/overview refreshes (other code paths) do not re-arm.
-        self._navigator_auto_opened = False
         ome = self._ome_path_edit.text().strip()
         outd = self._out_path_edit.text().strip()
         panel_csv = self._panel_csv_edit.text().strip()
@@ -2367,16 +2387,77 @@ class Step0Page(QWidget):
             QMessageBox.warning(self, "File not found", f"OME-TIFF not found:\n{ome}")
             return
 
-        OME_TIFF_FILE = ome
-        OUTPUT_DIR = outd if outd else os.path.dirname(ome)
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        self._out_path_edit.setText(OUTPUT_DIR)
+        # The whole-slide correction worker is the one worker we cannot stop
+        # here: its only save-consistent stop (stop_after_current_channel) can
+        # take a full channel of a whole slide to be observed, and forcing it
+        # would leave a half-written corrected zarr. Refuse the switch instead
+        # of racing it. (Unreachable from the UI -- Save disables the Load
+        # button and runs a modal dialog -- but the invariant is stated here
+        # rather than inferred from the dialog's modality.)
+        wsi = getattr(self, "_wsi_worker", None)
+        if wsi is not None and wsi.isRunning():
+            QMessageBox.warning(
+                self, "Correction in progress",
+                "A whole-slide background correction is still running.\n"
+                "Wait for it to finish, or cancel it, before loading another "
+                "dataset.")
+            return
 
+        new_output_dir = outd if outd else os.path.dirname(ome)
         try:
-            self.loader = OMETIFFLoader(OME_TIFF_FILE, CHANNEL_NAME_MAP)
+            os.makedirs(new_output_dir, exist_ok=True)
+            new_loader = OMETIFFLoader(ome, CHANNEL_NAME_MAP)
         except Exception as e:
+            # Nothing has been mutated yet: the current dataset is untouched.
             QMessageBox.critical(self, "Load error", str(e))
             return
+
+        # The old dataset's workers hold its loader, the GPU and open reads.
+        # Stop AND wait: a stop that has not been observed yet is not a
+        # finished thread. If a thread refuses to finish we keep its handle
+        # and abort the switch rather than destroy a running QThread.
+        stuck = self._stop_bg_workers()
+        if stuck:
+            QMessageBox.critical(
+                self, "Load error",
+                "Background workers did not stop (%s).\n"
+                "The current dataset is still loaded and displayed; the "
+                "background computation was asked to stop, so it may need to "
+                "be restarted. Try loading again."
+                % ", ".join(sorted(set(stuck))))
+            return
+
+        # ── commit ───────────────────────────────────────────────────────
+        # From here on the switch cannot fail back to the old dataset.
+        # The generation moves FIRST: every callback still bound to the old
+        # generation (including signals Qt has already queued) is dropped
+        # from this line on.
+        self._dataset_gen += 1
+        # Explore: tear the PREVIOUS dataset's stack down BEFORE self.ome_path
+        # moves, so neither its pixels nor its source identity can survive --
+        # and so a Full Image that is open right now is unbound before
+        # anything of the new dataset exists.
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is not None:
+            explore_tab.set_dataset(None)
+        # Drop the old dataset's on-screen pixels, metrics and caches.
+        self._reset_dataset_view_state()
+        old_loader = getattr(self, "loader", None)
+        if old_loader is not None and old_loader is not new_loader:
+            try:
+                # The only handle the loader caches is the corrected zarr store
+                # (the OME-TIFF itself is reopened per read); release it.
+                old_loader.set_corrected_zarr_store(None, {})
+            except Exception:
+                pass
+        self.loader = new_loader
+        # Re-arm the per-load auto-open guard: each genuine load may open the
+        # navigator once; ROI/overview refreshes (other code paths) do not re-arm.
+        self._navigator_auto_opened = False
+
+        OME_TIFF_FILE = ome
+        OUTPUT_DIR = new_output_dir
+        self._out_path_edit.setText(OUTPUT_DIR)
 
         self.ome_path = OME_TIFF_FILE
         self.output_dir = OUTPUT_DIR
@@ -2416,23 +2497,16 @@ class Step0Page(QWidget):
         )
         self.loader.set_corrected_zarr_store(None, {})
 
-        self._stop_bg_workers()
-        # Explore: tear the PREVIOUS dataset's stack down before anything is
-        # bound to the new one, so no pixel and no source identity of the old
-        # dataset can survive the switch. The new stack is built lazily, on
-        # the next activation of the Explore tab.
-        explore_tab = getattr(self, "_explore_tab", None)
+        # Bind Explore to the NEW dataset (the stack itself is built lazily,
+        # on the next activation of the Explore view).
         if explore_tab is not None:
             explore_tab.set_dataset(self.ome_path)
         self.current_patch_idx = 0
         self.current_channel = None
-        self._preview_req_id = 0
         self._channel_decisions.clear()
-        # New image/ROI loaded -> no BG run yet: button back to "▶ Process", clear
-        # stale results/dirty so a param change won't read as "Re-process" (Topic 1).
-        self._computed_channels = set()
-        self._preview_cache = {}
-        self._process_completed = False
+        # New image/ROI loaded -> no BG run yet: button back to "▶ Process".
+        # (The stale-result clearing itself lives in _reset_dataset_view_state,
+        # which ran above, before the new loader was bound.)
         if hasattr(self, "_btn_process"):
             self._reset_process_button()
         # (#5) the BG run-progress widgets (_bg_pbar/_bg_start_status) were removed
@@ -3621,12 +3695,12 @@ class Step0Page(QWidget):
             channel_params=self._channel_params,   # each channel uses its own params
             max_gpu_workers=4,
         )
-        self._batch_worker.channel_patch_done.connect(self._on_batch_patch_done)
-        self._batch_worker.channel_done.connect(self._on_batch_channel_done)
-        self._batch_worker.all_done.connect(self._on_batch_all_done)
-        self._batch_worker.progress.connect(self._on_batch_progress)
-        self._batch_worker.error_signal.connect(self._on_batch_error)
-        self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._batch_worker.channel_patch_done.connect(self._gen_slot(self._on_batch_patch_done))
+        self._batch_worker.channel_done.connect(self._gen_slot(self._on_batch_channel_done))
+        self._batch_worker.all_done.connect(self._gen_slot(self._on_batch_all_done))
+        self._batch_worker.progress.connect(self._gen_slot(self._on_batch_progress))
+        self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
+        self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
         self._release_explore_for_production("patch background correction")
         self._batch_worker.start()
 
@@ -3727,11 +3801,11 @@ class Step0Page(QWidget):
             self._cucim_slider.value(),
             max_gpu_workers=2,
         )
-        worker.channel_patch_done.connect(self._on_batch_patch_done)
-        worker.channel_done.connect(self._on_batch_channel_done)
-        worker.all_done.connect(lambda: None)
-        worker.error_signal.connect(self._on_batch_error)
-        worker.canceled.connect(lambda: None)
+        worker.channel_patch_done.connect(self._gen_slot(self._on_batch_patch_done))
+        worker.channel_done.connect(self._gen_slot(self._on_batch_channel_done))
+        worker.all_done.connect(self._gen_slot(lambda: None))
+        worker.error_signal.connect(self._gen_slot(self._on_batch_error))
+        worker.canceled.connect(self._gen_slot(lambda: None))
         self._ondemand_workers.append(worker)
         self._release_explore_for_production("on-demand background correction")
         worker.start()
@@ -3899,8 +3973,8 @@ class Step0Page(QWidget):
             _pv_s,
             nucleus_channel=self.nucleus_channel,
         )
-        self._preview_worker.finished.connect(self._on_preview_ready)
-        self._preview_worker.error.connect(self._on_preview_error)
+        self._preview_worker.finished.connect(self._gen_slot(self._on_preview_ready))
+        self._preview_worker.error.connect(self._gen_slot(self._on_preview_error))
         self._preview_worker.start()
 
     def _on_preview_ready(self, req_id, payload):
@@ -3988,12 +4062,12 @@ class Step0Page(QWidget):
             self._tophat_slider.value(), self._cucim_slider.value(),
             channel_params=params, max_gpu_workers=4,
         )
-        self._batch_worker.channel_patch_done.connect(self._on_batch_patch_done)
-        self._batch_worker.channel_done.connect(self._on_batch_channel_done)
-        self._batch_worker.all_done.connect(self._on_batch_all_done)
-        self._batch_worker.progress.connect(self._on_batch_progress)
-        self._batch_worker.error_signal.connect(self._on_batch_error)
-        self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._batch_worker.channel_patch_done.connect(self._gen_slot(self._on_batch_patch_done))
+        self._batch_worker.channel_done.connect(self._gen_slot(self._on_batch_channel_done))
+        self._batch_worker.all_done.connect(self._gen_slot(self._on_batch_all_done))
+        self._batch_worker.progress.connect(self._gen_slot(self._on_batch_progress))
+        self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
+        self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
         self._release_explore_for_production("patch background correction")
         self._batch_worker.start()
 
@@ -4038,11 +4112,167 @@ class Step0Page(QWidget):
         if explore_tab is not None:
             explore_tab.teardown()
 
-    def _stop_bg_workers(self):
-        for worker in self._bg_workers:
+    # ══ Dataset generation + worker lifetime ══════════════════════════
+    #
+    # Two independent mechanisms, neither a substitute for the other:
+    #
+    #   _gen_slot        rejects LATE SIGNALS from a previous dataset's
+    #                    workers, so they cannot mutate this page's state.
+    #   _stop_bg_workers releases the REAL RESOURCES (threads, GPU, IO) those
+    #                    workers still hold.
+    #
+    # Generation alone would leave threads running against a stale loader;
+    # stopping alone would still let already-queued signals land after the
+    # switch, because `stop()` is only a flag checked between work units.
+
+    def _gen_slot(self, slot):
+        """Bind `slot` to the dataset generation current AT CONNECTION TIME.
+
+        The captured generation lives in the closure -- it is never re-read
+        from page state when the signal arrives. That is the whole point: a
+        worker created for dataset A carries A's generation for its entire
+        life, so once the page commits a switch to B every one of that
+        worker's done/error/cancel/progress signals is dropped, including the
+        ones Qt had already queued at switch time.
+
+        The worker's own signal protocol is untouched; this is a page-side
+        forwarding slot.
+        """
+        gen = self._dataset_gen
+
+        def forward(*args):
+            if gen != self._dataset_gen:
+                return
+            return slot(*args)
+
+        return forward
+
+    def _live_bg_workers(self):
+        """(label, worker, stop_callable) for every worker handle that is a
+        real, still-running thread. Finished on-demand workers are pruned
+        here -- the list used to only ever grow."""
+        live = []
+        preload = getattr(self, "_preload_worker", None)
+        if preload is not None and preload.isRunning():
+            live.append(("preload", preload, preload.cancel))
+        batch = getattr(self, "_batch_worker", None)
+        if batch is not None and batch.isRunning():
+            live.append(("batch", batch, batch.stop))
+        kept = []
+        for worker in list(getattr(self, "_ondemand_workers", ()) or ()):
             if worker.isRunning():
-                worker.stop()
-        self._bg_workers = []
+                kept.append(worker)
+                live.append(("ondemand", worker, worker.stop))
+        self._ondemand_workers = kept
+        preview = getattr(self, "_preview_worker", None)
+        if preview is not None and preview.isRunning():
+            live.append(("preview", preview, preview.stop))
+        return live
+
+    def _stop_bg_workers(self, *, wait_ms=5000):
+        """Request a stop on every live worker, then WAIT for the threads.
+
+        "Stop requested" and "thread finished" are different states: every
+        worker's stop is a flag checked between work units, so the thread is
+        still running (and still touching the loader / the GPU) when stop()
+        returns. This method does both halves and reports what did not
+        finish, so a caller can refuse to proceed rather than leave a QThread
+        destroyed while running.
+
+        The whole-slide correction worker is deliberately NOT stopped here:
+        its only save-consistent stop is `stop_after_current_channel`, which
+        can take a full channel of a whole slide to observe. Callers that
+        must not race it check `production_correction_busy()` first.
+
+        Returns the list of labels still running after the wait (empty ==
+        everything released).
+        """
+        live = self._live_bg_workers()
+        for _label, _worker, stop in live:
+            try:
+                stop()
+            except Exception:
+                pass
+        stuck = []
+        for label, worker, _stop in live:
+            if not worker.wait(int(wait_ms)):
+                stuck.append(label)
+                print(f"[step0] worker '{label}' did not finish within "
+                      f"{int(wait_ms)} ms after stop")
+        # Drop the handles we have released; a stuck thread keeps its handle so
+        # nothing destroys a running QThread.
+        if getattr(self, "_preload_worker", None) is not None and "preload" not in stuck:
+            self._preload_worker = None
+        if getattr(self, "_batch_worker", None) is not None and "batch" not in stuck:
+            self._batch_worker = None
+        if getattr(self, "_preview_worker", None) is not None and "preview" not in stuck:
+            self._preview_worker = None
+        if "ondemand" not in stuck:
+            self._ondemand_workers = []
+        return stuck
+
+    def _reset_dataset_view_state(self):
+        """Drop every pixel, metric and cache that belongs to the OLD dataset.
+
+        Called on a committed dataset switch, BEFORE anything of the new
+        dataset is bound, so nothing of the previous dataset can survive on
+        screen -- not even until the first new result arrives.
+        """
+        self._last_payload = None
+        for img in (getattr(self, "_orig_img", None),
+                    getattr(self, "_top_img", None),
+                    getattr(self, "_cu_img", None)):
+            if img is not None:
+                img.clear()
+        if hasattr(self, "_metrics_original"):
+            self._metrics_original.setText("Original  → SNR: —  BG-CV: —")
+            self._metrics_tophat.setText("TopHat    → SNR: —  BG-CV: —")
+            self._metrics_cucim.setText("cucim     → SNR: —  BG-CV: —")
+        if hasattr(self, "_preview_status"):
+            self._preview_status.setText(
+                "Select a channel and patch ROI to preview background correction."
+            )
+            self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
+        self._preview_cache = {}
+        self._preload_cache = {}
+        self._computed_channels = set()
+        # This session's batch selection: which channels are ticked and with
+        # which method. Channel NAMES repeat across datasets (both slides have
+        # a CD3), so keeping this would silently carry A's ticks and methods
+        # into B. `_channel_decisions` / `_channel_params` are re-seeded later
+        # in the load by _load_existing_config; this one had no owner.
+        self._channel_methods = {}
+        # Explicit per-channel raw_ome / corrected_zarr override. Keyed by
+        # channel name, so B's CD3 would inherit A's forced source and skip
+        # auto-detection (_resolve... consults this BEFORE availability on
+        # disk). Cleared so B starts from auto-detection again.
+        self._channel_source_requests = {}
+        # Analysis-region identity + the minted roi_context it belongs to.
+        # The signature is (mode, shape) or (mode, first ROI bbox) -- neither
+        # mentions the dataset, so B drawing an ROI at A's bbox would REUSE
+        # A's roi_context and write B's outputs into A's roi_dir.
+        self._roi_context = None
+        self._roi_context_sig = None
+        # The exact remap config path Step0 last wrote; MainWindow hands it to
+        # Step1 in preference to re-resolving. It points inside A's output
+        # tree, so it must not survive into B.
+        self._last_saved_remap_path = ""
+        # Conditioning viewer zoom/pan, keyed by patch BBOX. A patch of B with
+        # the same bbox as one of A is not the same patch and must not inherit
+        # its viewport.
+        self._conditioning_patch_viewports = {}
+        # NOT cleared here: `_channel_colors` is a per-channel-name display
+        # preference -- not pixels, not source identity, not an output path.
+        self._process_completed = False
+        self._params_dirty = False
+        self._preview_req_id = 0
+        self._applied_corrected_decisions = {}
+        self._incremental_processed = None
+        # Full Image shows one source of the OLD dataset; go back to Compare so
+        # the new dataset starts from the neutral state.
+        self._full_image_source = "original"
+        if hasattr(self, "_preview_stack"):
+            self._return_to_compare()
 
     # (#5) The standalone "Run BG correction" preview-batch handlers
     # (_on_start_bg_correction / _bg_run_next / _finish_bg_start) were removed
@@ -4176,10 +4406,11 @@ class Step0Page(QWidget):
             self.loader, step0_dir, config, rois=rois, parent=self,
             process_channels=set(to_process), incremental=rois_match,
         )
-        self._wsi_worker.progress.connect(self._on_wsi_progress)
-        self._wsi_worker.finished.connect(lambda path, decisions: self._on_wsi_finished(config, path, decisions))
-        self._wsi_worker.canceled.connect(self._on_wsi_canceled)
-        self._wsi_worker.error.connect(self._on_wsi_error)
+        self._wsi_worker.progress.connect(self._gen_slot(self._on_wsi_progress))
+        self._wsi_worker.finished.connect(self._gen_slot(
+            lambda path, decisions: self._on_wsi_finished(config, path, decisions)))
+        self._wsi_worker.canceled.connect(self._gen_slot(self._on_wsi_canceled))
+        self._wsi_worker.error.connect(self._gen_slot(self._on_wsi_error))
         self._wsi_dialog.cancel_requested.connect(self._wsi_worker.stop_after_current_channel)
         self._release_explore_for_production("whole-slide correction (Save)")
         self._wsi_worker.start()

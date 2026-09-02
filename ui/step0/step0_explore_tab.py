@@ -111,8 +111,31 @@ def _cleanup_partial_stack(controller, scheduler, provider, view):
                 pass
 
 
-def build_default_stack(path, channel, parent_widget=None):
+def build_default_stack(path, channel, parent_widget=None, *,
+                        method=None, params=()):
     """Construct the real viewer stack for `path`.
+
+    `method` / `params` are the selection the stack should come up WITH --
+    `None` / `()` for Original, or `"tophat"` / `"cucim"` with that
+    channel's effective parameter. When a method is given it is applied
+    BEFORE the overview is installed: at that point
+    `_overview_matches_selection()` is false and `_current_bbox` is still
+    None, so the controller withholds the floor and issues nothing, and
+    `load_overview(ensure_floor=True)` then starts the floor once, already
+    against the right method.
+
+    What this buys over building Original and switching afterwards, stated
+    no wider than the evidence: the very first viewport request already
+    carries the right method/params context, and one `set_selection` call
+    with its provisional/precise-generation cancel cycle does not happen.
+    NOT claimed: a saved floor job (Original has no method, so it computes
+    no floor), fewer raw reads (both paths need raw for the provisional
+    display), or a wrong frame avoided -- none of that has a request trace
+    behind it.
+
+    When `method is None` the params are normalised to `()`: nothing reads
+    them, and letting a caller pass `(15,)` for Original would leave the
+    controller's state disagreeing with the triple the caller asked for.
 
     Explore opens its OWN `RawTileProvider` rather than reusing the page's
     `OMETIFFLoader`: the loader is GUI-thread single-handle, and
@@ -154,9 +177,15 @@ def build_default_stack(path, channel, parent_widget=None):
         view = ExploreView(parent_widget)
         controller = ExploreController(provider, scheduler, compute, grid,
                                        view, channel)
-        # `method` is left None: P0 is Original-only, so nothing corrected is
-        # requested and no correction parameter is read from the page.
-        controller.load_overview(ensure_floor=False)
+        if method is None:
+            params = ()
+        else:
+            # Before the overview: withheld, so this issues nothing (see
+            # this function's docstring).
+            controller.set_selection(method=method, params=tuple(params))
+        # `ensure_floor` only where there is a method to compute a floor
+        # for; Original needs none.
+        controller.load_overview(ensure_floor=method is not None)
         # Open on the whole slide. Without an explicit range the ViewBox
         # keeps its default one, no tile is visible, and the tab would come
         # up empty even though the stack is healthy.
@@ -269,17 +298,26 @@ class Step0ExploreTab(QtWidgets.QWidget):
             # A failed build is not retried silently on every tab click;
             # the user gets the error until the dataset is reloaded.
             return
+        self._build(getattr(self._page, "current_channel", None))
+
+    def _build(self, channel, *, method=None, params=()):
+        """The one build path, used by `activate` and by `show_source`.
+
+        Kept single deliberately: a second construction site is how the
+        failure handling, the logging and the placeholder state drift apart.
+        """
         self._build_attempts += 1
-        channel = getattr(self._page, "current_channel", None)
         # Lifecycle logging, deliberately kept: building this stack blocks
         # the GUI thread (a synchronous overview read), so when a manual test
         # reports "nothing appeared" the log has to be able to say whether
         # the build ran at all, and how long it took.
         print(f"[explore] building stack: {self._dataset_path} "
-              f"channel={channel!r}", flush=True)
+              f"channel={channel!r} method={method!r} params={tuple(params)!r}",
+              flush=True)
         t0 = time.perf_counter()
         try:
-            stack = self._stack_factory(self._dataset_path, channel, self)
+            stack = self._stack_factory(self._dataset_path, channel, self,
+                                        method=method, params=tuple(params))
         except Exception as exc:
             self._build_error = exc
             print(f"[explore] build FAILED after "
@@ -295,6 +333,55 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
+
+    def show_source(self, channel, method, params=()):
+        """Show `(channel, method, params)`, building the stack if needed.
+
+        The drill-down entry point: the compare panels' "full image" buttons
+        each name one result, and this is how they ask for it. Original is
+        `method=None, params=()`.
+
+        Two rules, both about not doing work twice:
+
+        * with no stack yet, the stack is BUILT with this selection, so the
+          first viewport request already carries the right method/params
+          and no extra `set_selection` (with its provisional/generation
+          cancel cycle) is needed;
+        * with a stack already up, the WHOLE triple is compared first and
+          `set_selection` is called only if something differs.
+          `set_selection` is not free even for an identical selection: it
+          cancels the directional prefetch and re-enters the provisional
+          state.
+
+        `method=None` (Original) always means `params=()`: the parameters
+        are not read in that case, and accepting them would let this report
+        success for a triple the controller does not actually hold.
+
+        Returns True when the selection has been ACCEPTED and a stack is
+        available to serve it -- not that its pixels or its floor are on
+        screen yet; those arrive asynchronously. False when there is
+        nothing to serve it with: no dataset bound, or a build that failed.
+        """
+        if self._dataset_path is None:
+            return False
+
+        params = () if method is None else tuple(params)
+        wanted = (channel, method, params)
+        if self._stack is None:
+            if self._build_error is not None:
+                return False
+            self._build(channel, method=method, params=params)
+            return self._stack is not None
+
+        controller = self._stack.controller
+        current = (controller.channel, controller.method,
+                   tuple(controller.params))
+        if current == wanted:
+            return True
+        print(f"[explore] switching source: {current} -> {wanted}", flush=True)
+        controller.set_selection(channel=channel, method=method,
+                                 params=params)
+        return True
 
     def _pull_channel_from_page(self):
         """Re-read the page's channel and switch to it if it changed.

@@ -73,23 +73,48 @@ class FakeScheduler:
         self.workers_running = False
 
 
+_UNSET = object()          # the fakes' stand-in for the controller's own
+
+
 class FakeController:
     """Mirrors `ExploreController.teardown`'s contract: scheduler first
     (which joins the workers), provider second."""
 
-    def __init__(self, provider, scheduler, order, channel=None):
+    def __init__(self, provider, scheduler, order, channel=None,
+                 method=None, params=()):
         self.provider = provider
         self.scheduler = scheduler
         self._order = order
         self.teardown_calls = 0
-        # The selection surface the tab pulls into on re-activation.
+        # The selection surface the tab reads and writes.
         self.channel = channel
+        self.method = method
+        self.params = tuple(params)
+        # What each call actually PASSED, as kwargs -- not the resulting
+        # state. An omitted argument and an argument set to None are
+        # different things here (see `set_selection`).
         self.selection_calls = []
 
-    def set_selection(self, channel=None, **_kwargs):
-        self.selection_calls.append(channel)
-        if channel is not None:
+    def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
+        """Mirrors `ExploreController.set_selection`'s sentinel semantics.
+
+        The real one defaults every argument to a private `_UNSET` and
+        leaves what it is not given ALONE -- so `set_selection(channel=x)`
+        keeps the current method and params. A fake defaulting them to None
+        would silently clear the method instead, and a test built on it
+        would "prove" a channel switch drops the correction.
+        """
+        passed = {}
+        if channel is not _UNSET:
+            passed["channel"] = channel
             self.channel = channel
+        if method is not _UNSET:
+            passed["method"] = method
+            self.method = method
+        if params is not _UNSET:
+            passed["params"] = tuple(params) if params is not None else ()
+            self.params = passed["params"]
+        self.selection_calls.append(passed)
 
     def teardown(self):
         self.teardown_calls += 1
@@ -115,11 +140,14 @@ class FakeView:
 def make_factory(order=None, fail=False):
     """Returns (factory, record) where `record` sees every stack built."""
     order = order if order is not None else []
-    record = {"built": [], "order": order, "channels": []}
+    record = {"built": [], "order": order, "channels": [], "built_with": []}
 
-    def factory(path, channel, parent_widget=None):
+    def factory(path, channel, parent_widget=None, *, method=None, params=()):
         record["channels"].append(channel)
         record["parent"] = parent_widget
+        # The selection the stack is asked to come up WITH -- the drill-down
+        # must not build Original and switch afterwards.
+        record["built_with"].append((channel, method, tuple(params)))
         provider = FakeProvider(path)
         if fail:
             # A factory that fails AFTER opening the provider is the case
@@ -128,7 +156,8 @@ def make_factory(order=None, fail=False):
             raise RuntimeError("boom: could not read pyramid")
         scheduler = FakeScheduler(order)
         controller = FakeController(provider, scheduler, order,
-                                    channel=channel)
+                                    channel=channel, method=method,
+                                    params=tuple(params))
         from PyQt5 import QtWidgets
         # Parented to the tab, exactly as the real `ExploreView(parent)` is:
         # the bug this models is that a parented widget still has to be put
@@ -216,7 +245,7 @@ def test_re_activation_follows_the_pages_channel_once(app):
 
     tab.activate()
 
-    assert controller.selection_calls == ["Ki67"]
+    assert controller.selection_calls == [{"channel": "Ki67"}]
     assert controller.channel == "Ki67"
     assert tab.build_attempts == 1, "following a channel must not rebuild"
     tab.teardown()
@@ -388,19 +417,6 @@ def test_p0_touches_no_save_config_or_correction_state(app):
     assert page.__dict__ == before
 
 
-def test_the_real_factory_asks_for_no_correction_method(app):
-    """P0 shows `Original`. The controller's `method` stays None, so no
-    CorrectionKey is ever built and no slider value is read."""
-    import inspect
-
-    from block01.ui.step0 import step0_explore_tab as mod
-
-    src = inspect.getsource(mod.build_default_stack)
-    assert "set_selection" not in src, (
-        "P0 must not select a correction method")
-    assert "tophat" not in src and "cucim" not in src
-
-
 def test_partial_build_failure_after_the_controller_exists_is_unwound(app):
     """`load_overview` and the initial `setRange` run AFTER the controller
     is constructed, so the failure path must unwind a CONTROLLER -- which
@@ -554,4 +570,305 @@ def test_the_view_is_actually_laid_out_and_visible_after_activation(app):
     QtWidgets.QApplication.processEvents()
     assert tab._placeholder.isVisible() is True
     assert tab._placeholder.width() > 0
+    tab.teardown()
+
+
+# ── show_source: the drill-down entry point ──────────────────────────────────
+#
+# Each compare panel's "full image" button names one result. These pin the two
+# rules that keep it from doing work twice: build WITH the selection rather
+# than build-then-switch, and compare the whole triple before switching.
+
+def test_show_source_builds_with_the_requested_selection(app):
+    """Never Original-then-switch: building with the selection means the
+    first viewport request already carries the right method/params, and no
+    extra `set_selection` (with its provisional/generation cancel cycle)
+    happens."""
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    assert tab.show_source("CD8", "tophat", (15,)) is True
+
+    assert record["built_with"] == [("CD8", "tophat", (15,))]
+    assert tab.build_attempts == 1
+    controller = tab.stack.controller
+    assert (controller.channel, controller.method, controller.params) == (
+        "CD8", "tophat", (15,))
+    assert controller.selection_calls == [], (
+        "the build already carried the selection; nothing to switch")
+    tab.teardown()
+
+
+def test_show_source_original_asks_for_no_method(app):
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    tab.show_source("CD8", None, ())
+
+    assert record["built_with"] == [("CD8", None, ())]
+    assert tab.stack.controller.method is None
+    tab.teardown()
+
+
+@pytest.mark.parametrize(
+    ("second", "expect_switch"),
+    [(("CD8", "cucim", (50,)), True),      # different method
+     (("CD8", "tophat", (25,)), True),     # same method, different param
+     (("CD3", "tophat", (15,)), True),     # different channel
+     (("CD8", None, ()), True),            # back to Original
+     (("CD8", "tophat", (15,)), False)],   # identical triple
+)
+def test_show_source_switches_only_on_a_real_difference(app, second,
+                                                        expect_switch):
+    """`set_selection` is not free even for an identical selection: it
+    cancels the directional prefetch and re-enters the provisional state.
+    So the WHOLE triple is compared, and every part of it counts."""
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.show_source("CD8", "tophat", (15,))
+    controller = tab.stack.controller
+
+    assert tab.show_source(*second) is True
+
+    if expect_switch:
+        assert controller.selection_calls == [
+            {"channel": second[0], "method": second[1], "params": second[2]}]
+        assert (controller.channel, controller.method,
+                controller.params) == second
+    else:
+        assert controller.selection_calls == []
+    assert tab.build_attempts == 1, "switching a source must not rebuild"
+    tab.teardown()
+
+
+def test_show_source_repeated_identical_calls_do_nothing(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.show_source("CD8", "cucim", (50,))
+    controller = tab.stack.controller
+
+    for _ in range(5):
+        assert tab.show_source("CD8", "cucim", (50,)) is True
+
+    assert controller.selection_calls == []
+    assert tab.build_attempts == 1
+    tab.teardown()
+
+
+def test_show_source_without_a_dataset_does_nothing(app):
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+
+    assert tab.show_source("CD8", "tophat", (15,)) is False
+
+    assert tab.stack is None
+    assert record["built_with"] == []
+    assert tab.build_attempts == 0
+    tab.teardown()
+
+
+def test_show_source_after_a_failed_build_stays_failed(app):
+    """A failed build is not retried on every button press -- that would
+    spawn a worker pool per click."""
+    factory, record = make_factory(fail=True)
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/broken.ome.tif")
+
+    assert tab.show_source("CD8", "tophat", (15,)) is False
+    assert tab.build_attempts == 1
+
+    assert tab.show_source("CD8", "cucim", (50,)) is False
+    assert tab.build_attempts == 1
+    assert record["built"] == []
+    tab.teardown()
+
+
+# ── the real factory's orchestration ─────────────────────────────────────────
+#
+# Behaviour, not source shape: the viewer classes `build_default_stack`
+# reaches for are replaced with recorders, and the ORDER and ARGUMENTS of
+# what it does to them are asserted. No real slide, no Qt view.
+
+# ONE timeline shared by the controller and the view. Separate per-object
+# lists could only show the order WITHIN each object -- they could never
+# show that `setRange` came after `load_overview`, which is half of what
+# this is meant to pin.
+_TIMELINE = []
+
+
+class _RecordingController:
+    instances = []
+
+    def __init__(self, provider, scheduler, compute, grid, view, channel):
+        self.channel = channel
+        self.method = None
+        self.params = ()
+        _RecordingController.instances.append(self)
+
+    def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
+        record = {}
+        if channel is not _UNSET:
+            record["channel"] = channel
+            self.channel = channel
+        if method is not _UNSET:
+            record["method"] = method
+            self.method = method
+        if params is not _UNSET:
+            record["params"] = tuple(params)
+            self.params = tuple(params)
+        _TIMELINE.append(("set_selection", record))
+
+    def load_overview(self, ensure_floor=True):
+        _TIMELINE.append(("load_overview", {"ensure_floor": ensure_floor}))
+
+    def teardown(self):
+        _TIMELINE.append(("teardown", {}))
+
+
+class _RecordingViewBox:
+    def setRange(self, **kwargs):
+        _TIMELINE.append(("setRange", sorted(kwargs)))
+
+
+class _RecordingView:
+    def __init__(self, parent=None):
+        self.view_box = _RecordingViewBox()
+
+    def setParent(self, _p):
+        pass
+
+    def deleteLater(self):
+        pass
+
+
+class _StubProvider:
+    channel_names = ["CD8", "CD3"]
+
+    def __init__(self, path):
+        self.path = path
+
+    def level_shape(self, _level):
+        return (4096, 4096)
+
+    def close(self):
+        pass
+
+
+def _patch_real_factory_dependencies(monkeypatch):
+    """Swap the viewer classes the factory imports for recorders.
+
+    The factory imports them INSIDE the function, so they resolve from the
+    module at call time and patching the module attribute is enough.
+    """
+    from block01.viewer import caches, correction_compute, explore_view
+    from block01.viewer import raw_tile_provider, scheduler
+
+    _RecordingController.instances = []
+    del _TIMELINE[:]
+    monkeypatch.setattr(raw_tile_provider, "RawTileProvider", _StubProvider)
+    monkeypatch.setattr(caches, "LRUByteCache", lambda _n: object())
+    monkeypatch.setattr(correction_compute, "CorrectionCompute",
+                        lambda *a, **k: object())
+    monkeypatch.setattr(scheduler, "TileScheduler", lambda *a, **k: object())
+    monkeypatch.setattr(explore_view, "ExploreView", _RecordingView)
+    monkeypatch.setattr(explore_view, "ExploreController",
+                        _RecordingController)
+
+
+def test_real_factory_orchestration_for_a_corrected_method(app, monkeypatch):
+    """Selection FIRST (so the overview install is the thing that starts the
+    floor, once, against the right method), then the overview with
+    `ensure_floor=True`, then the opening range."""
+    from block01.ui.step0.step0_explore_tab import build_default_stack
+
+    _patch_real_factory_dependencies(monkeypatch)
+    build_default_stack("/data/slide.ome.tif", "CD8",
+                        method="tophat", params=(15,))
+
+    assert [name for name, _payload in _TIMELINE] == [
+        "set_selection", "load_overview", "setRange"]
+    assert _TIMELINE[0][1] == {"method": "tophat", "params": (15,)}
+    assert _TIMELINE[1][1] == {"ensure_floor": True}
+    assert _TIMELINE[2][1] == ["padding", "xRange", "yRange"]
+
+
+def test_real_factory_orchestration_for_original(app, monkeypatch):
+    """Original selects nothing at all and asks for no floor."""
+    from block01.ui.step0.step0_explore_tab import build_default_stack
+
+    _patch_real_factory_dependencies(monkeypatch)
+    build_default_stack("/data/slide.ome.tif", "CD8")
+
+    assert [name for name, _p in _TIMELINE] == ["load_overview", "setRange"]
+    assert _TIMELINE[0][1] == {"ensure_floor": False}
+    controller = _RecordingController.instances[-1]
+    assert controller.method is None and controller.params == ()
+
+
+def test_real_factory_ignores_params_given_without_a_method(app, monkeypatch):
+    """`method=None` means `params=()`; a stray parameter must not leave the
+    controller's state disagreeing with what the caller asked for."""
+    from block01.ui.step0.step0_explore_tab import build_default_stack
+
+    _patch_real_factory_dependencies(monkeypatch)
+    build_default_stack("/data/slide.ome.tif", "CD8", method=None,
+                        params=(15,))
+
+    assert [name for name, _p in _TIMELINE] == ["load_overview", "setRange"]
+    controller = _RecordingController.instances[-1]
+    assert controller.params == ()
+
+
+def test_a_channel_change_keeps_the_current_method_and_params(app):
+    """`activate`'s channel pull must not disturb the correction.
+
+    The real `set_selection` leaves what it is not given alone, so passing
+    only `channel=` keeps the method and its parameter. That is exactly
+    what a user expects: they were looking at Top-hat, they pick another
+    channel on the correction tab, they come back to Top-hat of the new
+    channel -- not to Original.
+    """
+    factory, _record = make_factory()
+    page = FakePage("CD8")
+    tab = Step0ExploreTab(page, stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.show_source("CD8", "tophat", (15,))
+    controller = tab.stack.controller
+
+    page.current_channel = "CD3"
+    tab.activate()
+
+    assert controller.channel == "CD3"
+    assert controller.method == "tophat", (
+        "the channel pull cleared the correction method")
+    assert controller.params == (15,)
+    assert controller.selection_calls == [{"channel": "CD3"}], (
+        "the pull must pass only the channel")
+    tab.teardown()
+
+
+@pytest.mark.parametrize("stray", [(15,), (0,), (99, 1)])
+def test_show_source_normalises_original_params(app, stray):
+    """Original ignores parameters, so accepting them as part of the
+    requested triple would let `show_source` report success for a state the
+    controller does not hold -- and make an identical request look
+    different next time."""
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+
+    assert tab.show_source("CD8", None, stray) is True
+
+    assert record["built_with"] == [("CD8", None, ())]
+    controller = tab.stack.controller
+    assert controller.params == ()
+
+    # And the normalisation makes the comparison stable: a second Original
+    # request with different stray params is still the same request.
+    assert tab.show_source("CD8", None, (1234,)) is True
+    assert controller.selection_calls == []
     tab.teardown()

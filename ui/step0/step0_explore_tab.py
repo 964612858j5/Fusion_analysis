@@ -64,18 +64,22 @@ class ExploreStack:
         self.caches = caches
         self.torn_down = False
 
-    def teardown(self):
+    def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent. `ExploreController.teardown` performs, in order,
         `scheduler.shutdown()` (which joins the worker threads) and then
         `provider.close()`. Only THEN are the caches emptied: nothing can
         still be writing into them, and dropping the tuple reference alone
         would free nothing, since the scheduler and the compute layer hold
-        their own references to the same two cache objects."""
+        their own references to the same two cache objects.
+
+        `wait_for_floor` is passed straight through: True means a hand-off
+        to something else that needs the GPU, so a running floor
+        computation is waited out rather than joined with a timeout."""
         if self.torn_down:
             return
         self.torn_down = True
         try:
-            self.controller.teardown()
+            self.controller.teardown(wait_for_floor=wait_for_floor)
         finally:
             for cache in (self.caches or ()):
                 clear = getattr(cache, "clear", None)
@@ -400,24 +404,32 @@ class Step0ExploreTab(QtWidgets.QWidget):
               f"{controller.channel!r} -> {channel!r}", flush=True)
         controller.set_selection(channel=channel)
 
-    def teardown(self):
+    def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from
         the page's destruction, from the page's own cleanup entry point, or
-        twice."""
-        self._discard_stack()
+        twice.
+
+        `wait_for_floor=True` is the HAND-OFF form: the caller is about to
+        run something else on the GPU, so this must not return while a
+        floor computation is still using it. It blocks for as long as that
+        job needs. The host asks for it through this argument rather than
+        by reaching into the controller's thread list.
+        """
+        self._discard_stack(wait_for_floor=wait_for_floor)
 
     def _on_page_destroyed(self, *_args):
         self._page = None
         self.teardown()
 
     # ── internals ─────────────────────────────────────────────────────
-    def _discard_stack(self):
+    def _discard_stack(self, *, wait_for_floor: bool = False):
         stack, self._stack = self._stack, None
         if stack is None:
             return
-        print("[explore] tearing stack down", flush=True)
+        print(f"[explore] tearing stack down "
+              f"(wait_for_floor={wait_for_floor})", flush=True)
         try:
-            stack.teardown()
+            stack.teardown(wait_for_floor=wait_for_floor)
         finally:
             view = getattr(stack, "view", None)
             if view is not None:

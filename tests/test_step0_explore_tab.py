@@ -86,6 +86,7 @@ class FakeController:
         self.scheduler = scheduler
         self._order = order
         self.teardown_calls = 0
+        self.teardown_waits = []
         # The selection surface the tab reads and writes.
         self.channel = channel
         self.method = method
@@ -116,8 +117,11 @@ class FakeController:
             self.params = passed["params"]
         self.selection_calls.append(passed)
 
-    def teardown(self):
+    def teardown(self, *, wait_for_floor=False):
         self.teardown_calls += 1
+        # Recorded, not acted on: the fake has no floor thread. What matters
+        # is that the tab passes the hand-off flag through.
+        self.teardown_waits.append(wait_for_floor)
         if self.provider.closed:
             return
         self.scheduler.shutdown()
@@ -725,8 +729,8 @@ class _RecordingController:
     def load_overview(self, ensure_floor=True):
         _TIMELINE.append(("load_overview", {"ensure_floor": ensure_floor}))
 
-    def teardown(self):
-        _TIMELINE.append(("teardown", {}))
+    def teardown(self, *, wait_for_floor=False):
+        _TIMELINE.append(("teardown", {"wait_for_floor": wait_for_floor}))
 
 
 class _RecordingViewBox:

@@ -3419,3 +3419,85 @@ def test_atomic_swap_still_prepares_the_new_channels_floor(app):
     assert starts, "a successful atomic swap left the new channel with no floor"
 
     ctrl.teardown()
+
+
+# ── production hand-off: teardown must outwait a running floor job ───────────
+
+def test_teardown_hand_off_does_not_return_while_the_floor_is_computing(app):
+    """`wait_for_floor=True` exists for one reason: something else is about
+    to use the GPU this floor job is on.
+
+    The ordinary path joins each floor thread with a 2s TIMEOUT and then
+    proceeds regardless -- which for a hand-off would be the double GPU use
+    it is meant to prevent, just delayed. So this must block until the job
+    is genuinely finished, however long that takes.
+    """
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _BlockingCompute(FakeCompute):
+        def correct_array(self, arr, method, param):
+            entered.set()
+            assert release.wait(timeout=10), "test never released the floor"
+            return arr.astype(np.float32, copy=False)
+
+    ctrl, _provider, _scheduler, view = make_controller(app)
+    ctrl.compute = _BlockingCompute()
+    ctrl.load_overview()
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=50)
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert entered.wait(timeout=5), "no floor job started"
+
+    done = threading.Event()
+
+    def tear():
+        ctrl.teardown(wait_for_floor=True)
+        done.set()
+
+    t = threading.Thread(target=tear, name="handoff")
+    t.start()
+    try:
+        # The floor thread is still inside correct_array; the hand-off must
+        # be waiting on it. 2.5s is past the ordinary path's own timeout, so
+        # a teardown that finished here would prove the timeout was used.
+        assert not done.wait(timeout=2.5), (
+            "the hand-off returned while the floor job was still running")
+
+        release.set()
+        assert done.wait(timeout=10), "the hand-off never returned"
+    finally:
+        release.set()
+        t.join(timeout=10)
+    assert not t.is_alive()
+    assert ctrl._teardown_order == ["scheduler.shutdown", "provider.close"]
+
+
+def test_ordinary_teardown_gives_up_on_a_stuck_floor_job(app):
+    """The default path is best-effort by design: a late floor result is
+    dropped once `_torn_down` is set, so closing a window must not hang on
+    a floor job. It joins with a timeout and proceeds."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _StuckCompute(FakeCompute):
+        def correct_array(self, arr, method, param):
+            entered.set()
+            release.wait(timeout=30)
+            return arr.astype(np.float32, copy=False)
+
+    ctrl, _provider, _scheduler, view = make_controller(app)
+    ctrl.compute = _StuckCompute()
+    ctrl.load_overview()
+    set_view_and_pump(view, 0, 0, 1024, 1024, ms=50)
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert entered.wait(timeout=5)
+
+    try:
+        t0 = time.perf_counter()
+        ctrl.teardown()                      # no wait_for_floor
+        elapsed = time.perf_counter() - t0
+        assert 1.5 < elapsed < 6.0, (
+            f"expected the ~2s best-effort join, took {elapsed:.2f}s")
+        assert ctrl._teardown_order == ["scheduler.shutdown", "provider.close"]
+    finally:
+        release.set()

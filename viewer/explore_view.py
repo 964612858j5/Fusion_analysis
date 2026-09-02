@@ -3338,10 +3338,29 @@ class ExploreController(QtCore.QObject):
 
     # ── teardown ──────────────────────────────────────────────────────────
 
-    def teardown(self, shutdown_backend: bool = True):
+    def teardown(self, shutdown_backend: bool = True, *,
+                 wait_for_floor: bool = False):
         """Stop timers, disconnect signals, then (if `shutdown_backend`)
         scheduler.shutdown(), then provider.close(). Order recorded in
-        `_teardown_order`."""
+        `_teardown_order`.
+
+        `wait_for_floor` decides what happens to a floor computation that is
+        still running, and the two answers are for two different callers:
+
+        * False (default) -- the ordinary path, e.g. closing the window.
+          Each floor thread is joined with a TIMEOUT and teardown proceeds
+          either way. A late result is harmless (`_handle_floor_result`
+          drops it once `_torn_down` is set), so finishing quickly matters
+          more than finishing tidily.
+        * True -- a HAND-OFF, where something else is about to use the GPU
+          this floor job is on. Here the join must NOT time out: returning
+          while the floor thread is still computing is exactly the double
+          GPU use the hand-off exists to prevent. It blocks for as long as
+          the job takes (measured 0.36s on the real slide; jobs run
+          0.4-1.1s), on the caller's thread, deliberately -- correctness
+          before responsiveness, and no event re-entry to keep a spinner
+          alive.
+        """
         if self._torn_down:
             return
         self._torn_down = True
@@ -3375,12 +3394,15 @@ class ExploreController(QtCore.QObject):
 
         # Floor-compute worker threads are plain daemon threads (not owned
         # by Qt); join them here so teardown leaves nothing running behind
-        # it. A result arriving after `_torn_down = True` is a no-op
-        # (`_handle_floor_result`'s guard above), so this join is a
-        # best-effort cleanup, not a correctness requirement.
+        # it. With `wait_for_floor` false this is best-effort cleanup and
+        # not a correctness requirement -- a result arriving after
+        # `_torn_down = True` is a no-op (`_handle_floor_result`'s guard
+        # above). With it true the join is the whole point and must not
+        # give up: see this method's docstring.
+        floor_join_timeout = None if wait_for_floor else 2.0
         for t in self._floor_threads:
             if t.is_alive():
-                t.join(timeout=2.0)
+                t.join(timeout=floor_join_timeout)
         # Before `provider.close()` below: an overview read in flight would
         # otherwise touch a closed provider.
         pool = getattr(self, "_overview_pool", None)

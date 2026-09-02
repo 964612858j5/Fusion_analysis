@@ -597,7 +597,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import QRectF
 
 # Called through the module, never bound at import time, so a test can
@@ -887,6 +887,18 @@ class TileItemPool:
         # Layer opacity, owned here for the same reason as the LUT: items
         # created after the switch must come up in the same state.
         self._layer_opacity = 1.0
+        # Composition mode, same ownership rule. None = pyqtgraph's default
+        # (SourceOver), which is what every existing caller gets: this is
+        # only ever set by a layer that must ADD to what is underneath.
+        self._composition_mode = None
+
+    def set_composition_mode(self, mode) -> None:
+        """Apply a QPainter.CompositionMode to every item, now and on every
+        item created later. `None` restores pyqtgraph's default
+        (SourceOver), which is what all existing layers use."""
+        self._composition_mode = mode
+        for entry in self.entries.values():
+            entry.item.setCompositionMode(mode)
 
     def set_layer_opacity(self, alpha: float) -> None:
         """Fade the whole layer in/out without touching `setVisible`, which
@@ -928,6 +940,8 @@ class TileItemPool:
                 item.setLookupTable(self._lut)
             if self._layer_opacity != 1.0:
                 item.setOpacity(self._layer_opacity)
+            if self._composition_mode is not None:
+                item.setCompositionMode(self._composition_mode)
             item.setRect(rect)
             self.view_box.addItem(item)
             entry = _PoolEntry(item, level, tx, ty, rect)
@@ -1092,6 +1106,403 @@ class ExploreView(QtWidgets.QWidget):
         """World-space rect for a level-L tile/region, using UNROUNDED,
         per-axis downsample factors (module docstring)."""
         return QRectF(x0 * ds_x, y0 * ds_y, w * ds_x, h * ds_y)
+
+
+# ── RawOverlayLayer ──────────────────────────────────────────────────────────
+
+# Priority base for overlay raw requests. Requests are served from the
+# scheduler's RAW min-heap, so within THAT heap an overlay tile sorts after
+# every marker raw request (those start at 0 and there are at most a
+# viewport's worth) and ahead of the marker's two speculative classes
+# (FALLBACK_RING_BASE_PRIORITY, DIRECTIONAL_PREFETCH_BASE_PRIORITY): what the
+# user is looking at should not queue behind what the viewer is guessing.
+#
+# NOT a global ordering. The scheduler keeps a SECOND heap for CorrectionKey
+# work, and the raw staging a corrected tile needs is enqueued at priority 0
+# on the raw heap regardless of what asked for it -- so marker correction
+# work can and does overtake overlay tiles. This constant orders the raw heap
+# and nothing else.
+OVERLAY_RAW_BASE_PRIORITY = 500
+
+# Z base for the overlay's tile pool. Above PRECISE_BASE_Z plus the largest
+# per-level offset any pool can add (`base_z + num_levels - level`), so an
+# overlay tile always paints after every marker layer. Asserted against the
+# real pools at attach time rather than assumed.
+OVERLAY_BASE_Z = 300
+
+
+class RawOverlayLayer(QtCore.QObject):
+    """A second CHANNEL drawn on top of the marker layers, added to them.
+
+    Deliberately narrow. It owns one `TileItemPool`, its own channel, tint,
+    enabled flag, display range, calibration state and generation counter,
+    and its own queued delivery signal. It owns NOTHING else: no overview
+    item, no corrected floor, no precise pool, no gain calibration, no
+    motion/settle timer, no directional prefetch, no interaction epoch --
+    and, above all, no shutdown rights over the scheduler or the provider,
+    which it merely borrows from the main stack.
+
+    It is not a second camera. The marker `ExploreController` remains the
+    only planner of viewport, display level and visible-tile set; this layer
+    is handed those three values and requests exactly the tiles it is told
+    are visible. There is no second viewport state machine, and the two
+    channels are never waited for in pairs: each arrives and paints on its
+    own.
+
+    Generation tokens are namespaced `("dapi_raw", n)`. `TileRequest`
+    documents the generation as an opaque token precisely so independent
+    counters cannot collide, and `TileScheduler.cancel_generation` matches
+    tokens by value in one global stale-set -- so a bare integer, or the
+    marker's own `("raw", n)`, would let either side's cancel drop the
+    other side's in-flight work.
+
+    Composition is ADDITIVE (`CompositionMode_Plus`), which is what makes
+    this an overlay rather than an occluder: a dark overlay pixel adds zero
+    and leaves the marker exactly as it was, and where both are bright the
+    result is the per-channel saturating sum -- the same thing the compare
+    panels compute as `marker_colour * i + nucleus_colour * j`. Measured on
+    a real ExploreView, not assumed. Only THIS layer composes that way; the
+    marker layers keep SourceOver and keep occluding each other, because two
+    additive layers of the same channel would double their own brightness
+    where they overlap.
+    """
+
+    _delivered = QtCore.pyqtSignal(object)
+    _calibrated = QtCore.pyqtSignal(object)
+
+    def __init__(self, provider, scheduler, grid, view, channel, *,
+                 item_budget: int = DEFAULT_ITEM_BUDGET,
+                 base_z: int = OVERLAY_BASE_Z, parent=None):
+        super().__init__(parent)
+        self.provider = provider
+        self.scheduler = scheduler
+        self.grid = grid
+        self.view = view
+        self.channel = channel
+
+        self._pool = TileItemPool(view.view_box, base_z,
+                                  getattr(provider, "num_levels", 1),
+                                  item_budget)
+        self._pool.set_composition_mode(
+            QtGui.QPainter.CompositionMode_Plus)
+
+        # ── enable state: the user's switch and the suppression are kept
+        # SEPARATE. `_enabled` is what the button says and is never
+        # overwritten by the code; `_suppressed` is set when the marker is
+        # already showing this very channel, so it would otherwise be added
+        # to itself. The effective state is the AND, so moving off the
+        # nucleus channel restores the layer without the user touching the
+        # button and without a per-channel switch map to remember.
+        self._enabled = False
+        self._suppressed = False
+
+        # ── display range: this channel's OWN. Borrowing the marker's would
+        # quantise nucleus pixels against a range computed from a different
+        # channel's histogram, i.e. an arbitrary brightness.
+        self._display_lo = None
+        self._display_hi = None
+        self._calibrating = False
+        self._calibration_failed = False
+
+        self._generation_n = 0
+        self._generation = ("dapi_raw", 0)
+        self._torn_down = False
+        self._last_sync = None      # (level, bbox_l0, frozenset(tiles))
+
+        self.stats = {
+            "requests_issued": 0,
+            "tiles_blitted": 0,
+            "late_rejected": 0,
+            "mismatched_dropped": 0,
+            "calibration_failures": 0,
+        }
+
+        self._delivered.connect(self._handle_result, QtCore.Qt.QueuedConnection)
+        self._calibrated.connect(self._handle_calibration,
+                                 QtCore.Qt.QueuedConnection)
+
+    # ── state, readable by the host and by tests ──────────────────────
+    @property
+    def enabled(self):
+        """What the SWITCH says -- never overwritten by suppression."""
+        return self._enabled
+
+    @property
+    def suppressed(self):
+        return self._suppressed
+
+    @property
+    def effective_enabled(self):
+        return self._enabled and not self._suppressed and not self._torn_down
+
+    @property
+    def calibrated(self):
+        return self._display_lo is not None and self._display_hi is not None
+
+    @property
+    def calibration_failed(self):
+        return self._calibration_failed
+
+    @property
+    def generation(self):
+        return self._generation
+
+    @property
+    def pool(self):
+        return self._pool
+
+    # ── switches ──────────────────────────────────────────────────────
+    def set_enabled(self, enabled: bool, *, host=None):
+        """The user's switch. Turning it OFF cancels the current generation
+        and stops issuing; turning it back ON resumes from the host's
+        CURRENT viewport, so the user does not have to pan to get pixels
+        back. Tiles already pooled and cached are kept either way, so a
+        toggle is instant and reads nothing when the view has not moved.
+        """
+        self._enabled = bool(enabled)
+        self._apply_enabled_state(host=host)
+
+    def set_suppressed(self, suppressed: bool, *, host=None):
+        """Set when the marker layer is ALREADY showing this channel.
+
+        Additive composition would otherwise add the nucleus to itself,
+        doubling its brightness and misrepresenting the pixel values. The
+        user's switch is untouched, so leaving that channel restores the
+        overlay by itself.
+        """
+        self._suppressed = bool(suppressed)
+        self._apply_enabled_state(host=host)
+
+    def _apply_enabled_state(self, *, host=None):
+        on = self.effective_enabled
+        self._pool.set_layer_opacity(1.0 if on else 0.0)
+        if not on:
+            # Stop the in-flight work as well as the drawing: an overlay
+            # nobody is looking at must not keep the IO workers busy.
+            self._bump_generation()
+            return
+        if self.calibrated and host is not None:
+            self._resync_from(host)
+        elif not self.calibrated and not self._calibrating:
+            self.start_calibration(host)
+
+    def set_tint(self, rgb):
+        """Colour, as a lookup table. Display only -- no re-read, no
+        re-quantisation, no request."""
+        self._pool.set_lookup_table(
+            None if rgb is None else ExploreController.build_tint_lut(rgb))
+
+    # ── calibration ───────────────────────────────────────────────────
+    def start_calibration(self, host):
+        """Read ONE coarse level of this channel, only to derive its fixed
+        display range. The pixels are discarded: this layer never shows an
+        overview, and installing one would need a second occluding image
+        under an additive layer, which is exactly the doubling this design
+        avoids.
+
+        Single-flight, and it never retries in a loop: a failure leaves the
+        layer with no pixels and a recorded failure, and does NOT fall back
+        to the marker's display range -- which would be a different
+        channel's histogram presented as this one's.
+        """
+        if (self._torn_down or self._calibrating or self.calibrated
+                or host is None):
+            return
+        self._calibrating = True
+        provider = self.provider
+        source = provider.source_identity()
+        level = host._pick_overview_level()
+        channel = self.channel
+
+        def work():
+            try:
+                rec = ExploreController._read_overview_record(
+                    provider, source, channel, level)
+                self._calibrated.emit(rec)
+            except Exception as exc:        # noqa: BLE001 - reported, not raised
+                self._calibrated.emit(exc)
+
+        host._overview_pool.submit(work)
+
+    def _handle_calibration(self, rec_or_exc):
+        self._calibrating = False
+        if self._torn_down:
+            return
+        if isinstance(rec_or_exc, Exception):
+            self._calibration_failed = True
+            self.stats["calibration_failures"] += 1
+            return
+        rec = rec_or_exc
+        if (rec.channel != self.channel
+                or rec.source != self.provider.source_identity()):
+            self.stats["mismatched_dropped"] += 1
+            return
+        self._display_lo, self._display_hi = rec.display_lo, rec.display_hi
+        host = self.parent()
+        if self.effective_enabled and host is not None:
+            self._resync_from(host)
+
+    # ── the two mount points ──────────────────────────────────────────
+    def apply_visibility(self, current_level: int):
+        """Called right after the host has settled `level` for this frame.
+
+        `coarser_visible=False` is a hard contract here, not a tuning
+        choice: under additive composition a coarse tile left visible under
+        a current-level tile adds its brightness to it, so the same pixels
+        would read twice as bright wherever the two overlap.
+        """
+        self._pool.apply_visibility(
+            current_level,
+            current_level_visible=self.effective_enabled,
+            coarser_visible=False,
+        )
+
+    def sync(self, level: int, bbox_l0, visible_tiles):
+        """Request this channel's missing tiles for the viewport the HOST
+        has already planned.
+
+        `level`, `bbox_l0` and `visible_tiles` come from the marker
+        controller; nothing here recomputes them. Called after the marker's
+        own requests have been submitted, so those are already in the heap
+        ahead of these.
+        """
+        if self._torn_down or not self.effective_enabled:
+            return
+        if not self.calibrated:
+            # Not an error: the calibration callback resyncs when it lands.
+            return
+        self._last_sync = (level, tuple(bbox_l0), frozenset(visible_tiles))
+        self._bump_generation()
+        gen = self._generation
+        source = self.provider.source_identity()
+        missing = [coord for coord in self._order_tiles(bbox_l0, level,
+                                                        visible_tiles)
+                   if self._pool.get(level, *coord) is None]
+        for i, (tx, ty) in enumerate(missing):
+            addr = TileAddress(grid=self.grid, level=level, tx=tx, ty=ty)
+            req = TileRequest(key=RawKey(source=source, channel=self.channel,
+                                         tile=addr),
+                              generation=gen,
+                              priority=OVERLAY_RAW_BASE_PRIORITY + i)
+            self.scheduler.request(req, self._on_result)
+            self.stats["requests_issued"] += 1
+
+    def _order_tiles(self, bbox_l0, level, visible_tiles):
+        """Centre-out, by the same arithmetic the host uses for its own raw
+        batch. Ordering only -- the SET is the host's, unmodified."""
+        ds = self.provider.level_downsample(level)
+        y0, x0, y1, x1 = planning.bbox_to_level(tuple(bbox_l0), ds)
+        cy, cx = (y0 + y1) / 2.0, (x0 + x1) / 2.0
+        ts = self.grid.tile_size
+
+        def dist(coord):
+            tx, ty = coord
+            return ((ty * ts + ts / 2.0 - cy) ** 2
+                    + (tx * ts + ts / 2.0 - cx) ** 2)
+
+        return sorted(visible_tiles, key=dist)
+
+    def _resync_from(self, host):
+        """Re-issue for the host's CURRENT viewport, without waiting for the
+        user to move the camera."""
+        if host is None or getattr(host, "_current_bbox", None) is None:
+            return
+        self.sync(host.level, host._current_bbox, host._visible_tiles)
+        self.apply_visibility(host.level)
+
+    def _bump_generation(self):
+        self.scheduler.cancel_generation(self._generation)
+        self._generation_n += 1
+        self._generation = ("dapi_raw", self._generation_n)
+
+    # ── delivery ──────────────────────────────────────────────────────
+    def _on_result(self, result):
+        """Scheduler callback -- worker thread, or synchronous on a cache
+        hit. Marshal to the GUI thread."""
+        self._delivered.emit(result)
+
+    def _handle_result(self, result):
+        """GUI-side delivery guard.
+
+        Every check is load-bearing, and `disconnect` is NOT one of them: a
+        queued signal already sitting in Qt's event queue is delivered after
+        a disconnect, so teardown and the off switch have to be testable
+        here rather than assumed away upstream.
+        """
+        if self._torn_down or not self.effective_enabled:
+            return
+        if result.error is not None or result.pixels is None:
+            return
+        req = result.request
+        key = req.key
+        if not isinstance(key, RawKey):
+            return
+        if req.generation != self._generation:
+            self.stats["late_rejected"] += 1
+            return
+        if key.channel != self.channel:
+            self.stats["mismatched_dropped"] += 1
+            return
+        if key.source != self.provider.source_identity():
+            self.stats["mismatched_dropped"] += 1
+            return
+        if not self.calibrated:
+            self.stats["mismatched_dropped"] += 1
+            return
+        host = self.parent()
+        tile = key.tile
+        if host is not None:
+            if tile.level != host.level:
+                self.stats["mismatched_dropped"] += 1
+                return
+            if (tile.tx, tile.ty) not in host._visible_tiles:
+                self.stats["late_rejected"] += 1
+                return
+
+        arr = result.pixels.handle
+        gray = self._quantize(arr)
+        ds_y, ds_x = self.provider.level_downsample_yx(tile.level)
+        rect = ExploreView.world_rect(
+            tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
+            arr.shape[0], arr.shape[1], ds_y, ds_x)
+        self._pool.put(tile.level, tile.tx, tile.ty, rect, gray, key)
+        self.stats["tiles_blitted"] += 1
+        self.apply_visibility(tile.level)
+
+    def _quantize(self, arr):
+        """Same arithmetic and same ORDER as the host's raw quantisation,
+        against THIS channel's own display range."""
+        span = max(self._display_hi - self._display_lo, 1e-6)
+        buf = np.array(arr, dtype=np.float32, copy=True)
+        buf -= self._display_lo
+        buf /= span
+        np.clip(buf, 0.0, 1.0, out=buf)
+        buf *= 255.0
+        np.round(buf, out=buf)
+        return buf.astype(np.uint8)
+
+    # ── teardown ──────────────────────────────────────────────────────
+    def teardown(self):
+        """Release what this layer owns, and NOTHING it borrows.
+
+        No `scheduler.shutdown()`, no `provider.close()`: the main stack
+        owns those and closes them exactly once, after this. Physical reads
+        already started for this layer are drained by that single shutdown
+        -- there is deliberately no second drain/idle mechanism here.
+        Idempotent.
+        """
+        if self._torn_down:
+            return
+        self._torn_down = True
+        self._enabled = False
+        self._bump_generation()
+        for signal, slot in ((self._delivered, self._handle_result),
+                             (self._calibrated, self._handle_calibration)):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._pool.clear()
 
 
 # ── ExploreController ────────────────────────────────────────────────────────
@@ -1279,6 +1690,12 @@ class ExploreController(QtCore.QObject):
         self._tint = None
         self._marker_visible = True
 
+        # ── optional additive overlay (RawOverlayLayer) ──
+        # Attached by the host after construction, never created here: this
+        # controller stays the single planner of viewport/level/tiles, and
+        # the overlay is a consumer of that plan, not a second camera.
+        self._overlay = None
+
         # ── teardown bookkeeping ──
         self._teardown_order = []
         self._torn_down = False
@@ -1403,6 +1820,26 @@ class ExploreController(QtCore.QObject):
         return RawKey(source=source, channel=self.channel, tile=addr)
 
     # ── selection ─────────────────────────────────────────────────────────
+
+    def attach_overlay(self, overlay):
+        """Attach an additive `RawOverlayLayer`. It is parented to this
+        controller so it can read the live level/viewport/tile set, and it
+        is asserted to draw ABOVE every layer this controller owns --
+        additive composition under an occluding layer would be invisible.
+        """
+        if overlay is not None:
+            top_marker_z = max(
+                self._raw_pool.base_z + self._raw_pool.num_levels,
+                self._precise_pool.base_z + self._precise_pool.num_levels)
+            assert overlay.pool.base_z > top_marker_z, (
+                f"overlay base_z {overlay.pool.base_z} is not above every "
+                f"marker layer (max {top_marker_z})")
+            overlay.setParent(self)
+        self._overlay = overlay
+
+    @property
+    def overlay(self):
+        return self._overlay
 
     # ── channel tint / layer visibility ─────────────────────────────────
 
@@ -2491,6 +2928,15 @@ class ExploreController(QtCore.QObject):
                                 self._on_precise_cache_hit)
         self._prev_level_for_serve = self.level
         self._update_layer_visibility()
+        # Mount point 1 (module docstring "RawOverlayLayer"): `self.level`,
+        # `self._current_bbox` and `self._visible_tiles` are all settled for
+        # this frame, so the overlay's per-level visibility can be brought
+        # in line IMMEDIATELY -- before its new tiles are even asked for.
+        # Without this, a level change would leave the previous level's
+        # overlay tiles on screen, and under additive composition they would
+        # ADD to the incoming ones rather than being covered by them.
+        if self._overlay is not None:
+            self._overlay.apply_visibility(self.level)
 
         viewport_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
         margin_world = self.grid.tile_size * ds * PRUNE_MARGIN_TILES
@@ -2582,6 +3028,13 @@ class ExploreController(QtCore.QObject):
             key = self._make_raw_key(tx, ty)
             req = TileRequest(key=key, generation=gen, priority=i)
             self.scheduler.request(req, self._on_raw_result)
+
+        # Mount point 2 (module docstring "RawOverlayLayer"): AFTER the
+        # marker batch is submitted, and using only the level / bbox /
+        # visible-tile set already computed above -- the overlay never runs
+        # request planning of its own.
+        if self._overlay is not None:
+            self._overlay.sync(self.level, bbox_l0, visible)
 
         self._maybe_exit_provisional()
 
@@ -3450,6 +3903,16 @@ class ExploreController(QtCore.QObject):
         if self._torn_down:
             return
         self._torn_down = True
+
+        # The overlay goes FIRST and it releases only what it owns -- its
+        # generation, its signals, its pool. It never shuts the scheduler or
+        # the provider down: those are shared, this controller owns them,
+        # and they are closed exactly once, below. Physical reads already
+        # started for the overlay are drained by that one shutdown; there is
+        # deliberately no second drain mechanism.
+        if self._overlay is not None:
+            self._teardown_order.append("overlay.teardown")
+            self._overlay.teardown()
 
         self._settle_timer.stop()
         self._motion_timer.stop()

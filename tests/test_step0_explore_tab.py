@@ -172,7 +172,8 @@ def make_factory(order=None, fail=False):
               "viewports": [], "tints": []}
 
     def factory(path, channel, parent_widget=None, *, method=None, params=(),
-                initial_viewport_l0=None, tint=None):
+                initial_viewport_l0=None, tint=None, nucleus_channel=None,
+                nucleus_tint=None, nucleus_enabled=False):
         record["channels"].append(channel)
         record["parent"] = parent_widget
         # Where the stack was asked to OPEN. None = whole slide.

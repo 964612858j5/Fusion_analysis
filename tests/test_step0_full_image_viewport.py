@@ -68,10 +68,10 @@ class _RecordingTab:
         self.stack = None
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
-                    tint=None):
+                    tint=None, nucleus=None):
         self.calls.append({"channel": channel, "method": method,
                            "params": tuple(params), "viewport": viewport_l0,
-                           "tint": tint})
+                           "tint": tint, "nucleus": nucleus})
         return True
 
     def set_dataset(self, _path):

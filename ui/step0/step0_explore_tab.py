@@ -93,12 +93,17 @@ class ExploreStack:
     this interface.
     """
 
-    def __init__(self, provider, scheduler, controller, view, caches):
+    def __init__(self, provider, scheduler, controller, view, caches,
+                 overlay=None):
         self.provider = provider
         self.scheduler = scheduler
         self.controller = controller
         self.view = view
         self.caches = caches
+        # The additive nucleus layer, or None when the dataset has no
+        # nucleus channel. Held here so the host can reach it, but torn down
+        # BY the controller, which owns the ordering.
+        self.overlay = overlay
         self.torn_down = False
 
     def teardown(self, *, wait_for_floor: bool = False):
@@ -154,8 +159,15 @@ def _cleanup_partial_stack(controller, scheduler, provider, view):
 
 def build_default_stack(path, channel, parent_widget=None, *,
                         method=None, params=(), initial_viewport_l0=None,
-                        tint=None):
+                        tint=None, nucleus_channel=None, nucleus_tint=None,
+                        nucleus_enabled=False):
     """Construct the real viewer stack for `path`.
+
+    `nucleus_channel` adds an additive `RawOverlayLayer` for that channel
+    on top of the marker layers -- full-resolution tiles only, no overview
+    of its own. It is suppressed while the MARKER is showing that same
+    channel, so the nucleus is never added to itself. `nucleus_enabled` is
+    the switch's initial position and `nucleus_tint` its colour.
 
     `tint` is the channel's display colour as floats `(r, g, b)` in 0..1,
     or None for greyscale. It is applied to the built stack, not passed
@@ -204,7 +216,8 @@ def build_default_stack(path, channel, parent_widget=None, *,
 
     from ...viewer.caches import LRUByteCache
     from ...viewer.correction_compute import CorrectionCompute
-    from ...viewer.explore_view import ExploreController, ExploreView
+    from ...viewer.explore_view import (ExploreController, ExploreView,
+                                        RawOverlayLayer)
     from ...viewer.raw_tile_provider import RawTileProvider
     from ...viewer.scheduler import TileScheduler
     from ...viewer.tile_types import TileGridSpec
@@ -216,6 +229,7 @@ def build_default_stack(path, channel, parent_widget=None, *,
     scheduler = None
     controller = None
     view = None
+    overlay = None
     try:
         provider = RawTileProvider(path)
         if not channel or channel not in provider.channel_names:
@@ -241,6 +255,15 @@ def build_default_stack(path, channel, parent_widget=None, *,
         # right colour rather than a grey flash.
         if tint is not None:
             controller.set_tint(tint)
+        if nucleus_channel and nucleus_channel in provider.channel_names:
+            overlay = RawOverlayLayer(provider, scheduler, grid, view,
+                                      nucleus_channel)
+            controller.attach_overlay(overlay)
+            if nucleus_tint is not None:
+                overlay.set_tint(nucleus_tint)
+            overlay.set_suppressed(nucleus_channel == channel,
+                                   host=controller)
+            overlay.set_enabled(bool(nucleus_enabled), host=controller)
         controller.load_overview(ensure_floor=method is not None)
         # Open where the caller asked, else on the whole slide. Without an
         # explicit range the ViewBox keeps its default one, no tile is
@@ -256,7 +279,7 @@ def build_default_stack(path, channel, parent_widget=None, *,
             h0, w0 = provider.level_shape(0)
             view.view_box.setRange(xRange=(0, w0), yRange=(0, h0), padding=0)
         return ExploreStack(provider, scheduler, controller, view,
-                            (raw_cache, corrected_cache))
+                            (raw_cache, corrected_cache), overlay=overlay)
     except Exception:
         # `load_overview` and `setRange` run AFTER the controller exists, so
         # the failure path must be able to unwind a controller, not just the
@@ -385,7 +408,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._build(getattr(self._page, "current_channel", None))
 
     def _build(self, channel, *, method=None, params=(),
-              viewport_l0=None, tint=None):
+              viewport_l0=None, tint=None, nucleus=None):
         """The one build path, used by `activate` and by `show_source`.
 
         Kept single deliberately: a second construction site is how the
@@ -415,7 +438,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
             stack = self._stack_factory(self._dataset_path, channel, self,
                                         method=method, params=tuple(params),
                                         initial_viewport_l0=viewport_l0,
-                                        tint=tint)
+                                        tint=tint, **dict(nucleus or {}))
         except Exception as exc:
             self._build_error = exc
             print(f"[explore] build FAILED after "
@@ -431,7 +454,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
-                    tint=None):
+                    tint=None, nucleus=None):
         """Show `(channel, method, params)`, building the stack if needed.
 
         The drill-down entry point: the compare panels' "full image" buttons
@@ -484,7 +507,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
             if self._build_error is not None:
                 return False
             self._build(channel, method=method, params=params,
-                        viewport_l0=viewport_l0, tint=tint)
+                        viewport_l0=viewport_l0, tint=tint, nucleus=nucleus)
             return self._stack is not None
 
         controller = self._stack.controller
@@ -500,6 +523,14 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # channel in the old channel's colour.
         if tint is not None:
             controller.set_tint(tint)
+        # The nucleus overlay is suppressed exactly while the MARKER shows
+        # that same channel; re-evaluated on every source change because a
+        # channel switch is what moves it in and out of that state. The
+        # user's switch is not touched.
+        overlay = getattr(self._stack, "overlay", None)
+        if overlay is not None:
+            overlay.set_suppressed(overlay.channel == channel,
+                                   host=controller)
         if viewport_l0 is not None:
             controller.jump_to(*(int(v) for v in viewport_l0))
         return True

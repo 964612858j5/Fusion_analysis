@@ -1341,6 +1341,21 @@ class Step0Page(QWidget):
         self._btn_full_marker.toggled.connect(self._on_full_marker_toggled)
         bar.addWidget(self._btn_full_marker)
 
+        # Nucleus overlay on/off. Separate from the marker switch on
+        # purpose: the two layers are added together, so either can be
+        # looked at alone.
+        self._btn_full_nucleus = QPushButton("● DAPI")
+        self._btn_full_nucleus.setCheckable(True)
+        self._btn_full_nucleus.setChecked(True)
+        self._btn_full_nucleus.setToolTip(
+            "Show or hide the nucleus channel in the full image. It is drawn "
+            "ON TOP of the marker and ADDED to it, the same way the compare "
+            "panels combine the two. Hiding it also stops requesting its "
+            "tiles; showing it again resumes from the current view.")
+        self._btn_full_nucleus.setStyleSheet(btn_style)
+        self._btn_full_nucleus.toggled.connect(self._on_full_nucleus_toggled)
+        bar.addWidget(self._btn_full_nucleus)
+
         self._full_source_lbl = QLabel("—")
         self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
         bar.addWidget(self._full_source_lbl)
@@ -1444,6 +1459,45 @@ class Step0Page(QWidget):
         if stack is None:
             return
         stack.controller.set_marker_visible(bool(checked))
+
+    def _full_image_nucleus_args(self):
+        """The nucleus overlay's construction arguments, or `{}` when this
+        dataset has no nucleus channel to overlay.
+
+        The colour is `_nuc_color` -- the same one the compare panels
+        composite the nucleus with, so the two views agree.
+        """
+        nucleus = self.nucleus_channel
+        if not nucleus:
+            return {}
+        checked = (self._btn_full_nucleus.isChecked()
+                   if hasattr(self, "_btn_full_nucleus") else False)
+        return {
+            "nucleus_channel": nucleus,
+            "nucleus_tint": getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
+            "nucleus_enabled": bool(checked),
+        }
+
+    def _full_image_overlay(self):
+        """The live nucleus overlay, or None when no stack holds one."""
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        return getattr(stack, "overlay", None) if stack is not None else None
+
+    def _on_full_nucleus_toggled(self, checked):
+        """Nucleus layer on/off on the live stack.
+
+        Turning it OFF also stops its requests -- an overlay nobody is
+        looking at must not keep the IO workers busy -- and turning it back
+        ON resumes from the viewer's CURRENT viewport, so no pan is needed
+        to get pixels back.
+        """
+        overlay = self._full_image_overlay()
+        if overlay is None:
+            return
+        explore_tab = self._explore_tab
+        overlay.set_enabled(bool(checked),
+                            host=explore_tab.stack.controller)
 
     def _compare_viewport_l0(self, source):
         """The region the `source` compare panel is showing, in level-0
@@ -1615,13 +1669,18 @@ class Step0Page(QWidget):
         accepted = explore_tab.show_source(self.current_channel, method,
                                            params,
                                            viewport_l0=viewport_l0,
-                                           tint=self._full_image_tint())
+                                           tint=self._full_image_tint(),
+                                           nucleus=self._full_image_nucleus_args())
         # The marker toggle is page state, so a freshly built stack has to
         # be told about it -- a build always comes up visible.
         stack = explore_tab.stack if accepted else None
         if stack is not None and hasattr(self, "_btn_full_marker"):
             stack.controller.set_marker_visible(
                 self._btn_full_marker.isChecked())
+        overlay = getattr(stack, "overlay", None) if stack is not None else None
+        if overlay is not None and hasattr(self, "_btn_full_nucleus"):
+            overlay.set_enabled(self._btn_full_nucleus.isChecked(),
+                                host=stack.controller)
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
@@ -3279,6 +3338,13 @@ class Step0Page(QWidget):
         if self._last_payload is not None and self.current_channel:
             self._rebuild_payload_rgb(self.current_channel)
             self._refresh_preview_display(keep_zoom=True)
+        # The full image draws the nucleus in this same colour; swapping the
+        # lookup table is all it takes -- no re-read, no re-quantisation and
+        # no request. With no stack up, the new colour is simply what the
+        # next build starts from.
+        overlay = self._full_image_overlay()
+        if overlay is not None:
+            overlay.set_tint(self._nuc_color)
 
     def _pick_marker_color(self):
         """弹颜色对话框，让用户选择当前 marker 通道叠加显示颜色。"""

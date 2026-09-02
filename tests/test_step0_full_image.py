@@ -62,7 +62,7 @@ class _RecordingExploreTab:
         self.released = []
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
-                    tint=None):
+                    tint=None, nucleus=None):
         self.calls.append((channel, method, tuple(params)))
         self.tints.append(tint)
         # Recorded separately: most cases here are about the selection, and

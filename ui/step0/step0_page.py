@@ -1207,6 +1207,23 @@ class Step0Page(QWidget):
         lay.addLayout(bar)
         return w
 
+    @property
+    def preview_source_provider(self):
+        """The page's ONE `Step0PreviewSourceProvider`, read-only.
+
+        The single data-access seam between this page and anything that
+        wants to know what correction thinks about a channel (see that
+        module's docstring). Exposed so a consumer does not have to reach
+        for `_preview_provider`, and as a property with no setter so it
+        cannot be swapped for a second instance -- there is exactly one, and
+        the remap workbench's pixel source is bound to it.
+
+        Returns None before the conditioning tab has been built (the
+        provider is created there, partway through `__init__`), which is the
+        same guard the page's own `_refresh_remap_state_label` uses.
+        """
+        return getattr(self, "_preview_provider", None)
+
     def _on_step0_tab_changed(self, idx):
         if not hasattr(self, "_step0_tabs"):
             return

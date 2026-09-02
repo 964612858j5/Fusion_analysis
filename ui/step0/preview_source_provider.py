@@ -114,13 +114,34 @@ class Step0PreviewSourceProvider(QObject):
 
     def describe(self, channel):
         """One dict both sides can read: what correction AND remap currently
-        think about this channel."""
+        think about this channel.
+
+        Two kinds of correction parameter, and the difference matters to a
+        consumer that wants to RENDER with them:
+
+        * ``params`` -- the channel's explicit per-channel override, or
+          ``None`` where the user has never set one. Unchanged; it still
+          answers "has this channel been tuned?".
+        * ``effective_tophat_radius`` / ``effective_cucim_sigma`` -- what a
+          preview of this channel would ACTUALLY use right now. Never None.
+
+        The effective values come from the page's own
+        ``_resolve_channel_params``, which is also what the Per-Channel
+        Decision panel loads into its inputs, so the two cannot drift. The
+        fallback rule (module defaults, deliberately NOT the live global
+        sliders) lives there and is not repeated here -- a second copy of
+        it would be a second answer to the same question.
+
+        ``assigned_method`` and ``preview_method`` are passed through
+        verbatim, "both" included; interpreting them is the caller's job.
+        """
         page = self._page
         saved = self.is_saved_corrected(channel)
         tr, cs = None, None
         cp = page._channel_params.get(channel)
         if cp:
             tr, cs = cp.get("tophat_radius"), cp.get("cucim_sigma")
+        eff_tr, eff_cs = page._resolve_channel_params(channel)
         remap = self._remap_params(channel) or {}
         return {
             "channel": channel,
@@ -129,6 +150,8 @@ class Step0PreviewSourceProvider(QObject):
                 "preview_method": page._channel_methods.get(channel),
                 "saved_method": self.saved_method(channel),
                 "params": {"tophat_radius": tr, "cucim_sigma": cs},
+                "effective_tophat_radius": eff_tr,
+                "effective_cucim_sigma": eff_cs,
                 "saved": saved,
             },
             "remap": {

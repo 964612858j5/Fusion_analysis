@@ -210,3 +210,118 @@ def test_save_invalidation_repulls_into_workbench(app):
     _mark_saved(page, "CD3", "tophat", corrected)
     page._preview_provider.invalidate("CD3")           # what Save emits
     assert float(wb._raw["CD3"][0, 0]) == 9.0
+
+
+# ── effective correction parameters (the render-ready pair) ──────────────────
+#
+# `params` says whether a channel was tuned; the `effective_*` fields say what
+# a preview would actually use. A consumer that renders needs the second and
+# must never have to re-derive the fallback rule itself.
+
+def test_effective_params_are_the_explicit_per_channel_values(app):
+    page = _page(app)
+    pr = page.preview_source_provider
+    page._channel_params["CD3"] = {"tophat_radius": 33, "cucim_sigma": 44}
+
+    correction = pr.describe("CD3")["correction"]
+
+    assert correction["effective_tophat_radius"] == 33
+    assert correction["effective_cucim_sigma"] == 44
+    # The raw field still reports the override itself.
+    assert correction["params"] == {"tophat_radius": 33, "cucim_sigma": 44}
+
+
+def test_effective_params_fall_back_exactly_as_the_page_resolves_them(app):
+    """No second copy of the fallback rule: the value must equal what
+    `_resolve_channel_params` returns, whatever that is."""
+    page = _page(app)
+    pr = page.preview_source_provider
+    assert "CD20" not in page._channel_params
+
+    correction = pr.describe("CD20")["correction"]
+    expected_tr, expected_cs = page._resolve_channel_params("CD20")
+
+    assert correction["effective_tophat_radius"] == expected_tr
+    assert correction["effective_cucim_sigma"] == expected_cs
+    assert correction["effective_tophat_radius"] is not None
+    assert correction["effective_cucim_sigma"] is not None
+    # And the untouched field keeps its old meaning: not tuned -> None.
+    assert correction["params"] == {"tophat_radius": None, "cucim_sigma": None}
+
+
+def test_effective_params_come_from_the_pages_resolver_not_a_copy(app):
+    """The rule must be REUSED, not duplicated.
+
+    Comparing against the current default constants cannot show that: a
+    reimplementation with the same literals would agree. So the resolver is
+    replaced with one that answers differently, and `describe` has to
+    follow it.
+    """
+    page = _page(app)
+    pr = page.preview_source_provider
+    page._resolve_channel_params = lambda ch: (4242, 8484)
+
+    correction = pr.describe("CD20")["correction"]
+
+    assert correction["effective_tophat_radius"] == 4242
+    assert correction["effective_cucim_sigma"] == 8484
+
+
+def test_a_partial_override_still_resolves_both_effective_values(app):
+    """A channel with only one of the two set must still yield a usable
+    pair -- the missing half comes from the page's own fallback."""
+    page = _page(app)
+    pr = page.preview_source_provider
+    page._channel_params["CD3"] = {"tophat_radius": 7}
+
+    correction = pr.describe("CD3")["correction"]
+    expected_tr, expected_cs = page._resolve_channel_params("CD3")
+
+    assert correction["effective_tophat_radius"] == expected_tr == 7
+    assert correction["effective_cucim_sigma"] == expected_cs
+    assert correction["effective_cucim_sigma"] is not None
+    assert correction["params"] == {"tophat_radius": 7, "cucim_sigma": None}
+
+
+def test_method_fields_pass_both_through_untouched(app):
+    """`both` is a real value in this page's model (the Process path
+    computes tophat AND cucim). The provider reports it verbatim; deciding
+    what it means is the caller's job, not this seam's."""
+    page = _page(app)
+    pr = page.preview_source_provider
+    page._channel_decisions["CD3"] = "both"
+    page._channel_methods["CD3"] = "both"
+
+    correction = pr.describe("CD3")["correction"]
+
+    assert correction["assigned_method"] == "both"
+    assert correction["preview_method"] == "both"
+
+
+def test_preview_source_provider_property_is_the_one_instance(app):
+    page = _page(app)
+
+    assert page.preview_source_provider is page._preview_provider
+    assert page.preview_source_provider is page.preview_source_provider
+
+    with pytest.raises(AttributeError):
+        page.preview_source_provider = object()      # read-only, no setter
+
+    # Reading it does not construct anything.
+    assert page.preview_source_provider is page._preview_provider
+
+
+def test_preview_source_provider_property_answers_none_if_unbuilt(app):
+    """On a live page the provider always exists: `__init__` builds the
+    conditioning tab unconditionally, and that is where it is created. (A
+    never-`__init__`'d Step0Page cannot even be inspected -- PyQt raises
+    "super-class __init__() ... was never called" on attribute access -- so
+    that state is not reachable to test.) The guard is for a page whose
+    construction failed partway; simulate exactly that.
+    """
+    page = _page(app)
+    assert page.preview_source_provider is not None
+
+    del page._preview_provider
+    assert page.preview_source_provider is None, (
+        "the property must answer rather than raise on a half-built page")

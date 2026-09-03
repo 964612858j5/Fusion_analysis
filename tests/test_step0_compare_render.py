@@ -88,6 +88,7 @@ def test_the_painted_pixel_is_the_mapping_of_the_raw_value(app):
     page = _page(app)
     page._channel_colors["CD3"] = (0.0, 1.0, 0.0)
     page._nuc_color = (0.0, 0.5, 1.0)
+    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
     page.set_display_mapping("CD3", 100.0, 900.0, 1.0)
     page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
     _show(page, _payload(marker=500.0, nucleus=400.0))
@@ -119,6 +120,7 @@ def test_the_three_panels_share_one_mapping_so_a_darker_result_is_darker(app):
 def test_gamma_and_range_changes_are_table_and_level_swaps(app):
     page = _page(app)
     page._channel_colors["CD3"] = (1.0, 0.0, 0.0)
+    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
     page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
     page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
     _show(page, _payload(marker=400.0, nucleus=200.0))
@@ -243,6 +245,7 @@ def test_a_switch_between_cached_channels_is_cheap(app):
 
 def test_nucleus_items_are_created_on_first_use_additive_and_row_major(app):
     page = _page(app)
+    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
     assert page._preview_nuc_imgs == [None, None, None]
     _show(page, _payload(cucim=False))
     assert page._preview_nuc_imgs[0] is not None and page._preview_nuc_imgs[1] is not None

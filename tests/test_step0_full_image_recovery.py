@@ -175,6 +175,9 @@ def test_the_toggles_have_a_checked_rule_in_their_stylesheet(app):
 def test_the_label_says_which_layers_are_hidden(app):
     page = _page(app)
     page._enter_full_image("original")
+    # (v15) DAPI starts hidden; the "both layers visible" baseline this test
+    # is about needs it switched on first.
+    page._btn_full_nucleus.setChecked(True)
     base = page._full_source_lbl.text()
     assert "hidden" not in base
 

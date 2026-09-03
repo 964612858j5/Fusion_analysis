@@ -98,6 +98,13 @@ from ...utils.calibration_source import (
 # so any present/future product layer is dropped while every real marker stays.
 _NON_MARKER_CHANNEL_KEYWORDS = ("mask", "fusion")
 
+# (v15) The DAPI/nucleus overlay is a display AID, not the subject of the
+# Background Correction page: it starts hidden in BOTH views (compare panels
+# and full image) and the nucleus row's checkbox in the Channels list is what
+# turns it on. One constant so the two hidden state holders, the full-image
+# toolbar button and the dataset reload can never disagree.
+DAPI_LAYER_DEFAULT_ON = False
+
 
 def _is_non_marker_channel(name):
     """True if a channel name denotes a non-conditioning product (mask/fusion)."""
@@ -855,7 +862,11 @@ class Step0Page(QWidget):
         # plain booleans) keeps every existing `toggled` connection intact.
         self._btn_show_nucleus = QPushButton("Nucleus", self)
         self._btn_show_nucleus.setCheckable(True)
-        self._btn_show_nucleus.setChecked(True)
+        # (v15) The DAPI layer starts OFF: the page is about the MARKER
+        # channel the user selected, and a nucleus layer added on top of it
+        # from the first frame is a second signal nobody asked for. The
+        # nucleus row's checkbox in the Channels list turns it on.
+        self._btn_show_nucleus.setChecked(DAPI_LAYER_DEFAULT_ON)
         self._btn_show_nucleus.setVisible(False)
 
         self._btn_show_marker = QPushButton("Marker", self)
@@ -1370,9 +1381,11 @@ class Step0Page(QWidget):
         # Nucleus overlay on/off. Separate from the marker switch on
         # purpose: the two layers are added together, so either can be
         # looked at alone.
-        self._btn_full_nucleus = QPushButton("● DAPI")
+        self._btn_full_nucleus = QPushButton(
+            ("● " if DAPI_LAYER_DEFAULT_ON else "○ ") + "DAPI")
         self._btn_full_nucleus.setCheckable(True)
-        self._btn_full_nucleus.setChecked(True)
+        # Same default as the compare panels' holder: one state, both views.
+        self._btn_full_nucleus.setChecked(DAPI_LAYER_DEFAULT_ON)
         self._btn_full_nucleus.setToolTip(
             "Show or hide the nucleus channel in the full image. It is drawn "
             "ON TOP of the marker and ADDED to it, the same way the compare "
@@ -4008,7 +4021,23 @@ class Step0Page(QWidget):
 
     def _nucleus_layer_visible(self):
         btn = getattr(self, "_btn_show_nucleus", None)
-        return True if btn is None else bool(btn.isChecked())
+        return DAPI_LAYER_DEFAULT_ON if btn is None else bool(btn.isChecked())
+
+    def _reset_nucleus_layer_default(self):
+        """Put the DAPI layer back to its default (off) in BOTH views.
+
+        Called on a dataset (re)load. It goes through the same toggle that
+        the checkbox uses, so the compare panels, the full-image toolbar
+        button and the nucleus row's checkbox all follow -- there is no
+        second path that could leave one of them out of step.
+        """
+        holder = getattr(self, "_btn_show_nucleus", None)
+        if holder is None:
+            return
+        if holder.isChecked() != DAPI_LAYER_DEFAULT_ON:
+            holder.setChecked(DAPI_LAYER_DEFAULT_ON)
+        self._on_nucleus_visibility_toggled(DAPI_LAYER_DEFAULT_ON)
+        self._sync_nucleus_row_checkbox(DAPI_LAYER_DEFAULT_ON)
 
     def _on_nucleus_visibility_toggled(self, on):
         """The nucleus row's checkbox is the DAPI layer's show/hide switch --
@@ -5480,6 +5509,9 @@ class Step0Page(QWidget):
         # The slide-wide display seed IS per-dataset: a new slide must re-seed.
         self._display_fallback = {}
         self._display_seeded = set()
+        # The DAPI layer is per-dataset display state: a new slide starts from
+        # the default (off) rather than inheriting the previous slide's switch.
+        self._reset_nucleus_layer_default()
         self._process_completed = False
         self._params_dirty = False
         self._preview_req_id = 0

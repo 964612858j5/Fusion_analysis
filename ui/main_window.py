@@ -1730,6 +1730,15 @@ class MainWindow(QMainWindow):
         print("[Step1] patch manager source=Step0 OverviewPanel")
         return mgr
 
+    def _read_lowres(self, channel, y0, y1, x0, x1, ds):
+        """A downsampled nucleus crop for a preview: from the pyramid when
+        the loader offers it, else the plain (full-resolution) read that
+        every fake loader in the tests provides."""
+        fast = getattr(self.loader, "read_region_lowres", None)
+        if fast is not None:
+            return fast(channel, y0, y1, x0, x1, ds)
+        return self.loader.read_region(channel, y0, y1, x0, x1, downsample=ds)
+
     def _load_step1_manager_roi_crop(self, mgr):
         if mgr is None or self.loader is None:
             return
@@ -1754,7 +1763,10 @@ class MainWindow(QMainWindow):
         print(f"[Step1-ROI] roi_bbox={[y0, y1, x0, x1]}")
         print(f"[Step1-preview] roi_bbox={[y0, y1, x0, x1]}")
         print(f"[Step1-preview] read_region y0,y1,x0,x1={[y0, y1, x0, x1]} downsample={ds}")
-        arr = self.loader.read_region(nuc_ch, y0, y1, x0, x1, downsample=ds)
+        # Pyramid read, not a full-resolution decode: this runs on the GUI
+        # thread after every Save (step0_complete), and for a whole-slide
+        # ROI the full-resolution path froze the window for 15.6 s.
+        arr = self._read_lowres(nuc_ch, y0, y1, x0, x1, ds)
         grey = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
         rgb = np.stack([grey, grey, grey], axis=-1)
         mgr.set_background_crop(rgb, y0, y1, x0, x1, ds)
@@ -1848,7 +1860,7 @@ class MainWindow(QMainWindow):
             return
         ds = max(PREVIEW_DOWNSAMPLE, int(max(roi_h, roi_w) / 1800) + 1)
         try:
-            arr = self.loader.read_region(nuc_ch, ry0, ry1, rx0, rx1, downsample=ds)
+            arr = self._read_lowres(nuc_ch, ry0, ry1, rx0, rx1, ds)
             grey = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
             rgb = np.stack([grey, grey, grey], axis=-1)
             self.roi_img.setImage(rgb, autoLevels=False)

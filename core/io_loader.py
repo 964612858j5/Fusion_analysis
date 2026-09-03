@@ -115,6 +115,90 @@ class OMETIFFLoader:
             return self._norm(region)
         return region.astype(np.float32, copy=False)
 
+    def read_region_lowres(self, channel_name, y0, y1, x0, x1, downsample,
+                           normalize=True):
+        """`read_region(..., downsample=ds)` served from the TIFF's pyramid.
+
+        `read_region` reads the region at FULL resolution and then keeps
+        every `ds`-th pixel. For a whole-slide ROI that is the entire
+        channel decoded from disk -- measured 15.6 s on the GUI thread for a
+        59040x35520 slide at ds=33 -- to keep 1/1089 of it. This reads the
+        coarsest pyramid level whose downsample does not exceed `ds` and
+        picks rows/columns from it with the same floor mapping, so the
+        result has exactly the shape `read_region` would return (the
+        caller's coordinate maths depends on that) and covers the same
+        pixels, sampled at the pyramid's resolution instead of decoded from
+        the base level.
+
+        Correctness first: a channel that is served CORRECTED -- from the
+        saved zarr store or by an on-the-fly correction config -- falls back
+        to `read_region`, because the pyramid holds raw pixels. The nucleus
+        channel, which every caller of this method reads, is excluded from
+        correction. A TIFF without a pyramid takes the same fallback.
+        """
+        ds = max(1, int(downsample))
+        if ds == 1 or self._channel_is_corrected(channel_name):
+            return self.read_region(channel_name, y0, y1, x0, x1,
+                                    downsample=ds, normalize=normalize)
+        if channel_name not in self.ch_map:
+            raise KeyError(f"Channel '{channel_name}' not found")
+        page_idx = self.ch_map[channel_name]
+
+        h0, w0 = self.shape
+        y0, y1 = max(0, int(y0)), min(int(y1), h0)
+        x0, x1 = max(0, int(x0)), min(int(x1), w0)
+        # The rows/cols `read_region(...)[::ds, ::ds]` would keep, in
+        # level-0 coordinates.
+        rows0 = np.arange(y0, y1, ds)
+        cols0 = np.arange(x0, x1, ds)
+        if rows0.size == 0 or cols0.size == 0:
+            return np.zeros((rows0.size, cols0.size), np.float32)
+
+        with tifffile.TiffFile(self.filepath) as tif:
+            levels = list(tif.series[0].levels)
+            level_ds = [max(1.0, h0 / float(lv.shape[-2])) for lv in levels]
+            chosen = 0
+            for i, lds in enumerate(level_ds):
+                if lds <= ds and lds >= level_ds[chosen]:
+                    chosen = i
+            if chosen == 0:
+                # Nothing coarser than the base level: the plain path is
+                # already what this would compute.
+                return self.read_region(channel_name, y0, y1, x0, x1,
+                                        downsample=ds, normalize=normalize)
+            lv = levels[chosen]
+            lds_y = h0 / float(lv.shape[-2])
+            lds_x = w0 / float(lv.shape[-1])
+            z = zarr.open(lv.aszarr(), mode="r")
+            if not hasattr(z, "shape"):
+                z = z[str(chosen)]
+            lh, lw = z.shape[-2], z.shape[-1]
+            rows = np.clip((rows0 / lds_y).astype(np.int64), 0, lh - 1)
+            cols = np.clip((cols0 / lds_x).astype(np.int64), 0, lw - 1)
+            ry0, ry1 = int(rows[0]), int(rows[-1]) + 1
+            cx0, cx1 = int(cols[0]), int(cols[-1]) + 1
+            if z.ndim == 3:
+                block = np.asarray(z[page_idx, ry0:ry1, cx0:cx1])
+            elif z.ndim == 4:
+                block = np.asarray(z[0, page_idx, ry0:ry1, cx0:cx1])
+            else:
+                block = np.asarray(z[ry0:ry1, cx0:cx1])
+        region = block[np.ix_(rows - ry0, cols - cx0)]
+        if normalize:
+            return self._norm(region)
+        return region.astype(np.float32, copy=False)
+
+    def _channel_is_corrected(self, channel_name):
+        """True when `read_region` would return CORRECTED pixels for this
+        channel -- from the saved store, or by applying the correction
+        config on the fly."""
+        if (channel_name in self._corrected_decisions
+                and self._corrected_zarr_path
+                and os.path.exists(self._corrected_zarr_path)):
+            return True
+        decisions = (self.correction_config or {}).get("channel_decisions") or {}
+        return str(decisions.get(channel_name, "original")).strip().lower() in {"tophat", "cucim"}
+
     def _read_corrected_roi_only(self, channel_name, y0, y1, x0, x1):
         """
         Read a global-coordinate request from ROI-only corrected zarr when the

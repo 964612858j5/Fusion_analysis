@@ -160,6 +160,13 @@ PREVIEW_PAGE_FULL_IMAGE = 1
 # Which of the three compare results the full image shows. Ordered to match
 # the compare panels left to right.
 FULL_IMAGE_SOURCES = ("original", "tophat", "cucim")
+# Viewport size, in level-0 pixels, for a Tissue Preview jump made before the
+# full image has reported a viewport of its own.
+FULL_IMAGE_JUMP_DEFAULT_SIZE = 2048
+# A viewport at least this fraction of the slide in either dimension counts as
+# "the whole slide": a jump from it zooms in to the default size instead of
+# keeping a size that would make the jump invisible.
+FULL_IMAGE_JUMP_WHOLE_SLIDE_FRACTION = 0.9
 FULL_IMAGE_METHOD = {"original": None, "tophat": "tophat", "cucim": "cucim"}
 
 
@@ -1690,6 +1697,8 @@ class Step0Page(QWidget):
         instant, and the compare panels kept their own ranges while hidden.
         """
         self._preview_stack.setCurrentIndex(PREVIEW_PAGE_COMPARE)
+        # The Tissue Preview's rectangle goes back to the compare viewer's.
+        self._update_tissue_view_rect()
 
     def _reopen_full_image(self):
         """Rebuild the full image for the current channel and parameters.
@@ -1810,6 +1819,9 @@ class Step0Page(QWidget):
         if overlay is not None and hasattr(self, "_btn_full_nucleus"):
             overlay.set_enabled(self._btn_full_nucleus.isChecked(),
                                 host=stack.controller)
+        # The Tissue Preview follows the full image's camera while it is up.
+        self._connect_full_image_view_rect(stack)
+        self._update_full_image_view_rect()
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
@@ -2449,6 +2461,8 @@ class Step0Page(QWidget):
                 lambda *_: self._reconcile_roi_edit(popup.overview))
             popup.overview.rois_changed.connect(
                 lambda *_: self._reconcile_roi_edit(popup.overview))
+            # A click on the tissue -> the full image jumps there.
+            popup.overview.navigate_requested.connect(self._on_tissue_navigate)
         return self._tissue_navigator_popup
 
     # ── v14.2b single-model ROI bridge ───────────────────────────────────────
@@ -2553,13 +2567,83 @@ class Step0Page(QWidget):
         fy0 = y0p + float(vp["y0"]); fy1 = y0p + float(vp["y1"])
         return (fy0, fy1, fx0, fx1)
 
+    def _on_tissue_navigate(self, y, x):
+        """A click on the Tissue Preview at full-image `(y, x)`.
+
+        With the full image on screen: move its camera so the clicked spot is
+        centred, keeping the current viewport SIZE (the user's zoom), clamped
+        to the slide. Nothing else changes -- selection, layers, parameters.
+        Ignored while a production run holds the camera (`suspended`), and
+        ignored when the full image is not on screen: the compare panels show
+        a fixed patch and have no camera to move.
+        """
+        if not self._full_image_visible():
+            return
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        if stack is None:
+            return
+        controller = stack.controller
+        if getattr(controller, "suspended", False):
+            return
+        h0, w0 = (int(v) for v in stack.provider.level_shape(0))
+        bbox = getattr(controller, "_current_bbox", None)
+        if bbox is not None:
+            by0, bx0, by1, bx1 = (int(v) for v in bbox)
+            h, w = max(1, by1 - by0), max(1, bx1 - bx0)
+        else:
+            h, w = FULL_IMAGE_JUMP_DEFAULT_SIZE, FULL_IMAGE_JUMP_DEFAULT_SIZE
+        if h >= FULL_IMAGE_JUMP_WHOLE_SLIDE_FRACTION * h0 \
+                or w >= FULL_IMAGE_JUMP_WHOLE_SLIDE_FRACTION * w0:
+            # The view is (nearly) the whole slide: keeping that size would
+            # make the jump invisible. A click on the whole slide means
+            # "zoom in there".
+            h, w = FULL_IMAGE_JUMP_DEFAULT_SIZE, FULL_IMAGE_JUMP_DEFAULT_SIZE
+        h, w = min(h, h0), min(w, w0)
+        y0 = min(max(0, int(y) - h // 2), max(0, h0 - h))
+        x0 = min(max(0, int(x) - w // 2), max(0, w0 - w))
+        controller.jump_to(y0, x0, w, h)
+        self._update_full_image_view_rect()
+
+    def _connect_full_image_view_rect(self, stack):
+        """Once per stack: every camera move of the full image redraws its
+        viewport on the Tissue Preview. The connection dies with the view."""
+        if stack is None or getattr(stack, "_nav_rect_connected", False):
+            return
+        try:
+            stack.view.view_box.sigRangeChanged.connect(
+                lambda *_: self._update_full_image_view_rect())
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        stack._nav_rect_connected = True
+
+    def _update_full_image_view_rect(self):
+        """Draw the full image's current viewport on the Tissue Preview --
+        only while the full image is what the user is looking at."""
+        popup = getattr(self, "_tissue_navigator_popup", None)
+        if popup is None or not self._full_image_visible():
+            return
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        bbox = getattr(getattr(stack, "controller", None), "_current_bbox", None)
+        if bbox is None:
+            popup.overview.clear_current_view_rect()
+            return
+        y0, x0, y1, x1 = (float(v) for v in bbox)
+        popup.overview.set_current_view_rect((y0, y1, x0, x1))
+
     def _update_tissue_view_rect(self):
         """Refresh the popup's current-view rectangle from the active viewer.
 
         Clears the rectangle when: no popup, split view (mixed geometry), no
-        viewer image yet, or no current patch. Never creates ROIs/files."""
+        viewer image yet, or no current patch. Never creates ROIs/files.
+        While the FULL IMAGE is on screen the rectangle is its viewport
+        instead (`_update_full_image_view_rect`)."""
         popup = self._tissue_navigator_popup
         if popup is None:
+            return
+        if self._full_image_visible():
+            self._update_full_image_view_rect()
             return
         wb = getattr(self, "_cond_workbench", None)
         # Split view mixes raw|remapped per column → mapping ambiguous → clear.

@@ -1,0 +1,292 @@
+"""A click on the Tissue Preview jumps the full image there.
+
+Reported from manual testing: in full-image mode there was no way to get to
+a far region except panning. Two halves:
+
+  1. `OverviewPanel` emits `navigate_requested(y, x)` (full-image pixels) for
+     a plain click in patch mode -- press and release without a drag, which
+     used to be discarded as "too small for a patch" -- and for Ctrl+click in
+     ROI mode, which used to add no vertex. A drag still draws a patch, a
+     plain click in ROI mode still adds a vertex.
+  2. The page centres the full image's camera on that point, keeping the
+     viewport size (the zoom) and clamping to the slide; only while the full
+     image is on screen and not suspended. The full image's viewport is
+     drawn on the navigator as it moves, and the compare viewer's rectangle
+     comes back when the user returns to the compare page.
+
+Own module: page-heavy Step0 suites crash pyqtgraph offscreen when combined
+with the background-correction module in one process.
+"""
+
+import os
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip("PyQt5")
+
+from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+
+from block01.ui.step0 import overview_panel as ovp  # noqa: E402
+from block01.ui.step0 import step0_page as sp  # noqa: E402
+
+from test_step0_background_correction_tab import app  # noqa: E402,F401
+
+
+# ── 1. the overview emits the request ─────────────────────────────────────
+
+class _Loader:
+    shape = (8000, 6000)
+
+    def channel_names(self):
+        return ["DAPI"]
+
+
+def _panel(mode="patch"):
+    panel = ovp.OverviewPanel(_Loader(), "DAPI", lazy=True)
+    panel.ds = 10
+    panel.ov_h, panel.ov_w = 800, 600
+    panel._set_mode(mode)
+    return panel
+
+
+def _mouse(panel, kind, r, c, button=QtCore.Qt.LeftButton, mods=QtCore.Qt.NoModifier):
+    """Feed one mouse event through the panel's own event filter, with the
+    scene->overview mapping pinned to (r, c)."""
+    panel._ov_pos = lambda _sp: (r, c)
+    ev = QtGui.QMouseEvent(kind, QtCore.QPointF(5, 5), button,
+                           button if kind != QtCore.QEvent.MouseButtonRelease else QtCore.Qt.NoButton,
+                           mods)
+    return panel.eventFilter(panel.gview.viewport(), ev)
+
+
+def test_a_click_in_patch_mode_requests_navigation_in_full_image_pixels(app):
+    panel = _panel("patch")
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+    patches = []
+    panel.patches_changed.connect(patches.append)
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 120, 45)
+    _mouse(panel, QtCore.QEvent.MouseButtonRelease, 121, 46)   # < 3 px: a click
+
+    assert seen == [(1210, 460)]                # overview (r, c) x ds
+    assert patches == [], "a click must not draw a patch"
+
+
+def test_a_drag_in_patch_mode_still_draws_a_patch_and_does_not_navigate(app):
+    panel = _panel("patch")
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+    added = []
+    panel._add_patch = lambda *a, **k: added.append(a)
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 100, 100)
+    _mouse(panel, QtCore.QEvent.MouseButtonRelease, 140, 160)
+
+    assert seen == []
+    assert len(added) == 1
+
+
+def test_ctrl_click_in_roi_mode_navigates_and_adds_no_vertex(app):
+    panel = _panel("roi")
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 30, 40,
+           mods=QtCore.Qt.ControlModifier)
+
+    assert seen == [(300, 400)]
+    assert panel._cur_pts == []
+
+
+def test_a_plain_click_in_roi_mode_still_adds_a_vertex(app):
+    panel = _panel("roi")
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 30, 40)
+
+    assert seen == []
+    assert panel._cur_pts == [(40, 30)]
+
+
+def test_the_request_is_clamped_to_the_slide(app):
+    panel = _panel("patch")
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 5000, -3)
+    _mouse(panel, QtCore.QEvent.MouseButtonRelease, 5000, -3)
+
+    assert seen == [(7999, 0)]
+
+
+# ── 2. the page moves the full image ──────────────────────────────────────
+
+class _Ctl:
+    def __init__(self, bbox=(1000, 2000, 1500, 2800), suspended=False):
+        self._current_bbox = bbox
+        self.suspended = suspended
+        self.jumps = []
+        self.channel, self.method, self.params = "CD3", None, ()
+
+    def jump_to(self, y0, x0, w, h):
+        self.jumps.append((y0, x0, w, h))
+        # A real controller's range handler updates the bbox.
+        self._current_bbox = (y0, x0, y0 + h, x0 + w)
+
+
+class _Provider:
+    def level_shape(self, _level):
+        return (59040, 35520)
+
+
+class _Stack:
+    def __init__(self, ctl):
+        self.controller = ctl
+        self.provider = _Provider()
+        self.view = None
+
+
+class _Tab:
+    def __init__(self, stack):
+        self.stack = stack
+        self.calls = []
+
+    def show_source(self, *a, **k):
+        self.calls.append((a, k))
+        return True
+
+    def set_dataset(self, _p):
+        pass
+
+    def teardown(self, **_k):
+        pass
+
+
+def _page(app, ctl):
+    page = sp.Step0Page()
+    page.current_channel = "CD3"
+    page.nucleus_channel = "DAPI"
+    page._explore_tab = _Tab(_Stack(ctl)) if ctl is not None else _Tab(None)
+    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
+    return page
+
+
+def test_a_navigation_centres_the_current_viewport_on_the_point(app):
+    ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))       # 500 high, 800 wide
+    page = _page(app, ctl)
+
+    page._on_tissue_navigate(20000, 10000)
+
+    assert ctl.jumps == [(20000 - 250, 10000 - 400, 800, 500)]
+
+
+def test_a_navigation_is_clamped_to_the_slide(app):
+    ctl = _Ctl(bbox=(0, 0, 500, 800))
+    page = _page(app, ctl)
+
+    page._on_tissue_navigate(10, 35510)               # top edge, right edge
+
+    assert ctl.jumps == [(0, 35520 - 800, 800, 500)]
+
+
+def test_without_a_viewport_yet_a_default_size_is_used(app):
+    ctl = _Ctl(bbox=None)
+    page = _page(app, ctl)
+
+    page._on_tissue_navigate(5000, 5000)
+
+    d = sp.FULL_IMAGE_JUMP_DEFAULT_SIZE
+    assert ctl.jumps == [(5000 - d // 2, 5000 - d // 2, d, d)]
+
+
+def test_a_jump_from_the_whole_slide_view_zooms_in(app):
+    """Keeping a whole-slide viewport would move nothing; a click on the
+    whole slide means 'take me there, zoomed in'."""
+    ctl = _Ctl(bbox=(0, 0, 59040, 35520))
+    page = _page(app, ctl)
+
+    page._on_tissue_navigate(20000, 10000)
+
+    d = sp.FULL_IMAGE_JUMP_DEFAULT_SIZE
+    assert ctl.jumps == [(20000 - d // 2, 10000 - d // 2, d, d)]
+    # The second jump keeps that zoom.
+    page._on_tissue_navigate(30000, 12000)
+    assert ctl.jumps[-1] == (30000 - d // 2, 12000 - d // 2, d, d)
+
+
+def test_ignored_while_the_full_image_is_not_on_screen(app):
+    ctl = _Ctl()
+    page = _page(app, ctl)
+    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_COMPARE)
+
+    page._on_tissue_navigate(20000, 10000)
+
+    assert ctl.jumps == []
+    assert page._explore_tab.calls == [], "must not build or switch anything"
+
+
+def test_ignored_while_a_production_run_holds_the_camera(app):
+    ctl = _Ctl(suspended=True)
+    page = _page(app, ctl)
+
+    page._on_tissue_navigate(20000, 10000)
+
+    assert ctl.jumps == []
+
+
+def test_harmless_with_no_stack(app):
+    page = _page(app, None)
+    page._on_tissue_navigate(20000, 10000)            # must not raise
+
+
+def test_the_popup_is_wired_to_the_page(app):
+    ctl = _Ctl(bbox=(0, 0, 500, 800))
+    page = _page(app, ctl)
+    popup = page._ensure_tissue_navigator()
+
+    popup.overview.navigate_requested.emit(3000, 4000)
+
+    assert ctl.jumps == [(3000 - 250, 4000 - 400, 800, 500)]
+
+
+# ── 3. the navigator shows the full image's viewport ─────────────────────
+
+def test_the_full_image_viewport_is_drawn_on_the_navigator(app):
+    ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
+    page = _page(app, ctl)
+    popup = page._ensure_tissue_navigator()
+
+    page._update_full_image_view_rect()
+
+    # (y0, y1, x0, x1) in full-image pixels, the overview's own convention.
+    assert popup.overview.current_view_rect() == (1000.0, 1500.0, 2000.0, 2800.0)
+
+    page._on_tissue_navigate(20000, 10000)
+    assert popup.overview.current_view_rect() == (19750.0, 20250.0, 9600.0, 10400.0)
+
+
+def test_the_compare_rect_path_defers_to_the_full_image_while_it_is_shown(app):
+    ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
+    page = _page(app, ctl)
+    popup = page._ensure_tissue_navigator()
+
+    page._update_tissue_view_rect()          # the legacy entry point
+
+    assert popup.overview.current_view_rect() == (1000.0, 1500.0, 2000.0, 2800.0)
+
+
+def test_returning_to_compare_hands_the_rectangle_back(app):
+    ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
+    page = _page(app, ctl)
+    popup = page._ensure_tissue_navigator()
+    page._update_full_image_view_rect()
+    assert popup.overview.current_view_rect() is not None
+
+    page._return_to_compare()
+
+    # No conditioning workbench in this page: the compare path clears it.
+    assert popup.overview.current_view_rect() is None

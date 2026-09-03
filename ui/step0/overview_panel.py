@@ -1056,6 +1056,13 @@ class OverviewPanel(QWidget):
 
     patches_changed = pyqtSignal(list)   # [(y0,y1,x0,x1), ...]
     rois_changed    = pyqtSignal(list)   # [roi_dict, ...]
+    # A plain click (press + release without a drag) in patch mode, or a
+    # Ctrl+click in ROI mode: "take me there". (y, x) in FULL-IMAGE pixels.
+    # Emitted only; what "there" means is the host's business (Step 0 jumps
+    # the full image to it). Neither gesture had a meaning before: a
+    # drag shorter than 3 overview pixels was discarded as too small for a
+    # patch, and Ctrl+click added no vertex.
+    navigate_requested = pyqtSignal(int, int)
 
     def __init__(self, loader, nuc_ch: str, lazy: bool = False):
         super().__init__()
@@ -1741,6 +1748,14 @@ class OverviewPanel(QWidget):
     def get_rois(self):
         return list(self._rois)
 
+    def _emit_navigate(self, r, c):
+        """Overview (row, col) -> full-image (y, x), clamped to the slide,
+        then `navigate_requested`."""
+        ds = float(self.ds or 1)
+        y = int(min(max(0, self.full_h - 1), max(0, r * ds)))
+        x = int(min(max(0, self.full_w - 1), max(0, c * ds)))
+        self.navigate_requested.emit(y, x)
+
     # ── v14.2c current-view rectangle overlay (not an ROI) ───────────────────
     def set_current_view_rect(self, full_rect):
         """Draw the main viewer's current viewport as a non-interactive outline.
@@ -1953,6 +1968,10 @@ class OverviewPanel(QWidget):
             r, c = self._ov_pos(sp)
 
             if self._mode == 'roi':
+                if (event.button() == Qt.LeftButton
+                        and event.modifiers() & Qt.ControlModifier):
+                    self._emit_navigate(r, c)
+                    return True
                 if event.button() == Qt.LeftButton:
                     self._cur_pts.append((c, r))
                     self._redraw_cur_polygon()
@@ -2028,6 +2047,10 @@ class OverviewPanel(QWidget):
                     rmax = min(getattr(self,'ov_h',1), max(r0, r))
                     cmin = max(0, min(c0, c))
                     cmax = min(getattr(self,'ov_w',1), max(c0, c))
+                    if abs(r - r0) < 3 and abs(c - c0) < 3:
+                        # A click, not a drag: navigate to the clicked spot.
+                        self._emit_navigate(r, c)
+                        return True
                     if (rmax-rmin) < 3 or (cmax-cmin) < 3:
                         return True
 

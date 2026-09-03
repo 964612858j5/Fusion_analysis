@@ -12,6 +12,7 @@ import pyqtgraph as pg
 pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
 
 from .ui.main_window import MainWindow
+from .utils.gui_watchdog import start_gui_watchdog
 
 
 def main():
@@ -30,9 +31,19 @@ def main():
     pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(0, 0, 0))
     app.setPalette(pal)
 
+    # Reports, with the GUI thread's stack, whenever the event loop stops
+    # for 2 s or more -- see utils/gui_watchdog.py. Kept for the freeze on
+    # the first Save that manual testing reported and offscreen runs could
+    # not reproduce. Set BLOCK01_GUI_WATCHDOG=0 to disable.
+    watchdog = start_gui_watchdog()
+
     win = MainWindow()
     win.show()
-    sys.exit(app.exec_())
+    try:
+        sys.exit(app.exec_())
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
 
 
 if __name__ == "__main__":

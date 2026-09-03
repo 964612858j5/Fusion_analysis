@@ -10,12 +10,12 @@ the pools -- and calls these to decide WHAT the answer is.
 Where the "already covered / still missing" questions come in, the
 controller computes those SETS from its pools and passes them here; these
 functions never look at a pool. WHEN each set is snapshotted is part of the
-controller's contract and stays there, and the two layers differ: the
-fallback layer's candidate and missing sets are formed BEFORE local
-synthesis is attempted, and the synthesis result then filters which of them
-are actually requested; the current level's missing set is computed AFTER
-fallback synthesis has run. Getting either side of that wrong changes what
-is requested, not just when.
+controller's contract and stays there: each layer's missing set is
+snapshotted from the pools immediately before that layer's batch is
+issued, and every tile in it is requested. (An earlier revision had the
+fallback layer's set filtered afterwards by a GUI-thread synthesis step;
+that step is gone -- see `explore_view`'s "No synthesized coarse fallback
+(removed)".)
 
 This first round covers only the geometry-and-scale half of planning:
 display-level choice with hysteresis, viewport clamping, level-0 → level

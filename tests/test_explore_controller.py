@@ -2423,17 +2423,19 @@ def test_cache_serve_lookup_bounded_by_visible_set(app):
     ctrl.teardown()
 
 # ══════════════════════════════════════════════════════════════════════════
-# Synthesized coarse fallback (module docstring "Synthesized coarse
-# fallback") -- build a fallback-level tile locally from resident,
-# already-quantized finer tiles instead of asking the scheduler to compute
-# it, so it matches its neighbours exactly instead of showing the measured
-# 18-27% tophat non-commutativity mismatch.
+# No synthesized coarse fallback (module docstring "No synthesized coarse
+# fallback (removed)") -- a coarse tile is NEVER built locally by
+# downsampling finer corrected tiles. Top-hat does not commute with
+# downsampling (measured 18-27% mismatch), so such a tile sat as a
+# differently-bright square among its computed neighbours, and it was
+# pooled under a key indistinguishable from a computed tile's, so the real
+# tile was never requested and the square never resolved.
 # ══════════════════════════════════════════════════════════════════════════
 
 def _pool_all_finer_tiles_for_fallback(ctrl, provider, fallback_level, tx, ty, fill_fn):
-    """Pool every level-(fallback_level - 1) tile needed to synthesize
-    `(fallback_level, tx, ty)`, using `fill_fn(ftx, fty)` -> uint8 array for
-    each tile's pixels. Returns {(ftx, fty): arr_u8}."""
+    """Pool every level-(fallback_level - 1) tile that WOULD have been the
+    synthesis source for `(fallback_level, tx, ty)`, using `fill_fn(ftx,
+    fty)` -> uint8 array. Returns {(ftx, fty): arr_u8}."""
     finer_level = fallback_level - 1
     ds_finer = provider.level_downsample(finer_level)
     ds_fallback = provider.level_downsample(fallback_level)
@@ -2450,226 +2452,144 @@ def _pool_all_finer_tiles_for_fallback(ctrl, provider, fallback_level, tx, ty, f
     return arrs, k
 
 
-def test_synthesized_fallback_matches_downsampled_finer_tiles(app):
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-    ts = ctrl.grid.tile_size
-    rng = np.random.default_rng(1)
-
-    def fill(ftx, fty):
-        return rng.integers(0, 256, size=(ts, ts)).astype(np.float32)
-
-    arrs, k = _pool_all_finer_tiles_for_fallback(ctrl, provider, 1, 0, 0, fill)
-    result = ctrl._try_synthesize_fallback_tile(1, 0, 0)
-    assert result is not None
-    assembled = np.block([[arrs[(ftx, fty)] for ftx in range(k)] for fty in range(k)])
-    # No gain table: a pure box downsample of the raw values, float32.
-    np.testing.assert_allclose(result, _box_downsample(assembled, k), rtol=1e-6)
-    assert result.dtype == np.float32
-    assert ctrl.stats["fallback_synthesized"] >= 1
+def test_synthesis_entry_points_are_gone(app):
+    """The mechanism is removed, not merely disabled: neither the helper
+    nor its stats survive, so a future edit cannot switch it back on by
+    flipping a flag."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    assert not hasattr(ctrl, "_try_synthesize_fallback_tile")
+    assert not hasattr(ctrl, "_synthesize_and_pool_fallback_tile")
+    assert "fallback_synthesized" not in ctrl.stats
+    assert "fallback_synthesis_declined" not in ctrl.stats
     ctrl.teardown()
 
 
-def test_synthesis_sources_from_corrected_cache_too(app):
-    """A finer tile that is in the corrected CACHE but not yet pooled is a
-    valid synthesis source. The pool only holds what has been blitted; the
-    cache holds everything computed, including prefetched tiles, so it is
-    the larger source. Values pass through as raw corrected values."""
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-    ctrl.level = 0
-    fallback_level = 1
-    k = int(round(provider.level_downsample(fallback_level)
-                  / provider.level_downsample(0)))
-    ts = ctrl.grid.tile_size
+def test_zoom_out_does_not_synthesize_and_requests_the_real_tile(app):
+    """THE regression test for the "different-intensity square in the
+    middle after zooming out" report.
 
-    class _Cache:
-        def __init__(self):
-            self.d = {}
-
-        def get(self, key):
-            return self.d.get(key)
-
-    cache = _Cache()
-    scheduler.corrected_cache = cache
-    for j in range(k):
-        for i in range(k):
-            key = ctrl._make_correction_key(i, j, level=0)
-            cache.d[key] = np.full((ts, ts), 4.0, dtype=np.float32)
-    before = ctrl.stats["fallback_synthesized"]
-    arr = ctrl._try_synthesize_fallback_tile(fallback_level, 0, 0)
-    assert arr is not None, "cache-resident sources must be usable"
-    assert ctrl.stats["fallback_synthesized"] == before + 1
-    assert arr.dtype == np.float32
-    assert arr[0, 0] == pytest.approx(4.0)
-    ctrl.teardown()
-
-
-def test_synthesis_declined_when_any_source_missing(app):
-    """One finer tile absent -> synthesis declines, the normal
-    `_issue_settled_request` flow issues a scheduler request for the
-    fallback tile instead, and nothing is pooled at the fallback level."""
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-
-    ts = ctrl.grid.tile_size
-    for ftx in range(4):
-        for fty in range(4):
-            if (ftx, fty) == (3, 3):
-                continue  # leave one source tile missing
-            key = ctrl._make_correction_key(ftx, fty, level=0)
-            rect = ExploreView.world_rect(fty * ts, ftx * ts, ts, ts, 1.0, 1.0)
-            ctrl._precise_pool.put(0, ftx, fty, rect, np.full((ts, ts), 5, dtype=np.uint8), key)
-
-    before_declined = ctrl.stats["fallback_synthesis_declined"]
-    direct = ctrl._try_synthesize_fallback_tile(1, 0, 0)
-    assert direct is None
-    assert ctrl.stats["fallback_synthesis_declined"] == before_declined + 1
-
-    ctrl.jump_to(y0=0, x0=0, w=2048, h=2048)
-    fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
-                      if r.key.tile.level == 1 and r.key.tile.tx == 0 and r.key.tile.ty == 0]
-    assert fallback_reqs, "expected a request for the fallback tile since synthesis was declined"
-    assert ctrl._precise_pool.get(1, 0, 0) is None
-
-    ctrl.teardown()
-
-
-def test_synthesis_declined_when_any_source_stale(app):
-    """One finer tile present but keyed for a DIFFERENT selection ->
-    declined, even though every tile is physically present."""
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-
-    ts = ctrl.grid.tile_size
-    stale_addr = TileAddress(grid=ctrl.grid, level=0, tx=2, ty=2)
-    stale_key = CorrectionKey(
-        source=provider.source_identity(), channel=ctrl.channel, tile=stale_addr,
-        method="cucim", params=(8,), algorithm_version=BG_CORRECTION_ALGO_VERSION,
-        quality=ctrl.quality)
-
-    for ftx in range(4):
-        for fty in range(4):
-            key = stale_key if (ftx, fty) == (2, 2) else ctrl._make_correction_key(ftx, fty, level=0)
-            rect = ExploreView.world_rect(fty * ts, ftx * ts, ts, ts, 1.0, 1.0)
-            ctrl._precise_pool.put(0, ftx, fty, rect, np.full((ts, ts), 5, dtype=np.uint8), key)
-
-    before_declined = ctrl.stats["fallback_synthesis_declined"]
-    result = ctrl._try_synthesize_fallback_tile(1, 0, 0)
-    assert result is None
-    assert ctrl.stats["fallback_synthesis_declined"] == before_declined + 1
-
-    ctrl.teardown()
-
-
-def test_synthesized_tile_is_invalidated_by_selection_change(app):
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-
-    ts = ctrl.grid.tile_size
-
-    def fill(ftx, fty):
-        return np.full((ts, ts), 5, dtype=np.uint8)
-
-    _pool_all_finer_tiles_for_fallback(ctrl, provider, 1, 0, 0, fill)
-
-    ok = ctrl._synthesize_and_pool_fallback_tile(1, 0, 0)
-    assert ok is True
-    entry = ctrl._precise_pool.get(1, 0, 0)
-    assert entry is not None
-    assert ctrl._precise_key_current_for_level(entry.key, 1) is True
-
-    ctrl.set_selection(method="cucim", params=(8,))
-    assert ctrl._precise_key_current_for_level(entry.key, 1) is False
-
-    ctrl.teardown()
-
-
-def test_synthesis_not_requantized(app):
-    """The synthesized tile is pooled at the FALLBACK level and drawn under
-    that level's gain, while its constituents are FINER-level values that
-    display under the finer gain -- so the values are re-expressed by
-    g_finer / g_fallback exactly once. With gains {0: 1.0, 1: 3.5} the
-    result is the downsample divided by 3.5, and drawn at level 1 (levels
-    divided by 3.5) it shows precisely what the finer tiles showed."""
-    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
-    ctrl.load_overview()
-    ctrl.set_selection(method="tophat", params=(10,))
-    floor_level, stride = ctrl._pick_floor_level_and_stride()
-    ctrl._floor_level = floor_level
-    ctrl._floor_stride = stride
-    ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
-    ctrl._level_gain = {0: 1.0, 1: 3.5}
-    ts = ctrl.grid.tile_size
-    rng = np.random.default_rng(2)
-
-    def fill(ftx, fty):
-        return rng.integers(0, 256, size=(ts, ts)).astype(np.float32)
-
-    arrs, k = _pool_all_finer_tiles_for_fallback(ctrl, provider, 1, 0, 0, fill)
-    result = ctrl._try_synthesize_fallback_tile(1, 0, 0)
-    assert result is not None
-    assembled = np.block([[arrs[(ftx, fty)] for ftx in range(k)] for fty in range(k)])
-    down = _box_downsample(assembled, k)
-    np.testing.assert_allclose(result, down / 3.5, rtol=1e-5)
-    lo, hi = ctrl._display_lo, ctrl._display_hi
-    l1 = ctrl._corrected_levels(1)
-    shown_fallback = (result - l1[0]) / (l1[1] - l1[0])
-    shown_finer = (down - lo) / (hi - lo)
-    np.testing.assert_allclose(shown_fallback, shown_finer, rtol=1e-4, atol=1e-6)
-    ctrl.teardown()
-
-
-def test_zoom_out_synthesizes_from_finer(app):
-    """A real level increase (zoom-out): with every source (level-0) tile
-    for fallback tile (1, 0, 0) already pooled and current, the new
-    level's tile (0, 0) must be synthesized -- and therefore never
-    separately requested from the scheduler."""
+    Every level-0 source tile for the coarse tile (1, 0, 0) is pooled and
+    current -- the exact situation in which the old code synthesized. After
+    a real level increase, (1, 0, 0) must NOT be sitting in the pool as a
+    locally-built tile, and it MUST have been requested from the scheduler
+    like every other coarse tile, so what the user eventually sees at level
+    1 is a computed tile that matches its neighbours."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
     ctrl.jump_to(y0=0, x0=0, w=2048, h=2048)
     assert ctrl.level == 0
 
-    current_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey) if r.key.tile.level == 0]
-    # ViewBox aspect-lock may expand the requested rect slightly to match
-    # the widget's aspect ratio, so the exact tile count can exceed the
-    # nominal 4x4 -- assert the 16 tiles synthesis actually needs are among
-    # them rather than pinning an exact total.
-    assert len(current_reqs) >= 16
+    current_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
+                    if r.key.tile.level == 0]
+    # ViewBox aspect-lock may expand the requested rect slightly, so assert
+    # the 16 tiles the old synthesis needed are among them, not a total.
     needed = {(ftx, fty) for ftx in range(4) for fty in range(4)}
     got = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in current_reqs}
     assert needed <= got
     for req, _cb in current_reqs:
-        arr = np.full((512, 512), 7.0, dtype=np.float32)
-        scheduler.deliver(req, arr)
+        scheduler.deliver(req, np.full((512, 512), 7.0, dtype=np.float32))
     _pump(20)
     assert len(ctrl._precise_pool.entries) >= 16
 
     scheduler.requests.clear()
     ctrl._motion_timer.stop()
     view.view_box.setRange(xRange=(0, 40000), yRange=(0, 40000), padding=0)
-    _pump(30)
+    _pump(120)
     ctrl._motion_timer.stop()
     assert ctrl.level == 1, "test setup: a very wide view must land on the coarse level"
 
     entry = ctrl._precise_pool.get(1, 0, 0)
-    assert entry is not None
-    assert ctrl._precise_key_current_for_level(entry.key, 1) is True
+    assert entry is None or not ctrl._precise_key_current_for_level(entry.key, 1), (
+        "zoom-out must not leave a locally-built level-1 tile in the pool")
 
-    fallback_reqs_l1_00 = [r for r, cb in scheduler.requests
-                            if isinstance(r.key, CorrectionKey) and r.key.tile.level == 1
-                            and r.key.tile.tx == 0 and r.key.tile.ty == 0]
-    assert fallback_reqs_l1_00 == [], "synthesized tile must not also be requested"
-    assert ctrl.stats["fallback_synthesized"] >= 1
+    reqs_l1_00 = [r for r, cb in scheduler.requests
+                  if isinstance(r.key, CorrectionKey) and r.key.tile.level == 1
+                  and r.key.tile.tx == 0 and r.key.tile.ty == 0]
+    assert reqs_l1_00, "the real level-1 tile must still be requested"
 
     ctrl.teardown()
 
+
+def test_zoom_out_coarse_tile_is_only_pooled_once_computed(app):
+    """The pool gains the coarse tile only when the SCHEDULER delivers it,
+    and the delivered pixels are what is shown -- not a downsample of the
+    finer tiles, which for these fills would be a different number."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    # Pool the would-be synthesis sources with a distinctive value.
+    _pool_all_finer_tiles_for_fallback(
+        ctrl, provider, 1, 0, 0,
+        lambda ftx, fty: np.full((ctrl.grid.tile_size,) * 2, 200, dtype=np.uint8))
+
+    ctrl.jump_to(y0=0, x0=0, w=200000, h=200000)
+    _pump(20)
+    ctrl._motion_timer.stop()
+    assert ctrl.level >= 1
+
+    entry = ctrl._precise_pool.get(1, 0, 0)
+    assert entry is None or not ctrl._precise_key_current_for_level(entry.key, 1)
+
+    ctrl.teardown()
+
+
+def test_atomic_swap_path_still_requests_every_fallback_tile(app):
+    """`_issue_settled_request` no longer takes an `allow_local_synthesis`
+    flag -- the previously-exceptional "request them all asynchronously"
+    behaviour is now the only behaviour, for every caller."""
+    import inspect
+
+    ctrl, provider, scheduler, view = make_controller(app)
+    sig = inspect.signature(ctrl._issue_settled_request)
+    assert "allow_local_synthesis" not in sig.parameters
+    ctrl.teardown()
+
+
+def test_zoom_in_placeholder_is_the_coarser_level_still_visible(app):
+    """The OTHER direction, which is untouched: a zoom-IN has never
+    synthesized anything. "Level switching without clearing" keeps the
+    coarser level's own pooled items and `apply_visibility` leaves them
+    VISIBLE under the finer level, so the placeholder while the finer tile
+    computes is the coarser tile magnified -- coherent across the whole
+    viewport, hence no seam."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    # Land on a coarse level and fill it.
+    ctrl.jump_to(y0=0, x0=0, w=40000, h=40000)
+    _pump(20)
+    ctrl._motion_timer.stop()
+    coarse_level = ctrl.level
+    assert coarse_level >= 1, "test setup: a wide view must land on a coarse level"
+    for req, _cb in list(scheduler.pending_for(CorrectionKey)):
+        if req.key.tile.level == coarse_level:
+            scheduler.deliver(req, np.full((512, 512), 7.0, dtype=np.float32))
+    _pump(20)
+    coarse_entries = [c for c in ctrl._precise_pool.entries if c[0] == coarse_level]
+    assert coarse_entries, "test setup: the coarse level must be pooled"
+
+    # Zoom IN, delivering nothing for the finer level.
+    scheduler.requests.clear()
+    ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
+    _pump(120)
+    ctrl._motion_timer.stop()
+    assert ctrl.level < coarse_level, "test setup: the zoom-in must switch level"
+
+    # The coarser items are still pooled AND still drawn: that is the
+    # placeholder. Nothing was synthesized at the finer level.
+    still_pooled = [c for c in ctrl._precise_pool.entries if c[0] == coarse_level]
+    assert still_pooled, "the coarser level must stay pooled as the zoom-in placeholder"
+    visible_coarse = [ctrl._precise_pool.entries[c].item.isVisible() for c in still_pooled]
+    assert any(visible_coarse), "the coarser placeholder must stay VISIBLE under the finer level"
+
+    fine_pooled = [c for c in ctrl._precise_pool.entries if c[0] == ctrl.level]
+    assert not fine_pooled, (
+        "nothing may be pooled at the finer level before the scheduler delivers it")
+
+    ctrl.teardown()
 
 def test_zoom_gesture_state_cleared_on_settle(app):
     """`_viewport_zooming` is only recomputed when a range event arrives,
@@ -3165,15 +3085,17 @@ def test_the_paint_time_mapping_equals_the_reference_formula(app):
         ctrl.teardown()
 
 
-def test_atomic_swap_defers_fallback_synthesis_but_still_requests_it(app):
-    """The synthesis is DEFERRED on an atomic swap, not skipped.
+def test_atomic_swap_requests_the_fallback_tiles(app):
+    """An atomic swap must still ASK the scheduler for the fallback-level
+    tiles, or the next pan would expose the floor where the underlay
+    should have been.
 
-    After an atomic swap the viewport is already complete at the current
-    level, so a locally synthesized coarse underlay cannot be seen -- but
-    building it is ~30ms of `np.mean` on the GUI thread, measured inside a
-    switch that cost ~90ms in total. So the switch must not build it, and
-    must still ASK the scheduler for the same tiles, or the next pan would
-    expose the floor where the underlay should have been.
+    This used to be the interesting half of a pair: the swap DEFERRED a
+    GUI-thread synthesis of those tiles (~30ms of `np.mean` inside a
+    ~90ms switch) while still requesting them. The synthesis is gone
+    entirely (module docstring "No synthesized coarse fallback
+    (removed)"), so only the requesting half is left to assert -- for
+    this caller and every other one alike.
     """
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
@@ -3206,21 +3128,11 @@ def test_atomic_swap_defers_fallback_synthesis_but_still_requests_it(app):
             (ts, ts), 5.0, dtype=np.float32)
     ctrl.channel = saved
 
-    synth_calls = []
-    real_synth = ctrl._synthesize_and_pool_fallback_tile
-    ctrl._synthesize_and_pool_fallback_tile = (
-        lambda *a, **k: synth_calls.append(a) or False)
     scheduler.requests.clear()
-    try:
-        ctrl.set_selection(channel=other)
-    finally:
-        ctrl._synthesize_and_pool_fallback_tile = real_synth
+    ctrl.set_selection(channel=other)
     ctrl._motion_timer.stop()
 
     assert ctrl.stats.get("atomic_channel_swaps", 0) >= 1
-    assert synth_calls == [], (
-        f"the atomic swap built {len(synth_calls)} fallback tiles on the "
-        "GUI thread")
 
     if ctrl.intermediate_corrected_fallback and 1 < provider.num_levels:
         fallback_reqs = [
@@ -3228,9 +3140,13 @@ def test_atomic_swap_defers_fallback_synthesis_but_still_requests_it(app):
             if isinstance(r.key, CorrectionKey) and r.key.tile.level == 1
             and r.key.channel == other
         ]
-        assert fallback_reqs, (
-            "deferring the synthesis must still request the fallback tiles")
-        assert ctrl.stats.get("fallback_synthesis_deferred", 0) > 0
+        assert fallback_reqs, "the swap must request the fallback tiles"
+        # ...and none of them may have been built locally instead.
+        assert not any(
+            ctrl._precise_pool.get(1, r.key.tile.tx, r.key.tile.ty) is not None
+            and ctrl._precise_key_current_for_level(
+                ctrl._precise_pool.get(1, r.key.tile.tx, r.key.tile.ty).key, 1)
+            for r in fallback_reqs)
 
     ctrl.teardown()
 

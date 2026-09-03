@@ -468,14 +468,19 @@ One welcome consequence: after a zoom OUT, the fallback tiles computed for
 since `_precise_key_current_for_level` validates per level -- no extra
 work is required to make a zoom-out land on already-sharp tiles.
 
-## Synthesized coarse fallback
+## No synthesized coarse fallback (removed)
+
+A coarse tile was, for a while, SYNTHESIZED on the GUI thread by
+box-downsampling the already-pooled corrected tiles of the next finer
+level, instead of asking the scheduler to compute it. That is gone. The
+reasoning it rested on, and why it was wrong, is worth keeping, because
+the temptation to reintroduce it is real.
 
 Top-hat is a non-linear morphological operation, so downsampling and
 correcting do not commute:
 
-    A   = tophat computed AT level 1            (what the fallback shows today)
+    A   = tophat computed AT level 1
     REF = tophat computed at level 0, then box-downsampled to level-1 scale
-          (what an adjacent level-0 tile looks like at the same scale)
 
 Measured on the real slide (channel index 1, radius 25, 2048-px level-0
 windows, three windows per group, both put through the viewer's own
@@ -484,61 +489,44 @@ per-level display gain):
     tissue interior: mean brightness gap 18.4%, per-pixel |A-REF| 19.5%, p95 38.8%
     tissue edge:     mean brightness gap 26.4%, per-pixel |A-REF| 27.1%, p95 49.9%
 
-Edges are worse, matching the user's report that blockiness is worst near
-tissue borders, but the gap is large everywhere. It cannot be fixed by
-tuning the display gain: giving each window its OWN optimal scalar gain
-(1.36-1.63, against the calibrated 1.14) left |A-REF| at 18.4% interior /
-24.8% edge -- essentially unchanged -- and made p95 WORSE (46.3% / 61.5%).
-The difference is structural, not a brightness offset.
+The synthesis argued from that gap in the WRONG direction: since REF is by
+construction what the finer tiles already on screen show, a tile built as
+REF matches THOSE neighbours. True -- but only while every neighbour is
+also REF. The moment the tile beside it is a real, computed level-1 tile
+(A), the same 18-27% gap reappears as a hard seam along the tile boundary.
+On a zoom-out that is exactly the mix that occurs: the middle of the
+viewport is where the finer tiles were, so it synthesizes, while the
+surround has no finer source and is computed -- a differently-bright
+square in the centre of the screen, which is the artifact the user
+reported.
 
-But `REF` is, by construction, exactly what a level-0 tile shows. So a
-fallback tile SYNTHESIZED by downsampling already-computed level-0 (or,
-generally, level `L-1`) corrected tiles matches its neighbours exactly,
-with no seam at all -- it IS a downsample of what is already on screen.
+Worse, it was PERMANENT. A synthesized tile was pooled at the target level
+under `_make_correction_key(level=...)`, a key indistinguishable from a
+computed tile's, so `_issue_settled_request`'s `is_missing` predicate
+(and `_coverage_complete`) counted it as present and the real tile was
+never requested at all. The square did not resolve on its own; only a
+selection change or a prune could clear it.
 
-`_try_synthesize_fallback_tile(fallback_level, tx, ty)` sources ONLY from
-`fallback_level - 1` (no recursion through multiple levels). It requires
-EVERY finer-level tile tiling the fallback tile's world area to be present
-in `_precise_pool` with a key that is current for that finer level
-(`_precise_key_current_for_level`, the same predicate the visibility path
-already uses) -- if even one is missing or stale, it returns None: partial
-synthesis would leave holes, which is worse than the computed tile the
-caller falls back to requesting instead.
+Two directions of reuse are conceivable between levels, and only ONE
+existed here:
 
-The pool stores QUANTIZED uint8 pixels, not the float32 corrected values.
-Downsampling the quantized pixels (via `_box_downsample`, requiring an
-EXACT integer ratio between the two levels' downsample factors -- the
-tonsil pyramid is exactly 4x per level, so a non-integer ratio only
-matters for other layouts, and is declined rather than approximated) is
-fine here, and is in fact what keeps the result identical to what the
-neighbouring tiles display: the synthesized tile must NOT be re-quantized
-or re-gained, since it already carries the finer level's calibrated
-display gain baked in. Re-gaining it would double-apply the per-level
-gain (module docstring "Per-level display gain for CORRECTED pixels").
+- COARSE FROM FINE (downsample), the removed one. Both its call sites --
+  `_issue_settled_request`'s intermediate-fallback batch and the zoom-out
+  branch of `_on_range_changed` -- did this, and both are deleted.
+- FINE FROM COARSE (upsample) as a placeholder while the finer tile
+  computes. This viewer has never done it as a synthesis step, and does
+  not need to: "Level switching without clearing" keeps the coarser
+  level's own items pooled and visible UNDER the incoming finer ones, so
+  a zoom-in already shows the coarser tile, magnified and blurred, until
+  the finer one lands. That mechanism is untouched. It has no seam
+  problem precisely because the whole visible area is served by one
+  coherent coarser level, not a mixture.
 
-Used in two places: (1) in `_issue_settled_request`'s intermediate-fallback
-batch, before issuing a request for a missing fallback-level tile --
-success pools the result directly (with a `CorrectionKey` built for that
-level via `_make_correction_key(level=...)`, so it is accepted by
-`_precise_key_current_for_level` and invalidated by a selection change
-exactly like a computed tile) and skips the request; failure issues the
-request exactly as before. (2) in `_on_range_changed`, whenever a range
-event's display level INCREASES (a zoom-out or a jump landing on a
-coarser level) -- the newly-current level's tiles are attempted via
-synthesis from the level that was just current (guaranteed resident,
-having just been on screen) before falling through to the existing
-cache-serve-or-request path.
-
-HONEST LIMIT: a PAN exposes world area that has no finer tiles at all --
-there is nothing to downsample -- so synthesis cannot help there, and the
-computed fallback (with its measured 18-27% mismatch above) is still what
-shows in the roughly 4% of the viewport the directional prefetch has not
-covered. This change targets zoom-out and revisits, not panning.
-
-Stats: `fallback_synthesized` (a synthesis that produced a tile),
-`fallback_synthesis_declined` (a synthesis attempt where at least one
-source tile was missing or stale, or the level ratio was not an exact
-integer).
+So on zoom-out the placeholder is now whatever the existing chain
+provides next -- an already-computed coarser tile still pooled from
+before, the intermediate corrected fallback at `level + 1`, the corrected
+floor, the overview -- and the target level's corrected tile appears only
+once it has actually been computed.
 
 ## Directional prefetch (pan only)
 
@@ -1862,8 +1850,6 @@ class ExploreController(QtCore.QObject):
             "precise_tiles_blitted": 0,
             "mid_tiles_blitted": 0,
             "mid_requests_issued": 0,
-            "fallback_synthesized": 0,
-            "fallback_synthesis_declined": 0,
             "stale_precise_dropped": 0,
             "mismatched_key_dropped": 0,
             "mismatched_raw_dropped": 0,
@@ -2242,14 +2228,7 @@ class ExploreController(QtCore.QObject):
                 # I/O and contend with background channel preparation.
                 self._issue_raw_requests()
             else:
-                # After an atomic swap the viewport is ALREADY complete at
-                # the current level, so a synthesized coarse underlay cannot
-                # be seen -- but building it costs ~30ms of `np.mean` on the
-                # GUI thread, inside the switch. Request the same tiles
-                # asynchronously instead; the underlay is ready for the next
-                # pan either way.
-                self._issue_settled_request(
-                    allow_local_synthesis=not atomic_swapped)
+                self._issue_settled_request()
 
         # The atomic cached swap fills the pool BEFORE `_enter_provisional`
         # above, so no later delivery arrives to clear the flag: without
@@ -3267,25 +3246,22 @@ class ExploreController(QtCore.QObject):
             newly = (set(self._visible_tiles) if level_switched
                      else self._visible_tiles - prev_visible)
             if newly:
-                # Synthesized coarse fallback (module docstring): a level
-                # INCREASE (zoom-out, or a jump landing on a coarser level)
-                # means the level that was just current is guaranteed
-                # resident -- try building the new level's tiles from it
-                # before falling through to the cache-serve-or-request path
-                # below. Tiles this fails for (finer source missing/stale,
-                # e.g. most of a wide zoom-out) fall through unchanged.
-                zoom_out = level_switched and self.level > prev_level
-                synthesized_now = set()
-                if zoom_out:
-                    for tx, ty in newly:
-                        if self._synthesize_and_pool_fallback_tile(self.level, tx, ty):
-                            synthesized_now.add((tx, ty))
+                # A zoom-out USED to try to build the new level's tiles
+                # locally here, by downsampling the level that was just
+                # current (module docstring "No synthesized coarse
+                # fallback"). It does not any more: the result was not the
+                # same pixels a computed tile of this level produces, and
+                # it was pooled under a key indistinguishable from a
+                # computed one, so the real tile was never requested and
+                # the mismatch was permanent. What remains is the plain
+                # cache-serve path: a tile whose CORRECTED result is
+                # already in the cache is blitted immediately; everything
+                # else is requested by `_issue_settled_request` and shows
+                # the coarser fallback until it actually arrives.
                 cache = getattr(self.scheduler, "corrected_cache", None)
                 if cache is not None:
                     gen = self._settled_generation
                     for tx, ty in newly:
-                        if (tx, ty) in synthesized_now:
-                            continue
                         k = self._make_correction_key(tx, ty)
                         if cache.get(k) is not None:
                             self.scheduler.request(
@@ -3566,7 +3542,7 @@ class ExploreController(QtCore.QObject):
         self._clear_zoom_gesture_state()
         self.gesture_quiet.emit(self.snapshot())
 
-    def _issue_settled_request(self, allow_local_synthesis: bool = True):
+    def _issue_settled_request(self):
         """Cancel the previous precise generation, start a new one, and
         issue `CorrectionKey` requests for visible tiles that are MISSING
         under the current selection context -- i.e. `self._precise_pool`
@@ -3590,16 +3566,13 @@ class ExploreController(QtCore.QObject):
         Skips entirely (after bumping/cancelling the generation) when no
         method is selected or there is no current viewport yet.
 
-        `allow_local_synthesis=False` forbids the SYNCHRONOUS local
-        construction of missing fallback-level tiles from pooled finer
-        tiles; those tiles are still requested from the scheduler, so the
-        fallback layer is still filled, just asynchronously. Used by the
-        atomic cached channel swap, where the whole viewport is already
-        covered by current-level corrected tiles: the synthesis is invisible
-        at that moment and measured at ~30ms of GUI-thread `np.mean` inside
-        a switch that costs ~90ms in total. Every other caller (motion
-        ticks, pans, zooms) keeps the synchronous path, where the synthesized
-        underlay IS what the user sees instead of the floor."""
+        Every missing tile -- current level and fallback level alike -- is
+        REQUESTED from the scheduler. This used to take an
+        `allow_local_synthesis` flag that let the fallback batch build its
+        tiles on the GUI thread by downsampling finer pooled ones; that
+        whole mechanism is gone (module docstring "No synthesized coarse
+        fallback"), so the previously-exceptional asynchronous path is now
+        the only path."""
         if self._blocked_on_overview():
             return
         self.scheduler.cancel_generation(self._settled_generation)
@@ -3728,31 +3701,14 @@ class ExploreController(QtCore.QObject):
                 furgent = sorted((c for c in fmissing if c in finner), key=fdist)
                 fring = sorted((c for c in fmissing if c not in finner), key=fdist)
 
-                # Synthesized coarse fallback (module docstring): before
-                # requesting a missing fallback-level tile from the
-                # scheduler, try building it locally from already-pooled
-                # finer (level - 1) tiles. Success pools it directly and
-                # the tile is skipped from the request batch entirely;
-                # failure (a source tile missing/stale, or a non-integer
-                # level ratio) falls through to the request exactly as
-                # before.
-                if allow_local_synthesis:
-                    furgent_to_request = [
-                        c for c in furgent
-                        if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
-                    ]
-                    fring_to_request = [
-                        c for c in fring
-                        if not self._synthesize_and_pool_fallback_tile(fallback_level, *c)
-                    ]
-                else:
-                    # Not skipped, DEFERRED: every one of these is still
-                    # requested below, so the fallback layer still fills --
-                    # off the GUI thread.
-                    furgent_to_request, fring_to_request = furgent, fring
-                    self.stats["fallback_synthesis_deferred"] = (
-                        self.stats.get("fallback_synthesis_deferred", 0)
-                        + len(furgent) + len(fring))
+                # Every missing fallback tile is REQUESTED. This batch used
+                # to try to build them locally first, by downsampling the
+                # already-pooled finer tiles (module docstring "No
+                # synthesized coarse fallback"); it no longer does, because
+                # a downsample of corrected pixels is not the corrected
+                # pixels of the coarser level and the difference showed as
+                # a seam against the computed fallback tiles beside it.
+                furgent_to_request, fring_to_request = furgent, fring
                 for i, (tx, ty) in enumerate(furgent_to_request):
                     key = self._make_correction_key(tx, ty, level=fallback_level)
                     req = TileRequest(key=key, generation=gen, priority=i)
@@ -3781,125 +3737,6 @@ class ExploreController(QtCore.QObject):
             key = self._make_correction_key(tx, ty)
             req = TileRequest(key=key, generation=gen, priority=PRECISE_CURRENT_BASE_PRIORITY + i)
             self.scheduler.request(req, self._on_precise_result)
-
-    # ── synthesized coarse fallback (module docstring "Synthesized coarse
-    # fallback") ─────────────────────────────────────────────────────────
-
-    def _try_synthesize_fallback_tile(self, fallback_level: int, tx: int, ty: int) -> Optional[np.ndarray]:
-        """Try to build the `fallback_level` tile at `(tx, ty)` locally by
-        downsampling the already-pooled, already-quantized `fallback_level
-        - 1` tiles that tile its world area, instead of asking the
-        scheduler to compute it.
-
-        Returns the assembled uint8 array on success, or None (and
-        increments `stats["fallback_synthesis_declined"]`) when:
-        - there is no finer level (`fallback_level <= 0`);
-        - the ratio between the two levels' downsample factors is not an
-          exact integer (a guard for non-4x-per-level pyramids -- the real
-          tonsil pyramid is exactly 4x, so this path is inactive there);
-        - ANY finer-level tile covering the fallback tile's area is
-          missing from `_precise_pool`, or present with a key that is not
-          current for the finer level (`_precise_key_current_for_level`) --
-          partial synthesis would leave holes, worse than the computed
-          tile the caller falls back to requesting.
-
-        The source tiles are QUANTIZED uint8 pixels (already carrying the
-        finer level's own calibrated display gain), and the result is a
-        plain box-downsample of them -- NEVER re-quantized or re-gained,
-        since it is by construction a downsample of what is already
-        correctly on screen at the finer level (module docstring). A source
-        taken from the corrected CACHE instead of the pool is float32, so
-        it IS quantized once, with the finer level's gain -- which produces
-        exactly the pixels that tile would display.
-
-        MEASURED HIT RATE, so nobody assumes this carries the zoom-out
-        case: over a 15-step level-crossing zoom-out it fired 2 times and
-        declined 65; over a 25-step pan, 1 and 38. The reason is geometry,
-        not staleness -- one fallback tile needs a complete, GRID-ALIGNED
-        k-by-k block of finer tiles (k=4 on this pyramid, so 16 of them),
-        and a viewport at the finer level is barely wider than a single
-        fallback tile, so a browsing path covers strips rather than whole
-        aligned blocks. Sourcing from the cache as well as the pool roughly
-        doubled the rate and left it small. It is kept because when it does
-        fire the result is EXACT, and an "explore an area, then zoom out"
-        pattern is the case it is built for."""
-        finer_level = fallback_level - 1
-        if finer_level < 0:
-            self.stats["fallback_synthesis_declined"] += 1
-            return None
-
-        ds_finer = self.provider.level_downsample(finer_level)
-        ds_fallback = self.provider.level_downsample(fallback_level)
-        if ds_finer <= 0:
-            self.stats["fallback_synthesis_declined"] += 1
-            return None
-        ratio = ds_fallback / ds_finer
-        k = int(round(ratio))
-        if k < 1 or abs(ratio - k) > 1e-6:
-            self.stats["fallback_synthesis_declined"] += 1
-            return None
-
-        finer_tx0 = tx * k
-        finer_ty0 = ty * k
-        rows = []
-        for fty in range(finer_ty0, finer_ty0 + k):
-            row_arrs = []
-            for ftx in range(finer_tx0, finer_tx0 + k):
-                entry = self._precise_pool.get(finer_level, ftx, fty)
-                if (entry is not None and entry.key is not None
-                        and self._precise_key_current_for_level(entry.key, finer_level)):
-                    row_arrs.append(np.asarray(entry.item.image, dtype=np.float32))
-                    continue
-                # The pool only holds what has been BLITTED; the
-                # corrected cache holds everything computed, including
-                # prefetched tiles and previously-visited ones, so it is a
-                # far larger source. A cached tile is float32 corrected
-                # values, so it must be quantized with the FINER level's
-                # gain -- which is exactly what that tile would display.
-                cache = getattr(self.scheduler, "corrected_cache", None)
-                cached = None
-                if cache is not None:
-                    cached = cache.get(self._make_correction_key(ftx, fty, level=finer_level))
-                if cached is None:
-                    self.stats["fallback_synthesis_declined"] += 1
-                    return None
-                row_arrs.append(np.asarray(cached, dtype=np.float32))
-            rows.append(row_arrs)
-
-        try:
-            assembled = np.block(rows)
-        except ValueError:
-            # Mismatched constituent shapes (e.g. an edge tile truncated to
-            # less than a full tile_size) -- decline rather than guess.
-            self.stats["fallback_synthesis_declined"] += 1
-            return None
-
-        downsampled = _box_downsample(assembled, k)
-        # The constituents are FINER-level corrected values, which display
-        # under the finer level's gain; the result is pooled at the fallback
-        # level and will be drawn under THAT level's gain, so re-express it.
-        g_finer = self._display_gain_for_level(finer_level)
-        g_fallback = self._display_gain_for_level(fallback_level)
-        result = (downsampled * (g_finer / g_fallback)).astype(np.float32)
-        self.stats["fallback_synthesized"] += 1
-        return result
-
-    def _synthesize_and_pool_fallback_tile(self, fallback_level: int, tx: int, ty: int) -> bool:
-        """Attempt `_try_synthesize_fallback_tile`; on success, pool the
-        result directly at `fallback_level` with a `CorrectionKey` built
-        for that level (`_make_correction_key(level=fallback_level)`), so
-        `_precise_key_current_for_level` accepts it later and a selection
-        change invalidates it exactly like a computed tile. Returns True on
-        success (the caller must then skip requesting this tile)."""
-        arr_u8 = self._try_synthesize_fallback_tile(fallback_level, tx, ty)
-        if arr_u8 is None:
-            return False
-        ds_y, ds_x = self._downsample_yx(fallback_level)
-        ts = self.grid.tile_size
-        rect = ExploreView.world_rect(ty * ts, tx * ts, arr_u8.shape[0], arr_u8.shape[1], ds_y, ds_x)
-        key = self._make_correction_key(tx, ty, level=fallback_level)
-        self._precise_pool.put(fallback_level, tx, ty, rect, arr_u8, key)
-        return True
 
     # ── directional prefetch (module docstring "Directional prefetch
     # (pan only)") ───────────────────────────────────────────────────────

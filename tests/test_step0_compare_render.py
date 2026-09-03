@@ -140,17 +140,18 @@ def test_gamma_and_range_changes_are_table_and_level_swaps(app):
 
 
 def test_the_controls_show_and_edit_the_current_channels_mapping(app):
+    """The min/max/gamma controls moved out of the preview header into the
+    floating Display window; they still show and edit the same mapping."""
     page = _page(app)
     page.set_display_mapping("CD3", 10.0, 800.0, 1.5)
     page.set_display_mapping("DAPI", 5.0, 900.0, 0.9)
     _show(page, _payload())
+    popup = page.show_display_popup()
 
-    assert page._marker_display_min.value() == pytest.approx(10.0)
-    assert page._marker_display_max.value() == pytest.approx(800.0)
-    assert page._marker_display_gamma.value() == pytest.approx(1.5)
-    assert page._nuc_display_max.value() == pytest.approx(900.0)
+    assert popup.mapping("marker") == pytest.approx((10.0, 800.0, 1.5))
+    assert popup.mapping("nucleus")[1] == pytest.approx(900.0)
 
-    page._marker_display_max.setValue(600.0)
+    popup._widgets["marker"]["max"].setValue(600.0)
     assert page._display_mapping_for("CD3") == (10.0, 600.0, 1.5)
     assert list(page._preview_imgs[0].levels) == pytest.approx([10.0, 600.0])
 

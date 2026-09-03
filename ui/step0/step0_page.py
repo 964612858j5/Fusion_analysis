@@ -19,7 +19,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer, QRectF, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QGroupBox, QSlider, QDoubleSpinBox,
+    QScrollArea, QGroupBox, QSlider,
     QInputDialog, QMessageBox, QFileDialog,
     QComboBox, QFrame, QProgressBar, QSizePolicy,
     QRadioButton, QButtonGroup, QSplitter,
@@ -70,10 +70,13 @@ from ...utils.roi_project import (
 # — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
 # resolver / Step2-runtime import is introduced here.
 from ..widgets.channel_workbench import ChannelWorkbench
+from ..widgets.display_mapping_popup import DisplayMappingPopup
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
+    default_channel_remap_params,
+    normalize_channel_remap_params,
     CREATED_FROM_STEP0_CONDITIONING,
 )
 # v14.5b: source-aware preview-config primitives (schema + preview-time identity
@@ -214,6 +217,7 @@ class Step0Page(QWidget):
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
+        self._display_popup = None  # floating Display window, lazily created
         # Per-load guard for auto-opening the Tissue Navigator on data load:
         # re-armed at the start of each load, fired once at load-completion.
         self._navigator_auto_opened = False
@@ -830,11 +834,16 @@ class Step0Page(QWidget):
         )
         self._nuc_color_btn.clicked.connect(self._pick_nucleus_color)
 
-        self._btn_show_nucleus = QPushButton("Nucleus")
+        # (display-popup) The two layer switches are no longer IN the header:
+        # they are hidden, parentless-in-layout state holders whose checked
+        # state `_refresh_preview_display` reads. The user flips them through
+        # the floating Display window's "Show" checkboxes. Keeping them as
+        # QPushButtons (rather than plain booleans) keeps every existing
+        # `toggled` connection -- and the tests that drive them -- intact.
+        self._btn_show_nucleus = QPushButton("Nucleus", self)
         self._btn_show_nucleus.setCheckable(True)
         self._btn_show_nucleus.setChecked(True)
-        self._btn_show_nucleus.setToolTip("Show/hide nucleus channel")
-        self._btn_show_nucleus.setStyleSheet(_tg.format(c="#56b6c2"))
+        self._btn_show_nucleus.setVisible(False)
 
         mk_lbl = QLabel("Marker:")
         mk_lbl.setStyleSheet("color:#aaa;font-size:10px;")
@@ -847,11 +856,22 @@ class Step0Page(QWidget):
         )
         self._marker_color_btn.clicked.connect(self._pick_marker_color)
 
-        self._btn_show_marker = QPushButton("Marker")
+        self._btn_show_marker = QPushButton("Marker", self)
         self._btn_show_marker.setCheckable(True)
         self._btn_show_marker.setChecked(True)
-        self._btn_show_marker.setToolTip("Show/hide marker channel")
-        self._btn_show_marker.setStyleSheet(_tg.format(c="#98c379"))
+        self._btn_show_marker.setVisible(False)
+
+        # (display-popup) One small button in the header opens the floating
+        # Display window that now carries min / max / gamma / Auto / Show.
+        self._btn_display_popup = QPushButton("Display…")
+        self._btn_display_popup.setToolTip(
+            "Open the floating Display window: min / max / gamma and the "
+            "layer switches for the marker and DAPI channels.")
+        self._btn_display_popup.setStyleSheet(
+            "QPushButton{color:#c678dd;border:1px solid #c678dd;border-radius:3px;"
+            "padding:2px 6px;font-size:10px;background:#1a1a1a;}"
+            "QPushButton:hover{background:#2a1a33;}")
+        self._btn_display_popup.clicked.connect(self.show_display_popup)
 
         self._btn_lock_zoom = QPushButton("🔗 Lock")
         self._btn_lock_zoom.setCheckable(True)
@@ -870,11 +890,11 @@ class Step0Page(QWidget):
 
         ctrl_row.addWidget(nuc_lbl)
         ctrl_row.addWidget(self._nuc_color_btn)
-        ctrl_row.addWidget(self._btn_show_nucleus)
         ctrl_row.addSpacing(6)
         ctrl_row.addWidget(mk_lbl)
         ctrl_row.addWidget(self._marker_color_btn)
-        ctrl_row.addWidget(self._btn_show_marker)
+        ctrl_row.addSpacing(10)
+        ctrl_row.addWidget(self._btn_display_popup)
         ctrl_row.addSpacing(10)
         ctrl_row.addWidget(self._btn_lock_zoom)
         ctrl_row.addSpacing(4)
@@ -885,55 +905,16 @@ class Step0Page(QWidget):
         self._btn_show_marker.toggled.connect(lambda _: self._refresh_preview_display(keep_zoom=True))
         pvl.addLayout(ctrl_row)
 
-        # ── Display mapping rows (Marker / Nucleus): min, max, gamma, Auto ──
+        # ── Display mapping (Marker / Nucleus): min, max, gamma, Auto ──
         # Raw intensity in, screen value out: shown = clip((v - min)/(max -
         # min))**gamma, per channel, shared with the full image. Seeded once
         # per channel from the whole slide's tissue (QuPath auto, 0.1/99.9);
         # these are the explicit numbers the user may change. Display only:
         # never the h5ad, the corrected zarr or the segmentation remap.
-        def _make_display_row(label, prefix, color):
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            lbl = QLabel(label)
-            lbl.setStyleSheet(f"color:{color};font-size:10px;min-width:48px;")
-            row.addWidget(lbl)
-            spins = {}
-            for key, text, rng, step, dec in (("min", "Min", (-1e6, 1e7), 1.0, 1),
-                                              ("max", "Max", (-1e6, 1e7), 1.0, 1),
-                                              ("gamma", "γ", (0.1, 5.0), 0.1, 2)):
-                t = QLabel(text)
-                t.setStyleSheet("color:#aaa;font-size:10px;")
-                sp = QDoubleSpinBox()
-                sp.setRange(*rng)
-                sp.setSingleStep(step)
-                sp.setDecimals(dec)
-                sp.setValue(1.0 if key == "gamma" else 0.0)
-                sp.setKeyboardTracking(False)
-                sp.setStyleSheet("QDoubleSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-                                 "border-radius:3px;font-size:10px;padding:0 2px;}")
-                sp.setToolTip(f"{label} display {text.lower()} (raw intensity units; gamma is unitless).")
-                sp.valueChanged.connect(lambda _v, pfx=prefix: self._on_display_controls_edited(pfx))
-                row.addWidget(t)
-                row.addWidget(sp, stretch=1)
-                spins[key] = sp
-            btn_auto = QPushButton("Auto")
-            btn_auto.setFixedHeight(18)
-            btn_auto.setToolTip("Re-seed min/max from the whole slide's tissue "
-                                "(QuPath-style 0.1 / 99.9 percentiles); gamma back to 1.")
-            btn_auto.setStyleSheet(
-                "QPushButton{color:#aaa;border:1px solid #555;border-radius:3px;"
-                "font-size:10px;background:#1a1a1a;padding:0 6px;}"
-                "QPushButton:hover{background:#333;}")
-            btn_auto.clicked.connect(lambda _=False, pfx=prefix: self._on_display_auto(pfx))
-            row.addWidget(btn_auto)
-            setattr(self, f"_{prefix}_display_min", spins["min"])
-            setattr(self, f"_{prefix}_display_max", spins["max"])
-            setattr(self, f"_{prefix}_display_gamma", spins["gamma"])
-            setattr(self, f"_{prefix}_display_auto", btn_auto)
-            return row
-
-        pvl.addLayout(_make_display_row("Marker:", "marker", "#98c379"))
-        pvl.addLayout(_make_display_row("Nucleus:", "nuc", "#56b6c2"))
+        # (display-popup) The controls themselves live in the floating
+        # `DisplayMappingPopup` opened by the header's "Display…" button --
+        # two rows of the preview's height back for controls touched once
+        # per channel. The page still OWNS the mapping; the popup is a view.
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
         self._preview_vbs  = []
@@ -2573,6 +2554,95 @@ class Step0Page(QWidget):
         self._navigator_auto_opened = True
         self.show_tissue_navigator()
 
+    # ── the floating Display window ──────────────────────────────────────────
+    #  A SECOND, separate floating window (never inside the Tissue Navigator,
+    #  which must stay navigation-only). The page owns the display mapping;
+    #  this popup is a view over it: it emits what the user did, and
+    #  `_sync_display_controls` pushes the page's state back into it.
+    def _ensure_display_popup(self):
+        popup = getattr(self, "_display_popup", None)
+        if popup is None:
+            popup = DisplayMappingPopup(parent=self)
+            self._display_popup = popup
+            popup.mapping_edited.connect(self._on_popup_mapping_edited)
+            popup.auto_requested.connect(self._on_display_auto)
+            popup.show_toggled.connect(self._on_popup_show_toggled)
+            popup.use_as_remap_requested.connect(
+                self._use_display_as_segmentation_remap)
+            self._sync_display_controls()
+        return popup
+
+    def show_display_popup(self):
+        popup = self._ensure_display_popup()
+        self._sync_display_controls()
+        popup.show()
+        popup.raise_()
+        return popup
+
+    def toggle_display_popup(self):
+        popup = self._ensure_display_popup()
+        if popup.isVisible():
+            popup.hide()
+        else:
+            self._sync_display_controls()
+            popup.show()
+            popup.raise_()
+        return popup
+
+    def _on_popup_mapping_edited(self, role, lo, hi, gamma):
+        """A spin box in the Display window moved: write the mapping of the
+        channel that role stands for. Display only — nothing is computed."""
+        if self._display_controls_syncing:
+            return
+        ch = self.nucleus_channel if role == "nucleus" else self.current_channel
+        if not ch:
+            return
+        self.set_display_mapping(ch, float(lo), float(hi), float(gamma))
+
+    def _on_popup_show_toggled(self, role, on):
+        """The popup's "Show" checkbox drives the hidden state-holder button;
+        its existing `toggled` connection refreshes the panels."""
+        if self._display_controls_syncing:
+            return
+        btn = (self._btn_show_nucleus if role == "nucleus"
+               else self._btn_show_marker)
+        if btn.isChecked() != bool(on):
+            btn.setChecked(bool(on))
+
+    def _use_display_as_segmentation_remap(self):
+        """Copy the CURRENT channel's display mapping into the Channel Remap
+        tab as its segmentation remap.
+
+        Brightness/contrast are pinned to the neutral 0.0 / 1.0 Step0 uses (no
+        UI for them here), which is exactly where remap semantics equal the
+        display mapping's. `auto` goes False -- these are explicit numbers --
+        and the channel is marked user-adjusted so they survive patch
+        switches. Never for the nucleus channel: it is not corrected and has
+        no per-channel decision.
+        """
+        ch = self.current_channel
+        if not ch or ch == self.nucleus_channel:
+            print(f"[step0] display->remap skipped for {ch!r} "
+                  "(no channel, or the nucleus channel)", flush=True)
+            return
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None:
+            print("[step0] display->remap: no Channel Remap workbench", flush=True)
+            return
+        lo, hi, gamma = self._display_mapping_for(ch)
+        params = dict(wb._params.get(ch) or default_channel_remap_params())
+        params.update({"min": float(lo), "max": float(hi), "gamma": float(gamma),
+                       "brightness": 0.0, "contrast": 1.0, "auto": False})
+        wb._params[ch] = normalize_channel_remap_params(params)
+        wb._user_adjusted[ch] = True
+        if wb.active_channel() == ch:
+            wb._load_params_into_controls(ch)
+            wb._refresh_preview()
+        wb.params_changed.emit(ch)
+        self._refresh_remap_state_label()
+        print(f"[step0] display->remap {ch}: min {lo:.4g} max {hi:.4g} "
+              f"γ {gamma:.4g} (brightness 0, contrast 1)", flush=True)
+
     def toggle_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()
         if popup.isVisible():
@@ -3917,35 +3987,29 @@ class Step0Page(QWidget):
                 set_nuc(lo, hi, gamma)
 
     def _sync_display_controls(self):
-        """Controls show the current channel's and the nucleus's mapping."""
-        if not hasattr(self, "_marker_display_min"):
+        """The Display popup shows the current channel's and the nucleus's
+        mapping, their names and the two layer switches. No-op until the
+        popup has been opened once (it is created lazily)."""
+        popup = getattr(self, "_display_popup", None)
+        if popup is None:
             return
         self._display_controls_syncing = True
         try:
-            for prefix, ch, nuc in (("marker", self.current_channel, False),
-                                    ("nuc", self.nucleus_channel, True)):
+            popup.set_channel_names(self.current_channel or "",
+                                    self.nucleus_channel or "")
+            for role, ch, nuc in (("marker", self.current_channel, False),
+                                  ("nucleus", self.nucleus_channel, True)):
                 lo, hi, gamma = self._display_mapping_for(ch, nucleus=nuc) if ch else (0.0, 1.0, 1.0)
-                getattr(self, f"_{prefix}_display_min").setValue(lo)
-                getattr(self, f"_{prefix}_display_max").setValue(hi)
-                getattr(self, f"_{prefix}_display_gamma").setValue(gamma)
+                popup.set_mapping(role, lo, hi, gamma)
+            popup.set_shown("marker", self._btn_show_marker.isChecked())
+            popup.set_shown("nucleus", self._btn_show_nucleus.isChecked())
         finally:
             self._display_controls_syncing = False
 
-    def _on_display_controls_edited(self, prefix):
-        if self._display_controls_syncing:
-            return
-        ch = self.nucleus_channel if prefix == "nuc" else self.current_channel
-        if not ch:
-            return
-        lo = getattr(self, f"_{prefix}_display_min").value()
-        hi = getattr(self, f"_{prefix}_display_max").value()
-        gamma = getattr(self, f"_{prefix}_display_gamma").value()
-        if hi <= lo:
-            hi = lo + 1.0
-        self.set_display_mapping(ch, lo, hi, gamma)
-
     def _on_display_auto(self, prefix):
-        nuc = prefix == "nuc"
+        """Re-seed a role's mapping from the slide. `prefix` is the popup's
+        role ("marker" / "nucleus"); the legacy "nuc" spelling still works."""
+        nuc = prefix in ("nuc", "nucleus")
         ch = self.nucleus_channel if nuc else self.current_channel
         if not ch:
             return
@@ -4536,6 +4600,13 @@ class Step0Page(QWidget):
 
     def _start_ondemand(self, ch):
         """为未计算的通道启动按需计算（所有patches）。"""
+        # The nucleus channel is never background-corrected. Until now this
+        # was only true by accident: `_on_channel_row_changed` returned early
+        # for DAPI before reaching here. Any other caller -- and the Display
+        # window, which must never start a computation -- gets the guard.
+        if ch == self.nucleus_channel:
+            print(f"[step0] on-demand skipped: {ch} is the nucleus channel", flush=True)
+            return
         if not self.loader or not self.patches:
             return
         busy = self.production_correction_busy()

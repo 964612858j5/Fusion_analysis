@@ -1083,6 +1083,8 @@ class OverviewPanel(QWidget):
         self._mode            = 'patch'
         self._drag_start      = None
         self._pan_last        = None
+        self._nav_press       = None   # navigate/pan mode: (pos, r, c) of the press
+        self._nav_moved       = False
         self._right_press_pos = None
 
         # ROI in-progress drawing
@@ -1282,6 +1284,8 @@ class OverviewPanel(QWidget):
     # ── Mode switching ────────────────────────────────────────────────
 
     def _set_mode(self, mode):
+        """'roi', 'patch', or None -- None is navigate/pan: no drawing tool,
+        a click emits `navigate_requested`, a left-drag pans."""
         self._mode = mode
         # _btn_roi / _btn_patch 已从 OverviewPanel 移除，
         # 模式切换状态由 Step0Page 工具栏按钮负责，这里只更新内部状态和UI
@@ -1289,10 +1293,17 @@ class OverviewPanel(QWidget):
         self._patch_ctrl.setVisible(mode == 'patch')
         if mode == 'roi':
             self.hint.setText(
-                "Left-click = Add vertex  |  Enter/Right-click = Close ROI  |  Z = Undo  |  D = Delete  "
-                "|  Scroll = Zoom  |  Right-drag = Pan  |  Double-click = Reset"
+                "Left-click = Add vertex (inside an existing ROI: jump there)  |  "
+                "Enter/Right-click = Close ROI  |  Z = Undo  |  D = Delete  "
+                "|  Scroll = Zoom  |  Middle-drag = Pan  |  Double-click = Reset"
             )
             self.hint.setStyleSheet("color:#6bcb77;font-size:10px;")
+        elif mode is None:
+            self.hint.setText(
+                "Click = Jump the full image there  |  Left-drag = Pan  "
+                "|  Scroll = Zoom  |  Double-click = Reset"
+            )
+            self.hint.setStyleSheet("color:#19e0e0;font-size:10px;")
         else:
             self.hint.setText(
                 "Left-drag = Add Patch  |  Right-click = Delete last  "
@@ -1967,9 +1978,26 @@ class OverviewPanel(QWidget):
             sp = self.gview.mapToScene(event.pos())
             r, c = self._ov_pos(sp)
 
+            if self._mode is None:
+                # Navigate/pan: a left press starts a pan; if it ends where
+                # it began (< 3 px) it was a click, and the release
+                # navigates. Middle behaves the same for consistency.
+                if event.button() in (Qt.LeftButton, Qt.MiddleButton):
+                    self._pan_last = event.pos()
+                    self._nav_press = (event.pos(), r, c)
+                    self._nav_moved = False
+                    return True
+                return True
+
             if self._mode == 'roi':
-                if (event.button() == Qt.LeftButton
-                        and event.modifiers() & Qt.ControlModifier):
+                if event.button() == Qt.LeftButton and (
+                        event.modifiers() & Qt.ControlModifier
+                        or (not self._cur_pts
+                            and self._find_roi_for_patch(r, c) is not None)):
+                    # Inside an ROI that already exists there is nothing to
+                    # draw, so a click there is "take me there" (also always
+                    # with Ctrl). While a polygon is being drawn, clicks add
+                    # vertices wherever they land.
                     self._emit_navigate(r, c)
                     return True
                 if event.button() == Qt.LeftButton:
@@ -2004,6 +2032,14 @@ class OverviewPanel(QWidget):
             sp = self.gview.mapToScene(event.pos())
             r, c = self._ov_pos(sp)
 
+            if self._mode is None:
+                if (event.buttons() & (Qt.LeftButton | Qt.MiddleButton)) and self._pan_last:
+                    press = getattr(self, "_nav_press", None)
+                    if press is not None and (event.pos() - press[0]).manhattanLength() >= 3:
+                        self._nav_moved = True
+                    self._do_pan(event)
+                return True
+
             if self._mode == 'roi':
                 if self._cur_pts:
                     self._update_preview_line(r, c)
@@ -2028,6 +2064,15 @@ class OverviewPanel(QWidget):
 
         # ── Mouse release ─────────────────────────────────────────────
         elif t == QtCore.QEvent.MouseButtonRelease:
+            if self._mode is None:
+                self._pan_last = None
+                press = getattr(self, "_nav_press", None)
+                self._nav_press = None
+                if (press is not None and not getattr(self, "_nav_moved", False)
+                        and event.button() == Qt.LeftButton):
+                    self._emit_navigate(press[1], press[2])
+                return True
+
             if self._mode == 'roi':
                 if event.button() == Qt.MiddleButton:
                     self._pan_last = None

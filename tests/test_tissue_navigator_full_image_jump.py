@@ -26,7 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import overview_panel as ovp  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
@@ -290,3 +290,97 @@ def test_returning_to_compare_hands_the_rectangle_back(app):
 
     # No conditioning workbench in this page: the compare path clears it.
     assert popup.overview.current_view_rect() is None
+
+
+# ── 4. no drawing mode: click jumps, drag pans; ROI mode: inside an ROI jumps ─
+
+def _viewrange(panel):
+    return [tuple(round(v) for v in r) for r in panel.vb.viewRange()]
+
+
+def test_with_no_drawing_mode_a_click_navigates(app):
+    panel = _panel(None)
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 50, 60)
+    _mouse(panel, QtCore.QEvent.MouseButtonRelease, 50, 60)
+
+    assert seen == [(500, 600)]
+
+
+def test_with_no_drawing_mode_a_drag_pans_and_does_not_navigate(app):
+    panel = _panel(None)
+    panel.resize(400, 400)
+    panel.show()
+    panel.vb.setRange(xRange=(0, 600), yRange=(0, 800), padding=0)
+    QtTest.QTest.qWait(30)
+    before = _viewrange(panel)
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    press = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, QtCore.QPointF(50, 50),
+                              QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier)
+    move = QtGui.QMouseEvent(QtCore.QEvent.MouseMove, QtCore.QPointF(90, 70),
+                             QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier)
+    release = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonRelease, QtCore.QPointF(90, 70),
+                                QtCore.Qt.LeftButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier)
+    panel._ov_pos = lambda _sp: (50, 50)
+    vp = panel.gview.viewport()
+    assert panel.eventFilter(vp, press) is True
+    assert panel.eventFilter(vp, move) is True
+    assert panel.eventFilter(vp, release) is True
+
+    assert _viewrange(panel) != before, "the view did not pan"
+    assert seen == []
+    panel.close()
+
+
+def test_no_drawing_mode_hides_both_tool_panels_and_says_so(app):
+    panel = _panel(None)
+    assert panel._roi_ctrl.isHidden() and panel._patch_ctrl.isHidden()
+    assert "Jump" in panel.hint.text() and "Pan" in panel.hint.text()
+
+
+def test_in_roi_mode_a_click_inside_an_existing_roi_navigates(app):
+    panel = _panel("roi")
+    panel._rois = [{"name": "ROI_1", "polygon_display": [(10, 10), (100, 10), (100, 100), (10, 100)]}]
+    seen = []
+    panel.navigate_requested.connect(lambda y, x: seen.append((y, x)))
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 50, 50)          # inside
+
+    assert seen == [(500, 500)]
+    assert panel._cur_pts == []
+
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 300, 300)        # outside
+    assert seen == [(500, 500)]
+    assert panel._cur_pts == [(300, 300)]
+
+    # A polygon in progress keeps taking vertices, even inside an ROI.
+    _mouse(panel, QtCore.QEvent.MouseButtonPress, 50, 50)
+    assert panel._cur_pts == [(300, 300), (50, 50)]
+    assert seen == [(500, 500)]
+
+
+def test_the_mode_buttons_toggle_off_to_no_drawing_mode(app):
+    page = sp.Step0Page()
+    page._ensure_tissue_navigator()
+    ov = page._drawing_overview()
+
+    page._set_draw_mode("roi")
+    assert page._btn_mode_roi.isChecked() and not page._btn_mode_patch.isChecked()
+    assert ov._mode == "roi"
+
+    page._btn_mode_roi.click()                    # the active one: off
+    assert not page._btn_mode_roi.isChecked() and not page._btn_mode_patch.isChecked()
+    assert ov._mode is None
+    assert "jump" in ov.status.text().lower()
+
+    page._btn_mode_patch.click()                  # on
+    assert page._btn_mode_patch.isChecked() and ov._mode == "patch"
+    page._btn_mode_roi.click()                    # switches, never both
+    assert page._btn_mode_roi.isChecked() and not page._btn_mode_patch.isChecked()
+    assert ov._mode == "roi"
+    page._btn_mode_roi.click()
+    assert ov._mode is None

@@ -483,8 +483,11 @@ class Step0Page(QWidget):
         tool_row.addWidget(self._btn_rename_roi)
         tool_row.addStretch()
 
-        self._btn_mode_roi.clicked.connect(lambda: self._set_draw_mode("roi"))
-        self._btn_mode_patch.clicked.connect(lambda: self._set_draw_mode("patch"))
+        # Each button toggles its own mode; clicking the active one turns
+        # drawing OFF altogether (neither checked), which is the navigate/pan
+        # mode of the overview. Never both on.
+        self._btn_mode_roi.clicked.connect(lambda: self._on_mode_button("roi"))
+        self._btn_mode_patch.clicked.connect(lambda: self._on_mode_button("patch"))
         self._btn_delete_sel.clicked.connect(self._delete_selected_item)
         self._btn_rename_roi.clicked.connect(self._rename_selected_roi)
         tb_lay.addLayout(tool_row)
@@ -3160,11 +3163,27 @@ class Step0Page(QWidget):
         pop = getattr(self, "_tissue_navigator_popup", None)
         return pop.overview if pop is not None else self.overview
 
+    def _on_mode_button(self, mode):
+        """A mode button was clicked. QPushButton has already flipped its
+        checked state: on -> that mode; off -> no drawing mode at all."""
+        btn = self._btn_mode_roi if mode == "roi" else self._btn_mode_patch
+        self._set_draw_mode(mode if btn.isChecked() else None)
+
     def _set_draw_mode(self, mode):
-        """切换绘制模式，同步按钮状态"""
+        """切换绘制模式，同步按钮状态。
+
+        `mode` is "roi", "patch" or None. None is the navigate/pan mode: no
+        drawing tool active, a click on the tissue jumps the full image
+        there and a left-drag pans the overview. The two modes are never on
+        together; both off is allowed (user request).
+        """
         self._btn_mode_roi.setChecked(mode == "roi")
         self._btn_mode_patch.setChecked(mode == "patch")
         ov = self._drawing_overview()
+        if mode is None:
+            ov._set_mode(None)
+            ov.status.setText("Click the tissue to jump the full image there; drag to pan.")
+            return
         if mode == "roi":
             # 自动生成下一个不重名的默认ROI名，写入输入框，不弹对话框
             existing = {r["name"] for r in ov._rois}

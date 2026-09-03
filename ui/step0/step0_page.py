@@ -3677,6 +3677,31 @@ class Step0Page(QWidget):
         finally:
             self._zoom_lock_active = False
 
+    @staticmethod
+    def _payload_shape(payload):
+        """(h, w) of the pixels a preview payload would put on screen, from
+        whichever result it carries, or None for an empty payload."""
+        for key in ("original_disp", "tophat_disp", "cucim_disp"):
+            arr = (payload or {}).get(key)
+            if arr is not None:
+                return tuple(int(v) for v in arr.shape[:2])
+        return None
+
+    def _recompute_keeps_zoom(self, shown, incoming):
+        """Whether a freshly computed payload should keep the panels' zoom.
+
+        A result that REPLACES what is on screen -- the same patch, so the
+        same pixel grid, computed again with a changed parameter -- must not
+        move the camera: the user zoomed in to judge exactly that spot, and
+        pressing Enter on a radius used to throw the zoom away and show the
+        whole patch again. A result for a different-sized patch, or the
+        first result when nothing is shown, gets the auto-range as before,
+        because the previous view rectangle means nothing on a new grid.
+        """
+        shown_shape = self._payload_shape(shown)
+        return (shown_shape is not None
+                and shown_shape == self._payload_shape(incoming))
+
     def _on_contrast_changed(self):
         """调整显示对比度时刷新预览，不触发重算。"""
         self._refresh_preview_display(keep_zoom=True)
@@ -4079,12 +4104,13 @@ class Step0Page(QWidget):
         self._preview_cache[(ch, p_idx)] = payload
         # 如果当前正在查看这个通道的这个patch，立刻刷新
         if ch == self.current_channel and p_idx == self.current_patch_idx:
+            keep_zoom = self._recompute_keeps_zoom(self._last_payload, payload)
             self._last_payload = payload
             self._rebuild_payload_rgb_from(
                 payload, ch,
                 getattr(self, '_nuc_color', (0.0, 0.5, 1.0)),
                 self._channel_colors.get(ch, getattr(self, '_marker_color', (0.0, 1.0, 0.3))))
-            self._refresh_preview_display(keep_zoom=False)
+            self._refresh_preview_display(keep_zoom=keep_zoom)
             self._metrics_original.setText(self._metric_text("Original", payload["original_metrics"]))
             if payload.get("tophat_disp") is not None:
                 self._metrics_tophat.setText(self._metric_text("TopHat", payload["tophat_metrics"]))
@@ -4343,6 +4369,7 @@ class Step0Page(QWidget):
         if req_id != self._preview_req_id:
             return
         self._preview_cache[(self.current_channel, self.current_patch_idx)] = payload
+        keep_zoom = self._recompute_keeps_zoom(self._last_payload, payload)
         self._last_payload = payload
         self._rebuild_payload_rgb_from(
             payload,
@@ -4352,7 +4379,7 @@ class Step0Page(QWidget):
                 self.current_channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3))
             ),
         )
-        self._refresh_preview_display(keep_zoom=False)
+        self._refresh_preview_display(keep_zoom=keep_zoom)
         self._metrics_original.setText(self._metric_text("Original", payload["original_metrics"]))
         self._metrics_tophat.setText(self._metric_text("TopHat", payload["tophat_metrics"]))
         self._metrics_cucim.setText(self._metric_text("cucim", payload["cucim_metrics"]))

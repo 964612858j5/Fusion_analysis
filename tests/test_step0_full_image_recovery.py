@@ -458,6 +458,9 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
         def exec_(self):
             timeline.append("dialog.exec_")
 
+        def show(self):
+            timeline.append("dialog.show")
+
         def set_progress(self, *_a, **_k):
             pass
 

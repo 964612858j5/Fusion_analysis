@@ -4021,6 +4021,13 @@ class Step0Page(QWidget):
 
     def _on_process_clicked(self):
         """▶ Process 按钮。只要勾选就跑，method只有tophat/cucim/both。"""
+        busy = self.production_correction_busy()
+        if busy:
+            # Reachable during a Save now that its progress dialog is not
+            # modal; two GPU users at once is what this gate prevents.
+            QMessageBox.information(
+                self, "Busy", f"A {busy} run is already in progress.")
+            return
         selected = {}
         for ch, row_data in self._channel_rows.items():
             if ch == self.nucleus_channel:
@@ -4157,6 +4164,14 @@ class Step0Page(QWidget):
     def _start_ondemand(self, ch):
         """为未计算的通道启动按需计算（所有patches）。"""
         if not self.loader or not self.patches:
+            return
+        busy = self.production_correction_busy()
+        if busy:
+            # Now reachable during a Save: the progress dialog is no longer
+            # modal. Two GPU users at once is what the gate exists to stop.
+            self._preview_status.setText(
+                f"Waiting: {busy} is running. Click the channel again when it finishes.")
+            self._preview_status.setStyleSheet("color:#ffb86c;font-size:10px;")
             return
         # 从method_cb直接读（最可靠），_channel_methods作为备用，默认both
         row_data = self._channel_rows.get(ch)
@@ -4418,8 +4433,10 @@ class Step0Page(QWidget):
             QMessageBox.information(self, "No patches",
                                     "Draw at least one patch in the navigator first.")
             return
-        if self._batch_worker is not None and self._batch_worker.isRunning():
-            QMessageBox.information(self, "Busy", "A process run is already in progress.")
+        busy = self.production_correction_busy()
+        if busy:
+            QMessageBox.information(
+                self, "Busy", f"A {busy} run is already in progress.")
             return
         # persist this channel's current params, then recompute just it (fresh cache)
         self._channel_params[ch] = {
@@ -4796,7 +4813,11 @@ class Step0Page(QWidget):
         # it, and the full image would stay released for good.
         self._watch_production_worker(self._wsi_worker)
         self._wsi_worker.start()
-        self._wsi_dialog.exec_()
+        # `show()`, not `exec_()`: a modal dialog froze every other window
+        # for the whole run (the Tissue Preview could not even be closed).
+        # Nothing follows this call that needed the modal loop to return;
+        # the run's end is handled by the worker's signals.
+        self._wsi_dialog.show()
 
     def _on_wsi_progress(self, channel_idx, channel_total, tile_idx, tile_total, ch_name, method, eta_s):
         pct = int(((channel_idx - 1) + tile_idx / max(1, tile_total)) / max(1, channel_total) * 100)
@@ -4887,7 +4908,10 @@ class Step0Page(QWidget):
             self._wsi_dialog.reject()
         self._btn_continue.setEnabled(True)
         self._btn_load.setEnabled(True)
-        QMessageBox.information(self, "Canceled", "Background correction was canceled. Partial corrected zarr output was removed.")
+        QMessageBox.information(
+            self, "Canceled",
+            "Background correction was canceled. The channel that was being "
+            "written has been removed; nothing partial was kept.")
 
     def _on_wsi_error(self, msg):
         if self._wsi_dialog is not None:

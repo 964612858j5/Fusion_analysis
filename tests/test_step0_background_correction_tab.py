@@ -622,6 +622,9 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
         def exec_(self):
             timeline.append("dialog.exec_")
 
+        def show(self):
+            timeline.append("dialog.show")
+
         def set_progress(self, *_a, **_k):
             pass
 

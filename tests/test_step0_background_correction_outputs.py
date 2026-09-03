@@ -472,6 +472,8 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
             super().__init__(parent)
         def exec_(self):
             return 0
+        def show(self):
+            pass
         def allow_close(self):
             pass
         def accept(self):
@@ -581,6 +583,9 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     class _FD(QtCore.QObject):
         cancel_requested = QtCore.pyqtSignal()
         def exec_(self): return 0
+        def show(self): pass
+        def show(self):
+            pass
         def allow_close(self): pass
         def accept(self): pass
         def set_progress(self, *a, **k): pass

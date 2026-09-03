@@ -1987,7 +1987,25 @@ class WsiCorrectionWorker(QThread):
         self._incremental = bool(incremental)
 
     def stop_after_current_channel(self):
+        """Request cancellation. Honoured at the next TILE boundary (see
+        `run`); the name is kept for its callers."""
         self._cancel_requested = True
+
+    @staticmethod
+    def _discard_partial(zarr_path, incremental, group, ch_name):
+        """What a cancel leaves behind. Fresh save: nothing -- the whole
+        zarr goes, it held only this run's output. Incremental save: the
+        channels complete before this run stay; only the dataset that was
+        being written (`ch_name` in `group`, if any) is removed, so the zarr
+        never holds a half-written channel that reads as corrected."""
+        if not incremental:
+            shutil.rmtree(zarr_path, ignore_errors=True)
+            return
+        if group is not None and ch_name is not None and ch_name in group:
+            try:
+                del group[ch_name]
+            except Exception:
+                pass
 
     @staticmethod
     def _safe_group_name(name, idx):
@@ -2170,6 +2188,18 @@ class WsiCorrectionWorker(QThread):
                     )
 
                     for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
+                        if self._cancel_requested:
+                            # Checked per TILE, not per channel: in Full-WSI
+                            # mode one channel is the whole slide, and a
+                            # cancel that waited for it was a cancel that did
+                            # nothing for minutes. The channel in progress is
+                            # partial and is dropped; a fresh save drops the
+                            # whole zarr, an incremental save keeps the
+                            # channels that were already complete before this
+                            # run and drops only the partial dataset.
+                            self._discard_partial(zarr_path, incremental, group, ch_name)
+                            self.canceled.emit(zarr_path)
+                            return
                         y0, y1, x0, x1 = core
                         py0, py1, px0, px1 = padded
                         cy0, cy1, cx0, cx1 = crop
@@ -2203,11 +2233,9 @@ class WsiCorrectionWorker(QThread):
                     corrected_decisions[ch_name] = method
                     completed_units += len(tiles)
                     if self._cancel_requested:
-                        # Fresh save: drop the whole partial zarr. Incremental:
-                        # keep the prior (already-corrected) data intact — only the
-                        # in-progress channel is partial; do not delete everything.
-                        if not incremental:
-                            shutil.rmtree(zarr_path, ignore_errors=True)
+                        # Requested after the last tile of this channel: the
+                        # channel is complete, nothing partial to drop.
+                        self._discard_partial(zarr_path, incremental, None, None)
                         self.canceled.emit(zarr_path)
                         return
 
@@ -2222,7 +2250,14 @@ class _WsiCorrectionProgressDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._allow_close = False
-        self.setModal(True)
+        # NOT modal. An application-modal dialog blocks every other window
+        # of the application, including the floating Tissue Preview / ROI
+        # Navigator, whose close button then does nothing for the length of
+        # a whole-slide run. The page disables what must not run during a
+        # save (Load, Continue) and gates the GPU entry points on
+        # `production_correction_busy()`; the dialog itself only has to stay
+        # visible and refuse to be closed until the run has ended.
+        self.setModal(False)
         self.setWindowTitle("Background Correction")
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
         self.setMinimumWidth(520)
@@ -2259,7 +2294,7 @@ class _WsiCorrectionProgressDialog(QDialog):
 
     def _on_cancel(self):
         self._cancel.setEnabled(False)
-        self._label.setText("Cancellation requested. The current channel will finish before cleanup.")
+        self._label.setText("Cancellation requested. Stopping after the current tile…")
         self.cancel_requested.emit()
 
     def set_progress(self, pct, label, eta_s):

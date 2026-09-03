@@ -648,7 +648,18 @@ class Step0Page(QWidget):
         from .step0_dock_adapter import Step0ChannelDockAdapter
         self._dock_adapter = Step0ChannelDockAdapter(self)
         self._channel_list = self._dock_adapter.dock.list_widget
-        self._channel_list.currentRowChanged.connect(self._on_channel_row_changed)
+        # The MODEL's selection, not the list's `currentRowChanged`. A click
+        # on a row goes `ChannelRowBase.mousePressEvent` -> `model.select`
+        # -> `ChannelDock._on_model_selection`, which moves the list's
+        # current item with its signals BLOCKED -- so `currentRowChanged`
+        # never fired for a mouse click, and the page kept showing the
+        # channel it had (measured: the list's current row moved, the page's
+        # `current_channel` did not). A programmatic `setCurrentRow` reaches
+        # the model too (`ChannelDock._on_current_item`), so this one
+        # connection covers both paths, and the model's own de-duplication
+        # means the handler runs once per actual change.
+        self._dock_adapter.model.selection_changed.connect(
+            self._on_channel_selected_by_id)
         chl.addWidget(self._dock_adapter.dock, stretch=1)
         cll.addWidget(ch_box, stretch=2)
 
@@ -3973,6 +3984,18 @@ class Step0Page(QWidget):
         else:
             self._channel_methods.pop(ch, None)
             self._channel_decisions[ch] = "original"
+
+    def _on_channel_selected_by_id(self, cid):
+        """The shared dock's selection, as a channel id, routed to the
+        legacy row handler. `""` is the model's "nothing selected"."""
+        if not cid:
+            self._on_channel_row_changed(-1)
+            return
+        try:
+            row = self._channel_order.index(cid)
+        except ValueError:
+            return
+        self._on_channel_row_changed(row)
 
     def _on_channel_row_changed(self, row):
         if row < 0 or row >= len(self._channel_order):

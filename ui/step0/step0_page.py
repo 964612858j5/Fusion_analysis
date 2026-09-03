@@ -267,6 +267,14 @@ class Step0Page(QWidget):
         self._batch_worker: BatchProcessWorker = None
         # 计算完成的通道集合
         self._computed_channels: set = set()
+        # What PRODUCED the cached result of a channel: {ch: signature}, with
+        # signature = (method, tophat_radius, cucim_sigma, sorted patch bboxes).
+        # Process compares the would-be signature against this and skips the
+        # channels whose evidence says they are already up to date.
+        self._computed_signatures: dict = {}
+        # Signature of the run currently in flight per channel; promoted into
+        # _computed_signatures as that channel's results land.
+        self._pending_signatures: dict = {}
         # 参数是否被修改（提示需要重新Process）
         self._params_dirty: bool = False
         # Process是否已完成（只有完成后才允许按需计算）
@@ -3980,6 +3988,49 @@ class Step0Page(QWidget):
         cs = int(cp.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))
         return tr, cs
 
+    def _patch_signature(self):
+        """The patch list as a hashable, order-independent key."""
+        return tuple(sorted(tuple(int(v) for v in p) for p in self.patches))
+
+    def _channel_signature(self, ch, method, params=None):
+        """Everything a channel's result depends on, as one comparable tuple.
+
+        (method, tophat_radius, cucim_sigma, patches). Anything else the worker
+        sees (loader, nucleus channel) changes only on a dataset switch, which
+        wipes the signatures wholesale."""
+        tr, cs = params if params is not None else self._resolve_channel_params(ch)
+        return (str(method), int(tr), int(cs), self._patch_signature())
+
+    def _channel_is_up_to_date(self, ch, sig):
+        """True when the cache really holds THIS channel's result for THIS sig.
+
+        Evidence, not a flag: the recorded signature must match, the channel
+        must be marked done, and every current patch must have a payload."""
+        have = self._computed_signatures.get(ch)
+        if have is None:
+            return False
+        if have != sig:
+            # A "both" result carries the TopHat AND the cuCIM output for the
+            # same params and patches, so it satisfies a request for either.
+            covers = (have[0] == "both" and sig[0] in ("tophat", "cucim")
+                      and have[1:] == sig[1:])
+            if not covers:
+                return False
+        if ch not in self._computed_channels:
+            return False
+        return all((ch, p_idx) in self._preview_cache
+                   for p_idx in range(len(self.patches)))
+
+    def _record_channel_signature(self, ch):
+        """Promote the in-flight signature of `ch` once its results arrive."""
+        sig = self._pending_signatures.get(ch)
+        if sig is not None:
+            self._computed_signatures[ch] = sig
+
+    def _invalidate_channel_signature(self, ch):
+        self._computed_signatures.pop(ch, None)
+        self._pending_signatures.pop(ch, None)
+
     def _current_dec_method(self):
         if self._dec_top.isChecked():
             return "tophat"
@@ -4336,13 +4387,43 @@ class Step0Page(QWidget):
                                     "Please draw at least one patch in Section B.")
             return
 
-        # 清掉受影响通道的缓存（params dirty时重算）
-        if self._params_dirty:
-            for ch in selected:
-                self._preview_cache = {k: v for k, v in self._preview_cache.items()
-                                       if k[0] != ch}
-            self._computed_channels -= set(selected.keys())
-            self._params_dirty = False
+        # Incremental Process: only NEW or CHANGED channels are recomputed.
+        # "Changed" is decided from evidence -- the signature (method, this
+        # channel's params, the patch list) that produced the cached result --
+        # not from the dirty flag, which cannot say WHICH channel changed.
+        to_process, skipped = {}, []
+        for ch, method in selected.items():
+            sig = self._channel_signature(ch, method)
+            if self._channel_is_up_to_date(ch, sig):
+                skipped.append(ch)
+                continue
+            to_process[ch] = method
+            self._pending_signatures[ch] = sig
+        for ch in skipped:
+            print(f"[Step0] Process: {ch} is up to date (unchanged method/params/"
+                  f"patches) — skipped", flush=True)
+        self._params_dirty = False
+
+        if not to_process:
+            n = len(selected)
+            print(f"[Step0] Process: nothing to do — all {n} selected channel(s) "
+                  f"are up to date", flush=True)
+            self._proc_status.setText(
+                f"All {n} selected channel{'s' if n != 1 else ''} are up to date.")
+            self._proc_status.setStyleSheet("color:#6bffa0;font-size:10px;")
+            self._btn_process.setEnabled(True)
+            self._btn_stop_process.setEnabled(False)
+            self._process_completed = True
+            self._reset_process_button()
+            return
+
+        # 清掉待重算通道的缓存（method/params/patches 变了）
+        stale = set(to_process.keys())
+        self._preview_cache = {k: v for k, v in self._preview_cache.items()
+                               if k[0] not in stale}
+        self._computed_channels -= stale
+        for ch in stale:
+            self._computed_signatures.pop(ch, None)
         self._process_completed = False   # 锁住按需计算，直到本次process完成
 
         self._btn_process.setEnabled(False)
@@ -4351,12 +4432,12 @@ class Step0Page(QWidget):
         self._proc_pbar.setValue(0)
         self._proc_status.setText("Starting…")
 
-        # 将选中通道标记为"计算中"
-        for ch in selected:
+        # 将待计算通道标记为"计算中"
+        for ch in to_process:
             self._set_channel_computing(ch)
 
         self._batch_worker = BatchProcessWorker(
-            self.loader, self.patches, selected,
+            self.loader, self.patches, to_process,
             self.nucleus_channel,
             self._tophat_slider.value(),
             self._cucim_slider.value(),
@@ -4385,6 +4466,8 @@ class Step0Page(QWidget):
     def _on_batch_patch_done(self, ch, p_idx, payload):
         """一个patch计算完成，存入缓存。"""
         self._preview_cache[(ch, p_idx)] = payload
+        # Evidence for the incremental Process: remember WHAT produced this.
+        self._record_channel_signature(ch)
         # 如果当前正在查看这个通道的这个patch，立刻刷新
         if ch == self.current_channel and p_idx == self.current_patch_idx:
             keep_zoom = self._recompute_keeps_zoom(self._last_payload, payload)
@@ -4409,6 +4492,8 @@ class Step0Page(QWidget):
 
     def _on_batch_channel_done(self, ch):
         """一个通道的所有patches全部计算完成。"""
+        self._record_channel_signature(ch)
+        self._pending_signatures.pop(ch, None)
         self._set_channel_done(ch)
 
     def _reset_process_button(self):
@@ -4470,6 +4555,11 @@ class Step0Page(QWidget):
         if method not in {"tophat", "cucim", "both"}:
             method = "both"
         self._set_channel_computing(ch)
+        # On demand runs with the GLOBAL slider params (no channel_params), so
+        # record exactly those -- not the per-channel ones.
+        self._pending_signatures[ch] = self._channel_signature(
+            ch, method,
+            params=(self._tophat_slider.value(), self._cucim_slider.value()))
 
         worker = BatchProcessWorker(
             self.loader, self.patches,
@@ -4733,6 +4823,10 @@ class Step0Page(QWidget):
         }
         self._preview_cache = {k: v for k, v in self._preview_cache.items() if k[0] != ch}
         self._computed_channels.discard(ch)
+        # Apply always recomputes: drop the old evidence and register what this
+        # run will produce, so a later Process sees it as up to date.
+        self._invalidate_channel_signature(ch)
+        self._pending_signatures[ch] = self._channel_signature(ch, "both")
         params = {ch: dict(self._channel_params.get(ch) or {})}
         self._set_channel_computing(ch)
         self._proc_pbar.setVisible(True)
@@ -4919,6 +5013,11 @@ class Step0Page(QWidget):
         self._preview_cache = {}
         self._preload_cache = {}
         self._computed_channels = set()
+        # The per-channel "what produced this" evidence belongs to the OLD
+        # dataset's pixels; channel names repeat across datasets, so keeping it
+        # would let Process skip a channel of B that was only ever computed for A.
+        self._computed_signatures = {}
+        self._pending_signatures = {}
         # This session's batch selection: which channels are ticked and with
         # which method. Channel NAMES repeat across datasets (both slides have
         # a CD3), so keeping this would silently carry A's ticks and methods

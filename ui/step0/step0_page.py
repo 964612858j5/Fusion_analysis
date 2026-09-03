@@ -1694,6 +1694,244 @@ class Step0Page(QWidget):
             return None
         return (ly0, lx0, lx1 - lx0, ly1 - ly0)
 
+    # -- the drill-down keeps the pixels where they are -------------------
+    #
+    # `_compare_viewport_l0` answers "which slide region is this panel
+    # showing"; that is the right question for a viewer that may open
+    # anywhere, and the wrong one for THIS gesture. The full-image widget is
+    # bigger than a compare panel and has a different aspect, so opening on
+    # the panel's region means FITTING that region into the bigger widget:
+    # the image grows under the cursor. What the user asked for by clicking
+    # the panel's expand button is "the same picture, with the surroundings
+    # filled in" -- same scale, same place on the screen. So the two things
+    # that make a camera are taken from the panel directly (its scale, and
+    # the world point at a known GLOBAL screen position) and re-imposed on
+    # the full view, which then differs from the panel only by being a
+    # larger window onto the very same plane.
+
+    @staticmethod
+    def _full_view_range_for_panel(panel_scale, panel_world_tl,
+                                   panel_global_tl, full_global_rect):
+        """The world range the full view must hold to continue the panel.
+
+        Pure geometry, so it can be checked by hand:
+
+        * `panel_scale` -- widget pixels per world unit in the panel. Panel
+          world units ARE level-0 slide pixels (the payload is an uncropped,
+          un-downsampled level-0 slice; see `_compare_viewport_l0`), so this
+          is also the full view's required scale.
+        * `panel_world_tl` -- `(x, y)` in LEVEL-0 world coordinates: the
+          point drawn at the panel viewport's top-left corner.
+        * `panel_global_tl` -- `(x, y)` in GLOBAL screen pixels: where that
+          corner is on the desktop.
+        * `full_global_rect` -- `(x, y, w, h)` of the full view's own
+          viewport, in the same global screen frame.
+
+        Both viewports live in one screen coordinate system, so the world
+        point at any global pixel is fixed once the scale and one anchor
+        are:
+
+            world = panel_world_tl + (global - panel_global_tl) / scale
+
+        applied to the full viewport's top-left corner; its extent is just
+        its pixel size over the scale. Returns `(x0, x1, y0, y1)` in level-0
+        world units, or None when the inputs cannot describe a camera (no
+        scale, no area, a non-finite value) -- the caller then falls back to
+        the region-based open.
+
+        Nothing is clipped to the slide. The surrounding area IS the point
+        of the drill-down, and past the slide edge there is background,
+        which is the honest thing to show there.
+        """
+        try:
+            scale = float(panel_scale)
+            wx, wy = (float(v) for v in panel_world_tl)
+            gx, gy = (float(v) for v in panel_global_tl)
+            fx, fy, fw, fh = (float(v) for v in full_global_rect)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(v)
+                   for v in (scale, wx, wy, gx, gy, fx, fy, fw, fh)):
+            return None
+        if scale <= 0 or fw <= 0 or fh <= 0:
+            return None
+        x0 = wx + (fx - gx) / scale
+        y0 = wy + (fy - gy) / scale
+        return (x0, x0 + fw / scale, y0, y0 + fh / scale)
+
+    @staticmethod
+    def _vb_screen_geometry(view_box):
+        """A ViewBox's viewport as `(global_x, global_y, w_px, h_px)`, or
+        None when it has no usable geometry yet.
+
+        GLOBAL, because the two viewports being related sit in different
+        widgets (and in different pages of a stack): only the desktop frame
+        is common to both. The route is pyqtgraph's own -- ViewBox ->
+        graphics scene -> the QGraphicsView showing that scene -> the
+        desktop. The SIZE comes from the mapped rect rather than from two
+        mapped corners, so it stays sub-pixel exact instead of being rounded
+        to whole widget pixels twice.
+
+        `mapRectToScene(rect())` and NOT `sceneBoundingRect()`: the latter
+        is the item's PAINTED bounds and so carries half the border pen on
+        every side -- measured 1306.5 x 652.5 for a 1306 x 652 box. Half a
+        pixel is not noise here: `rect()` is what the ViewBox's own aspect
+        lock divides by, so a size half a pixel off makes the range this
+        answer feeds slightly the wrong shape, the lock refits it, and the
+        match comes out ~0.04% off in scale and a third of a pixel adrift
+        (both measured, on the real slide, before this was `rect()`).
+        """
+        if view_box is None:
+            return None
+        try:
+            rect = view_box.mapRectToScene(view_box.rect())
+            scene = view_box.scene()
+            views = scene.views() if scene is not None else []
+            if not views:
+                return None
+            gv = views[0]
+            top_left = gv.mapToGlobal(gv.mapFromScene(rect.topLeft()))
+        except Exception:
+            return None
+        w, h = float(rect.width()), float(rect.height())
+        if not (w > 1.0 and h > 1.0):
+            return None
+        return (float(top_left.x()), float(top_left.y()), w, h)
+
+    def _compare_panel_camera(self, source):
+        """The clicked panel's camera: `(scale, (world_x, world_y),
+        (global_x, global_y))`, all read at its viewport's top-left corner,
+        with the world point already offset into LEVEL-0.
+
+        None when the panel cannot be trusted to define one -- no payload
+        for this (channel, patch), a degenerate range, or a widget that has
+        never been laid out (offscreen tests, a page that was never shown).
+        The caller then keeps the region-based behaviour.
+
+        The world top-left is `(x_min, y_min)`: the panels call
+        `invertY(True)`, so the smallest y is at the TOP of the screen.
+        """
+        try:
+            idx = FULL_IMAGE_SOURCES.index(source)
+        except ValueError:
+            return None
+        vbs = getattr(self, "_preview_vbs", None)
+        if not vbs or not (0 <= idx < len(vbs)):
+            return None
+        if not self.patches or not (0 <= self.current_patch_idx
+                                    < len(self.patches)):
+            return None
+        # The same identity gate `_compare_viewport_l0` documents: a payload
+        # from another patch would be given this patch's origin, which is a
+        # wrong position rather than a missing one.
+        key = (self.current_channel, self.current_patch_idx)
+        if (self._last_payload is None
+                or self._preview_cache.get(key) is not self._last_payload):
+            return None
+        py0, _py1, px0, _px1 = (int(v) for v in
+                                self.patches[self.current_patch_idx])
+        vb = vbs[idx]
+        try:
+            (vx0, vx1), (vy0, vy1) = vb.viewRange()
+        except Exception:
+            return None
+        if not all(math.isfinite(float(v)) for v in (vx0, vx1, vy0, vy1)):
+            return None
+        if vx1 <= vx0 or vy1 <= vy0:
+            return None
+        geom = self._vb_screen_geometry(vb)
+        if geom is None:
+            return None
+        gx, gy, w_px, _h_px = geom
+        scale = w_px / (float(vx1) - float(vx0))
+        if not math.isfinite(scale) or scale <= 0:
+            return None
+        return (scale, (px0 + float(vx0), py0 + float(vy0)), (gx, gy))
+
+    # How many event-loop turns the match will chase the widget's geometry
+    # for. Small and FINITE: each turn is one deferred re-measure, never a
+    # wait loop, and the chase stops as soon as the geometry it measured is
+    # the geometry it already used.
+    _FULL_IMAGE_MATCH_PASSES = 4
+
+    def _match_full_image_to_panel(self, camera, passes=None, last_rect=None):
+        """Re-impose the compare panel's `camera` on the full view.
+
+        Called after the page has been switched and the viewer asked for its
+        selection, because only then does the full view exist at all.
+
+        It is applied more than once, and that is not belt-and-braces. The
+        range that continues the panel is computed FROM the full view's
+        pixel size, and Qt hands out that size over several event-loop
+        turns: on a cold open the widget is added to the tab with the
+        placeholder's geometry, the page switch resizes it once, the stack
+        page's own layout resizes it again. Every resize makes the
+        aspect-locked ViewBox rescale, which is exactly the refit this
+        feature exists to avoid -- measured on the real slide: matched at
+        622x462, resized to 1306x652, and the scale came out 1.41x the
+        panel's. So each deferred pass re-measures, and re-applies only when
+        the geometry has MOVED since the pass that set it; when it has not,
+        the chase stops (typically after one confirming turn). At most
+        `_FULL_IMAGE_MATCH_PASSES` turns either way -- a bounded number of
+        `singleShot(0)`s, not a busy-wait -- after which whatever is on
+        screen stands.
+
+        Returns True when the camera was applied on THIS pass, which is what
+        the tests assert on; the button ignores the return value.
+        """
+        if passes is None:
+            passes = self._FULL_IMAGE_MATCH_PASSES
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        view = getattr(stack, "view", None) if stack is not None else None
+        controller = (getattr(stack, "controller", None)
+                      if stack is not None else None)
+        if view is None or controller is None:
+            return False
+        set_rect = getattr(controller, "set_view_rect_l0", None)
+        if not callable(set_rect):
+            return False
+        # Ask Qt for the layout it owes us BEFORE measuring: on the cold
+        # path the view widget was added to the tab a moment ago and still
+        # carries the placeholder's geometry.
+        layout = getattr(explore_tab, "layout", None)
+        if callable(layout):
+            try:
+                lay = layout()
+                if lay is not None:
+                    lay.activate()
+            except Exception:
+                pass
+        def _again(next_rect):
+            if passes > 1:
+                QTimer.singleShot(
+                    0, lambda: self._match_full_image_to_panel(
+                        camera, passes=passes - 1, last_rect=next_rect))
+
+        full_rect = self._vb_screen_geometry(getattr(view, "view_box", None))
+        if full_rect is None:
+            # No geometry yet at all: come back after Qt has laid the page
+            # out, still holding the same camera.
+            _again(None)
+            return False
+        if last_rect is not None and all(
+                abs(a - b) <= 0.5 for a, b in zip(full_rect, last_rect)):
+            # The widget has settled where the previous pass measured it, so
+            # what is on screen is already the panel's camera.
+            return False
+        scale, world_tl, global_tl = camera
+        rng = self._full_view_range_for_panel(scale, world_tl, global_tl,
+                                              full_rect)
+        if rng is None:
+            return False
+        x0, x1, y0, y1 = rng
+        set_rect(x0, y0, x1 - x0, y1 - y0)
+        # The Tissue Preview's rectangle follows the camera, and this moved
+        # it after `_show_full_image` already published the old one.
+        self._update_full_image_view_rect()
+        _again(full_rect)
+        return True
+
     def _enter_full_image(self, source):
         """A compare panel's "full image" button.
 
@@ -1702,13 +1940,25 @@ class Step0Page(QWidget):
         moment the full image is repositioned. Nothing is stored: a refused
         or failed build simply drops it, and the next click recomputes from
         whatever the panels hold then.
+
+        Two positionings, and the second wins wherever it can: the REGION
+        (`viewport_l0`) opens the view roughly where the panel was looking,
+        which is all a cold build can do before its widget has a size, and
+        then `_match_full_image_to_panel` replaces it with the panel's exact
+        CAMERA, so the pixels the user was looking at neither move nor
+        change size. With no panel camera to be had (no payload, a page that
+        was never laid out) only the region applies -- the pre-existing
+        behaviour, unchanged.
         """
         if source not in FULL_IMAGE_METHOD:
             return
+        camera = self._compare_panel_camera(source)
         viewport_l0 = self._compare_viewport_l0(source)
         self._full_image_source = source
         self._preview_stack.setCurrentIndex(PREVIEW_PAGE_FULL_IMAGE)
         self._show_full_image(viewport_l0=viewport_l0)
+        if camera is not None:
+            self._match_full_image_to_panel(camera)
 
     def _return_to_compare(self):
         """Back to the three panels. Deliberately does nothing else.

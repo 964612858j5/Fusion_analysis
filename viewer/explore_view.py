@@ -3422,9 +3422,37 @@ class ExploreController(QtCore.QObject):
         timer) via `_issue_raw_requests`, which now issues both layers
         (module docstring "Camera contract")."""
         rect = QRectF(float(x0), float(y0), float(w), float(h))
+        self._move_camera(lambda vb: vb.setRange(rect=rect, padding=0))
+
+    def set_view_rect_l0(self, x0: float, y0: float, w: float, h: float):
+        """Put EXACTLY this level-0 rect on the camera: both axes are set
+        independently, so nothing is re-fitted.
+
+        `jump_to` hands the ViewBox a `rect`, which an aspect-locked box
+        FITS -- the scale it ends up with is whatever makes the rect fit the
+        widget. That is right for a navigator jump ("show me this region")
+        and wrong for the compare-panel drill-down, whose whole promise is
+        that the pixels stay at the same size in the same place on screen:
+        the caller has already solved for a rect whose aspect IS the
+        widget's, and any refit would break it by a fraction of a percent
+        and shift what the user was looking at.
+
+        Otherwise identical to `jump_to`: the camera really moves, so the
+        range-changed path runs, and both request batches are issued at once
+        rather than after the motion timer.
+        """
+        x0, y0, w, h = float(x0), float(y0), float(w), float(h)
+        self._move_camera(lambda vb: vb.setRange(xRange=(x0, x0 + w),
+                                                 yRange=(y0, y0 + h),
+                                                 padding=0))
+
+    def _move_camera(self, apply_range):
+        """The shared body of `jump_to` / `set_view_rect_l0`: move the
+        camera with `apply_range`, then do everything a jump owes the rest
+        of the machine."""
         self._jumping = True
         try:
-            self.view.view_box.setRange(rect=rect, padding=0)
+            apply_range(self.view.view_box)
         finally:
             self._jumping = False
         self._motion_timer.stop()

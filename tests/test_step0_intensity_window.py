@@ -331,12 +331,73 @@ def test_selecting_a_row_switches_the_inspector(app):
     assert wb._sp_gamma.value() == pytest.approx(1.2)
 
 
-def test_the_nucleus_channel_is_inspectable_too(app):
+def test_the_dapi_row_only_moves_the_inspector(app):
+    """DAPI is a REFERENCE channel: selecting its row means "the Intensity
+    window now edits DAPI's mapping", nothing else. The compare panels, the
+    full image and the method combo keep the marker they were on."""
+    stack = _Stack()
+    page = _page(app, stack)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+    page._on_channel_selected_by_id("CD20")
+    stack.controller.channel = "CD20"
+
+    page._on_channel_selected_by_id("DAPI")
+
+    assert page.current_channel == "CD20", "the displayed channel was dropped"
+    assert stack.controller.channel == "CD20", "the full image switched to DAPI"
+    assert wb.active_channel() == "DAPI"
+    assert _hist_hex(wb) == page._channel_swatch_hex("DAPI").lower()
+    assert page._channel_rows["CD20"]["method_cb"].isEnabled()
+
+
+def test_the_dapi_row_starts_no_correction_and_rebuilds_no_viewer(app,
+                                                                  monkeypatch):
+    stack = _Stack()
+    page = _page(app, stack)
+    page._on_channel_selected_by_id("CD20")
+    page._process_completed = True
+    started = []
+    monkeypatch.setattr(page, "_start_ondemand",
+                        lambda ch: started.append(ch))
+    shown = []
+    monkeypatch.setattr(page, "_show_full_image",
+                        lambda *a, **k: shown.append(a))
+
+    page._on_channel_selected_by_id("DAPI")
+
+    assert started == [], "selecting DAPI started a correction"
+    assert shown == [], "selecting DAPI rebuilt the full image"
+
+
+def test_moving_the_dapi_sliders_reaches_the_overlay(app):
+    stack = _Stack()
+    page = _page(app, stack)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+    page._on_channel_selected_by_id("CD20")
+    page._on_channel_selected_by_id("DAPI")
+
+    wb._sp_max.setValue(777.0)
+
+    assert page._display_mapping_for("DAPI", nucleus=True)[1] == 777.0
+    assert stack.overlay.mappings[-1][1] == 777.0
+    assert page.current_channel == "CD20"
+
+
+def test_a_marker_row_takes_the_inspector_back(app):
     page = _page(app)
     wb = page._cond_workbench
+    page.show_intensity_window()
+    page._on_channel_selected_by_id("CD20")
     page._on_channel_selected_by_id("DAPI")
-    assert page.current_channel == "DAPI"
-    assert wb.active_channel() == "DAPI"
+
+    page._on_channel_selected_by_id("CD3")
+
+    assert page.current_channel == "CD3"
+    assert page._inspector_channel is None
+    assert wb.active_channel() == "CD3"
+    assert _hist_hex(wb) == page._channel_swatch_hex("CD3").lower()
 
 
 # ── 4. the Patch Preview header keeps only lock + reset-all ──────────────

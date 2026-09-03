@@ -124,11 +124,17 @@ def test_clicking_the_current_row_again_does_not_rerun_the_handler(app):
     assert page.current_channel == "CD20"
 
 
-def test_the_nucleus_row_is_selectable_too(app):
+def test_clicking_the_nucleus_row_keeps_the_displayed_channel(app):
+    """DAPI is a reference channel: its row hands the Intensity window DAPI's
+    mapping and changes nothing else -- the page keeps showing the marker."""
     page = _page(app)
+    _click_row(page, "CD20")
+
     _click_row(page, "DAPI")
-    assert page.current_channel == "DAPI"
-    assert "excluded" in page._preview_status.text().lower()
+
+    assert page._dock_adapter.model.selected() == "DAPI"
+    assert page.current_channel == "CD20"
+    assert page._inspector_channel == "DAPI"
 
 
 def test_the_page_no_longer_depends_on_current_row_changed(app):

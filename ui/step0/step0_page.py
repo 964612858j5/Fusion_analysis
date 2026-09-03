@@ -274,6 +274,13 @@ class Step0Page(QWidget):
         self._preview_cache: dict = {}
         # 通道颜色：key=channel_name → (R,G,B) float 0-1
         self._channel_colors: dict = {}
+        # The channel the floating Intensity window EDITS, when that is not the
+        # channel the page displays. Only ever the nucleus/DAPI channel: its row
+        # is a REFERENCE selection ("now edit DAPI's mapping"), not a display
+        # switch, so `current_channel` -- what the compare panels, the full
+        # image and the method combo follow -- stays on the last marker.
+        # None = the inspector follows `current_channel` like every other row.
+        self._inspector_channel = None
         # 通道方法选择：key=channel_name → "tophat"|"cucim"|"both"
         self._channel_methods: dict = {}
         # Per-channel param overrides: {ch: {"tophat_radius": int, "cucim_sigma": int}}.
@@ -2924,8 +2931,9 @@ class Step0Page(QWidget):
         return wb.has_channel_data()
 
     def _sync_intensity_to_channel(self):
-        """Point the inspector at the channel the Background Correction tab is
-        showing -- the nucleus channel included.
+        """Point the inspector at the channel the user is editing: the channel
+        the Background Correction tab is SHOWING, or DAPI while its reference
+        row is selected (`_inspector_channel`).
 
         The histogram it draws is the WORKBENCH's own pixels for that channel,
         i.e. the saved-corrected-or-raw preview patch served by
@@ -2934,7 +2942,7 @@ class Step0Page(QWidget):
         `_ensure_loaded` calls the provider), so the histogram fills itself.
         """
         wb = getattr(self, "_cond_workbench", None)
-        ch = self.current_channel
+        ch = self._inspector_channel or self.current_channel
         if wb is None or not ch:
             return
         # Engage the workbench when the Intensity window is up (its contents
@@ -4879,10 +4887,25 @@ class Step0Page(QWidget):
     def _on_channel_row_changed(self, row):
         if row < 0 or row >= len(self._channel_order):
             self.current_channel = None
+            self._inspector_channel = None
             self._apply_btn.setEnabled(False)
             self._update_full_image_buttons()
             return
-        self.current_channel = self._channel_order[row]
+        ch = self._channel_order[row]
+        if ch and ch == self.nucleus_channel:
+            # DAPI is a REFERENCE channel, never a displayed one. Selecting its
+            # row means one thing only: the Intensity window now edits DAPI's
+            # min/max/gamma -- the mapping of the additive overlay the compare
+            # panels and the full image draw when its checkbox is on. The
+            # displayed channel, the method combo and the sigma controls stay
+            # on the marker the user was working on, so nothing is dropped and
+            # no correction is started. Selecting a marker row afterwards hands
+            # the inspector back to that marker.
+            self._inspector_channel = ch
+            self._sync_intensity_to_channel()
+            return
+        self._inspector_channel = None
+        self.current_channel = ch
         self._update_decision_ui()
         self._update_full_image_buttons()
         # The floating Intensity window edits the channel the user is looking

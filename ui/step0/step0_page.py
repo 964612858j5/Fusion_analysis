@@ -1517,7 +1517,12 @@ class Step0Page(QWidget):
             set_marker(lo, hi, gamma, channel=ch)
         overlay = getattr(stack, "overlay", None)
         set_nuc = getattr(overlay, "set_display_mapping", None)
-        if set_nuc is not None and self.nucleus_channel:
+        # A hidden overlay gets no mapping: asking for one seeds the nucleus
+        # channel's window from the WHOLE SLIDE (a ~165 ms pyramid read) on
+        # the GUI thread, for a layer that is drawing nothing. Turning the
+        # layer back on applies it then -- see `_on_full_nucleus_toggled`.
+        if (set_nuc is not None and self.nucleus_channel
+                and self._nucleus_layer_visible()):
             lo, hi, gamma = self._display_mapping_for(self.nucleus_channel)
             set_nuc(lo, hi, gamma)
 
@@ -1604,6 +1609,10 @@ class Step0Page(QWidget):
         explore_tab = self._explore_tab
         overlay.set_enabled(bool(checked),
                             host=explore_tab.stack.controller)
+        if checked:
+            # The mapping was skipped while the layer was hidden; give it now,
+            # before the first tile of it is painted.
+            self._apply_full_image_display(explore_tab.stack)
 
     def _compare_viewport_l0(self, source):
         """The region the `source` compare panel is showing, in level-0
@@ -4293,7 +4302,11 @@ class Step0Page(QWidget):
                     wb._params[ch] = normalize_channel_remap_params(p)
                     p = wb._params[ch]
                     if wb.active_channel() == ch:
-                        wb._load_params_into_controls(ch)
+                        # Numbers only: this wrote a new window over the same
+                        # pixels, so the density curve does not have to be
+                        # rebuilt from the whole patch a second time.
+                        wb._load_params_into_controls(
+                            ch, rebuild_histogram=False)
             p["brightness"], p["contrast"] = 0.0, 1.0
             return (float(p["min"]), float(p["max"]), float(p["gamma"]))
         entry = self._display_fallback.get(ch)

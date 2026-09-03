@@ -29,6 +29,14 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
 
     window_changed = pyqtSignal(float, float)
 
+    # A 256-bin density curve does not get more accurate past a few hundred
+    # thousand samples, but `arr[np.isfinite(arr)]` over a whole preview patch
+    # (2720x2336 float32) costs a 25 MB mask + copy -- measured 79 ms, on the
+    # GUI thread, every channel switch. Above this many pixels the curve is
+    # built from an evenly strided sample instead. Display only: nothing reads
+    # these bins back, and the window lines carry the real min/max.
+    _MAX_HISTOGRAM_SAMPLES = 500_000
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._updating = False
@@ -109,7 +117,11 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
         try:
             if color is not None:
                 self.set_color(color)
-            arr = np.asarray(image)
+            arr = np.asarray(image).reshape(-1)
+            if arr.size > self._MAX_HISTOGRAM_SAMPLES:
+                # Stride, don't slice: a contiguous head would be the top of
+                # the patch, not the patch.
+                arr = arr[::int(np.ceil(arr.size / self._MAX_HISTOGRAM_SAMPLES))]
             arr = arr[np.isfinite(arr)]
             vb = self._plot.getPlotItem().getViewBox()
             if arr.size == 0:

@@ -103,6 +103,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # ── model ─────────────────────────────────────────────────────
         self._names = []                 # list[str], display order
         self._raw = {}                   # name -> np.ndarray (preview patch)
+        # name -> the channel patch's finite maximum. Only the Min/Max
+        # SLIDER RANGE needs it, but computing it means an isfinite mask
+        # over the whole patch (6.4 M float32 on a real slide); the value
+        # cannot change while the pixels do not, so it is cached and
+        # dropped wherever `_raw[name]` is written.
+        self._raw_dmax = {}
         self._params = {}                # name -> normalized params dict
         # (#2) Min/Max/Gamma are GLOBAL per channel (QuPath-style): once the user
         # adjusts a channel, its params stick across patch switches instead of
@@ -133,6 +139,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._inspector_detached = False
         self._inspector = None
         self._inspector_owner = None
+        # Set when a preview refresh was SKIPPED because this widget is not on
+        # screen while its inspector drives another host (Step0's floating
+        # "Intensity" window). The composite is replayed once, on the next
+        # showEvent / reattach -- see `_refresh_preview`.
+        self._preview_dirty = False
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -660,8 +671,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """
         if not name or name not in self._params or name == self._active:
             return False
+        # `set_active` moves the list's current item, which EMITS
+        # active_changed -> _on_active_changed. Calling it again here ran the
+        # whole activation twice per switch (two composites, two histogram
+        # rebuilds, two _load_params_into_controls -- 943 ms of the 1.48 s a
+        # channel switch cost on a real slide). Only drive it by hand when
+        # the list did not (a name it does not carry, signals blocked).
         self._layer_list.set_active(name)      # keeps the row highlight in sync
-        self._on_active_changed(name)
+        if self._active != name:
+            self._on_active_changed(name)
         return True
 
     def detach_inspector(self):
@@ -679,6 +697,19 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return box
         self._inspector_detached = True
         box.setParent(None)
+        return box
+
+    def reattach_inspector(self):
+        """Undo `detach_inspector`: put the panel back where it was built and
+        pay back any preview deferred while it was away. Idempotent."""
+        box = getattr(self, "_inspector", None)
+        owner = getattr(self, "_inspector_owner", None)
+        if box is None or owner is None or not self._inspector_detached:
+            return box
+        self._inspector_detached = False
+        owner.addWidget(box)
+        box.show()
+        self.flush_pending_preview()
         return box
 
     def inspector_is_detached(self):
@@ -770,6 +801,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         self._names = new_names
         self._raw = clean
+        self._raw_dmax = {}
         self._params = {}
         self._colors = {}
         self._visible = {}
@@ -837,6 +869,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._stop_progressive_load()           # no stale loads for dropped names
         self._names = []
         self._raw = {}
+        self._raw_dmax = {}
         self._params = {}
         self._user_adjusted = {}
         self._colors = {}
@@ -1057,6 +1090,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if name not in self._names:
             return
         self._raw[name] = None
+        self._raw_dmax.pop(name, None)
         if name == self._active or self._visible.get(name):
             self._ensure_loaded(name)
             if name == self._active:
@@ -1082,6 +1116,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if arr is None:
             return
         self._raw[name] = arr
+        self._raw_dmax.pop(name, None)
         if self._user_adjusted.get(name):
             return                              # (#2) keep user params; no re-seed
         params = dict(self._params.get(name, default_channel_remap_params()))
@@ -1186,7 +1221,24 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._histogram.set_color(hexc)
         self._refresh_preview()
 
-    def _load_params_into_controls(self, name):
+    def _channel_data_max(self, name, arr):
+        """The channel patch's finite maximum, computed once per load."""
+        cached = self._raw_dmax.get(name)
+        if cached is not None:
+            return cached
+        finite = arr[np.isfinite(arr)] if arr.size else arr
+        dmax = float(finite.max()) if finite.size else 0.0
+        self._raw_dmax[name] = dmax
+        return dmax
+
+    def _load_params_into_controls(self, name, rebuild_histogram=True):
+        """Push `name`'s params into the inspector widgets.
+
+        `rebuild_histogram=False` is for a caller that changed the NUMBERS
+        but not the pixels (Step0 writing its slide-wide seed on top of the
+        patch seed): the density curve is already the right one, so only the
+        window lines move and the whole-patch rescan is skipped.
+        """
         self._loading = True
         try:
             p = self._params[name]
@@ -1207,12 +1259,14 @@ class ChannelWorkbench(QtWidgets.QWidget):
             hist_src = self._raw.get(name)
             if hist_src is None:
                 hist_src = np.zeros((1, 1), np.float32)
-            self._histogram.set_data(hist_src, p["min"], p["max"],
-                                     color=self._colors.get(name))
+            if rebuild_histogram:
+                self._histogram.set_data(hist_src, p["min"], p["max"],
+                                         color=self._colors.get(name))
+            else:
+                self._histogram.set_window(p["min"], p["max"])
             # step0 Min/Max sliders: range from this channel's data, then sync.
             if hasattr(self, "_sl_min"):
-                finite = hist_src[np.isfinite(hist_src)] if hist_src.size else hist_src
-                dmax = float(finite.max()) if finite.size else 0.0
+                dmax = self._channel_data_max(name, hist_src)
                 top = max(1, int(dmax) + 1, int(p["max"]) + 1)
                 self._sl_min.setRange(0, top)
                 self._sl_max.setRange(0, top)
@@ -1410,7 +1464,37 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._composite_loaded_now()
         self._schedule_progressive_load()
 
+    def _preview_is_offscreen(self):
+        """True when refreshing the preview would paint nothing anyone sees.
+
+        Only ever true once the inspector has been DETACHED: the controls
+        then live in another window (Step0's floating "Intensity") and drive
+        that host's own views, while this widget -- canvas included -- sits
+        on a tab nobody is looking at. Every parameter edit and every active
+        channel change still ran `compose_multichannel_overlay` over the
+        whole preview patch for that hidden canvas: 360 ms per slider step
+        and 943 ms per channel switch on a real slide, for zero pixels on
+        screen. Hosts that never detach are unaffected.
+        """
+        return self._inspector_detached and not self.isVisible()
+
+    def showEvent(self, event):
+        """Pay back a preview deferred while this widget was off screen, so
+        returning to the Channel Remap tab shows the CURRENT parameters."""
+        super().showEvent(event)
+        self.flush_pending_preview()
+
+    def flush_pending_preview(self):
+        """Recomposite once if refreshes were skipped while off screen."""
+        if not self._preview_dirty:
+            return
+        self._preview_dirty = False
+        self._refresh_preview()
+
     def _refresh_preview(self):
+        if self._preview_is_offscreen():
+            self._preview_dirty = True          # replayed by showEvent
+            return
         if self._multichannel_overlay:
             self._recomposite_overlay()
             return

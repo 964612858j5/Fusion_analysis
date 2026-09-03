@@ -587,3 +587,161 @@ def test_engaging_starts_no_correction(app, monkeypatch):
     page._on_channel_selected_by_id("CD20")
 
     assert _FakeBatchWorker.created == []
+
+
+# ── 7. the detached inspector must not drive the workbench's own preview ──
+#
+# While the inspector lives in Step0's floating window the Channel Remap tab
+# is not on screen, but every Min/Max move and every channel switch still
+# recomposited the workbench's OWN patch overlay: measured on a real slide,
+# 360 ms of a 404 ms slider step and 943 ms of a 1.48 s channel switch, for
+# pixels nobody can see. Step0's own views are raw arrays + a lookup table,
+# so nothing here depends on that composite.
+
+def _count_composites(monkeypatch):
+    """Count `compose_multichannel_overlay` calls from the workbench."""
+    import block01.ui.widgets.channel_workbench as cwb
+    calls = []
+    real = cwb.compose_multichannel_overlay
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cwb, "compose_multichannel_overlay", counting)
+    return calls
+
+
+def test_a_param_change_while_detached_recomposites_nothing(app, monkeypatch):
+    page = _page(app)
+    page.show_intensity_window()
+    wb = page._cond_workbench
+    assert wb.inspector_is_detached() and not wb.isVisible()
+
+    calls = _count_composites(monkeypatch)
+    wb._sp_max.setValue(float(wb._sp_max.value()) + 50.0)
+
+    assert calls == [], f"{len(calls)} composite(s) for an off-screen canvas"
+    assert wb._preview_dirty, "the deferred refresh was not recorded"
+
+
+def test_the_inspector_still_drives_the_page_while_detached(app, monkeypatch):
+    """Skipping the workbench's own composite must not skip anything Step0
+    shows: the compare panels and the full image still follow live."""
+    stack = _Stack()
+    page = _page(app, stack=stack)
+    page._last_payload = _payload()
+    page.show_intensity_window()
+    wb = page._cond_workbench
+    page._show_full_image()
+    before = len(stack.controller.mappings)
+
+    _count_composites(monkeypatch)
+    wb._sp_max.setValue(4321.0)
+
+    assert page._display_mapping_for("CD3")[1] == 4321.0
+    assert len(stack.controller.mappings) > before
+    assert stack.controller.mappings[-1][1] == 4321.0
+
+
+def test_an_active_change_while_detached_recomposites_once_after_reattach(app, monkeypatch):
+    page = _page(app)
+    page.show_intensity_window()
+    wb = page._cond_workbench
+
+    calls = _count_composites(monkeypatch)
+    page._on_channel_selected_by_id("CD20")
+    assert calls == [], "the hidden canvas was recomposited on a channel switch"
+    assert wb.active_channel() == "CD20"
+
+    wb.reattach_inspector()
+
+    assert len(calls) == 1, f"{len(calls)} composites on reattach, want 1"
+    assert not wb._preview_dirty
+    assert not wb.inspector_is_detached()
+    # And it is paid back only once: a second reattach has nothing to replay.
+    wb.reattach_inspector()
+    assert len(calls) == 1
+
+
+def test_showing_the_channel_remap_tab_pays_the_deferred_preview_back(app, monkeypatch):
+    page = _page(app)
+    page.show_intensity_window()
+    wb = page._cond_workbench
+    calls = _count_composites(monkeypatch)
+    wb._sp_max.setValue(float(wb._sp_max.value()) + 50.0)
+    assert calls == []
+
+    # Entering the Channel Remap tab: Qt delivers a show event to the
+    # workbench, whose handler pays the deferred composite back.
+    page.show()
+    page._step0_tabs.setCurrentIndex(page._cond_tab_index)
+    try:
+        assert wb.isVisible()
+        assert len(calls) == 1, f"{len(calls)} composites on show, want 1"
+        assert not wb._preview_dirty
+        # ...and only once: leaving and re-entering with nothing changed in
+        # between must not recomposite again.
+        page._step0_tabs.setCurrentIndex(0)
+        page._step0_tabs.setCurrentIndex(page._cond_tab_index)
+        assert len(calls) == 1, "a second visit recomposited again"
+    finally:
+        page.hide()
+
+
+def test_a_channel_switch_rebuilds_the_histogram_exactly_once(app):
+    """`set_active_channel` used to run the whole activation twice: the list's
+    own `active_changed` signal AND an explicit second call."""
+    page = _page(app)
+    page.show_intensity_window()
+    wb = page._cond_workbench
+    hist, loads = [], []
+    real_hist = wb._histogram.set_data
+    real_load = wb._load_params_into_controls
+    wb._histogram.set_data = lambda *a, **k: (hist.append(1), real_hist(*a, **k))[1]
+    wb._load_params_into_controls = lambda *a, **k: (loads.append(1), real_load(*a, **k))[1]
+
+    page._on_channel_selected_by_id("CD20")
+
+    assert len(hist) == 1, f"{len(hist)} histogram rebuilds for one switch"
+    # The slide-wide seed lands after the activation and refreshes the numbers
+    # once more -- but without a second whole-patch histogram rebuild.
+    assert len(loads) <= 2, f"{len(loads)} control reloads for one switch"
+
+
+def test_the_slide_seed_is_computed_once_per_channel(app):
+    """`_display_mapping_for` is called several times per switch (marker +
+    nucleus, compare panels + full image); only the FIRST may read the
+    slide."""
+    page = _page(app, loader=_SeedLoader())
+    reads = []
+    real = page.loader.read_region_lowres
+    page.loader.read_region_lowres = lambda *a, **k: (reads.append(a[0]), real(*a, **k))[1]
+    page.show_intensity_window()
+
+    page._on_channel_selected_by_id("CD20")
+    for _ in range(5):
+        page._display_mapping_for("CD20")
+
+    assert reads.count("CD20") == 1, f"the slide-wide seed was recomputed: {reads}"
+
+
+def test_a_big_patch_histogram_is_subsampled_not_scanned_whole(app):
+    """The density curve is display-only; scanning 6.4 M float32 pixels for
+    it cost 79 ms on the GUI thread of every channel switch."""
+    from block01.ui.widgets.channel_histogram_panel import ChannelHistogramPanel
+    panel = ChannelHistogramPanel()
+    cap = ChannelHistogramPanel._MAX_HISTOGRAM_SAMPLES
+    rng = np.random.default_rng(0)
+    big = rng.uniform(0.0, 1000.0, size=(2000, 2000)).astype(np.float32)
+    assert big.size > cap
+
+    panel.set_data(big, 100.0, 900.0)
+
+    lo, hi = panel._data_bounds
+    assert 0.0 <= lo <= 5.0 and 995.0 <= hi <= 1000.0, (lo, hi)
+    assert panel.window() == (100.0, 900.0)
+    # A small image is still used whole.
+    small = np.linspace(0.0, 10.0, 100, dtype=np.float32).reshape(10, 10)
+    panel.set_data(small)
+    assert panel._data_bounds == (0.0, 10.0)

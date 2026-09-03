@@ -4,8 +4,9 @@ image and its DAPI overlay.
 Why: the full image looked dimmer than the compare panels for the same
 channel because the two views normalised differently (per-patch percentiles
 against a slide-wide range). Now both read `(min, max, gamma)` from the
-channel model, seeded once per channel from the slide, and never normalise
-into the pixels.
+Channel Remap workbench's per-channel params -- the ONE place the numbers
+live -- seeded once per channel from the slide, and never normalise into the
+pixels.
 
 Own module: page-heavy Step0 suites crash pyqtgraph offscreen when combined
 with the background-correction module in one process.
@@ -144,12 +145,56 @@ def test_another_channels_change_does_not_touch_the_full_image(app):
     assert len(stack.controller.mappings) == n
 
 
-def test_the_mapping_lives_in_the_model_when_it_knows_the_channel(app):
+def test_the_mapping_lives_in_the_workbench_params(app):
+    """Single source of truth: the Channel Remap params ARE the display
+    mapping, brightness/contrast pinned neutral. The channel model keeps a
+    mirror, but nothing reads it back."""
     page = _page(app)
+    page._sync_step0_to_workbench()
+    wb = page._cond_workbench
+    assert "CD3" in wb._params, "the workbench must know the page's channels"
+
     page.set_display_mapping("CD3", 3.0, 30.0, 1.1)
+
+    p = wb._params["CD3"]
+    assert (p["min"], p["max"], p["gamma"]) == (3.0, 30.0, 1.1)
+    assert (p["brightness"], p["contrast"]) == (0.0, 1.0)
+    assert page._display_mapping_for("CD3") == (3.0, 30.0, 1.1)
     state = page._dock_adapter.model.get("CD3")
     assert (state.display_min, state.display_max, state.display_gamma) == (3.0, 30.0, 1.1)
-    assert page._display_mapping_for("CD3") == (3.0, 30.0, 1.1)
+
+
+def test_moving_the_inspector_reaches_the_full_image(app):
+    """The inspector's own controls emit `params_changed`, which is the one
+    signal that pushes the numbers out to every view."""
+    stack = _Stack()
+    page = _page(app, stack)
+    page._sync_step0_to_workbench()
+    wb = page._cond_workbench
+    wb.set_active_channel("CD3")
+    n = len(stack.controller.mappings)
+
+    wb._sp_max.setValue(777.0)
+
+    assert wb._params["CD3"]["max"] == 777.0
+    assert page._display_mapping_for("CD3")[1] == 777.0
+    assert stack.controller.mappings[n:][-1] == (
+        page._display_mapping_for("CD3") + ("CD3",))
+
+
+def test_the_seed_lands_once_and_never_over_a_user_value(app):
+    page = _page(app)
+    page._sync_step0_to_workbench()
+    wb = page._cond_workbench
+    page._display_mapping_for("CD3")                  # first show -> seeded
+    assert "CD3" in page._display_seeded
+    seeded = tuple(page._display_mapping_for("CD3"))
+
+    page.set_display_mapping("CD3", 11.0, 22.0, 1.0)  # a deliberate edit
+    assert wb._user_adjusted["CD3"] is True
+    for _ in range(3):
+        assert page._display_mapping_for("CD3") == (11.0, 22.0, 1.0)
+    assert seeded != (11.0, 22.0, 1.0)
 
 
 def test_auto_reseeds_from_the_available_pixels(app):

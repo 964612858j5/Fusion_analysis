@@ -15,7 +15,7 @@ preserving the page's data model and slot contract untouched:
 No correction/remap math, worker behavior, or config semantics change here.
 """
 
-from PyQt5.QtCore import QObject
+from PyQt5.QtCore import QObject, Qt
 
 from ..widgets.channel_dock import (
     ChannelDock, ChannelSetModel, ChannelState, Step0ChannelRow,
@@ -31,6 +31,20 @@ def _hex(color) -> str:
         return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
     except Exception:
         return "#888888"
+
+
+def _dapi_visible(page) -> bool:
+    """Whether the DAPI layer is shown (the nucleus row's checkbox state)."""
+    fn = getattr(page, "_nucleus_layer_visible", None)
+    return True if fn is None else bool(fn())
+
+
+def _swatch_hex(page, ch) -> str:
+    """The channel's swatch colour, asked of the page when it can answer."""
+    fn = getattr(page, "_channel_swatch_hex", None)
+    if fn is not None:
+        return fn(ch)
+    return _hex(page._channel_colors.get(ch, "#888888"))
 
 
 class Step0ChannelDockAdapter(QObject):
@@ -52,9 +66,13 @@ class Step0ChannelDockAdapter(QObject):
     def _make_row(self, model, cid):
         page = self._page
         row = Step0ChannelRow(model, cid)
-        # BG tab has no per-channel display color; the grey swatch reads as a
-        # dead checkbox next to the real one — hide it (user request).
-        row.swatch.setVisible(False)
+        # Every channel carries its own display-colour swatch here now (the
+        # colour buttons that used to sit in the Patch Preview header are
+        # gone). Row order: checkbox · swatch · name · method combo.
+        row.swatch.setVisible(True)
+        _swatch = getattr(page, "_on_channel_swatch_clicked", None)
+        if _swatch is not None:
+            row.color_clicked.connect(_swatch)
         # The right-edge status badge column (★ on nucleus, — boxes elsewhere)
         # adds no information here — computing/done are shown by the row
         # background and the green checkbox. Hidden, not removed: legacy code
@@ -67,8 +85,19 @@ class Step0ChannelDockAdapter(QObject):
             lambda state, name=cid: page._on_channel_checkbox_toggled(name, state))
         row.method_changed.connect(page._on_channel_method_changed)
         if is_nucleus:
-            row.checkbox.setEnabled(False)
+            # The nucleus row's checkbox is NOT a processing checkbox: it is
+            # the DAPI layer's show/hide switch (compare panels + full
+            # image). It therefore stays enabled while the method combo does
+            # not -- DAPI is never background-corrected, never enters
+            # Process/Apply/on-demand/Save. `_on_channel_checkbox_toggled`
+            # returns early for it, so no method is ever recorded.
+            row.checkbox.setEnabled(True)
+            row.checkbox.setToolTip("Show / hide the DAPI layer")
             row.method_cb.setEnabled(False)
+            _dapi = getattr(page, "_on_nucleus_visibility_toggled", None)
+            if _dapi is not None:
+                row.checkbox.stateChanged.connect(
+                    lambda state: _dapi(state == Qt.Checked))
         return row
 
     # -- rebuild (mirrors legacy _rebuild_channel_list) ------------------------
@@ -92,8 +121,9 @@ class Step0ChannelDockAdapter(QObject):
             states.append(ChannelState(
                 channel_id=ch,
                 name=f"{ch} ★" if is_nucleus else ch,
-                visible=(ch in page._channel_methods) and not is_nucleus,
-                color=_hex(page._channel_colors.get(ch, "#888888")),
+                visible=(_dapi_visible(page) if is_nucleus
+                         else (ch in page._channel_methods)),
+                color=_swatch_hex(page, ch),
                 locked=is_nucleus,
                 bg_final_method=saved,
                 bg_preview_method=page._channel_methods.get(ch),

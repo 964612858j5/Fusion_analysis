@@ -128,6 +128,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # immediately and this timer reads the rest one-per-tick so the UI never
         # blocks on ~28 synchronous reads.
         self._progressive_timer = None
+        # Set by detach_inspector(): the inspector panel now lives in a host
+        # window (Step0's floating "Intensity"), not inside this widget.
+        self._inspector_detached = False
+        self._inspector = None
+        self._inspector_owner = None
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -245,6 +250,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
         # Inspector — "Intensity" (Step0) / "Active Channel"
         inspector = self._build_inspector()
+        # Kept as an attribute so a host can take the whole panel out of this
+        # widget and re-parent it (Step0's floating "Intensity" window).
+        self._inspector = inspector
 
         if self._step0_intensity_panel:
             # (#1) Stack Intensity BELOW Channels in a left column (vertical
@@ -261,6 +269,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             left_col.setSizes([400, 300])
             left_col.setChildrenCollapsible(False)
             self._left_col = left_col
+            self._inspector_owner = left_col
             split.addWidget(left_col)
             split.addWidget(center)
             # Left column default width = 3/5 of the previous 240 (~144); the image
@@ -272,6 +281,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             split.addWidget(left)
             split.addWidget(center)
             split.addWidget(inspector)
+            self._inspector_owner = split
             split.setStretchFactor(0, 2)
             split.setStretchFactor(1, 5)
             split.setStretchFactor(2, 3)
@@ -640,6 +650,40 @@ class ChannelWorkbench(QtWidgets.QWidget):
     def active_channel(self):
         """The currently active channel name, or None."""
         return self._active
+
+    def set_active_channel(self, name):
+        """Public: make `name` the inspected channel.
+
+        For hosts that own a second channel list (Step0's Background
+        Correction tab) and want this workbench's inspector to follow their
+        selection. Returns True when the active channel actually moved.
+        """
+        if not name or name not in self._params or name == self._active:
+            return False
+        self._layer_list.set_active(name)      # keeps the row highlight in sync
+        self._on_active_changed(name)
+        return True
+
+    def detach_inspector(self):
+        """Hand the inspector ("Intensity" / "Active Channel") panel to the
+        caller, which becomes responsible for parenting it.
+
+        The workbench keeps DRIVING the panel exactly as before -- the same
+        widget objects, the same signal connections -- it just no longer
+        shows it, and its own layout closes over the gap (the splitter is
+        left with one child, which then fills the space). Idempotent; other
+        hosts that never call this are unaffected.
+        """
+        box = getattr(self, "_inspector", None)
+        if box is None or self._inspector_detached:
+            return box
+        self._inspector_detached = True
+        box.setParent(None)
+        return box
+
+    def inspector_is_detached(self):
+        """True once `detach_inspector` handed the panel to a host."""
+        return bool(self._inspector_detached)
 
     def visible_channels(self):
         """List of channel names currently checked/visible (list order)."""

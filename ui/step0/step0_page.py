@@ -70,12 +70,10 @@ from ...utils.roi_project import (
 # — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
 # resolver / Step2-runtime import is introduced here.
 from ..widgets.channel_workbench import ChannelWorkbench
-from ..widgets.display_mapping_popup import DisplayMappingPopup
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
-    default_channel_remap_params,
     normalize_channel_remap_params,
     CREATED_FROM_STEP0_CONDITIONING,
 )
@@ -217,7 +215,14 @@ class Step0Page(QWidget):
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
-        self._display_popup = None  # floating Display window, lazily created
+        # The floating "Intensity" window (the Channel Remap inspector,
+        # re-parented) and the widget it hosts. Both lazily created.
+        self._intensity_window = None
+        self._intensity_panel = None
+        # Display mapping bookkeeping. `_display_mapping_for` may be asked for
+        # a channel before the Channels box is built, so both live here.
+        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
+        self._display_seeded = set()     # channels whose slide-wide seed was applied
         # Per-load guard for auto-opening the Tissue Navigator on data load:
         # re-armed at the start of each load, fired once at load-completion.
         self._navigator_auto_opened = False
@@ -634,8 +639,24 @@ class Step0Page(QWidget):
         )
         self._method_all.setFixedWidth(64)
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
+        # One compact button opens the floating "Intensity" window -- the
+        # Channel Remap tab's inspector itself (histogram, Min/Max, Gamma,
+        # Auto, Reset), re-parented. It belongs next to the channel list,
+        # not in the Patch Preview header: it edits the SELECTED CHANNEL.
+        self._btn_intensity_window = QPushButton("Intensity…")
+        self._btn_intensity_window.setToolTip(
+            "Open the floating Intensity window: the Channel Remap "
+            "histogram, Min/Max, Gamma, Auto and Reset for the selected "
+            "channel. Display only — it never changes the h5ad.")
+        self._btn_intensity_window.setStyleSheet(
+            "QPushButton{color:#c678dd;border:1px solid #c678dd;border-radius:3px;"
+            "padding:1px 6px;font-size:10px;background:#1a1a1a;}"
+            "QPushButton:hover{background:#2a1a33;}")
+        self._btn_intensity_window.clicked.connect(self.show_intensity_window)
+
         all_row.addWidget(self._cb_all)
         all_row.addStretch()
+        all_row.addWidget(self._btn_intensity_window)
         all_row.addWidget(self._method_all)   # "Method:" label dropped (combo is clear)
         chl.addLayout(all_row)
 
@@ -663,13 +684,14 @@ class Step0Page(QWidget):
         # means the handler runs once per actual change.
         self._dock_adapter.model.selection_changed.connect(
             self._on_channel_selected_by_id)
-        # One display mapping per channel (core/display_mapping.py), owned by
-        # the model's display fields: the compare panels, the full image and
-        # its DAPI overlay all read it, so a change here reaches every view.
-        self._dock_adapter.model.display_changed.connect(
-            self._on_display_mapping_changed)
-        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the model has no entry
-        self._display_controls_syncing = False
+        # One display mapping per channel (core/display_mapping.py). Its
+        # SOURCE is the Channel Remap workbench's params (see
+        # `_display_mapping_for`); `wb.params_changed` is what tells the
+        # compare panels, the full image and its DAPI overlay to follow. The
+        # model's display fields are only a mirror, so nothing is connected
+        # to `display_changed` -- one source, one signal.
+        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
+        self._display_seeded = set()     # channels whose slide-wide seed was applied
         chl.addWidget(self._dock_adapter.dock, stretch=1)
         cll.addWidget(ch_box, stretch=2)
 
@@ -819,59 +841,27 @@ class Step0Page(QWidget):
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(4)
 
-        # Nucleus / Marker 颜色选择色块
+        # Nucleus / Marker display colours. The COLOUR PICKERS are no longer
+        # here: every channel (the nucleus included) carries its own swatch in
+        # the Channels list, which is where the user picks a colour now.
         self._nuc_color = (0.0, 0.5, 1.0)      # 默认蓝色
         self._marker_color = (0.0, 1.0, 0.3)   # 默认绿色
 
-        nuc_lbl = QLabel("Nuc:")
-        nuc_lbl.setStyleSheet("color:#aaa;font-size:10px;")
-        self._nuc_color_btn = QPushButton()
-        self._nuc_color_btn.setFixedSize(18, 18)
-        self._nuc_color_btn.setToolTip("Click to change nucleus (DAPI) display color")
-        self._nuc_color_btn.setStyleSheet(
-            "QPushButton{background:#0080ff;border:1px solid #555;border-radius:2px;}"
-            "QPushButton:hover{border:1px solid #aaa;}"
-        )
-        self._nuc_color_btn.clicked.connect(self._pick_nucleus_color)
-
-        # (display-popup) The two layer switches are no longer IN the header:
-        # they are hidden, parentless-in-layout state holders whose checked
-        # state `_refresh_preview_display` reads. The user flips them through
-        # the floating Display window's "Show" checkboxes. Keeping them as
-        # QPushButtons (rather than plain booleans) keeps every existing
-        # `toggled` connection -- and the tests that drive them -- intact.
+        # The two layer switches are not IN the header either: they are
+        # hidden, out-of-layout state holders whose checked state
+        # `_refresh_preview_display` reads. The nucleus one is flipped by the
+        # DAPI row's checkbox in the Channels list; the marker one is driven
+        # by code (and by tests). Keeping them as QPushButtons (rather than
+        # plain booleans) keeps every existing `toggled` connection intact.
         self._btn_show_nucleus = QPushButton("Nucleus", self)
         self._btn_show_nucleus.setCheckable(True)
         self._btn_show_nucleus.setChecked(True)
         self._btn_show_nucleus.setVisible(False)
 
-        mk_lbl = QLabel("Marker:")
-        mk_lbl.setStyleSheet("color:#aaa;font-size:10px;")
-        self._marker_color_btn = QPushButton()
-        self._marker_color_btn.setFixedSize(18, 18)
-        self._marker_color_btn.setToolTip("Click to change marker channel display color")
-        self._marker_color_btn.setStyleSheet(
-            "QPushButton{background:#00ff4d;border:1px solid #555;border-radius:2px;}"
-            "QPushButton:hover{border:1px solid #aaa;}"
-        )
-        self._marker_color_btn.clicked.connect(self._pick_marker_color)
-
         self._btn_show_marker = QPushButton("Marker", self)
         self._btn_show_marker.setCheckable(True)
         self._btn_show_marker.setChecked(True)
         self._btn_show_marker.setVisible(False)
-
-        # (display-popup) One small button in the header opens the floating
-        # Display window that now carries min / max / gamma / Auto / Show.
-        self._btn_display_popup = QPushButton("Display…")
-        self._btn_display_popup.setToolTip(
-            "Open the floating Display window: min / max / gamma and the "
-            "layer switches for the marker and DAPI channels.")
-        self._btn_display_popup.setStyleSheet(
-            "QPushButton{color:#c678dd;border:1px solid #c678dd;border-radius:3px;"
-            "padding:2px 6px;font-size:10px;background:#1a1a1a;}"
-            "QPushButton:hover{background:#2a1a33;}")
-        self._btn_display_popup.clicked.connect(self.show_display_popup)
 
         self._btn_lock_zoom = QPushButton("🔗 Lock")
         self._btn_lock_zoom.setCheckable(True)
@@ -888,33 +878,28 @@ class Step0Page(QWidget):
         )
         btn_reset_all.clicked.connect(self._reset_all_views)
 
-        ctrl_row.addWidget(nuc_lbl)
-        ctrl_row.addWidget(self._nuc_color_btn)
-        ctrl_row.addSpacing(6)
-        ctrl_row.addWidget(mk_lbl)
-        ctrl_row.addWidget(self._marker_color_btn)
-        ctrl_row.addSpacing(10)
-        ctrl_row.addWidget(self._btn_display_popup)
-        ctrl_row.addSpacing(10)
+        # The header now carries the VIEW controls only: lock zoom + reset all.
+        # Colours moved to the channel swatches, display mapping to the
+        # floating "Intensity" window opened from the Channels box.
         ctrl_row.addWidget(self._btn_lock_zoom)
         ctrl_row.addSpacing(4)
         ctrl_row.addWidget(btn_reset_all)
         ctrl_row.addStretch()
+        self._preview_ctrl_row = ctrl_row   # exposed for the header's own tests
 
         self._btn_show_nucleus.toggled.connect(lambda _: self._refresh_preview_display(keep_zoom=True))
         self._btn_show_marker.toggled.connect(lambda _: self._refresh_preview_display(keep_zoom=True))
         pvl.addLayout(ctrl_row)
 
-        # ── Display mapping (Marker / Nucleus): min, max, gamma, Auto ──
+        # ── Display mapping (min, max, gamma) ──────────────────────────
         # Raw intensity in, screen value out: shown = clip((v - min)/(max -
-        # min))**gamma, per channel, shared with the full image. Seeded once
-        # per channel from the whole slide's tissue (QuPath auto, 0.1/99.9);
-        # these are the explicit numbers the user may change. Display only:
-        # never the h5ad, the corrected zarr or the segmentation remap.
-        # (display-popup) The controls themselves live in the floating
-        # `DisplayMappingPopup` opened by the header's "Display…" button --
-        # two rows of the preview's height back for controls touched once
-        # per channel. The page still OWNS the mapping; the popup is a view.
+        # min))**gamma, per channel, shared with the full image. Display
+        # only: never the h5ad or the corrected zarr.
+        # The controls are the Channel Remap tab's "Intensity" inspector
+        # ITSELF -- histogram + Min/Max/Gamma + Auto/Reset -- re-parented
+        # into a floating window (`show_intensity_window`). The workbench's
+        # per-channel params ARE this mapping (`_display_mapping_for`), so
+        # there is one set of numbers and one set of controls for both tabs.
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
         self._preview_vbs  = []
@@ -1258,6 +1243,11 @@ class Step0Page(QWidget):
         # Per-Channel Decision panel.
         self._cond_workbench.params_changed.connect(
             self._on_remap_params_changed)
+        # SINGLE SOURCE OF TRUTH: those same params are the display mapping.
+        # Every Min/Max/Gamma/Auto/Reset move in the inspector lands here and
+        # redraws the compare panels + the full image and its DAPI overlay.
+        self._cond_workbench.params_changed.connect(
+            self._on_display_mapping_changed)
         # v14.2c: when the viewer's viewport settles (debounced), update the
         # Tissue Navigator current-view rectangle.
         self._cond_workbench.viewer.viewport_changed.connect(
@@ -1594,6 +1584,7 @@ class Step0Page(QWidget):
         """
         self._set_layer_toggle_text(self._btn_full_nucleus, "DAPI", checked)
         self._update_full_source_label()
+        self._sync_nucleus_row_checkbox(checked)
         overlay = self._full_image_overlay()
         if overlay is None:
             return
@@ -2804,94 +2795,116 @@ class Step0Page(QWidget):
         self._navigator_auto_opened = True
         self.show_tissue_navigator()
 
-    # ── the floating Display window ──────────────────────────────────────────
+    # ── the floating "Intensity" window ─────────────────────────────────────
     #  A SECOND, separate floating window (never inside the Tissue Navigator,
-    #  which must stay navigation-only). The page owns the display mapping;
-    #  this popup is a view over it: it emits what the user did, and
-    #  `_sync_display_controls` pushes the page's state back into it.
-    def _ensure_display_popup(self):
-        popup = getattr(self, "_display_popup", None)
-        if popup is None:
-            popup = DisplayMappingPopup(parent=self)
-            self._display_popup = popup
-            popup.mapping_edited.connect(self._on_popup_mapping_edited)
-            popup.auto_requested.connect(self._on_display_auto)
-            popup.show_toggled.connect(self._on_popup_show_toggled)
-            popup.use_as_remap_requested.connect(
-                self._use_display_as_segmentation_remap)
-            self._sync_display_controls()
-        return popup
-
-    def show_display_popup(self):
-        popup = self._ensure_display_popup()
-        self._sync_display_controls()
-        popup.show()
-        popup.raise_()
-        return popup
-
-    def toggle_display_popup(self):
-        popup = self._ensure_display_popup()
-        if popup.isVisible():
-            popup.hide()
-        else:
-            self._sync_display_controls()
-            popup.show()
-            popup.raise_()
-        return popup
-
-    def _on_popup_mapping_edited(self, role, lo, hi, gamma):
-        """A spin box in the Display window moved: write the mapping of the
-        channel that role stands for. Display only — nothing is computed."""
-        if self._display_controls_syncing:
-            return
-        ch = self.nucleus_channel if role == "nucleus" else self.current_channel
-        if not ch:
-            return
-        self.set_display_mapping(ch, float(lo), float(hi), float(gamma))
-
-    def _on_popup_show_toggled(self, role, on):
-        """The popup's "Show" checkbox drives the hidden state-holder button;
-        its existing `toggled` connection refreshes the panels."""
-        if self._display_controls_syncing:
-            return
-        btn = (self._btn_show_nucleus if role == "nucleus"
-               else self._btn_show_marker)
-        if btn.isChecked() != bool(on):
-            btn.setChecked(bool(on))
-
-    def _use_display_as_segmentation_remap(self):
-        """Copy the CURRENT channel's display mapping into the Channel Remap
-        tab as its segmentation remap.
-
-        Brightness/contrast are pinned to the neutral 0.0 / 1.0 Step0 uses (no
-        UI for them here), which is exactly where remap semantics equal the
-        display mapping's. `auto` goes False -- these are explicit numbers --
-        and the channel is marked user-adjusted so they survive patch
-        switches. Never for the nucleus channel: it is not corrected and has
-        no per-channel decision.
-        """
-        ch = self.current_channel
-        if not ch or ch == self.nucleus_channel:
-            print(f"[step0] display->remap skipped for {ch!r} "
-                  "(no channel, or the nucleus channel)", flush=True)
-            return
+    #  which must stay navigation-only). What it hosts is NOT a re-implementation
+    #  of the Channel Remap inspector -- it IS that inspector: the workbench
+    #  hands its "Intensity" panel over (`detach_inspector`) and keeps driving
+    #  it, so histogram, Min/Max/Gamma, Auto and Reset behave here exactly as
+    #  they do in the Channel Remap tab, on the same params.
+    def _ensure_intensity_window(self):
+        win = getattr(self, "_intensity_window", None)
+        if win is not None:
+            return win
         wb = getattr(self, "_cond_workbench", None)
         if wb is None:
-            print("[step0] display->remap: no Channel Remap workbench", flush=True)
+            return None
+        # Feed the workbench the current dataset/patch first: opening this
+        # window is engaging the Channel Remap machinery, exactly as entering
+        # its tab is (see `_engage_conditioning_workbench`).
+        self._engage_conditioning_workbench()
+        panel = wb.detach_inspector()
+        if panel is None:
+            return None
+        win = QWidget(
+            self,
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowStaysOnTopHint,
+        )
+        win.setWindowTitle("Intensity")
+        win.setStyleSheet("background:#1c1c1c;")
+        win.setMinimumWidth(260)
+        win.resize(320, 460)
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.addWidget(panel)
+        self._intensity_window = win
+        self._intensity_panel = panel
+        self._sync_intensity_to_channel()
+        return win
+
+    def intensity_panel(self):
+        """The workbench inspector widget hosted by the floating window, or
+        None while the window has never been opened."""
+        return getattr(self, "_intensity_panel", None)
+
+    def show_intensity_window(self):
+        win = self._ensure_intensity_window()
+        if win is None:
+            return None
+        self._sync_intensity_to_channel()
+        win.show()
+        win.raise_()
+        return win
+
+    def toggle_intensity_window(self):
+        win = self._ensure_intensity_window()
+        if win is None:
+            return None
+        if win.isVisible():
+            win.hide()
+        else:
+            self._sync_intensity_to_channel()
+            win.show()
+            win.raise_()
+        return win
+
+    def _engage_conditioning_workbench(self):
+        """Populate the Channel Remap workbench for the current dataset/patch
+        WITHOUT showing its tab.
+
+        The workbench used to be fed only when its tab was entered
+        (`_on_step0_tab_changed`), so on a real slide the floating Intensity
+        window opened empty: no channel set, no params, no histogram pixels,
+        and `_display_mapping_for` silently fell back to the page-level
+        entry -- i.e. the single source of truth was not in effect.
+
+        This is the tab's OWN engagement path, not a copy of it: the same
+        guard (`has_channel_data`) and the same loader
+        (`_sync_step0_to_workbench`, which sets `_conditioning_in_use` so
+        later patch switches keep it fresh). It reads pixels only -- eagerly
+        for the active channel, lazily for the rest through the workbench's
+        pixel provider -- and starts no background correction.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not self.loader or not self.patches:
+            return False
+        if not wb.has_channel_data():
+            self._sync_step0_to_workbench()
+        return wb.has_channel_data()
+
+    def _sync_intensity_to_channel(self):
+        """Point the inspector at the channel the Background Correction tab is
+        showing -- the nucleus channel included.
+
+        The histogram it draws is the WORKBENCH's own pixels for that channel,
+        i.e. the saved-corrected-or-raw preview patch served by
+        `Step0PreviewSourceProvider` -- not the compare panels' payload.
+        Activating the channel is what pulls those pixels in (the workbench's
+        `_ensure_loaded` calls the provider), so the histogram fills itself.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        ch = self.current_channel
+        if wb is None or not ch:
             return
-        lo, hi, gamma = self._display_mapping_for(ch)
-        params = dict(wb._params.get(ch) or default_channel_remap_params())
-        params.update({"min": float(lo), "max": float(hi), "gamma": float(gamma),
-                       "brightness": 0.0, "contrast": 1.0, "auto": False})
-        wb._params[ch] = normalize_channel_remap_params(params)
-        wb._user_adjusted[ch] = True
-        if wb.active_channel() == ch:
-            wb._load_params_into_controls(ch)
-            wb._refresh_preview()
-        wb.params_changed.emit(ch)
-        self._refresh_remap_state_label()
-        print(f"[step0] display->remap {ch}: min {lo:.4g} max {hi:.4g} "
-              f"γ {gamma:.4g} (brightness 0, contrast 1)", flush=True)
+        # Engage the workbench when the Intensity window is up (its contents
+        # must follow the selection) or when it is already carrying data.
+        if getattr(self, "_intensity_window", None) is not None:
+            self._engage_conditioning_workbench()
+        wb.set_active_channel(ch)
 
     def toggle_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()
@@ -3878,30 +3891,72 @@ class Step0Page(QWidget):
         row["status_lbl"].setText("")
         row["row_widget"].setStyleSheet("background:#1a2e1a;border-radius:3px;")
 
-    def _pick_channel_color(self, ch, btn):
+    # ── per-channel display colour (the Channels list swatches) ──────────
+    def _channel_swatch_hex(self, ch):
+        """`#rrggbb` for a channel's swatch: the page's own colour for it, the
+        nucleus colour for the nucleus channel, the marker default otherwise."""
+        if ch and ch == self.nucleus_channel:
+            rgb = self._channel_colors.get(
+                ch, getattr(self, "_nuc_color", (0.0, 0.5, 1.0)))
+        else:
+            rgb = self._channel_colors.get(
+                ch, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
+        return QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
+                            int(rgb[2] * 255)).name()
+
+    def _on_channel_swatch_clicked(self, ch):
+        """A swatch in the Channels list was clicked: pick that channel's
+        display colour. The nucleus channel drives `_nuc_color` and the DAPI
+        overlay; every other channel drives `_channel_colors` (the compare
+        panels) and the full image's tint."""
+        if ch and ch == self.nucleus_channel:
+            self._pick_nucleus_color()
+        else:
+            self._pick_channel_color(ch)
+
+    def _apply_channel_color(self, ch, rgb):
+        """Record `rgb` for `ch` and push it to every view: the swatch (via
+        the channel model), the compare panels and the full image's tint."""
+        self._channel_colors[ch] = rgb
+        model = self._display_model()
+        if model is not None and model.get(ch) is not None:
+            model.set_color(ch, QtGui.QColor(
+                int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)).name())
+        # Invalidate this channel's cached composites, then redraw.
+        for k in [k for k in self._preview_cache if k[0] == ch]:
+            del self._preview_cache[k]
+        if ch == self.current_channel and self._last_payload is not None:
+            self._rebuild_payload_rgb(ch)
+            self._refresh_preview_display(keep_zoom=True)
+        # The full image draws the SAME channel in the SAME colour: a lookup
+        # table swap, no re-read and no request.
+        if ch == self.current_channel:
+            explore_tab = getattr(self, "_explore_tab", None)
+            stack = explore_tab.stack if explore_tab is not None else None
+            set_tint = getattr(getattr(stack, "controller", None), "set_tint", None)
+            if set_tint is not None:
+                set_tint(self._full_image_tint(ch))
+
+    def _pick_channel_color(self, ch, btn=None):
         """弹颜色对话框，让用户选择通道显示颜色。"""
         from PyQt5.QtWidgets import QColorDialog
-        rgb = self._channel_colors.get(ch, (0.2, 1.0, 0.2))
+        if not ch:
+            return
+        rgb = self._channel_colors.get(
+            ch, getattr(self, "_marker_color", (0.2, 1.0, 0.2)))
         init_color = QtGui.QColor(int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
         color = QColorDialog.getColor(init_color, self, f"Color for {ch}")
         if not color.isValid():
             return
         new_rgb = (color.red()/255.0, color.green()/255.0, color.blue()/255.0)
-        self._channel_colors[ch] = new_rgb
-        hex_color = color.name()
-        btn.setStyleSheet(
-            f"QPushButton{{background:{hex_color};border:1px solid #555;border-radius:2px;}}"
-            f"QPushButton:hover{{border:1px solid #aaa;}}"
-        )
-        # 使缓存中该通道的结果失效，下次重新合成RGB
-        keys_to_del = [k for k in self._preview_cache if k[0] == ch]
-        for k in keys_to_del:
-            del self._preview_cache[k]
-        # 如果当前正在显示这个通道，重新渲染
-        if ch == self.current_channel and self._last_payload is not None:
-            # 用新颜色重新合成RGB overlay
-            self._rebuild_payload_rgb(ch)
-            self._refresh_preview_display(keep_zoom=True)
+        if btn is not None:                     # legacy callers with their own swatch
+            btn.setStyleSheet(
+                f"QPushButton{{background:{color.name()};border:1px solid #555;"
+                f"border-radius:2px;}}"
+                f"QPushButton:hover{{border:1px solid #aaa;}}")
+        if ch == self.current_channel:
+            self._marker_color = new_rgb
+        self._apply_channel_color(ch, new_rgb)
 
     def _pick_nucleus_color(self):
         """弹颜色对话框，让用户选择 nucleus 叠加显示颜色。"""
@@ -3911,11 +3966,14 @@ class Step0Page(QWidget):
         color = QColorDialog.getColor(init_color, self, "Color for nucleus")
         if not color.isValid():
             return
-        self._nuc_color = (color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0)
-        self._nuc_color_btn.setStyleSheet(
-            f"QPushButton{{background:{color.name()};border:1px solid #555;border-radius:2px;}}"
-            f"QPushButton:hover{{border:1px solid #aaa;}}"
-        )
+        self._nuc_color = (color.red() / 255.0, color.green() / 255.0,
+                           color.blue() / 255.0)
+        nuc = self.nucleus_channel
+        if nuc:
+            self._channel_colors[nuc] = self._nuc_color
+            model = self._display_model()
+            if model is not None and model.get(nuc) is not None:
+                model.set_color(nuc, color.name())
         if self._last_payload is not None and self.current_channel:
             self._rebuild_payload_rgb(self.current_channel)
             self._refresh_preview_display(keep_zoom=True)
@@ -3927,28 +3985,51 @@ class Step0Page(QWidget):
         if overlay is not None:
             overlay.set_tint(self._nuc_color)
 
-    def _pick_marker_color(self):
-        """弹颜色对话框，让用户选择当前 marker 通道叠加显示颜色。"""
-        from PyQt5.QtWidgets import QColorDialog
-        current_ch = self.current_channel
-        default_rgb = getattr(self, '_marker_color', (0.0, 1.0, 0.3))
-        rgb = self._channel_colors.get(current_ch, default_rgb) if current_ch else default_rgb
-        init_color = QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
-        title = f"Color for {current_ch}" if current_ch else "Color for marker"
-        color = QColorDialog.getColor(init_color, self, title)
-        if not color.isValid():
+    # ── the DAPI layer switch (the nucleus row's checkbox) ───────────────
+    def _sync_nucleus_row_checkbox(self, on):
+        """Reflect the DAPI layer state in the nucleus row's checkbox, and in
+        the compare panels' hidden holder, without re-entering."""
+        if getattr(self, "_nucleus_vis_syncing", False):
             return
-        new_rgb = (color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0)
-        self._marker_color = new_rgb
-        if current_ch:
-            self._channel_colors[current_ch] = new_rgb
-        self._marker_color_btn.setStyleSheet(
-            f"QPushButton{{background:{color.name()};border:1px solid #555;border-radius:2px;}}"
-            f"QPushButton:hover{{border:1px solid #aaa;}}"
-        )
-        if self._last_payload is not None and current_ch:
-            self._rebuild_payload_rgb(current_ch)
-            self._refresh_preview_display(keep_zoom=True)
+        self._nucleus_vis_syncing = True
+        try:
+            on = bool(on)
+            holder = getattr(self, "_btn_show_nucleus", None)
+            if holder is not None and holder.isChecked() != on:
+                holder.setChecked(on)
+            row = (self._channel_rows or {}).get(self.nucleus_channel)
+            cb = row.get("checkbox") if row else None
+            if cb is not None and cb.isChecked() != on:
+                cb.blockSignals(True)
+                cb.setChecked(on)
+                cb.blockSignals(False)
+        finally:
+            self._nucleus_vis_syncing = False
+
+    def _nucleus_layer_visible(self):
+        btn = getattr(self, "_btn_show_nucleus", None)
+        return True if btn is None else bool(btn.isChecked())
+
+    def _on_nucleus_visibility_toggled(self, on):
+        """The nucleus row's checkbox is the DAPI layer's show/hide switch --
+        ONE state driving both views: the compare panels (via the hidden
+        `_btn_show_nucleus` holder) and the full image (`_btn_full_nucleus`).
+
+        It is purely a display switch: DAPI never enters Process/Apply/
+        on-demand/Save, and no method is recorded for it.
+        """
+        if getattr(self, "_nucleus_vis_syncing", False):
+            return
+        self._nucleus_vis_syncing = True
+        try:
+            on = bool(on)
+            for btn in (getattr(self, "_btn_show_nucleus", None),
+                        getattr(self, "_btn_full_nucleus", None)):
+                if btn is not None and btn.isChecked() != on:
+                    btn.setChecked(on)          # each has its own view handler
+            print(f"[step0] DAPI layer {'shown' if on else 'hidden'}", flush=True)
+        finally:
+            self._nucleus_vis_syncing = False
 
     def _rebuild_payload_rgb_from(self, payload, ch, nucleus_rgb, marker_rgb):
         """Record `marker_rgb` as the channel's colour.
@@ -4119,7 +4200,6 @@ class Step0Page(QWidget):
                     vb.autoRange()
         finally:
             self._zoom_lock_active = False
-        self._sync_display_controls()
 
     @staticmethod
     def _payload_array(payload, key):
@@ -4137,32 +4217,62 @@ class Step0Page(QWidget):
         adapter = getattr(self, "_dock_adapter", None)
         return getattr(adapter, "model", None)
 
-    def _display_mapping_for(self, ch, payload=None, nucleus=False):
-        """`(min, max, gamma)` for `ch`, seeded on first use.
+    def _workbench_params(self, ch):
+        """The Channel Remap workbench's params dict for `ch`, or None when
+        the workbench does not (yet) know that channel."""
+        wb = getattr(self, "_cond_workbench", None)
+        params = getattr(wb, "_params", None) if wb is not None else None
+        if params is None or ch not in params:
+            return None
+        return params[ch]
 
-        The model's display fields are the source of truth. A channel the
-        model does not know (no dataset, fake loaders) gets a per-page
-        fallback entry seeded the same way. The seed is the whole slide's
-        tissue (`_seed_display_mapping`); when the slide cannot be read
-        (no pyramid-capable loader) the payload's own raw pixels seed it,
-        which is the best information available.
+    def _display_mapping_for(self, ch, payload=None, nucleus=False):
+        """`(min, max, gamma)` for `ch` -- the Channel Remap params.
+
+        ONE source of truth: the workbench's per-channel remap params ARE
+        this page's display mapping, so the floating Intensity window, the
+        compare panels, the full image and the Channel Remap tab can never
+        disagree. Brightness/contrast have no Step0 UI and are pinned to the
+        neutral 0.0 / 1.0 where remap semantics equal a display window.
+
+        A channel the workbench has never seen (no dataset, fake loaders)
+        falls back to a per-page entry seeded the same way.
+
+        Seeding: the FIRST time a channel is shown its min/max come from the
+        whole slide's tissue (`_seed_display_mapping`) -- a slide-wide window
+        that stays valid as the user pans. That is deliberately NOT what the
+        inspector's own "Auto" button does: Auto is QuPath auto-contrast on
+        the CURRENT PREVIEW PATCH, and it stays that way because the floating
+        window is a 1:1 replica of the Channel Remap inspector.
         """
         if not ch:
             return (0.0, 1.0, 1.0)
-        model = self._display_model()
-        state = model.get(ch) if model is not None else None
-        if state is not None:
-            if state.display_min is None or state.display_max is None:
-                lo, hi = self._seed_display_mapping(ch, payload=payload, nucleus=nucleus)
-                self._set_display_silently(ch, lo, hi, 1.0)
-                state = model.get(ch)
-            return (float(state.display_min), float(state.display_max),
-                    float(state.display_gamma))
+        p = self._workbench_params(ch)
+        if p is not None:
+            wb = self._cond_workbench
+            # The workbench has taken this channel over: drop any entry the
+            # pre-engagement fallback left behind, so no stale second copy of
+            # the numbers shadows the source of truth.
+            self._display_fallback.pop(ch, None)
+            if ch not in self._display_seeded:
+                self._display_seeded.add(ch)
+                if not wb._user_adjusted.get(ch):
+                    lo, hi = self._seed_display_mapping(
+                        ch, payload=payload, nucleus=nucleus)
+                    p.update({"min": float(lo), "max": float(hi), "gamma": 1.0,
+                              "brightness": 0.0, "contrast": 1.0, "auto": True})
+                    wb._params[ch] = normalize_channel_remap_params(p)
+                    p = wb._params[ch]
+                    if wb.active_channel() == ch:
+                        wb._load_params_into_controls(ch)
+            p["brightness"], p["contrast"] = 0.0, 1.0
+            return (float(p["min"]), float(p["max"]), float(p["gamma"]))
         entry = self._display_fallback.get(ch)
         if entry is None:
             lo, hi = self._seed_display_mapping(ch, payload=payload, nucleus=nucleus)
             entry = (lo, hi, 1.0)
             self._display_fallback[ch] = entry
+            self._set_display_silently(ch, *entry)
         return entry
 
     def _seed_display_mapping(self, ch, payload=None, nucleus=False):
@@ -4188,11 +4298,13 @@ class Step0Page(QWidget):
         return (0.0, 1.0)
 
     def _set_display_silently(self, ch, lo, hi, gamma):
-        """Write a mapping into the model without the change handler
-        redrawing (seeding happens INSIDE a redraw)."""
+        """Mirror a mapping into the channel model without the model
+        re-broadcasting it. The model's display fields are a MIRROR only --
+        nothing reads them back as the mapping (see `_display_mapping_for`);
+        they are kept so the shared dock/model stays a faithful description
+        of the channel set."""
         model = self._display_model()
         if model is None or model.get(ch) is None:
-            self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
             return
         model.blockSignals(True)
         try:
@@ -4201,17 +4313,32 @@ class Step0Page(QWidget):
             model.blockSignals(False)
 
     def set_display_mapping(self, ch, lo, hi, gamma=None):
-        """Public: set a channel's display mapping. Every view follows."""
+        """Public: set a channel's display mapping. Every view follows.
+
+        Writes the workbench's remap params -- the single source of truth --
+        and emits its `params_changed`, which is the one signal that redraws
+        the compare panels and pushes the numbers to the full image.
+        """
         if not ch:
             return
         cur = self._display_mapping_for(ch)
         gamma = cur[2] if gamma is None else gamma
-        model = self._display_model()
-        if model is not None and model.get(ch) is not None:
-            model.set_display(ch, lo, hi, gamma)      # emits display_changed
-        else:
-            self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
-            self._on_display_mapping_changed(ch)
+        self._set_display_silently(ch, lo, hi, gamma)     # model mirror
+        wb = getattr(self, "_cond_workbench", None)
+        if self._workbench_params(ch) is not None:
+            p = dict(wb._params[ch])
+            p.update({"min": float(lo), "max": float(hi), "gamma": float(gamma),
+                      "brightness": 0.0, "contrast": 1.0, "auto": False})
+            wb._params[ch] = normalize_channel_remap_params(p)
+            wb._user_adjusted[ch] = True     # explicit numbers survive a patch switch
+            self._display_seeded.add(ch)     # and are never re-seeded over
+            if wb.active_channel() == ch:
+                wb._load_params_into_controls(ch)
+                wb._refresh_preview()
+            wb.params_changed.emit(ch)       # -> _on_display_mapping_changed
+            return
+        self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
+        self._on_display_mapping_changed(ch)
 
     def _on_display_mapping_changed(self, cid):
         """A channel's mapping changed: the compare panels redraw (a levels
@@ -4219,8 +4346,6 @@ class Step0Page(QWidget):
         if cid in (self.current_channel, self.nucleus_channel):
             if self._last_payload is not None and hasattr(self, "_preview_imgs"):
                 self._refresh_preview_display(keep_zoom=True)
-            else:
-                self._sync_display_controls()
         explore_tab = getattr(self, "_explore_tab", None)
         stack = explore_tab.stack if explore_tab is not None else None
         if stack is None:
@@ -4236,29 +4361,10 @@ class Step0Page(QWidget):
                 lo, hi, gamma = self._display_mapping_for(cid, nucleus=True)
                 set_nuc(lo, hi, gamma)
 
-    def _sync_display_controls(self):
-        """The Display popup shows the current channel's and the nucleus's
-        mapping, their names and the two layer switches. No-op until the
-        popup has been opened once (it is created lazily)."""
-        popup = getattr(self, "_display_popup", None)
-        if popup is None:
-            return
-        self._display_controls_syncing = True
-        try:
-            popup.set_channel_names(self.current_channel or "",
-                                    self.nucleus_channel or "")
-            for role, ch, nuc in (("marker", self.current_channel, False),
-                                  ("nucleus", self.nucleus_channel, True)):
-                lo, hi, gamma = self._display_mapping_for(ch, nucleus=nuc) if ch else (0.0, 1.0, 1.0)
-                popup.set_mapping(role, lo, hi, gamma)
-            popup.set_shown("marker", self._btn_show_marker.isChecked())
-            popup.set_shown("nucleus", self._btn_show_nucleus.isChecked())
-        finally:
-            self._display_controls_syncing = False
-
     def _on_display_auto(self, prefix):
-        """Re-seed a role's mapping from the slide. `prefix` is the popup's
-        role ("marker" / "nucleus"); the legacy "nuc" spelling still works."""
+        """Re-seed a role's mapping from the SLIDE (not the patch). `prefix`
+        is "marker" / "nucleus" (the legacy "nuc" spelling still works). The
+        inspector's own Auto button is the patch-based one."""
         nuc = prefix in ("nuc", "nucleus")
         ch = self.nucleus_channel if nuc else self.current_channel
         if not ch:
@@ -4436,7 +4542,10 @@ class Step0Page(QWidget):
         method_cb = row.get("method_cb")
         cb.blockSignals(True)
         if ch == self.nucleus_channel:
-            cb.setChecked(False)
+            # The nucleus checkbox is the DAPI show/hide switch, not a
+            # processing checkbox -- it follows the layer's state, not a
+            # correction decision (there is none for DAPI).
+            cb.setChecked(self._nucleus_layer_visible())
             row["status_lbl"].setText("★")
             row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
         else:
@@ -4635,7 +4744,9 @@ class Step0Page(QWidget):
         self.current_channel = self._channel_order[row]
         self._update_decision_ui()
         self._update_full_image_buttons()
-        self._sync_display_controls()
+        # The floating Intensity window edits the channel the user is looking
+        # at: point the workbench's inspector at it (the nucleus included).
+        self._sync_intensity_to_channel()
         # The full image follows the channel, but only when it is on screen
         # and only when the GPU is free -- see `_sync_full_image_to_channel`.
         # Placed BEFORE the on-demand path below on purpose: that path's
@@ -5366,6 +5477,9 @@ class Step0Page(QWidget):
         self._conditioning_patch_viewports = {}
         # NOT cleared here: `_channel_colors` is a per-channel-name display
         # preference -- not pixels, not source identity, not an output path.
+        # The slide-wide display seed IS per-dataset: a new slide must re-seed.
+        self._display_fallback = {}
+        self._display_seeded = set()
         self._process_completed = False
         self._params_dirty = False
         self._preview_req_id = 0

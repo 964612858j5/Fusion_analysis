@@ -233,8 +233,10 @@ def test_step0_adapter_legacy_registry(app):
     for key in ("checkbox", "label", "badge", "item",
                 "method_cb", "status_lbl", "row_widget"):
         assert key in page._channel_rows["CD3"]
-    # nucleus locked
-    assert not page._channel_rows["DAPI"]["checkbox"].isEnabled()
+    # nucleus locked FOR CORRECTION: its method combo is dead. Its checkbox
+    # is not a processing checkbox at all -- it is the DAPI layer's show/hide
+    # switch -- so it stays enabled.
+    assert page._channel_rows["DAPI"]["checkbox"].isEnabled()
     assert not page._channel_rows["DAPI"]["method_cb"].isEnabled()
     # selection skipped nucleus
     assert page.current_channel == "CD3"
@@ -284,8 +286,9 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
     assert page._channel_decisions["CD3"] == "cucim"
     assert page._channel_rows["CD3"]["checkbox"].isChecked()
-    # the color swatch is hidden in Step0 BG rows (read as a dead checkbox)
-    assert not page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(
+    # every Step0 BG row carries its own display-colour swatch (the colour
+    # buttons that used to sit in the Patch Preview header are gone)
+    assert page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(
         page._channel_rows["CD3"]["row_widget"])
 
 

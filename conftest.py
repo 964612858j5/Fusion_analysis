@@ -40,3 +40,42 @@ def _register_block01_alias():
 
 
 _register_block01_alias()
+
+
+# ── Qt garbage is collected BETWEEN tests, never inside a paint ─────────────
+#
+# Controllers, views and fake schedulers reference each other (a scheduler
+# keeps bound-method callbacks, a ViewBox keeps a bound-method slot), so a
+# test's Qt objects die in a CYCLIC garbage-collection pass, not by refcount
+# at the end of the test. Left to the allocator, that pass fired inside the
+# next test's `ImageItem.paint`, destroying still-shown top-level widgets
+# while another widget was painting -- a segfault in `QPainter::drawImage`
+# (native backtrace: drawImage -> jump to a garbage address). This is the
+# "pre-existing pyqtgraph/offscreen crash" of the Step0 suites. Forcing the
+# collection here, with no paint in progress, makes the destruction
+# deterministic and safe.
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _collect_qt_garbage_between_tests():
+    yield
+    try:
+        from PyQt5 import QtWidgets
+    except Exception:
+        return
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    import gc
+    # Flush FIRST: a queued slot invocation already posted to a receiver
+    # that the collection then destroys would be delivered to a dead
+    # object (native backtrace: PyQtSlot::call -> segfault). Then collect,
+    # then flush the deferred deletes the collection posted.
+    app.processEvents()
+    app.processEvents()
+    gc.collect()
+    app.processEvents()
+    gc.collect()
+    app.processEvents()

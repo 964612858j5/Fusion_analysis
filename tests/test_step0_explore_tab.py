@@ -15,6 +15,8 @@ import pytest
 
 pytest.importorskip("PyQt5")
 
+from PyQt5 import QtWidgets  # noqa: E402
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from block01.ui.step0 import step0_explore_tab as _et  # noqa: E402
@@ -153,16 +155,31 @@ class FakeController:
         self.provider.close()
 
 
-class FakeView:
-    """Stands in for the ExploreView QWidget."""
+class FakeView(QtWidgets.QLabel):
+    """Stands in for the ExploreView QWidget.
+
+    A REAL QWidget, because the tab puts it in a layout (`indexOf` refuses
+    anything else). Carries the two surfaces a RELEASE touches -- the
+    status badge and the camera's mouse enable -- since a release now keeps
+    this widget on screen instead of deleting it.
+    """
 
     def __init__(self, parent, provider):
-        from PyQt5 import QtWidgets
-        self._w = QtWidgets.QLabel("fake explore view", parent)
+        super().__init__("fake explore view", parent)
         self.provider = provider
+        self.status_text = None
+        self.mouse_enabled = (True, True)
+        view = self
 
-    def __getattr__(self, name):
-        return getattr(self._w, name)
+        class _Box:
+            @staticmethod
+            def setMouseEnabled(x, y):
+                view.mouse_enabled = (x, y)
+
+        self.view_box = _Box()
+
+    def set_status_text(self, text):
+        self.status_text = text
 
 
 def make_factory(order=None, fail=False):
@@ -192,11 +209,11 @@ def make_factory(order=None, fail=False):
         controller = FakeController(provider, scheduler, order,
                                     channel=channel, method=method,
                                     params=tuple(params))
-        from PyQt5 import QtWidgets
         # Parented to the tab, exactly as the real `ExploreView(parent)` is:
         # the bug this models is that a parented widget still has to be put
-        # into the layout, or it gets no geometry and shows nothing.
-        view = QtWidgets.QLabel("fake explore view", parent_widget)
+        # into the layout, or it gets no geometry and shows nothing. It also
+        # carries the badge and camera surfaces a release freezes.
+        view = FakeView(parent_widget, provider)
         caches = (FakeCache("raw"), FakeCache("corrected"))
         # A scheduler holds the same cache objects, exactly as the real one
         # does -- so a test that only checked `stack.caches is None` would
@@ -981,11 +998,19 @@ def test_release_for_production_waits_for_the_floor_and_says_why(app):
     assert stack.provider.closed is True
     assert stack.controller.teardown_waits == [True], (
         "the release must be the hand-off form, or a floor job keeps the GPU")
-    # Not blank: the view is gone, so something has to be in its place.
-    assert tab._placeholder.isVisible()
-    text = tab._placeholder.text()
-    assert "patch background correction" in text
-    assert "released" in text.lower()
+    # The BACKEND went away; the picture did not. The user pressing Save
+    # should not have to watch their image vanish, and the pixels are
+    # already-blitted uint8 -- they need neither GPU nor provider.
+    assert tab.frozen_view is stack.view
+    assert tab._layout.indexOf(stack.view) >= 0
+    assert stack.view.isVisible() is True
+    assert tab._placeholder.isVisible() is False
+    # Frozen, and it says so: nothing can fetch a newly exposed tile any
+    # more, so the camera is stopped rather than left to pan into blank.
+    assert stack.view.status_text is not None
+    assert "patch background correction" in stack.view.status_text
+    assert "frozen" in stack.view.status_text.lower()
+    assert stack.view.mouse_enabled == (False, False)
 
 
 def test_release_is_idempotent_and_a_no_op_without_a_stack(app):
@@ -1093,8 +1118,123 @@ def test_no_placeholder_still_calls_this_a_trial_tab(app):
     tab, and none may carry the v15 trial label."""
     texts = [_et.PLACEHOLDER_NO_DATASET, _et.PLACEHOLDER_NOT_OPEN,
              _et.PLACEHOLDER_BUILD_FAILED, _et.PLACEHOLDER_BUSY,
-             _et.PLACEHOLDER_RELEASED]
+             ]
     for text in texts:
         assert "trial" not in text.lower(), text
         # Whole word: "stable"/"table" are not claims about a tab.
         assert not re.search(r"\btabs?\b", text, re.I), text
+
+
+# ── a release keeps the picture ──────────────────────────────────────────────
+#
+# Pressing Save used to blank the full image. The GPU has to go, but the
+# pixels do not: they are already-blitted uint8 arrays in ImageItems and
+# need neither the provider nor the scheduler.
+
+def test_a_release_shuts_the_backend_down_but_keeps_the_frame(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.resize(640, 480)
+    tab.show()
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    stack = tab.stack
+
+    tab.release_for_production("whole-slide correction (Save)")
+
+    # Backend: gone, and in the hand-off form.
+    assert stack.provider.closed is True
+    assert stack.scheduler.workers_running is False
+    assert stack.caches is None
+    assert stack.controller.teardown_waits == [True]
+    # Picture: still there.
+    assert tab.stack is None, "there is no live stack -- only a frame"
+    assert tab.frozen_view is stack.view
+    assert tab._layout.indexOf(stack.view) >= 0
+    assert stack.view.isVisible() is True
+    tab.teardown()
+
+
+def test_a_frozen_frame_cannot_be_panned(app):
+    """With no scheduler nothing can fetch a newly exposed tile, so the
+    camera is stopped instead of letting the user pan into blank space."""
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    view = tab.stack.view
+    assert view.mouse_enabled == (True, True)
+
+    tab.release_for_production("patch background correction")
+
+    assert view.mouse_enabled == (False, False)
+    tab.teardown()
+
+
+def test_a_rebuild_destroys_the_frozen_frame(app):
+    """Two views in the layout would leave the old pixels painted over the
+    new stack -- and the frozen one holds a pool of tile arrays."""
+    factory, record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.resize(640, 480)
+    tab.show()
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    old_view = tab.stack.view
+    tab.release_for_production("patch background correction")
+    assert tab.frozen_view is old_view
+
+    tab.activate()                      # rebuild
+
+    assert tab.stack is not None
+    assert tab.stack.view is not old_view
+    assert tab.frozen_view is None
+    assert tab._layout.indexOf(old_view) < 0
+    assert len(record["built"]) == 2
+    tab.teardown()
+
+
+def test_a_dataset_change_destroys_the_frozen_frame(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    old_view = tab.stack.view
+    tab.release_for_production("patch background correction")
+
+    tab.set_dataset("/data/slide_b.ome.tif")
+
+    assert tab.frozen_view is None
+    assert tab._layout.indexOf(old_view) < 0
+    tab.teardown()
+
+
+def test_a_teardown_destroys_the_frozen_frame(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    old_view = tab.stack.view
+    tab.release_for_production("patch background correction")
+
+    tab.teardown()
+
+    assert tab.frozen_view is None
+    assert tab._layout.indexOf(old_view) < 0
+
+
+def test_releasing_twice_keeps_one_frame(app):
+    """Two production runs in a row: the second release has no stack, so it
+    must leave the frame from the first alone rather than dropping it."""
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.activate()
+    view = tab.stack.view
+
+    tab.release_for_production("patch background correction")
+    tab.release_for_production("on-demand background correction")
+
+    assert tab.frozen_view is view
+    assert tab._layout.indexOf(view) >= 0
+    tab.teardown()

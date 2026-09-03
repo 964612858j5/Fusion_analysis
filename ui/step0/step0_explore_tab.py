@@ -50,18 +50,17 @@ RAW_CACHE_BYTES = 512 * 1024 * 1024
 CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 TILE_SIZE = 512
 
-PLACEHOLDER_RELEASED = (
-    "Full image released\n\n"
-    "Background correction is running ({reason}).\n"
-    "Open this view again when it finishes -- it will be rebuilt with the "
-    "parameters current at that time."
-)
+# NOTE: there is no "released" PLACEHOLDER any more. A release keeps the
+# last frame on screen and writes its reason onto that view's badge (see
+# `release_for_production`); a release with nothing built yet leaves
+# whatever placeholder was up, because there is no view to speak for.
 
-# After the run that released the view has ENDED. The "released" text
-# above says the run is going; once it is not, keeping that text up says
+# After the run that released the view has ENDED. While it runs, the frozen
+# frame's badge says so; once it is not running, keeping that text up says
 # something false, and the user has no way to tell it from a run that hangs.
+# Used on the frozen frame's badge, or on the placeholder when the release
+# happened before anything was ever built.
 PLACEHOLDER_RUN_FINISHED = (
-    "Full image released\n\n"
     "Background correction has finished.\n"
     "Click \"Reopen full image\" to rebuild it with the parameters current "
     "now; it opens where you were."
@@ -317,6 +316,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._stack_factory = stack_factory
         self._busy_probe = busy_probe
         self._stack = None
+        # A view whose backend has been released but whose pixels are still
+        # on screen (see `release_for_production`). Never a live stack.
+        self._frozen_view = None
         self._dataset_path = None
         self._build_attempts = 0
         self._build_error = None
@@ -482,6 +484,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._stack = stack
         self._released = False
         self._released_viewport_l0 = None
+        # Before the new view goes up: two views in the layout would leave
+        # the frozen pixels painted over the fresh stack.
+        self._drop_frozen_view()
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
@@ -586,15 +591,24 @@ class Step0ExploreTab(QtWidgets.QWidget):
         controller.set_selection(channel=channel)
 
     def release_for_production(self, reason):
-        """Give the GPU up to a production correction run.
+        """Give the GPU up to a production correction run, and LEAVE THE
+        LAST FRAME ON SCREEN.
 
-        The same physical teardown as `teardown(wait_for_floor=True)` -- it
-        blocks until a running floor computation has actually finished --
-        but a DIFFERENT user-facing state: this is recoverable. The view
-        says why it went away and that reopening will rebuild it, where a
-        real teardown either says nothing (destruction) or asks for a
-        dataset. Without a placeholder here the tab would simply go blank:
-        `_discard_stack` removes the view and puts nothing in its place.
+        The backend teardown is the same as `teardown(wait_for_floor=True)`
+        -- it blocks until a running floor computation has actually
+        finished, then shuts the scheduler down, closes the provider and
+        empties the caches -- but the WIDGET stays, with its tile items
+        still holding their pixels. Nothing about those pixels needs the
+        GPU or the provider: they are `uint8` numpy arrays already blitted
+        into `ImageItem`s, so keeping them costs the run nothing and saves
+        the user from watching their image vanish every time they press
+        Save.
+
+        What the user loses is INTERACTION, not the picture: with no
+        scheduler there is nothing to fetch a newly exposed tile with, so
+        panning would scroll into blank space. The camera is therefore
+        disabled and the badge says the view is frozen. Both come back when
+        the run ends and the stack is rebuilt.
 
         Idempotent; a no-op when no stack exists (the placeholder is left
         alone in that case, so a "no dataset" message is not overwritten).
@@ -602,9 +616,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
         if self._stack is None:
             return
         self._released_viewport_l0 = self._current_viewport_l0()
-        self._discard_stack(wait_for_floor=True)
+        self._freeze_stack(reason)
         self._released = True
-        self._show_placeholder(PLACEHOLDER_RELEASED.format(reason=reason))
 
     def _current_viewport_l0(self):
         """The live controller's viewport as `(y0, x0, w, h)`, or None.
@@ -623,13 +636,30 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return None
         return (y0, x0, x1 - x0, y1 - y0)
 
+    @property
+    def frozen_view(self):
+        """The released-but-still-painted view, or None. Readable so a host
+        -- and a test -- can tell "frozen" from "gone"."""
+        return self._frozen_view
+
     def production_finished(self):
         """The run that released the view has ended, and the host has
-        decided NOT to rebuild right now (the view is not on screen). Tell
-        the truth in the placeholder instead of leaving "is running" up.
-        No-op unless the view is actually in the released state."""
+        decided NOT to rebuild right now (the view is not on screen). Say
+        so instead of leaving "is running" up. No-op unless the view is
+        actually in the released state.
+
+        Two places to say it, because a released view is now either a
+        frozen frame (its badge carries the message) or a placeholder (when
+        the release happened before anything was ever built).
+        """
         if not self._released or self._stack is not None:
             return
+        if self._frozen_view is not None:
+            try:
+                self._frozen_view.set_status_text(PLACEHOLDER_RUN_FINISHED)
+                return
+            except (AttributeError, RuntimeError):
+                pass
         self._show_placeholder(PLACEHOLDER_RUN_FINISHED)
 
     def teardown(self, *, wait_for_floor: bool = False):
@@ -650,7 +680,54 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self.teardown()
 
     # ── internals ─────────────────────────────────────────────────────
+    def _freeze_stack(self, reason):
+        """Tear the BACKEND down but keep the view and its pixels on screen.
+
+        The frozen widget is remembered separately from `_stack`, which
+        goes to None: there is no live stack any more (no scheduler, no
+        provider, no caches), so every "is a stack up?" test must keep
+        answering no. What is left is a picture, and it is destroyed by the
+        next build, by a dataset change or by a real teardown -- never left
+        to accumulate alongside a new one.
+        """
+        stack, self._stack = self._stack, None
+        if stack is None:
+            return
+        print("[explore] freezing stack (backend released, frame kept)",
+              flush=True)
+        try:
+            stack.teardown(wait_for_floor=True)
+        finally:
+            view = getattr(stack, "view", None)
+            if view is not None:
+                try:
+                    # No fetching is possible any more, so a pan would
+                    # scroll into blank space. Say so, and stop the camera
+                    # rather than let the user discover it.
+                    view.view_box.setMouseEnabled(False, False)
+                    view.set_status_text(
+                        f"Frozen — background correction is running "
+                        f"({reason}). The view returns when it finishes.")
+                except (AttributeError, RuntimeError):
+                    pass
+                self._frozen_view = view
+
+    def _drop_frozen_view(self):
+        """Destroy a frozen frame. Called before a new view goes up, and on
+        any real teardown -- two views in the layout would leave the old
+        pixels showing over the new stack."""
+        view, self._frozen_view = self._frozen_view, None
+        if view is None:
+            return
+        try:
+            self._layout.removeWidget(view)
+            view.setParent(None)
+            view.deleteLater()
+        except RuntimeError:
+            pass
+
     def _discard_stack(self, *, wait_for_floor: bool = False):
+        self._drop_frozen_view()
         stack, self._stack = self._stack, None
         if stack is None:
             return

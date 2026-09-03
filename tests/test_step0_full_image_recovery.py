@@ -104,11 +104,30 @@ def _tab_with_controller(bbox=(100, 200, 400, 700)):
     `bbox` as its current level-0 viewport."""
     made = {}
 
+    class _View(QtWidgets.QLabel):
+        """Enough of ExploreView for a release to freeze it."""
+
+        def __init__(self):
+            super().__init__("fake")
+            self.status_text = None
+            self.mouse_enabled = (True, True)
+            view = self
+
+            class _Box:
+                @staticmethod
+                def setMouseEnabled(x, y):
+                    view.mouse_enabled = (x, y)
+
+            self.view_box = _Box()
+
+        def set_status_text(self, text):
+            self.status_text = text
+
     class _Stack:
         def __init__(self, controller):
             self.controller = controller
             self.provider = self
-            self.view = QtWidgets.QLabel("fake")
+            self.view = _View()
             self.caches = ()
             self.overlay = None
 
@@ -313,7 +332,10 @@ def test_release_records_the_viewport_and_the_released_state(app):
     assert tab.released is True
     # (y0, x0, y1, x1) -> (y0, x0, w, h)
     assert tab.released_viewport_l0 == (100, 200, 500, 300)
-    assert "running" in tab._placeholder.text()
+    # The frame stays up and carries the message; the placeholder is not
+    # used for a release any more.
+    assert tab.frozen_view is not None
+    assert "running" in tab.frozen_view.status_text
     tab.teardown()
 
 
@@ -369,10 +391,26 @@ def test_production_finished_replaces_the_running_text_only_when_released(app):
     tab.release_for_production("patch background correction")
     tab.production_finished()
 
-    text = tab._placeholder.text()
+    # The frame is still on screen, so the message belongs on ITS badge --
+    # the placeholder is not even visible.
+    text = tab.frozen_view.status_text
     assert text == et.PLACEHOLDER_RUN_FINISHED
     assert "finished" in text and "Reopen full image" in text
     assert "is running" not in text
+    tab.teardown()
+
+
+def test_production_finished_uses_the_placeholder_when_nothing_was_built(app):
+    """A release before anything was ever built has no frame to write on,
+    so the placeholder is still the right surface."""
+    tab, _made = _tab_with_controller()
+    tab.set_dataset("/data/a.ome.tif")
+    tab._released = True                      # released with no stack
+
+    tab.production_finished()
+
+    assert tab.frozen_view is None
+    assert tab._placeholder.text() == et.PLACEHOLDER_RUN_FINISHED
     tab.teardown()
 
 

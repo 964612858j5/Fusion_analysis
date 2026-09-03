@@ -929,6 +929,16 @@ class Step0Page(QWidget):
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
         self._preview_vbs  = []
         self._preview_imgs = []
+        # One nucleus ImageItem per panel, drawn ON TOP of the marker item
+        # and ADDED to it (CompositionMode_Plus): marker_colour*i +
+        # nucleus_colour*j, per channel, saturating -- the same sum
+        # `_make_colored_rgb` computes in numpy, done by the painter
+        # instead. See `_refresh_preview_display`. Created on FIRST USE
+        # (`_nuc_item`), not here: three more scene items per page made the
+        # known pyqtgraph/offscreen crash of the Step0 test suite -- which
+        # builds dozens of pages in one process -- deterministic, exactly
+        # as constructing the full-image viewer eagerly once did.
+        self._preview_nuc_imgs = [None, None, None]
         self._preview_gv = pg.GraphicsLayoutWidget()   # 单一widget
         self._preview_gv.setBackground("#111")
         TITLES = ("Original", "TopHat", "cucim")
@@ -3599,24 +3609,63 @@ class Step0Page(QWidget):
             self._refresh_preview_display(keep_zoom=True)
 
     def _rebuild_payload_rgb_from(self, payload, ch, nucleus_rgb, marker_rgb):
-        """按当前 nucleus / marker 颜色重建 payload 中三路 RGB 预览。"""
+        """Record `marker_rgb` as the channel's colour.
+
+        This used to composite three float32 RGB previews into the payload
+        (~215 ms for a 2720x2336 patch, and it ran twice per channel switch).
+        Nothing read them: the panels are coloured by a lookup table at paint
+        time now (`_refresh_preview_display`), so the only thing left to do
+        is remember the colour. Kept as the one place every caller already
+        goes through; any stale composites are dropped.
+        """
         if payload is None:
             return
         self._channel_colors[ch] = marker_rgb
-        for mono_key, rgb_key in (
-            ("original_disp", "original_rgb"),
-            ("tophat_disp",   "tophat_rgb"),
-            ("cucim_disp",    "cucim_rgb"),
-        ):
-            marker = payload.get(mono_key)
-            if marker is None:
-                continue
-            payload[rgb_key] = self._make_colored_rgb(
-                marker,
-                payload.get("nucleus_disp"),
-                marker_rgb=marker_rgb,
-                nucleus_rgb=nucleus_rgb,
-            )
+        for rgb_key in ("original_rgb", "tophat_rgb", "cucim_rgb"):
+            payload.pop(rgb_key, None)
+
+    _black_lut = np.zeros((256, 3), dtype=np.uint8)
+
+    def _nuc_item(self, idx):
+        """Panel `idx`'s nucleus ImageItem, created on first use: additive
+        (CompositionMode_Plus), above the marker item, row-major."""
+        item = self._preview_nuc_imgs[idx]
+        if item is None:
+            item = pg.ImageItem(axisOrder="row-major")
+            item.setZValue(1)
+            item.setCompositionMode(QtGui.QPainter.CompositionMode_Plus)
+            item.setVisible(False)
+            self._preview_vbs[idx].addItem(item)
+            self._preview_nuc_imgs[idx] = item
+        return item
+
+    @staticmethod
+    def _tint_lut(rgb):
+        """256x3 uint8 table, entry i = i * rgb: the same "grey scales one
+        colour" mapping `_make_colored_rgb` applies, as a lookup table."""
+        ramp = np.arange(256, dtype=np.float32)
+        scaled = ramp[:, None] * np.asarray(rgb, dtype=np.float32)[None, :3]
+        return np.clip(scaled, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _payload_u8(payload, key):
+        """The payload's `key` array quantised ONCE to uint8 (0..1 -> 0..255)
+        and cached in the payload, or None when the result is absent. The
+        contrast slider and the colour are applied at paint time, so this is
+        the only per-pixel work a channel switch does, and only the first
+        time a result is shown."""
+        arr = payload.get(key)
+        if arr is None:
+            return None
+        cache = payload.setdefault("_u8", {})
+        u8 = cache.get(key)
+        if u8 is None or u8.shape != arr.shape[:2]:
+            buf = np.clip(np.asarray(arr, dtype=np.float32), 0.0, 1.0)
+            buf *= 255.0
+            np.round(buf, out=buf)
+            u8 = buf.astype(np.uint8)
+            cache[key] = u8
+        return u8
 
     def _rebuild_payload_rgb(self, ch):
         """用当前通道颜色重新合成_last_payload中的RGB图。"""
@@ -3685,90 +3734,74 @@ class Step0Page(QWidget):
             self._zoom_lock_active = False
 
     def _refresh_preview_display(self, keep_zoom=False):
-        """按当前显示开关、颜色和对比度刷新三联预览。"""
+        """按当前显示开关、颜色和对比度刷新三联预览。
+
+        Rendering is delegated to the painter: each panel shows the marker
+        result as a uint8 image with a colour LOOKUP TABLE and the contrast
+        slider as its `levels`, and the nucleus as a second image item ADDED
+        on top (`CompositionMode_Plus`). Per pixel that is
+        clip(marker_colour*clip(m/marker_scale) + nucleus_colour*clip(n/
+        nucleus_scale)) -- exactly what `_make_colored_rgb` computed here in
+        numpy for every switch (measured ~850 ms per channel switch on a
+        2720x2336 patch, three panels, all on the GUI thread). Now a switch
+        costs one quantise per result the first time it is shown (~12 ms)
+        and nothing afterwards; a contrast or colour change costs nothing
+        per pixel at all.
+        """
         payload = self._last_payload
         if payload is None:
             return
 
         prev_ranges = [vb.viewRange() for vb in self._preview_vbs] if keep_zoom else None
-        self._rebuild_payload_rgb(
-            self.current_channel or next(iter(self._channel_colors.keys()), "")
-        )
-
+        ch = self.current_channel or next(iter(self._channel_colors.keys()), "")
+        marker_rgb = self._channel_colors.get(
+            ch, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
+        nuc_rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
         marker_on = self._btn_show_marker.isChecked()
         nucleus_on = self._btn_show_nucleus.isChecked()
         marker_scale = max(float(self._marker_contrast_slider.value()) / 100.0, 1e-3)
         nucleus_scale = max(float(self._nuc_contrast_slider.value()) / 100.0, 1e-3)
 
-        def _compose(rgb_key, mono_key):
-            rgb = payload.get(rgb_key)
-            marker = payload.get(mono_key)
-            nucleus = payload.get("nucleus_disp")
+        marker_lut = self._tint_lut(marker_rgb)
+        nuc_lut = self._tint_lut(nuc_rgb)
+        nucleus_u8 = self._payload_u8(payload, "nucleus_disp")
+        markers = [self._payload_u8(payload, key)
+                   for key in ("original_disp", "tophat_disp", "cucim_disp")]
 
-            if rgb is None and marker is not None:
-                rgb = self._make_colored_rgb(
-                    marker,
-                    nucleus,
-                    marker_rgb=self._channel_colors.get(
-                        self.current_channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3))
-                    ),
-                    nucleus_rgb=getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
-                )
-            if rgb is None:
-                return None
-
-            out = np.zeros_like(rgb, dtype=np.float32)
-            if marker_on:
-                out += rgb.astype(np.float32, copy=False)
-            if not marker_on and nucleus_on and nucleus is not None:
-                nuc_rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
-                nucleus_f = np.clip(nucleus.astype(np.float32, copy=False) / nucleus_scale, 0, 1)
-                out[..., 0] += nucleus_f * nuc_rgb[0]
-                out[..., 1] += nucleus_f * nuc_rgb[1]
-                out[..., 2] += nucleus_f * nuc_rgb[2]
-            elif marker_on and not nucleus_on and nucleus is not None:
-                nuc_rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
-                nucleus_f = nucleus.astype(np.float32, copy=False)
-                out[..., 0] -= nucleus_f * nuc_rgb[0]
-                out[..., 1] -= nucleus_f * nuc_rgb[1]
-                out[..., 2] -= nucleus_f * nuc_rgb[2]
-
-            if marker_on and marker is not None:
-                base_marker = np.clip(marker.astype(np.float32, copy=False) / marker_scale, 0, 1)
-                marker_rgb = self._channel_colors.get(
-                    self.current_channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3))
-                )
-                if nucleus_on and nucleus is not None:
-                    nucleus_f = np.clip(nucleus.astype(np.float32, copy=False) / nucleus_scale, 0, 1)
-                else:
-                    nucleus_f = None
-                out = self._make_colored_rgb(
-                    base_marker,
-                    nucleus_f,
-                    marker_rgb=marker_rgb,
-                    nucleus_rgb=getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
-                )
-
-            return np.clip(out, 0, 1)
-
-        imgs = (
-            _compose("original_rgb", "original_disp"),
-            _compose("tophat_rgb", "tophat_disp"),
-            _compose("cucim_rgb", "cucim_disp"),
-        )
-        _lv = [0.0, 1.0]
-
-        # 确定黑图尺寸（用第一个非None图的尺寸，或默认64x64）
-        _blank_shape = next((a.shape[:2] for a in imgs if a is not None), (64, 64))
-        _blank = np.zeros((*_blank_shape, 3), dtype=np.float32)
+        # A result that was not computed shows BLACK, not the previous
+        # channel's pixels -- and nothing added on top of black either.
+        _blank_shape = next((m.shape for m in markers if m is not None), (64, 64))
+        _blank = np.zeros(_blank_shape, dtype=np.uint8)
 
         self._zoom_lock_active = True
         try:
-            for idx, arr in enumerate(imgs):
-                # arr=None表示该方法未计算，显示黑色清空，不保留上一通道的图
-                self._preview_imgs[idx].setImage(
-                    arr if arr is not None else _blank,
-                    autoLevels=False, levels=_lv)
+            for idx, m in enumerate(markers):
+                item = self._preview_imgs[idx]
+                nuc_item = self._preview_nuc_imgs[idx]      # None until first used
+                if m is None:
+                    item.setImage(_blank, autoLevels=False, levels=(0, 255))
+                    item.setLookupTable(None)
+                    if nuc_item is not None:
+                        nuc_item.setVisible(False)
+                    continue
+                # Marker: `levels=(0, 255*scale)` makes the painter compute
+                # clip(m/scale, 0, 1) before the table, i.e. the contrast
+                # slider; opacity 0 is the "marker off" switch. The image is
+                # always set so the panel keeps its geometry for the zoom
+                # and for the full-image drill-down's coordinate mapping.
+                item.setImage(m, autoLevels=False, levels=(0, 255.0 * marker_scale))
+                # "Marker off" is an all-black TABLE, not opacity 0: the item
+                # must stay opaque so the panel background does not show
+                # through and get ADDED under the nucleus.
+                item.setLookupTable(marker_lut if marker_on else self._black_lut)
+                if nucleus_on and nucleus_u8 is not None and nucleus_u8.shape == m.shape:
+                    nuc_item = self._nuc_item(idx)
+                    nuc_item.setImage(nucleus_u8, autoLevels=False,
+                                      levels=(0, 255.0 * nucleus_scale))
+                    nuc_item.setLookupTable(nuc_lut)
+                    nuc_item.setVisible(True)
+                elif nuc_item is not None:
+                    nuc_item.setVisible(False)
             if keep_zoom and prev_ranges is not None:
                 for idx, vb in enumerate(self._preview_vbs):
                     xr, yr = prev_ranges[idx]

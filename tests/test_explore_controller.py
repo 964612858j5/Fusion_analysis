@@ -3786,3 +3786,44 @@ def test_the_overlay_prefetches_the_same_ring_for_its_own_channel(app):
     _pump(40)
     assert len(overlay.pool.entries) == 0
     ctrl.teardown()
+
+
+# ── marker contrast: paint-time levels on every marker layer ────────────────
+
+def test_marker_contrast_sets_levels_everywhere_without_requantising(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    _paint_viewport(ctrl, provider, scheduler, view)
+    lo, hi = ctrl._display_lo, ctrl._display_hi
+    entry = next(iter(ctrl._raw_pool.entries.values()))
+    pixels_before = entry.item.image.copy()
+
+    ctrl.set_marker_contrast(0.5)
+
+    assert list(view.overview_item.levels) == pytest.approx([lo, lo + (hi - lo) * 0.5])
+    for e in ctrl._raw_pool.entries.values():
+        assert list(e.item.levels) == pytest.approx([0, 127.5])
+    assert np.array_equal(entry.item.image, pixels_before), "pixels were re-quantised"
+
+    # A tile arriving AFTER the change comes up at the same levels.
+    set_view_and_pump(view, 3000, 3000, 3000 + 1024, 3000 + 1024)
+    for req, _cb in list(scheduler.pending_for(RawKey)):
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(40)
+    assert all(list(e.item.levels) == pytest.approx([0, 127.5])
+               for e in ctrl._raw_pool.entries.values())
+    ctrl.teardown()
+
+
+def test_overlay_contrast_is_its_own(app):
+    from block01.viewer.explore_view import RawOverlayLayer
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    overlay = RawOverlayLayer(provider, scheduler, ctrl.grid, view, "CD3")
+    ctrl.attach_overlay(overlay)
+    overlay.set_contrast(2.0)
+    ctrl.set_marker_contrast(0.5)
+    assert overlay.pool._levels == (0, 510.0)
+    assert ctrl._raw_pool._levels == (0, 127.5)
+    ctrl.teardown()

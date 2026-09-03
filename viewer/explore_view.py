@@ -887,6 +887,10 @@ class TileItemPool:
         # Layer opacity, owned here for the same reason as the LUT: items
         # created after the switch must come up in the same state.
         self._layer_opacity = 1.0
+        # Display levels, same ownership rule. (0, 255) is the quantised
+        # range as stored; a contrast control raises or lowers the top end
+        # at paint time, so no tile is ever re-quantised for it.
+        self._levels = (0, 255)
         # Composition mode, same ownership rule. None = pyqtgraph's default
         # (SourceOver), which is what every existing caller gets: this is
         # only ever set by a layer that must ADD to what is underneath.
@@ -907,6 +911,13 @@ class TileItemPool:
         self._layer_opacity = float(alpha)
         for entry in self.entries.values():
             entry.item.setOpacity(self._layer_opacity)
+
+    def set_levels(self, levels) -> None:
+        """Display levels for every item, now and for items created later.
+        Paint-time only: the stored uint8 pixels are untouched."""
+        self._levels = (float(levels[0]), float(levels[1]))
+        for entry in self.entries.values():
+            entry.item.setLevels(self._levels)
 
     def set_lookup_table(self, lut) -> None:
         """Apply `lut` (or None for greyscale) to every item, now and on
@@ -935,7 +946,7 @@ class TileItemPool:
             # the fixed (0, 255).
             item = pg.ImageItem(axisOrder="row-major")
             item.setZValue(self._z_for_level(level))
-            item.setImage(arr_uint8, autoLevels=False, levels=(0, 255))
+            item.setImage(arr_uint8, autoLevels=False, levels=self._levels)
             if self._lut is not None:
                 item.setLookupTable(self._lut)
             if self._layer_opacity != 1.0:
@@ -948,7 +959,7 @@ class TileItemPool:
             self.entries[coord] = entry
             self.items_created += 1
         else:
-            entry.item.setImage(arr_uint8, autoLevels=False, levels=(0, 255))
+            entry.item.setImage(arr_uint8, autoLevels=False, levels=self._levels)
             # rect/level are immutable after creation (design contract):
             # entries never move.
         entry.key = key
@@ -1312,6 +1323,13 @@ class RawOverlayLayer(QtCore.QObject):
         re-quantisation, no request."""
         self._pool.set_lookup_table(
             None if rgb is None else ExploreController.build_tint_lut(rgb))
+
+    def set_contrast(self, scale: float):
+        """Brightness of this layer as a factor on its fixed display range:
+        pixel = clip(value / (range * scale)). 1.0 is the calibrated range;
+        0.5 shows it twice as bright. Paint-time levels only."""
+        scale = max(float(scale), 1e-3)
+        self._pool.set_levels((0, 255.0 * scale))
 
     # ── calibration ───────────────────────────────────────────────────
     def start_calibration(self, host):
@@ -1744,6 +1762,13 @@ class ExploreController(QtCore.QObject):
         # newly pooled tile and a floor rebuild all pick up the same table.
         self._tint = None
         self._marker_visible = True
+        # Marker contrast (module docstring "Channel tint"): a factor on the
+        # fixed display range, applied as paint-time levels to the overview,
+        # the floor and both pools. 1.0 = the calibrated range. The compare
+        # panels stretch each PATCH by its own percentiles, so the same
+        # tissue is brighter there than under the slide-wide range; this
+        # lets the user match them without re-quantising a single tile.
+        self._marker_contrast = 1.0
 
         # ── optional additive overlay (RawOverlayLayer) ──
         # Attached by the host after construction, never created here: this
@@ -1966,6 +1991,25 @@ class ExploreController(QtCore.QObject):
         self.view.corrected_floor_item.setLookupTable(lut)
         self._raw_pool.set_lookup_table(lut)
         self._precise_pool.set_lookup_table(lut)
+
+    def _overview_levels(self):
+        lo, hi = self._display_lo, self._display_hi
+        return (lo, lo + (hi - lo) * self._marker_contrast)
+
+    def _uint8_levels(self):
+        return (0, 255.0 * self._marker_contrast)
+
+    def set_marker_contrast(self, scale: float):
+        """Brightness of every marker layer as a factor on the fixed display
+        range (see `_marker_contrast`). Paint-time only: overview, floor and
+        both pools get new `levels`; nothing is re-read or re-quantised."""
+        self._marker_contrast = max(float(scale), 1e-3)
+        if self._overview_arr is not None:
+            self.view.overview_item.setLevels(self._overview_levels())
+        if self.view.corrected_floor_item.image is not None:
+            self.view.corrected_floor_item.setLevels(self._uint8_levels())
+        self._raw_pool.set_levels(self._uint8_levels())
+        self._precise_pool.set_levels(self._uint8_levels())
 
     def set_marker_visible(self, visible: bool):
         """Show/hide every layer this controller owns.
@@ -2372,7 +2416,9 @@ class ExploreController(QtCore.QObject):
         # Whole level read at once, so always fully valid -- plain
         # grayscale, never masked; fixed levels only, never autoLevels.
         self.view.overview_item.setImage(
-            rec.arr, autoLevels=False, levels=(rec.display_lo, rec.display_hi))
+            rec.arr, autoLevels=False,
+            levels=(rec.display_lo,
+                    rec.display_lo + (rec.display_hi - rec.display_lo) * self._marker_contrast))
         self.view.overview_item.setRect(ExploreView.world_rect(0, 0, h, w, ds_y, ds_x))
         self.view.overview_item.setVisible(True)
         self._overview_cache_put(rec)
@@ -2954,7 +3000,8 @@ class ExploreController(QtCore.QObject):
                 ds_y, ds_x = ds_y * stride, ds_x * stride
                 h, w = result_arr.shape
                 rect = ExploreView.world_rect(0, 0, h, w, ds_y, ds_x)
-                self.view.corrected_floor_item.setImage(gray, autoLevels=False, levels=(0, 255))
+                self.view.corrected_floor_item.setImage(
+                    gray, autoLevels=False, levels=self._uint8_levels())
                 self.view.corrected_floor_item.setRect(rect)
                 self._floor_ready = True
                 self._floor_ctx = ctx
@@ -3005,7 +3052,7 @@ class ExploreController(QtCore.QObject):
         if self._overview_arr is not None:
             self.view.overview_item.setImage(
                 self._overview_arr, autoLevels=False,
-                levels=(self._display_lo, self._display_hi))
+                levels=self._overview_levels())
 
     # ── level selection ───────────────────────────────────────────────────
 

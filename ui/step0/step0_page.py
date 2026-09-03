@@ -1382,6 +1382,37 @@ class Step0Page(QWidget):
         self._btn_full_nucleus.toggled.connect(self._on_full_nucleus_toggled)
         bar.addWidget(self._btn_full_nucleus)
 
+        # Contrast, per layer, as in the compare panels. The compare panels
+        # stretch each PATCH by its own percentiles while the full image
+        # uses one range for the whole slide (TOX on the test slide: patch
+        # 1..9 against slide 0..17), so the same tissue reads about half as
+        # bright here. These raise or lower the top of the range at paint
+        # time -- no tile is re-read or re-quantised.
+        for attr, name, tip in (
+                ("_full_marker_contrast", "Marker",
+                 "Marker brightness in the full image. 100% = the slide-wide "
+                 "display range; lower = brighter."),
+                ("_full_nucleus_contrast", "DAPI",
+                 "Nucleus brightness in the full image. 100% = its calibrated "
+                 "range; lower = brighter.")):
+            lbl = QLabel(f"{name}:")
+            lbl.setStyleSheet("color:#aaa;font-size:10px;")
+            slider = QtWidgets.QSlider(Qt.Horizontal)
+            slider.setRange(20, 400)
+            slider.setValue(100)
+            slider.setFixedWidth(90)
+            slider.setToolTip(tip)
+            val = QLabel("100%")
+            val.setStyleSheet("color:#aaa;font-size:10px;")
+            val.setFixedWidth(34)
+            setattr(self, attr, slider)
+            setattr(self, attr + "_lbl", val)
+            bar.addWidget(lbl)
+            bar.addWidget(slider)
+            bar.addWidget(val)
+        self._full_marker_contrast.valueChanged.connect(self._on_full_marker_contrast)
+        self._full_nucleus_contrast.valueChanged.connect(self._on_full_nucleus_contrast)
+
         self._full_source_lbl = QLabel("—")
         self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
         # What the label says about the SOURCE, kept apart from the hidden-
@@ -1490,6 +1521,34 @@ class Step0Page(QWidget):
         if stack is None:
             return
         stack.controller.set_marker_visible(bool(checked))
+
+    def _on_full_marker_contrast(self, value):
+        """Marker brightness slider -> the live controller's paint-time
+        levels. Remembered by the slider itself for the next stack."""
+        self._full_marker_contrast_lbl.setText(f"{int(value)}%")
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        set_marker = getattr(getattr(stack, "controller", None), "set_marker_contrast", None)
+        if set_marker is not None:
+            set_marker(value / 100.0)
+
+    def _on_full_nucleus_contrast(self, value):
+        self._full_nucleus_contrast_lbl.setText(f"{int(value)}%")
+        set_nuc = getattr(self._full_image_overlay(), "set_contrast", None)
+        if set_nuc is not None:
+            set_nuc(value / 100.0)
+
+    def _apply_full_image_contrast(self, stack):
+        """A freshly built stack comes up at 100%; tell it the sliders."""
+        if stack is None:
+            return
+        set_marker = getattr(stack.controller, "set_marker_contrast", None)
+        if set_marker is not None and hasattr(self, "_full_marker_contrast"):
+            set_marker(self._full_marker_contrast.value() / 100.0)
+        overlay = getattr(stack, "overlay", None)
+        set_nuc = getattr(overlay, "set_contrast", None)
+        if set_nuc is not None and hasattr(self, "_full_nucleus_contrast"):
+            set_nuc(self._full_nucleus_contrast.value() / 100.0)
 
     @staticmethod
     def _set_layer_toggle_text(button, name, checked):
@@ -1812,6 +1871,7 @@ class Step0Page(QWidget):
         if overlay is not None and hasattr(self, "_btn_full_nucleus"):
             overlay.set_enabled(self._btn_full_nucleus.isChecked(),
                                 host=stack.controller)
+        self._apply_full_image_contrast(stack)
         # The Tissue Preview follows the full image's camera while it is up.
         self._connect_full_image_view_rect(stack)
         self._update_full_image_view_rect()

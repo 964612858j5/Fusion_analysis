@@ -309,7 +309,8 @@ def test_with_no_drawing_mode_a_click_navigates(app):
     assert seen == [(500, 600)]
 
 
-def test_with_no_drawing_mode_a_drag_pans_and_does_not_navigate(app):
+def test_with_no_drawing_mode_a_left_drag_neither_pans_nor_navigates(app):
+    """No left-drag pan (by request): a drag is simply not a click."""
     panel = _panel(None)
     panel.resize(400, 400)
     panel.show()
@@ -331,15 +332,34 @@ def test_with_no_drawing_mode_a_drag_pans_and_does_not_navigate(app):
     assert panel.eventFilter(vp, move) is True
     assert panel.eventFilter(vp, release) is True
 
-    assert _viewrange(panel) != before, "the view did not pan"
+    assert _viewrange(panel) == before, "a left drag must not pan"
     assert seen == []
+    panel.close()
+
+
+def test_with_no_drawing_mode_the_middle_button_pans(app):
+    panel = _panel(None)
+    panel.resize(400, 400)
+    panel.show()
+    panel.vb.setRange(xRange=(0, 600), yRange=(0, 800), padding=0)
+    QtTest.QTest.qWait(30)
+    before = _viewrange(panel)
+    panel._ov_pos = lambda _sp: (50, 50)
+    vp = panel.gview.viewport()
+    press = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, QtCore.QPointF(50, 50),
+                              QtCore.Qt.MiddleButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier)
+    move = QtGui.QMouseEvent(QtCore.QEvent.MouseMove, QtCore.QPointF(90, 70),
+                             QtCore.Qt.NoButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier)
+    panel.eventFilter(vp, press)
+    panel.eventFilter(vp, move)
+    assert _viewrange(panel) != before
     panel.close()
 
 
 def test_no_drawing_mode_hides_both_tool_panels_and_says_so(app):
     panel = _panel(None)
     assert panel._roi_ctrl.isHidden() and panel._patch_ctrl.isHidden()
-    assert "Jump" in panel.hint.text() and "Pan" in panel.hint.text()
+    assert "Jump" in panel.hint.text() and "Left-drag" not in panel.hint.text()
 
 
 def test_in_roi_mode_a_click_inside_an_existing_roi_navigates(app):
@@ -372,10 +392,14 @@ def test_the_mode_buttons_toggle_off_to_no_drawing_mode(app):
     assert page._btn_mode_roi.isChecked() and not page._btn_mode_patch.isChecked()
     assert ov._mode == "roi"
 
+    status_before = ov.status.text()
     page._btn_mode_roi.click()                    # the active one: off
     assert not page._btn_mode_roi.isChecked() and not page._btn_mode_patch.isChecked()
     assert ov._mode is None
-    assert "jump" in ov.status.text().lower()
+    # No mode sentence in the status line any more (it took a row a click
+    # meant for the tissue landed on); the hint line carries the mouse help.
+    assert ov.status.text() == status_before
+    assert "Jump" in ov.hint.text()
 
     page._btn_mode_patch.click()                  # on
     assert page._btn_mode_patch.isChecked() and ov._mode == "patch"

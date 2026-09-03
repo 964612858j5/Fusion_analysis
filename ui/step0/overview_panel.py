@@ -1300,8 +1300,8 @@ class OverviewPanel(QWidget):
             self.hint.setStyleSheet("color:#6bcb77;font-size:10px;")
         elif mode is None:
             self.hint.setText(
-                "Click = Jump the full image there  |  Left-drag = Pan  "
-                "|  Scroll = Zoom  |  Double-click = Reset"
+                "Click = Jump the full image there  |  Scroll = Zoom  "
+                "|  Middle-drag = Pan  |  Double-click = Reset"
             )
             self.hint.setStyleSheet("color:#19e0e0;font-size:10px;")
         else:
@@ -1979,14 +1979,15 @@ class OverviewPanel(QWidget):
             r, c = self._ov_pos(sp)
 
             if self._mode is None:
-                # Navigate/pan: a left press starts a pan; if it ends where
-                # it began (< 3 px) it was a click, and the release
-                # navigates. Middle behaves the same for consistency.
-                if event.button() in (Qt.LeftButton, Qt.MiddleButton):
-                    self._pan_last = event.pos()
+                # Navigate: a left press that is released where it began
+                # (< 3 px) is a click, and the release navigates. A left
+                # drag does nothing (no left-drag pan, by request); the
+                # middle button pans as in the other modes.
+                if event.button() == Qt.LeftButton:
                     self._nav_press = (event.pos(), r, c)
                     self._nav_moved = False
-                    return True
+                elif event.button() == Qt.MiddleButton:
+                    self._pan_last = event.pos()
                 return True
 
             if self._mode == 'roi':
@@ -2033,10 +2034,10 @@ class OverviewPanel(QWidget):
             r, c = self._ov_pos(sp)
 
             if self._mode is None:
-                if (event.buttons() & (Qt.LeftButton | Qt.MiddleButton)) and self._pan_last:
-                    press = getattr(self, "_nav_press", None)
-                    if press is not None and (event.pos() - press[0]).manhattanLength() >= 3:
-                        self._nav_moved = True
+                press = getattr(self, "_nav_press", None)
+                if press is not None and (event.pos() - press[0]).manhattanLength() >= 3:
+                    self._nav_moved = True
+                if (event.buttons() & Qt.MiddleButton) and self._pan_last:
                     self._do_pan(event)
                 return True
 
@@ -2065,12 +2066,13 @@ class OverviewPanel(QWidget):
         # ── Mouse release ─────────────────────────────────────────────
         elif t == QtCore.QEvent.MouseButtonRelease:
             if self._mode is None:
-                self._pan_last = None
-                press = getattr(self, "_nav_press", None)
-                self._nav_press = None
-                if (press is not None and not getattr(self, "_nav_moved", False)
-                        and event.button() == Qt.LeftButton):
-                    self._emit_navigate(press[1], press[2])
+                if event.button() == Qt.MiddleButton:
+                    self._pan_last = None
+                if event.button() == Qt.LeftButton:
+                    press = getattr(self, "_nav_press", None)
+                    self._nav_press = None
+                    if press is not None and not getattr(self, "_nav_moved", False):
+                        self._emit_navigate(press[1], press[2])
                 return True
 
             if self._mode == 'roi':

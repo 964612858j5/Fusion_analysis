@@ -110,6 +110,13 @@ def test_controller_trajectory_planning_is_unchanged(app):
             ctrl._settle_timer.stop()
 
             requests = [r for r, _cb in scheduler.requests[first_request:]]
+            # The raw prefetch RING (priority >= RAW_PREFETCH_RING_BASE_PRIORITY)
+            # is speculative and never pooled; the golden trajectory records
+            # the VISIBLE plan, which it must not change.
+            from block01.viewer.explore_view import RAW_PREFETCH_RING_BASE_PRIORITY
+            requests = [r for r in requests
+                        if not (isinstance(r.key, RawKey)
+                                and r.priority >= RAW_PREFETCH_RING_BASE_PRIORITY)]
             cancels = [_gen(g) for g
                        in scheduler.cancelled_generations[first_cancel:]]
 

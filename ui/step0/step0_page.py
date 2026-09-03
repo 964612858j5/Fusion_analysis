@@ -3167,7 +3167,6 @@ class Step0Page(QWidget):
         ov = self._drawing_overview()
         if mode is None:
             ov._set_mode(None)
-            ov.status.setText("Click the tissue to jump the full image there; drag to pan.")
             return
         if mode == "roi":
             # 自动生成下一个不重名的默认ROI名，写入输入框，不弹对话框
@@ -3179,11 +3178,12 @@ class Step0Page(QWidget):
                 next_name = f"ROI_{n}"
             ov._roi_name_edit.setText(next_name)
             ov._set_mode("roi")
-            ov.status.setText(
-                "Draw ROI vertices on the overview, then press Enter or right-click to close.")
         else:
             ov._set_mode("patch")
-            ov.status.setText("Drag to draw a patch rectangle inside a ROI.")
+        # No mode sentence in the overview's status line: it took a row
+        # under the tissue that a click meant for the tissue landed on
+        # (user report). The mode's hint line already says what the mouse
+        # does.
 
     def _delete_selected_item(self):
         """优先删除选中patch，其次删除选中ROI（兼容旧工具栏调用）"""

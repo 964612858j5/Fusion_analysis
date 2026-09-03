@@ -1346,33 +1346,29 @@ def test_controller_drives_status_badge_around_floor_job(app):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_corrected_quantization_applies_level_gain(app):
-    """With a calibrated gain table installed directly against the LIVE
-    selection context, `_quantize_corrected_uint8(arr, L)` must equal the
-    plain quantization of `arr * gain[L]`, and the raw path
-    (`_quantize_tile_uint8`) must be completely unaffected by the table."""
+    """Tiles hold RAW values; a level's display gain is folded into the
+    paint-time LEVELS of that level's items:
+    clip((v*g - lo)/(hi - lo)) == clip((v - lo/g)/((hi - lo)/g)).
+    Raw pixels get the mapping itself, never scaled by the gain table."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
-
     floor_level, stride = ctrl._pick_floor_level_and_stride()
     ctrl._floor_level = floor_level
     ctrl._floor_stride = stride
     ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
     ctrl._level_gain = {0: 1.0, 1: 3.5}
 
-    arr = np.linspace(0.0, ctrl._display_hi * 0.5, 64, dtype=np.float32).reshape(8, 8)
-
-    q_level1 = ctrl._quantize_corrected_uint8(arr, 1)
-    expected = ctrl._quantize_tile_uint8(arr * 3.5)
-    np.testing.assert_array_equal(q_level1, expected)
-
-    q_level0 = ctrl._quantize_corrected_uint8(arr, 0)
-    np.testing.assert_array_equal(q_level0, ctrl._quantize_tile_uint8(arr))
-
-    # Raw path is a plain quantization -- never scaled by the gain table.
-    raw_q = ctrl._quantize_tile_uint8(arr)
-    assert not np.array_equal(raw_q, q_level1)
-
+    lo, hi = ctrl._display_lo, ctrl._display_hi
+    assert ctrl._corrected_levels(1) == pytest.approx((lo / 3.5, hi / 3.5))
+    assert ctrl._corrected_levels(0) == pytest.approx((lo, hi))
+    assert ctrl._raw_levels() == pytest.approx((lo, hi))
+    arr = np.linspace(0.0, hi * 0.5, 64, dtype=np.float32).reshape(8, 8)
+    np.testing.assert_array_equal(ctrl._prepare_raw(arr), arr)
+    np.testing.assert_array_equal(ctrl._prepare_corrected(arr), arr)
+    fn = ctrl._corrected_levels_fn()            # the pool's closure, by value
+    assert fn(1) == pytest.approx((lo / 3.5, hi / 3.5))
+    assert fn(0) == pytest.approx((lo, hi))
     ctrl.teardown()
 
 
@@ -1789,33 +1785,30 @@ def test_intermediate_fallback_key_uses_its_own_effective_param(app):
 
 def test_intermediate_fallback_blitted_at_own_level_with_own_gain(app):
     """A delivered level-1 fallback result must be pooled AT level 1, with
-    level-1 world geometry, and quantized through level 1's own calibrated
-    display gain (not level 0's, and not unscaled)."""
+    level-1 world geometry, as raw corrected values, and drawn under level
+    1's own calibrated display gain (its levels) -- not level 0's, and not
+    unscaled."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
     ctrl.jump_to(y0=0, x0=0, w=1024, h=1024)
-
     floor_level, stride = ctrl._pick_floor_level_and_stride()
     ctrl._floor_level = floor_level
     ctrl._floor_stride = stride
     ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
     ctrl._level_gain = {0: 1.0, 1: 3.5}
-
+    ctrl._precise_pool.set_levels_for_level(ctrl._corrected_levels_fn())
     fallback_reqs = [(r, cb) for r, cb in scheduler.pending_for(CorrectionKey)
-                      if r.key.tile.level == 1]
+                     if r.key.tile.level == 1]
     assert fallback_reqs
     req, _cb = fallback_reqs[0]
     tx, ty = req.key.tile.tx, req.key.tile.ty
-
     arr = raw_arr_for(provider, 1, tx, ty)
     scheduler.deliver(req, arr)
     _pump(20)
-
     entry = ctrl._precise_pool.get(1, tx, ty)
     assert entry is not None
     assert entry.level == 1
-
     ds_y, ds_x = provider.level_downsample_yx(1)
     ts = ctrl.grid.tile_size
     expected_rect = ExploreView.world_rect(ty * ts, tx * ts, arr.shape[0], arr.shape[1], ds_y, ds_x)
@@ -1823,12 +1816,11 @@ def test_intermediate_fallback_blitted_at_own_level_with_own_gain(app):
     assert entry.rect.y() == pytest.approx(expected_rect.y())
     assert entry.rect.width() == pytest.approx(expected_rect.width())
     assert entry.rect.height() == pytest.approx(expected_rect.height())
-
-    expected_gray = ctrl._quantize_tile_uint8(arr.astype(np.float32) * 3.5)
-    np.testing.assert_array_equal(entry.item.image, expected_gray)
-
+    np.testing.assert_array_equal(entry.item.image, arr.astype(np.float32))
+    assert entry.item.image.dtype == np.float32
+    assert list(entry.item.levels) == pytest.approx(
+        [ctrl._display_lo / 3.5, ctrl._display_hi / 3.5])
     assert ctrl.stats["mid_tiles_blitted"] >= 1
-
     ctrl.teardown()
 
 
@@ -2390,23 +2382,20 @@ def test_synthesized_fallback_matches_downsampled_finer_tiles(app):
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
-
     ts = ctrl.grid.tile_size
     rng = np.random.default_rng(1)
 
     def fill(ftx, fty):
-        return rng.integers(0, 256, size=(ts, ts), dtype=np.uint8)
+        return rng.integers(0, 256, size=(ts, ts)).astype(np.float32)
 
     arrs, k = _pool_all_finer_tiles_for_fallback(ctrl, provider, 1, 0, 0, fill)
-
     result = ctrl._try_synthesize_fallback_tile(1, 0, 0)
     assert result is not None
-
     assembled = np.block([[arrs[(ftx, fty)] for ftx in range(k)] for fty in range(k)])
-    expected = np.clip(np.round(_box_downsample(assembled, k)), 0, 255).astype(np.uint8)
-    np.testing.assert_array_equal(result, expected)
+    # No gain table: a pure box downsample of the raw values, float32.
+    np.testing.assert_allclose(result, _box_downsample(assembled, k), rtol=1e-6)
+    assert result.dtype == np.float32
     assert ctrl.stats["fallback_synthesized"] >= 1
-
     ctrl.teardown()
 
 
@@ -2414,18 +2403,11 @@ def test_synthesis_sources_from_corrected_cache_too(app):
     """A finer tile that is in the corrected CACHE but not yet pooled is a
     valid synthesis source. The pool only holds what has been blitted; the
     cache holds everything computed, including prefetched tiles, so it is
-    the larger source. A cached tile is float32, so it is quantized once
-    with the FINER level's gain -- exactly the pixels that tile would show.
-
-    Measured, this roughly doubled an otherwise very low hit rate (a
-    level-crossing zoom-out went from 1 synthesis to 2, a pan from 0 to 1);
-    the rate stays small for geometric reasons documented on
-    `_try_synthesize_fallback_tile`."""
+    the larger source. Values pass through as raw corrected values."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
     ctrl.level = 0
-
     fallback_level = 1
     k = int(round(provider.level_downsample(fallback_level)
                   / provider.level_downsample(0)))
@@ -2440,22 +2422,16 @@ def test_synthesis_sources_from_corrected_cache_too(app):
 
     cache = _Cache()
     scheduler.corrected_cache = cache
-    # Every source tile lives ONLY in the cache, never in the pool.
     for j in range(k):
         for i in range(k):
             key = ctrl._make_correction_key(i, j, level=0)
             cache.d[key] = np.full((ts, ts), 4.0, dtype=np.float32)
-
     before = ctrl.stats["fallback_synthesized"]
     arr = ctrl._try_synthesize_fallback_tile(fallback_level, 0, 0)
     assert arr is not None, "cache-resident sources must be usable"
     assert ctrl.stats["fallback_synthesized"] == before + 1
-    assert arr.dtype == np.uint8
-    expected = ctrl._quantize_corrected_uint8(
-        np.full((ts, ts), 4.0, dtype=np.float32), 0)[0, 0]
-    assert arr[0, 0] == expected, (
-        "a cached source must be quantized once with the FINER level's gain")
-
+    assert arr.dtype == np.float32
+    assert arr[0, 0] == pytest.approx(4.0)
     ctrl.teardown()
 
 
@@ -2543,39 +2519,37 @@ def test_synthesized_tile_is_invalidated_by_selection_change(app):
 
 
 def test_synthesis_not_requantized(app):
-    """The synthesized tile must be a PURE downsample of the pooled uint8
-    pixels -- the finer level's display gain (already baked into those
-    pooled pixels) must not be applied a second time."""
+    """The synthesized tile is pooled at the FALLBACK level and drawn under
+    that level's gain, while its constituents are FINER-level values that
+    display under the finer gain -- so the values are re-expressed by
+    g_finer / g_fallback exactly once. With gains {0: 1.0, 1: 3.5} the
+    result is the downsample divided by 3.5, and drawn at level 1 (levels
+    divided by 3.5) it shows precisely what the finer tiles showed."""
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     ctrl.set_selection(method="tophat", params=(10,))
-
     floor_level, stride = ctrl._pick_floor_level_and_stride()
     ctrl._floor_level = floor_level
     ctrl._floor_stride = stride
     ctrl._gain_ctx = ctrl._current_floor_ctx(floor_level, stride)
     ctrl._level_gain = {0: 1.0, 1: 3.5}
-
     ts = ctrl.grid.tile_size
     rng = np.random.default_rng(2)
 
     def fill(ftx, fty):
-        return rng.integers(0, 256, size=(ts, ts), dtype=np.uint8)
+        return rng.integers(0, 256, size=(ts, ts)).astype(np.float32)
 
     arrs, k = _pool_all_finer_tiles_for_fallback(ctrl, provider, 1, 0, 0, fill)
-
     result = ctrl._try_synthesize_fallback_tile(1, 0, 0)
     assert result is not None
-
     assembled = np.block([[arrs[(ftx, fty)] for ftx in range(k)] for fty in range(k)])
-    expected = np.clip(np.round(_box_downsample(assembled, k)), 0, 255).astype(np.uint8)
-    np.testing.assert_array_equal(result, expected)
-
-    # A second application of level 1's gain would produce a materially
-    # different image (random pixels, high gain) -- pin that it does NOT.
-    gained_again = np.clip(result.astype(np.float32) * 3.5, 0, 255).astype(np.uint8)
-    assert not np.array_equal(result, gained_again)
-
+    down = _box_downsample(assembled, k)
+    np.testing.assert_allclose(result, down / 3.5, rtol=1e-5)
+    lo, hi = ctrl._display_lo, ctrl._display_hi
+    l1 = ctrl._corrected_levels(1)
+    shown_fallback = (result - l1[0]) / (l1[1] - l1[0])
+    shown_finer = (down - lo) / (hi - lo)
+    np.testing.assert_allclose(shown_fallback, shown_finer, rtol=1e-4, atol=1e-6)
     ctrl.teardown()
 
 
@@ -3084,75 +3058,37 @@ def test_atomic_swap_issues_no_raw_requests(app):
     ctrl.teardown()
 
 
-def test_quantisation_is_bit_identical_to_the_reference_formula(app):
-    """The uint8 quantisation is the pixels a user compares between
-    channels, so an implementation change must be provably a no-op.
-
-    The reference here is the formula the viewer used before the
-    allocation rewrite -- `round(clip((v - lo) / span, 0, 1) * 255)` --
-    written out independently, not called from the code under test.
-    A faster fused multiply-add would give a different float rounding and
-    a scattered +/-1 in the output; this test is what forbids it.
-
-    Fixed seed, and deliberately covering: float32 and integer-derived
-    input, values below `lo` and above `hi` so both clip sides are hit,
-    tiny and huge dynamic ranges, and BOTH the gain == 1.0 fast path and
-    the gain != 1.0 path.
-    """
+def test_the_paint_time_mapping_equals_the_reference_formula(app):
+    """The screen value of a pixel is `clip((v*gain - lo)/(hi - lo))`. There
+    is no quantisation step any more -- tiles hold raw values -- so what is
+    proven is that the LEVELS the items get are the algebraic equivalent,
+    for raw pixels (gain 1) and for corrected pixels under a live non-unit
+    gain table, over tiny and huge ranges and negative lows."""
     ctrl, _provider, _scheduler, _view = make_controller(app)
     try:
         rng = np.random.default_rng(20260901)
-
-        def reference(arr, lo, hi, gain):
-            gained = arr.astype(np.float32, copy=False) * gain
-            span = max(hi - lo, 1e-6)
-            norm = np.clip((gained - lo) / span, 0.0, 1.0)
-            return np.round(norm * 255.0).astype(np.uint8)
-
-        applied_gains = set()
-        cases = []
+        if ctrl._floor_level is None:
+            ctrl._floor_level, ctrl._floor_stride = 0, 1
+        ctrl._level_gain = {0: 1.0, 1: 1.75, 2: 0.5}
+        ctrl._gain_ctx = ctrl._current_floor_ctx(ctrl._floor_level, ctrl._floor_stride)
+        applied = set()
         for span in (1e-3, 1.0, 255.0, 4000.0, 65535.0):
             for lo in (-7.5, 0.0, 12.0):
-                cases.append((lo, lo + span))
-
-        for lo, hi in cases:
-            for integer_source in (False, True):
-                # Deliberately overshoot the display range on both sides.
-                raw = (rng.random((64, 96), dtype=np.float32)
-                       * (hi - lo) * 1.4 + lo - (hi - lo) * 0.2)
-                arr = raw.astype(np.uint16).astype(np.float32) if integer_source else raw
-                ctrl._display_lo, ctrl._display_hi = lo, hi
-
-                got = ctrl._quantize_tile_uint8(arr)
-                assert np.array_equal(got, reference(arr, lo, hi, 1.0)), (
-                    f"plain quantisation differs at lo={lo} hi={hi} "
-                    f"integer_source={integer_source}")
-
-                # The table is only honoured when `_gain_ctx` matches the
-                # LIVE floor context -- a stale table must never scale
-                # pixels -- so install it the way the floor job does.
-                if ctrl._floor_level is None:
-                    ctrl._floor_level, ctrl._floor_stride = 0, 1
-                ctrl._level_gain = {0: 1.0, 1: 1.75, 2: 0.5}
-                ctrl._gain_ctx = ctrl._current_floor_ctx(
-                    ctrl._floor_level, ctrl._floor_stride)
+                hi = lo + span
+                ctrl.set_display_mapping(lo, hi)
+                v = rng.random((16, 16), dtype=np.float32) * span * 1.4 + lo - span * 0.2
+                rl = ctrl._raw_levels()
+                np.testing.assert_allclose(
+                    np.clip((v - rl[0]) / (rl[1] - rl[0]), 0, 1),
+                    np.clip((v - lo) / span, 0, 1), rtol=1e-5, atol=1e-6)
                 for level in (0, 1, 2):
-                    applied = ctrl._display_gain_for_level(level)
-                    applied_gains.add(applied)
-                    got = ctrl._quantize_corrected_uint8(arr, level)
-                    assert np.array_equal(
-                        got, reference(arr, lo, hi, applied)), (
-                        f"corrected quantisation differs at lo={lo} hi={hi} "
-                        f"level={level} gain={applied}")
-                    if applied == 1.0:
-                        # The fast path must return exactly what the general
-                        # path would have.
-                        assert np.array_equal(got, ctrl._quantize_tile_uint8(arr))
-
-        # Guard against a vacuous run: if the gain table never installed,
-        # every case above would have exercised the 1.0 fast path only.
-        assert applied_gains - {1.0}, (
-            f"no non-unit gain was ever applied: {applied_gains}")
+                    g = ctrl._display_gain_for_level(level)
+                    applied.add(g)
+                    cl = ctrl._corrected_levels(level)
+                    got = np.clip((v - cl[0]) / (cl[1] - cl[0]), 0, 1)
+                    ref = np.clip((v * g - lo) / span, 0, 1)
+                    np.testing.assert_allclose(got, ref, rtol=1e-4, atol=1e-6)
+        assert applied - {1.0}, f"no non-unit gain was ever applied: {applied}"
     finally:
         ctrl.teardown()
 
@@ -3790,40 +3726,56 @@ def test_the_overlay_prefetches_the_same_ring_for_its_own_channel(app):
 
 # ── marker contrast: paint-time levels on every marker layer ────────────────
 
-def test_marker_contrast_sets_levels_everywhere_without_requantising(app):
+def test_display_mapping_sets_levels_and_table_everywhere_without_requantising(app):
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     _paint_viewport(ctrl, provider, scheduler, view)
-    lo, hi = ctrl._display_lo, ctrl._display_hi
     entry = next(iter(ctrl._raw_pool.entries.values()))
     pixels_before = entry.item.image.copy()
 
-    ctrl.set_marker_contrast(0.5)
+    ctrl.set_display_mapping(100.0, 5000.0, gamma=0.5)
 
-    assert list(view.overview_item.levels) == pytest.approx([lo, lo + (hi - lo) * 0.5])
+    assert ctrl.display_mapping == (100.0, 5000.0, 0.5)
+    assert list(view.overview_item.levels) == pytest.approx([100.0, 5000.0])
     for e in ctrl._raw_pool.entries.values():
-        assert list(e.item.levels) == pytest.approx([0, 127.5])
+        assert list(e.item.levels) == pytest.approx([100.0, 5000.0])
+        assert e.item.lut is not None and e.item.lut.shape == (256, 3)
+    assert int(view.overview_item.lut[128][0]) > 128      # gamma 0.5 lifts mid-grey
     assert np.array_equal(entry.item.image, pixels_before), "pixels were re-quantised"
 
-    # A tile arriving AFTER the change comes up at the same levels.
     set_view_and_pump(view, 3000, 3000, 3000 + 1024, 3000 + 1024)
     for req, _cb in list(scheduler.pending_for(RawKey)):
         t = req.key.tile
         scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
     _pump(40)
-    assert all(list(e.item.levels) == pytest.approx([0, 127.5])
+    assert all(list(e.item.levels) == pytest.approx([100.0, 5000.0])
                for e in ctrl._raw_pool.entries.values())
     ctrl.teardown()
 
 
-def test_overlay_contrast_is_its_own(app):
+def test_a_host_mapping_wins_over_the_overview_records_seed(app):
+    """The host owns the channel's mapping; a later overview install for
+    that channel must not reset it to the percentile seed."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.set_display_mapping(3.0, 40.0, gamma=1.2, channel="DAPI")
+    ctrl.load_overview()
+    assert ctrl.display_mapping == (3.0, 40.0, 1.2)
+    assert list(view.overview_item.levels) == pytest.approx([3.0, 40.0])
+    ctrl.set_display_mapping(1.0, 2.0, channel="CD3")     # remembered, not applied
+    assert ctrl.display_mapping == (3.0, 40.0, 1.2)
+    ctrl.teardown()
+
+
+def test_overlay_mapping_is_its_own(app):
     from block01.viewer.explore_view import RawOverlayLayer
     ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
     ctrl.load_overview()
     overlay = RawOverlayLayer(provider, scheduler, ctrl.grid, view, "CD3")
     ctrl.attach_overlay(overlay)
-    overlay.set_contrast(2.0)
-    ctrl.set_marker_contrast(0.5)
-    assert overlay.pool._levels == (0, 510.0)
-    assert ctrl._raw_pool._levels == (0, 127.5)
+    overlay.set_display_mapping(0.0, 900.0, gamma=0.8)
+    ctrl.set_display_mapping(5.0, 50.0)
+    assert overlay.display_mapping == (0.0, 900.0, 0.8)
+    assert overlay.pool._levels_for_level(0) == (0.0, 900.0)
+    assert ctrl._raw_pool._levels_for_level(0) == pytest.approx((5.0, 50.0))
+    assert overlay.calibrated
     ctrl.teardown()

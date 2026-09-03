@@ -115,6 +115,19 @@ class OMETIFFLoader:
             return self._norm(region)
         return region.astype(np.float32, copy=False)
 
+    def overview_downsample(self):
+        """The power-of-two downsample of the coarsest pyramid level whose
+        longer side is still >= 512 px -- the level the full image reads
+        its overview from (`ExploreController._pick_overview_level`). Both
+        the compare panels' display seed and the full image's are computed
+        on this level, so they agree."""
+        h, w = self.shape
+        longest = max(int(h), int(w))
+        ds = 1
+        while longest / (ds * 2) >= 512:
+            ds *= 2
+        return ds
+
     def read_region_lowres(self, channel_name, y0, y1, x0, x1, downsample,
                            normalize=True):
         """`read_region(..., downsample=ds)` served from the TIFF's pyramid.

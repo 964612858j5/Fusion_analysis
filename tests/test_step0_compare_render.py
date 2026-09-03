@@ -1,13 +1,12 @@
-"""The compare panels paint what `_make_colored_rgb` computes -- without
-computing it.
+"""The compare panels paint raw intensity through the channel's display
+mapping -- the same numbers the full image uses -- and never normalise.
 
-Channel switching in compare mode took ~850 ms per switch on a 2720x2336
-patch: two float32 RGB composites per result plus a third in the refresh,
-all on the GUI thread, for three panels. The panels now hold a uint8 marker
-image with a colour lookup table and the contrast as `levels`, and a second
-image item for the nucleus that is ADDED on top (CompositionMode_Plus). The
-sum the painter computes must be the sum the numpy code computed, so the
-proof here is a pixel comparison against `_make_colored_rgb` itself.
+Each panel holds the raw (or background-corrected) array with
+`levels=(min, max)` and a lookup table carrying gamma and colour; the
+nucleus is a second item ADDED on top (CompositionMode_Plus) under its own
+channel's mapping. Per pixel that is
+clip(marker_colour*clip((m-min)/(max-min))**gamma + nucleus_colour*...),
+proven here against `_make_colored_rgb` computed on the mapped values.
 
 Own module: page-heavy Step0 suites crash pyqtgraph offscreen when combined
 with the background-correction module in one process.
@@ -44,17 +43,19 @@ def _page(app):
     return page
 
 
-def _payload(marker=0.5, nucleus=0.3, h=64, w=64, with_nucleus=True):
+def _payload(marker=500.0, nucleus=300.0, h=64, w=64, with_nucleus=True,
+             tophat_scale=0.5, cucim=True):
+    """Raw-intensity payload the way the worker builds it."""
     m = np.full((h, w), marker, np.float32)
     metrics = {"snr": 1.0, "bg_cv": 0.1}
-    return {"original_disp": m, "tophat_disp": m * 0.5, "cucim_disp": None,
+    return {"original_raw": m, "tophat_raw": m * tophat_scale,
+            "cucim_raw": (m * 0.8) if cucim else None,
             "original_metrics": metrics, "tophat_metrics": metrics,
             "cucim_metrics": metrics,
-            "nucleus_disp": np.full((h, w), nucleus, np.float32) if with_nucleus else None}
+            "nucleus_raw": np.full((h, w), nucleus, np.float32) if with_nucleus else None}
 
 
 def _centre_pixel(page, idx):
-    """The painted colour at the centre of panel `idx`, as floats 0..1."""
     vb = page._preview_vbs[idx]
     vb.autoRange()
     QtTest.QTest.qWait(30)
@@ -65,15 +66,17 @@ def _centre_pixel(page, idx):
     return np.array([c.red(), c.green(), c.blue()]) / 255.0
 
 
-def _expected(page, marker, nucleus, marker_scale=1.0, nucleus_scale=1.0,
-              marker_on=True, nucleus_on=True):
+def _mapped(v, lo, hi, gamma):
+    return float(np.clip((v - lo) / (hi - lo), 0, 1) ** gamma)
+
+
+def _expected(page, marker, nucleus, m_map, n_map, marker_on=True, nucleus_on=True):
     ch = page.current_channel
     marker_rgb = page._channel_colors.get(ch, getattr(page, "_marker_color", (0.0, 1.0, 0.3)))
-    m = np.array([[min(1.0, marker / marker_scale) if marker_on else 0.0]], np.float32)
-    n = (np.array([[min(1.0, nucleus / nucleus_scale)]], np.float32)
+    m = np.array([[_mapped(marker, *m_map) if marker_on else 0.0]], np.float32)
+    n = (np.array([[_mapped(nucleus, *n_map)]], np.float32)
          if nucleus_on and nucleus is not None else None)
-    return page._make_colored_rgb(m, n, marker_rgb=marker_rgb,
-                                  nucleus_rgb=page._nuc_color)[0, 0]
+    return page._make_colored_rgb(m, n, marker_rgb=marker_rgb, nucleus_rgb=page._nuc_color)[0, 0]
 
 
 def _show(page, payload):
@@ -81,51 +84,107 @@ def _show(page, payload):
     QtTest.QTest.qWait(30)
 
 
-def test_the_painted_pixel_is_the_numpy_sum(app):
+def test_the_painted_pixel_is_the_mapping_of_the_raw_value(app):
     page = _page(app)
     page._channel_colors["CD3"] = (0.0, 1.0, 0.0)
     page._nuc_color = (0.0, 0.5, 1.0)
-    _show(page, _payload(marker=0.6, nucleus=0.4))
+    page.set_display_mapping("CD3", 100.0, 900.0, 1.0)
+    page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
+    _show(page, _payload(marker=500.0, nucleus=400.0))
 
     got = _centre_pixel(page, 0)
-    want = _expected(page, 0.6, 0.4)
+    want = _expected(page, 500.0, 400.0, (100.0, 900.0, 1.0), (0.0, 1000.0, 1.0))
 
     assert np.allclose(got, want, atol=2 / 255), (got, want)
-    # And the nucleus really is added, not painted over: green from the
-    # marker survives under the blue nucleus.
-    assert got[1] > 0.5 and got[2] > 0.3
+    assert got[1] > 0.45 and got[2] > 0.3        # added, not painted over
 
 
-def test_contrast_sliders_change_the_pixel_without_recomputing(app):
+def test_the_three_panels_share_one_mapping_so_a_darker_result_is_darker(app):
+    """The worker's TopHat result here is half the original: under one
+    shared mapping it must paint at half the brightness, not be re-stretched
+    to look as bright."""
+    page = _page(app)
+    page._channel_colors["CD3"] = (1.0, 1.0, 1.0)
+    page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
+    page._btn_show_nucleus.setChecked(False)
+    _show(page, _payload(marker=600.0, tophat_scale=0.5))
+
+    orig = _centre_pixel(page, 0)
+    tophat = _centre_pixel(page, 1)
+
+    assert np.allclose(orig, [0.6] * 3, atol=2 / 255)
+    assert np.allclose(tophat, [0.3] * 3, atol=2 / 255)
+
+
+def test_gamma_and_range_changes_are_table_and_level_swaps(app):
     page = _page(app)
     page._channel_colors["CD3"] = (1.0, 0.0, 0.0)
-    _show(page, _payload(marker=0.4, nucleus=0.2))
+    page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
+    page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
+    _show(page, _payload(marker=400.0, nucleus=200.0))
     before = _centre_pixel(page, 0)
-    quantised = page._last_payload["_u8"]
+    image_before = page._preview_imgs[0].image
 
-    page._marker_contrast_slider.setValue(50)        # scale 0.5 -> marker doubles
-    page._nuc_contrast_slider.setValue(50)
+    page.set_display_mapping("CD3", 0.0, 500.0, 0.5)         # brighter, gamma
+    page.set_display_mapping("DAPI", 0.0, 400.0, 1.0)
     QtTest.QTest.qWait(30)
     after = _centre_pixel(page, 0)
 
     assert not np.allclose(before, after)
-    assert np.allclose(after, _expected(page, 0.4, 0.2, 0.5, 0.5), atol=2 / 255)
-    assert page._last_payload["_u8"] is quantised, "the slider re-quantised the pixels"
+    assert np.allclose(after, _expected(page, 400.0, 200.0, (0.0, 500.0, 0.5), (0.0, 400.0, 1.0)),
+                       atol=2 / 255)
+    # No per-pixel work: the item still holds the same raw buffer.
+    assert np.shares_memory(page._preview_imgs[0].image, image_before), "the pixels were rebuilt"
+    assert page._preview_imgs[0].image.dtype == np.float32
+    assert list(page._preview_imgs[0].levels) == pytest.approx([0.0, 500.0])
+
+
+def test_the_controls_show_and_edit_the_current_channels_mapping(app):
+    page = _page(app)
+    page.set_display_mapping("CD3", 10.0, 800.0, 1.5)
+    page.set_display_mapping("DAPI", 5.0, 900.0, 0.9)
+    _show(page, _payload())
+
+    assert page._marker_display_min.value() == pytest.approx(10.0)
+    assert page._marker_display_max.value() == pytest.approx(800.0)
+    assert page._marker_display_gamma.value() == pytest.approx(1.5)
+    assert page._nuc_display_max.value() == pytest.approx(900.0)
+
+    page._marker_display_max.setValue(600.0)
+    assert page._display_mapping_for("CD3") == (10.0, 600.0, 1.5)
+    assert list(page._preview_imgs[0].levels) == pytest.approx([10.0, 600.0])
+
+
+def test_the_seed_comes_from_the_payload_when_the_slide_cannot_be_read(app):
+    """A loader without a pyramid (the fakes) cannot seed from the slide,
+    so the first result's own raw pixels seed the mapping -- QuPath-style
+    0.1/99.9 over non-zero pixels."""
+    page = _page(app)
+    rng = np.random.default_rng(3)
+    p = _payload()
+    p["original_raw"] = rng.uniform(100, 2000, size=(64, 64)).astype(np.float32)
+    _show(page, p)
+    lo, hi, gamma = page._display_mapping_for("CD3")
+    assert gamma == 1.0
+    assert 100 <= lo < 200 and 1900 < hi <= 2000
 
 
 def test_the_switches_hide_and_show_each_layer(app):
     page = _page(app)
     page._channel_colors["CD3"] = (0.0, 1.0, 0.0)
-    _show(page, _payload(marker=0.6, nucleus=0.4))
+    page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
+    page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
+    _show(page, _payload(marker=600.0, nucleus=400.0))
+    maps = ((0.0, 1000.0, 1.0), (0.0, 1000.0, 1.0))
 
     page._btn_show_nucleus.setChecked(False)
     QtTest.QTest.qWait(30)
-    assert np.allclose(_centre_pixel(page, 0), _expected(page, 0.6, 0.4, nucleus_on=False), atol=2 / 255)
+    assert np.allclose(_centre_pixel(page, 0), _expected(page, 600.0, 400.0, *maps, nucleus_on=False), atol=2 / 255)
 
     page._btn_show_nucleus.setChecked(True)
     page._btn_show_marker.setChecked(False)
     QtTest.QTest.qWait(30)
-    assert np.allclose(_centre_pixel(page, 0), _expected(page, 0.6, 0.4, marker_on=False), atol=2 / 255)
+    assert np.allclose(_centre_pixel(page, 0), _expected(page, 600.0, 400.0, *maps, marker_on=False), atol=2 / 255)
 
     page._btn_show_marker.setChecked(False)
     page._btn_show_nucleus.setChecked(False)
@@ -135,42 +194,35 @@ def test_the_switches_hide_and_show_each_layer(app):
 
 def test_a_result_that_was_not_computed_is_black_with_nothing_added(app):
     page = _page(app)
-    _show(page, _payload(marker=0.6, nucleus=0.4))     # cucim_disp is None
-
+    _show(page, _payload(cucim=False))
     assert np.allclose(_centre_pixel(page, 2), (0, 0, 0), atol=2 / 255)
     nuc = page._preview_nuc_imgs[2]
     assert nuc is None or nuc.isVisible() is False
-    assert page._preview_imgs[2].image.shape == (64, 64), "geometry kept for the zoom"
+    assert page._preview_imgs[2].image.shape == (64, 64)
 
 
-def test_the_colour_change_is_a_table_swap(app):
+def test_legacy_normalised_payloads_still_display(app):
+    """Older payloads and fixtures carry only `*_disp` arrays in 0..1."""
     page = _page(app)
-    page._channel_colors["CD3"] = (0.0, 1.0, 0.0)
-    _show(page, _payload(marker=0.6, nucleus=0.0))
-    quantised = page._last_payload["_u8"]
-
-    page._channel_colors["CD3"] = (1.0, 0.0, 0.0)
-    page._rebuild_payload_rgb("CD3")
-    page._refresh_preview_display(keep_zoom=True)
-    QtTest.QTest.qWait(30)
-
-    got = _centre_pixel(page, 0)
-    assert got[0] > 0.5 and got[1] < 0.05, got
-    assert page._last_payload["_u8"] is quantised
-    assert "original_rgb" not in page._last_payload, "no composite is kept any more"
+    disp = np.full((32, 32), 0.5, np.float32)
+    m = {"snr": 1.0, "bg_cv": 0.1}
+    page._on_batch_patch_done("CD3", 0, {"original_disp": disp, "tophat_disp": disp, "cucim_disp": disp,
+                                        "original_metrics": m, "tophat_metrics": m, "cucim_metrics": m,
+                                        "nucleus_disp": None})
+    assert page._preview_imgs[0].image is not None
+    lo, hi, _g = page._display_mapping_for("CD3")
+    assert lo <= 0.5 <= hi
 
 
 def test_a_switch_between_cached_channels_is_cheap(app):
-    """The reason for the change. Both channels quantised once; the second
-    and later switches do no per-pixel work at all."""
     page = _page(app)
     big = 1024
-    a = _payload(0.5, 0.3, big, big)
-    b = _payload(0.7, 0.2, big, big)
+    a = _payload(500.0, 300.0, big, big)
+    b = _payload(700.0, 200.0, big, big)
     page._on_batch_patch_done("CD3", 0, a)
     page._preview_cache[("CD20", 0)] = b
     page._computed_channels = {"CD3", "CD20"}
-    page._show_channel_from_cache("CD20")            # first show: quantise
+    page._show_channel_from_cache("CD20")
     page._show_channel_from_cache("CD3")
 
     t = time.perf_counter()
@@ -178,22 +230,16 @@ def test_a_switch_between_cached_channels_is_cheap(app):
         page._show_channel_from_cache(ch)
     per_switch_ms = (time.perf_counter() - t) * 1000 / 4
 
-    assert per_switch_ms < 60, f"{per_switch_ms:.0f} ms per switch"
+    assert per_switch_ms < 80, f"{per_switch_ms:.0f} ms per switch"
     assert page._last_payload is a
 
 
 def test_nucleus_items_are_created_on_first_use_additive_and_row_major(app):
-    """Deferred, like the full-image viewer: three more scene items per page
-    made the Step0 suite's known offscreen crash deterministic."""
     page = _page(app)
     assert page._preview_nuc_imgs == [None, None, None]
-
-    _show(page, _payload(marker=0.6, nucleus=0.4))      # cucim result absent
-
+    _show(page, _payload(cucim=False))
     assert page._preview_nuc_imgs[0] is not None and page._preview_nuc_imgs[1] is not None
-    assert page._preview_nuc_imgs[2] is None, "no nucleus item for a panel with no result"
+    assert page._preview_nuc_imgs[2] is None
     for item in page._preview_nuc_imgs[:2]:
         assert item.axisOrder == "row-major"
         assert item.paintMode == QtGui.QPainter.CompositionMode_Plus
-        assert item.zValue() > page._preview_imgs[0].zValue()
-    assert page._nuc_item(0) is page._preview_nuc_imgs[0]

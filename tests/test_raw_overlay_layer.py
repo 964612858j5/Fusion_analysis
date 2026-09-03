@@ -636,17 +636,16 @@ def test_a_stale_generation_result_is_dropped(app):
     ctrl.teardown()
 
 
-def test_a_delivered_tile_is_quantised_against_the_overlays_own_range(app):
-    """Borrowing the marker's range would quantise nucleus pixels against a
-    different channel's histogram."""
+def test_a_delivered_tile_is_drawn_under_the_overlays_own_range(app):
+    """Borrowing the marker's range would show nucleus pixels against a
+    different channel's histogram. Tiles hold raw values; the layer's own
+    range is in the item's levels."""
     ctrl, provider, scheduler, view = make_controller(app)
     ctrl.load_overview()
-    # Enabled only AFTER the range is set: enabling an uncalibrated layer
-    # starts the real calibration, which would land later and overwrite it.
     layer = _overlay(ctrl, provider, scheduler, view, calibrate=False,
                      enabled=False)
-    layer._display_lo, layer._display_hi = 0.0, 1000.0
-    ctrl._display_lo, ctrl._display_hi = 0.0, 10.0      # deliberately unlike
+    layer.set_display_mapping(0.0, 1000.0)
+    ctrl.set_display_mapping(0.0, 10.0)                  # deliberately unlike
     layer.set_enabled(True, host=ctrl)
     set_view_and_pump(view, 0, 0, 1024, 1024)
     req = _live_overlay_requests(scheduler, layer)[0]
@@ -656,9 +655,8 @@ def test_a_delivered_tile_is_quantised_against_the_overlays_own_range(app):
     entry = layer._pool.get(req.key.tile.level, req.key.tile.tx,
                             req.key.tile.ty)
     assert entry is not None
-    # 500 of 0..1000 -> ~128, NOT saturated at 255 (which the marker's
-    # 0..10 range would have produced).
-    assert 120 <= int(entry.item.image.flat[0]) <= 135
+    assert float(entry.item.image.flat[0]) == pytest.approx(500.0)
+    assert list(entry.item.levels) == pytest.approx([0.0, 1000.0])
     ctrl.teardown()
 
 

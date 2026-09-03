@@ -604,6 +604,7 @@ from PyQt5.QtCore import QRectF
 # patch a rule and watch the controller's output follow -- the same
 # discipline `multichannel_prefetch` uses for `prefetch_policy`.
 from . import request_planning as planning
+from ..core.display_mapping import build_display_lut, seed_display_range
 from .tile_types import (
     CorrectionKey,
     QualityLevel,
@@ -887,10 +888,12 @@ class TileItemPool:
         # Layer opacity, owned here for the same reason as the LUT: items
         # created after the switch must come up in the same state.
         self._layer_opacity = 1.0
-        # Display levels, same ownership rule. (0, 255) is the quantised
-        # range as stored; a contrast control raises or lowers the top end
-        # at paint time, so no tile is ever re-quantised for it.
-        self._levels = (0, 255)
+        # Display levels, same ownership rule -- as a FUNCTION of the level,
+        # because corrected tiles carry a per-pyramid-level display gain.
+        # Items hold RAW values (uint16 raw, float32 corrected); the mapping
+        # to the screen is these levels plus the table, at paint time, so a
+        # change of mapping never re-quantises a tile.
+        self._levels_for_level = lambda level: (0.0, 1.0)
         # Composition mode, same ownership rule. None = pyqtgraph's default
         # (SourceOver), which is what every existing caller gets: this is
         # only ever set by a layer that must ADD to what is underneath.
@@ -912,12 +915,17 @@ class TileItemPool:
         for entry in self.entries.values():
             entry.item.setOpacity(self._layer_opacity)
 
-    def set_levels(self, levels) -> None:
-        """Display levels for every item, now and for items created later.
-        Paint-time only: the stored uint8 pixels are untouched."""
-        self._levels = (float(levels[0]), float(levels[1]))
+    def set_levels_for_level(self, fn) -> None:
+        """`fn(level) -> (lo, hi)`: display levels for every item, now and
+        for items created later. Paint-time only: stored pixels untouched."""
+        self._levels_for_level = fn
         for entry in self.entries.values():
-            entry.item.setLevels(self._levels)
+            entry.item.setLevels(fn(entry.level))
+
+    def set_levels(self, levels) -> None:
+        """Convenience: the same levels for every level."""
+        lo, hi = float(levels[0]), float(levels[1])
+        self.set_levels_for_level(lambda _level: (lo, hi))
 
     def set_lookup_table(self, lut) -> None:
         """Apply `lut` (or None for greyscale) to every item, now and on
@@ -946,7 +954,8 @@ class TileItemPool:
             # the fixed (0, 255).
             item = pg.ImageItem(axisOrder="row-major")
             item.setZValue(self._z_for_level(level))
-            item.setImage(arr_uint8, autoLevels=False, levels=self._levels)
+            item.setImage(arr_uint8, autoLevels=False,
+                          levels=self._levels_for_level(level))
             if self._lut is not None:
                 item.setLookupTable(self._lut)
             if self._layer_opacity != 1.0:
@@ -959,7 +968,8 @@ class TileItemPool:
             self.entries[coord] = entry
             self.items_created += 1
         else:
-            entry.item.setImage(arr_uint8, autoLevels=False, levels=self._levels)
+            entry.item.setImage(arr_uint8, autoLevels=False,
+                                levels=self._levels_for_level(level))
             # rect/level are immutable after creation (design contract):
             # entries never move.
         entry.key = key
@@ -1234,6 +1244,8 @@ class RawOverlayLayer(QtCore.QObject):
         # channel's histogram, i.e. an arbitrary brightness.
         self._display_lo = None
         self._display_hi = None
+        self._gamma = 1.0
+        self._tint = None
         self._calibrating = False
         self._calibration_failed = False
 
@@ -1319,17 +1331,25 @@ class RawOverlayLayer(QtCore.QObject):
             self.start_calibration(host)
 
     def set_tint(self, rgb):
-        """Colour, as a lookup table. Display only -- no re-read, no
-        re-quantisation, no request."""
-        self._pool.set_lookup_table(
-            None if rgb is None else ExploreController.build_tint_lut(rgb))
+        """Colour, as a lookup table (gamma folded in). Display only -- no
+        re-read, no re-quantisation, no request."""
+        self._tint = rgb
+        self._pool.set_lookup_table(build_display_lut(rgb, self._gamma))
 
-    def set_contrast(self, scale: float):
-        """Brightness of this layer as a factor on its fixed display range:
-        pixel = clip(value / (range * scale)). 1.0 is the calibrated range;
-        0.5 shows it twice as bright. Paint-time levels only."""
-        scale = max(float(scale), 1e-3)
-        self._pool.set_levels((0, 255.0 * scale))
+    def set_display_mapping(self, lo, hi, gamma=None):
+        """This layer's mapping `(display_min, display_max, gamma)`, see
+        core/display_mapping.py. Paint-time levels and table; the tiles are
+        raw values and stay so. Also counts as calibrated: a host that knows
+        the channel's mapping need not wait for the overview read."""
+        self._display_lo, self._display_hi = float(lo), float(hi)
+        if gamma is not None:
+            self._gamma = max(float(gamma), 1e-3)
+        self._pool.set_levels((self._display_lo, self._display_hi))
+        self._pool.set_lookup_table(build_display_lut(self._tint, self._gamma))
+
+    @property
+    def display_mapping(self):
+        return (self._display_lo, self._display_hi, self._gamma)
 
     # ── calibration ───────────────────────────────────────────────────
     def start_calibration(self, host):
@@ -1376,7 +1396,9 @@ class RawOverlayLayer(QtCore.QObject):
                 or rec.source != self.provider.source_identity()):
             self.stats["mismatched_dropped"] += 1
             return
-        self._display_lo, self._display_hi = rec.display_lo, rec.display_hi
+        if not self.calibrated:
+            # The seed, unless a host already installed the channel's mapping.
+            self.set_display_mapping(rec.display_lo, rec.display_hi)
         host = self.parent()
         if self.effective_enabled and host is not None:
             self._resync_from(host)
@@ -1533,7 +1555,7 @@ class RawOverlayLayer(QtCore.QObject):
                 return
 
         arr = result.pixels.handle
-        gray = self._quantize(arr)
+        gray = np.asarray(arr)                 # raw values; mapped at paint time
         ds_y, ds_x = self.provider.level_downsample_yx(tile.level)
         rect = ExploreView.world_rect(
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
@@ -1541,18 +1563,6 @@ class RawOverlayLayer(QtCore.QObject):
         self._pool.put(tile.level, tile.tx, tile.ty, rect, gray, key)
         self.stats["tiles_blitted"] += 1
         self.apply_visibility(tile.level)
-
-    def _quantize(self, arr):
-        """Same arithmetic and same ORDER as the host's raw quantisation,
-        against THIS channel's own display range."""
-        span = max(self._display_hi - self._display_lo, 1e-6)
-        buf = np.array(arr, dtype=np.float32, copy=True)
-        buf -= self._display_lo
-        buf /= span
-        np.clip(buf, 0.0, 1.0, out=buf)
-        buf *= 255.0
-        np.round(buf, out=buf)
-        return buf.astype(np.uint8)
 
     # ── teardown ──────────────────────────────────────────────────────
     def teardown(self):
@@ -1760,15 +1770,23 @@ class ExploreController(QtCore.QObject):
         # None = greyscale, which is what every layer draws as until a host
         # sets a colour. Kept as controller state so a channel switch, a
         # newly pooled tile and a floor rebuild all pick up the same table.
-        self._tint = None
+        self._tint = None            # (r, g, b) floats or None = grey
         self._marker_visible = True
-        # Marker contrast (module docstring "Channel tint"): a factor on the
-        # fixed display range, applied as paint-time levels to the overview,
-        # the floor and both pools. 1.0 = the calibrated range. The compare
-        # panels stretch each PATCH by its own percentiles, so the same
-        # tissue is brighter there than under the slide-wide range; this
-        # lets the user match them without re-quantising a single tile.
-        self._marker_contrast = 1.0
+        # Display mapping (core/display_mapping.py): `_display_lo/_hi` plus
+        # `_gamma`, applied at paint time as `levels` and a lookup table to
+        # the overview, the floor and both pools. Items hold RAW values.
+        # A host that owns the channel's mapping installs it with
+        # `set_display_mapping`; that entry then wins over the seed an
+        # overview record would otherwise bring for the same channel.
+        self._gamma = 1.0
+        self._host_mapping = {}      # channel -> (lo, hi, gamma)
+        # Levels callbacks capture VALUES, never `self`: a closure over the
+        # controller would put it, its pools and their items in a reference
+        # cycle, and a torn-down controller would then die in a cyclic GC
+        # pass at an arbitrary moment -- measured as a segfault inside
+        # `QPainter::drawImage` while the old view was still painting.
+        self._raw_pool.set_levels(self._raw_levels())
+        self._precise_pool.set_levels_for_level(self._corrected_levels_fn())
 
         # ── optional additive overlay (RawOverlayLayer) ──
         # Attached by the host after construction, never created here: this
@@ -1963,7 +1981,7 @@ class ExploreController(QtCore.QObject):
     # ── channel tint / layer visibility ─────────────────────────────────
 
     @staticmethod
-    def build_tint_lut(rgb):
+    def build_tint_lut(rgb, gamma=1.0):
         """A 256-entry uint8 RGB colour table for `rgb` (floats 0..1).
 
         Entry i is `i * rgb`, i.e. the same "grey value scales one colour"
@@ -1973,9 +1991,7 @@ class ExploreController(QtCore.QObject):
         through, and a transparent dark end would only reveal the ViewBox
         background.
         """
-        ramp = np.arange(256, dtype=np.float32)
-        scaled = ramp[:, None] * np.asarray(rgb, dtype=np.float32)[None, :3]
-        return np.clip(scaled, 0, 255).astype(np.uint8)
+        return build_display_lut(rgb, gamma)
 
     def set_tint(self, rgb):
         """Colour every layer this controller owns. `None` = greyscale.
@@ -1985,31 +2001,84 @@ class ExploreController(QtCore.QObject):
         traffic. Applied to the overview, the corrected floor and BOTH tile
         pools, and remembered so tiles that arrive later are coloured too.
         """
-        lut = None if rgb is None else self.build_tint_lut(rgb)
-        self._tint = lut
+        self._tint = rgb
+        try:
+            gamma = self._gamma
+        except (AttributeError, RuntimeError):     # built without __init__ (tests)
+            gamma = 1.0
+        lut = None if (rgb is None and gamma == 1.0) else build_display_lut(rgb, gamma)
         self.view.overview_item.setLookupTable(lut)
         self.view.corrected_floor_item.setLookupTable(lut)
         self._raw_pool.set_lookup_table(lut)
         self._precise_pool.set_lookup_table(lut)
 
-    def _overview_levels(self):
-        lo, hi = self._display_lo, self._display_hi
-        return (lo, lo + (hi - lo) * self._marker_contrast)
+    # ── display mapping (core/display_mapping.py) ─────────────────────
 
-    def _uint8_levels(self):
-        return (0, 255.0 * self._marker_contrast)
+    def _raw_levels(self):
+        """Levels for raw pixels: the mapping itself."""
+        return (self._display_lo, self._display_hi)
 
-    def set_marker_contrast(self, scale: float):
-        """Brightness of every marker layer as a factor on the fixed display
-        range (see `_marker_contrast`). Paint-time only: overview, floor and
-        both pools get new `levels`; nothing is re-read or re-quantised."""
-        self._marker_contrast = max(float(scale), 1e-3)
+    def _corrected_levels(self, level):
+        """Levels for CORRECTED pixels at `level`: the mapping divided by
+        that level's display gain, so `clip((v*gain - lo)/(hi - lo))` is
+        what the painter computes from the stored, un-gained values."""
+        g = self._display_gain_for_level(level)
+        return (self._display_lo / g, self._display_hi / g)
+
+    def _corrected_levels_fn(self):
+        """`_corrected_levels` as a closure over VALUES (the current mapping
+        and gain table), safe to hand to a pool: it must not reference the
+        controller (see `__init__`)."""
+        lo, hi = float(self._display_lo), float(self._display_hi)
+        num_levels = getattr(self.provider, "num_levels", 1)
+        gains = {L: float(self._display_gain_for_level(L)) for L in range(num_levels)}
+
+        def levels_for(level, _lo=lo, _hi=hi, _g=gains):
+            g = _g.get(level, 1.0)
+            return (_lo / g, _hi / g)
+
+        return levels_for
+
+    def _apply_display_mapping(self):
+        """Push the current `(lo, hi, gamma)` and tint to every item."""
+        lut = (None if (self._tint is None and self._gamma == 1.0)
+               else build_display_lut(self._tint, self._gamma))
         if self._overview_arr is not None:
-            self.view.overview_item.setLevels(self._overview_levels())
-        if self.view.corrected_floor_item.image is not None:
-            self.view.corrected_floor_item.setLevels(self._uint8_levels())
-        self._raw_pool.set_levels(self._uint8_levels())
-        self._precise_pool.set_levels(self._uint8_levels())
+            self.view.overview_item.setLevels(self._raw_levels())
+        self.view.overview_item.setLookupTable(lut)
+        if self.view.corrected_floor_item.image is not None and self._floor_level is not None:
+            self.view.corrected_floor_item.setLevels(self._corrected_levels(self._floor_level))
+        self.view.corrected_floor_item.setLookupTable(lut)
+        # Levels callbacks capture VALUES, never `self`: a closure over the
+        # controller would put it, its pools and their items in a reference
+        # cycle, and a torn-down controller would then die in a cyclic GC
+        # pass at an arbitrary moment -- measured as a segfault inside
+        # `QPainter::drawImage` while the old view was still painting.
+        self._raw_pool.set_levels(self._raw_levels())
+        self._precise_pool.set_levels_for_level(self._corrected_levels_fn())
+        self._raw_pool.set_lookup_table(lut)
+        self._precise_pool.set_lookup_table(lut)
+
+    def set_display_mapping(self, lo, hi, gamma=None, *, channel=None):
+        """Install the mapping for `channel` (default: the current one) --
+        the host's word, which wins over the seed an overview record brings
+        for that channel. Paint-time only: nothing is re-read or
+        re-quantised, and a tile that lands later is drawn the same way."""
+        lo, hi = float(lo), float(hi)
+        if hi <= lo:
+            hi = lo + 1.0
+        if gamma is None:
+            gamma = self._gamma
+        gamma = max(float(gamma), 1e-3)
+        self._host_mapping[channel or self.channel] = (lo, hi, gamma)
+        if channel is not None and channel != self.channel:
+            return
+        self._display_lo, self._display_hi, self._gamma = lo, hi, gamma
+        self._apply_display_mapping()
+
+    @property
+    def display_mapping(self):
+        return (self._display_lo, self._display_hi, self._gamma)
 
     def set_marker_visible(self, visible: bool):
         """Show/hide every layer this controller owns.
@@ -2202,7 +2271,7 @@ class ExploreController(QtCore.QObject):
         ts = self.grid.tile_size
         ds_y, ds_x = self._downsample_yx(self.level)
         for tx, ty, key, arr in pending:
-            gray = self._quantize_corrected_uint8(arr, self.level)
+            gray = self._prepare_corrected(arr)
             rect = ExploreView.world_rect(
                 ty * ts, tx * ts, arr.shape[0], arr.shape[1], ds_y, ds_x)
             self._precise_pool.put(self.level, tx, ty, rect, gray, key)
@@ -2408,7 +2477,11 @@ class ExploreController(QtCore.QObject):
         another channel's range."""
         ds_y, ds_x = self._downsample_yx(rec.level)
         h, w = rec.shape
-        self._display_lo, self._display_hi = rec.display_lo, rec.display_hi
+        host = self._host_mapping.get(rec.channel)
+        if host is not None:
+            self._display_lo, self._display_hi, self._gamma = host
+        else:
+            self._display_lo, self._display_hi = rec.display_lo, rec.display_hi
         self._overview_arr = rec.arr
         self._overview_identity = (rec.source, rec.channel)
         self._overview_level = rec.level
@@ -2416,12 +2489,12 @@ class ExploreController(QtCore.QObject):
         # Whole level read at once, so always fully valid -- plain
         # grayscale, never masked; fixed levels only, never autoLevels.
         self.view.overview_item.setImage(
-            rec.arr, autoLevels=False,
-            levels=(rec.display_lo,
-                    rec.display_lo + (rec.display_hi - rec.display_lo) * self._marker_contrast))
+            rec.arr, autoLevels=False, levels=self._raw_levels())
         self.view.overview_item.setRect(ExploreView.world_rect(0, 0, h, w, ds_y, ds_x))
         self.view.overview_item.setVisible(True)
         self._overview_cache_put(rec)
+        # Levels of the pools and the table follow the (possibly new) range.
+        self._apply_display_mapping()
 
     def _clear_overview(self):
         """Drop the live overview and hide it. Used the instant a switch
@@ -2995,19 +3068,26 @@ class ExploreController(QtCore.QObject):
                 # gain[floor_level] slightly under-corrects the floor
                 # specifically -- accepted, and inactive on the real data
                 # (stride is 1 there).
-                gray = self._quantize_corrected_uint8(result_arr, floor_level)
+                gray = np.asarray(result_arr, dtype=np.float32)   # raw corrected values
                 ds_y, ds_x = self._downsample_yx(floor_level)
                 ds_y, ds_x = ds_y * stride, ds_x * stride
                 h, w = result_arr.shape
                 rect = ExploreView.world_rect(0, 0, h, w, ds_y, ds_x)
                 self.view.corrected_floor_item.setImage(
-                    gray, autoLevels=False, levels=self._uint8_levels())
+                    gray, autoLevels=False, levels=self._corrected_levels(floor_level))
+                self.view.corrected_floor_item.setLookupTable(
+                    None if (self._tint is None and self._gamma == 1.0)
+                    else build_display_lut(self._tint, self._gamma))
                 self.view.corrected_floor_item.setRect(rect)
                 self._floor_ready = True
                 self._floor_ctx = ctx
                 accepted = True
         self.stats["level_display_gain"] = dict(self._level_gain)
         self.stats["gain_calibrated"] = bool(self._level_gain)
+        if current:
+            # The gain table changed: the precise pool's levels closure holds
+            # the previous table by value, so hand it the new one.
+            self._precise_pool.set_levels_for_level(self._corrected_levels_fn())
         self.floor_ready_changed.emit(accepted)
 
         if self._floor_pending:
@@ -3030,29 +3110,16 @@ class ExploreController(QtCore.QObject):
 
     @staticmethod
     def _compute_display_levels(arr: np.ndarray) -> Tuple[float, float]:
-        """(0, 99.5th percentile), guarding the degenerate all-zero/constant
-        case so span-based normalization never divides by ~0."""
-        lo = 0.0
-        hi = float(np.percentile(arr, 99.5)) if arr.size else 0.0
-        if not np.isfinite(hi) or hi <= lo:
-            hi = lo + 1.0
-        return lo, hi
+        """The SEED of a channel's display mapping: the QuPath-style
+        automatic window over the level's tissue pixels (zeros excluded),
+        the same rule the compare panels seed with (core/display_mapping.py).
+        A host that owns the mapping overrides it via `set_display_mapping`."""
+        return seed_display_range(arr)
 
     def set_display_levels(self, lo: float, hi: float):
-        """Public: reapply fixed display levels to overview/raw/precise.
-        Never triggered automatically by new tile arrivals. Re-quantizes
-        every currently-pooled item's pixels from its LAST delivered raw
-        array is not tracked (only the quantized uint8 is kept) -- so this
-        only affects the overview immediately; already-pooled tile items
-        keep their existing quantization until next re-delivery. (This
-        mirrors the fixed-levels contract: brightness is fixed at arrival
-        time and does not silently rescale existing pixels.)"""
-        self._display_lo = float(lo)
-        self._display_hi = float(hi)
-        if self._overview_arr is not None:
-            self.view.overview_item.setImage(
-                self._overview_arr, autoLevels=False,
-                levels=self._overview_levels())
+        """Compatibility alias for `set_display_mapping(lo, hi)`. Since the
+        pools hold raw values, this now reaches every pooled tile at once."""
+        self.set_display_mapping(lo, hi)
 
     # ── level selection ───────────────────────────────────────────────────
 
@@ -3703,7 +3770,7 @@ class ExploreController(QtCore.QObject):
                 entry = self._precise_pool.get(finer_level, ftx, fty)
                 if (entry is not None and entry.key is not None
                         and self._precise_key_current_for_level(entry.key, finer_level)):
-                    row_arrs.append(entry.item.image)
+                    row_arrs.append(np.asarray(entry.item.image, dtype=np.float32))
                     continue
                 # The pool only holds what has been BLITTED; the
                 # corrected cache holds everything computed, including
@@ -3718,7 +3785,7 @@ class ExploreController(QtCore.QObject):
                 if cached is None:
                     self.stats["fallback_synthesis_declined"] += 1
                     return None
-                row_arrs.append(self._quantize_corrected_uint8(cached, finer_level))
+                row_arrs.append(np.asarray(cached, dtype=np.float32))
             rows.append(row_arrs)
 
         try:
@@ -3730,7 +3797,12 @@ class ExploreController(QtCore.QObject):
             return None
 
         downsampled = _box_downsample(assembled, k)
-        result = np.clip(np.round(downsampled), 0, 255).astype(np.uint8)
+        # The constituents are FINER-level corrected values, which display
+        # under the finer level's gain; the result is pooled at the fallback
+        # level and will be drawn under THAT level's gain, so re-express it.
+        g_finer = self._display_gain_for_level(finer_level)
+        g_fallback = self._display_gain_for_level(fallback_level)
+        result = (downsampled * (g_finer / g_fallback)).astype(np.float32)
         self.stats["fallback_synthesized"] += 1
         return result
 
@@ -3985,7 +4057,7 @@ class ExploreController(QtCore.QObject):
 
         t0 = time.perf_counter() if self.probe else None
         arr = result.pixels.handle
-        rgba_or_gray = self._quantize_tile_uint8(arr)
+        rgba_or_gray = self._prepare_raw(arr)
         ds_y, ds_x = self._downsample_yx(tile.level)
         rect = ExploreView.world_rect(
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
@@ -4075,7 +4147,7 @@ class ExploreController(QtCore.QObject):
 
         t0 = time.perf_counter() if self.probe else None
         arr = result.pixels.handle
-        gray = self._quantize_corrected_uint8(arr, tile.level)
+        gray = self._prepare_corrected(arr)
         ds_y, ds_x = self._downsample_yx(tile.level)
         rect = ExploreView.world_rect(
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
@@ -4098,45 +4170,21 @@ class ExploreController(QtCore.QObject):
 
     # ── quantization (once, at arrival) ─────────────────────────────────
 
-    def _quantize_tile_uint8(self, arr: np.ndarray) -> np.ndarray:
-        """uint8 grayscale quantization under the FIXED display levels,
-        performed exactly ONCE per delivered tile (module docstring).
-        `rgb = round(clip((v-lo)/(hi-lo), 0, 1) * 255)`; no alpha channel
-        is needed since each tile item is fully opaque within its own rect
-        (there is no shared canvas with unfilled holes any more)."""
-        span = max(self._display_hi - self._display_lo, 1e-6)
-        # Same arithmetic, same ORDER, one scratch buffer. The chain used to
-        # allocate a fresh 512x512 float32 array per operation (subtract,
-        # divide, clip, scale, round) -- six temporaries per tile, and an
-        # atomic channel swap quantises the whole viewport at once, measured
-        # at ~11ms for 16 tiles inside a ~90ms switch. Folding the constants
-        # into a single multiply-add would be faster still, but it changes
-        # the floating-point rounding, and this function's output is the
-        # pixels the user compares between channels -- so the operations are
-        # kept identical and only the allocations removed.
-        buf = np.array(arr, dtype=np.float32, copy=True)
-        buf -= self._display_lo
-        buf /= span
-        np.clip(buf, 0.0, 1.0, out=buf)
-        buf *= 255.0
-        np.round(buf, out=buf)
-        return buf.astype(np.uint8)
+    @staticmethod
+    def _prepare_raw(arr: np.ndarray) -> np.ndarray:
+        """A raw tile as pooled: the source's native values (uint16 on the
+        real slides), untouched. The display mapping is paint-time
+        (`_raw_levels` + the table), so there is no quantisation step and
+        nothing to re-do when the mapping changes."""
+        return np.ascontiguousarray(arr)
 
-    def _quantize_corrected_uint8(self, arr: np.ndarray, level: int) -> np.ndarray:
-        """Like `_quantize_tile_uint8`, but for CORRECTED pixels only
-        (precise tiles and the floor): multiplies by the calibrated
-        per-level display gain (module docstring "Per-level display gain
-        for CORRECTED pixels") BEFORE normalizing/clipping against the same
-        fixed display range. `_display_gain_for_level` returns 1.0 for an
-        uncalibrated or stale table, so this is a no-op difference from
-        `_quantize_tile_uint8` in that case."""
-        gain = self._display_gain_for_level(level)
-        if gain == 1.0:
-            # The overwhelmingly common case (level 0's calibrated gain is
-            # 1.0 by construction): skip a full multiply and a temporary.
-            return self._quantize_tile_uint8(arr)
-        gained = arr.astype(np.float32, copy=False) * gain
-        return self._quantize_tile_uint8(gained)
+    @staticmethod
+    def _prepare_corrected(arr: np.ndarray) -> np.ndarray:
+        """A corrected tile as pooled: float32 corrected values, WITHOUT the
+        per-level display gain -- that is folded into the item's levels
+        (`_corrected_levels`), so the same stored tile is right under any
+        mapping and any gain table."""
+        return np.ascontiguousarray(arr, dtype=np.float32)
 
     # ── probe-only viewport-first/full progress tracking ─────────────────
 

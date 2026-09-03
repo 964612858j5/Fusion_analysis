@@ -50,6 +50,7 @@ from ...workers.cellpose_worker import (
 )
 from .overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
 from .step0_explore_tab import Step0ExploreTab
+from ...core.display_mapping import build_display_lut, seed_display_range
 from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
 from .search_ctrl import (
@@ -650,6 +651,13 @@ class Step0Page(QWidget):
         # means the handler runs once per actual change.
         self._dock_adapter.model.selection_changed.connect(
             self._on_channel_selected_by_id)
+        # One display mapping per channel (core/display_mapping.py), owned by
+        # the model's display fields: the compare panels, the full image and
+        # its DAPI overlay all read it, so a change here reaches every view.
+        self._dock_adapter.model.display_changed.connect(
+            self._on_display_mapping_changed)
+        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the model has no entry
+        self._display_controls_syncing = False
         chl.addWidget(self._dock_adapter.dock, stretch=1)
         cll.addWidget(ch_box, stretch=2)
 
@@ -869,42 +877,55 @@ class Step0Page(QWidget):
         self._btn_show_marker.toggled.connect(lambda _: self._refresh_preview_display(keep_zoom=True))
         pvl.addLayout(ctrl_row)
 
-        # ── 对比度滑块行（Marker 和 Nucleus 分开）──────────────────────
-        def _make_contrast_row(label, attr_slider, attr_lbl, color):
+        # ── Display mapping rows (Marker / Nucleus): min, max, gamma, Auto ──
+        # Raw intensity in, screen value out: shown = clip((v - min)/(max -
+        # min))**gamma, per channel, shared with the full image. Seeded once
+        # per channel from the whole slide's tissue (QuPath auto, 0.1/99.9);
+        # these are the explicit numbers the user may change. Display only:
+        # never the h5ad, the corrected zarr or the segmentation remap.
+        def _make_display_row(label, prefix, color):
             row = QHBoxLayout()
             row.setSpacing(4)
             lbl = QLabel(label)
             lbl.setStyleSheet(f"color:{color};font-size:10px;min-width:48px;")
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(1, 100)
-            slider.setValue(100)
-            slider.setToolTip(
-                f"Adjust {label} display upper level. Lower = brighter.\n"
-                "Does not affect actual correction data.")
-            slider.valueChanged.connect(lambda v: self._on_contrast_changed())
-            val_lbl = QLabel("100%")
-            val_lbl.setStyleSheet("color:#ddd;font-size:10px;min-width:34px;")
-            slider.valueChanged.connect(lambda v, vl=val_lbl: vl.setText(f"{v}%"))
-            btn_r = QPushButton("↺")
-            btn_r.setFixedSize(18, 18)
-            btn_r.setStyleSheet(
-                "QPushButton{color:#aaa;border:1px solid #555;border-radius:3px;"
-                "font-size:10px;background:#1a1a1a;}"
-                "QPushButton:hover{background:#333;}"
-            )
-            btn_r.clicked.connect(lambda: slider.setValue(100))
             row.addWidget(lbl)
-            row.addWidget(slider, stretch=1)
-            row.addWidget(val_lbl)
-            row.addWidget(btn_r)
-            setattr(self, attr_slider, slider)
-            setattr(self, attr_lbl, val_lbl)
+            spins = {}
+            for key, text, rng, step, dec in (("min", "Min", (-1e6, 1e7), 1.0, 1),
+                                              ("max", "Max", (-1e6, 1e7), 1.0, 1),
+                                              ("gamma", "γ", (0.1, 5.0), 0.1, 2)):
+                t = QLabel(text)
+                t.setStyleSheet("color:#aaa;font-size:10px;")
+                sp = QDoubleSpinBox()
+                sp.setRange(*rng)
+                sp.setSingleStep(step)
+                sp.setDecimals(dec)
+                sp.setValue(1.0 if key == "gamma" else 0.0)
+                sp.setKeyboardTracking(False)
+                sp.setStyleSheet("QDoubleSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
+                                 "border-radius:3px;font-size:10px;padding:0 2px;}")
+                sp.setToolTip(f"{label} display {text.lower()} (raw intensity units; gamma is unitless).")
+                sp.valueChanged.connect(lambda _v, pfx=prefix: self._on_display_controls_edited(pfx))
+                row.addWidget(t)
+                row.addWidget(sp, stretch=1)
+                spins[key] = sp
+            btn_auto = QPushButton("Auto")
+            btn_auto.setFixedHeight(18)
+            btn_auto.setToolTip("Re-seed min/max from the whole slide's tissue "
+                                "(QuPath-style 0.1 / 99.9 percentiles); gamma back to 1.")
+            btn_auto.setStyleSheet(
+                "QPushButton{color:#aaa;border:1px solid #555;border-radius:3px;"
+                "font-size:10px;background:#1a1a1a;padding:0 6px;}"
+                "QPushButton:hover{background:#333;}")
+            btn_auto.clicked.connect(lambda _=False, pfx=prefix: self._on_display_auto(pfx))
+            row.addWidget(btn_auto)
+            setattr(self, f"_{prefix}_display_min", spins["min"])
+            setattr(self, f"_{prefix}_display_max", spins["max"])
+            setattr(self, f"_{prefix}_display_gamma", spins["gamma"])
+            setattr(self, f"_{prefix}_display_auto", btn_auto)
             return row
 
-        pvl.addLayout(_make_contrast_row(
-            "Marker:", "_marker_contrast_slider", "_marker_contrast_lbl", "#98c379"))
-        pvl.addLayout(_make_contrast_row(
-            "Nucleus:", "_nuc_contrast_slider", "_nuc_contrast_lbl", "#56b6c2"))
+        pvl.addLayout(_make_display_row("Marker:", "marker", "#98c379"))
+        pvl.addLayout(_make_display_row("Nucleus:", "nuc", "#56b6c2"))
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
         self._preview_vbs  = []
@@ -1382,37 +1403,6 @@ class Step0Page(QWidget):
         self._btn_full_nucleus.toggled.connect(self._on_full_nucleus_toggled)
         bar.addWidget(self._btn_full_nucleus)
 
-        # Contrast, per layer, as in the compare panels. The compare panels
-        # stretch each PATCH by its own percentiles while the full image
-        # uses one range for the whole slide (TOX on the test slide: patch
-        # 1..9 against slide 0..17), so the same tissue reads about half as
-        # bright here. These raise or lower the top of the range at paint
-        # time -- no tile is re-read or re-quantised.
-        for attr, name, tip in (
-                ("_full_marker_contrast", "Marker",
-                 "Marker brightness in the full image. 100% = the slide-wide "
-                 "display range; lower = brighter."),
-                ("_full_nucleus_contrast", "DAPI",
-                 "Nucleus brightness in the full image. 100% = its calibrated "
-                 "range; lower = brighter.")):
-            lbl = QLabel(f"{name}:")
-            lbl.setStyleSheet("color:#aaa;font-size:10px;")
-            slider = QtWidgets.QSlider(Qt.Horizontal)
-            slider.setRange(20, 400)
-            slider.setValue(100)
-            slider.setFixedWidth(90)
-            slider.setToolTip(tip)
-            val = QLabel("100%")
-            val.setStyleSheet("color:#aaa;font-size:10px;")
-            val.setFixedWidth(34)
-            setattr(self, attr, slider)
-            setattr(self, attr + "_lbl", val)
-            bar.addWidget(lbl)
-            bar.addWidget(slider)
-            bar.addWidget(val)
-        self._full_marker_contrast.valueChanged.connect(self._on_full_marker_contrast)
-        self._full_nucleus_contrast.valueChanged.connect(self._on_full_nucleus_contrast)
-
         self._full_source_lbl = QLabel("—")
         self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
         # What the label says about the SOURCE, kept apart from the hidden-
@@ -1522,33 +1512,22 @@ class Step0Page(QWidget):
             return
         stack.controller.set_marker_visible(bool(checked))
 
-    def _on_full_marker_contrast(self, value):
-        """Marker brightness slider -> the live controller's paint-time
-        levels. Remembered by the slider itself for the next stack."""
-        self._full_marker_contrast_lbl.setText(f"{int(value)}%")
-        explore_tab = getattr(self, "_explore_tab", None)
-        stack = explore_tab.stack if explore_tab is not None else None
-        set_marker = getattr(getattr(stack, "controller", None), "set_marker_contrast", None)
-        if set_marker is not None:
-            set_marker(value / 100.0)
-
-    def _on_full_nucleus_contrast(self, value):
-        self._full_nucleus_contrast_lbl.setText(f"{int(value)}%")
-        set_nuc = getattr(self._full_image_overlay(), "set_contrast", None)
-        if set_nuc is not None:
-            set_nuc(value / 100.0)
-
-    def _apply_full_image_contrast(self, stack):
-        """A freshly built stack comes up at 100%; tell it the sliders."""
+    def _apply_full_image_display(self, stack):
+        """Give a stack the current channel's and the nucleus channel's
+        display mapping -- the same numbers the compare panels use. A
+        freshly built stack otherwise shows its own percentile seed."""
         if stack is None:
             return
-        set_marker = getattr(stack.controller, "set_marker_contrast", None)
-        if set_marker is not None and hasattr(self, "_full_marker_contrast"):
-            set_marker(self._full_marker_contrast.value() / 100.0)
+        ch = self.current_channel
+        set_marker = getattr(getattr(stack, "controller", None), "set_display_mapping", None)
+        if ch and set_marker is not None:
+            lo, hi, gamma = self._display_mapping_for(ch)
+            set_marker(lo, hi, gamma, channel=ch)
         overlay = getattr(stack, "overlay", None)
-        set_nuc = getattr(overlay, "set_contrast", None)
-        if set_nuc is not None and hasattr(self, "_full_nucleus_contrast"):
-            set_nuc(self._full_nucleus_contrast.value() / 100.0)
+        set_nuc = getattr(overlay, "set_display_mapping", None)
+        if set_nuc is not None and self.nucleus_channel:
+            lo, hi, gamma = self._display_mapping_for(self.nucleus_channel)
+            set_nuc(lo, hi, gamma)
 
     @staticmethod
     def _set_layer_toggle_text(button, name, checked):
@@ -1871,7 +1850,7 @@ class Step0Page(QWidget):
         if overlay is not None and hasattr(self, "_btn_full_nucleus"):
             overlay.set_enabled(self._btn_full_nucleus.isChecked(),
                                 host=stack.controller)
-        self._apply_full_image_contrast(stack)
+        self._apply_full_image_display(stack)
         # The Tissue Preview follows the full image's camera while it is up.
         self._connect_full_image_view_rect(stack)
         self._update_full_image_view_rect()
@@ -3674,34 +3653,6 @@ class Step0Page(QWidget):
             self._preview_nuc_imgs[idx] = item
         return item
 
-    @staticmethod
-    def _tint_lut(rgb):
-        """256x3 uint8 table, entry i = i * rgb: the same "grey scales one
-        colour" mapping `_make_colored_rgb` applies, as a lookup table."""
-        ramp = np.arange(256, dtype=np.float32)
-        scaled = ramp[:, None] * np.asarray(rgb, dtype=np.float32)[None, :3]
-        return np.clip(scaled, 0, 255).astype(np.uint8)
-
-    @staticmethod
-    def _payload_u8(payload, key):
-        """The payload's `key` array quantised ONCE to uint8 (0..1 -> 0..255)
-        and cached in the payload, or None when the result is absent. The
-        contrast slider and the colour are applied at paint time, so this is
-        the only per-pixel work a channel switch does, and only the first
-        time a result is shown."""
-        arr = payload.get(key)
-        if arr is None:
-            return None
-        cache = payload.setdefault("_u8", {})
-        u8 = cache.get(key)
-        if u8 is None or u8.shape != arr.shape[:2]:
-            buf = np.clip(np.asarray(arr, dtype=np.float32), 0.0, 1.0)
-            buf *= 255.0
-            np.round(buf, out=buf)
-            u8 = buf.astype(np.uint8)
-            cache[key] = u8
-        return u8
-
     def _rebuild_payload_rgb(self, ch):
         """用当前通道颜色重新合成_last_payload中的RGB图。"""
         payload = self._last_payload
@@ -3769,19 +3720,18 @@ class Step0Page(QWidget):
             self._zoom_lock_active = False
 
     def _refresh_preview_display(self, keep_zoom=False):
-        """按当前显示开关、颜色和对比度刷新三联预览。
+        """按当前显示开关、颜色和显示映射刷新三联预览。
 
-        Rendering is delegated to the painter: each panel shows the marker
-        result as a uint8 image with a colour LOOKUP TABLE and the contrast
-        slider as its `levels`, and the nucleus as a second image item ADDED
-        on top (`CompositionMode_Plus`). Per pixel that is
-        clip(marker_colour*clip(m/marker_scale) + nucleus_colour*clip(n/
-        nucleus_scale)) -- exactly what `_make_colored_rgb` computed here in
-        numpy for every switch (measured ~850 ms per channel switch on a
-        2720x2336 patch, three panels, all on the GUI thread). Now a switch
-        costs one quantise per result the first time it is shown (~12 ms)
-        and nothing afterwards; a contrast or colour change costs nothing
-        per pixel at all.
+        The panels show RAW intensity -- the original and the corrected
+        results as the worker produced them, no per-patch normalisation --
+        through the channel's display mapping (core/display_mapping.py):
+        `levels=(min, max)` on the image item and a lookup table carrying
+        gamma and colour. The nucleus is a second item ADDED on top
+        (CompositionMode_Plus) under its own channel's mapping. The same
+        mapping drives the full image, so a patch looks the same in both,
+        and the three panels share one mapping, so a corrected result that
+        is darker IS darker. Nothing per pixel happens here; a mapping,
+        colour or switch change is a levels/table swap.
         """
         payload = self._last_payload
         if payload is None:
@@ -3794,18 +3744,17 @@ class Step0Page(QWidget):
         nuc_rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
         marker_on = self._btn_show_marker.isChecked()
         nucleus_on = self._btn_show_nucleus.isChecked()
-        marker_scale = max(float(self._marker_contrast_slider.value()) / 100.0, 1e-3)
-        nucleus_scale = max(float(self._nuc_contrast_slider.value()) / 100.0, 1e-3)
 
-        marker_lut = self._tint_lut(marker_rgb)
-        nuc_lut = self._tint_lut(nuc_rgb)
-        nucleus_u8 = self._payload_u8(payload, "nucleus_disp")
-        markers = [self._payload_u8(payload, key)
-                   for key in ("original_disp", "tophat_disp", "cucim_disp")]
+        m_lo, m_hi, m_gamma = self._display_mapping_for(ch, payload=payload)
+        n_lo, n_hi, n_gamma = self._display_mapping_for(
+            self.nucleus_channel, payload=payload, nucleus=True)
+        marker_lut = build_display_lut(marker_rgb, m_gamma)
+        nuc_lut = build_display_lut(nuc_rgb, n_gamma)
+        nucleus = self._payload_array(payload, "nucleus")
+        markers = [self._payload_array(payload, key)
+                   for key in ("original", "tophat", "cucim")]
 
-        # A result that was not computed shows BLACK, not the previous
-        # channel's pixels -- and nothing added on top of black either.
-        _blank_shape = next((m.shape for m in markers if m is not None), (64, 64))
+        _blank_shape = next((m.shape[:2] for m in markers if m is not None), (64, 64))
         _blank = np.zeros(_blank_shape, dtype=np.uint8)
 
         self._zoom_lock_active = True
@@ -3819,20 +3768,16 @@ class Step0Page(QWidget):
                     if nuc_item is not None:
                         nuc_item.setVisible(False)
                     continue
-                # Marker: `levels=(0, 255*scale)` makes the painter compute
-                # clip(m/scale, 0, 1) before the table, i.e. the contrast
-                # slider; opacity 0 is the "marker off" switch. The image is
-                # always set so the panel keeps its geometry for the zoom
-                # and for the full-image drill-down's coordinate mapping.
-                item.setImage(m, autoLevels=False, levels=(0, 255.0 * marker_scale))
                 # "Marker off" is an all-black TABLE, not opacity 0: the item
-                # must stay opaque so the panel background does not show
-                # through and get ADDED under the nucleus.
+                # must stay opaque so the panel background is not added
+                # under the nucleus. The image is always set so the panel
+                # keeps its geometry for the zoom and for the full-image
+                # drill-down's coordinate mapping.
+                item.setImage(m, autoLevels=False, levels=(m_lo, m_hi))
                 item.setLookupTable(marker_lut if marker_on else self._black_lut)
-                if nucleus_on and nucleus_u8 is not None and nucleus_u8.shape == m.shape:
+                if nucleus_on and nucleus is not None and nucleus.shape[:2] == m.shape[:2]:
                     nuc_item = self._nuc_item(idx)
-                    nuc_item.setImage(nucleus_u8, autoLevels=False,
-                                      levels=(0, 255.0 * nucleus_scale))
+                    nuc_item.setImage(nucleus, autoLevels=False, levels=(n_lo, n_hi))
                     nuc_item.setLookupTable(nuc_lut)
                     nuc_item.setVisible(True)
                 elif nuc_item is not None:
@@ -3846,6 +3791,158 @@ class Step0Page(QWidget):
                     vb.autoRange()
         finally:
             self._zoom_lock_active = False
+        self._sync_display_controls()
+
+    @staticmethod
+    def _payload_array(payload, key):
+        """The RAW array for `key` ("original" / "tophat" / "cucim" /
+        "nucleus"): `<key>_raw` from the worker, else the legacy normalised
+        `<key>_disp` (older payloads and test fixtures), else None."""
+        arr = payload.get(f"{key}_raw")
+        if arr is None:
+            arr = payload.get(f"{key}_disp")
+        return None if arr is None else np.asarray(arr)
+
+    # ── display mapping: one per channel, shared by every view ─────────
+
+    def _display_model(self):
+        adapter = getattr(self, "_dock_adapter", None)
+        return getattr(adapter, "model", None)
+
+    def _display_mapping_for(self, ch, payload=None, nucleus=False):
+        """`(min, max, gamma)` for `ch`, seeded on first use.
+
+        The model's display fields are the source of truth. A channel the
+        model does not know (no dataset, fake loaders) gets a per-page
+        fallback entry seeded the same way. The seed is the whole slide's
+        tissue (`_seed_display_mapping`); when the slide cannot be read
+        (no pyramid-capable loader) the payload's own raw pixels seed it,
+        which is the best information available.
+        """
+        if not ch:
+            return (0.0, 1.0, 1.0)
+        model = self._display_model()
+        state = model.get(ch) if model is not None else None
+        if state is not None:
+            if state.display_min is None or state.display_max is None:
+                lo, hi = self._seed_display_mapping(ch, payload=payload, nucleus=nucleus)
+                self._set_display_silently(ch, lo, hi, 1.0)
+                state = model.get(ch)
+            return (float(state.display_min), float(state.display_max),
+                    float(state.display_gamma))
+        entry = self._display_fallback.get(ch)
+        if entry is None:
+            lo, hi = self._seed_display_mapping(ch, payload=payload, nucleus=nucleus)
+            entry = (lo, hi, 1.0)
+            self._display_fallback[ch] = entry
+        return entry
+
+    def _seed_display_mapping(self, ch, payload=None, nucleus=False):
+        """QuPath-style automatic window over the whole slide's tissue
+        pixels (the viewer's overview level, zeros excluded) -- the same
+        rule and level the full image seeds with. Falls back to the
+        payload's raw pixels when the loader cannot read a pyramid."""
+        loader = getattr(self, "loader", None)
+        read = getattr(loader, "read_region_lowres", None)
+        shape = getattr(loader, "shape", None)
+        if read is not None and shape and len(shape) >= 2 and int(shape[0]) > 0:
+            try:
+                ds = loader.overview_downsample() if hasattr(loader, "overview_downsample") else 32
+                arr = read(ch, 0, int(shape[0]), 0, int(shape[1]), ds, normalize=False)
+                return seed_display_range(arr)
+            except Exception as exc:                   # noqa: BLE001 - fall back below
+                print(f"[step0] display seed from slide failed for {ch!r}: {exc}", flush=True)
+        payload = payload if payload is not None else self._last_payload
+        if payload is not None:
+            arr = self._payload_array(payload, "nucleus" if nucleus else "original")
+            if arr is not None:
+                return seed_display_range(arr)
+        return (0.0, 1.0)
+
+    def _set_display_silently(self, ch, lo, hi, gamma):
+        """Write a mapping into the model without the change handler
+        redrawing (seeding happens INSIDE a redraw)."""
+        model = self._display_model()
+        if model is None or model.get(ch) is None:
+            self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
+            return
+        model.blockSignals(True)
+        try:
+            model.set_display(ch, lo, hi, gamma)
+        finally:
+            model.blockSignals(False)
+
+    def set_display_mapping(self, ch, lo, hi, gamma=None):
+        """Public: set a channel's display mapping. Every view follows."""
+        if not ch:
+            return
+        cur = self._display_mapping_for(ch)
+        gamma = cur[2] if gamma is None else gamma
+        model = self._display_model()
+        if model is not None and model.get(ch) is not None:
+            model.set_display(ch, lo, hi, gamma)      # emits display_changed
+        else:
+            self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
+            self._on_display_mapping_changed(ch)
+
+    def _on_display_mapping_changed(self, cid):
+        """A channel's mapping changed: the compare panels redraw (a levels
+        and table swap), the full image and its overlay get the numbers."""
+        if cid in (self.current_channel, self.nucleus_channel):
+            if self._last_payload is not None and hasattr(self, "_preview_imgs"):
+                self._refresh_preview_display(keep_zoom=True)
+            else:
+                self._sync_display_controls()
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        if stack is None:
+            return
+        if cid == self.current_channel:
+            set_marker = getattr(stack.controller, "set_display_mapping", None)
+            if set_marker is not None:
+                lo, hi, gamma = self._display_mapping_for(cid)
+                set_marker(lo, hi, gamma, channel=cid)
+        if cid == self.nucleus_channel:
+            set_nuc = getattr(getattr(stack, "overlay", None), "set_display_mapping", None)
+            if set_nuc is not None:
+                lo, hi, gamma = self._display_mapping_for(cid, nucleus=True)
+                set_nuc(lo, hi, gamma)
+
+    def _sync_display_controls(self):
+        """Controls show the current channel's and the nucleus's mapping."""
+        if not hasattr(self, "_marker_display_min"):
+            return
+        self._display_controls_syncing = True
+        try:
+            for prefix, ch, nuc in (("marker", self.current_channel, False),
+                                    ("nuc", self.nucleus_channel, True)):
+                lo, hi, gamma = self._display_mapping_for(ch, nucleus=nuc) if ch else (0.0, 1.0, 1.0)
+                getattr(self, f"_{prefix}_display_min").setValue(lo)
+                getattr(self, f"_{prefix}_display_max").setValue(hi)
+                getattr(self, f"_{prefix}_display_gamma").setValue(gamma)
+        finally:
+            self._display_controls_syncing = False
+
+    def _on_display_controls_edited(self, prefix):
+        if self._display_controls_syncing:
+            return
+        ch = self.nucleus_channel if prefix == "nuc" else self.current_channel
+        if not ch:
+            return
+        lo = getattr(self, f"_{prefix}_display_min").value()
+        hi = getattr(self, f"_{prefix}_display_max").value()
+        gamma = getattr(self, f"_{prefix}_display_gamma").value()
+        if hi <= lo:
+            hi = lo + 1.0
+        self.set_display_mapping(ch, lo, hi, gamma)
+
+    def _on_display_auto(self, prefix):
+        nuc = prefix == "nuc"
+        ch = self.nucleus_channel if nuc else self.current_channel
+        if not ch:
+            return
+        lo, hi = self._seed_display_mapping(ch, nucleus=nuc)
+        self.set_display_mapping(ch, lo, hi, 1.0)
 
     @staticmethod
     def _payload_shape(payload):
@@ -3871,10 +3968,6 @@ class Step0Page(QWidget):
         shown_shape = self._payload_shape(shown)
         return (shown_shape is not None
                 and shown_shape == self._payload_shape(incoming))
-
-    def _on_contrast_changed(self):
-        """调整显示对比度时刷新预览，不触发重算。"""
-        self._refresh_preview_display(keep_zoom=True)
 
     def _resolve_channel_params(self, ch):
         """(tophat_radius, cucim_sigma) for a channel — its OWN per-channel value.
@@ -4177,6 +4270,7 @@ class Step0Page(QWidget):
         self.current_channel = self._channel_order[row]
         self._update_decision_ui()
         self._update_full_image_buttons()
+        self._sync_display_controls()
         # The full image follows the channel, but only when it is on screen
         # and only when the GPU is free -- see `_sync_full_image_to_channel`.
         # Placed BEFORE the on-demand path below on purpose: that path's

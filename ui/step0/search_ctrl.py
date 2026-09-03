@@ -1628,6 +1628,8 @@ class BgComputeWorker(QThread):
                 "original_raw":     raw.astype(np.float32, copy=False),
                 "tophat_raw":       tophat.astype(np.float32, copy=False),
                 "cucim_raw":        cucim.astype(np.float32, copy=False),
+                "nucleus_raw":      (self.nuc_raw.astype(np.float32, copy=False)
+                                     if self.nuc_raw is not None else None),
                 "original_metrics": _compute_bg_metrics(raw),
                 "tophat_metrics":   _compute_bg_metrics(tophat),
                 "cucim_metrics":    _compute_bg_metrics(cucim),
@@ -1778,6 +1780,7 @@ class BatchProcessWorker(QThread):
                         "original_raw":     raw.astype(np.float32, copy=False),
                         "tophat_raw":       tophat_raw.astype(np.float32, copy=False) if tophat_raw is not None else None,
                         "cucim_raw":        cucim_raw.astype(np.float32, copy=False)  if cucim_raw  is not None else None,
+                        "nucleus_raw":      nuc_raw.astype(np.float32, copy=False) if nuc_raw is not None else None,
                         "original_metrics": _compute_bg_metrics(raw),
                         "tophat_metrics":   _compute_bg_metrics(tophat_raw) if tophat_raw is not None else {"snr":0.0,"bg_cv":0.0},
                         "cucim_metrics":    _compute_bg_metrics(cucim_raw)  if cucim_raw  is not None else {"snr":0.0,"bg_cv":0.0},

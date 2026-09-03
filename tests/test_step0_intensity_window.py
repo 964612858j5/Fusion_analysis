@@ -157,6 +157,11 @@ def _page(app, stack=None, loader=None):
     return page
 
 
+def _hist_hex(wb):
+    """The colour the inspector's density curve is drawn/filled with."""
+    return wb._histogram._curve.opts["pen"].color().name().lower()
+
+
 def _payload(marker=500.0, nucleus=300.0, h=32, w=32):
     m = np.full((h, w), marker, np.float32)
     metrics = {"snr": 1.0, "bg_cv": 0.1}
@@ -577,6 +582,53 @@ def test_a_cancelled_dialog_changes_nothing(app, monkeypatch):
     page._on_channel_swatch_clicked("CD3")
 
     assert page._channel_colors == before
+
+
+def test_the_histogram_is_filled_with_the_active_channels_colour(app):
+    """The Intensity inspector's density curve is the channel's colour, on
+    activation and live while it is active."""
+    page = _page(app)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+    model = page._dock_adapter.model
+
+    wb.set_active_channel("CD3")
+    assert _hist_hex(wb) == page._channel_swatch_hex("CD3").lower()
+
+    # live: the swatch colour changes while CD3 is the active channel
+    model.set_color("CD3", "#00ffcc")
+    assert _hist_hex(wb) == "#00ffcc"
+    assert page._channel_swatch_hex("CD3").lower() == "#00ffcc"
+
+    # a channel switch brings the OTHER channel's colour with it
+    wb.set_active_channel("CD20")
+    assert _hist_hex(wb) == page._channel_swatch_hex("CD20").lower()
+    assert _hist_hex(wb) != "#00ffcc"
+
+
+def test_the_histogram_follows_the_dapi_colour_too(app):
+    page = _page(app)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+    wb.set_active_channel("DAPI")
+
+    page._dock_adapter.model.set_color("DAPI", "#8844ff")
+
+    assert _hist_hex(wb) == "#8844ff"
+    assert page._nuc_color == pytest.approx(
+        (0x88 / 255, 0x44 / 255, 1.0), abs=1 / 255)
+
+
+def test_a_colour_change_on_an_inactive_channel_leaves_the_curve_alone(app):
+    page = _page(app)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+    wb.set_active_channel("CD3")
+    before = _hist_hex(wb)
+
+    page._dock_adapter.model.set_color("CD20", "#ff0000")
+
+    assert _hist_hex(wb) == before
 
 
 # ── 7. the workbench is engaged by the window, not by its tab ────────────

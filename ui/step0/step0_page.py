@@ -695,6 +695,12 @@ class Step0Page(QWidget):
         # means the handler runs once per actual change.
         self._dock_adapter.model.selection_changed.connect(
             self._on_channel_selected_by_id)
+        # The model is the third writer of a channel's colour (after this page
+        # and the Channel Remap layer list). Listening here is what makes the
+        # Intensity window's histogram follow a swatch change live, whichever
+        # of the three did the writing.
+        self._dock_adapter.model.color_changed.connect(
+            self._on_model_color_changed)
         # One display mapping per channel (core/display_mapping.py). Its
         # SOURCE is the Channel Remap workbench's params (see
         # `_display_mapping_for`); `wb.params_changed` is what tells the
@@ -2935,6 +2941,11 @@ class Step0Page(QWidget):
         # must follow the selection) or when it is already carrying data.
         if getattr(self, "_intensity_window", None) is not None:
             self._engage_conditioning_workbench()
+        # The histogram is filled with the channel's colour by the activation
+        # itself, so the store's answer has to be in the workbench BEFORE it
+        # activates -- otherwise the curve would come up in whatever colour the
+        # workbench happened to hold.
+        self._push_color_to_workbench(ch, self._channel_color(ch))
         wb.set_active_channel(ch)
 
     def toggle_tissue_navigator(self):
@@ -3982,6 +3993,20 @@ class Step0Page(QWidget):
             return
         setter(ch, QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
                                 int(rgb[2] * 255)).name())
+
+    def _on_model_color_changed(self, ch, hexc):
+        """The channel model's colour changed: the one store follows, and with
+        it the compare panels, the full image and the Intensity window's
+        histogram. Our own writes echo back through here; comparing against the
+        store's current answer swallows the echo instead of looping."""
+        if not ch or QtGui.QColor(hexc).name() == self._channel_color_hex(ch):
+            return
+        c = QtGui.QColor(hexc)
+        rgb = (c.red() / 255.0, c.green() / 255.0, c.blue() / 255.0)
+        if ch == self.nucleus_channel:
+            self._apply_nucleus_color(rgb)
+        else:
+            self._apply_channel_color(ch, rgb)
 
     def _on_workbench_color_changed(self, ch, hexc):
         """A swatch was picked in the Channel Remap layer list: the same

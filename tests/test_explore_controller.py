@@ -3501,3 +3501,172 @@ def test_ordinary_teardown_gives_up_on_a_stuck_floor_job(app):
         assert ctrl._teardown_order == ["scheduler.shutdown", "provider.close"]
     finally:
         release.set()
+
+
+# ── production hand-off: suspend / resume ───────────────────────────────────
+#
+# A production correction run needs the GPU. The controller used to be torn
+# down for it and rebuilt afterwards (overview re-read, floor recomputed, a
+# black frame in between). It is now SUSPENDED in place and resumed.
+
+def _paint_viewport(ctrl, provider, scheduler, view, x0=700, y0=100, size=2048):
+    """Move the camera and deliver every raw tile it asked for."""
+    set_view_and_pump(view, x0, y0, x0 + size, y0 + size)
+    for req, _cb in list(scheduler.pending_for(RawKey)):
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(40)
+
+
+def test_suspend_stops_every_request_path_and_locks_the_camera(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    _paint_viewport(ctrl, provider, scheduler, view)
+    raw_gen, precise_gen = ctrl.view_generation, ctrl._settled_generation
+    scheduler.requests.clear()
+    scheduler.cancelled_generations.clear()
+
+    timings = ctrl.suspend_for_production("whole-slide correction (Save)")
+
+    assert ctrl.suspended is True
+    assert isinstance(timings, dict) and "floor_join_ms" in timings
+    # What was queued is cancelled, under every generation the controller
+    # issues with.
+    assert raw_gen in scheduler.cancelled_generations
+    assert precise_gen in scheduler.cancelled_generations
+    assert any(g[0] == "dirprefetch" for g in scheduler.cancelled_generations)
+    assert not ctrl._motion_timer.isActive() and not ctrl._settle_timer.isActive()
+    # Camera locked, and the badge says why.
+    assert list(view.view_box.mouseEnabled()) == [False, False]
+    assert "Paused" in view.status_label.text()
+    assert "whole-slide correction (Save)" in view.status_label.text()
+
+    # Moving the camera (programmatically -- the mouse is locked) issues
+    # NOTHING: not raw, not precise, not prefetch.
+    set_view_and_pump(view, 3000, 3000, 3000 + 1024, 3000 + 1024)
+    assert scheduler.requests == []
+    # And nothing is torn down: pools, provider, scheduler all live.
+    assert provider.close_called is False
+    assert scheduler.shutdown_called is False
+    assert len(ctrl._raw_pool.entries) > 0
+
+    ctrl.teardown()
+
+
+def test_resume_reissues_only_what_the_current_viewport_is_missing(app):
+    """An unchanged viewport paints nothing new -- the whole point: the user
+    gets back exactly what they were looking at. A viewport that moved while
+    suspended gets its missing tiles asked for on resume."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    _paint_viewport(ctrl, provider, scheduler, view)
+    assert len(ctrl._raw_pool.entries) == len(ctrl._visible_tiles)
+    ctrl.suspend_for_production("patch background correction")
+    scheduler.requests.clear()
+
+    ctrl.resume_from_production()
+
+    assert ctrl.suspended is False
+    assert scheduler.pending_for(RawKey) == [], "pooled tiles were re-requested"
+    assert list(view.view_box.mouseEnabled()) == [True, True]
+    assert not view.status_label.isVisible()
+
+    # Suspend again, move, resume: the new tiles are asked for at once.
+    ctrl.suspend_for_production("patch background correction")
+    set_view_and_pump(view, 3000, 3000, 3000 + 1024, 3000 + 1024)
+    assert scheduler.requests == []
+    ctrl.resume_from_production()
+    wanted = set(ctrl._visible_tiles)
+    asked = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in scheduler.pending_for(RawKey)}
+    assert asked == wanted - {(e.tx, e.ty) for e in ctrl._raw_pool.entries.values()
+                              if e.level == ctrl.level}
+    assert asked, "the moved viewport had nothing pooled and asked for nothing"
+
+    ctrl.teardown()
+
+
+def test_a_floor_job_is_deferred_while_suspended_and_started_on_resume(app):
+    """The floor is GPU work. A selection change during a run must not start
+    it; resuming must, against the selection current then."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    _paint_viewport(ctrl, provider, scheduler, view)
+    ctrl.suspend_for_production("on-demand background correction")
+
+    ctrl.set_selection(method="tophat", params=(10,))
+
+    assert ctrl._floor_pending is True
+    assert ctrl._floor_job_running is False
+    assert not any(t.is_alive() for t in ctrl._floor_threads)
+    assert ctrl._floor_ready is False
+    assert "Paused" in view.status_label.text(), "the notice must survive the selection change"
+
+    ctrl.resume_from_production()
+
+    assert ctrl._floor_pending is False
+    assert ctrl._floor_job_running is True or ctrl._floor_ready is True
+    assert view.status_label.text() in ("Preparing corrected preview…", "") or ctrl._floor_ready
+    for _ in range(100):
+        if ctrl._floor_ready:
+            break
+        _pump(20)
+    assert ctrl._floor_ready is True
+    assert not view.status_label.isVisible()
+
+    ctrl.teardown()
+
+
+def test_a_late_floor_result_does_not_wipe_the_suspension_notice(app):
+    """`suspend_for_production` joins the floor thread, but its result still
+    arrives through the queued signal afterwards and ends with 'not
+    preparing any more' -- which used to clear the badge."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.suspend_for_production("patch background correction")
+
+    ctrl.floor_preparing_changed.emit(False)
+    _pump(10)
+
+    assert "Paused" in view.status_label.text()
+    assert view.status_label.isVisible()
+    ctrl.teardown()
+
+
+def test_suspend_and_resume_are_idempotent_and_teardown_still_works(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    assert ctrl.resume_from_production() is None and ctrl.suspended is False
+
+    ctrl.suspend_for_production("a")
+    n_cancels = len(scheduler.cancelled_generations)
+    assert ctrl.suspend_for_production("b") == {}       # second call: no-op
+    assert len(scheduler.cancelled_generations) == n_cancels
+    assert "(a)" in view.status_label.text()
+
+    ctrl.teardown()
+    assert scheduler.shutdown_called and provider.close_called
+    ctrl.resume_from_production()                         # after teardown: no-op
+    assert ctrl.suspended is True                          # state is simply frozen
+
+
+def test_the_overlay_issues_nothing_while_its_host_is_suspended(app):
+    from block01.viewer.explore_view import RawOverlayLayer
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    _paint_viewport(ctrl, provider, scheduler, view)
+    overlay = RawOverlayLayer(provider, scheduler, ctrl.grid, view, "CD3")
+    ctrl.attach_overlay(overlay)
+    overlay._display_lo, overlay._display_hi = 0.0, 1.0     # calibrated, by hand
+    overlay._enabled = True
+    scheduler.requests.clear()
+
+    ctrl.suspend_for_production("patch background correction")
+    overlay.sync(ctrl.level, sorted(ctrl._visible_tiles))
+    assert scheduler.requests == []
+
+    ctrl.resume_from_production()
+    asked = {r.key.channel for r, _cb in scheduler.pending_for(RawKey)}
+    assert asked == {"CD3"}, "resume must bring the overlay's tiles back too"
+    ctrl.teardown()

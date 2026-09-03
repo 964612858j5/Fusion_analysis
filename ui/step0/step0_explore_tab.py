@@ -29,9 +29,12 @@ Scope, deliberately narrow:
   idempotent.
 
 The GPU hand-off IS here, in both directions: a production correction run
-releases this view first (`release_for_production` -> teardown with
-`wait_for_floor=True`, which blocks until a floor computation is off the
-GPU), and a build is refused while such a run is going (`busy_probe`).
+SUSPENDS this view first (`release_for_production` ->
+`ExploreController.suspend_for_production`, which stops issuing, cancels
+what is queued, joins a running floor job and waits the scheduler idle --
+nothing is torn down, the pixels stay on screen and the camera is locked),
+`resume_from_production` puts it back when the run ends, and a build is
+refused while such a run is going (`busy_probe`).
 
 Still NOT here (later phases): HOT/COVERAGE prefetch, a multi-channel
 overlay, a channel control inside this view and the reverse sync that
@@ -50,21 +53,10 @@ RAW_CACHE_BYTES = 512 * 1024 * 1024
 CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 TILE_SIZE = 512
 
-# NOTE: there is no "released" PLACEHOLDER any more. A release keeps the
-# last frame on screen and writes its reason onto that view's badge (see
-# `release_for_production`); a release with nothing built yet leaves
-# whatever placeholder was up, because there is no view to speak for.
-
-# After the run that released the view has ENDED. While it runs, the frozen
-# frame's badge says so; once it is not running, keeping that text up says
-# something false, and the user has no way to tell it from a run that hangs.
-# Used on the frozen frame's badge, or on the placeholder when the release
-# happened before anything was ever built.
-PLACEHOLDER_RUN_FINISHED = (
-    "Background correction has finished.\n"
-    "Click \"Reopen full image\" to rebuild it with the parameters current "
-    "now; it opens where you were."
-)
+# NOTE: there is no "released" placeholder. A production run SUSPENDS the
+# live stack in place (see `release_for_production`): the view stays on
+# screen and its badge carries the reason. A release with nothing built yet
+# leaves whatever placeholder was up, because there is no view to speak for.
 
 PLACEHOLDER_BUSY = (
     "Background correction is running ({reason}).\n\n"
@@ -316,16 +308,13 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._stack_factory = stack_factory
         self._busy_probe = busy_probe
         self._stack = None
-        # A view whose backend has been released but whose pixels are still
-        # on screen (see `release_for_production`). Never a live stack.
-        self._frozen_view = None
         self._dataset_path = None
         self._build_attempts = 0
         self._build_error = None
-        # Set by `release_for_production`, cleared by a rebuild or a dataset
-        # change: the view is gone RECOVERABLY, and here is where it was.
+        # Set by `release_for_production`, cleared by `resume_from_production`
+        # or by anything that discards the stack: the live stack is
+        # SUSPENDED for a production run and must be resumed afterwards.
         self._released = False
-        self._released_viewport_l0 = None
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -366,17 +355,10 @@ class Step0ExploreTab(QtWidgets.QWidget):
 
     @property
     def released(self):
-        """True between `release_for_production` and the next rebuild or
-        dataset change: the placeholder is up because a production run
-        asked for the GPU, not because nothing was ever opened."""
+        """True between `release_for_production` and the matching
+        `resume_from_production` (or a dataset change / teardown): the live
+        stack is suspended because a production run asked for the GPU."""
         return self._released
-
-    @property
-    def released_viewport_l0(self):
-        """Where the view was when it was released -- `(y0, x0, w, h)` in
-        level-0 pixels -- or None when nothing is known. Read by the host to
-        reopen the view in the same place instead of on the whole slide."""
-        return self._released_viewport_l0
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def set_dataset(self, path):
@@ -390,9 +372,6 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._discard_stack()
         self._dataset_path = path or None
         self._build_error = None
-        # A release belongs to the dataset it happened on.
-        self._released = False
-        self._released_viewport_l0 = None
         # A bound dataset is NOT the "load something" state: the view simply
         # has not been opened yet, and it is opened from a compare panel.
         self._show_placeholder(PLACEHOLDER_NO_DATASET
@@ -482,11 +461,6 @@ class Step0ExploreTab(QtWidgets.QWidget):
             traceback.print_exc()
             return
         self._stack = stack
-        self._released = False
-        self._released_viewport_l0 = None
-        # Before the new view goes up: two views in the layout would leave
-        # the frozen pixels painted over the fresh stack.
-        self._drop_frozen_view()
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
@@ -591,76 +565,42 @@ class Step0ExploreTab(QtWidgets.QWidget):
         controller.set_selection(channel=channel)
 
     def release_for_production(self, reason):
-        """Give the GPU up to a production correction run, and LEAVE THE
-        LAST FRAME ON SCREEN.
+        """Give the GPU up to a production correction run -- by SUSPENDING
+        the live stack, not by tearing it down.
 
-        The backend teardown is the same as `teardown(wait_for_floor=True)`
-        -- it blocks until a running floor computation has actually
-        finished, then shuts the scheduler down, closes the provider and
-        empties the caches -- but the WIDGET stays, with its tile items
-        still holding their pixels. Nothing about those pixels needs the
-        GPU or the provider: they are `uint8` numpy arrays already blitted
-        into `ImageItem`s, so keeping them costs the run nothing and saves
-        the user from watching their image vanish every time they press
-        Save.
-
-        What the user loses is INTERACTION, not the picture: with no
-        scheduler there is nothing to fetch a newly exposed tile with, so
-        panning would scroll into blank space. The camera is therefore
-        disabled and the badge says the view is frozen. Both come back when
-        the run ends and the stack is rebuilt.
+        `ExploreController.suspend_for_production` stops every request
+        path, cancels what is queued, joins a running floor computation
+        (this blocks until the GPU is actually free: the hand-off) and waits
+        the scheduler idle. The pools, caches, provider and scheduler stay;
+        the pixels stay on screen; the camera is locked and the badge says
+        why. `resume_from_production` reverses it in place, so the user
+        gets the same image back at the same viewport with no rebuild and
+        no flash.
 
         Idempotent; a no-op when no stack exists (the placeholder is left
         alone in that case, so a "no dataset" message is not overwritten).
         """
-        if self._stack is None:
+        if self._stack is None or self._released:
             return
-        self._released_viewport_l0 = self._current_viewport_l0()
-        self._freeze_stack(reason)
+        t0 = time.perf_counter()
+        timings = self._stack.controller.suspend_for_production(reason) or {}
         self._released = True
+        print(f"[explore] suspended for {reason} in "
+              f"{(time.perf_counter() - t0) * 1000:.0f} ms "
+              f"(floor join {timings.get('floor_join_ms', 0):.0f} ms, "
+              f"scheduler drain {timings.get('scheduler_drain_ms', 0):.0f} ms, "
+              f"drained={timings.get('scheduler_drained', 'n/a')})", flush=True)
 
-    def _current_viewport_l0(self):
-        """The live controller's viewport as `(y0, x0, w, h)`, or None.
-
-        Read from `_current_bbox` -- `(y0, x0, y1, x1)` in level-0 pixels,
-        already clamped to the slide -- which is None until the first range
-        event. Best effort: a stack fake without the attribute yields None,
-        and the caller then opens on the whole slide as before.
-        """
-        controller = getattr(self._stack, "controller", None)
-        bbox = getattr(controller, "_current_bbox", None)
-        if bbox is None:
-            return None
-        y0, x0, y1, x1 = (int(v) for v in bbox)
-        if y1 <= y0 or x1 <= x0:
-            return None
-        return (y0, x0, x1 - x0, y1 - y0)
-
-    @property
-    def frozen_view(self):
-        """The released-but-still-painted view, or None. Readable so a host
-        -- and a test -- can tell "frozen" from "gone"."""
-        return self._frozen_view
-
-    def production_finished(self):
-        """The run that released the view has ended, and the host has
-        decided NOT to rebuild right now (the view is not on screen). Say
-        so instead of leaving "is running" up. No-op unless the view is
-        actually in the released state.
-
-        Two places to say it, because a released view is now either a
-        frozen frame (its badge carries the message) or a placeholder (when
-        the release happened before anything was ever built).
-        """
-        if not self._released or self._stack is not None:
+    def resume_from_production(self):
+        """The production run that suspended the stack is over: unlock the
+        camera and re-issue for the current viewport. No-op unless a stack
+        is actually suspended."""
+        if self._stack is None or not self._released:
+            self._released = False
             return
-        if self._frozen_view is not None:
-            try:
-                self._frozen_view.set_status_text(PLACEHOLDER_RUN_FINISHED)
-                return
-            except (AttributeError, RuntimeError):
-                pass
-        self._show_placeholder(PLACEHOLDER_RUN_FINISHED)
+        self._released = False
+        self._stack.controller.resume_from_production()
+        print("[explore] resumed after production run", flush=True)
 
     def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent full teardown. Safe to call from `aboutToQuit`, from
@@ -680,54 +620,10 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self.teardown()
 
     # ── internals ─────────────────────────────────────────────────────
-    def _freeze_stack(self, reason):
-        """Tear the BACKEND down but keep the view and its pixels on screen.
-
-        The frozen widget is remembered separately from `_stack`, which
-        goes to None: there is no live stack any more (no scheduler, no
-        provider, no caches), so every "is a stack up?" test must keep
-        answering no. What is left is a picture, and it is destroyed by the
-        next build, by a dataset change or by a real teardown -- never left
-        to accumulate alongside a new one.
-        """
-        stack, self._stack = self._stack, None
-        if stack is None:
-            return
-        print("[explore] freezing stack (backend released, frame kept)",
-              flush=True)
-        try:
-            stack.teardown(wait_for_floor=True)
-        finally:
-            view = getattr(stack, "view", None)
-            if view is not None:
-                try:
-                    # No fetching is possible any more, so a pan would
-                    # scroll into blank space. Say so, and stop the camera
-                    # rather than let the user discover it.
-                    view.view_box.setMouseEnabled(False, False)
-                    view.set_status_text(
-                        f"Frozen — background correction is running "
-                        f"({reason}). The view returns when it finishes.")
-                except (AttributeError, RuntimeError):
-                    pass
-                self._frozen_view = view
-
-    def _drop_frozen_view(self):
-        """Destroy a frozen frame. Called before a new view goes up, and on
-        any real teardown -- two views in the layout would leave the old
-        pixels showing over the new stack."""
-        view, self._frozen_view = self._frozen_view, None
-        if view is None:
-            return
-        try:
-            self._layout.removeWidget(view)
-            view.setParent(None)
-            view.deleteLater()
-        except RuntimeError:
-            pass
-
     def _discard_stack(self, *, wait_for_floor: bool = False):
-        self._drop_frozen_view()
+        # A suspended stack is torn down like any other; the suspension
+        # simply ends with it.
+        self._released = False
         stack, self._stack = self._stack, None
         if stack is None:
             return

@@ -1,19 +1,21 @@
-"""The full image comes back after the production run that released it.
+"""The full image comes back after the production run that suspended it.
 
 Found on a live session (2026-09-03): with the full image open, Apply
 released the viewer ("Background correction is running"), the run ended,
 the placeholder still said running, and "Reopen full image" produced a
 black canvas. The canvas was black because BOTH layer toggles were off and
 looked identical to on; the placeholder was stale because nothing told the
-view the run had ended. Three claims, one per cause:
+view the run had ended. A production run no longer tears the viewer down
+at all: it SUSPENDS the live stack and resumes it in place, so there is
+nothing to rebuild and no flash. Three claims:
 
   1. the two layer toggles show their state (glyph + :checked rule), and
      the toolbar label says so when a layer -- or both -- is hidden;
-  2. when the run that released the view ends, the view is rebuilt if it
-     is on screen, at the viewport it had, and otherwise the placeholder
-     says the run has finished;
-  3. the viewer records where it was at release time, and a rebuild or a
-     dataset change forgets it.
+  2. when the run that suspended the view ends -- however it ends, and only
+     once no other run holds the GPU -- the view is resumed, and, if it is
+     on screen, the current selection is re-applied to the live stack;
+  3. the viewer suspends and resumes its controller in place; a dataset
+     change or a teardown ends the suspension with the stack.
 
 Own module, like the other full-image suites: the page-heavy Step0 modules
 crash pyqtgraph offscreen when run after the background-correction module.
@@ -41,12 +43,11 @@ from test_step0_background_correction_tab import app  # noqa: E402,F401
 class _RecordingTab:
     """Stands in for Step0ExploreTab on the page side."""
 
-    def __init__(self, released=False, viewport=None):
+    def __init__(self, released=False):
         self.calls = []
-        self.finished_calls = 0
+        self.resume_calls = 0
         self.stack = None
         self.released = released
-        self.released_viewport_l0 = viewport
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
                     tint=None, nucleus=None):
@@ -54,8 +55,9 @@ class _RecordingTab:
                            "params": tuple(params), "viewport": viewport_l0})
         return True
 
-    def production_finished(self):
-        self.finished_calls += 1
+    def resume_from_production(self):
+        self.resume_calls += 1
+        self.released = False
 
     def set_dataset(self, _path):
         pass
@@ -81,10 +83,21 @@ class _Run(QtCore.QThread):
 
 
 class _Ctl:
-    def __init__(self, bbox):
-        self._current_bbox = bbox
+    def __init__(self):
         self.channel, self.method, self.params = "CD3", None, ()
         self.teardown_waits = []
+        self.suspended = False
+        self.suspend_reasons = []
+        self.resume_calls = 0
+
+    def suspend_for_production(self, reason):
+        self.suspended = True
+        self.suspend_reasons.append(reason)
+        return {}
+
+    def resume_from_production(self):
+        self.suspended = False
+        self.resume_calls += 1
 
     def set_tint(self, rgb):
         pass
@@ -99,48 +112,32 @@ class _Ctl:
         pass
 
 
-def _tab_with_controller(bbox=(100, 200, 400, 700)):
-    """A real Step0ExploreTab over a fake stack whose controller reports
-    `bbox` as its current level-0 viewport."""
+def _tab_with_controller():
+    """A real Step0ExploreTab over a fake stack with a suspendable
+    controller."""
     made = {}
-
-    class _View(QtWidgets.QLabel):
-        """Enough of ExploreView for a release to freeze it."""
-
-        def __init__(self):
-            super().__init__("fake")
-            self.status_text = None
-            self.mouse_enabled = (True, True)
-            view = self
-
-            class _Box:
-                @staticmethod
-                def setMouseEnabled(x, y):
-                    view.mouse_enabled = (x, y)
-
-            self.view_box = _Box()
-
-        def set_status_text(self, text):
-            self.status_text = text
 
     class _Stack:
         def __init__(self, controller):
             self.controller = controller
             self.provider = self
-            self.view = _View()
+            self.view = QtWidgets.QLabel("fake")
             self.caches = ()
             self.overlay = None
+            self.torn_down = False
 
         def level_shape(self, _l):
             return (1000, 1000)
 
         def teardown(self, *, wait_for_floor=False):
+            self.torn_down = True
             self.controller.teardown_waits.append(wait_for_floor)
 
     def factory(path, channel, parent_widget=None, **_kw):
-        ctl = _Ctl(made.get("bbox", bbox))
+        ctl = _Ctl()
         made["ctl"] = ctl
         stack = _Stack(ctl)
+        made["stack"] = stack
         stack.view.setParent(parent_widget)
         return stack
 
@@ -207,29 +204,36 @@ def test_reopening_keeps_the_hidden_layer_hint(app):
     assert "both layers hidden" in text
 
 
-# ── 2. the run ends -> the view comes back ───────────────────────────────
+# ── 2. the run ends -> the view resumes ──────────────────────────────────
 
-def test_a_visible_released_view_is_rebuilt_where_it_was(app):
-    tab = _RecordingTab(released=True, viewport=(100, 200, 500, 300))
+def test_a_visible_suspended_view_is_resumed_and_its_selection_reapplied(app):
+    """Resume first; then the current selection goes to the live stack --
+    an Apply changed the parameters, and that is a `set_selection`, not a
+    rebuild. The camera is not moved."""
+    tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     page._on_production_worker_finished()
 
+    assert tab.resume_calls == 1
     assert len(tab.calls) == 1
-    assert tab.calls[0]["viewport"] == (100, 200, 500, 300)
-    assert tab.finished_calls == 0
+    assert tab.calls[0]["viewport"] is None
+    assert tab.released is False
 
 
-def test_a_hidden_released_view_only_gets_a_truthful_placeholder(app):
-    tab = _RecordingTab(released=True, viewport=(1, 2, 3, 4))
+def test_a_hidden_suspended_view_is_resumed_without_being_re_shown(app):
+    """Resuming is cheap wherever the view is -- the stack is live, nothing
+    is read -- so the hidden view is unlocked too. Re-applying the
+    selection is left to the next time it is shown."""
+    tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_COMPARE)
 
     page._on_production_worker_finished()
 
-    assert tab.calls == [], "a hidden view was rebuilt"
-    assert tab.finished_calls == 1
+    assert tab.resume_calls == 1
+    assert tab.calls == []
 
 
 def test_nothing_happens_while_another_run_still_holds_the_gpu(
@@ -242,33 +246,24 @@ def test_nothing_happens_while_another_run_still_holds_the_gpu(
 
     page._on_production_worker_finished()
 
-    assert tab.calls == [] and tab.finished_calls == 0
+    assert tab.resume_calls == 0 and tab.calls == []
 
 
-def test_a_view_that_was_never_released_is_left_alone(app):
+def test_a_view_that_was_never_suspended_is_left_alone(app):
     """The placeholder may be up because nothing was ever opened, or because
     a dataset switch tore the stack down; a finishing run is not a reason
-    to build in either case."""
+    to build or to resume in either case."""
     tab = _RecordingTab(released=False)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     page._on_production_worker_finished()
 
-    assert tab.calls == [] and tab.finished_calls == 0
+    assert tab.resume_calls == 0 and tab.calls == []
 
 
-def test_the_reopen_button_restores_the_released_viewport(app):
-    tab = _RecordingTab(released=True, viewport=(7, 8, 90, 60))
-    page = _page(app, tab)
-
-    page._reopen_full_image()
-
-    assert tab.calls[-1]["viewport"] == (7, 8, 90, 60)
-
-
-def test_the_reopen_button_opens_on_the_whole_slide_when_nothing_is_known(app):
-    tab = _RecordingTab(released=True, viewport=None)
+def test_the_reopen_button_does_not_move_the_camera(app):
+    tab = _RecordingTab()
     page = _page(app, tab)
 
     page._reopen_full_image()
@@ -279,8 +274,8 @@ def test_the_reopen_button_opens_on_the_whole_slide_when_nothing_is_known(app):
 def test_a_finishing_worker_thread_reaches_the_page_on_the_gui_thread(app):
     """`QThread.finished` is the signal watched -- it fires once the thread
     is no longer running, whatever way the run ended -- and the slot must
-    run on the GUI thread, because it rebuilds widgets."""
-    tab = _RecordingTab(released=True, viewport=(1, 2, 3, 4))
+    run on the GUI thread, because it touches widgets."""
+    tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     seen = []
@@ -299,12 +294,12 @@ def test_a_finishing_worker_thread_reaches_the_page_on_the_gui_thread(app):
     QtTest.QTest.qWait(100)
 
     assert seen == [True]
-    assert tab.calls[-1]["viewport"] == (1, 2, 3, 4)
+    assert tab.resume_calls == 1
 
 
 def test_a_worker_from_a_previous_dataset_is_ignored(app):
     """The watch goes through `_gen_slot`: a run of dataset A finishing
-    after the page moved to dataset B must not build anything."""
+    after the page moved to dataset B must not touch anything."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
@@ -316,44 +311,46 @@ def test_a_worker_from_a_previous_dataset_is_ignored(app):
     assert worker.wait(5000)
     QtTest.QTest.qWait(100)
 
-    assert tab.calls == [] and tab.finished_calls == 0
+    assert tab.resume_calls == 0 and tab.calls == []
 
 
-# ── 3. the viewer records where it was ───────────────────────────────────
+# ── 3. the viewer suspends and resumes its controller in place ───────────
 
-def test_release_records_the_viewport_and_the_released_state(app):
-    tab, _made = _tab_with_controller(bbox=(100, 200, 400, 700))
+def test_release_suspends_the_controller_and_keeps_the_stack(app):
+    tab, made = _tab_with_controller()
     tab.set_dataset("/data/a.ome.tif")
     tab.show_source("CD3", None, ())
-    assert tab.released is False and tab.released_viewport_l0 is None
+    assert tab.released is False
 
     tab.release_for_production("patch background correction")
 
     assert tab.released is True
-    # (y0, x0, y1, x1) -> (y0, x0, w, h)
-    assert tab.released_viewport_l0 == (100, 200, 500, 300)
-    # The frame stays up and carries the message; the placeholder is not
-    # used for a release any more.
-    assert tab.frozen_view is not None
-    assert "running" in tab.frozen_view.status_text
+    assert tab.stack is made["stack"]
+    assert made["ctl"].suspended is True
+    assert made["ctl"].suspend_reasons == ["patch background correction"]
+    assert made["stack"].torn_down is False
+    assert tab._layout.indexOf(made["stack"].view) >= 0
     tab.teardown()
 
 
-def test_a_rebuild_forgets_the_release(app):
-    tab, _made = _tab_with_controller()
+def test_resume_reverses_the_release_in_place(app):
+    tab, made = _tab_with_controller()
     tab.set_dataset("/data/a.ome.tif")
     tab.show_source("CD3", None, ())
     tab.release_for_production("patch background correction")
 
-    assert tab.show_source("CD3", None, ()) is True
+    tab.resume_from_production()
 
     assert tab.released is False
-    assert tab.released_viewport_l0 is None
+    assert made["ctl"].suspended is False
+    assert made["ctl"].resume_calls == 1
+    assert tab.stack is made["stack"]
+    assert tab.build_attempts == 1
     tab.teardown()
 
 
-def test_a_dataset_change_forgets_the_release(app):
-    tab, _made = _tab_with_controller()
+def test_a_dataset_change_ends_the_suspension_with_the_stack(app):
+    tab, made = _tab_with_controller()
     tab.set_dataset("/data/a.ome.tif")
     tab.show_source("CD3", None, ())
     tab.release_for_production("patch background correction")
@@ -361,91 +358,41 @@ def test_a_dataset_change_forgets_the_release(app):
     tab.set_dataset("/data/b.ome.tif")
 
     assert tab.released is False
-    assert tab.released_viewport_l0 is None
+    assert made["stack"].torn_down is True
     tab.teardown()
 
 
-def test_no_viewport_yet_means_none(app):
-    """`_current_bbox` is None until the first range event; a release in
-    that window records nothing rather than a garbage rectangle."""
-    tab, _made = _tab_with_controller(bbox=None)
+def test_a_teardown_ends_the_suspension(app):
+    tab, made = _tab_with_controller()
     tab.set_dataset("/data/a.ome.tif")
     tab.show_source("CD3", None, ())
-
     tab.release_for_production("patch background correction")
 
-    assert tab.released is True
-    assert tab.released_viewport_l0 is None
     tab.teardown()
 
-
-def test_production_finished_replaces_the_running_text_only_when_released(app):
-    tab, _made = _tab_with_controller()
-    tab.set_dataset("/data/a.ome.tif")
-    before = tab._placeholder.text()
-
-    tab.production_finished()                 # not released: no-op
-    assert tab._placeholder.text() == before
-
-    tab.show_source("CD3", None, ())
-    tab.release_for_production("patch background correction")
-    tab.production_finished()
-
-    # The frame is still on screen, so the message belongs on ITS badge --
-    # the placeholder is not even visible.
-    text = tab.frozen_view.status_text
-    assert text == et.PLACEHOLDER_RUN_FINISHED
-    assert "finished" in text and "Reopen full image" in text
-    assert "is running" not in text
-    tab.teardown()
+    assert tab.released is False
+    assert made["stack"].torn_down is True
 
 
-def test_production_finished_uses_the_placeholder_when_nothing_was_built(app):
-    """A release before anything was ever built has no frame to write on,
-    so the placeholder is still the right surface."""
-    tab, _made = _tab_with_controller()
-    tab.set_dataset("/data/a.ome.tif")
-    tab._released = True                      # released with no stack
-
-    tab.production_finished()
-
-    assert tab.frozen_view is None
-    assert tab._placeholder.text() == et.PLACEHOLDER_RUN_FINISHED
-    tab.teardown()
+def test_no_placeholder_talks_about_a_released_view(app):
+    """There is no "released" or "finished" placeholder any more: the view
+    never leaves the screen for a production run."""
+    names = [n for n in dir(et) if n.startswith("PLACEHOLDER_")]
+    assert "PLACEHOLDER_RELEASED" not in names
+    assert "PLACEHOLDER_RUN_FINISHED" not in names
+    for n in names:
+        text = getattr(et, n).lower()
+        assert "released" not in text, n
 
 
-def test_the_finished_placeholder_promises_no_tab(app):
-    text = et.PLACEHOLDER_RUN_FINISHED
-    assert "trial" not in text.lower()
-    assert " tab" not in text.lower()
-
-
-# ── the whole-slide worker's SHADOWED finished signal ────────────────────
+# ── 4. the real Save path: resume only once the thread has exited ────────
 #
 # `WsiCorrectionWorker` declares `finished = pyqtSignal(str, dict)`, which
 # SHADOWS `QThread.finished`. That business signal is emitted from inside
-# `run()`, while `isRunning()` is still true, so a rebuild started from it
+# `run()`, while `isRunning()` is still true, so a resume started from it
 # would be refused by the busy gate and never retried. The watcher must
 # therefore bind the base class's signal explicitly, and this module proves
 # the difference rather than trusting the spelling.
-
-class _FakeWsiWorker(QtCore.QThread):
-    """Mirrors the real worker's shape: a business `finished(str, dict)`
-    that shadows `QThread.finished`, emitted from inside run(), followed by
-    a controllable delay before the thread actually exits."""
-
-    finished = QtCore.pyqtSignal(str, dict)
-
-    def __init__(self):
-        super().__init__()
-        self.may_exit = threading.Event()
-        self.emitted = threading.Event()
-
-    def run(self):
-        self.finished.emit("/tmp/corrected.zarr", {"CD3": "tophat"})
-        self.emitted.set()
-        self.may_exit.wait(10)
-
 
 def _wait_until(predicate, deadline_ms=5000):
     """Pump the event loop until `predicate()` or the deadline. No fixed
@@ -576,10 +523,10 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
 
     def physical():
         timeline.append("physical_finished")
-        before = len(tab.calls)
+        before = tab.resume_calls
         real_physical()
-        if len(tab.calls) > before:
-            timeline.append("rebuild")
+        if tab.resume_calls > before:
+            timeline.append("resume")
 
     page._on_wsi_finished = wsi_finished
     page._apply_corrected_store = apply_store
@@ -596,19 +543,12 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
     return page, timeline
 
 
-def test_the_real_save_path_rebuilds_only_after_the_thread_exits(
+def test_the_real_save_path_resumes_only_after_the_thread_exits(
         app, monkeypatch, tmp_path):
     """The whole chain, driven: the business signal and the store swap run
-    while the thread is STILL running, and the rebuild happens only after it
-    physically exits.
-
-    This is the case the shadowed signal name breaks. `WsiCorrectionWorker`
-    declares `finished(str, dict)`; connecting the watcher to
-    `worker.finished` would fire it here, inside run(), with `isRunning()`
-    still true -- the busy gate would refuse the rebuild and nothing would
-    ask again.
-    """
-    tab = _RecordingTab(released=True, viewport=(11, 22, 33, 44))
+    while the thread is STILL running, and the resume happens only after it
+    physically exits -- the case the shadowed signal name breaks."""
+    tab = _RecordingTab(released=True)
     watched = []
     real_watch = sp.Step0Page._watch_production_worker
     monkeypatch.setattr(
@@ -618,8 +558,6 @@ def test_the_real_save_path_rebuilds_only_after_the_thread_exits(
     page, timeline = _drive_real_save(app, monkeypatch, tmp_path, tab)
     worker = page._wsi_worker
 
-    # Released first, then the worker that was actually started is the one
-    # handed to the watcher -- both driven, neither read off the source.
     assert timeline.index("release") == 0
     assert watched and watched[0] is worker
 
@@ -629,34 +567,29 @@ def test_the_real_save_path_rebuilds_only_after_the_thread_exits(
     assert "logical_finished" in timeline
     assert "apply_corrected_store" in timeline
     assert worker.isRunning() is True
-    assert tab.calls == [], (
-        f"rebuilt while the worker was still running: {timeline}")
-    # The store swap really happened -- the real handler ran, not a stub.
+    assert tab.resume_calls == 0, (
+        f"resumed while the worker was still running: {timeline}")
     assert page.loader._corrected_zarr_path == "/tmp/corrected.zarr"
     assert page.loader._corrected_decisions == {"CD3": "tophat"}
 
     worker.may_exit.set()
     assert worker.wait(5000)
-    assert _wait_until(lambda: "rebuild" in timeline)
+    assert _wait_until(lambda: "resume" in timeline)
 
     assert timeline.index("logical_finished") < \
         timeline.index("apply_corrected_store") < \
-        timeline.index("physical_finished") < timeline.index("rebuild")
-    assert len(tab.calls) == 1
-    assert tab.calls[-1]["viewport"] == (11, 22, 33, 44)
+        timeline.index("physical_finished") < timeline.index("resume")
+    assert tab.resume_calls == 1
 
 
-def test_a_cancelled_or_failed_run_still_restores_exactly_once(app):
+def test_a_cancelled_or_failed_run_still_resumes_exactly_once(app):
     """`QThread.finished` fires once however the run ended, so cancel and
-    error need no separate wiring -- and must not double-restore."""
-    tab = _RecordingTab(released=True, viewport=(1, 1, 2, 2))
+    error need no separate wiring -- and must not double-resume."""
+    tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     class _Cancelled(QtCore.QThread):
-        """A run that ended by cancellation: its business signal fires from
-        inside run(), and only `QThread.finished` marks the physical end."""
-
         canceled = QtCore.pyqtSignal(str)
         finished = QtCore.pyqtSignal(str, dict)      # SHADOWS QThread's
 
@@ -669,15 +602,16 @@ def test_a_cancelled_or_failed_run_still_restores_exactly_once(app):
 
     worker.start()
     assert worker.wait(5000)
-    assert _wait_until(lambda: bool(tab.calls))
+    assert _wait_until(lambda: tab.resume_calls > 0)
+    QtTest.QTest.qWait(50)
 
-    assert len(tab.calls) == 1
+    assert tab.resume_calls == 1
 
 
-def test_the_last_worker_to_finish_is_the_one_that_restores(app):
-    """Two production runs: the first to finish must not restore while the
+def test_the_last_worker_to_finish_is_the_one_that_resumes(app):
+    """Two production runs: the first to finish must not resume while the
     second still holds the GPU; the second must."""
-    tab = _RecordingTab(released=True, viewport=(4, 5, 6, 7))
+    tab = _RecordingTab(released=True)
     page = _page(app, tab)
     page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
@@ -701,57 +635,10 @@ def test_the_last_worker_to_finish_is_the_one_that_restores(app):
     first.may_exit.set()
     assert first.wait(5000)
     QtTest.QTest.qWait(80)
-    assert tab.calls == [], "restored while the second run still held the GPU"
+    assert tab.resume_calls == 0, "resumed while the second run held the GPU"
 
     second.may_exit.set()
     assert second.wait(5000)
-    # Deliberately NOT clearing `_ondemand_workers`: the real page keeps
-    # finished handles and decides with `isRunning()`, so the gate must open
-    # on its own once the thread has exited.
-    assert _wait_until(lambda: bool(tab.calls))
+    assert _wait_until(lambda: tab.resume_calls > 0)
 
-    assert len(tab.calls) == 1
-    assert tab.calls[-1]["viewport"] == (4, 5, 6, 7)
-
-
-def test_a_hidden_full_image_is_not_built_by_a_wsi_finish(app):
-    tab = _RecordingTab(released=True, viewport=(1, 2, 3, 4))
-    page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_COMPARE)
-    worker = _FakeWsiWorker()
-    page._watch_production_worker(worker)
-    page._wsi_worker = worker
-
-    worker.start()
-    assert _wait_until(lambda: worker.emitted.is_set())
-    worker.may_exit.set()
-    assert worker.wait(5000)
-    assert _wait_until(lambda: tab.finished_calls > 0)
-
-    assert tab.calls == []               # no hidden viewer was built
-    assert tab.finished_calls == 1       # only the placeholder was corrected
-
-
-def test_the_finish_handler_checks_the_gate_itself(app):
-    """`_show_full_image` has a busy gate of its own, so the two together
-    keep the behaviour right even if one is removed. This pins the handler's
-    OWN check by watching whether it calls the rebuild at all."""
-    tab = _RecordingTab(released=True, viewport=(1, 2, 3, 4))
-    page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
-    shown = []
-    page._show_full_image = lambda **kw: shown.append(kw)
-
-    class _Busy:
-        @staticmethod
-        def isRunning():
-            return True
-
-    page._batch_worker = _Busy()
-    page._on_production_worker_finished()
-    assert shown == [], "rebuilt while a run still held the GPU"
-    assert tab.finished_calls == 0
-
-    page._batch_worker = None
-    page._on_production_worker_finished()
-    assert shown == [{"viewport_l0": (1, 2, 3, 4)}]
+    assert tab.resume_calls == 1

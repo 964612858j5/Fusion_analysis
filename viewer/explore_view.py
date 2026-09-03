@@ -1382,6 +1382,12 @@ class RawOverlayLayer(QtCore.QObject):
         if not self.calibrated:
             # Not an error: the calibration callback resyncs when it lands.
             return
+        host = self.parent()
+        if host is not None and getattr(host, "suspended", False):
+            # A production run holds the GPU and the disk; the host's
+            # `resume_from_production` calls back in for the current
+            # viewport when it is over.
+            return
         self._bump_generation()
         gen = self._generation
         source = self.provider.source_identity()
@@ -1411,6 +1417,12 @@ class RawOverlayLayer(QtCore.QObject):
             return
         self.sync(host.level, ordered)
         self.apply_visibility(host.level)
+
+    def cancel_inflight(self):
+        """Drop every request this layer has outstanding (the host is being
+        suspended for a production run). Pooled tiles are kept; the next
+        `sync` re-issues only what is missing."""
+        self._bump_generation()
 
     def _bump_generation(self):
         self.scheduler.cancel_generation(self._generation)
@@ -1697,6 +1709,14 @@ class ExploreController(QtCore.QObject):
         # controller stays the single planner of viewport/level/tiles, and
         # the overlay is a consumer of that plan, not a second camera.
         self._overlay = None
+
+        # ── production hand-off (`suspend_for_production`) ──
+        # While True a production correction run owns the GPU: nothing is
+        # issued, no floor job starts, the camera is locked. The stack stays
+        # alive -- pools, caches, provider, scheduler -- so resuming is a
+        # re-issue for the current viewport, not a rebuild.
+        self._suspended = False
+        self._suspend_reason = None
 
         # ── teardown bookkeeping ──
         self._teardown_order = []
@@ -2622,7 +2642,108 @@ class ExploreController(QtCore.QObject):
         return ds, ds
 
     def _on_floor_preparing_changed_for_badge(self, preparing: bool):
+        if self._suspended:
+            # A floor job that was joined by `suspend_for_production` still
+            # delivers its result through the queued signal afterwards; its
+            # "not preparing any more" must not wipe the suspension notice.
+            self.view.set_status_text(self._suspend_badge_text())
+            return
         self.view.set_status_text("Preparing corrected preview…" if preparing else None)
+
+    # ── production hand-off: suspend / resume ───────────────────────────
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspended
+
+    def _suspend_badge_text(self) -> str:
+        return (f"Paused — background correction is running "
+                f"({self._suspend_reason}). The view resumes when it finishes.")
+
+    def suspend_for_production(self, reason: str, *,
+                               drain_timeout_s: float = 10.0) -> dict:
+        """Give the GPU up to a production correction run WITHOUT tearing
+        anything down.
+
+        What stops: both timers; every generation this controller and its
+        overlay issue under (raw, precise, directional prefetch, overlay),
+        so queued work is dropped by the workers when they reach it; the
+        floor thread, which is JOINED without a timeout -- this is the
+        hand-off, and returning while a floor job is still on the GPU is
+        the double use the hand-off exists to prevent; and the scheduler is
+        waited out until idle (bounded by `drain_timeout_s`), so a compute
+        worker mid-tile has finished before this returns. The camera is
+        locked and the badge says why.
+
+        What stays: the pools with their pixels, both caches, the provider
+        and the scheduler threads (idle). Nothing here needs the GPU, and
+        keeping it is what lets `resume_from_production` put the user back
+        exactly where they were -- same pixels, same viewport -- with a
+        re-issue for the current viewport instead of a rebuild, a
+        synchronous overview read and a fresh floor computation.
+
+        Guards elsewhere hold the promise for as long as this lasts:
+        `_issue_raw_requests` issues nothing (it is the single entry for
+        raw, precise and prefetch), `_start_floor_job` defers, the overlay's
+        `sync` returns, and the badge handler keeps the notice up.
+
+        Idempotent. Returns timings for the log.
+        """
+        timings = {}
+        if self._torn_down or self._suspended:
+            return timings
+        self._suspended = True
+        self._suspend_reason = reason
+        self._settle_timer.stop()
+        self._motion_timer.stop()
+
+        self.scheduler.cancel_generation(self.view_generation)
+        self.scheduler.cancel_generation(self._settled_generation)
+        self._cancel_directional_prefetch()
+        if self._overlay is not None:
+            self._overlay.cancel_inflight()
+
+        t0 = time.perf_counter()
+        for t in self._floor_threads:
+            if t.is_alive():
+                t.join()
+        timings["floor_join_ms"] = (time.perf_counter() - t0) * 1000.0
+
+        # Producers are stopped above, so "reached idle" here means the
+        # scheduler has nothing running and nothing queued that will run.
+        t0 = time.perf_counter()
+        notify = getattr(self.scheduler, "notify_when_idle", None)
+        if notify is not None:
+            done = threading.Event()
+            notify(done.set)
+            timings["scheduler_drained"] = done.wait(drain_timeout_s)
+        timings["scheduler_drain_ms"] = (time.perf_counter() - t0) * 1000.0
+
+        self.view.view_box.setMouseEnabled(False, False)
+        self.view.set_status_text(self._suspend_badge_text())
+        return timings
+
+    def resume_from_production(self) -> None:
+        """The production run is over: unlock the camera, start the floor
+        job that was deferred (if any) and re-issue for the CURRENT
+        viewport. Tiles already pooled are not requested again, so with an
+        unchanged viewport this paints nothing new -- the user sees the same
+        image they saw before, and can move it again. Idempotent."""
+        if self._torn_down or not self._suspended:
+            return
+        self._suspended = False
+        self._suspend_reason = None
+        self.view.view_box.setMouseEnabled(True, True)
+
+        start_floor = self._floor_pending and not self._floor_job_running
+        preparing = self._wants_precise() and (start_floor or self._floor_job_running)
+        self.view.set_status_text("Preparing corrected preview…" if preparing else None)
+        if start_floor:
+            self._floor_pending = False
+            self._start_floor_job(self._floor_gen)
+
+        if self._current_bbox is not None and not self._blocked_on_overview():
+            self._issue_raw_requests()
 
     def _ensure_corrected_floor(self):
         """(Re)request the corrected floor for the current selection.
@@ -2665,6 +2786,12 @@ class ExploreController(QtCore.QObject):
         levels match) and dispatch `compute.correct_array` on a worker
         thread. Exactly one such job is ever in flight (enforced by
         `_ensure_corrected_floor`/`_handle_floor_result`)."""
+        if self._suspended:
+            # A production run holds the GPU. Deferred, not dropped:
+            # `resume_from_production` starts the pending job against
+            # whatever selection is current then.
+            self._floor_pending = True
+            return
         self._floor_job_running = True
         floor_level, stride = self._pick_floor_level_and_stride()
         self._floor_level = floor_level
@@ -3021,7 +3148,7 @@ class ExploreController(QtCore.QObject):
         this is no longer raw-only."""
         t0 = time.perf_counter() if self.probe else None
 
-        if self._blocked_on_overview():
+        if self._blocked_on_overview() or self._suspended:
             return
 
         self.scheduler.cancel_generation(self.view_generation)

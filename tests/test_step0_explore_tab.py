@@ -105,6 +105,21 @@ class FakeController:
         self.jump_calls = []
         self.tints = []
         self.marker_visible = []
+        # The production hand-off surface: a release SUSPENDS the live
+        # controller and a finished run resumes it -- nothing is torn down.
+        self.suspended = False
+        self.suspend_reasons = []
+        self.resume_calls = 0
+
+    def suspend_for_production(self, reason):
+        self.suspended = True
+        self.suspend_reasons.append(reason)
+        return {"floor_join_ms": 0.0, "scheduler_drain_ms": 0.0,
+                "scheduler_drained": True}
+
+    def resume_from_production(self):
+        self.suspended = False
+        self.resume_calls += 1
 
     def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Mirrors `ExploreController.set_selection`'s sentinel semantics.
@@ -983,7 +998,11 @@ def test_no_probe_means_never_busy(app):
     tab.teardown()
 
 
-def test_release_for_production_waits_for_the_floor_and_says_why(app):
+def test_release_for_production_suspends_the_live_stack(app):
+    """A production run needs the GPU, not the viewer's death. The stack
+    stays -- provider open, scheduler running, view on screen -- and the
+    controller is suspended with the reason, so the user keeps their image
+    and gets it back in place when the run ends."""
     factory, _record = make_factory()
     tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
     tab.resize(640, 480)
@@ -994,23 +1013,18 @@ def test_release_for_production_waits_for_the_floor_and_says_why(app):
 
     tab.release_for_production("patch background correction")
 
-    assert tab.stack is None
-    assert stack.provider.closed is True
-    assert stack.controller.teardown_waits == [True], (
-        "the release must be the hand-off form, or a floor job keeps the GPU")
-    # The BACKEND went away; the picture did not. The user pressing Save
-    # should not have to watch their image vanish, and the pixels are
-    # already-blitted uint8 -- they need neither GPU nor provider.
-    assert tab.frozen_view is stack.view
+    assert tab.stack is stack, "the stack must survive a release"
+    assert tab.released is True
+    assert stack.controller.suspended is True
+    assert stack.controller.suspend_reasons == ["patch background correction"]
+    assert stack.controller.teardown_calls == 0
+    assert stack.provider.closed is False
+    assert stack.scheduler.workers_running is True
+    assert stack.caches is not None
     assert tab._layout.indexOf(stack.view) >= 0
     assert stack.view.isVisible() is True
     assert tab._placeholder.isVisible() is False
-    # Frozen, and it says so: nothing can fetch a newly exposed tile any
-    # more, so the camera is stopped rather than left to pan into blank.
-    assert stack.view.status_text is not None
-    assert "patch background correction" in stack.view.status_text
-    assert "frozen" in stack.view.status_text.lower()
-    assert stack.view.mouse_enabled == (False, False)
+    tab.teardown()
 
 
 def test_release_is_idempotent_and_a_no_op_without_a_stack(app):
@@ -1018,37 +1032,61 @@ def test_release_is_idempotent_and_a_no_op_without_a_stack(app):
     tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
     tab.set_dataset("/data/slide_a.ome.tif")
 
-    # No stack yet: the release must not overwrite the "load a dataset"
-    # style placeholder with a "released" message for something that was
-    # never there.
+    # No stack yet: nothing to suspend, and the placeholder must not be
+    # overwritten for something that was never there.
     before = tab._placeholder.text()
     tab.release_for_production("patch background correction")
     assert tab._placeholder.text() == before
+    assert tab.released is False
 
     tab.activate()
     tab.release_for_production("patch background correction")
-    released = tab._placeholder.text()
-    tab.release_for_production("patch background correction")
-    assert tab._placeholder.text() == released
-    assert tab.stack is None
+    tab.release_for_production("on-demand background correction")
+    assert tab.stack.controller.suspend_reasons == ["patch background correction"], (
+        "a second release while suspended must not suspend twice")
+    assert tab.released is True
+    tab.teardown()
 
 
-def test_a_released_stack_can_be_rebuilt(app):
-    """Releasing is recoverable -- that is what distinguishes it from a
-    teardown. The rebuild uses whatever is current at that point."""
+def test_a_suspended_stack_is_resumed_in_place(app):
+    """Resuming is the reverse of the release: same stack, same view, the
+    controller told to continue. A new selection afterwards is applied to
+    that stack -- there is nothing to rebuild."""
     factory, record = make_factory()
     page = FakePage("CD8")
     tab = Step0ExploreTab(page, stack_factory=factory)
     tab.set_dataset("/data/slide_a.ome.tif")
     tab.show_source("CD8", "tophat", (15,))
+    stack = tab.stack
     tab.release_for_production("whole-slide correction (Save)")
+
+    tab.resume_from_production()
+
+    assert tab.stack is stack
+    assert tab.released is False
+    assert stack.controller.suspended is False
+    assert stack.controller.resume_calls == 1
 
     page.current_channel = "CD3"
     assert tab.show_source("CD3", "cucim", (50,)) is True
+    assert tab.build_attempts == 1, "a selection change must not rebuild"
+    assert record["built_with"] == [("CD8", "tophat", (15,))]
+    assert stack.controller.selection_calls[-1] == {
+        "channel": "CD3", "method": "cucim", "params": (50,)}
+    tab.teardown()
 
-    assert record["built_with"] == [("CD8", "tophat", (15,)),
-                                    ("CD3", "cucim", (50,))]
-    assert tab.build_attempts == 2
+
+def test_resume_without_a_release_is_a_no_op(app):
+    factory, _record = make_factory()
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
+    tab.set_dataset("/data/slide_a.ome.tif")
+    tab.resume_from_production()                    # no stack at all
+    tab.activate()
+
+    tab.resume_from_production()                    # stack, never released
+
+    assert tab.stack.controller.resume_calls == 0
+    assert tab.released is False
     tab.teardown()
 
 
@@ -1125,116 +1163,53 @@ def test_no_placeholder_still_calls_this_a_trial_tab(app):
         assert not re.search(r"\btabs?\b", text, re.I), text
 
 
-# ── a release keeps the picture ──────────────────────────────────────────────
-#
-# Pressing Save used to blank the full image. The GPU has to go, but the
-# pixels do not: they are already-blitted uint8 arrays in ImageItems and
-# need neither the provider nor the scheduler.
+# ── a suspension ends with the stack ─────────────────────────────────────────
 
-def test_a_release_shuts_the_backend_down_but_keeps_the_frame(app):
+def test_a_dataset_change_tears_a_suspended_stack_down(app):
+    """The old dataset's pixels must not survive into the next one, suspended
+    or not -- and the suspension flag goes with the stack."""
     factory, _record = make_factory()
     tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
-    tab.resize(640, 480)
-    tab.show()
     tab.set_dataset("/data/slide_a.ome.tif")
     tab.activate()
     stack = tab.stack
-
-    tab.release_for_production("whole-slide correction (Save)")
-
-    # Backend: gone, and in the hand-off form.
-    assert stack.provider.closed is True
-    assert stack.scheduler.workers_running is False
-    assert stack.caches is None
-    assert stack.controller.teardown_waits == [True]
-    # Picture: still there.
-    assert tab.stack is None, "there is no live stack -- only a frame"
-    assert tab.frozen_view is stack.view
-    assert tab._layout.indexOf(stack.view) >= 0
-    assert stack.view.isVisible() is True
-    tab.teardown()
-
-
-def test_a_frozen_frame_cannot_be_panned(app):
-    """With no scheduler nothing can fetch a newly exposed tile, so the
-    camera is stopped instead of letting the user pan into blank space."""
-    factory, _record = make_factory()
-    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
-    tab.set_dataset("/data/slide_a.ome.tif")
-    tab.activate()
-    view = tab.stack.view
-    assert view.mouse_enabled == (True, True)
-
-    tab.release_for_production("patch background correction")
-
-    assert view.mouse_enabled == (False, False)
-    tab.teardown()
-
-
-def test_a_rebuild_destroys_the_frozen_frame(app):
-    """Two views in the layout would leave the old pixels painted over the
-    new stack -- and the frozen one holds a pool of tile arrays."""
-    factory, record = make_factory()
-    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
-    tab.resize(640, 480)
-    tab.show()
-    tab.set_dataset("/data/slide_a.ome.tif")
-    tab.activate()
-    old_view = tab.stack.view
-    tab.release_for_production("patch background correction")
-    assert tab.frozen_view is old_view
-
-    tab.activate()                      # rebuild
-
-    assert tab.stack is not None
-    assert tab.stack.view is not old_view
-    assert tab.frozen_view is None
-    assert tab._layout.indexOf(old_view) < 0
-    assert len(record["built"]) == 2
-    tab.teardown()
-
-
-def test_a_dataset_change_destroys_the_frozen_frame(app):
-    factory, _record = make_factory()
-    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
-    tab.set_dataset("/data/slide_a.ome.tif")
-    tab.activate()
-    old_view = tab.stack.view
     tab.release_for_production("patch background correction")
 
     tab.set_dataset("/data/slide_b.ome.tif")
 
-    assert tab.frozen_view is None
-    assert tab._layout.indexOf(old_view) < 0
+    assert tab.stack is None
+    assert tab.released is False
+    assert stack.provider.closed is True
+    assert stack.scheduler.workers_running is False
+    assert tab._layout.indexOf(stack.view) < 0
     tab.teardown()
 
 
-def test_a_teardown_destroys_the_frozen_frame(app):
+def test_a_teardown_ends_a_suspended_stack(app):
     factory, _record = make_factory()
     tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
     tab.set_dataset("/data/slide_a.ome.tif")
     tab.activate()
-    old_view = tab.stack.view
+    stack = tab.stack
     tab.release_for_production("patch background correction")
 
     tab.teardown()
 
-    assert tab.frozen_view is None
-    assert tab._layout.indexOf(old_view) < 0
+    assert tab.stack is None
+    assert tab.released is False
+    assert stack.provider.closed is True
+    assert stack.controller.teardown_waits == [False]
 
 
-def test_releasing_twice_keeps_one_frame(app):
-    """Two production runs in a row: the second release has no stack, so it
-    must leave the frame from the first alone rather than dropping it."""
+def test_a_resume_after_the_stack_went_away_is_harmless(app):
     factory, _record = make_factory()
     tab = Step0ExploreTab(FakePage("CD8"), stack_factory=factory)
     tab.set_dataset("/data/slide_a.ome.tif")
     tab.activate()
-    view = tab.stack.view
-
     tab.release_for_production("patch background correction")
-    tab.release_for_production("on-demand background correction")
+    tab.set_dataset(None)
 
-    assert tab.frozen_view is view
-    assert tab._layout.indexOf(view) >= 0
+    tab.resume_from_production()
+
+    assert tab.stack is None and tab.released is False
     tab.teardown()

@@ -1681,21 +1681,15 @@ class Step0Page(QWidget):
         self._preview_stack.setCurrentIndex(PREVIEW_PAGE_COMPARE)
 
     def _reopen_full_image(self):
-        """Rebuild after a production run released the viewer.
+        """Rebuild the full image for the current channel and parameters.
 
-        The parameters are read fresh -- the run may have changed them --
-        but the CAMERA goes back to where the user was when the release
-        happened, if the viewer recorded that. A rebuild that opened on the
-        whole slide after every Apply threw the user's position away each
-        time they changed a parameter.
+        Needed only when there is no stack to show (a failed build, or a
+        view that was never opened from a compare panel); a production run
+        no longer takes the stack away, it suspends and resumes it in
+        place, so after a run this is a no-op re-sync. The camera is left
+        where it is.
         """
-        self._show_full_image(viewport_l0=self._released_full_viewport())
-
-    def _released_full_viewport(self):
-        """The viewport the full image had when a production run released
-        it, as `(y0, x0, w, h)` in level-0 pixels -- or None."""
-        explore_tab = getattr(self, "_explore_tab", None)
-        return getattr(explore_tab, "released_viewport_l0", None)
+        self._show_full_image()
 
     def _watch_production_worker(self, worker):
         """Bring the full image back when `worker` -- a production run that
@@ -1725,22 +1719,20 @@ class Step0Page(QWidget):
             self._gen_slot(self._on_production_worker_finished))
 
     def _on_production_worker_finished(self):
-        """A production run that released the viewer is over.
+        """A production run that suspended the viewer is over: resume it.
 
-        Two outcomes, both decided here rather than left to the user:
-
-        * the full-image page is ON SCREEN -> rebuild now, with the fresh
-          parameters, at the viewport the user had. Leaving the "running"
-          placeholder up after the run has ended told the user something
-          false, and the fix used to be a button they had to know about;
-        * it is not -> the placeholder is changed to say the run has
-          finished and how to get the view back. Rebuilding a hidden view
-          would spend a synchronous overview read on something nobody is
-          looking at.
+        The stack was never torn down, so resuming is cheap wherever the
+        view is -- it unlocks the camera and re-issues only the tiles the
+        current viewport is missing, which after an unchanged viewport is
+        none. Nothing is rebuilt and nothing flashes. Then, if the
+        full-image page is on screen, the current selection is re-applied
+        through `_show_full_image`: an Apply changes the parameters, and a
+        parameter change is a `set_selection` on the live stack, not a new
+        stack.
 
         Nothing happens while ANOTHER production run is still going -- the
-        gate that released the viewer still holds -- or when the viewer was
-        not released in the first place (never opened, or torn down for a
+        gate that suspended the viewer still holds -- or when the viewer was
+        not suspended in the first place (never opened, or torn down for a
         dataset switch).
         """
         explore_tab = getattr(self, "_explore_tab", None)
@@ -1748,10 +1740,9 @@ class Step0Page(QWidget):
             return
         if self.production_correction_busy():
             return
+        explore_tab.resume_from_production()
         if self._full_image_visible():
-            self._show_full_image(viewport_l0=self._released_full_viewport())
-        else:
-            explore_tab.production_finished()
+            self._show_full_image()
 
     def _fit_full_image(self):
         """Reset the full-image view to the whole slide.
@@ -1861,28 +1852,25 @@ class Step0Page(QWidget):
         return None
 
     def _release_explore_for_production(self, reason):
-        """Tear the Explore stack down and WAIT for it, before a GPU run.
+        """Suspend the Explore stack and WAIT for it, before a GPU run.
 
-        `wait_for_floor=True`: this must not return while a corrected-floor
-        computation is still on the GPU, which is the whole point of the
-        hand-off (see `ExploreController.teardown`). It therefore blocks the
-        GUI thread -- measured 2ms with nothing in flight and 0.35s with a
-        floor job running, and a floor job takes 0.4-1.1s, so a hand-off
-        landing early in one blocks for most of it. No progress UI is
-        attempted: repainting during a synchronous block would need event
-        re-entry, and re-entering the event loop here is how a "release"
-        turns into a second Explore being built underneath it.
+        `ExploreController.suspend_for_production` must not return while a
+        corrected-floor computation is still on the GPU, which is the whole
+        point of the hand-off. It therefore blocks the GUI thread -- a
+        floor job takes 0.4-1.1s, so a hand-off landing early in one blocks
+        for most of it. No progress UI is attempted: repainting during a
+        synchronous block would need event re-entry, and re-entering the
+        event loop here is how a hand-off turns into a second GPU user.
 
-        Idempotent, and a no-op when no stack exists. The user can enter the
-        full image again once the run finishes; it is rebuilt then with
-        whatever parameters are current.
+        Idempotent, and a no-op when no stack exists. The stack is resumed
+        in place by `_on_production_worker_finished` when the run ends.
         """
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or explore_tab.stack is None:
             return
         t0 = time.perf_counter()
         explore_tab.release_for_production(reason)
-        print(f"[step0] released Explore for {reason} in "
+        print(f"[step0] suspended Explore for {reason} in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
     @property

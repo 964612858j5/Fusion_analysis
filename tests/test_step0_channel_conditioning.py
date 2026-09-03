@@ -358,9 +358,13 @@ def test_dapi_is_conditionable_in_build_config(app):
 
 
 def test_dapi_default_color_blue(app):
+    """DAPI keeps its own blue -- and it is now the SAME blue the compare
+    panels and the full-image overlay use (`_nuc_color`), not a second one
+    the workbench kept privately."""
     p = _page_with_mixed(app)
     p._sync_step0_to_workbench()
-    assert p._cond_workbench._colors.get("DAPI") == "#3366ff"
+    assert p._cond_workbench._colors.get("DAPI") == p._channel_color_hex("DAPI")
+    assert p._cond_workbench._colors.get("DAPI") == "#007fff"
 
 
 def test_no_enabled_checkbox_in_step0_workbench(app):

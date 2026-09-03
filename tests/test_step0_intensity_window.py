@@ -484,6 +484,60 @@ def test_the_swatch_starts_at_the_pages_colour(app):
     assert page._dock_adapter.model.get("DAPI").color.lower() == "#0000ff"
 
 
+def test_the_default_swatches_are_the_channel_remap_palette(app):
+    """One colour store: the default a channel wears in the Background
+    Correction list is the Channel Remap palette entry for its index, so the
+    same channel is the same colour in both lists (and in the full image)."""
+    page = _page(app)
+    wb = page._cond_workbench
+    from block01.ui.widgets import channel_workbench as cw
+
+    order = [c for c in page._channel_order if c != "DAPI"]
+    assert len(set(page._channel_swatch_hex(c) for c in order)) == len(order), \
+        "the marker swatches are not distinct"
+    for ch in page._channel_order:
+        assert page._channel_swatch_hex(ch).lower() == wb._colors[ch].lower(), ch
+        assert page._dock_adapter.model.get(ch).color.lower() == \
+            wb._colors[ch].lower(), ch
+    # ...and that is the palette rule, by channel index.
+    palette_order = page._palette_channel_order()
+    for i, ch in enumerate(palette_order):
+        if ch == "DAPI":
+            continue                       # DAPI keeps its own blue
+        assert page._channel_swatch_hex(ch).lower() == \
+            cw._PALETTE[i % len(cw._PALETTE)].lower(), ch
+    # The full image of channel i paints in palette colour i.
+    assert page._full_image_tint("CD3") == pytest.approx(
+        cw._hex_to_rgb01(page._channel_swatch_hex("CD3")))
+
+
+def test_a_swatch_pick_moves_the_channel_remap_list_too(app, monkeypatch):
+    page = _page(app)
+    wb = page._cond_workbench
+    monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                        staticmethod(lambda *a, **k: QColor("#123456")))
+
+    page._on_channel_swatch_clicked("CD20")
+
+    assert wb._colors["CD20"].lower() == "#123456"
+    assert page._channel_swatch_hex("CD20").lower() == "#123456"
+
+
+def test_a_channel_remap_pick_moves_the_background_correction_swatch(app,
+                                                                     monkeypatch):
+    page = _page(app)
+    wb = page._cond_workbench
+    monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                        staticmethod(lambda *a, **k: QColor("#abcdef")))
+
+    wb._on_color_clicked("CD3")
+
+    assert page._channel_colors["CD3"] == pytest.approx(
+        (0xab / 255, 0xcd / 255, 0xef / 255), abs=1 / 255)
+    assert page._channel_swatch_hex("CD3").lower() == "#abcdef"
+    assert page._dock_adapter.model.get("CD3").color.lower() == "#abcdef"
+
+
 def test_clicking_a_marker_swatch_recolours_every_view(app, monkeypatch):
     stack = _Stack()
     page = _page(app, stack)

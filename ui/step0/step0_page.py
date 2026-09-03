@@ -69,7 +69,11 @@ from ...utils.roi_project import (
 # Remap tab (the third host alongside Step1.5 creator + Step3 reviewer). GUI-only
 # — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
 # resolver / Step2-runtime import is introduced here.
-from ..widgets.channel_workbench import ChannelWorkbench
+from ..widgets.channel_workbench import (
+    ChannelWorkbench,
+    _PALETTE as CHANNEL_PALETTE,
+    _hex_to_rgb01 as _channel_hex_to_rgb01,
+)
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
@@ -1240,6 +1244,10 @@ class Step0Page(QWidget):
         # Channels column top is not pushed down by it and aligns with the BG tab.
         self._cond_workbench.set_center_top_bar(_patch_bar)
         self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
+        # A colour picked in the Channel Remap layer list is the SAME colour
+        # store the Background Correction swatches read (and vice versa).
+        self._cond_workbench.channel_color_changed.connect(
+            self._on_workbench_color_changed)
         # v15: single data-access seam with the SAVE boundary — remap eats
         # only loader-served pixels (saved corrected after Save, raw before,
         # honestly labeled). Lazy per-channel fetch preserved.
@@ -1486,8 +1494,7 @@ class Step0Page(QWidget):
         channel = channel or self.current_channel
         if not channel:
             return None
-        return self._channel_colors.get(
-            channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
+        return self._channel_color(channel)
 
     def _on_full_marker_toggled(self, checked):
         """Marker layer on/off, applied to the live stack only.
@@ -2432,9 +2439,11 @@ class Step0Page(QWidget):
         # actually read eagerly below.
         if active not in channels:
             active = channels[0]
-        # DAPI is traditionally blue in fluorescence — give the nucleus channel a
-        # fixed blue swatch; other channels fall back to the workbench palette.
-        colors = {self.nucleus_channel: "#3366ff"}
+        # ONE colour store: the page answers for every channel (a user pick if
+        # there is one, else the same palette-by-index default the workbench
+        # would have chosen, DAPI's own blue for the nucleus). Passing the whole
+        # map means the two lists cannot drift apart on the first load either.
+        colors = {ch: self._channel_color_hex(ch) for ch in channels}
         # Preload integration: serve every channel from the warm cache (zero IO →
         # All-toggle / patch-switch instant). Cold channels stay None (lazy); only
         # the active one is read eagerly so first paint is never blank.
@@ -3913,18 +3922,76 @@ class Step0Page(QWidget):
         row["status_lbl"].setText("")
         row["row_widget"].setStyleSheet("background:#1a2e1a;border-radius:3px;")
 
-    # ── per-channel display colour (the Channels list swatches) ──────────
-    def _channel_swatch_hex(self, ch):
-        """`#rrggbb` for a channel's swatch: the page's own colour for it, the
-        nucleus colour for the nucleus channel, the marker default otherwise."""
-        if ch and ch == self.nucleus_channel:
-            rgb = self._channel_colors.get(
-                ch, getattr(self, "_nuc_color", (0.0, 0.5, 1.0)))
-        else:
-            rgb = self._channel_colors.get(
-                ch, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
+    # ── per-channel display colour: ONE store, shared with Channel Remap ──
+    #  `_channel_colors` holds the USER's choices; anything not in it answers
+    #  from the Channel Remap palette by channel index, which is exactly the
+    #  rule `ChannelWorkbench.set_channel_images` uses. So a channel wears the
+    #  same colour in the Background Correction list, the Channel Remap layer
+    #  list, the compare panels and the full image -- before anyone picks a
+    #  colour at all -- and a pick on either side moves both.
+    def _palette_channel_order(self):
+        """The channel order the palette is dealt over: exactly the list
+        `_sync_step0_to_workbench` hands the workbench, so index i here is
+        index i there. `_channel_order` is empty mid-rebuild, hence the
+        loader fallback."""
+        names = list(getattr(self, "_channel_order", ()) or ())
+        if not names and getattr(self, "loader", None) is not None:
+            try:
+                names = list(self.loader.channel_names())
+            except Exception:                       # noqa: BLE001
+                names = []
+        return [ch for ch in names if not _is_non_marker_channel(ch)]
+
+    def _default_channel_color(self, ch):
+        """The palette default for `ch` as (r, g, b) floats 0-1."""
+        order = self._palette_channel_order()
+        try:
+            i = order.index(ch)
+        except ValueError:
+            return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
+        return _channel_hex_to_rgb01(CHANNEL_PALETTE[i % len(CHANNEL_PALETTE)])
+
+    def _channel_color(self, ch):
+        """THE colour of `ch` as (r, g, b) floats 0-1 -- the one answer every
+        view asks for. A user pick wins; the nucleus falls back to its own
+        colour; every other channel to its palette default."""
+        if not ch:
+            return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
+        rgb = self._channel_colors.get(ch)
+        if rgb is not None:
+            return rgb
+        if ch == self.nucleus_channel:
+            return getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
+        return self._default_channel_color(ch)
+
+    def _channel_color_hex(self, ch):
+        rgb = self._channel_color(ch)
         return QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
                             int(rgb[2] * 255)).name()
+
+    def _channel_swatch_hex(self, ch):
+        """`#rrggbb` for a channel's swatch (the dock adapter asks this)."""
+        return self._channel_color_hex(ch)
+
+    def _push_color_to_workbench(self, ch, rgb):
+        """Mirror a colour into the Channel Remap layer list. Silent: the
+        workbench's own setter does not re-emit, so this cannot loop."""
+        wb = getattr(self, "_cond_workbench", None)
+        setter = getattr(wb, "set_channel_color", None)
+        if setter is None:
+            return
+        setter(ch, QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
+                                int(rgb[2] * 255)).name())
+
+    def _on_workbench_color_changed(self, ch, hexc):
+        """A swatch was picked in the Channel Remap layer list: the same
+        colour is now this page's colour for that channel."""
+        c = QtGui.QColor(hexc)
+        rgb = (c.red() / 255.0, c.green() / 255.0, c.blue() / 255.0)
+        if ch and ch == self.nucleus_channel:
+            self._apply_nucleus_color(rgb, push_workbench=False)
+        else:
+            self._apply_channel_color(ch, rgb, push_workbench=False)
 
     def _on_channel_swatch_clicked(self, ch):
         """A swatch in the Channels list was clicked: pick that channel's
@@ -3936,10 +4003,13 @@ class Step0Page(QWidget):
         else:
             self._pick_channel_color(ch)
 
-    def _apply_channel_color(self, ch, rgb):
+    def _apply_channel_color(self, ch, rgb, push_workbench=True):
         """Record `rgb` for `ch` and push it to every view: the swatch (via
-        the channel model), the compare panels and the full image's tint."""
+        the channel model), the Channel Remap layer list, the compare panels
+        and the full image's tint."""
         self._channel_colors[ch] = rgb
+        if push_workbench:
+            self._push_color_to_workbench(ch, rgb)
         model = self._display_model()
         if model is not None and model.get(ch) is not None:
             model.set_color(ch, QtGui.QColor(
@@ -3964,8 +4034,7 @@ class Step0Page(QWidget):
         from PyQt5.QtWidgets import QColorDialog
         if not ch:
             return
-        rgb = self._channel_colors.get(
-            ch, getattr(self, "_marker_color", (0.2, 1.0, 0.2)))
+        rgb = self._channel_color(ch)
         init_color = QtGui.QColor(int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
         color = QColorDialog.getColor(init_color, self, f"Color for {ch}")
         if not color.isValid():
@@ -3983,19 +4052,25 @@ class Step0Page(QWidget):
     def _pick_nucleus_color(self):
         """弹颜色对话框，让用户选择 nucleus 叠加显示颜色。"""
         from PyQt5.QtWidgets import QColorDialog
-        rgb = getattr(self, '_nuc_color', (0.0, 0.5, 1.0))
+        rgb = self._channel_color(self.nucleus_channel)
         init_color = QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
         color = QColorDialog.getColor(init_color, self, "Color for nucleus")
         if not color.isValid():
             return
-        self._nuc_color = (color.red() / 255.0, color.green() / 255.0,
-                           color.blue() / 255.0)
+        self._apply_nucleus_color((color.red() / 255.0, color.green() / 255.0,
+                                   color.blue() / 255.0))
+
+    def _apply_nucleus_color(self, rgb, push_workbench=True):
+        """Record the DAPI overlay colour and push it to every view."""
+        self._nuc_color = rgb
         nuc = self.nucleus_channel
         if nuc:
             self._channel_colors[nuc] = self._nuc_color
+            if push_workbench:
+                self._push_color_to_workbench(nuc, self._nuc_color)
             model = self._display_model()
             if model is not None and model.get(nuc) is not None:
-                model.set_color(nuc, color.name())
+                model.set_color(nuc, self._channel_color_hex(nuc))
         if self._last_payload is not None and self.current_channel:
             self._rebuild_payload_rgb(self.current_channel)
             self._refresh_preview_display(keep_zoom=True)
@@ -4108,8 +4183,8 @@ class Step0Page(QWidget):
         self._rebuild_payload_rgb_from(
             payload,
             ch,
-            getattr(self, '_nuc_color', (0.0, 0.5, 1.0)),
-            self._channel_colors.get(ch, getattr(self, '_marker_color', (0.0, 1.0, 0.3))),
+            self._channel_color(self.nucleus_channel),
+            self._channel_color(ch),
         )
 
     @staticmethod
@@ -4186,9 +4261,8 @@ class Step0Page(QWidget):
 
         prev_ranges = [vb.viewRange() for vb in self._preview_vbs] if keep_zoom else None
         ch = self.current_channel or next(iter(self._channel_colors.keys()), "")
-        marker_rgb = self._channel_colors.get(
-            ch, getattr(self, "_marker_color", (0.0, 1.0, 0.3)))
-        nuc_rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
+        marker_rgb = self._channel_color(ch)
+        nuc_rgb = self._channel_color(self.nucleus_channel)
         marker_on = self._btn_show_marker.isChecked()
         nucleus_on = self._btn_show_nucleus.isChecked()
 
@@ -4941,8 +5015,8 @@ class Step0Page(QWidget):
             self._last_payload = payload
             self._rebuild_payload_rgb_from(
                 payload, ch,
-                getattr(self, '_nuc_color', (0.0, 0.5, 1.0)),
-                self._channel_colors.get(ch, getattr(self, '_marker_color', (0.0, 1.0, 0.3))))
+                self._channel_color(self.nucleus_channel),
+                self._channel_color(ch))
             self._refresh_preview_display(keep_zoom=keep_zoom)
             self._metrics_original.setText(self._metric_text("Original", payload["original_metrics"]))
             if payload.get("tophat_disp") is not None:
@@ -5073,8 +5147,8 @@ class Step0Page(QWidget):
         if payload is None:
             self._preview_status.setText(f"No cached result for {ch}.")
             return
-        nc = getattr(self, '_nuc_color', (0.0, 0.5, 1.0))
-        mc = self._channel_colors.get(ch, getattr(self, '_marker_color', (0.0, 1.0, 0.3)))
+        nc = self._channel_color(self.nucleus_channel)
+        mc = self._channel_color(ch)
         self._rebuild_payload_rgb_from(payload, ch, nc, mc)
         self._last_payload = payload
         self._refresh_preview_display(keep_zoom=True)
@@ -5229,10 +5303,8 @@ class Step0Page(QWidget):
         self._rebuild_payload_rgb_from(
             payload,
             self.current_channel,
-            getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
-            self._channel_colors.get(
-                self.current_channel, getattr(self, "_marker_color", (0.0, 1.0, 0.3))
-            ),
+            self._channel_color(self.nucleus_channel),
+            self._channel_color(self.current_channel),
         )
         self._refresh_preview_display(keep_zoom=keep_zoom)
         self._metrics_original.setText(self._metric_text("Original", payload["original_metrics"]))

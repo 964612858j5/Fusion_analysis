@@ -74,6 +74,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
     """
 
     refresh_requested = pyqtSignal()
+    # A channel's display colour was changed HERE (the layer list's swatch).
+    # Hosts that keep their own channel list (Step0's Background Correction
+    # rows) listen so both lists show one colour per channel.
+    channel_color_changed = pyqtSignal(str, str)   # channel name, "#rrggbb"
     # v15: a channel's remap params changed via the controls (live mutual
     # visibility with the background-correction side).
     params_changed = pyqtSignal(str)
@@ -1207,6 +1211,23 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if search is not None:
             self._layer_list.filter_rows(search.text())
 
+    def set_channel_color(self, name, color):
+        """Set a channel's display colour from OUTSIDE (the host's own list).
+
+        Silent by design: it does not re-emit `channel_color_changed`, so a
+        host mirroring the colour back cannot start a ping-pong.
+        """
+        if name not in self._colors:
+            return
+        hexc = QColor(color).name()
+        if self._colors[name] == hexc:
+            return
+        self._colors[name] = hexc
+        self._layer_list.set_channel_color(name, hexc)
+        if name == self._active:
+            self._histogram.set_color(hexc)
+        self._refresh_preview()
+
     def _on_color_clicked(self, name):
         if name not in self._colors:
             return
@@ -1215,11 +1236,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if not chosen.isValid():
             return                              # user cancelled
         hexc = chosen.name()
-        self._colors[name] = hexc
-        self._layer_list.set_channel_color(name, hexc)
-        if name == self._active:
-            self._histogram.set_color(hexc)
-        self._refresh_preview()
+        self.set_channel_color(name, hexc)
+        self.channel_color_changed.emit(name, hexc)
 
     def _channel_data_max(self, name, arr):
         """The channel patch's finite maximum, computed once per load."""

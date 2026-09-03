@@ -33,6 +33,42 @@ Every `pg.ImageItem` (overview, raw-pool, precise-pool) is constructed with
 `pg.setConfigOptions(imageAxisOrder=...)`, which a standalone script (or a
 future host window) might not have set, producing a transposed render.
 
+## Smooth tile scaling
+
+A pooled tile is almost never drawn at 1:1. The controller picks the
+pyramid level whose downsample factor is the closest one AT OR ABOVE the
+camera's, so the residual scale sits somewhere in (0.25, 1] for a 4x
+pyramid, and during a gesture it moves continuously. `pg.ImageItem.paint`
+is a single `painter.drawImage(rect, qimage)` and sets no render hints of
+its own, so without `QPainter.SmoothPixmapTransform` Qt's raster engine
+resamples with NEAREST NEIGHBOUR: at a 0.3-0.5 residual scale that throws
+away two of every three source pixels, which is exactly the crawling,
+blocky look during a zoom. `ExploreView.__init__` sets the hint once on
+the `GraphicsLayoutWidget`, the QGraphicsView that supplies the painter
+to every item in the scene -- both tile pools, the overview, the
+corrected floor, and `RawOverlayLayer`, which shares this ViewBox.
+
+Measured (36 512-px tiles, 1200x900 widget, offscreen raster, mean of 40
+`grab()` frames), nearest -> smooth:
+
+    residual scale 0.30:  5.3 -> 17.6 ms/frame
+    residual scale 0.50:  5.1 -> 17.4 ms/frame
+    residual scale 0.75:  4.5 -> 10.3 ms/frame
+    residual scale 0.98:  4.3 ->  8.4 ms/frame
+
+HONEST COST: this is 2-3.4x the paint time, far above a 20% budget, and
+it is paid on every frame of a pan as well as a zoom. It is accepted
+because the absolute number stays inside a frame budget (17.6 ms worst
+case is ~55 fps, and the viewport is not repainted more often than the
+30 ms motion tick) and the aliasing it removes is the specific artifact
+being complained about. If it ever needs to be cheaper, the answer is the
+reference viewer's: an OpenGL viewport with GL_LINEAR, where the filtering
+is free -- not a smaller hint.
+
+`QPainter.Antialiasing` was measured alongside and is NOT set: it affects
+only path rendering, so on this scene it changed nothing but the outermost
+pixel row of each tile rect (mean |diff| 0.42/255 across the frame).
+
 ## Level switching without clearing; active draw set
 
 Switching the displayed pyramid level does NOT clear previously-drawn
@@ -1064,6 +1100,20 @@ class ExploreView(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.graphics = pg.GraphicsLayoutWidget()
+        # Smooth (bilinear) tile scaling (module docstring "Smooth tile
+        # scaling"). Every pooled tile -- precise, raw, the overview, the
+        # corrected floor, and the additive `RawOverlayLayer`, which shares
+        # this very ViewBox -- is painted by `pg.ImageItem.paint` through a
+        # single `QPainter.drawImage`, and ImageItem sets no render hints of
+        # its own, so the hint has to be set ONCE here, on the QGraphicsView
+        # that supplies the painter to every item in the scene.
+        #
+        # `QPainter.Antialiasing` is deliberately NOT set alongside it:
+        # measured, it changes only the outermost pixel row of each tile
+        # rect (mean |diff| 0.42/255 over the whole frame) and buys no
+        # smoothing of the image content itself, which is what
+        # SmoothPixmapTransform governs.
+        self.graphics.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         layout.addWidget(self.graphics)
 
         self.view_box: pg.ViewBox = self.graphics.addViewBox()

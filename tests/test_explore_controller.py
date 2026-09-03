@@ -250,6 +250,78 @@ def test_overview_loads_full_extent(app):
     ctrl.teardown()
 
 
+def test_view_enables_smooth_pixmap_transform(app):
+    """Module docstring "Smooth tile scaling": tiles are essentially never
+    drawn at 1:1, and `pg.ImageItem.paint` sets no render hints of its own,
+    so the hint has to be on the QGraphicsView that supplies the painter.
+    Antialiasing is deliberately NOT required -- it buys nothing for
+    drawImage and is only measured noise on the tile rect's edge."""
+    from PyQt5 import QtGui
+
+    view = ExploreView()
+    hints = view.graphics.renderHints()
+    assert hints & QtGui.QPainter.SmoothPixmapTransform
+
+    # The controller's view is the same widget, and so is the additive
+    # overlay's: they all share one ViewBox in one scene, so one hint
+    # covers every pooled tile.
+    ctrl, provider, scheduler, cview = make_controller(app)
+    assert cview.graphics.renderHints() & QtGui.QPainter.SmoothPixmapTransform
+    from block01.viewer.explore_view import RawOverlayLayer
+    overlay = RawOverlayLayer(provider, scheduler, ctrl.grid, cview, "CD3")
+    assert overlay.view is cview
+    assert (overlay._pool.view_box.scene() is cview.view_box.scene())
+    overlay.teardown()
+    ctrl.teardown()
+
+
+def test_smooth_pixmap_transform_actually_smooths_a_zoomed_out_frame(app):
+    """The hint is not cosmetic bookkeeping: rendering the same scene at a
+    sub-1.0 scale with and without it must produce visibly different
+    pixels, with LESS high-frequency energy when smoothing is on (nearest
+    neighbour keeps the full-contrast source rows; bilinear averages
+    them)."""
+    import pyqtgraph as pg
+    from PyQt5 import QtCore, QtGui
+
+    def render(smooth):
+        view = ExploreView()
+        view.resize(400, 400)
+        hints = view.graphics.renderHints()
+        if smooth:
+            hints |= QtGui.QPainter.SmoothPixmapTransform
+        else:
+            hints &= ~QtGui.QPainter.SmoothPixmapTransform
+        view.graphics.setRenderHints(hints)
+        # One-pixel-wide stripes: the pattern nearest-neighbour aliases on
+        # worst and bilinear averages away.
+        arr = np.zeros((256, 256), dtype=np.uint8)
+        arr[::2, :] = 255
+        item = pg.ImageItem(axisOrder="row-major")
+        item.setImage(arr, autoLevels=False, levels=(0, 255))
+        item.setRect(QtCore.QRectF(0, 0, 256, 256))
+        view.view_box.addItem(item)
+        view.view_box.setRange(QtCore.QRectF(0, 0, 900, 900), padding=0)
+        view.show()
+        app.processEvents()
+        img = view.graphics.grab().toImage().convertToFormat(
+            QtGui.QImage.Format_Grayscale8)
+        w, h = img.width(), img.height()
+        ptr = img.bits()
+        ptr.setsize(img.byteCount())
+        out = np.frombuffer(ptr, dtype=np.uint8).reshape(
+            h, img.bytesPerLine())[:, :w].astype(np.float64).copy()
+        view.hide()
+        return out
+
+    hard = render(False)
+    soft = render(True)
+    assert hard.shape == soft.shape
+    assert not np.array_equal(hard, soft), "the hint changed nothing"
+    assert soft.std() < hard.std(), (
+        f"smoothed frame is not smoother: std {soft.std()} vs {hard.std()}")
+
+
 # ── 2. range change computes correct tile set + center-out priority ────────
 
 def test_range_change_requests_missing_raw_tiles_center_out(app):

@@ -64,7 +64,9 @@ def test_step0_pushes_context_into_both_views(app):
     s.toggle_tissue_navigator()             # popup fed from the model on create
     pop = s._tissue_navigator_popup
     assert _names(pop.overview.get_rois()) == ["A"]
-    assert pop.is_full_wsi_mode() is True
+    # The analysis region is derived from the drawing now: an ROI exists, so
+    # this is ROI mode whatever the legacy `full_wsi_mode` flag says.
+    assert pop.is_full_wsi_mode() is False
     assert pop.roi_count() == 1
 
 

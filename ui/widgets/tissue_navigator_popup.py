@@ -204,7 +204,9 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
             return 0
 
     def is_full_wsi_mode(self):
-        return bool(getattr(self._overview, "full_wsi_mode", False))
+        """No ROI drawn = the whole slide is the analysis region. There is
+        no separate selector any more: drawing an ROI is the choice."""
+        return self.roi_count() == 0
 
     def _has_data(self):
         return getattr(self._overview, "loader", None) is not None
@@ -246,7 +248,7 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         return self._minimized
 
     def _refresh_bar_text(self):
-        mode = "Full WSI" if self.is_full_wsi_mode() else "ROI mode"
+        mode = "Full WSI (no ROI drawn)" if self.is_full_wsi_mode() else "ROI"
         view = "Current View" if self._viewport_rect is not None else "—"
         self._bar_label.setText(
             f"Tissue Preview | {mode} | ROI: {self.roi_count()} | {view}")

@@ -308,53 +308,55 @@ def test_tab2_save_renamed(app):
     assert "Save remap config (Step0)" not in labels
 
 
-# ── step0-restore-region-selector: analysis-region selector -> popup ─────────
-def test_region_selector_in_navigator_popup(app):
+# ── the analysis region is DERIVED from the drawing, not chosen ──────────────
+# The ROI-vs-Full-WSI selector duplicated the ROI button (user report) and is
+# gone. No ROI drawn -> the whole slide; an ROI drawn -> ROI mode.
+
+def test_there_is_no_region_selector_any_more(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     s.toggle_tissue_navigator()
     pop = s._tissue_navigator_popup
-    # the combo (+ button + msg + its container) live inside the popup now
-    assert _under(pop, s._analysis_region_combo)
-    assert _under(pop, s._btn_use_full_wsi)
-    assert _under(pop, s._region_selector)
-    assert s._region_selector.isVisible()
+    for name in ("_analysis_region_combo", "_btn_use_full_wsi", "_region_selector"):
+        assert not hasattr(s, name), name
+    assert pop._region_selector is None
+    # The toolbar (ROI / Patch buttons) is still hosted, first thing under the bar.
+    assert _under(pop, s._roi_patch_toolbar)
 
 
-def test_region_selector_not_in_background_correction(app):
-    from block01.ui.step0.step0_page import Step0Page
-    s = Step0Page()
-    # before the navigator exists, the selector is not shown in the BG tab and
-    # sec_b (which used to host it) stays hidden as a model-only view.
-    assert not s._roi_patch_section.isVisible()
-    assert not _under(s._roi_patch_section, s._analysis_region_combo)
-    # and it is NOT under the BG splitter (Section C)
-    ms = s._main_split
-    kids = [ms.widget(i) for i in range(ms.count())]
-    assert not any(_under(k, s._analysis_region_combo) for k in kids)
-
-
-def test_region_selector_handler_still_fires(app):
+def test_no_roi_drawn_means_full_wsi(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     s.toggle_tissue_navigator()
-    # changing the combo still drives the region-mode handler (signal preserved
-    # across reparenting into the popup)
-    s._analysis_region_combo.setCurrentIndex(1)     # Full WSI
-    assert s._analysis_region_mode == "full_wsi"
+    ov = s._drawing_overview()
+    assert ov.get_rois() == []
     assert s._is_full_wsi_mode() is True
-    s._analysis_region_combo.setCurrentIndex(0)     # ROI
-    assert s._analysis_region_mode == "roi"
-    assert s._is_full_wsi_mode() is False
+    assert s._tissue_navigator_popup.is_full_wsi_mode() is True
+    assert "Full WSI" in s._tissue_navigator_popup._bar_label.text()
 
 
-def test_use_full_wsi_button_still_works_from_popup(app):
+def test_an_roi_drawn_means_roi_mode(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     s.toggle_tissue_navigator()
-    s._analysis_region_combo.setCurrentIndex(0)
-    s._btn_use_full_wsi.click()                     # button -> combo index 1
-    assert s._analysis_region_combo.currentIndex() == 1
+    ov = s._drawing_overview()
+    ov.set_rois_and_patches(
+        [{"name": "ROI_1", "color": "#ffffff",
+          "polygon_display": [(0, 0), (10, 0), (10, 10), (0, 10)],
+          "polygon_fullres": [(0, 0), (80, 0), (80, 80), (0, 80)],
+          "bbox_fullres": [0, 80, 0, 80], "patch_indices": []}], [])
+    assert len(ov.get_rois()) == 1
+    assert s._is_full_wsi_mode() is False
+    assert s._tissue_navigator_popup.is_full_wsi_mode() is False
+    assert "ROI" in s._tissue_navigator_popup._bar_label.text()
+    # ROI tools are never disabled by a "mode" now.
+    assert s._btn_mode_roi.isEnabled()
+
+
+def test_the_old_handler_is_a_harmless_no_op(app):
+    from block01.ui.step0.step0_page import Step0Page
+    s = Step0Page()
+    assert s._on_analysis_region_changed(1) is None
     assert s._is_full_wsi_mode() is True
 
 
@@ -411,13 +413,11 @@ def test_mode_switch_drives_popup_overview(app):
     assert s._btn_mode_patch.isChecked() and not s._btn_mode_roi.isChecked()
 
 
-def test_region_selector_and_toolbar_both_hosted(app):
+def test_toolbar_hosted_in_the_popup(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     s.toggle_tissue_navigator()
     pop = s._tissue_navigator_popup
-    # the earlier region-selector relocation (eab9e39) still holds alongside this
-    assert _under(pop, s._analysis_region_combo)
     assert _under(pop, s._roi_patch_toolbar)
     # the popup still hosts the overview (drawing surface) undisturbed
     from block01.ui.step0.overview_panel import OverviewPanel
@@ -432,12 +432,11 @@ def test_navigator_overview_above_lists_with_proportions(app):
     s.toggle_tissue_navigator()
     pop = s._tissue_navigator_popup
     outer = pop._outer
-    i_region = outer.indexOf(s._region_selector)
     i_modebar = outer.indexOf(s._roi_patch_toolbar)
     i_over = outer.indexOf(pop._overview)
     i_lists = outer.indexOf(s._roi_patch_lists)
     # controls above the overview, lists below it
-    assert i_region < i_over and i_modebar < i_over
+    assert i_modebar < i_over
     assert i_lists > i_over
     # overview is the dominant element (3) vs lists (2): 3/5 vs 2/5
     assert outer.stretch(i_over) == 3
@@ -460,11 +459,12 @@ def test_navigator_no_full_wsi_message(app):
     assert not hasattr(s, "_analysis_region_msg")
     s.toggle_tissue_navigator()
     pop = s._tissue_navigator_popup
-    # switching to Full WSI does not surface any such banner (and does not crash)
-    s._analysis_region_combo.setCurrentIndex(1)
+    # There is no region selector any more either; the old handler is a no-op
+    # and no banner appears anywhere in the popup.
+    s._on_analysis_region_changed(1)
     labels = [l.text() for l in pop.findChildren(QtWidgets.QLabel)]
     assert not any("entire image will be processed" in t for t in labels)
-    assert s._analysis_region_mode == "full_wsi"
+    assert not any("Analysis region" in t for t in labels)
 
 
 def test_navigator_lists_uncapped_for_proportional_growth(app):

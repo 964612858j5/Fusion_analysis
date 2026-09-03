@@ -407,30 +407,10 @@ class Step0Page(QWidget):
         )
         bl.addWidget(b_title)
 
-        # Analysis-region selector (ROI vs Full WSI). Built here but NOT added to
-        # sec_b: sec_b is hidden (#10 relocation), and choosing ROI-vs-full-WSI is
-        # logically tied to ROI drawing, which now lives in the Tissue Navigator
-        # popup. The selector is wrapped in its own container and handed to the
-        # popup in _ensure_tissue_navigator. Its handler/signals are unchanged.
-        self._region_selector = QWidget()
-        rs_lay = QVBoxLayout(self._region_selector)
-        rs_lay.setContentsMargins(0, 0, 0, 0)
-        rs_lay.setSpacing(4)
-        region_row = QHBoxLayout()
-        region_row.addWidget(QLabel("Analysis region:"))
-        self._analysis_region_combo = QComboBox()
-        self._analysis_region_combo.addItems(["ROI selection", "Full WSI"])
-        self._analysis_region_combo.currentIndexChanged.connect(self._on_analysis_region_changed)
-        region_row.addWidget(self._analysis_region_combo, stretch=1)
-        self._btn_use_full_wsi = QPushButton("Use full image")
-        self._btn_use_full_wsi.setToolTip("Switch to Full WSI mode. ROI drawing is not required.")
-        self._btn_use_full_wsi.clicked.connect(lambda: self._analysis_region_combo.setCurrentIndex(1))
-        region_row.addWidget(self._btn_use_full_wsi)
-        rs_lay.addLayout(region_row)
-        # (navigator-layout) The "Full WSI mode: the entire image will be
-        # processed." banner was removed as redundant clutter — the region
-        # dropdown already conveys the mode (and the overview status line echoes
-        # it). _on_analysis_region_changed no longer references a message label.
+        # There is NO analysis-region selector any more (user request: it
+        # duplicated the ROI button). The rule is the drawing itself: no ROI
+        # drawn -> the whole slide is the analysis region; an ROI drawn ->
+        # ROI mode. See `_is_full_wsi_mode`.
 
         # ROI/Patch drawing toolbar + ROI/Patch lists. Like the region selector,
         # these are built here but NOT added to the hidden sec_b: they belong with
@@ -2457,7 +2437,6 @@ class Step0Page(QWidget):
             # restore-region-selector: host the analysis-region selector (ROI vs
             # Full WSI) in the popup, alongside the ROI drawing it controls. The
             # widget + handler are owned by Step0; reparenting preserves signals.
-            popup.set_region_selector(self._region_selector)
             # restore-roi-patch-toolbar: host the ROI/patch drawing toolbar (mode
             # switches + ROI/patch lists) in the popup, with the overview it draws
             # on. _set_draw_mode targets the popup overview via _drawing_overview.
@@ -3016,31 +2995,27 @@ class Step0Page(QWidget):
 
         self.overview._add_patch = wrapped
 
+    def _roi_count(self):
+        """ROIs drawn on the overview the user draws on (the navigator's when
+        it exists, else the page's), falling back to `self.rois`."""
+        try:
+            ov = self._drawing_overview()
+            if ov is not None:
+                return len(ov.get_rois())
+        except Exception:
+            pass
+        return len(getattr(self, "rois", None) or [])
+
     def _is_full_wsi_mode(self):
-        return str(getattr(self, "_analysis_region_mode", "roi")) == "full_wsi"
+        """The analysis region is the whole slide exactly when no ROI has
+        been drawn. Derived, never chosen: the former ROI-vs-Full-WSI
+        selector duplicated the ROI button and is gone."""
+        return self._roi_count() == 0
 
     def _on_analysis_region_changed(self, idx):
-        self._analysis_region_mode = "full_wsi" if int(idx) == 1 else "roi"
-        full = self._is_full_wsi_mode()
-        for btn in (
-            getattr(self, "_btn_mode_roi", None),
-            getattr(self, "_btn_del_roi", None),
-            getattr(self, "_btn_rename_roi", None),
-        ):
-            if btn is not None:
-                btn.setEnabled(not full)
-        if full:
-            self._set_draw_mode("patch")
-            if self.overview:
-                self.overview.full_wsi_mode = True
-                self.overview.status.setText(
-                    "Full WSI mode: drag patch rectangles anywhere. ROI drawing is disabled."
-                )
-        else:
-            if self.overview:
-                self.overview.full_wsi_mode = False
-            if self.overview:
-                self.overview.status.setText("ROI mode: draw ROI vertices or patch rectangles inside a ROI.")
+        """Kept for callers of the old selector; the region is derived now
+        (`_is_full_wsi_mode`), so there is nothing to set."""
+        return None
 
     def _full_wsi_roi(self):
         h, w = (self.loader.shape if self.loader is not None else (0, 0))

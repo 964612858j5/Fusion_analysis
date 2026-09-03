@@ -72,9 +72,14 @@ def _deliver(scheduler, layer, req, value=500.0, error=None):
 
 
 def _overlay_requests(scheduler):
+    """The overlay's VISIBLE requests. Its prefetch-ring requests (priority
+    >= RAW_PREFETCH_RING_BASE_PRIORITY, speculative, never pooled) are a
+    separate matter and are left out here."""
+    from block01.viewer.explore_view import RAW_PREFETCH_RING_BASE_PRIORITY
     return [r for r, _cb in scheduler.requests
             if isinstance(r.key, RawKey)
-            and str(r.generation[0]) == "dapi_raw"]
+            and str(r.generation[0]) == "dapi_raw"
+            and r.priority < RAW_PREFETCH_RING_BASE_PRIORITY]
 
 
 def _live_overlay_requests(scheduler, layer):
@@ -711,8 +716,10 @@ def test_the_handler_refuses_a_matching_result_once_disabled(app):
 # fetching the same viewport in different orders.
 
 def _marker_request_order(scheduler):
+    from block01.viewer.explore_view import RAW_PREFETCH_RING_BASE_PRIORITY
     return [(r.key.tile.tx, r.key.tile.ty) for r, _cb in scheduler.requests
-            if isinstance(r.key, RawKey) and r.generation[0] == "raw"]
+            if isinstance(r.key, RawKey) and r.generation[0] == "raw"
+            and r.priority < RAW_PREFETCH_RING_BASE_PRIORITY]
 
 
 def test_the_marker_request_order_is_the_controllers_ordering(app):

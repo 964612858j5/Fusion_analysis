@@ -167,10 +167,20 @@ class FakeScheduler:
     def shutdown(self):
         self.shutdown_called = True
 
-    def pending_for(self, key_type=None):
-        if key_type is None:
-            return list(self.requests)
-        return [(r, cb) for r, cb in self.requests if isinstance(r.key, key_type)]
+    def pending_for(self, key_type=None, include_ring=False):
+        """Requests by key type. The raw prefetch RING (priority >=
+        RAW_PREFETCH_RING_BASE_PRIORITY, speculative, never pooled) is left
+        out by default: every assertion here about "what was requested" is
+        about the VISIBLE set. `include_ring=True` returns everything."""
+        from block01.viewer.explore_view import RAW_PREFETCH_RING_BASE_PRIORITY
+        reqs = list(self.requests)
+        if key_type is not None:
+            reqs = [(r, cb) for r, cb in reqs if isinstance(r.key, key_type)]
+        if not include_ring:
+            reqs = [(r, cb) for r, cb in reqs
+                    if not (isinstance(r.key, RawKey)
+                            and r.priority >= RAW_PREFETCH_RING_BASE_PRIORITY)]
+        return reqs
 
     def deliver(self, req, arr, error=None):
         pixels = None if error else PixelBuffer(
@@ -3573,6 +3583,9 @@ def test_resume_reissues_only_what_the_current_viewport_is_missing(app):
     assert not view.status_label.isVisible()
 
     # Suspend again, move, resume: the new tiles are asked for at once.
+    # (The resume above legitimately issued the prefetch RING for the
+    # unchanged viewport; that is not what this part is about.)
+    scheduler.requests.clear()
     ctrl.suspend_for_production("patch background correction")
     set_view_and_pump(view, 3000, 3000, 3000 + 1024, 3000 + 1024)
     assert scheduler.requests == []
@@ -3669,4 +3682,107 @@ def test_the_overlay_issues_nothing_while_its_host_is_suspended(app):
     ctrl.resume_from_production()
     asked = {r.key.channel for r, _cb in scheduler.pending_for(RawKey)}
     assert asked == {"CD3"}, "resume must bring the overlay's tiles back too"
+    ctrl.teardown()
+
+
+# ── raw prefetch ring ───────────────────────────────────────────────────────
+#
+# Measured before it existed: a pan of 60% of the viewport reached full raw
+# coverage 131-197 ms after the range change, each new tile popping in as
+# its disk read finished. The band of tiles around the viewport is now read
+# into the raw cache after the visible tiles, at a lower priority, so a pan
+# finds them there.
+
+from block01.viewer.explore_view import (  # noqa: E402
+    RAW_PREFETCH_RING_BASE_PRIORITY, RAW_PREFETCH_RING_MAX, RawOverlayLayer)
+
+
+def _ring_requests(scheduler):
+    return [(r, cb) for r, cb in scheduler.pending_for(RawKey, include_ring=True)
+            if r.priority >= RAW_PREFETCH_RING_BASE_PRIORITY]
+
+
+def test_the_ring_is_the_band_around_the_visible_tiles_after_them(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 1000, 1000, 1000 + 1024, 1000 + 1024)
+
+    visible = set(ctrl._visible_tiles)
+    vis_reqs = scheduler.pending_for(RawKey)
+    ring_reqs = _ring_requests(scheduler)
+    ring = {(r.key.tile.tx, r.key.tile.ty) for r, _cb in ring_reqs}
+
+    assert {(r.key.tile.tx, r.key.tile.ty) for r, _cb in vis_reqs} == visible
+    assert ring, "no ring was issued"
+    assert not (ring & visible), "a visible tile was issued as ring"
+    # Every ring tile touches the visible set (one tile wide).
+    for tx, ty in ring:
+        assert any(abs(tx - vx) <= 1 and abs(ty - vy) <= 1 for vx, vy in visible), (tx, ty)
+    # Same generation as the visible batch, so the next tick cancels both.
+    assert {r.generation for r, _cb in ring_reqs} == {ctrl.view_generation}
+    assert all(r.key.channel == ctrl.channel for r, _cb in ring_reqs)
+    assert len(ring_reqs) <= RAW_PREFETCH_RING_MAX
+    ctrl.teardown()
+
+
+def test_a_ring_tile_is_never_pooled_when_it_lands(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 1000, 1000, 1000 + 1024, 1000 + 1024)
+    ring_reqs = _ring_requests(scheduler)
+    n_before = len(ctrl._raw_pool.entries)
+
+    for req, _cb in ring_reqs:
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(40)
+
+    assert len(ctrl._raw_pool.entries) == n_before
+    assert ctrl.stats["ring_prefetch_issued"] == len(ring_reqs)
+    ctrl.teardown()
+
+
+def test_no_ring_while_suspended_or_for_tiles_already_pooled(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 1000, 1000, 1000 + 1024, 1000 + 1024)
+    # Pool every ring tile as if a previous viewport had shown it.
+    for req, _cb in _ring_requests(scheduler):
+        t = req.key.tile
+        ctrl._raw_pool.put(t.level, t.tx, t.ty, view.world_rect(0, 0, 1, 1, 1, 1),
+                           np.zeros((4, 4), np.uint8), req.key)
+    scheduler.requests.clear()
+    ctrl._issue_raw_requests()
+    assert _ring_requests(scheduler) == [], "pooled tiles were re-read"
+
+    ctrl.suspend_for_production("x")
+    scheduler.requests.clear()
+    ctrl._issue_raw_prefetch_ring((1000, 1000, 2024, 2024), set(), ctrl.view_generation)
+    assert scheduler.requests == []
+    ctrl.teardown()
+
+
+def test_the_overlay_prefetches_the_same_ring_for_its_own_channel(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    overlay = RawOverlayLayer(provider, scheduler, ctrl.grid, view, "CD3")
+    ctrl.attach_overlay(overlay)
+    overlay._display_lo, overlay._display_hi = 0.0, 1.0
+    overlay._enabled = True
+
+    set_view_and_pump(view, 1000, 1000, 1000 + 1024, 1000 + 1024)
+
+    ring_reqs = _ring_requests(scheduler)
+    by_channel = {}
+    for r, _cb in ring_reqs:
+        by_channel.setdefault(r.key.channel, set()).add((r.key.tile.tx, r.key.tile.ty))
+    assert set(by_channel) == {ctrl.channel, "CD3"}
+    assert by_channel[ctrl.channel] == by_channel["CD3"]
+    # Delivering the overlay's ring pools nothing either.
+    for req, _cb in ring_reqs:
+        if req.key.channel == "CD3":
+            t = req.key.tile
+            scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(40)
+    assert len(overlay.pool.entries) == 0
     ctrl.teardown()

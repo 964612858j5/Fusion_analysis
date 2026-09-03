@@ -1129,6 +1129,18 @@ class ExploreView(QtWidgets.QWidget):
 # marker work.
 OVERLAY_RAW_BASE_PRIORITY = 500
 
+# Raw prefetch RING (module docstring "Raw prefetch ring"): the band of tiles
+# this many tiles wide around the visible set is read into the raw cache
+# ahead of a pan, so the next motion tick finds them and pools them from the
+# cache in one synchronous callback instead of after a disk read. Measured
+# before it existed: a 60%-of-viewport pan reached full raw coverage 131-197
+# ms after the range change; a 54-tile zoom-out, 667 ms. The ring is
+# SPECULATIVE, so it sorts after everything the user can see -- the marker's
+# visible raw (0..N) and the overlay's (500..) -- and it is capped.
+RAW_PREFETCH_RING_TILES = 1
+RAW_PREFETCH_RING_BASE_PRIORITY = 700
+RAW_PREFETCH_RING_MAX = 64
+
 # Z base for the overlay's tile pool. Above PRECISE_BASE_Z plus the largest
 # per-level offset any pool can add (`base_z + num_levels - level`), so an
 # overlay tile always paints after every marker layer. Asserted against the
@@ -1417,6 +1429,35 @@ class RawOverlayLayer(QtCore.QObject):
             return
         self.sync(host.level, ordered)
         self.apply_visibility(host.level)
+
+    def prefetch(self, level: int, ordered_ring_tiles):
+        """Read this channel's tiles for the host's prefetch RING into the
+        raw cache. Nothing is pooled from here (the ring is outside the
+        viewport by definition); when a pan makes one visible, `sync`
+        requests it and the cache answers at once. Same gates as `sync`,
+        same generation, lower priority than any visible tile."""
+        if self._torn_down or not self.effective_enabled or not self.calibrated:
+            return
+        host = self.parent()
+        if host is not None and getattr(host, "suspended", False):
+            return
+        source = self.provider.source_identity()
+        cache = getattr(self.scheduler, "raw_cache", None)
+        gen = self._generation
+        for i, (tx, ty) in enumerate(ordered_ring_tiles):
+            if self._pool.get(level, tx, ty) is not None:
+                continue
+            addr = TileAddress(grid=self.grid, level=level, tx=tx, ty=ty)
+            key = RawKey(source=source, channel=self.channel, tile=addr)
+            if cache is not None and cache.get(key) is not None:
+                continue
+            req = TileRequest(key=key, generation=gen,
+                              priority=RAW_PREFETCH_RING_BASE_PRIORITY + i)
+            self.scheduler.request(req, self._on_prefetch_result)
+            self.stats["ring_prefetch_issued"] = self.stats.get("ring_prefetch_issued", 0) + 1
+
+    def _on_prefetch_result(self, _result):
+        """A ring tile landed in the raw cache. Nothing to draw."""
 
     def cancel_inflight(self):
         """Drop every request this layer has outstanding (the host is being
@@ -3187,6 +3228,10 @@ class ExploreController(QtCore.QObject):
         if self._overlay is not None:
             self._overlay.sync(self.level, ordered)
 
+        # Raw prefetch ring (module docstring): after every visible tile of
+        # both layers has been asked for, the band around the viewport.
+        self._issue_raw_prefetch_ring(bbox_level, visible, gen)
+
         self._maybe_exit_provisional()
 
         if self.probe and t0 is not None:
@@ -3202,6 +3247,58 @@ class ExploreController(QtCore.QObject):
         # priority base sits above all of them regardless of order, but
         # issuing last keeps this call site's ordering self-documenting.
         self._issue_directional_prefetch()
+
+    def _ring_tiles_center_out(self, bbox_level, visible):
+        """The tiles of the band `RAW_PREFETCH_RING_TILES` wide around
+        `bbox_level` (this level's coordinates), minus the visible set,
+        clamped to the level, ordered centre-out, capped."""
+        ts = self.grid.tile_size
+        pad = ts * RAW_PREFETCH_RING_TILES
+        lh, lw = self.provider.level_shape(self.level)
+        y0, x0, y1, x1 = bbox_level
+        ring_bbox = (max(0, int(y0) - pad), max(0, int(x0) - pad),
+                     min(int(lh), int(y1) + pad), min(int(lw), int(x1) + pad))
+        ring = tiles_covering(ring_bbox, ts) - set(visible)
+        cy = (y0 + y1) / 2.0
+        cx = (x0 + x1) / 2.0
+
+        def dist(coord):
+            tx, ty = coord
+            return ((ty * ts + ts / 2.0 - cy) ** 2 + (tx * ts + ts / 2.0 - cx) ** 2)
+
+        return sorted(ring, key=dist)[:RAW_PREFETCH_RING_MAX]
+
+    def _issue_raw_prefetch_ring(self, bbox_level, visible, gen):
+        """Read the ring's raw tiles (marker, and the overlay's channel) into
+        the raw cache under the current raw generation and a priority below
+        every visible request. Never pooled from here: `_on_raw_ring_result`
+        draws nothing, so a ring tile can never be mistaken for a visible one.
+        A pan that exposes a ring tile has the next motion tick request it
+        as visible, and the cache answers synchronously."""
+        if self._suspended or RAW_PREFETCH_RING_TILES <= 0:
+            return
+        ring = self._ring_tiles_center_out(bbox_level, visible)
+        if not ring:
+            return
+        cache = getattr(self.scheduler, "raw_cache", None)
+        issued = 0
+        for i, (tx, ty) in enumerate(ring):
+            if self._raw_pool.get(self.level, tx, ty) is not None:
+                continue
+            key = self._make_raw_key(tx, ty)
+            if cache is not None and cache.get(key) is not None:
+                continue
+            req = TileRequest(key=key, generation=gen,
+                              priority=RAW_PREFETCH_RING_BASE_PRIORITY + i)
+            self.scheduler.request(req, self._on_raw_ring_result)
+            issued += 1
+        self.stats["ring_prefetch_issued"] = self.stats.get("ring_prefetch_issued", 0) + issued
+        if self._overlay is not None:
+            self._overlay.prefetch(self.level, ring)
+
+    def _on_raw_ring_result(self, _result):
+        """A ring tile landed in the raw cache. Nothing to draw; the visible
+        path pools it if and when it comes into view."""
 
     def jump_to(self, y0: int, x0: int, w: int, h: int):
         """Navigator / checkpoint jump: level-0 coordinates. Actually moves

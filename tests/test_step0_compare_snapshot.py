@@ -108,6 +108,7 @@ class _Controller:
         self.compute = _Compute()
         self.grid = type("G", (), {"tile_size": 512})()
         self.view_rects = []
+        self.view_box = None
 
     def set_marker_visible(self, _v):
         pass
@@ -117,22 +118,42 @@ class _Controller:
 
     def set_view_rect_l0(self, x0, y0, w, h):
         self.view_rects.append((x0, y0, w, h))
+        # The camera really MOVES, as the real controller's does: the
+        # round-trip contract (enter compare mode, come back, and land on
+        # the rectangle you left) is only checkable against a view box that
+        # remembers what it was told.
+        if self.view_box is not None:
+            self.view_box.set_rect(x0, y0, w, h)
 
 
 class _ViewBox:
-    """Reports a fixed viewport and widget width, which together fix the
-    full image's scale in screen pixels per level-0 pixel."""
+    """Reports a viewport and a widget size, which together fix the full
+    image's scale in screen pixels per level-0 pixel.
 
-    def __init__(self, x0=0.0, x1=None, width=1024.0):
+    `set_rect` is the real ViewBox's `setRange` reduced to what
+    `set_view_rect_l0` asks of it: the rectangle handed in is solved for
+    this widget's own aspect, so an aspect-locked box would honour it
+    exactly and this one simply stores it.
+    """
+
+    def __init__(self, x0=0.0, x1=None, width=1024.0, height=768.0):
         self._range = ((float(x0), float(SLIDE_W if x1 is None else x1)),
                        (0.0, float(SLIDE_H)))
         self._width = float(width)
+        self._height = float(height)
 
     def viewRange(self):
         return self._range
 
     def width(self):
         return self._width
+
+    def height(self):
+        return self._height
+
+    def set_rect(self, x0, y0, w, h):
+        self._range = ((float(x0), float(x0) + float(w)),
+                       (float(y0), float(y0) + float(h)))
 
 
 class _Stack:
@@ -144,6 +165,7 @@ class _Stack:
         self.overlay = None
         self.view = type("V", (), {"view_box": _ViewBox(0.0, view_w,
                                                         scale_width)})()
+        self.controller.view_box = self.view.view_box
 
 
 class _Tab:
@@ -244,16 +266,35 @@ def test_a_right_click_fills_all_three_panels(app):
     assert [img.image is not None for img in page._preview_imgs] == [True] * 3
 
 
-def test_the_snapshot_is_centred_on_the_clicked_point(app):
+def test_the_snapshot_is_centred_on_the_full_images_view(app):
+    """The right-click is a TRIGGER, not a centre.
+
+    Recentring on the clicked point is what made the two modes drift: going
+    back adopted the recentred view, so the next click at the same screen
+    pixel named a different slide point and the view walked. The panels take
+    the view that is already on screen.
+    """
     page = _page(app)
+    (vx0, vx1), (vy0, vy1) = page._explore_tab.stack.view.view_box.viewRange()
 
     payload = _snapshot(page, 2000, 1500)
 
     x0, y0, w, h = payload["snapshot_rect_l0"]
     # Within the rounding of the crop to whole level pixels: an odd width
-    # cannot have the click exactly in the middle of a pixel.
-    assert (x0 + w / 2.0, y0 + h / 2.0) == pytest.approx((2000.0, 1500.0),
-                                                         abs=1.0)
+    # cannot have the centre exactly in the middle of a pixel.
+    assert (x0 + w / 2.0, y0 + h / 2.0) == pytest.approx(
+        ((vx0 + vx1) / 2.0, (vy0 + vy1) / 2.0), abs=1.0)
+
+
+def test_the_clicked_point_moves_nothing(app):
+    """Two right-clicks at opposite corners of the slide, same view: the
+    same frame both times."""
+    page = _page(app)
+
+    first = dict(_snapshot(page, 10, 10))
+    second = _snapshot(page, SLIDE_W - 10, SLIDE_H - 10)
+
+    assert second["snapshot_rect_l0"] == first["snapshot_rect_l0"]
 
 
 def test_the_panels_are_at_the_full_images_own_scale(app):
@@ -332,6 +373,11 @@ def test_near_the_edge_the_frame_slides_in_rather_than_shrinking(app):
     snapshot must not do."""
     page = _page(app, scale_width=1024.0, view_w=1024)
     pw, ph = _panel_px(page)
+    # The full image hanging over the slide's top-left corner at 1:1, so
+    # its centre is a few pixels in and a panel-sized frame around that
+    # centre runs off the slide.
+    page._explore_tab.stack.view.view_box.set_rect(-500.0, -400.0,
+                                                   1024.0, 768.0)
 
     payload = _snapshot(page, 5, 5)
 
@@ -531,15 +577,20 @@ def test_the_old_pixels_stay_up_while_the_new_crop_is_read(app, monkeypatch):
 
 
 def test_a_second_right_click_retakes_the_snapshot(app):
+    """A right-click after the full image has been moved cuts the new
+    view."""
     page = _page(app)
     first = dict(_snapshot(page, 2000, 1500))
+    page._exit_compare_mode()
+    page._explore_tab.stack.view.view_box.set_rect(3000.0, 2500.0,
+                                                   1024.0, 768.0)
 
-    second = _snapshot(page, 3000, 2500)
+    second = _snapshot(page, 2000, 1500)
 
     assert second["snapshot_rect_l0"] != first["snapshot_rect_l0"]
     x0, y0, w, h = second["snapshot_rect_l0"]
-    assert (x0 + w / 2.0, y0 + h / 2.0) == pytest.approx((3000.0, 2500.0),
-                                                         abs=1.0)
+    assert (x0 + w / 2.0, y0 + h / 2.0) == pytest.approx(
+        (3000.0 + 512.0, 2500.0 + 384.0), abs=1.0)
 
 
 # ── 3. a snapshot is not a computed result ───────────────────────────────
@@ -684,7 +735,63 @@ def test_the_way_back_puts_the_panels_camera_on_the_full_image(app):
 
     rects = page._explore_tab.stack.controller.view_rects
     assert rects, "the full image was not moved"
-    assert rects[-1] == pytest.approx((x0, y0, w, h), abs=1e-6)
+    # The CENTRE and the SCALE come back, not the rectangle: the full image
+    # is a different shape from a panel, so it covers more x at the same
+    # magnification. The panel's own axis is the y one (`_compare_camera`
+    # reads the scale off it), and the widths are the two widgets'.
+    fx0, fy0, fw, fh = rects[-1]
+    vb = page._explore_tab.stack.view.view_box
+    ph_px = page._preview_vbs[0].rect().height()
+    assert (fx0 + fw / 2.0, fy0 + fh / 2.0) == pytest.approx(
+        (x0 + w / 2.0, y0 + h / 2.0), rel=1e-9)
+    assert vb.width() / fw == pytest.approx(ph_px / h, rel=1e-9)
+    assert vb.height() / fh == pytest.approx(ph_px / h, rel=1e-9)
+
+
+def test_toggling_the_modes_in_place_moves_nothing(app):
+    """The bug this pins: with the mouse held still, every in-and-out cycle
+    used to move the view a little further in one direction.
+
+    Entering recentred the panels on the clicked point, and coming back
+    adopted that recentred rectangle -- so the same screen pixel named a new
+    slide point each cycle and the drift compounded. Centre and scale are
+    carried instead, and the rectangle after N cycles is the rectangle
+    before them, to float noise.
+    """
+    page = _page(app)
+    vb = page._explore_tab.stack.view.view_box
+    vb.set_rect(19000.0, 12000.0, 1024.0, 768.0)
+    before = vb.viewRange()
+    panels_before = None
+
+    for _ in range(5):
+        _snapshot(page, 2000, 1500)
+        camera = page._compare_camera()
+        if panels_before is None:
+            panels_before = camera
+        assert camera == pytest.approx(panels_before, rel=1e-9)
+        page._exit_compare_mode()
+
+    (bx0, bx1), (by0, by1) = before
+    (ax0, ax1), (ay0, ay1) = vb.viewRange()
+    assert (ax0, ax1, ay0, ay1) == pytest.approx((bx0, bx1, by0, by1),
+                                                 rel=1e-6)
+
+
+def test_the_panels_open_on_the_full_images_centre_and_scale(app):
+    """Less width -- a panel is a third of the area -- at the same
+    magnification and around the same point."""
+    page = _page(app, scale_width=1024.0, view_w=1024)   # 1 screen px / px
+    vb = page._explore_tab.stack.view.view_box
+    vb.set_rect(2000.0, 1500.0, 1024.0, 768.0)
+
+    _snapshot(page, 0, 0)
+
+    cx, cy, scale = page._compare_camera()
+    assert (cx, cy) == pytest.approx((2512.0, 1884.0), rel=1e-9)
+    assert scale == pytest.approx(1.0, rel=1e-9)
+    (px0, px1), _yr = page._preview_vbs[0].viewRange()
+    assert px1 - px0 < 1024.0, "a panel is not narrower than the image"
 
 
 def test_flipping_modes_without_a_snapshot_moves_no_camera(app):

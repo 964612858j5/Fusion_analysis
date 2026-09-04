@@ -1944,10 +1944,15 @@ class Step0Page(QWidget):
         pressed Esc was thrown back out to the landmark, with no way to
         follow what they had just been looking at into the full image.
 
-        The rectangle is the panels' own, in level-0 coordinates, and it
-        goes through `set_view_rect_l0` -- both axes set independently, no
-        refit -- which is the same path the compare-panel drill-down used
-        before fd205f2 removed it and the same one the navigator jumps on.
+        What comes back is the panels' CENTRE and SCALE, not their
+        rectangle. A rectangle carries the panels' shape as well as their
+        view, and the full image's aspect lock then has to fit it -- which
+        changes the scale, and with it the slide point under the mouse, so
+        toggling in and out repeatedly walked the view in one direction a
+        little further every cycle. Solved from the centre and the scale,
+        the rectangle handed to `set_view_rect_l0` already has the full
+        image's own aspect: the lock has nothing to fix, x simply covers
+        more slide than a panel could, and the trip is exactly reversible.
 
         Only when there IS a snapshot: flipping modes on a page that has
         never taken one must not move the image.
@@ -1955,11 +1960,11 @@ class Step0Page(QWidget):
         if not self._compare_mode():
             return False
         self._compare_refill_timer.stop()
-        rect = (self._compare_view_rect_l0()
-                if getattr(self, "_compare_snapshot", None) else None)
+        camera = (self._compare_camera()
+                  if getattr(self, "_compare_snapshot", None) else None)
         self._set_compare_mode(False)
-        if rect is not None:
-            self._apply_full_image_view_rect(rect)
+        if camera is not None:
+            self._apply_full_image_camera(*camera)
         return True
 
     def _apply_full_image_view_rect(self, rect):
@@ -2079,22 +2084,30 @@ class Step0Page(QWidget):
     _VIEW_FULL = 0
     _VIEW_COMPARE = 1
 
-    def _full_image_scale(self):
-        """Screen pixels per LEVEL-0 slide pixel in the full image, or None.
-
-        Read off the live ViewBox the same way `ExploreController.
-        _on_range_changed` reads it -- widget width over world width -- so
-        the number the snapshot is cut at is the number the image is drawn
-        at.
-        """
+    def _full_image_view_box(self):
+        """The full image's live pyqtgraph ViewBox, or None."""
         explore_tab = getattr(self, "_explore_tab", None)
         stack = getattr(explore_tab, "stack", None) if explore_tab else None
         view = getattr(stack, "view", None)
-        vb = getattr(view, "view_box", None)
+        return getattr(view, "view_box", None)
+
+    def _full_image_camera(self):
+        """The full image's camera as `(cx, cy, scale)`, or None.
+
+        `(cx, cy)` is the centre of what is on screen, in level-0 slide
+        coordinates, and `scale` is screen pixels per level-0 pixel -- the
+        two numbers a view IS, independent of the shape of the widget
+        showing it. That independence is the whole point: the compare panels
+        are a different shape from the full image, so a RECTANGLE cannot be
+        handed between them without one of the two aspect locks reshaping it
+        and, cycle after cycle, walking the view away from where it started.
+        A centre and a scale survive the trip unchanged.
+        """
+        vb = self._full_image_view_box()
         if vb is None:
             return None
         try:
-            (vx0, vx1), _yr = vb.viewRange()
+            (vx0, vx1), (vy0, vy1) = vb.viewRange()
             width_px = float(vb.width())
         except Exception:                                   # noqa: BLE001
             return None
@@ -2102,7 +2115,89 @@ class Step0Page(QWidget):
         if not (world > 0 and width_px > 0):
             return None
         scale = width_px / world
-        return scale if math.isfinite(scale) and scale > 0 else None
+        if not (math.isfinite(scale) and scale > 0):
+            return None
+        return ((float(vx0) + float(vx1)) / 2.0,
+                (float(vy0) + float(vy1)) / 2.0, scale)
+
+    def _apply_full_image_camera(self, cx, cy, scale):
+        """Put centre `(cx, cy)` at `scale` on the full image.
+
+        The rectangle is solved for the full image's OWN widget aspect --
+        width_px/scale by height_px/scale -- so the aspect-locked ViewBox
+        has nothing left to fix and honours it exactly. Handing it the
+        panels' rectangle instead would make it fit that rectangle, which is
+        a different scale and (after the widening) a different centre.
+        """
+        vb = self._full_image_view_box()
+        if vb is None or not (scale > 0 and math.isfinite(scale)):
+            return False
+        try:
+            w_px, h_px = float(vb.width()), float(vb.height())
+        except Exception:                                   # noqa: BLE001
+            return False
+        if not (w_px > 0 and h_px > 0):
+            return False
+        w, h = w_px / float(scale), h_px / float(scale)
+        return self._apply_full_image_view_rect(
+            (cx - w / 2.0, cy - h / 2.0, w, h))
+
+    def _compare_camera(self):
+        """The compare panels' shared camera as `(cx, cy, scale)`, or None.
+
+        Read off the FIRST panel, which is the one `_compare_panel_px`
+        measures and the one every "what are the panels looking at" question
+        on this page is answered from.
+        """
+        vbs = getattr(self, "_preview_vbs", None) or ()
+        if not vbs:
+            return None
+        try:
+            (x0, x1), (y0, y1) = vbs[0].viewRange()
+            h_px = float(vbs[0].rect().height())
+        except Exception:                                   # noqa: BLE001
+            return None
+        world = float(y1) - float(y0)
+        if not (world > 0 and h_px > 0):
+            return None
+        scale = h_px / world
+        if not (math.isfinite(scale) and scale > 0):
+            return None
+        return ((float(x0) + float(x1)) / 2.0,
+                (float(y0) + float(y1)) / 2.0, scale)
+
+    def _apply_compare_camera(self, cx, cy, scale):
+        """Put centre `(cx, cy)` at `scale` on all three panels.
+
+        Each panel is given the rectangle that fits ITS OWN widget at that
+        scale, rather than one rectangle for all three: the three are
+        aspect-locked columns of one layout whose widths differ by a pixel
+        or two, and a shared rectangle would be reshaped differently in each
+        of them. Solved per panel, every one of them ends up at the same
+        centre and the same magnification, which is what "one camera" means.
+
+        Held under `_compare_range_syncing`, so this is the page talking to
+        itself: no mirroring between the three and no refill armed.
+        """
+        vbs = getattr(self, "_preview_vbs", None) or ()
+        if not vbs or not (scale > 0 and math.isfinite(scale)):
+            return False
+        self._compare_range_syncing = True
+        try:
+            for vb in vbs:
+                try:
+                    rect = vb.rect()
+                    w_px, h_px = float(rect.width()), float(rect.height())
+                except Exception:                           # noqa: BLE001
+                    continue
+                if not (w_px > 0 and h_px > 0):
+                    continue
+                w, h = w_px / float(scale), h_px / float(scale)
+                vb.setRange(xRange=(cx - w / 2.0, cx + w / 2.0),
+                            yRange=(cy - h / 2.0, cy + h / 2.0), padding=0)
+        finally:
+            self._compare_range_syncing = False
+        return True
 
     def _compare_panel_px(self):
         """One compare panel's size in screen pixels, as `(w, h)`."""
@@ -2216,11 +2311,28 @@ class Step0Page(QWidget):
             return
         stack._snapshot_connected = True
 
-    def _on_full_image_right_click(self, x_l0, y_l0):
-        self._take_compare_snapshot(float(x_l0), float(y_l0))
+    def _on_full_image_right_click(self, _x_l0=None, _y_l0=None):
+        """A right-click on the full image opens the panels ON THAT VIEW.
 
-    def _take_compare_snapshot(self, x_l0, y_l0, _laid_out=False):
-        """Fill the three panels with a static crop centred on `(x, y)`.
+        The point is the TRIGGER and nothing else. It used to be the centre
+        the panels were re-cut around, and that is what made the two modes
+        drift: entering recentred the view on P, going back adopted the
+        recentred rectangle, and the next right-click with the mouse still
+        found a different slide point under the same screen pixel -- so
+        toggling in place walked the view steadily in one direction. The
+        panels now adopt the view the user already has.
+        """
+        self._take_compare_snapshot()
+
+    def _take_compare_snapshot(self, _laid_out=False):
+        """Fill the three panels with the view the full image is on.
+
+        Same CENTRE, same SCALE. Each panel then shows whatever fits at that
+        scale around that centre, which is less width than the full image
+        had -- three columns in the area one image filled -- and exactly as
+        much detail. Nothing is recentred and nothing is refitted, so the
+        move is reversible: `_exit_compare_mode` hands the same two numbers
+        back and the full image lands on the rectangle it left.
 
         Order matters: the viewing area is SWITCHED to the panels first,
         because the crop's size is the panel's size and the panels are much
@@ -2257,19 +2369,32 @@ class Step0Page(QWidget):
                 f"A {busy} run is using the GPU — snapshot not taken.")
             return None
         if not self._compare_mode() and not _laid_out:
+            camera = self._full_image_camera()
             self._set_compare_mode(True)
             self._preview_status.setText("Taking snapshot…")
             QTimer.singleShot(0, lambda: self._take_compare_snapshot(
-                x_l0, y_l0, _laid_out=True))
+                _laid_out=camera))
             return None
         provider, controller = stack.provider, stack.controller
-        scale = self._full_image_scale()
-        if scale is None:
+        # The camera measured BEFORE the switch, when there is one. A hidden
+        # stack page keeps its geometry, so reading it afterwards gives the
+        # same numbers -- but only the pre-switch read is guaranteed to, and
+        # this is the one place the two modes hand a view to each other.
+        camera = (_laid_out if isinstance(_laid_out, tuple)
+                  else self._full_image_camera())
+        if camera is None:
             self._exit_compare_mode()
             return None
+        x_l0, y_l0, scale = (float(camera[0]), float(camera[1]),
+                             float(camera[2]))
 
         self._set_compare_mode(True)
         pw_px, ph_px = self._compare_panel_px()
+        # The panels take the view NOW, before a single pixel is read: the
+        # whole-slide underlay is already under them, so the user sees the
+        # place they are going to at the scale they asked for while the crop
+        # is on its way.
+        self._apply_compare_camera(x_l0, y_l0, scale)
 
         level = int(getattr(controller, "level", 0) or 0)
         try:
@@ -2302,8 +2427,13 @@ class Step0Page(QWidget):
         # which is visible.
         x0 = max(0, min(x0, lw - w))
         y0 = max(0, min(y0, lh - h))
+        # `keep_view`, because the camera is already the one the user asked
+        # for: it was set above from the full image's own centre and scale,
+        # and re-pinning the panels to the crop's rounded rectangle would
+        # nudge them off it by a fraction of a pixel per toggle.
         return self._start_compare_snapshot(level, y0, x0, h, w,
-                                            (float(x_l0), float(y_l0)))
+                                            (float(x_l0), float(y_l0)),
+                                            keep_view=True)
 
     def _start_compare_snapshot(self, level, y0, x0, h, w, center_l0=None,
                                 keep_view=False):

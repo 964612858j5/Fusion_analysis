@@ -9,6 +9,7 @@ import json
 import shutil
 import time
 import traceback
+import weakref
 import multiprocessing as mp
 from queue import Empty
 
@@ -384,13 +385,24 @@ class Step0Page(QWidget):
         self._dataset_gen = 0
         # 预览结果缓存（供toggle复用）和zoom联动防循环flag
         self._last_payload = None
-        # The compare panels hold a SNAPSHOT (`_take_compare_snapshot`):
-        # what they show, where and at what scale is decided when it is
-        # taken and never again, so there is no panel camera to keep in
-        # step with anything and at most one request in flight.
+        # The compare panels hold a SNAPSHOT (`_take_compare_snapshot`),
+        # and the snapshot is now VIEW-DRIVEN: the three panels share one
+        # camera the user may zoom and pan, and when that camera settles
+        # somewhere the cached crop does not cover -- or on a pyramid level
+        # the crop was not cut at -- it is recut for where they are looking
+        # (`_maybe_refill_compare_snapshot`). At most one request in flight.
         self._compare_snapshot = None
         self._compare_snapshot_worker = None
         self._compare_snapshot_req = 0
+        # Re-entrancy guard for the three panels' shared camera, and the
+        # settle timer that turns "the user stopped moving" into a refill.
+        # The guard is also held while the page sets the panels' range
+        # ITSELF, so a programmatic pin neither mirrors nor asks for pixels.
+        self._compare_range_syncing = False
+        self._compare_refill_timer = QTimer(self)
+        self._compare_refill_timer.setSingleShot(True)
+        self._compare_refill_timer.timeout.connect(
+            self._maybe_refill_compare_snapshot)
         # 预览结果缓存：key=(channel, patch_idx) → payload dict
         self._preview_cache: dict = {}
         # 通道颜色：key=channel_name → (R,G,B) float 0-1
@@ -1103,15 +1115,35 @@ class Step0Page(QWidget):
             # transposition would land the user in the wrong part of the
             # slide. viewer/explore_view.py sets it per item for the same
             # reason.
-            # No mouse: a snapshot is a FIXED frame at the full image's own
-            # scale. Zooming a panel would put a second, silently different
-            # magnification next to the one the header describes, and
-            # panning would ask for margin the crop does not contain.
-            vb.setMouseEnabled(False, False)
+            # The panels ARE a camera now: wheel to zoom, left-drag to pan,
+            # all three moving together, and the crop refetched when the
+            # camera settles outside it. The earlier "a snapshot has one
+            # magnification" rule held while the panels were a strip beside
+            # the image; they are the whole viewing area now, and being
+            # unable to look closer at the thing you opened them to look at
+            # is a worse fault than a header that has to say which level it
+            # is on -- which it does, and now follows the level.
+            vb.setMouseEnabled(True, True)
             item = pg.ImageItem(axisOrder="row-major")
             vb.addItem(item)
             self._preview_vbs.append(vb)
             self._preview_imgs.append(item)
+            # LINKED, by a shared range handler rather than setXLink: the
+            # three boxes are aspect-locked columns of one layout whose
+            # widths differ by a pixel or two, so each has to be given the
+            # range and allowed to satisfy its own aspect -- which is what
+            # the panels' original lock-zoom did before fd205f2 removed it.
+            # The connection captures a WEAK reference to the page: a bound
+            # method (or a closure over `self`) on a signal owned by a child
+            # of this page closes a reference cycle through sip, which is
+            # the shape of the offscreen segfaults fd205f2 and 9152802 both
+            # measured.
+            _ref = weakref.ref(self)
+            def _on_range(*_a, _i=i, _ref=_ref):
+                page = _ref()
+                if page is not None:
+                    page._on_compare_range_changed(_i)
+            vb.sigRangeChanged.connect(_on_range)
 
 
         pvl.addWidget(self._preview_gv, stretch=1)
@@ -1896,10 +1928,45 @@ class Step0Page(QWidget):
         self._update_full_method_buttons()
 
     def _exit_compare_mode(self):
-        """Back to the full image, at the camera it had."""
+        """Back to the full image, at the camera the PANELS were on.
+
+        It used to come back at the camera it left with, which was right
+        while the panels were a fixed frame cut from exactly that camera --
+        the two were the same view. They are not any more: the panels zoom
+        and pan, so someone who went in at a landmark, zoomed to a cell and
+        pressed Esc was thrown back out to the landmark, with no way to
+        follow what they had just been looking at into the full image.
+
+        The rectangle is the panels' own, in level-0 coordinates, and it
+        goes through `set_view_rect_l0` -- both axes set independently, no
+        refit -- which is the same path the compare-panel drill-down used
+        before fd205f2 removed it and the same one the navigator jumps on.
+
+        Only when there IS a snapshot: flipping modes on a page that has
+        never taken one must not move the image.
+        """
         if not self._compare_mode():
             return False
+        self._compare_refill_timer.stop()
+        rect = (self._compare_view_rect_l0()
+                if getattr(self, "_compare_snapshot", None) else None)
         self._set_compare_mode(False)
+        if rect is not None:
+            self._apply_full_image_view_rect(rect)
+        return True
+
+    def _apply_full_image_view_rect(self, rect):
+        """Put level-0 `(x, y, w, h)` on the full image's camera."""
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        setter = getattr(getattr(stack, "controller", None),
+                         "set_view_rect_l0", None)
+        if not callable(setter):
+            return False
+        try:
+            setter(*(float(v) for v in rect))
+        except Exception:                                   # noqa: BLE001
+            return False
         return True
 
     def _on_compare_escape(self):
@@ -1969,8 +2036,7 @@ class Step0Page(QWidget):
                       and self.nucleus_channel != snapshot.get("channel"))
         if carries == wanted:
             return
-        x_l0, y_l0 = snapshot["center_l0"]
-        self._take_compare_snapshot(x_l0, y_l0)
+        self._retake_compare_snapshot()
 
 
 
@@ -2232,7 +2298,8 @@ class Step0Page(QWidget):
         return self._start_compare_snapshot(level, y0, x0, h, w,
                                             (float(x_l0), float(y_l0)))
 
-    def _start_compare_snapshot(self, level, y0, x0, h, w, center_l0=None):
+    def _start_compare_snapshot(self, level, y0, x0, h, w, center_l0=None,
+                                keep_view=False):
         """Cut and compute a snapshot for an ALREADY-DECIDED region.
 
         The half of `_take_compare_snapshot` that does not decide WHERE to
@@ -2284,6 +2351,7 @@ class Step0Page(QWidget):
             "rect_l0": rect_l0, "level": level, "channel": channel,
             "center_l0": (float(x_l0), float(y_l0)),
             "region": (y0, x0, h, w), "cached": sorted(cached),
+            "keep_view": bool(keep_view),
         }
         self._compare_where_lbl.setText(
             f"Snapshot at ({int(y_l0)}, {int(x_l0)}) · level {level} · "
@@ -2303,6 +2371,194 @@ class Step0Page(QWidget):
         worker.start()
         return self._compare_snapshot
 
+    # How much slide beyond the visible rectangle a view-driven refill asks
+    # for, as a fraction of the view on each side: a small pan then costs
+    # nothing at all, and the cost of the margin is one read of 2.25x the
+    # area rather than a read per nudge. The crop cut by a right-click has
+    # NO margin -- it is exactly the frame the user pointed at, which is
+    # what the header, "Save as patch" and every existing contract mean by
+    # the snapshot's rectangle -- so the first gesture after entering
+    # compare mode refills, and every one inside the margin after that does
+    # not.
+    _COMPARE_REFILL_MARGIN = 0.25
+    # Quiet time after the last range event before a refill is considered.
+    # A drag emits a range event per mouse move; refetching per event would
+    # queue a worker per pixel of travel.
+    _COMPARE_SETTLE_MS = 150
+    # Slop, in pixels of the level the crop was cut at, when asking whether
+    # the camera has left the cached region. An aspect-locked ViewBox handed
+    # a rectangle widens the axis it does not have to grow, so a panel's own
+    # range overhangs the crop it was pinned to by a pixel or two; without
+    # this the pin would ask for a refill of the thing it just drew.
+    _COMPARE_CONTAINMENT_SLOP_PX = 3.0
+
+    def _on_compare_range_changed(self, idx):
+        """Panel `idx` moved: move the other two, then arm the refill.
+
+        The three panels are ONE camera. Anything else would put three
+        magnifications of three places side by side under a header that
+        describes one, which is the objection that kept them still in the
+        first place -- it was never zoom itself.
+
+        Programmatic range changes do not come through here: the page holds
+        `_compare_range_syncing` while it pins the panels to a new snapshot,
+        so drawing a snapshot cannot ask for another one.
+        """
+        if getattr(self, "_compare_range_syncing", False):
+            return
+        vbs = getattr(self, "_preview_vbs", None) or ()
+        if not (0 <= int(idx) < len(vbs)):
+            return
+        try:
+            xr, yr = vbs[int(idx)].viewRange()
+        except Exception:                                   # noqa: BLE001
+            return
+        self._compare_range_syncing = True
+        try:
+            for i, vb in enumerate(vbs):
+                if i == int(idx):
+                    continue
+                vb.setRange(xRange=tuple(xr), yRange=tuple(yr), padding=0)
+        finally:
+            self._compare_range_syncing = False
+        if self._compare_mode():
+            self._compare_refill_timer.start(self._COMPARE_SETTLE_MS)
+
+    def _compare_view_rect_l0(self):
+        """The panels' shared camera as a level-0 `(x, y, w, h)`, or None.
+
+        Level-0 because that is the coordinate system the panels work in
+        (`_place_preview_item` puts the pixels there), which is what lets
+        this rectangle be handed straight to the full image on the way back.
+        """
+        vbs = getattr(self, "_preview_vbs", None) or ()
+        if not vbs:
+            return None
+        try:
+            (x0, x1), (y0, y1) = vbs[0].viewRange()
+        except Exception:                                   # noqa: BLE001
+            return None
+        w, h = float(x1) - float(x0), float(y1) - float(y0)
+        if not (w > 0 and h > 0 and math.isfinite(w) and math.isfinite(h)):
+            return None
+        return (float(x0), float(y0), w, h)
+
+    def _compare_level_for_scale(self, scale, provider, controller=None):
+        """The pyramid level the panels should be cut at for `scale`.
+
+        The FULL IMAGE's rule, not a second one: the controller's own
+        `_pick_display_level` where there is a controller to ask, and the
+        same `request_planning.pick_display_level` it delegates to
+        otherwise. Two views of one slide disagreeing about which level a
+        magnification calls for is exactly the kind of "subtly different
+        picture" this page keeps having to argue about.
+        """
+        picker = getattr(controller, "_pick_display_level", None)
+        if callable(picker):
+            try:
+                return int(picker(float(scale)))
+            except Exception:                               # noqa: BLE001
+                pass
+        try:
+            n = int(getattr(provider, "num_levels", 0) or 0)
+            downsamples = [float(provider.level_downsample(lv))
+                           for lv in range(n)]
+        except Exception:                                   # noqa: BLE001
+            downsamples = []
+        if not downsamples:
+            return int(getattr(controller, "level", 0) or 0)
+        from ...viewer import request_planning as planning
+        return int(planning.pick_display_level(downsamples, float(scale)))
+
+    def _compare_needs_refill(self, view_rect, level, provider):
+        """True when the cached crop cannot serve `view_rect` at `level`.
+
+        Two reasons, and only two. The level changed -- the user zoomed past
+        a pyramid boundary, so the pixels on screen are the wrong ones
+        magnified. Or the camera has moved off the crop: what is asked for
+        outside it is not "background", it is slide the panels do not have.
+
+        Clamped to the slide first: a view hanging over the edge of level 0
+        is asking for nothing, and refetching for it would loop forever at
+        the border. And slopped by a few level pixels, because an
+        aspect-locked box overhangs the rectangle it was pinned to.
+        """
+        snapshot = getattr(self, "_compare_snapshot", None)
+        if not snapshot or not snapshot.get("rect_l0"):
+            return True
+        if int(snapshot.get("level") or 0) != int(level):
+            return True
+        cx, cy, cw, ch = (float(v) for v in snapshot["rect_l0"])
+        vx0, vy0, vw, vh = (float(v) for v in view_rect)
+        vx1, vy1 = vx0 + vw, vy0 + vh
+        try:
+            ds = float(provider.level_downsample(int(level)))
+            h0, w0 = (float(v) for v in provider.level_shape(0))
+        except Exception:                                   # noqa: BLE001
+            return False
+        vx0, vy0 = max(vx0, 0.0), max(vy0, 0.0)
+        vx1, vy1 = min(vx1, w0), min(vy1, h0)
+        slop = self._COMPARE_CONTAINMENT_SLOP_PX * max(ds, 1.0)
+        return (vx0 < cx - slop or vy0 < cy - slop
+                or vx1 > cx + cw + slop or vy1 > cy + ch + slop)
+
+    def _maybe_refill_compare_snapshot(self):
+        """The panels' camera settled: recut the crop if it has to be.
+
+        Cheap and silent when it does not: this runs after every gesture,
+        and the common one -- a zoom in, a nudge inside the margin -- asks
+        the provider for nothing.
+
+        While the new crop is on its way the OLD one stays on screen,
+        stretched by the camera. A blanked panel would be the correct
+        picture of what the page knows and the wrong thing to show someone
+        judging a background: they lose the thing they were comparing for as
+        long as the read takes.
+        """
+        if not self._compare_mode():
+            return None
+        snapshot = getattr(self, "_compare_snapshot", None)
+        if not snapshot:
+            return None
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        if stack is None or not self.current_channel:
+            return None
+        view_rect = self._compare_view_rect_l0()
+        if view_rect is None:
+            return None
+        pw_px, _ph_px = self._compare_panel_px()
+        scale = pw_px / view_rect[2]
+        if not (scale > 0 and math.isfinite(scale)):
+            return None
+        provider = stack.provider
+        level = self._compare_level_for_scale(scale, provider,
+                                              getattr(stack, "controller", None))
+        if not self._compare_needs_refill(view_rect, level, provider):
+            return None
+        return self._refill_compare_snapshot(view_rect, level, provider)
+
+    def _refill_compare_snapshot(self, view_rect, level, provider):
+        """Recut the panels for `view_rect` (level-0) at `level`, with margin."""
+        x0_l0, y0_l0, w_l0, h_l0 = (float(v) for v in view_rect)
+        mx = w_l0 * self._COMPARE_REFILL_MARGIN
+        my = h_l0 * self._COMPARE_REFILL_MARGIN
+        try:
+            ds = float(provider.level_downsample(int(level)))
+            lh, lw = (int(v) for v in provider.level_shape(int(level)))
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not (ds > 0 and lh > 0 and lw > 0):
+            return None
+        x0 = max(0, int(math.floor((x0_l0 - mx) / ds)))
+        y0 = max(0, int(math.floor((y0_l0 - my) / ds)))
+        x1 = min(lw, int(math.ceil((x0_l0 + w_l0 + mx) / ds)))
+        y1 = min(lh, int(math.ceil((y0_l0 + h_l0 + my) / ds)))
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        return self._start_compare_snapshot(
+            int(level), y0, x0, h, w,
+            (x0_l0 + w_l0 / 2.0, y0_l0 + h_l0 / 2.0), keep_view=True)
+
     def _cancel_compare_snapshot(self):
         """Let a snapshot in flight finish and stop listening to it.
 
@@ -2310,6 +2566,11 @@ class Step0Page(QWidget):
         is disconnected and waited for rather than killed, which keeps the
         provider alive until its last reader is done.
         """
+        # A settle still pending is about a camera whose pixels are being
+        # replaced right now (or, at teardown, about nothing at all).
+        timer = getattr(self, "_compare_refill_timer", None)
+        if timer is not None:
+            timer.stop()
         worker = getattr(self, "_compare_snapshot_worker", None)
         self._compare_snapshot_worker = None
         if worker is None:
@@ -2351,9 +2612,14 @@ class Step0Page(QWidget):
         if not region:
             return None
         y0, x0, h, w = (int(v) for v in region)
+        # `keep_view`: the camera is the user's, and they did not ask to
+        # move it -- they asked to look at a different channel, or at the
+        # same one with a different radius, in the place they are already
+        # in. The region always covers that place: it is either the frame
+        # the right-click cut or the one the last settle refilled for.
         return self._start_compare_snapshot(
             int(snapshot.get("level") or 0), y0, x0, h, w,
-            snapshot.get("center_l0"))
+            snapshot.get("center_l0"), keep_view=True)
 
     def _on_compare_snapshot_failed(self, req_id, message):
         if int(req_id) != int(self._compare_snapshot_req):
@@ -2377,7 +2643,12 @@ class Step0Page(QWidget):
         payload["snapshot_rect_l0"] = snapshot.get("rect_l0")
         payload["snapshot_level"] = snapshot.get("level")
         self._last_payload = payload
-        self._refresh_preview_display()
+        # A view-driven refill is pixels for the camera the user already
+        # has; pinning the panels to the crop's rectangle would jump them
+        # out from under the gesture that asked for it. A right-click's
+        # snapshot IS a new camera, and pins.
+        self._refresh_preview_display(
+            keep_zoom=bool(snapshot.get("keep_view")))
         for label, key, name in (
                 (self._metrics_original, "original_metrics", "Original"),
                 (self._metrics_tophat, "tophat_metrics", "TopHat"),
@@ -5029,17 +5300,31 @@ class Step0Page(QWidget):
         # from, at that image's own scale. Anything else -- a Process
         # result, a test fixture -- keeps the previous patch-pixel
         # behaviour.
+        # `keep_zoom` now WINS over the rectangle. The panels have a camera
+        # of their own, so a redraw that is not itself a new camera -- a
+        # colour swap, a mapping edit, a crop refetched for the view the
+        # user already has -- must leave it exactly where it is. Only a
+        # right-click's snapshot pins, because that gesture IS the camera.
+        #
+        # Held under `_compare_range_syncing` so the panels' own range
+        # handler treats this as the page talking to itself: no mirroring
+        # between the three (all three are being set) and no refill armed
+        # for pixels that have just arrived.
         rect = payload.get("snapshot_rect_l0")
-        for idx, vb in enumerate(self._preview_vbs):
-            if rect is not None:
-                rx, ry, rw, rh = (float(v) for v in rect)
-                vb.setRange(xRange=(rx, rx + rw), yRange=(ry, ry + rh),
-                            padding=0)
-            elif keep_zoom and prev_ranges is not None:
-                xr, yr = prev_ranges[idx]
-                vb.setRange(xRange=xr, yRange=yr, padding=0)
-            else:
-                vb.autoRange()
+        self._compare_range_syncing = True
+        try:
+            for idx, vb in enumerate(self._preview_vbs):
+                if keep_zoom and prev_ranges is not None:
+                    xr, yr = prev_ranges[idx]
+                    vb.setRange(xRange=xr, yRange=yr, padding=0)
+                elif rect is not None:
+                    rx, ry, rw, rh = (float(v) for v in rect)
+                    vb.setRange(xRange=(rx, rx + rw), yRange=(ry, ry + rh),
+                                padding=0)
+                else:
+                    vb.autoRange()
+        finally:
+            self._compare_range_syncing = False
 
     def _place_preview_item(self, item, arr, payload):
         """Put `item`'s pixels where the payload says they are.

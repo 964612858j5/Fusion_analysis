@@ -32,6 +32,7 @@ object is replaced by one that records what it was asked for.
 """
 
 import os
+import time
 
 import numpy as np
 import pytest
@@ -62,6 +63,8 @@ class _Provider:
     The value at a level-L pixel is `y * 10000 + x`, so a crop identifies
     exactly where it was read from and an x/y swap cannot go unnoticed.
     """
+
+    num_levels = 4
 
     def __init__(self):
         self.reads = []
@@ -104,12 +107,16 @@ class _Controller:
         self.params = ()
         self.compute = _Compute()
         self.grid = type("G", (), {"tile_size": 512})()
+        self.view_rects = []
 
     def set_marker_visible(self, _v):
         pass
 
     def set_display_mapping(self, *_a, **_k):
         pass
+
+    def set_view_rect_l0(self, x0, y0, w, h):
+        self.view_rects.append((x0, y0, w, h))
 
 
 class _ViewBox:
@@ -333,12 +340,12 @@ def test_near_the_edge_the_frame_slides_in_rather_than_shrinking(app):
     assert (x0, y0) == (0.0, 0.0)
 
 
-# ── 2. the panels are not a viewer ───────────────────────────────────────
+# ── 2. the panels have one camera, and it drives the crop ────────────────
 
-def test_the_panels_take_no_mouse_input(app):
+def test_the_panels_take_mouse_input(app):
     page = _page(app)
     for vb in page._preview_vbs:
-        assert vb.state["mouseEnabled"] == [False, False]
+        assert vb.state["mouseEnabled"] == [True, True]
 
 
 def test_the_view_controls_are_gone(app):
@@ -349,17 +356,6 @@ def test_the_view_controls_are_gone(app):
                  "_compare_panel_camera", "_vb_screen_geometry",
                  "_compare_viewport_l0", "_preview_stack"):
         assert not hasattr(page, gone), gone
-
-
-def test_a_wheel_event_does_not_move_a_panel(app):
-    page = _page(app)
-    _snapshot(page, 2000, 1500)
-    before = [vb.viewRange() for vb in page._preview_vbs]
-
-    for vb in page._preview_vbs:
-        vb.wheelEvent(_WheelEvent())
-
-    assert [vb.viewRange() for vb in page._preview_vbs] == before
 
 
 class _WheelEvent:
@@ -379,6 +375,159 @@ class _WheelEvent:
 
     def ignore(self):
         pass
+
+
+def _settle(page, ms=260, timeout=5000):
+    """Let the panels' refill debounce fire and its worker land."""
+    QtTest.QTest.qWait(ms)
+    worker = page._compare_snapshot_worker
+    if worker is not None:
+        assert worker.wait(timeout)
+    QtTest.QTest.qWait(80)
+
+
+def _view(page):
+    (x0, x1), (y0, y1) = page._preview_vbs[0].viewRange()
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _pan(page, dx, dy=0.0):
+    """Move the shared camera by `(dx, dy)` level-0 pixels, as a drag would."""
+    (x0, x1), (y0, y1) = page._preview_vbs[0].viewRange()
+    page._preview_vbs[0].setRange(xRange=(x0 + dx, x1 + dx),
+                                  yRange=(y0 + dy, y1 + dy), padding=0)
+
+
+def test_a_wheel_event_zooms_a_panel(app):
+    """The panels are the whole viewing area now. Not being able to look
+    closer at the thing they were opened to look at cost more than the
+    second magnification it avoided."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _x0, _y0, before_w, _h = _view(page)
+
+    page._preview_vbs[0].wheelEvent(_WheelEvent())
+
+    assert _view(page)[2] < before_w, "the wheel did not zoom in"
+
+
+def test_zooming_one_panel_moves_the_other_two(app):
+    """One camera, three panels: three columns at three magnifications of
+    three places would not be a comparison."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+
+    page._preview_vbs[0].wheelEvent(_WheelEvent())
+
+    ranges = [vb.viewRange() for vb in page._preview_vbs]
+    for xr, yr in ranges[1:]:
+        # The HEIGHT is the exact shared number; the aspect-locked columns
+        # differ by a pixel or two in width, so the x extents carry that
+        # difference and their CENTRES are what "the same place" means --
+        # the same reading the geometry tests above take.
+        assert list(yr) == pytest.approx(list(ranges[0][1]), rel=1e-6)
+        assert (xr[0] + xr[1]) / 2 == pytest.approx(
+            (ranges[0][0][0] + ranges[0][0][1]) / 2, abs=2.0)
+
+
+def test_panning_inside_the_margin_asks_for_nothing(app):
+    """A view-driven crop carries 25% of the view on each side, so a nudge
+    inside it costs no read at all. (The crop a right-click cuts has no
+    margin -- it is exactly the frame that was pointed at -- so the first
+    gesture after entering compare mode does refetch.)"""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _pan(page, 40.0)
+    _settle(page)
+    req = page._compare_snapshot_req
+    view_w = _view(page)[2]
+
+    _pan(page, view_w * 0.1)             # well inside a 25% margin
+    _settle(page)
+
+    assert page._compare_snapshot_req == req
+
+
+def test_panning_beyond_the_margin_recuts_the_crop(app):
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _pan(page, 40.0)
+    _settle(page)
+    req = page._compare_snapshot_req
+    crop_before = page._compare_snapshot["rect_l0"]
+    view_w = _view(page)[2]
+
+    _pan(page, view_w * 0.8)             # past the margin
+    _settle(page)
+
+    assert page._compare_snapshot_req == req + 1, "exactly one refill"
+    view = _view(page)
+    crop = page._compare_snapshot["rect_l0"]
+    assert crop[0] > crop_before[0], "the crop did not follow the camera"
+    # The crop covers the camera, with the margin around it.
+    assert crop[0] <= view[0] + 1.0
+    assert crop[0] + crop[2] >= view[0] + view[2] - 1.0
+    # A margin of a quarter of the view on the near side. (The far side is
+    # clamped at the edge of the slide here, so the width is not the full
+    # 1.5x -- there is no more slide to ask for.)
+    assert crop[0] == pytest.approx(view[0] - view[2] * 0.25, abs=4.0)
+    # And the pixels arriving for a camera do not move it.
+    assert _view(page)[0] == pytest.approx(view[0], abs=1e-6)
+
+
+def test_a_refill_is_read_for_the_new_rectangle(app):
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    reads_before = len(page._explore_tab.stack.provider.reads)
+
+    _pan(page, 600.0)
+    _settle(page)
+
+    _ch, level, ry0, ry1, rx0, rx1 = (
+        page._explore_tab.stack.provider.reads[reads_before])
+    y0, x0, h, w = page._compare_snapshot["region"]
+    assert (level, ry0, rx0) == (page._compare_snapshot["level"], y0, x0)
+    assert (ry1 - ry0, rx1 - rx0) == (h, w)
+
+
+def test_zooming_past_a_level_boundary_recuts_at_the_new_level(app):
+    """The level rule is the full image's own: the coarsest level whose
+    downsample still does not exceed one slide pixel per screen pixel."""
+    page = _page(app, level=2, scale_width=1024.0, view_w=SLIDE_W * 4)
+    _snapshot(page, 2000, 1500)
+    assert page._compare_snapshot["level"] == 2
+    assert "downsampled ×4" in page._compare_level_lbl.text()
+
+    for _ in range(12):                  # well past two level boundaries
+        page._preview_vbs[0].wheelEvent(_WheelEvent())
+    _settle(page)
+
+    assert page._compare_snapshot["level"] == 0
+    # The "downsampled xN" warning follows the level it describes.
+    assert page._compare_level_lbl.isHidden() or (
+        page._compare_level_lbl.text() == "")
+
+
+def test_the_old_pixels_stay_up_while_the_new_crop_is_read(app, monkeypatch):
+    """No blanking: someone judging a background must have something to
+    look at for the whole of the read."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    before = [img.image for img in page._preview_imgs]
+    compute = page._explore_tab.stack.controller.compute
+    slow = compute.correct_array
+    monkeypatch.setattr(compute, "correct_array",
+                        lambda *a, **k: (time.sleep(0.4), slow(*a, **k))[1])
+
+    _pan(page, 900.0)
+    QtTest.QTest.qWait(300)              # debounce fired, read still running
+
+    assert page._compare_snapshot_worker is not None
+    assert page._compare_snapshot_worker.isRunning()
+    assert [img.image is not None for img in page._preview_imgs] == [True] * 3
+    assert all(a is b for a, b in
+               zip(before, (img.image for img in page._preview_imgs)))
+    page._compare_snapshot_worker.wait(5000)
 
 
 def test_a_second_right_click_retakes_the_snapshot(app):
@@ -515,14 +664,36 @@ def test_the_right_click_replaces_the_image_with_the_panels(app):
 def test_a_right_click_in_compare_mode_goes_back_to_the_image(app):
     page = _page(app)
     _snapshot(page, 2000, 1500)
-    camera = page._explore_tab.stack.view.view_box.viewRange()
 
     _right_click(page._preview_gv.viewport())
 
     assert page._compare_mode() is False
-    assert page._explore_tab.stack.view.view_box.viewRange() == camera, (
-        "the camera moved on the way back")
     assert page._last_payload is not None, "the snapshot is kept"
+
+
+def test_the_way_back_puts_the_panels_camera_on_the_full_image(app):
+    """Someone who zoomed to a cell in the panels comes back to that cell,
+    not to the landmark they went in at."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    for _ in range(4):
+        page._preview_vbs[0].wheelEvent(_WheelEvent())
+    x0, y0, w, h = _view(page)
+
+    page._on_compare_escape()
+
+    rects = page._explore_tab.stack.controller.view_rects
+    assert rects, "the full image was not moved"
+    assert rects[-1] == pytest.approx((x0, y0, w, h), abs=1e-6)
+
+
+def test_flipping_modes_without_a_snapshot_moves_no_camera(app):
+    page = _page(app)
+
+    page._set_compare_mode(True)
+    page._exit_compare_mode()
+
+    assert page._explore_tab.stack.controller.view_rects == []
 
 
 def test_escape_goes_back_to_the_image_too(app):

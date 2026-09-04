@@ -31,6 +31,7 @@ from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtGui import QColor  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
+from block01.core.display_mapping import build_display_lut  # noqa: E402
 
 from test_step0_background_correction_tab import _GpuPathLoader, app  # noqa: E402,F401
 
@@ -286,52 +287,18 @@ def test_the_button_lives_next_to_the_channel_list(app):
     assert btn not in [row.itemAt(i).widget() for i in range(row.count())]
 
 
-class _CompareSpy:
-    """Stands in for a BUILT compare strip.
+def _show_virtual_patch(page, payload=None):
+    """Put a virtual patch on the three panels and render it.
 
-    The three panels are tile viewers now, built lazily on a real entry into
-    compare mode with a slide behind them -- which these page fixtures have
-    no business doing. What they need to check is that the page PUSHES the
-    one mapping (and the one nucleus switch) onto them, which is this
-    object's whole surface.
+    The panels hold ONE in-memory array each, so "did the page push the
+    mapping onto them" is answered by looking at the real `ImageItem`s --
+    their levels and their lookup table -- rather than at a stand-in for a
+    strip object. `_refresh_preview_display` needs nothing else: no slide,
+    no provider, no worker.
     """
-
-    def __init__(self):
-        self.built = True
-        self.tints = []
-        self.mappings = []
-        self.nucleus_mappings = []
-        self.nucleus_tints = []
-        self.nucleus_enabled = []
-        self.nucleus_suppressed = []
-        self.marker_visible = []
-
-    @classmethod
-    def install(cls, page):
-        spy = cls()
-        page._compare_strip_widget = spy
-        return spy
-
-    def set_tint(self, rgb):
-        self.tints.append(rgb)
-
-    def set_display_mapping(self, lo, hi, gamma=None, *, channel=None):
-        self.mappings.append((lo, hi, gamma, channel))
-
-    def set_marker_visible(self, visible):
-        self.marker_visible.append(bool(visible))
-
-    def set_nucleus_display_mapping(self, lo, hi, gamma=None):
-        self.nucleus_mappings.append((lo, hi, gamma))
-
-    def set_nucleus_tint(self, rgb):
-        self.nucleus_tints.append(rgb)
-
-    def set_nucleus_enabled(self, enabled):
-        self.nucleus_enabled.append(bool(enabled))
-
-    def set_nucleus_suppressed(self, suppressed):
-        self.nucleus_suppressed.append(bool(suppressed))
+    page._compare_payload = payload if payload is not None else _payload()
+    page._refresh_preview_display(keep_zoom=True)
+    return page._compare_payload
 
 
 # ── 2. the controls edit the one mapping every view reads ────────────────
@@ -349,11 +316,13 @@ def test_moving_min_max_gamma_moves_every_view(app):
     wb._sp_gamma.setValue(1.75)
 
     assert page._display_mapping_for("CD3") == pytest.approx((120.0, 880.0, 1.75))
-    # the compare panels -- three tile viewers now, so the mapping is put on
-    # their controllers rather than composited into three ImageItems
-    strip = _CompareSpy.install(page)
-    page._refresh_preview_display(keep_zoom=True)
-    assert strip.mappings[-1] == pytest.approx((120.0, 880.0, 1.75, "CD3"))
+    # the compare panels -- one in-memory array each, so the mapping is
+    # `levels` on the item and the gamma is baked into its lookup table
+    _show_virtual_patch(page)
+    expected_lut = build_display_lut(page._channel_color("CD3"), 1.75)
+    for item in page._preview_imgs:
+        assert tuple(item.levels) == pytest.approx((120.0, 880.0))
+        assert np.array_equal(item.lut, expected_lut)
     # the full image
     assert stack.controller.mappings[-1] == pytest.approx((120.0, 880.0, 1.75, "CD3"))
 
@@ -642,7 +611,11 @@ def test_the_compare_header_says_where_and_offers_the_patch(app):
 
     assert widgets == [page._compare_where_lbl, page._btn_snapshot_patch], (
         [w.__class__.__name__ for w in widgets])
-    for gone in ("_btn_lock_zoom", "_reset_all_views", "_sync_zoom",
+    # `_sync_zoom` is NOT in this list: the three panels are one camera and
+    # the mirroring that makes them one is the panel design, not a control.
+    # What is gone is the BUTTONS -- the lock is permanent and has no switch,
+    # and there is no per-panel reset and no per-panel ⤢.
+    for gone in ("_btn_lock_zoom", "_reset_all_views",
                  "_reset_single_view", "_full_image_buttons",
                  "_dec_process_btn", "_preview_stack", "_compare_level_lbl",
                  "_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
@@ -688,10 +661,10 @@ def test_the_dapi_layer_starts_off_in_both_views(app):
     # Marker channels are untouched by the change.
     assert page._btn_show_marker.isChecked() is True
 
-    # compare panels: their overlays are asked to stay off
-    strip = _CompareSpy.install(page)
-    page._refresh_preview_display()
-    assert strip.nucleus_enabled[-1] is False
+    # compare panels: no nucleus item is drawn at all
+    _show_virtual_patch(page)
+    assert all(it is None or not it.isVisible()
+               for it in page._preview_nuc_imgs)
 
     # full image: the overlay is asked to stay off
     page._show_full_image()
@@ -701,8 +674,9 @@ def test_the_dapi_layer_starts_off_in_both_views(app):
     cb.setChecked(True)
     assert page._btn_show_nucleus.isChecked() is True
     assert page._btn_full_nucleus.isChecked() is True
-    page._refresh_preview_display()
-    assert strip.nucleus_enabled[-1] is True
+    _show_virtual_patch(page)
+    assert all(it is not None and it.isVisible()
+               for it in page._preview_nuc_imgs)
     page._show_full_image()
     assert stack.overlay.enabled[-1] is True
 

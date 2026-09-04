@@ -227,7 +227,7 @@ def test_flipping_the_viewing_area_changes_nothing_but_which_page_is_up(
 
     assert page._compare_mode() is False
     assert tab.calls == calls_after, "the mode switch asked the viewer again"
-    assert page._compare_strip_widget.built is False
+    assert page._compare_region is None and page._compare_payload is None
     assert page._full_image_source == "cucim", "the choice is remembered"
 
 
@@ -360,7 +360,7 @@ def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
 
     assert tab.stack.view.view_box.calls == [["padding", "xRange", "yRange"]]
     # And nothing else was opened: "fit" is the full image's own control.
-    assert page._compare_strip_widget.built is False
+    assert page._compare_region is None and page._compare_payload is None
 
 
 def test_fit_whole_slide_without_a_stack_is_a_no_op(full_image_page,

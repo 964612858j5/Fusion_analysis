@@ -313,14 +313,6 @@ namespaced tuple: `("raw", n)` / `("precise", n)`. `TileScheduler` treats
 generation tokens purely by hashable-equality, so this requires no
 scheduler changes beyond the type hint/docstring already updated there.
 
-The same collision exists BETWEEN controllers when several of them share
-one scheduler, which is what the compare strip does: three views of one
-slide, so three controllers reaching `("raw", 5)` and cancelling each
-other. A controller given a `gen_ns` splices it in -- `("raw", ns, n)` --
-through `_gen_token`, which is the single place any of these tuples is
-built. Without one the tokens are exactly the two-element ones described
-above, which is every other caller.
-
 ## GUI-side delivery guard
 
 A scheduler callback may fire on a worker thread; it is marshalled to the
@@ -1008,38 +1000,6 @@ class OverviewRecord:
     shape: Tuple[int, int]
 
 
-class SharedOverviewStore:
-    """The overview cache, the in-flight claim set and the single reader
-    thread, factored out so SEVERAL controllers over one slide can hold
-    them in common.
-
-    A controller that is given one reads the whole-slide overview only if
-    nobody has read it yet: `load_overview` consults the same
-    `(source, channel, level)` cache all of them write into, so the compare
-    strip's three views cost ONE disk read (p95 ~293 ms) and two memcpys
-    rather than three reads on three threads. `inflight` is shared for the
-    same reason -- a rapid channel switch across three controllers must
-    start one background read between them, not three.
-
-    A controller constructed without one gets a private store that it also
-    OWNS: it shuts the pool down in `teardown`. A shared store is owned by
-    whoever built it (`ExploreStack`/the strip), and the controllers using
-    it leave the pool alone.
-    """
-
-    def __init__(self, max_workers: int = 1):
-        # (source, channel, level) -> OverviewRecord, trimmed to
-        # OVERVIEW_CACHE_BYTES by whichever controller last wrote to it.
-        self.cache = OrderedDict()
-        # (source, channel, level) currently being read.
-        self.inflight = set()
-        self.pool = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="explore-overview")
-
-    def shutdown(self):
-        self.pool.shutdown(wait=True)
-
-
 # ── Interaction snapshot ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -1558,14 +1518,8 @@ class RawOverlayLayer(QtCore.QObject):
 
     def __init__(self, provider, scheduler, grid, view, channel, *,
                  item_budget: int = DEFAULT_ITEM_BUDGET,
-                 base_z: int = OVERLAY_BASE_Z, parent=None, gen_ns=None):
-        """`gen_ns` namespaces this layer's generation tokens, for the case
-        where several overlays share one scheduler (the compare strip has
-        three). Without it all three issue under `("dapi_raw", n)` and one
-        layer's cancel drops another's queued tiles. Default None keeps the
-        historical two-element token."""
+                 base_z: int = OVERLAY_BASE_Z, parent=None):
         super().__init__(parent)
-        self._gen_ns = gen_ns
         self.provider = provider
         self.scheduler = scheduler
         self.grid = grid
@@ -1599,7 +1553,7 @@ class RawOverlayLayer(QtCore.QObject):
         self._calibration_failed = False
 
         self._generation_n = 0
-        self._generation = self._gen_token(0)
+        self._generation = ("dapi_raw", 0)
         self._torn_down = False
 
         self.stats = {
@@ -1615,13 +1569,6 @@ class RawOverlayLayer(QtCore.QObject):
                                  QtCore.Qt.QueuedConnection)
 
     # ── state, readable by the host and by tests ──────────────────────
-    def _gen_token(self, n: int):
-        """`("dapi_raw", n)`, or `("dapi_raw", ns, n)` when this layer was
-        given a namespace. Equality is all the scheduler asks of these."""
-        if self._gen_ns is None:
-            return ("dapi_raw", n)
-        return ("dapi_raw", self._gen_ns, n)
-
     @property
     def enabled(self):
         """What the SWITCH says -- never overwritten by suppression."""
@@ -1864,7 +1811,7 @@ class RawOverlayLayer(QtCore.QObject):
     def _bump_generation(self):
         self.scheduler.cancel_generation(self._generation)
         self._generation_n += 1
-        self._generation = self._gen_token(self._generation_n)
+        self._generation = ("dapi_raw", self._generation_n)
 
     # ── delivery ──────────────────────────────────────────────────────
     def _on_result(self, result):
@@ -2013,31 +1960,8 @@ class ExploreController(QtCore.QObject):
                  view: ExploreView, channel: str, settle_ms: int = 80,
                  probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET,
                  intermediate_corrected_fallback: bool = True,
-                 directional_prefetch: bool = True, *,
-                 gen_ns=None, overview_store=None):
-        """`gen_ns` and `overview_store` exist for the ONE case where
-        several controllers share one backend: the compare strip, which is
-        three views of the same slide side by side.
-
-        `gen_ns` is an extra, opaque element spliced into every generation
-        token this controller issues under. Tokens are compared by equality
-        in `TileScheduler._stale_gens`, so two controllers sharing a
-        scheduler would otherwise both reach `("raw", 5)` and cancel each
-        other's queued work. Default None keeps the historical two-element
-        tokens exactly, so a sole controller's tokens are unchanged.
-
-        `overview_store` is a `SharedOverviewStore` whose cache, in-flight
-        set and single reader thread this controller uses INSTEAD of
-        opening its own. Sharing it is what makes the whole-slide overview
-        one disk read for the strip rather than three: the first
-        `load_overview` reads it, the other two find the record resident
-        and install it with a memcpy. Default None gives this controller a
-        private store, which it also owns and shuts down.
-        """
+                 directional_prefetch: bool = True):
         super().__init__()
-        # Before anything that builds a generation token (the directional
-        # prefetch generation is one of them).
-        self._gen_ns = gen_ns
         self.provider = provider
         self.scheduler = scheduler
         self.compute = compute
@@ -2074,8 +1998,7 @@ class ExploreController(QtCore.QObject):
         self._dirprefetch_candidates: list = []
         self._dirprefetch_inflight: int = 0
         self._dirprefetch_gen_n = 0
-        self._dirprefetch_generation = self._gen_token(
-            "dirprefetch", self._dirprefetch_gen_n)
+        self._dirprefetch_generation = ("dirprefetch", self._dirprefetch_gen_n)
 
         # ── selection state ──
         self.channel = channel
@@ -2086,9 +2009,8 @@ class ExploreController(QtCore.QObject):
         # ── generations (namespaced tuples -- see module docstring) ──
         self._raw_gen_n = 0
         self._settled_gen_n = 0
-        self.view_generation = self._gen_token("raw", self._raw_gen_n)
-        self._settled_generation = self._gen_token("precise",
-                                                   self._settled_gen_n)
+        self.view_generation = ("raw", self._raw_gen_n)
+        self._settled_generation = ("precise", self._settled_gen_n)
 
         # ── display level / viewport bookkeeping ──
         self.level = 0
@@ -2126,14 +2048,7 @@ class ExploreController(QtCore.QObject):
         # (source, channel, level) -> OverviewRecord. Lets a prepared
         # channel be installed with a memcpy instead of a p95-293ms disk
         # read on the GUI thread; see `OverviewRecord`.
-        # Shared or private -- see `SharedOverviewStore`. The three
-        # attributes below are BOUND to the store's objects rather than
-        # copied, so every existing mutation site keeps working unchanged
-        # and a shared store sees all of them.
-        self._owns_overview_store = overview_store is None
-        self._overview_store = (overview_store if overview_store is not None
-                                else SharedOverviewStore())
-        self._overview_cache = self._overview_store.cache
+        self._overview_cache = OrderedDict()
         # Single-flight: one persistent worker, and one in-flight read per
         # (source, channel, level). Spawning a thread per call duplicated
         # reads whenever a settle, a rapid switch and a prefetch all wanted
@@ -2141,8 +2056,9 @@ class ExploreController(QtCore.QObject):
         # parse the TIFF again for its own per-thread handle, which then
         # lives until the provider closes. One worker is enough: five
         # records measured 708ms in total.
-        self._overview_inflight = self._overview_store.inflight
-        self._overview_pool = self._overview_store.pool
+        self._overview_inflight = set()
+        self._overview_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="explore-overview")
         # Bumped on every interaction event and every selection change; see
         # PrefetchSnapshot.epoch.
         self._interaction_epoch = 0
@@ -2194,7 +2110,6 @@ class ExploreController(QtCore.QObject):
         # re-issue for the current viewport, not a rebuild.
         self._suspended = False
         self._suspend_reason = None
-        self._suspend_badge = None
 
         # ── teardown bookkeeping ──
         self._teardown_order = []
@@ -2282,20 +2197,6 @@ class ExploreController(QtCore.QObject):
         self.floor_preparing_changed.connect(self._on_floor_preparing_changed_for_badge)
 
     # ── source identity / correction key helpers ─────────────────────────
-
-    def _gen_token(self, kind: str, n: int):
-        """A generation token for `kind`.
-
-        Two elements when this controller has the scheduler to itself --
-        which is every historical case and what the module docstring
-        describes -- and three when it was given a `gen_ns`, so that
-        controllers sharing one scheduler cannot cancel each other's work
-        by both arriving at `("raw", 5)`. The scheduler only ever compares
-        these by equality, so a longer tuple costs nothing.
-        """
-        if self._gen_ns is None:
-            return (kind, n)
-        return (kind, self._gen_ns, n)
 
     def selection_key_context(self):
         """(source, channel, method, effective params, level, quality) —
@@ -3269,14 +3170,11 @@ class ExploreController(QtCore.QObject):
         return self._suspended
 
     def _suspend_badge_text(self) -> str:
-        if self._suspend_badge is not None:
-            return self._suspend_badge
         return (f"Paused — background correction is running "
                 f"({self._suspend_reason}). The view resumes when it finishes.")
 
     def suspend_for_production(self, reason: str, *,
-                               drain_timeout_s: float = 10.0,
-                               badge: Optional[str] = None) -> dict:
+                               drain_timeout_s: float = 10.0) -> dict:
         """Give the GPU up to a production correction run WITHOUT tearing
         anything down.
 
@@ -3309,12 +3207,6 @@ class ExploreController(QtCore.QObject):
             return timings
         self._suspended = True
         self._suspend_reason = reason
-        # A production run is not the only reason to pause any more: the
-        # compare strip pauses the full image (and the full image pauses the
-        # strip) for exactly the same "keep the pools, stop the GPU work"
-        # reason. `badge` lets such a pause say something true instead of
-        # claiming a correction run is going.
-        self._suspend_badge = badge
         self._settle_timer.stop()
         self._motion_timer.stop()
 
@@ -3354,7 +3246,6 @@ class ExploreController(QtCore.QObject):
             return
         self._suspended = False
         self._suspend_reason = None
-        self._suspend_badge = None
         self.view.view_box.setMouseEnabled(True, True)
 
         start_floor = self._floor_pending and not self._floor_job_running
@@ -3778,7 +3669,7 @@ class ExploreController(QtCore.QObject):
 
         self.scheduler.cancel_generation(self.view_generation)
         self._raw_gen_n += 1
-        self.view_generation = self._gen_token("raw", self._raw_gen_n)
+        self.view_generation = ("raw", self._raw_gen_n)
 
         bbox_l0 = self._current_bbox
         if bbox_l0 is None:
@@ -4106,8 +3997,7 @@ class ExploreController(QtCore.QObject):
             return
         self.scheduler.cancel_generation(self._settled_generation)
         self._settled_gen_n += 1
-        self._settled_generation = self._gen_token(
-            "precise", self._settled_gen_n)
+        self._settled_generation = ("precise", self._settled_gen_n)
         gen = self._settled_generation
 
         # Reset every call -- a disabled switch, or no fallback level
@@ -4285,8 +4175,7 @@ class ExploreController(QtCore.QObject):
         had_activity = bool(self._dirprefetch_candidates) or self._dirprefetch_inflight > 0
         self.scheduler.cancel_generation(self._dirprefetch_generation)
         self._dirprefetch_gen_n += 1
-        self._dirprefetch_generation = self._gen_token(
-            "dirprefetch", self._dirprefetch_gen_n)
+        self._dirprefetch_generation = ("dirprefetch", self._dirprefetch_gen_n)
         self._dirprefetch_candidates = []
         self._dirprefetch_inflight = 0
         if had_activity:
@@ -4765,13 +4654,9 @@ class ExploreController(QtCore.QObject):
                 t.join(timeout=floor_join_timeout)
         # Before `provider.close()` below: an overview read in flight would
         # otherwise touch a closed provider.
-        # Only a store this controller OWNS. A shared one outlives it --
-        # its other users are still reading through that pool, and shutting
-        # it here would leave them unable to switch channels.
-        if getattr(self, "_owns_overview_store", True):
-            store = getattr(self, "_overview_store", None)
-            if store is not None:
-                store.shutdown()
+        pool = getattr(self, "_overview_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=True)
 
         if not shutdown_backend:
             return

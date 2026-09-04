@@ -225,11 +225,16 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert page._channel_colors == {"CD3": (1.0, 0.0, 0.0)}
     assert page._full_image_source == "original"
     # Full-image-first: a committed switch LANDS on the new slide's full
-    # image (raw, first marker), and the compare strip -- which could only
-    # hold the OLD slide's pixels, its provider and its source identity --
-    # is torn down and put away.
+    # image (raw, first marker), and the virtual patch -- which could only
+    # hold the OLD slide's pixels -- is dropped, cache included: its keys
+    # are (channel, rectangle, level, params) and every one of those can
+    # repeat across two slides.
     assert page._compare_mode() is False
-    assert page._compare_strip_widget.built is False
+    assert page._compare_region is None
+    assert page._compare_payload is None
+    assert page._compare_cache == {}
+    assert page._compare_opened is False
+    assert page._compare_entry_view_rect is None
     assert page._compare_opened is False
 
 

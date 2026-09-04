@@ -436,6 +436,12 @@ class Step0Page(QWidget):
         # level L, and the cache key that produced the arrays.
         self._compare_region = None
         self._compare_level = 0
+        # The right-click point P, level-0, and the full image's scale at
+        # that moment in SCREEN PIXELS PER LEVEL-0 PIXEL. Together they are
+        # the panels' camera: entering compare mode changes what is
+        # computed, never how big it is drawn.
+        self._compare_point = None
+        self._compare_scale = None
         self._compare_key = None
         # (channel, R, L, params) -> payload. Small and bounded: re-entering
         # the same spot with the same numbers must not recompute.
@@ -2142,6 +2148,26 @@ class Step0Page(QWidget):
             return None
         return (x0, y0, w, h)
 
+    def _full_image_scale(self):
+        """The full image's magnification: SCREEN PIXELS PER LEVEL-0 PIXEL.
+
+        Asked of the ViewBox rather than computed from a widget size and a
+        range, because `viewPixelSize` is the number pyqtgraph itself uses
+        and it carries whatever device transform the graphics view has --
+        which is what makes "the same scale" mean the same thing in two
+        different widgets.
+        """
+        vb = self._full_image_view_box()
+        if vb is None:
+            return None
+        try:
+            per_pixel = float(vb.viewPixelSize()[0])
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not (per_pixel > 0 and math.isfinite(per_pixel)):
+            return None
+        return 1.0 / per_pixel
+
     def _slide_shape_l0(self):
         """The slide's level-0 `(height, width)`, or None."""
         explore_tab = getattr(self, "_explore_tab", None)
@@ -2277,26 +2303,105 @@ class Step0Page(QWidget):
         finally:
             self._zoom_lock_active = False
 
-    def _fit_compare_region(self):
-        """Fit the region to the panels -- ONCE, when its arrays land.
+    def _frame_compare_region(self):
+        """Open the panels at the FULL IMAGE'S scale, centred on P -- ONCE,
+        when the region's arrays land.
+
+        ENTERING COMPARE MODE IS NOT A ZOOM. The user right-clicked a spot
+        to see it computed three ways; nothing about that gesture asks for
+        the magnification to change, and the panels used to `autoRange`,
+        which fits the whole of R into a panel a third the width of the
+        image it came from -- a visible zoom OUT, every time, of a picture
+        the user had just finished framing.
+
+        So each panel is given the range that reproduces the full image's
+        magnification exactly: the same number of screen pixels per level-0
+        pixel, with P at the centre. R is bigger than that -- it is the
+        whole of what the full image was showing -- so most panels show a
+        part of it and the rest is simply off the edge. That is not a loss:
+        R is what was COMPUTED, and the linked camera moves freely inside
+        it with no fetch behind it.
+
+        The arithmetic is one conversion. A panel's world coordinates are
+        the crop's own pixels at level L, so one view unit is `ds` level-0
+        pixels; at the full image's scale `s` it is drawn `ds * s` screen
+        pixels wide, and a panel `W` pixels across therefore shows
+        `W / (ds * s)` view units. The three boxes are equal-width columns
+        of one grid, so the range is solved once, from the first, and given
+        to all three -- identical by construction rather than to within a
+        fit, which is what `_sync_zoom` exists to protect.
+
+        Falls back to fitting when anything needed is missing (no scale
+        recorded, no provider, a panel that has never been laid out and so
+        has no width to solve with): a fitted picture is worse than an
+        unfitted one, and no picture at all is worse than both.
 
         Every later refresh of the SAME region keeps the camera: a channel
         row change and a parameter edit recompute the same R, and yanking
-        the user back to the whole region because a radius moved by one
-        would lose the place they were looking at.
+        the user back because a radius moved by one would lose the place
+        they were looking at.
         """
         vbs = getattr(self, "_preview_vbs", None)
         if not vbs:
             return
+        rect = self._compare_panel_range()
         self._zoom_lock_active = True
         try:
-            for vb in vbs:
-                vb.autoRange()
+            if rect is None:
+                for vb in vbs:
+                    vb.autoRange()
+            else:
+                (cx0, cx1), (cy0, cy1) = rect
+                for vb in vbs:
+                    vb.setRange(xRange=(cx0, cx1), yRange=(cy0, cy1),
+                                padding=0)
         finally:
             self._zoom_lock_active = False
-        # autoRange solves each box independently; one mirror pass makes the
-        # three literally equal rather than equal to within a fit.
+        # `autoRange` solves each box independently; one mirror pass makes
+        # the three literally equal rather than equal to within a fit.
         self._sync_zoom(0)
+
+    def _compare_panel_range(self):
+        """`((x0, x1), (y0, y1))` in the crop's own pixels: the rectangle a
+        panel must show to draw the region at the full image's scale with P
+        at its centre. None when it cannot be solved."""
+        vbs = getattr(self, "_preview_vbs", None)
+        region = self._compare_region
+        point = self._compare_point
+        scale = self._compare_scale
+        if not vbs or region is None or point is None or not scale:
+            return None
+        crop = self._compare_crop_for(region, self._compare_level)
+        if crop is None:
+            return None
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        provider = getattr(stack, "provider", None)
+        if provider is None:
+            return None
+        try:
+            ds = float(provider.level_downsample(int(self._compare_level)))
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not (ds > 0 and math.isfinite(ds)):
+            return None
+        try:
+            w_px = float(vbs[0].width())
+            h_px = float(vbs[0].height())
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not (w_px > 1 and h_px > 1):
+            return None
+        # View units per screen pixel at the full image's magnification.
+        per_pixel = 1.0 / (ds * float(scale))
+        cy0, cx0, _ch, _cw = crop
+        # P in the crop's pixels: level-0 -> level L, minus the crop origin.
+        px, py = (float(v) for v in point)
+        cx = px / ds - float(cx0)
+        cy = py / ds - float(cy0)
+        half_w = w_px * per_pixel / 2.0
+        half_h = h_px * per_pixel / 2.0
+        return ((cx - half_w, cx + half_w), (cy - half_h, cy + half_h))
 
     def _effective_correction_params(self, channel):
         """`(tophat_radius, cucim_sigma)` for `channel` -- the numbers a
@@ -2380,6 +2485,12 @@ class Step0Page(QWidget):
         if region is None:
             return None
         level = self._compare_level_for(region)
+        # The camera, read off the full image BEFORE the switch and while
+        # it is still the view: P, and the magnification to reproduce.
+        # `_full_image_view_rect_l0` would give the scale too, but only
+        # together with a widget size; `_full_image_scale` asks the ViewBox
+        # the question directly.
+        scale = self._full_image_scale()
 
         # Saved ONLY on the way in from the full image. Re-opening on a new
         # point while already comparing must not overwrite the rectangle the
@@ -2388,6 +2499,8 @@ class Step0Page(QWidget):
             self._compare_entry_view_rect = entry_rect
         self._compare_region = region
         self._compare_level = int(level)
+        self._compare_point = (px, py)
+        self._compare_scale = scale
         # A new region is a new picture: it is fitted when it arrives.
         self._compare_fitted = False
         self._set_compare_mode(True)
@@ -5475,7 +5588,7 @@ class Step0Page(QWidget):
         finally:
             self._zoom_lock_active = False
         if not keep_zoom:
-            self._fit_compare_region()
+            self._frame_compare_region()
 
     def _update_compare_metrics(self):
         """SNR / BG-CV for the three arrays of the virtual patch.
@@ -7084,6 +7197,8 @@ class Step0Page(QWidget):
         self._compare_cache.clear()
         self._compare_payload = None
         self._compare_region = None
+        self._compare_point = None
+        self._compare_scale = None
         self._compare_key = None
         self._compare_fitted = False
         self._compare_pending = False

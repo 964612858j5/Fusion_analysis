@@ -12,7 +12,8 @@ The module pins the four things that has to be true of:
 
 * the RULE -- what R is, what L is, and that neither depends on the panels;
 * the FEED -- one worker, three arrays, a placeholder until they land, and
-  the region fitted exactly once;
+  the camera set exactly once -- at the FULL IMAGE'S scale, centred on P,
+  never a fit;
 * the RECOMPUTE -- a channel row change or a parameter edit recomputes the
   same R and keeps the camera;
 * the TOGGLE -- entering and leaving must not move the full image by a
@@ -350,19 +351,108 @@ def test_a_right_click_starts_one_worker_for_the_region(app):
     page._stop_compare_worker()
 
 
-def test_the_arrays_land_and_the_region_is_fitted_once(app):
+def test_the_arrays_land_and_the_camera_is_set_once(app):
     page = _page(app)
     _enter(page, 20000.0, 15000.0, _payload(h=100, w=200))
 
     assert page._compare_pending is False
     assert page._compare_fitted is True
     assert page._preview_imgs[0].image.shape == (100, 200)
-    # Fitted: the whole picture is inside the view, on all three.
+    assert page._metrics_original.text().startswith("Original")
+    assert "(preview)" in page._metrics_original.text()
+
+
+# ── 2b. entering compare mode is not a zoom ──────────────────────────────
+#
+# The panels used to `autoRange` the whole of R into a panel a third the
+# width of the image it came from -- a visible zoom OUT of a picture the
+# user had just finished framing. The rule is that the magnification does
+# not change: the same screen pixels per level-0 pixel, with P at the
+# centre, and whatever does not fit is simply not shown.
+
+def _panel_scale(page, idx=0):
+    """Panel `idx`'s magnification in SCREEN PIXELS PER LEVEL-0 PIXEL."""
+    vb = page._preview_vbs[idx]
+    provider = page._explore_tab.stack.provider
+    ds = float(provider.level_downsample(int(page._compare_level)))
+    (x0, x1), _y = vb.viewRange()
+    return float(vb.width()) / ((x1 - x0) * ds)
+
+
+def _panel_centre_l0(page, idx=0):
+    """What level-0 point is at the centre of panel `idx`."""
+    vb = page._preview_vbs[idx]
+    provider = page._explore_tab.stack.provider
+    ds = float(provider.level_downsample(int(page._compare_level)))
+    cy0, cx0, _h, _w = page._compare_crop_for(page._compare_region,
+                                              page._compare_level)
+    (x0, x1), (y0, y1) = vb.viewRange()
+    return ((cx0 + (x0 + x1) / 2.0) * ds, (cy0 + (y0 + y1) / 2.0) * ds)
+
+
+def test_every_panel_opens_at_the_full_images_scale(app):
+    page = _page(app)
+    before = page._full_image_scale()
+
+    _enter(page, 20000.0, 15000.0, _payload(h=600, w=900))
+
+    assert before == pytest.approx(page._compare_scale)
+    for idx in range(3):
+        assert _panel_scale(page, idx) == pytest.approx(before, rel=1e-6)
+
+
+def test_the_right_clicked_point_is_at_the_panels_centre(app):
+    page = _page(app)
+
+    _enter(page, 20000.0, 15000.0, _payload(h=600, w=900))
+
+    for idx in range(3):
+        cx, cy = _panel_centre_l0(page, idx)
+        assert (cx, cy) == pytest.approx((20000.0, 15000.0), rel=1e-6)
+
+
+def test_the_panels_show_less_than_the_region_rather_than_shrinking_it(app):
+    """R is the whole of what the full image was showing, and a panel is a
+    third as wide -- so at the full image's scale most of R is off the edge.
+    That is the property, not a shortfall: R is what was COMPUTED, and the
+    linked camera moves inside it with no fetch behind it."""
+    page = _page(app, view_rect=(10000.0, 8000.0, 4000.0, 2000.0))
+
+    region = _enter(page, 20000.0, 15000.0, _payload(h=600, w=900))
+
+    (x0, x1), _y = page._preview_vbs[0].viewRange()
+    ds = float(page._explore_tab.stack.provider.level_downsample(
+        page._compare_level))
+    shown_l0 = (x1 - x0) * ds
+    assert shown_l0 < region[2], "the region was shrunk to fit a panel"
+
+
+def test_the_three_panels_are_given_one_rectangle_not_three(app):
+    """Identical by construction, not to within a fit: the range is solved
+    once, from the first box, and handed to all three."""
+    page = _page(app)
+
+    _enter(page, 20000.0, 15000.0, _payload(h=600, w=900))
+
+    first = page._preview_vbs[0].viewRange()
+    for vb in page._preview_vbs[1:]:
+        assert vb.viewRange() == first
+
+
+def test_without_a_scale_to_reproduce_the_region_is_still_shown(app):
+    """A page that cannot answer "how big was it?" gets a fit rather than
+    an empty panel: a fitted picture is worse than an unfitted one, and no
+    picture at all is worse than both."""
+    page = _page(app)
+    _enter(page, 20000.0, 15000.0, _payload(h=100, w=200))
+    page._compare_scale = None
+    page._compare_fitted = False
+
+    page._refresh_preview_display(keep_zoom=False)
+
     for vb in page._preview_vbs:
         (x0, x1), (y0, y1) = vb.viewRange()
         assert x0 <= 0 and x1 >= 200 and y0 <= 0 and y1 >= 100
-    assert page._metrics_original.text().startswith("Original")
-    assert "(preview)" in page._metrics_original.text()
 
 
 def test_a_late_reply_from_a_superseded_region_is_dropped(app):

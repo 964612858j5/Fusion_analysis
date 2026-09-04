@@ -184,9 +184,44 @@ class _Tab:
         pass
 
 
+class _LowresLoader(_GpuPathLoader):
+    """A `_GpuPathLoader` that can also read the WHOLE SLIDE at 1/64.
+
+    That read is the compare panels' underlay -- the floor a zoom-out
+    uncovers -- so a fixture without it is a page with no floor at all and
+    proves nothing about the layering. Same ramp as the provider serves, so
+    an underlay array says which slide pixels it holds; DAPI is offset by
+    1000, so its overlay cannot be confused with a second copy of the
+    marker.
+    """
+
+    shape = (SLIDE_H, SLIDE_W)
+    OVERVIEW_DS = 64
+
+    def __init__(self):
+        super().__init__()
+        self.lowres_reads = []
+
+    def overview_downsample(self):
+        return self.OVERVIEW_DS
+
+    def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+        ds = int(ds)
+        self.lowres_reads.append((ch, ds))
+        h = max(1, (int(y1) - int(y0)) // ds)
+        w = max(1, (int(x1) - int(x0)) // ds)
+        ys = np.arange(h, dtype=np.float32)[:, None] * ds
+        xs = np.arange(w, dtype=np.float32)[None, :] * ds
+        return ys * 10000.0 + xs + (1000.0 if ch == "DAPI" else 0.0)
+
+
+LOWRES_SHAPE = (SLIDE_H // _LowresLoader.OVERVIEW_DS,
+                SLIDE_W // _LowresLoader.OVERVIEW_DS)
+
+
 def _page(app, *, level=0, scale_width=1024.0, view_w=SLIDE_W):
     page = sp.Step0Page()
-    page.loader = _GpuPathLoader()
+    page.loader = _LowresLoader()
     page.ome_path = "/fake/slide.ome.tif"
     page.patches = []
     page.nucleus_channel = "DAPI"
@@ -237,6 +272,22 @@ def _right_click(widget):
         QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress,
                           QtCore.QPointF(5.0, 5.0), QtCore.Qt.RightButton,
                           QtCore.Qt.RightButton, QtCore.Qt.NoModifier))
+
+
+def _crop_calls(page):
+    """`(method, param)` for the corrections run on a CROP, not on the
+    whole-slide underlay."""
+    return [(m, p) for m, p, shape
+            in page._explore_tab.stack.controller.compute.calls
+            if shape != LOWRES_SHAPE]
+
+
+def _underlay_calls(page):
+    """`(method, param)` for the corrections run on the whole-slide
+    underlay."""
+    return [(m, p) for m, p, shape
+            in page._explore_tab.stack.controller.compute.calls
+            if shape == LOWRES_SHAPE]
 
 
 def _no_workers(monkeypatch):
@@ -647,9 +698,10 @@ def test_the_two_methods_run_with_the_rows_current_parameters(app):
 
     _snapshot(page, 2000, 1500)
 
-    calls = page._explore_tab.stack.controller.compute.calls
-    assert [(m, p) for m, p, _shape in calls] == [("tophat", 21),
-                                                  ("cucim", 9)]
+    # The CROP's calls. The whole-slide underlay runs through the same
+    # compute object, with the same parameters scaled for the overview's
+    # downsample instead, and is told apart by the array it ran on.
+    assert _crop_calls(page) == [("tophat", 21), ("cucim", 9)]
 
 
 def test_a_coarse_level_scales_the_parameter_the_way_a_tile_does(app):
@@ -662,8 +714,7 @@ def test_a_coarse_level_scales_the_parameter_the_way_a_tile_does(app):
     _snapshot(page, 2000, 1500)
 
     ds = page._explore_tab.stack.provider.level_downsample(2)
-    calls = page._explore_tab.stack.controller.compute.calls
-    assert [(m, p) for m, p, _s in calls] == [
+    assert _crop_calls(page) == [
         ("tophat", effective_param(20, 2, ds)),
         ("cucim", effective_param(8, 2, ds))]
 
@@ -1056,3 +1107,279 @@ def test_a_parameter_edit_recuts_the_panels(app):
     calls = page._explore_tab.stack.controller.compute.calls[calls_before:]
     sigmas = [param for method, param, _shape in calls if method == "cucim"]
     assert sigmas == [page._dec_sigma.value()]
+
+
+# ── 9. the panels never show background ──────────────────────────────────
+#
+# A panel used to hold exactly one image, so a fast zoom-out shrank the crop
+# into the widget's black background and then, when the refill landed,
+# snapped a full-size image back in: a flash of nothing followed by a jump,
+# once per zoom-out. The full image never does that -- not because it is
+# faster, but because it keeps coarser layers underneath. The panels now
+# keep the same two: the whole slide at overview resolution under
+# everything, and the crop being replaced under the one being read.
+
+
+def _underlay_ready(page, timeout=5000):
+    """Wait for the corrected underlays as well as the crop."""
+    deadline = QtCore.QElapsedTimer()
+    deadline.start()
+    while len(page._compare_underlay_cache) < 3:
+        worker = page._compare_underlay_worker
+        if worker is not None:
+            worker.wait(timeout)
+        QtTest.QTest.qWait(10)
+        assert deadline.elapsed() < timeout, "the underlay never arrived"
+    QtTest.QTest.qWait(30)
+    return page._compare_underlay_cache
+
+
+def _item_rects(page, idx):
+    """Every visible image item's level-0 rectangle in panel `idx`."""
+    out = []
+    for slots in (page._compare_under_imgs, page._compare_under_nuc_imgs,
+                  page._preview_prev_imgs, page._preview_prev_nuc_imgs,
+                  page._preview_imgs, page._preview_nuc_imgs):
+        item = slots[idx]
+        rect = getattr(item, "_l0_rect", None)
+        if item is None or rect is None or not item.isVisible():
+            continue
+        if getattr(item, "image", None) is None:
+            continue
+        out.append((rect.x(), rect.y(), rect.width(), rect.height()))
+    return out
+
+
+def _covered(page, idx):
+    """True when SOME image item covers the whole of panel `idx`'s view.
+
+    The panels only ever hold axis-aligned rectangles that share a corner
+    with the slide or with each other, so "no gap" is "one of them contains
+    the view" -- which is the shape of the guarantee anyway: the underlay
+    covers the entire slide.
+    """
+    (vx0, vx1), (vy0, vy1) = page._preview_vbs[idx].viewRange()
+    for x, y, w, h in _item_rects(page, idx):
+        if (x <= vx0 + 1e-6 and y <= vy0 + 1e-6
+                and x + w >= vx1 - 1e-6 and y + h >= vy1 - 1e-6):
+            return True
+    return False
+
+
+def test_every_panel_gets_the_whole_slide_underneath(app):
+    page = _page(app)
+
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    for idx in range(3):
+        item = page._compare_under_imgs[idx]
+        assert item is not None, f"panel {idx} has no underlay"
+        assert item.isVisible()
+        assert item.image is not None
+        assert item.image.shape == LOWRES_SHAPE
+        rect = item._l0_rect
+        assert (rect.x(), rect.y(), rect.width(), rect.height()) == (
+            0.0, 0.0, float(SLIDE_W), float(SLIDE_H)), (
+            "the underlay is not placed on the whole slide")
+
+
+def test_the_underlay_is_below_the_crop(app):
+    page = _page(app)
+
+    _snapshot(page, 2000, 1500)
+
+    for idx in range(3):
+        assert (page._compare_under_imgs[idx].zValue()
+                < page._preview_imgs[idx].zValue())
+
+
+def test_the_corrected_underlays_are_the_low_res_array_corrected(app):
+    """The same correction function the crop is corrected with, on the same
+    array the Tissue Preview is drawn from, with the parameter scaled for
+    the overview's downsample."""
+    page = _page(app)
+
+    _snapshot(page, 2000, 1500)
+    cache = _underlay_ready(page)
+
+    radius, sigma = page._effective_correction_params("CD3")
+    ds = float(_LowresLoader.OVERVIEW_DS)
+    eff = {"tophat": effective_param(radius, 1, ds),
+           "cucim": effective_param(sigma, 1, ds)}
+    calls = page._explore_tab.stack.controller.compute.calls
+    for method in ("tophat", "cucim"):
+        assert ("CD3", method, eff[method]) in cache
+        assert (method, eff[method], LOWRES_SHAPE) in calls, (
+            f"{method} was not run over the whole-slide array")
+    # And it really is the correction of that array: the fake compute
+    # doubles for tophat and triples for cucim.
+    base = cache[("CD3", "original", 0)]
+    assert np.allclose(cache[("CD3", "tophat", eff["tophat"])], base * 2.0)
+    assert np.allclose(cache[("CD3", "cucim", eff["cucim"])], base * 3.0)
+
+
+def test_the_underlay_costs_one_read_and_it_is_the_page_s_own(app):
+    """No new IO: the array is the one `_slide_lowres_array` already
+    holds."""
+    page = _page(app)
+
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    assert ([r for r in page.loader.lowres_reads if r[0] == "CD3"]
+            == [("CD3", _LowresLoader.OVERVIEW_DS)])
+    assert (page._compare_underlay_cache[("CD3", "original", 0)]
+            is page._slide_lowres_array("CD3"))
+
+
+def test_a_zoom_out_never_uncovers_the_background(app):
+    """The measurement the bug was reported as: shrink the crop hard, and
+    look at every frame BEFORE the refill lands."""
+    # Opened deep in: 4 screen pixels per slide pixel, in the middle of the
+    # slide, so a dozen 1.4x steps out still ask for slide rather than for
+    # the void beyond its edge -- which no layer can cover and which is not
+    # what the bug was about.
+    page = _page(app, scale_width=1024.0, view_w=256)
+    page._explore_tab.stack.view.view_box.set_rect(1920.0, 1952.0,
+                                                   256.0, 192.0)
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    for step in range(11):
+        (x0, x1), (y0, y1) = page._preview_vbs[0].viewRange()
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        w, h = (x1 - x0) * 1.4, (y1 - y0) * 1.4
+        page._preview_vbs[0].setRange(xRange=(cx - w / 2, cx + w / 2),
+                                      yRange=(cy - h / 2, cy + h / 2),
+                                      padding=0)
+        for idx in range(3):
+            assert _covered(page, idx), (
+                f"panel {idx} showed background at zoom-out step {step}")
+
+
+def test_the_previous_crop_stays_up_until_the_new_one_lands(app, monkeypatch):
+    """The viewer's "switch levels without clearing", in three panels."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    before = [img.image for img in page._preview_imgs]
+
+    real_run = sp.CompareSnapshotWorker.run
+    monkeypatch.setattr(sp.CompareSnapshotWorker, "run",
+                        lambda self: (time.sleep(0.6), real_run(self)))
+    _pan(page, 600.0)
+    QtTest.QTest.qWait(200)
+
+    for idx in range(3):
+        prev = page._preview_prev_imgs[idx]
+        assert prev is not None and prev.isVisible(), (
+            f"panel {idx} dropped the crop it was showing")
+        assert np.array_equal(prev.image, before[idx])
+        assert prev.zValue() < page._preview_imgs[idx].zValue()
+        assert prev.zValue() > page._compare_under_imgs[idx].zValue()
+
+    _settle(page)
+
+    assert all(not item.isVisible() for item in page._preview_prev_imgs)
+    assert all(img.image.shape != b.shape or not np.array_equal(img.image, b)
+               for img, b in zip(page._preview_imgs, before))
+
+
+def test_a_parameter_change_recomputes_the_corrected_underlay_once(app):
+    page = _page(app)
+    page._channel_params["CD3"] = {"tophat_radius": 21, "cucim_sigma": 9}
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+    before = _underlay_calls(page)
+    assert len(before) == 2, before
+
+    page._channel_params["CD3"]["cucim_sigma"] = 200
+    page._retake_compare_snapshot()
+    _wait_for_retake(page)
+    _underlay_ready(page)
+
+    added = _underlay_calls(page)[len(before):]
+    assert len(added) == 1, f"the underlay was recomputed {len(added)} times"
+    ds = float(_LowresLoader.OVERVIEW_DS)
+    assert added == [("cucim", effective_param(200, 1, ds))]
+    # And nothing at all for a retake that changes no parameter: the floor
+    # is a picture of the channel and its numbers, not of the camera.
+    page._retake_compare_snapshot()
+    _wait_for_retake(page)
+    _underlay_ready(page)
+    assert _underlay_calls(page)[len(before):] == added
+
+
+def test_a_channel_change_gives_the_new_channel_its_own_floor(app):
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    page._last_payload = None
+    page._on_channel_selected_by_id("CD20")
+    _wait_for_retake(page)
+    _underlay_ready(page)
+
+    assert page._compare_underlay_keys["original"][0] == "CD20"
+    assert np.allclose(page._compare_under_imgs[0].image,
+                       page._slide_lowres_array("CD20"))
+
+
+def test_zooming_out_across_a_level_refills_without_waiting(app):
+    """The settle is for the expensive direction. A coarser level is fewer
+    pixels for more slide, and it is what the user asked to see."""
+    page = _page(app, level=0, scale_width=1024.0, view_w=1024)
+    _snapshot(page, 2000, 1500)
+    req = page._compare_snapshot_req
+    assert page._compare_snapshot["level"] == 0
+
+    (x0, x1), (y0, y1) = page._preview_vbs[0].viewRange()
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    w, h = (x1 - x0) * 8.0, (y1 - y0) * 8.0
+    page._preview_vbs[0].setRange(xRange=(cx - w / 2, cx + w / 2),
+                                  yRange=(cy - h / 2, cy + h / 2), padding=0)
+
+    # No wait at all: the request is in flight already.
+    assert page._compare_snapshot_req == req + 1
+    assert page._compare_snapshot["level"] > 0
+
+
+def test_zooming_in_still_waits_out_the_settle(app):
+    page = _page(app, level=2, scale_width=1024.0, view_w=SLIDE_W * 4)
+    _snapshot(page, 2000, 1500)
+    req = page._compare_snapshot_req
+
+    (x0, x1), (y0, y1) = page._preview_vbs[0].viewRange()
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    w, h = (x1 - x0) / 8.0, (y1 - y0) / 8.0
+    page._preview_vbs[0].setRange(xRange=(cx - w / 2, cx + w / 2),
+                                  yRange=(cy - h / 2, cy + h / 2), padding=0)
+
+    assert page._compare_snapshot_req == req, "the expensive read did not wait"
+    _settle(page)
+    assert page._compare_snapshot_req == req + 1
+
+
+def test_the_settle_is_a_tenth_of_a_second(app):
+    assert sp.Step0Page._COMPARE_SETTLE_MS == 100
+
+
+def test_the_dapi_underlay_follows_the_switch(app):
+    """One switch, one picture -- on the floor as well as on the crop."""
+    page = _page(app)
+    page._btn_show_nucleus.setChecked(True)
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    for idx in range(3):
+        nuc = page._compare_under_nuc_imgs[idx]
+        assert nuc is not None and nuc.isVisible(), f"panel {idx}"
+        assert np.allclose(nuc.image, page._slide_lowres_array("DAPI"))
+        assert nuc.paintMode == QtGui.QPainter.CompositionMode_Plus
+        assert nuc.zValue() < page._preview_imgs[idx].zValue()
+
+    page._btn_show_nucleus.setChecked(False)
+    _wait_for_retake(page)
+
+    assert all(item is None or not item.isVisible()
+               for item in page._compare_under_nuc_imgs)

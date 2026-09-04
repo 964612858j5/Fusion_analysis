@@ -265,6 +265,66 @@ class CompareSnapshotWorker(QThread):
 
 
 
+class CompareUnderlayWorker(QThread):
+    """The corrected WHOLE-SLIDE low-resolution arrays, off the GUI thread.
+
+    The compare panels' floor. Each panel keeps a picture of the entire
+    slide underneath the crop it is showing, so zooming out reveals coarse
+    slide rather than the widget's background -- exactly what the full image
+    does with its overview layer, and for exactly the same reason: a view
+    that goes black while a read is in flight is a view you cannot judge a
+    background in.
+
+    Original needs no work: the array IS the page's cached
+    `_slide_lowres_array(ch)`, the same pixels the Tissue Preview, the
+    display seed and the Intensity histogram are drawn from. TopHat and
+    cuCIM need the correction run over it, and this is where that happens.
+
+    The parameter is DOWNSAMPLE-AWARE, `effective_param(base, 1, ds)` --
+    the same rule `CompareSnapshotWorker` and `ExploreController` scale a
+    radius or a sigma by for a coarse level, with `ds` the overview's own
+    downsample (about 64 on the real slide). A level-0 sigma applied to
+    level-0-sized features in a 64x-downsampled array would be a correction
+    of something else entirely.
+
+    The kernels are the caller's `CorrectionCompute.correct_array`: the same
+    object, the same GPU path and the same numerics the crop is corrected
+    with, so the floor and the crop cannot disagree about what a correction
+    looks like.
+
+    Small and fast (a 923x555 array on the real slide), and computed ONCE
+    per (channel, method, effective parameter) -- the caller caches by
+    exactly that key, so panning, zooming and re-cutting the crop cost
+    nothing here and only a parameter edit or a channel change does.
+    """
+
+    done = pyqtSignal(int, dict)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, req_id, compute, source, wants, parent=None):
+        super().__init__(parent)
+        self.req_id = int(req_id)
+        self.compute = compute
+        self.source = np.asarray(source, dtype=np.float32)
+        # {cache key: (method, effective param)}
+        self.wants = dict(wants)
+
+    def run(self):
+        out = {}
+        try:
+            for key, (method, param) in self.wants.items():
+                out[key] = np.ascontiguousarray(
+                    self.compute.correct_array(
+                        self.source, method, int(param)
+                    ).astype(np.float32, copy=False))
+        except Exception as exc:                            # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(self.req_id, str(exc))
+            return
+        self.done.emit(self.req_id, out)
+
+
+
 # Which of the three compare results the full image shows. Ordered to match
 # the compare panels left to right.
 FULL_IMAGE_SOURCES = ("original", "tophat", "cucim")
@@ -394,6 +454,26 @@ class Step0Page(QWidget):
         self._compare_snapshot = None
         self._compare_snapshot_worker = None
         self._compare_snapshot_req = 0
+        # The panels' FLOOR: the whole slide at the overview resolution, in
+        # every panel, under everything else. Original is the page's cached
+        # low-res array; TopHat and cuCIM are that array corrected with the
+        # row's current parameters, computed once per (channel, method,
+        # effective parameter) by `CompareUnderlayWorker` and cached here.
+        # Zooming out therefore uncovers coarse slide, never background.
+        self._compare_underlay_cache = {}
+        self._compare_underlay_keys = {}
+        # Keys a worker is computing right now. Without it, the two calls a
+        # single snapshot makes -- one to draw the floor, one to complete it
+        # -- would each start a worker for the same two arrays.
+        self._compare_underlay_pending = set()
+        self._compare_underlay_worker = None
+        self._compare_underlay_req = 0
+        # The last view WIDTH the panels reported, so a range event can say
+        # whether the user was zooming out. A zoom-out that crosses a
+        # pyramid boundary refills immediately rather than waiting out the
+        # settle: the coarser level is the cheap direction, and it is the
+        # direction that used to end in a shrinking image on a black field.
+        self._compare_last_view_w = None
         # Re-entrancy guard for the three panels' shared camera, and the
         # settle timer that turns "the user stopped moving" into a refill.
         # The guard is also held while the page sets the panels' range
@@ -1102,6 +1182,23 @@ class Step0Page(QWidget):
         # builds dozens of pages in one process -- deterministic, exactly
         # as constructing the full-image viewer eagerly once did.
         self._preview_nuc_imgs = [None, None, None]
+        # Two more layers per panel, both created on first use for the same
+        # reason as the nucleus item -- eager scene items made the known
+        # offscreen pyqtgraph crash of this suite deterministic.
+        #
+        # The UNDERLAY is the whole slide at overview resolution (plus its
+        # own additive nucleus), pinned to the slide's level-0 rectangle and
+        # below everything: what a zoom-out uncovers.
+        #
+        # The PREVIOUS crop is the pixels that were on screen when a refill
+        # started, kept between the underlay and the incoming crop until the
+        # new one has landed -- the panels' version of the viewer's "switch
+        # levels without clearing". At most two crops and one underlay per
+        # panel, ever.
+        self._compare_under_imgs = [None, None, None]
+        self._compare_under_nuc_imgs = [None, None, None]
+        self._preview_prev_imgs = [None, None, None]
+        self._preview_prev_nuc_imgs = [None, None, None]
         self._preview_gv = pg.GraphicsLayoutWidget()   # 单一widget
         self._preview_gv.setBackground("#111")
         TITLES = ("Original", "TopHat", "cucim")
@@ -2182,6 +2279,7 @@ class Step0Page(QWidget):
         vbs = getattr(self, "_preview_vbs", None) or ()
         if not vbs or not (scale > 0 and math.isfinite(scale)):
             return False
+        width = None
         self._compare_range_syncing = True
         try:
             for vb in vbs:
@@ -2195,8 +2293,15 @@ class Step0Page(QWidget):
                 w, h = w_px / float(scale), h_px / float(scale)
                 vb.setRange(xRange=(cx - w / 2.0, cx + w / 2.0),
                             yRange=(cy - h / 2.0, cy + h / 2.0), padding=0)
+                if not width:
+                    width = w
         finally:
             self._compare_range_syncing = False
+        # The zoom-direction bookkeeping is the page's, not the signal's:
+        # this move does not come through `_on_compare_range_changed` (it is
+        # held under the guard), and leaving a stale width behind would make
+        # the next user gesture look like a zoom out of nowhere.
+        self._compare_last_view_w = width or None
         return True
 
     def _compare_panel_px(self):
@@ -2395,6 +2500,11 @@ class Step0Page(QWidget):
         # place they are going to at the scale they asked for while the crop
         # is on its way.
         self._apply_compare_camera(x_l0, y_l0, scale)
+        # Whatever floor is already in hand, drawn NOW. Computing what is
+        # missing is `_start_compare_snapshot`'s job, a few lines below --
+        # asking here as well would start a second worker for the same
+        # arrays, since the first has not put anything in the cache yet.
+        self._refresh_compare_underlay()
 
         level = int(getattr(controller, "level", 0) or 0)
         try:
@@ -2496,6 +2606,14 @@ class Step0Page(QWidget):
         self._update_compare_level_label(level)
         self._preview_status.setText("Taking snapshot…")
 
+        # The floor first, and the outgoing crop kept on its own layer: for
+        # the whole of the read there is a picture of this place at every
+        # magnification the panels can be at, so neither a zoom-out nor the
+        # wait itself can show background.
+        self._ensure_compare_underlay()
+        self._refresh_compare_underlay()
+        self._stash_previous_crop()
+
         self._cancel_compare_snapshot()
         self._compare_snapshot_req += 1
         worker = CompareSnapshotWorker(
@@ -2520,8 +2638,11 @@ class Step0Page(QWidget):
     _COMPARE_REFILL_MARGIN = 0.25
     # Quiet time after the last range event before a refill is considered.
     # A drag emits a range event per mouse move; refetching per event would
-    # queue a worker per pixel of travel.
-    _COMPARE_SETTLE_MS = 150
+    # queue a worker per pixel of travel. Shortened from 150 ms now that the
+    # panels have a floor to wait on: nothing goes black during the wait, so
+    # the wait can be tuned for how soon the fine pixels arrive rather than
+    # for how long a blank one would last.
+    _COMPARE_SETTLE_MS = 100
     # Slop, in pixels of the level the crop was cut at, when asking whether
     # the camera has left the cached region. An aspect-locked ViewBox handed
     # a rectangle widens the axis it does not have to grow, so a panel's own
@@ -2558,8 +2679,46 @@ class Step0Page(QWidget):
                 vb.setRange(xRange=tuple(xr), yRange=tuple(yr), padding=0)
         finally:
             self._compare_range_syncing = False
-        if self._compare_mode():
-            self._compare_refill_timer.start(self._COMPARE_SETTLE_MS)
+        if not self._compare_mode():
+            return
+        # Zooming OUT across a pyramid boundary refills at once, without
+        # waiting for the settle. The coarser level is the cheap direction
+        # -- fewer level pixels for more slide -- and it is the direction
+        # the user is asking to see more in, so making them wait out a
+        # settle before the wider crop is even requested is the one case
+        # where the debounce costs more than it saves. Zooming IN, and
+        # panning, still settle: those are the expensive reads, and a drag
+        # emits one of these per mouse move.
+        width = float(xr[1]) - float(xr[0])
+        previous = self._compare_last_view_w
+        self._compare_last_view_w = width
+        zooming_out = previous is not None and width > float(previous) * 1.001
+        if zooming_out and self._compare_level_would_change():
+            self._compare_refill_timer.stop()
+            self._maybe_refill_compare_snapshot()
+            return
+        self._compare_refill_timer.start(self._COMPARE_SETTLE_MS)
+
+    def _compare_level_would_change(self):
+        """True when the panels' camera now calls for a different pyramid
+        level than the crop on screen was cut at."""
+        snapshot = getattr(self, "_compare_snapshot", None)
+        if not snapshot:
+            return False
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        if stack is None:
+            return False
+        view_rect = self._compare_view_rect_l0()
+        if view_rect is None:
+            return False
+        pw_px, _ph_px = self._compare_panel_px()
+        scale = pw_px / view_rect[2]
+        if not (scale > 0 and math.isfinite(scale)):
+            return False
+        level = self._compare_level_for_scale(
+            scale, stack.provider, getattr(stack, "controller", None))
+        return int(level) != int(snapshot.get("level") or 0)
 
     def _compare_view_rect_l0(self):
         """The panels' shared camera as a level-0 `(x, y, w, h)`, or None.
@@ -2786,6 +2945,8 @@ class Step0Page(QWidget):
         # snapshot IS a new camera, and pins.
         self._refresh_preview_display(
             keep_zoom=bool(snapshot.get("keep_view")))
+        # The new crop is up; the one it replaced can go.
+        self._hide_previous_crop()
         for label, key, name in (
                 (self._metrics_original, "original_metrics", "Original"),
                 (self._metrics_tophat, "tophat_metrics", "TopHat"),
@@ -5353,6 +5514,27 @@ class Step0Page(QWidget):
             self._preview_nuc_imgs[idx] = item
         return item
 
+    # Panel layering, bottom to top: the whole-slide underlay and its
+    # nucleus, the crop that is being replaced and its nucleus, and the
+    # current crop and its nucleus (z 0 / 1, as they always were).
+    _Z_UNDERLAY = -4
+    _Z_UNDERLAY_NUC = -3
+    _Z_PREV = -2
+    _Z_PREV_NUC = -1
+
+    def _extra_item(self, slots, idx, z, additive=False):
+        """Panel `idx`'s item in `slots`, created on first use at `z`."""
+        item = slots[idx]
+        if item is None:
+            item = pg.ImageItem(axisOrder="row-major")
+            item.setZValue(z)
+            if additive:
+                item.setCompositionMode(QtGui.QPainter.CompositionMode_Plus)
+            item.setVisible(False)
+            self._preview_vbs[idx].addItem(item)
+            slots[idx] = item
+        return item
+
     def _rebuild_payload_rgb(self, ch):
         """用当前通道颜色重新合成_last_payload中的RGB图。"""
         payload = self._last_payload
@@ -5384,6 +5566,251 @@ class Step0Page(QWidget):
             b = np.clip(b + nucleus_f * nucleus_rgb[2], 0, 1)
         return np.stack([r, g, b], axis=-1)
 
+    def _compare_display_luts(self):
+        """Everything a compare layer needs to be drawn with, as a dict.
+
+        Split out of `_refresh_preview_display` because the underlay has to
+        be drawn when there is no payload at all -- entering compare mode
+        puts the slide on screen before a single crop pixel has been read --
+        and it must be drawn with exactly the same mapping, colour and
+        switches as the crop that lands on top of it. Two formulas would be
+        two pictures of one channel.
+        """
+        ch = self.current_channel or next(iter(self._channel_colors.keys()), "")
+        m_lo, m_hi, m_gamma = self._display_mapping_for(ch)
+        n_lo, n_hi, n_gamma = self._display_mapping_for(
+            self.nucleus_channel, nucleus=True)
+        return {
+            "channel": ch,
+            "marker_levels": (m_lo, m_hi),
+            "marker_lut": build_display_lut(self._channel_color(ch), m_gamma),
+            "nucleus_levels": (n_lo, n_hi),
+            "nucleus_lut": build_display_lut(
+                self._channel_color(self.nucleus_channel), n_gamma),
+            "marker_on": self._btn_show_marker.isChecked(),
+            "nucleus_on": self._btn_show_nucleus.isChecked(),
+        }
+
+    # -- the panels' floor: the whole slide, under everything -------------
+    #
+    # A compare panel used to hold exactly one image: the crop. Zoom out and
+    # the crop shrank into the widget's background, and the panel was mostly
+    # BLACK until the refill landed and snapped a full-size image back in --
+    # a flash of nothing, then a jump, once per zoom-out. The full image
+    # never does that, and the reason is not that it is faster: it keeps
+    # coarser layers underneath, so a zoom-out uncovers the overview instead
+    # of the void.
+    #
+    # The panels now keep the same floor. Every panel carries the WHOLE
+    # SLIDE at the overview resolution, placed in level-0 coordinates and
+    # drawn through the same mapping and colour as the crop: Original from
+    # the page's cached `_slide_lowres_array`, TopHat and cuCIM from that
+    # same array corrected with the row's current parameters. The
+    # "downsampled" look of it is the same look the full image's overview
+    # layer has, which is the point -- it is the same picture.
+
+    def _compare_underlay_downsample(self, arr):
+        """`(slide_h, slide_w, level-0 pixels per overview pixel)`, or None."""
+        shape = getattr(getattr(self, "loader", None), "shape", None)
+        if not shape or len(shape) < 2:
+            return None
+        h0, w0 = float(shape[0]), float(shape[1])
+        h, w = (float(v) for v in np.asarray(arr).shape[:2])
+        if not (h > 0 and w > 0 and h0 > 0 and w0 > 0):
+            return None
+        return (h0, w0, max(h0 / h, w0 / w))
+
+    def _ensure_compare_underlay(self):
+        """Make sure the three underlay arrays exist, computing what is
+        missing off the GUI thread.
+
+        Original is free -- it is the array the page already holds. The two
+        corrected ones are keyed by `(channel, method, effective parameter)`
+        and cached, so this is a dictionary lookup on every pan, zoom and
+        refill and a real computation only when the channel or a parameter
+        changes. Which is the whole cost argument: the floor is recomputed
+        when what it is a picture OF changes, and never because the camera
+        moved.
+        """
+        from ...viewer.tile_types import effective_param
+
+        ch = self.current_channel
+        arr = self._slide_lowres_array(ch) if ch else None
+        if arr is None:
+            self._compare_underlay_keys = {}
+            return None
+        dims = self._compare_underlay_downsample(arr)
+        if dims is None:
+            self._compare_underlay_keys = {}
+            return None
+        _h0, _w0, ds = dims
+        radius, sigma = self._effective_correction_params(ch)
+        keys = {"original": (ch, "original", 0)}
+        wants = {}
+        for method, base in (("tophat", radius), ("cucim", sigma)):
+            param = int(effective_param(int(base), 1, float(ds)))
+            key = (ch, method, param)
+            keys[method] = key
+            if (key not in self._compare_underlay_cache
+                    and key not in self._compare_underlay_pending):
+                wants[key] = (method, param)
+        self._compare_underlay_cache[keys["original"]] = arr
+        self._compare_underlay_keys = keys
+        if not wants:
+            return keys
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        compute = getattr(getattr(stack, "controller", None), "compute", None)
+        if compute is None:
+            return keys
+        self._cancel_compare_underlay()
+        self._compare_underlay_pending = set(wants)
+        self._compare_underlay_req += 1
+        worker = CompareUnderlayWorker(self._compare_underlay_req, compute,
+                                       arr, wants, parent=self)
+        worker.done.connect(self._gen_slot(self._on_compare_underlay_done))
+        worker.failed.connect(self._gen_slot(self._on_compare_underlay_failed))
+        self._compare_underlay_worker = worker
+        worker.start()
+        return keys
+
+    def _cancel_compare_underlay(self):
+        """Stop listening to an underlay in flight, the way
+        `_cancel_compare_snapshot` does: disconnected and waited out, never
+        killed."""
+        worker = getattr(self, "_compare_underlay_worker", None)
+        self._compare_underlay_worker = None
+        self._compare_underlay_pending = set()
+        if worker is None:
+            return
+        try:
+            worker.done.disconnect()
+            worker.failed.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        if worker.isRunning():
+            worker.wait(5000)
+
+    def _on_compare_underlay_done(self, req_id, arrays):
+        if int(req_id) != int(self._compare_underlay_req):
+            return
+        self._compare_underlay_cache.update(arrays)
+        self._compare_underlay_pending = set()
+        self._compare_underlay_worker = None
+        self._refresh_compare_underlay()
+
+    def _on_compare_underlay_failed(self, req_id, message):
+        if int(req_id) != int(self._compare_underlay_req):
+            return
+        self._compare_underlay_pending = set()
+        self._compare_underlay_worker = None
+        print(f"[step0] compare underlay failed: {message}", flush=True)
+
+    def _refresh_compare_underlay(self):
+        """Draw whatever underlay arrays are in hand, in all three panels.
+
+        Placed on the SLIDE's level-0 rectangle rather than on its own pixel
+        grid -- the panels work in level-0 coordinates, which is what makes
+        "the same place at the same scale as the full image" a statement one
+        can check -- so an overview pixel simply covers `ds x ds` of them.
+
+        A panel whose corrected array has not arrived yet keeps whatever it
+        had; it does not blank, because blanking is the failure this exists
+        to remove.
+        """
+        keys = getattr(self, "_compare_underlay_keys", None) or {}
+        if not keys or not getattr(self, "_preview_vbs", None):
+            return False
+        arr = self._compare_underlay_cache.get(keys.get("original"))
+        if arr is None:
+            return False
+        dims = self._compare_underlay_downsample(arr)
+        if dims is None:
+            return False
+        h0, w0, _ds = dims
+        slide = {"snapshot_rect_l0": (0.0, 0.0, w0, h0)}
+        style = self._compare_display_luts()
+        nuc_arr = None
+        if (self.nucleus_channel and self._nucleus_layer_visible()
+                and self.nucleus_channel != style["channel"]):
+            nuc_arr = self._slide_lowres_array(self.nucleus_channel)
+            if nuc_arr is not None and nuc_arr.shape[:2] != arr.shape[:2]:
+                nuc_arr = None
+        for idx, method in enumerate(("original", "tophat", "cucim")):
+            a = self._compare_underlay_cache.get(keys.get(method))
+            if a is None:
+                continue
+            item = self._extra_item(self._compare_under_imgs, idx,
+                                    self._Z_UNDERLAY)
+            item.setImage(a, autoLevels=False, levels=style["marker_levels"])
+            self._place_preview_item(item, a, slide)
+            item.setLookupTable(style["marker_lut"] if style["marker_on"]
+                                else self._black_lut)
+            item.setVisible(True)
+            nuc_item = self._compare_under_nuc_imgs[idx]
+            if style["nucleus_on"] and nuc_arr is not None:
+                nuc_item = self._extra_item(self._compare_under_nuc_imgs, idx,
+                                            self._Z_UNDERLAY_NUC,
+                                            additive=True)
+                nuc_item.setImage(nuc_arr, autoLevels=False,
+                                  levels=style["nucleus_levels"])
+                self._place_preview_item(nuc_item, nuc_arr, slide)
+                nuc_item.setLookupTable(style["nucleus_lut"])
+                nuc_item.setVisible(True)
+            elif nuc_item is not None:
+                nuc_item.setVisible(False)
+        return True
+
+    def _stash_previous_crop(self):
+        """Keep the crop that is on screen visible while the next one is
+        read, on its own layer under the incoming one.
+
+        The viewer's "switch levels without clearing", in three panels: the
+        pixels the user is comparing stay up for the whole of the read and
+        are replaced when -- not before -- there is something to replace
+        them with. Above the underlay, because they are the finer picture;
+        below the current crop, because that is the one that is true.
+        """
+        imgs = getattr(self, "_preview_imgs", None) or ()
+        for idx, cur in enumerate(imgs):
+            image = getattr(cur, "image", None)
+            rect = getattr(cur, "_l0_rect", None)
+            if image is None or rect is None:
+                self._hide_previous_crop(idx)
+                continue
+            prev = self._extra_item(self._preview_prev_imgs, idx,
+                                    self._Z_PREV)
+            levels = cur.levels
+            prev.setImage(image, autoLevels=False,
+                          levels=tuple(levels) if levels is not None else None)
+            prev.setLookupTable(cur.lut)
+            prev.setRect(rect)
+            prev._l0_rect = rect
+            prev.setVisible(True)
+            nuc = self._preview_nuc_imgs[idx]
+            nuc_prev = self._preview_prev_nuc_imgs[idx]
+            if (nuc is not None and nuc.isVisible()
+                    and getattr(nuc, "image", None) is not None
+                    and getattr(nuc, "_l0_rect", None) is not None):
+                nuc_prev = self._extra_item(self._preview_prev_nuc_imgs, idx,
+                                            self._Z_PREV_NUC, additive=True)
+                nlv = nuc.levels
+                nuc_prev.setImage(nuc.image, autoLevels=False,
+                                  levels=tuple(nlv) if nlv is not None
+                                  else None)
+                nuc_prev.setLookupTable(nuc.lut)
+                nuc_prev.setRect(nuc._l0_rect)
+                nuc_prev.setVisible(True)
+            elif nuc_prev is not None:
+                nuc_prev.setVisible(False)
+
+    def _hide_previous_crop(self, idx=None):
+        """Drop the outgoing crop: the new one has landed on top of it."""
+        for slots in (self._preview_prev_imgs, self._preview_prev_nuc_imgs):
+            for i, item in enumerate(slots):
+                if item is not None and (idx is None or i == int(idx)):
+                    item.setVisible(False)
+
     def _refresh_preview_display(self, keep_zoom=False):
         """按当前显示开关、颜色和显示映射刷新三联预览。
 
@@ -5398,6 +5825,12 @@ class Step0Page(QWidget):
         is darker IS darker. Nothing per pixel happens here; a mapping,
         colour or switch change is a levels/table swap.
         """
+        # The FLOOR first, and unconditionally: it is drawn with the same
+        # mapping, colour and switches as the crop, so a Min/Max edit or a
+        # colour swap has to reach it -- and it has to be reached even with
+        # no payload at all, which is the state the panels are in between
+        # opening and the first crop landing.
+        self._refresh_compare_underlay()
         payload = self._last_payload
         if payload is None:
             return
@@ -5582,6 +6015,9 @@ class Step0Page(QWidget):
             item.setRect(box)
         except Exception:                                   # noqa: BLE001
             pass
+        # Remembered, so the crop being replaced can be copied onto the
+        # "previous" layer without asking pyqtgraph to invert its transform.
+        item._l0_rect = box
 
 
     @staticmethod
@@ -6841,8 +7277,10 @@ class Step0Page(QWidget):
         """
         self._stop_bg_workers()
         # Before the explore tab: a snapshot in flight is reading through
-        # that stack's provider, and `teardown` closes it.
+        # that stack's provider, and `teardown` closes it. The underlay
+        # worker holds the same stack's `CorrectionCompute`.
         self._cancel_compare_snapshot()
+        self._cancel_compare_underlay()
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is not None:
             explore_tab.teardown()
@@ -7024,7 +7462,20 @@ class Step0Page(QWidget):
         # slide's full image -- the landing state.
         self._full_image_source = "original"
         self._cancel_compare_snapshot()
+        self._cancel_compare_underlay()
         self._compare_snapshot = None
+        # The floor is a picture of THIS slide, keyed by channel name --
+        # which the next slide may well reuse for different pixels.
+        self._compare_underlay_cache = {}
+        self._compare_underlay_keys = {}
+        self._compare_last_view_w = None
+        for slots in (getattr(self, "_compare_under_imgs", None),
+                      getattr(self, "_compare_under_nuc_imgs", None),
+                      getattr(self, "_preview_prev_imgs", None),
+                      getattr(self, "_preview_prev_nuc_imgs", None)):
+            for item in (slots or ()):
+                if item is not None:
+                    item.setVisible(False)
         if hasattr(self, "_btn_snapshot_patch"):
             self._btn_snapshot_patch.setEnabled(False)
             self._compare_where_lbl.setText(

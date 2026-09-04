@@ -477,6 +477,14 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
             pass
 
     class _Msg:
+        # The real button-role values: Save now asks for confirmation of the
+        # channels it will write raw, and compares the answer against
+        # `QMessageBox.Ok`.
+        Ok = 0x00000400
+        Cancel = 0x00400000
+        Yes = 0x00004000
+        No = 0x00010000
+
         @staticmethod
         def information(*a, **k):
             timeline.append(f"dialog:information:{a[2] if len(a) > 2 else ''}")
@@ -492,7 +500,9 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
         @staticmethod
         def question(*a, **k):
             timeline.append("dialog:question")
-            return getattr(mod.QMessageBox, "Yes", 16384)
+            # "Go ahead", for both idioms the page uses: this test is about
+            # the suspend/resume timeline, not about the confirmation.
+            return _Msg.Ok
 
     monkeypatch.setattr(mod, "QMessageBox", _Msg)
     monkeypatch.setattr(mod, "WsiCorrectionWorker", _FakeWsiWorker)
@@ -564,7 +574,11 @@ def test_the_real_save_path_resumes_only_after_the_thread_exits(
     page, timeline = _drive_real_save(app, monkeypatch, tmp_path, tab)
     worker = page._wsi_worker
 
-    assert timeline.index("release") == 0
+    # Save asks first -- the raw-channel confirmation happens before Save
+    # does anything at all -- and the Explore release is still the first
+    # step of the run itself, ahead of the dialog and the worker.
+    assert timeline[0] == "dialog:question", timeline
+    assert timeline.index("release") == 1
     assert watched and watched[0] is worker
 
     assert _wait_until(lambda: worker.emitted.is_set())

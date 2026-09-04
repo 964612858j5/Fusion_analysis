@@ -1,0 +1,656 @@
+"""Phase A1: the Background Correction page is FULL-IMAGE-first.
+
+What changed, and what these tests pin down:
+
+* a loaded dataset LANDS on the whole-slide full image -- raw, first marker
+  channel, no patch drawn, no Process run. The three compare panels moved
+  into a collapsible area that starts collapsed;
+* the full image's own header carries an exclusive Original / TopHat /
+  cuCIM switch. It is a PREVIEW: on-the-fly viewport correction with the
+  row's current parameters, available for every marker channel whatever its
+  checkbox or Method combo says, never for the DAPI reference, and it writes
+  nothing and marks nothing computed;
+* the ONLY things that start a correction run are the checkbox and the
+  Process button. The old "click an unticked row after Process and it
+  computes on demand" behaviour is gone;
+* every marker row shows what its result is worth -- not computed /
+  computed / stale -- derived from the same signature bookkeeping the
+  incremental Process consults;
+* Save says, once, which channels it is about to write raw.
+
+Own module, like the other page-heavy Step0 suites: combined runs segfault
+in offscreen pyqtgraph (not a regression, see the note in
+test_step0_full_image.py).
+"""
+
+import os
+
+import numpy as np
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip("PyQt5")
+
+from PyQt5 import QtCore  # noqa: E402
+
+from block01.ui.step0 import step0_page as sp  # noqa: E402
+from block01.ui.step0.step0_page import (  # noqa: E402
+    PREVIEW_PAGE_COMPARE,
+    PREVIEW_PAGE_FULL_IMAGE,
+    FULL_IMAGE_COARSE_LEVEL,
+)
+
+from test_step0_background_correction_tab import (  # noqa: E402
+    _GpuPathLoader,
+    app,            # noqa: F401  (pytest fixture)
+)
+
+
+# ── stand-ins ────────────────────────────────────────────────────────────
+
+class _RecordingExploreTab:
+    """Records what the page asks the viewer to show. No slide involved."""
+
+    def __init__(self, stack=None):
+        self.calls = []          # [(channel, method, params)]
+        self.viewports = []
+        self.stack = stack
+        self.released = []
+
+    def show_source(self, channel, method, params=(), *, viewport_l0=None,
+                    tint=None, nucleus=None):
+        self.calls.append((channel, method, tuple(params)))
+        self.viewports.append(viewport_l0)
+        return True
+
+    def set_dataset(self, _path):
+        pass
+
+    def release_for_production(self, reason):
+        self.released.append(reason)
+
+    def teardown(self, **_kw):
+        pass
+
+
+class _FakeController:
+    def __init__(self, level=0):
+        self.level = level
+        self.channel = None
+        self.method = None
+        self.params = ()
+
+    def set_marker_visible(self, _v):
+        pass
+
+    def set_display_mapping(self, *_a, **_k):
+        pass
+
+
+class _FakeProvider:
+    """Level shapes of a 2x pyramid over a 4096-row slide."""
+
+    def level_shape(self, level):
+        return (4096 >> int(level), 4096 >> int(level))
+
+
+class _FakeStack:
+    def __init__(self, level=0):
+        self.controller = _FakeController(level)
+        self.provider = _FakeProvider()
+        self.overlay = None
+
+
+def _page(app, *, patches=True):
+    page = sp.Step0Page()
+    page.loader = _GpuPathLoader()
+    page.ome_path = "/fake/slide.ome.tif"
+    page.patches = [(0, 32, 0, 32)] if patches else []
+    page.current_patch_idx = 0
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page._preload_cache = {0: {ch: np.zeros((32, 32), np.float32)
+                               for ch in ("DAPI", "CD3", "CD20")}}
+    page.current_channel = "CD3"
+    page._update_full_image_buttons()
+    page._update_full_method_buttons()
+    return page
+
+
+def _no_workers(monkeypatch):
+    """Fail loudly if ANY correction worker is constructed."""
+    started = []
+
+    def _boom(*a, **k):
+        started.append(a)
+        raise AssertionError("a correction worker was constructed")
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+    return started
+
+
+def _finish_run(page, channels, method="both"):
+    """Deliver a run's results for `channels`, as the worker signals do."""
+    disp = np.zeros((32, 32), np.float32)
+    m = {"snr": 1.0, "bg_cv": 0.1}
+    for ch in channels:
+        page._pending_signatures[ch] = page._channel_signature(ch, method)
+        page._set_channel_computing(ch)
+        page._on_batch_patch_done(ch, 0, {
+            "original_disp": disp, "tophat_disp": disp, "cucim_disp": disp,
+            "original_metrics": m, "tophat_metrics": m, "cucim_metrics": m,
+            "nucleus_disp": None})
+        page._on_batch_channel_done(ch)
+    page._on_batch_all_done()
+
+
+# ── 1. the full image is the landing view ────────────────────────────────
+
+def test_the_landing_view_is_the_full_image_with_no_patch_and_no_process(
+        app, monkeypatch):
+    """The whole point of A1: a loaded slide opens on the whole slide."""
+    started = _no_workers(monkeypatch)
+    page = _page(app, patches=False)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+
+    page._enter_full_image_landing()
+
+    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE
+    assert page.patches == []                      # no patch was drawn
+    assert page._computed_channels == set()        # no Process ran
+    assert started == []
+    # Raw, first marker channel, no viewport hand-off from a compare panel.
+    assert tab.calls == [("CD3", None, ())]
+    assert tab.viewports == [None]
+
+
+def test_the_landing_view_does_not_need_the_reopen_placeholder(app,
+                                                               monkeypatch):
+    """Landing opens the viewer itself; "Reopen full image" is a recovery
+    path, not the way in."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+
+    page._enter_full_image_landing()
+
+    assert tab.calls, "landing did not open the full image"
+    assert page._full_image_visible()
+
+
+def test_the_compare_panels_start_collapsed_and_expand_on_demand(app,
+                                                                monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    page._enter_full_image_landing()
+
+    assert not page._preview_stack.currentIndex() == PREVIEW_PAGE_COMPARE
+    assert "Compare panels" in page._btn_show_compare.text()
+
+    page._btn_show_compare.click()
+
+    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_COMPARE
+
+
+def test_entering_from_a_compare_panel_still_works(app, monkeypatch):
+    """A2 replaces the panels later; A1 must not break them now."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+    page._return_to_compare()
+
+    page._enter_full_image("tophat")
+
+    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE
+    assert page._full_image_source == "tophat"
+    assert tab.calls[-1][0] == "CD3" and tab.calls[-1][1] == "tophat"
+
+
+# ── 2. the method buttons on top of the full image ───────────────────────
+
+def test_the_header_carries_three_exclusive_method_buttons(app):
+    page = _page(app)
+    buttons = page._full_method_buttons
+
+    assert [b.text() for b in
+            (buttons["original"], buttons["tophat"], buttons["cucim"])] == [
+        "Original", "TopHat", "cuCIM"]
+    assert page._full_method_group.exclusive()
+    assert buttons["original"].isChecked()
+    assert not buttons["tophat"].isChecked()
+
+
+@pytest.mark.parametrize(
+    ("source", "method", "key"),
+    [("tophat", "tophat", "effective_tophat_radius"),
+     ("cucim", "cucim", "effective_cucim_sigma")])
+def test_a_method_button_previews_with_the_rows_current_parameters(
+        app, monkeypatch, source, method, key):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+    page._channel_params["CD3"] = {"tophat_radius": 41, "cucim_sigma": 57}
+    expected = page.preview_source_provider.describe("CD3")["correction"][key]
+
+    page._full_method_buttons[source].click()
+
+    assert page._full_image_source == source
+    assert tab.calls[-1] == ("CD3", method, (int(expected),))
+    assert page._full_method_buttons[source].isChecked()
+    assert not page._full_method_buttons["original"].isChecked()
+
+
+def test_switching_method_keeps_the_camera(app, monkeypatch):
+    """No viewport is handed down, so the controller leaves the view alone."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+
+    page._full_method_buttons["tophat"].click()
+    page._full_method_buttons["cucim"].click()
+    page._full_method_buttons["original"].click()
+
+    assert tab.viewports == [None, None, None]
+    assert [c[1] for c in tab.calls] == ["tophat", "cucim", None]
+
+
+def test_the_preview_ignores_the_checkbox_and_the_method_combo(app,
+                                                               monkeypatch):
+    """Every marker channel can be previewed corrected -- that is what makes
+    the switch a way to DECIDE whether to correct it."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+    row = page._channel_rows["CD3"]
+    row["checkbox"].setChecked(False)
+    row["method_cb"].setCurrentText("Original")
+    assert page._channel_decisions["CD3"] == "original"
+
+    page._full_method_buttons["tophat"].click()
+
+    assert tab.calls[-1][1] == "tophat"
+    # ...and the preview changed no decision of its own.
+    assert page._channel_decisions["CD3"] == "original"
+    assert not row["checkbox"].isChecked()
+
+
+def test_a_preview_marks_nothing_computed(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+
+    page._full_method_buttons["cucim"].click()
+
+    assert page._computed_channels == set()
+    assert page._computed_signatures == {}
+    assert page._channel_compute_state("CD3") == "not-computed"
+
+
+def test_the_reference_channel_is_never_previewed_corrected(app, monkeypatch):
+    """DAPI is the overlay, not a subject: the corrected buttons are shut."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    tab = _RecordingExploreTab()
+    page._explore_tab = tab
+    page.current_channel = "DAPI"
+
+    page._update_full_method_buttons()
+
+    assert page._full_method_buttons["original"].isEnabled()
+    assert not page._full_method_buttons["tophat"].isEnabled()
+    assert not page._full_method_buttons["cucim"].isEnabled()
+    assert page._full_method_buttons["original"].isChecked()
+
+    before = list(tab.calls)
+    page._on_full_method_clicked("tophat")
+    assert tab.calls == before, "a corrected preview of DAPI was requested"
+    assert page._full_image_source == "original"
+
+
+def test_selecting_the_dapi_row_only_moves_the_intensity_window(app,
+                                                                monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+
+    page._on_channel_selected_by_id("DAPI")
+
+    assert page.current_channel == "CD3"        # display unchanged
+    assert page._inspector_channel == "DAPI"
+
+
+# ── the coarse-level hint ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("level", [0, 1])
+def test_no_coarse_hint_at_a_fine_level(app, monkeypatch, level):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(level))
+    page._full_image_source = "tophat"
+
+    page._update_full_level_hint()
+
+    # `isHidden`, not `isVisible`: the hint is inside the full-image page of
+    # a stack that is not on screen in a headless test, so `isVisible` is
+    # False for every label here and would prove nothing.
+    assert page._full_level_hint.isHidden()
+
+
+def test_a_coarse_level_says_the_preview_is_downsampled(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(3))
+    page._full_image_source = "cucim"
+
+    page._update_full_level_hint()
+
+    text = page._full_level_hint.text()
+    assert "×8" in text, text                       # 4096 -> 512 at level 3
+    assert "zoom in" in text
+    assert not page._full_level_hint.isHidden()
+
+
+def test_the_hint_is_about_the_correction_not_the_zoom(app, monkeypatch):
+    """Original at a coarse level is just a smaller picture of the same
+    pixels; there is nothing to warn about."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(4))
+    page._full_image_source = "original"
+
+    page._update_full_level_hint()
+
+    assert page._full_level_hint.isHidden()
+
+
+def test_the_hint_threshold_is_the_documented_one(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(
+        stack=_FakeStack(FULL_IMAGE_COARSE_LEVEL))
+    page._full_image_source = "tophat"
+
+    page._update_full_level_hint()
+
+    assert not page._full_level_hint.isHidden()
+
+
+# ── 3. only the checkbox + Process compute ───────────────────────────────
+
+def test_clicking_an_unticked_row_starts_nothing(app, monkeypatch):
+    """The removed behaviour, pinned: after a completed Process, selecting a
+    channel that was never ticked used to launch a worker for it."""
+    started = _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"])
+    assert page._process_completed is True
+    assert not page._channel_rows["CD20"]["checkbox"].isChecked()
+
+    page._on_channel_selected_by_id("CD20")
+
+    assert page.current_channel == "CD20"          # it still DISPLAYS
+    assert started == []
+    assert "CD20" not in page._computed_channels
+
+
+def test_no_helper_is_left_that_could_start_one(app):
+    page = _page(app)
+    assert not hasattr(page, "_start_ondemand")
+
+
+@pytest.mark.parametrize(
+    ("what", "drive"),
+    [("a patch change", lambda p: p._select_patch(0)),
+     ("a channel click", lambda p: p._on_channel_selected_by_id("CD20")),
+     ("a method combo change",
+      lambda p: p._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")),
+     ("a sigma change", lambda p: p._dec_sigma.setValue(37)),
+     ("enter in the sigma box", lambda p: p._on_dec_param_entered()),
+     ("a method preview", lambda p: p._full_method_buttons["tophat"].click())])
+def test_nothing_but_process_reaches_a_worker(app, monkeypatch, what, drive):
+    started = _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"])
+
+    drive(page)
+
+    assert started == [], f"{what} started a correction run"
+
+
+def test_process_computes_exactly_the_ticked_channels(app, monkeypatch):
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    asked = {}
+
+    class _Worker(QtCore.QThread):
+        channel_patch_done = QtCore.pyqtSignal(str, int, dict)
+        channel_done = QtCore.pyqtSignal(str)
+        all_done = QtCore.pyqtSignal()
+        progress = QtCore.pyqtSignal(int, int, str)
+        error_signal = QtCore.pyqtSignal(str, int, str)
+        canceled = QtCore.pyqtSignal()
+
+        def __init__(self, _loader, _patches, channels, *_a, **_k):
+            super().__init__()
+            asked["channels"] = dict(channels)
+
+        def run(self):
+            return
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _Worker)
+    for ch in ("CD3", "CD20"):
+        page._channel_rows[ch]["method_cb"].setCurrentText("TopHat")
+        page._channel_rows[ch]["checkbox"].setChecked(True)
+
+    page._on_process_clicked()
+
+    assert asked["channels"] == {"CD3": "tophat", "CD20": "tophat"}
+
+
+def test_a_parameter_change_only_marks_the_channel_stale(app, monkeypatch):
+    started = _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"])
+    assert page._channel_compute_state("CD3") == "computed"
+
+    page.current_channel = "CD3"
+    page._dec_sigma.setValue(51)
+    page._on_dec_param_changed()
+
+    assert page._channel_compute_state("CD3") == "stale"
+    assert started == []
+    # The result is still there -- stale is not "gone".
+    assert ("CD3", 0) in page._preview_cache
+
+
+# ── 4. the per-row state glyph ───────────────────────────────────────────
+
+def test_a_fresh_row_reads_not_computed(app):
+    page = _page(app)
+    row = page._channel_rows["CD3"]["row_widget"]
+
+    assert page._channel_compute_state("CD3") == "not-computed"
+    assert row.state_lbl.text() == "○"
+    assert "not computed" in row.state_lbl.toolTip()
+
+
+def test_the_glyph_sits_next_to_the_checkbox(app):
+    page = _page(app)
+    row = page._channel_rows["CD3"]["row_widget"]
+    layout = row.layout()
+    order = [layout.itemAt(i).widget() for i in range(layout.count())]
+
+    assert order.index(row.state_lbl) == order.index(row.checkbox) + 1
+
+
+def test_the_glyph_follows_a_run_and_then_a_parameter_change(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    row = page._channel_rows["CD3"]["row_widget"]
+
+    _finish_run(page, ["CD3"])
+    assert page._channel_compute_state("CD3") == "computed"
+    assert row.state_lbl.text() == "✓"
+
+    page.current_channel = "CD3"
+    page._dec_radius.setValue(37)
+    page._on_dec_param_changed()
+
+    assert row.state_lbl.text() == "!"
+    assert "stale" in row.state_lbl.toolTip()
+
+
+def test_a_method_change_makes_a_computed_channel_stale(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    _finish_run(page, ["CD3"], method="tophat")
+    assert page._channel_compute_state("CD3") == "computed"
+
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+
+    assert page._channel_compute_state("CD3") == "stale"
+
+
+def test_the_reference_row_is_marked_as_one(app):
+    page = _page(app)
+    row = page._channel_rows["DAPI"]["row_widget"]
+
+    assert page._channel_compute_state("DAPI") == "nucleus"
+    assert row.state_lbl.text() == "★"
+
+
+def test_a_stopped_run_does_not_leave_a_row_spinning(app):
+    page = _page(app)
+    page._pending_signatures["CD3"] = page._channel_signature("CD3", "both")
+    page._set_channel_computing("CD3")
+    assert page._channel_compute_state("CD3") == "computing"
+
+    page._on_batch_canceled()
+
+    assert page._channel_compute_state("CD3") == "not-computed"
+
+
+def test_a_dataset_switch_resets_every_glyph(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"])
+    assert page._channel_compute_state("CD3") == "computed"
+
+    page._reset_dataset_view_state()
+
+    assert page._channel_compute_state("CD3") == "not-computed"
+    assert page._channel_rows["CD3"]["row_widget"].state_lbl.text() == "○"
+
+
+def test_a_computed_channel_can_still_be_unticked(app, monkeypatch):
+    """It has to be: unticking is how a computed channel is saved raw."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"])
+    cb = page._channel_rows["CD3"]["checkbox"]
+
+    assert cb.isEnabled()
+    cb.setChecked(False)
+
+    assert page._channel_decisions["CD3"] == "original"
+
+
+# ── 5. Save names the channels it writes raw ─────────────────────────────
+
+def _confirm_recorder(monkeypatch):
+    asked = []
+
+    class _Msg:
+        Ok = 0x00000400
+        Cancel = 0x00400000
+
+        @staticmethod
+        def question(*a, **k):
+            asked.append(a[2] if len(a) > 2 else "")
+            return _Msg.Ok
+
+        @staticmethod
+        def information(*a, **k):
+            pass
+
+        @staticmethod
+        def warning(*a, **k):
+            pass
+
+    monkeypatch.setattr(sp, "QMessageBox", _Msg)
+    return asked, _Msg
+
+
+def test_save_lists_the_raw_channels_once(app, monkeypatch):
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    _finish_run(page, ["CD3"], method="tophat")
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    page._channel_rows["CD3"]["checkbox"].setChecked(True)
+    _finish_run(page, ["CD3"], method="tophat")
+    # CD20 is ticked but was never computed -> raw. CD3 is computed -> not.
+    page._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")
+    page._channel_rows["CD20"]["checkbox"].setChecked(True)
+    asked, _ = _confirm_recorder(monkeypatch)
+
+    assert page._raw_save_channels() == ["CD20"]
+    assert page._confirm_raw_channels() is True
+    assert len(asked) == 1, "the confirmation was shown more than once"
+    assert "CD20" in asked[0]
+    assert "CD3" not in asked[0].replace("CD20", "")
+
+
+def test_an_untouched_channel_counts_as_raw(app, monkeypatch):
+    page = _page(app)
+    _confirm_recorder(monkeypatch)
+
+    assert page._raw_save_channels() == ["CD3", "CD20"]
+    # ...and the reference channel is not one of them.
+    assert "DAPI" not in page._raw_save_channels()
+
+
+def test_cancelling_the_confirmation_stops_the_save(app, monkeypatch):
+    page = _page(app)
+    page.output_dir = "/nonexistent-should-never-be-written"
+    page._analysis_region_mode = "full_wsi"
+    asked, msg = _confirm_recorder(monkeypatch)
+    monkeypatch.setattr(msg, "question",
+                        staticmethod(lambda *a, **k: msg.Cancel))
+    made = []
+    monkeypatch.setattr(sp, "create_full_wsi_context",
+                        lambda *a, **k: made.append(a))
+
+    page._save_and_continue()
+
+    assert made == [], "Save went ahead after the confirmation was cancelled"
+
+
+def test_no_confirmation_when_everything_is_corrected(app, monkeypatch):
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab()
+    for ch in ("CD3", "CD20"):
+        page._channel_rows[ch]["method_cb"].setCurrentText("TopHat")
+        page._channel_rows[ch]["checkbox"].setChecked(True)
+    _finish_run(page, ["CD3", "CD20"], method="tophat")
+    asked, _ = _confirm_recorder(monkeypatch)
+
+    assert page._raw_save_channels() == []
+    assert page._confirm_raw_channels() is True
+    assert asked == []

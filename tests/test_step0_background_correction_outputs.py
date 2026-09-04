@@ -29,6 +29,57 @@ def app():
     return a
 
 
+@pytest.fixture(autouse=True)
+def no_modal_dialogs(monkeypatch):
+    """Answer Save's modal dialogs instead of blocking on them.
+
+    `_save_and_continue` pops the "no background correction" notice, and
+    since the full-image-first restructure also the "these channels will be
+    saved raw" confirmation. `QMessageBox` runs its own event loop, and with
+    nobody to click the button it never returns: without this fixture the
+    module hangs at the first Save-driving test (it did, offscreen, before
+    the fixture existed) instead of failing.
+    """
+    import block01.ui.step0.step0_page as sp
+
+    seen = []
+
+    class _Msg:
+        """Records what was popped; `seen` is reachable as `_Msg.dialogs`."""
+
+        dialogs = seen
+        # Real button-role values, so a page comparing an answer against
+        # `QMessageBox.Ok` gets a truthful match.
+        Ok = 0x00000400
+        Cancel = 0x00400000
+        Yes = 0x00004000
+        No = 0x00010000
+
+        @staticmethod
+        def information(*a, **k):
+            seen.append(("information", a[1] if len(a) > 1 else "",
+                         a[2] if len(a) > 2 else ""))
+
+        @staticmethod
+        def warning(*a, **k):
+            seen.append(("warning", a[1] if len(a) > 1 else "",
+                         a[2] if len(a) > 2 else ""))
+
+        @staticmethod
+        def critical(*a, **k):
+            seen.append(("critical", a[1] if len(a) > 1 else "",
+                         a[2] if len(a) > 2 else ""))
+
+        @staticmethod
+        def question(*a, **k):
+            seen.append(("question", a[1] if len(a) > 1 else "",
+                         a[2] if len(a) > 2 else ""))
+            return _Msg.Ok
+
+    monkeypatch.setattr(sp, "QMessageBox", _Msg)
+    return _Msg
+
+
 # ── validity report: empty group is NOT a valid corrected output ─────────────
 def test_report_empty_group_is_not_valid(tmp_path):
     from block01.core.bg_correction import corrected_zarr_report
@@ -451,7 +502,11 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
 
     cap = {"process": None, "started": False}
 
-    class _FakeWorker(QtCore.QObject):
+    # A QThread, not a bare QObject: the page WATCHES every production
+    # worker off `QThread.finished` (reaching past the business `finished`
+    # this class shadows it with, exactly as the real worker does), so a
+    # stand-in that is not a QThread cannot be watched at all.
+    class _FakeWorker(QtCore.QThread):
         progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
         finished = QtCore.pyqtSignal(str, dict)
         canceled = QtCore.pyqtSignal(str)
@@ -568,7 +623,10 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
 
     cap = {"process": None}
 
-    class _FW(QtCore.QObject):
+    # QThread for the same reason as `_FakeWorker` above: the page watches
+    # every production worker off `QThread.finished`, reaching past the
+    # business `finished` this class shadows it with.
+    class _FW(QtCore.QThread):
         progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
         finished = QtCore.pyqtSignal(str, dict)
         canceled = QtCore.pyqtSignal(str)
@@ -659,7 +717,7 @@ def test_method_change_cucim_to_tophat_overwrites_channel(app, tmp_path):
     assert not np.array_equal(before, after)
     # the read signature + merged decisions reflect tophat
     sigs, _ = read_corrected_zarr_state(zp)
-    assert sigs["CD11b"] == ("tophat", 80)
+    assert sigs["CD11b"] == ("tophat", 80, _V)
     assert out["dec"]["CD11b"] == "tophat"
 
 
@@ -672,7 +730,7 @@ def test_method_change_tophat_to_cucim_overwrites_channel(app, tmp_path):
     assert _ch_attrs(d, "CD11b") == ("cucim", "cucim_sigma", 3)
     sigs, _ = read_corrected_zarr_state(
         os.path.join(d, "corrected_channels.zarr"))
-    assert sigs["CD11b"] == ("cucim", 3)
+    assert sigs["CD11b"] == ("cucim", 3, _V)
 
 
 def test_same_method_param_change_overwrites_channel(app, tmp_path):
@@ -682,7 +740,7 @@ def test_same_method_param_change_overwrites_channel(app, tmp_path):
     _run_one(d, "CD11b", "tophat", 80, process_channels={"CD11b"}, incremental=True)
     sigs, _ = read_corrected_zarr_state(
         os.path.join(d, "corrected_channels.zarr"))
-    assert sigs["CD11b"] == ("tophat", 80)     # param updated 50 -> 80
+    assert sigs["CD11b"] == ("tophat", 80, _V)   # param updated 50 -> 80
 
 
 def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):

@@ -39,6 +39,15 @@ def _dapi_visible(page) -> bool:
     return True if fn is None else bool(fn())
 
 
+def _compute_state(page, ch) -> str:
+    """The row's compute-state glyph key, asked of the page when it can
+    answer. Same shape as `_swatch_hex` / `_dapi_visible`: the adapter
+    describes the page, it does not decide for it, and a host that has no
+    signature bookkeeping simply gets no glyph."""
+    fn = getattr(page, "_channel_compute_state", None)
+    return "" if fn is None else str(fn(ch))
+
+
 def _swatch_hex(page, ch) -> str:
     """The channel's swatch colour, asked of the page when it can answer."""
     fn = getattr(page, "_channel_swatch_hex", None)
@@ -127,6 +136,11 @@ class Step0ChannelDockAdapter(QObject):
                 locked=is_nucleus,
                 bg_final_method=saved,
                 bg_preview_method=page._channel_methods.get(ch),
+                # The compute state is DERIVED from the page's signature
+                # bookkeeping, never stored twice: the row is seeded with
+                # the current answer here and re-asked on every change
+                # (see `page._refresh_channel_state`).
+                status=_compute_state(page, ch),
                 scope=SCOPE_PROCESSING,
             ))
         self.model.set_channels(states)

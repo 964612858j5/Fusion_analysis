@@ -357,9 +357,12 @@ def test_the_dapi_row_starts_no_correction_and_rebuilds_no_viewer(app,
     page = _page(app, stack)
     page._on_channel_selected_by_id("CD20")
     page._process_completed = True
+    # On-demand computing is gone; the guard is now that NO worker is
+    # constructed at all, whichever row is clicked.
     started = []
-    monkeypatch.setattr(page, "_start_ondemand",
-                        lambda ch: started.append(ch))
+    import block01.ui.step0.step0_page as _sp
+    monkeypatch.setattr(_sp, "BatchProcessWorker",
+                        lambda *a, **k: started.append(a))
     shown = []
     monkeypatch.setattr(page, "_show_full_image",
                         lambda *a, **k: shown.append(a))
@@ -535,8 +538,10 @@ def test_the_row_order_is_checkbox_swatch_name_combo(app):
         lay = row.layout()
         widgets = [lay.itemAt(i).widget() for i in range(lay.count())]
         widgets = [w for w in widgets if w is not None]
-        assert widgets[:4] == [row.checkbox, row.swatch, row.name_label,
-                               row.method_cb], (ch, widgets)
+        # The compute-state glyph sits between the checkbox and the swatch:
+        # it is a claim about the channel the checkbox selects.
+        assert widgets[:5] == [row.checkbox, row.state_lbl, row.swatch,
+                               row.name_label, row.method_cb], (ch, widgets)
         assert row.swatch.isVisibleTo(row), f"{ch}: the swatch is hidden"
 
 

@@ -181,6 +181,24 @@ FULL_IMAGE_JUMP_DEFAULT_SIZE = 2048
 # keeping a size that would make the jump invisible.
 FULL_IMAGE_JUMP_WHOLE_SLIDE_FRACTION = 0.9
 FULL_IMAGE_METHOD = {"original": None, "tophat": "tophat", "cucim": "cucim"}
+# Labels for the full image's own method switch. Separate from the compare
+# panels' TITLES tuple: those name three PANELS, these name three previews.
+FULL_IMAGE_SOURCE_LABELS = {"original": "Original", "tophat": "TopHat",
+                            "cucim": "cuCIM"}
+FULL_IMAGE_SOURCE_TIPS = {
+    "original": "Show the raw channel.",
+    "tophat": "Preview a top-hat correction of the current viewport with "
+              "this channel's radius. Nothing is written and nothing is "
+              "marked computed.",
+    "cucim": "Preview a cuCIM correction of the current viewport with this "
+             "channel's sigma. Nothing is written and nothing is marked "
+             "computed.",
+}
+# From this pyramid level up, the on-the-fly correction is computed on
+# box-downsampled pixels with a level-scaled radius/sigma, which is NOT the
+# level-0 correction Save writes. The user is told so rather than left to
+# infer it from a preview that looks subtly different after a zoom.
+FULL_IMAGE_COARSE_LEVEL = 2
 
 
 class Step0Page(QWidget):
@@ -304,9 +322,12 @@ class Step0Page(QWidget):
         self._pending_signatures: dict = {}
         # 参数是否被修改（提示需要重新Process）
         self._params_dirty: bool = False
-        # Process是否已完成（只有完成后才允许按需计算）
+        # True once a Process run has completed. Purely informational now
+        # (it used to unlock on-demand computing, which no longer exists).
         self._process_completed: bool = False
-        # 按需计算worker（点击未计算通道时）
+        # Kept empty: on-demand computing is gone (see the removal note near
+        # the batch handlers), but `production_correction_busy` and teardown
+        # still read this list unconditionally.
         self._ondemand_worker = None
         self._ondemand_workers: list = []
         self._build_ui()
@@ -1330,10 +1351,15 @@ class Step0Page(QWidget):
     def _build_full_image_page(self):
         """The full-image page: a fixed toolbar plus the ONE Explore tab.
 
+        This is the LANDING view of the Background Correction workspace: a
+        loaded dataset opens here, on the whole slide, with no patch and no
+        Process. The compare panels are the other page of the same stack,
+        expanded on demand by the "Compare panels" button.
+
         The Explore tab is created here and nowhere else -- this page owns
         it. The toolbar lives inside the page, so it is visible exactly when
-        the page is, and "back to compare" can never be hidden by the
-        viewer's own placeholder swapping.
+        the page is, and the way back to the panels can never be hidden by
+        the viewer's own placeholder swapping.
         """
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1348,12 +1374,59 @@ class Step0Page(QWidget):
             "QPushButton:hover{border-color:#aaa;}"
             "QPushButton:disabled{color:#555;border-color:#333;}"
         )
-        back = QPushButton("← Back to compare")
-        back.setToolTip("Return to the three-panel comparison. Nothing is "
-                        "recomputed and the viewer stays loaded.")
+        # The compare panels are no longer the place the user starts from,
+        # so this reads as EXPANDING an area rather than going "back".
+        back = QPushButton("⊞ Compare panels")
+        back.setToolTip("Expand the three-panel patch comparison. It is "
+                        "collapsed by default; nothing is recomputed and the "
+                        "full image stays loaded behind it.")
         back.setStyleSheet(btn_style)
         back.clicked.connect(self._return_to_compare)
+        self._btn_show_compare = back
         bar.addWidget(back)
+
+        # ── the method switch, on top of the image it changes ───────────
+        #
+        # A PREVIEW, and nothing else: Original serves raw pixels, TopHat and
+        # cuCIM are computed on the fly for the viewport with the channel's
+        # current parameters. Nothing is written, no channel becomes
+        # "computed", and no checkbox or Method combo is consulted -- every
+        # marker channel can be looked at corrected before deciding whether
+        # to correct it, which is the whole point of a full-image-first page.
+        method_style = (
+            "QPushButton{color:#9aa7b4;border:1px solid #3a4a5c;"
+            "border-left-width:0px;padding:2px 10px;font-size:10px;"
+            "background:#161c25;}"
+            "QPushButton:hover{color:#dce5ef;border-color:#61afef;}"
+            "QPushButton:checked{color:#0f1620;background:#61afef;"
+            "border-color:#61afef;font-weight:bold;}"
+            "QPushButton:disabled{color:#4a545e;border-color:#2a323c;}"
+        )
+        self._full_method_group = QButtonGroup(self)
+        self._full_method_group.setExclusive(True)
+        self._full_method_buttons = {}
+        for source in FULL_IMAGE_SOURCES:
+            label = FULL_IMAGE_SOURCE_LABELS[source]
+            btn_m = QPushButton(label)
+            btn_m.setCheckable(True)
+            btn_m.setStyleSheet(method_style)
+            btn_m.setToolTip(FULL_IMAGE_SOURCE_TIPS[source])
+            btn_m.clicked.connect(
+                lambda _checked, src=source: self._on_full_method_clicked(src))
+            self._full_method_group.addButton(btn_m)
+            self._full_method_buttons[source] = btn_m
+            bar.addWidget(btn_m)
+        self._full_method_buttons["original"].setChecked(True)
+
+        # The correction of a COARSE pyramid level is not the correction of
+        # level 0 -- the structuring element / sigma is scaled with the
+        # level, so the background it removes is a different background. The
+        # preview is still worth looking at; it just must not be mistaken
+        # for the result Save would write.
+        self._full_level_hint = QLabel("")
+        self._full_level_hint.setStyleSheet("color:#e5c07b;font-size:10px;")
+        self._full_level_hint.setVisible(False)
+        bar.addWidget(self._full_level_hint)
 
         self._btn_full_reopen = QPushButton("Reopen full image")
         self._btn_full_reopen.setToolTip(
@@ -1994,14 +2067,40 @@ class Step0Page(QWidget):
             self._match_full_image_to_panel(camera)
 
     def _return_to_compare(self):
-        """Back to the three panels. Deliberately does nothing else.
+        """Expand the compare-panel area. Deliberately does nothing else.
 
-        No teardown, no `set_selection`, no recompute: coming back should be
-        instant, and the compare panels kept their own ranges while hidden.
+        No teardown, no `set_selection`, no recompute: showing the panels
+        should be instant, and they keep their own ranges while collapsed.
+        The full image behind them is left exactly as it was, so the ⤢
+        buttons still open it at a matched camera.
         """
         self._preview_stack.setCurrentIndex(PREVIEW_PAGE_COMPARE)
         # The Tissue Preview's rectangle goes back to the compare viewer's.
         self._update_tissue_view_rect()
+
+    def _enter_full_image_landing(self):
+        """Open the full image as the LANDING view of a freshly loaded slide.
+
+        Raw pixels, the first marker channel, the whole slide -- and no patch
+        and no Process anywhere in the path. This is the one entry that does
+        not come from a user gesture, so it is also the one that must not
+        assume anything is already set up: `_rebuild_channel_list` has just
+        chosen `current_channel`, and everything else (decision panel, ⤢
+        buttons, method switch) is brought into line here rather than being
+        left to whichever handler happens to run next.
+
+        Silent when there is nothing to show (no loader, no channel, a
+        correction run holding the GPU): `_show_full_image` refuses on its
+        own terms and the placeholder keeps saying why.
+        """
+        if getattr(self, "_preview_stack", None) is None:
+            return
+        self._full_image_source = "original"
+        self._preview_stack.setCurrentIndex(PREVIEW_PAGE_FULL_IMAGE)
+        self._update_decision_ui()
+        self._update_full_image_buttons()
+        self._update_full_method_buttons()
+        self._show_full_image()
 
     def _reopen_full_image(self):
         """Rebuild the full image for the current channel and parameters.
@@ -2101,9 +2200,11 @@ class Step0Page(QWidget):
         message rather than replacing it with a second refusal.
         """
         if not self.current_channel:
+            self._update_full_method_buttons()
             return
         source, method, params = self._full_image_selection()
         self._update_full_source_label(source, method, params)
+        self._update_full_method_buttons()
         if self.production_correction_busy():
             return
         explore_tab = self._ensure_explore_tab()
@@ -2126,16 +2227,18 @@ class Step0Page(QWidget):
         # The Tissue Preview follows the full image's camera while it is up.
         self._connect_full_image_view_rect(stack)
         self._update_full_image_view_rect()
+        # The pyramid level the new selection lands on decides whether the
+        # coarse-preview hint applies.
+        self._update_full_level_hint()
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
 
         Only when the full image is actually on screen: switching a hidden
         viewer costs a synchronous overview read for something nobody is
-        looking at. And never when a correction run is going -- a channel
-        change can itself start an on-demand run, whose resource gate has
-        just released the viewer; rebuilding here would undo that release
-        immediately.
+        looking at. `_show_full_image` refuses on its own while a production
+        run holds the GPU, so a rebuild can never undo the release that run
+        was given.
         """
         if not self._full_image_visible():
             return
@@ -2159,13 +2262,136 @@ class Step0Page(QWidget):
                 if is_nucleus else
                 f"View the whole slide with {source}")
 
+    # ── the full image's own method switch ──────────────────────────────
+
+    def _on_full_method_clicked(self, source):
+        """Original / TopHat / cuCIM on top of the full image.
+
+        The camera is deliberately NOT touched: `_show_full_image` is called
+        without a viewport, so the controller keeps the view where it is and
+        only swaps the selection. Where that method's corrected tiles or its
+        corrected floor are still in the stack's caches (they are keyed by
+        method + parameter, not merely by channel), the swap reuses them and
+        nothing is recomputed.
+        """
+        if source not in FULL_IMAGE_METHOD:
+            return
+        if source != "original" and self._full_image_preview_blocked():
+            # Nothing to preview a correction OF. Put the switch back where
+            # it was rather than leaving it claiming a state that is not on
+            # screen.
+            self._update_full_method_buttons()
+            return
+        self._full_image_source = source
+        self._update_full_method_buttons()
+        if not self._full_image_visible():
+            self._preview_stack.setCurrentIndex(PREVIEW_PAGE_FULL_IMAGE)
+        self._show_full_image()
+
+    def _full_image_preview_blocked(self):
+        """True when a corrected preview cannot be shown for the current
+        channel: no channel at all, or the nucleus reference channel, which
+        is never background-corrected."""
+        ch = self.current_channel
+        return (not ch) or ch == self.nucleus_channel
+
+    def _update_full_method_buttons(self):
+        """Reflect `_full_image_source` and what the current channel allows.
+
+        Checked state is driven from the page's state, never left to the
+        click: `_show_full_image` can refuse (a busy GPU, no channel), and a
+        button that stayed pressed would be claiming something false.
+        """
+        buttons = getattr(self, "_full_method_buttons", None)
+        if not buttons:
+            return
+        blocked = self._full_image_preview_blocked()
+        ch = self.current_channel
+        shown = "original" if blocked else self._full_image_source
+        group = getattr(self, "_full_method_group", None)
+        if group is not None:
+            group.setExclusive(False)
+        for source, button in buttons.items():
+            enabled = bool(ch) and (source == "original" or not blocked)
+            button.setEnabled(enabled)
+            button.setChecked(source == shown)
+            if source != "original" and blocked and ch:
+                button.setToolTip(
+                    "The nucleus channel is the reference overlay and is "
+                    "never background-corrected.")
+            else:
+                button.setToolTip(FULL_IMAGE_SOURCE_TIPS[source])
+        if group is not None:
+            group.setExclusive(True)
+        self._update_full_level_hint()
+
+    def _full_image_level(self):
+        """The pyramid level the full image is currently displaying, or
+        None when there is no live stack to ask."""
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        controller = getattr(stack, "controller", None)
+        level = getattr(controller, "level", None)
+        return None if level is None else int(level)
+
+    def _full_image_level_downsample(self, level):
+        """How many level-0 pixels one pixel of `level` covers, as an int.
+
+        Measured from the provider's own level shapes rather than assumed to
+        be 2**level: a pyramid may be built with any factor, and the number
+        in the hint has to be the one the user is actually looking through.
+        """
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        provider = getattr(stack, "provider", None)
+        shape = getattr(provider, "level_shape", None)
+        if shape is None:
+            return 2 ** int(level)
+        try:
+            h0 = float(shape(0)[0])
+            hl = float(shape(int(level))[0])
+            if hl > 0:
+                return max(1, int(round(h0 / hl)))
+        except Exception:                               # noqa: BLE001
+            pass
+        return 2 ** int(level)
+
+    def _update_full_level_hint(self):
+        """Show the coarse-level warning exactly while it is true.
+
+        Only for a CORRECTED preview: Original at level 3 is simply a
+        downsampled image of the same pixels, which needs no warning.
+        """
+        hint = getattr(self, "_full_level_hint", None)
+        if hint is None:
+            return
+        level = self._full_image_level()
+        corrected = (self._full_image_source != "original"
+                     and not self._full_image_preview_blocked())
+        if not corrected or level is None or level < FULL_IMAGE_COARSE_LEVEL:
+            hint.setVisible(False)
+            hint.setText("")
+            return
+        n = self._full_image_level_downsample(level)
+        hint.setText(f"⚠ downsampled ×{n} preview — zoom in for "
+                     f"full-resolution correction")
+        hint.setToolTip(
+            f"At pyramid level {level} the correction runs on pixels "
+            f"box-downsampled ×{n}, with the radius/sigma scaled to match. "
+            "That is a different background from the level-0 correction "
+            "Save writes; zoom in to compare like with like.")
+        hint.setVisible(True)
+
     def production_correction_busy(self):
         """Name of the production correction task now running, else None.
 
         Read-only; starts nothing and cancels nothing. Checked per worker
         with `isRunning()` rather than by the presence of a handle:
-        `_ondemand_workers` only ever grows (nothing removes finished
-        entries), so its length says nothing about whether work is live.
+        `_ondemand_workers` only ever grew (nothing removed finished
+        entries), so its length said nothing about whether work is live.
+        It is empty for good now -- on-demand computing is gone -- but the
+        loop stays: proving no handle can ever land there is a stronger
+        claim than checking.
         """
         worker = getattr(self, "_batch_worker", None)
         if worker is not None and worker.isRunning():
@@ -3029,15 +3255,22 @@ class Step0Page(QWidget):
 
     def _connect_full_image_view_rect(self, stack):
         """Once per stack: every camera move of the full image redraws its
-        viewport on the Tissue Preview. The connection dies with the view."""
+        viewport on the Tissue Preview -- and re-asks whether the pyramid
+        level it settled on still deserves the coarse-preview hint, since a
+        zoom is precisely what changes that. The connection dies with the
+        view."""
         if stack is None or getattr(stack, "_nav_rect_connected", False):
             return
         try:
             stack.view.view_box.sigRangeChanged.connect(
-                lambda *_: self._update_full_image_view_rect())
+                lambda *_: self._on_full_image_camera_moved())
         except (AttributeError, RuntimeError, TypeError):
             return
         stack._nav_rect_connected = True
+
+    def _on_full_image_camera_moved(self):
+        self._update_full_image_view_rect()
+        self._update_full_level_hint()
 
     def _update_full_image_view_rect(self):
         """Draw the full image's current viewport on the Tissue Preview --
@@ -3406,6 +3639,10 @@ class Step0Page(QWidget):
         self._load_status.setText(
             f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"
         )
+
+        # The workspace is full-image-first: a loaded slide LANDS on the whole
+        # slide, not on three empty compare panels.
+        self._enter_full_image_landing()
 
         # Auto-open the Tissue Navigator once on a successful load (ROI/patch
         # drawing lives there since #10). Reuses the existing open path; guarded
@@ -3921,9 +4158,17 @@ class Step0Page(QWidget):
         row["status_lbl"].setText("⟳")
         row["status_lbl"].setStyleSheet("color:#e5c07b;font-size:13px;")
         row["row_widget"].setStyleSheet("background:#2a2a1a;border-radius:3px;")
+        self._refresh_channel_state(ch)
 
     def _set_channel_done(self, ch):
-        """计算完成：checkbox绿色锁定，不可取消。"""
+        """A channel's result landed: green tick, row highlighted.
+
+        The checkbox stays ENABLED. It used to be locked ("computed" was
+        treated as final), but the checkbox is now the ONE selector Process
+        and Save read: locked, a computed channel could never be turned back
+        into a raw one, and `_raw_save_channels` would have a set the user
+        cannot leave. Green says "computed", not "frozen".
+        """
         self._computed_channels.add(ch)
         row = self._channel_rows.get(ch)
         if not row:
@@ -3931,7 +4176,7 @@ class Step0Page(QWidget):
         cb = row["checkbox"]
         cb.blockSignals(True)
         cb.setChecked(True)
-        cb.setEnabled(False)
+        cb.setEnabled(True)
         cb.setStyleSheet(
             "QCheckBox::indicator{border:1px solid #6bffa0;border-radius:2px;"
             "background:#6bffa0;}"
@@ -3940,6 +4185,7 @@ class Step0Page(QWidget):
         cb.blockSignals(False)
         row["status_lbl"].setText("")
         row["row_widget"].setStyleSheet("background:#1a2e1a;border-radius:3px;")
+        self._refresh_channel_state(ch)
 
     # ── per-channel display colour: ONE store, shared with Channel Remap ──
     #  `_channel_colors` holds the USER's choices; anything not in it answers
@@ -4600,6 +4846,90 @@ class Step0Page(QWidget):
         self._computed_signatures.pop(ch, None)
         self._pending_signatures.pop(ch, None)
 
+    # ── per-row compute state (the glyph beside each checkbox) ──────────
+    #
+    # DERIVED, never stored: the answer comes from the same evidence the
+    # incremental Process consults (`_computed_signatures` +
+    # `_computed_channels` + `_preview_cache`), so the glyph and the run
+    # cannot disagree about which channels are up to date. A second flag
+    # would be a second answer, and it is exactly the kind of flag that
+    # drifts -- the reason `_channel_is_up_to_date` takes evidence rather
+    # than `_params_dirty` in the first place.
+
+    def _channel_row_method(self, ch):
+        """The method a Process run would use for `ch` right now.
+
+        The row's Method combo first (it is the assigned-method control),
+        then the recorded decision, then "both" -- the same precedence
+        `_on_process_clicked` uses when it reads the ticked rows.
+        """
+        row = self._channel_rows.get(ch)
+        combo = (row or {}).get("method_cb")
+        if combo is not None:
+            method = combo.currentText().lower()
+            if method in {"tophat", "cucim", "both", "original"}:
+                return method
+        return self._channel_decisions.get(ch) or "both"
+
+    def _channel_compute_state(self, ch):
+        """`nucleus` / `computing` / `not-computed` / `computed` / `stale`.
+
+        `stale` is deliberately distinct from `not-computed`: a channel
+        whose parameters moved after a run still HAS a result on screen,
+        and the user needs to know the pixels they are looking at were made
+        with the old numbers -- which "not computed" would not say.
+        """
+        if ch == self.nucleus_channel:
+            return "nucleus"
+        if ch in self._pending_signatures:
+            return "computing"
+        if ch not in self._computed_signatures or ch not in self._computed_channels:
+            return "not-computed"
+        method = self._channel_row_method(ch)
+        if method == "original":
+            # No correction is assigned, so there is nothing for the cached
+            # result to be current WITH; report what actually exists.
+            method = self._computed_signatures[ch][0]
+        sig = self._channel_signature(ch, method)
+        return "computed" if self._channel_is_up_to_date(ch, sig) else "stale"
+
+    def _refresh_channel_state(self, ch):
+        """Push `ch`'s derived compute state onto its row."""
+        state = self._channel_compute_state(ch)
+        adapter = getattr(self, "_dock_adapter", None)
+        if adapter is not None and ch in adapter.model:
+            adapter.model.set_status(ch, state)
+        # Directly too: `set_status` is a no-op when the value is unchanged,
+        # which is exactly the case on a fresh rebuild (the state was seeded
+        # into the model before the row existed).
+        row = self._channel_rows.get(ch)
+        setter = getattr((row or {}).get("row_widget"), "set_state", None)
+        if setter is not None:
+            setter(state)
+
+    def _refresh_all_channel_states(self):
+        for ch in list(self._channel_order):
+            self._refresh_channel_state(ch)
+
+    def _raw_save_channels(self):
+        """Marker channels Save would write as RAW: unticked, assigned
+        Original, or ticked but with no current computed result.
+
+        Order follows the channel list, so the confirmation reads in the
+        same order as the rows the user just looked at.
+        """
+        raw = []
+        for ch in self._channel_order:
+            if ch == self.nucleus_channel:
+                continue
+            row = self._channel_rows.get(ch)
+            checked = bool(row and row["checkbox"].isChecked())
+            if not checked or self._channel_row_method(ch) == "original":
+                raw.append(ch)
+            elif self._channel_compute_state(ch) != "computed":
+                raw.append(ch)
+        return raw
+
     def _current_dec_method(self):
         if self._dec_top.isChecked():
             return "tophat"
@@ -4638,13 +4968,24 @@ class Step0Page(QWidget):
             "tophat_radius": int(self._dec_radius.value()),
             "cucim_sigma": int(self._dec_sigma.value()),
         }
+        # The recorded signature no longer matches these numbers, so the
+        # row's glyph turns `stale`. Nothing is recomputed and nothing is
+        # thrown away: the old result stays visible until a Process replaces
+        # it, and the glyph is what says it was made with other parameters.
+        self._refresh_channel_state(ch)
 
     def _on_dec_param_entered(self):
-        """Enter pressed in a per-channel param box -> process this channel's
-        ALL patches with its params (same as the Process button)."""
+        """Enter pressed in a per-channel param box.
+
+        Records the value and marks the channel stale -- it no longer starts
+        a run. A parameter change is not a request to compute: the checkbox
+        plus the Process button are the only path to a correction run, so
+        that pressing Enter while tuning a number cannot put the GPU to work
+        behind the user's back.
+        """
         if getattr(self, "_loading_decision", False):
             return
-        self._process_current_channel()
+        self._on_dec_param_changed()
 
     def _update_decision_ui(self):
         ch = self.current_channel
@@ -4716,6 +5057,7 @@ class Step0Page(QWidget):
             if row["status_lbl"].text() != "⟳":   # don't clobber a running spinner
                 row["status_lbl"].setText("")
         cb.blockSignals(False)
+        self._refresh_channel_state(ch)
 
     def _on_channel_checkbox_toggled(self, ch, state):
         if ch == self.nucleus_channel:
@@ -4823,6 +5165,7 @@ class Step0Page(QWidget):
                 else:
                     self._channel_methods.pop(ch, None)
                     self._channel_decisions[ch] = "original"
+        self._refresh_all_channel_states()
 
     def _on_method_all_changed(self, txt):
         """All channels 方法下拉变化，同步到所有勾选通道。"""
@@ -4844,10 +5187,17 @@ class Step0Page(QWidget):
             row["method_cb"].blockSignals(True)
             row["method_cb"].setCurrentIndex(self._METHOD_IDX.get(method, 0))
             row["method_cb"].blockSignals(False)
+        self._refresh_all_channel_states()
 
     def _on_channel_method_changed(self, ch, txt):
         """Single channel method dropdown change. The combo now also carries the
-        assigned decision: "Original" means no correction (channel unchecked)."""
+        assigned decision: "Original" means no correction (channel unchecked).
+
+        Records the choice and re-derives the row's state -- and starts
+        NOTHING. A method change is a change to what the next Process would
+        do, so a channel already computed with the other method simply
+        becomes `stale`.
+        """
         m = txt.lower()
         self._channel_decisions[ch] = m
         if m == "original":
@@ -4860,6 +5210,7 @@ class Step0Page(QWidget):
             cb.blockSignals(True)
             cb.setChecked(m != "original")   # original = raw = not corrected
             cb.blockSignals(False)
+        self._refresh_channel_state(ch)
 
     def _on_channel_checkbox_toggled(self, ch, state):
         if ch == self.nucleus_channel:
@@ -4871,6 +5222,7 @@ class Step0Page(QWidget):
         else:
             self._channel_methods.pop(ch, None)
             self._channel_decisions[ch] = "original"
+        self._refresh_channel_state(ch)
 
     def _on_channel_selected_by_id(self, cid):
         """The shared dock's selection, as a channel id, routed to the
@@ -4911,16 +5263,15 @@ class Step0Page(QWidget):
         # The floating Intensity window edits the channel the user is looking
         # at: point the workbench's inspector at it (the nucleus included).
         self._sync_intensity_to_channel()
-        # The full image follows the channel, but only when it is on screen
-        # and only when the GPU is free -- see `_sync_full_image_to_channel`.
-        # Placed BEFORE the on-demand path below on purpose: that path's
-        # resource gate releases the viewer, and this must not race it.
+        # The full image follows the channel -- and it is the landing view,
+        # so this is the main thing a row click does.
         self._sync_full_image_to_channel()
 
         if not self.patches:
             self._preview_status.setText(
-                "⚠  Draw patches in Section B first.")
-            self._preview_status.setStyleSheet("color:#ffb86c;font-size:11px;")
+                "Full image only — draw a patch in the Tissue Navigator to "
+                "use the compare panels.")
+            self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
             return
 
         ch = self.current_channel
@@ -4928,22 +5279,23 @@ class Step0Page(QWidget):
             self._preview_status.setText("Nucleus channel is excluded from correction.")
             return
 
-        # 检查是否有缓存结果可以直接显示
+        # Selecting a row DISPLAYS; it never computes. The on-demand run that
+        # used to start here (a `BatchProcessWorker` for any unticked channel
+        # clicked after the first Process) is gone: it put the GPU to work on
+        # a channel the user had not selected for processing, took the full
+        # image away while it ran, and made "which channels did I compute?"
+        # depend on the order rows happened to be clicked in. The checkbox
+        # plus the Process button are now the only way to a correction run;
+        # the row's own state glyph says whether a result exists.
         if self._has_any_cache(ch):
             self._show_channel_from_cache(ch)
         elif ch in self._computed_channels:
             self._preview_status.setText(f"No result for {ch}. Try re-processing.")
         else:
-            # 按需计算：只有process已完成（_process_completed=True）才允许
-            if getattr(self, '_process_completed', False):
-                self._preview_status.setText(
-                    f"Computing {ch} on demand…")
-                self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
-                self._start_ondemand(ch)
-            else:
-                self._preview_status.setText(
-                    "Run Process first. On-demand computing is locked until Process completes.")
-                self._preview_status.setStyleSheet("color:#ffb86c;font-size:10px;")
+            self._preview_status.setText(
+                f"{ch}: not computed. Tick it and press Process to fill the "
+                f"compare panels. The full image previews it either way.")
+            self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
 
     # ══ Process 按钮逻辑 ══════════════════════════════════════════════
 
@@ -5013,7 +5365,7 @@ class Step0Page(QWidget):
         self._computed_channels -= stale
         for ch in stale:
             self._computed_signatures.pop(ch, None)
-        self._process_completed = False   # 锁住按需计算，直到本次process完成
+        self._process_completed = False
 
         self._btn_process.setEnabled(False)
         self._btn_stop_process.setEnabled(True)
@@ -5103,15 +5455,21 @@ class Step0Page(QWidget):
         self._proc_status.setStyleSheet("color:#6bffa0;font-size:10px;font-weight:bold;")
         self._btn_process.setEnabled(True)
         self._btn_stop_process.setEnabled(False)
-        self._process_completed = True   # 解锁按需计算
+        self._process_completed = True
         # Not auto "Re-process": only a param change after this flips it (Topic 1).
         self._reset_process_button()
+        # Every row is re-asked, not just the ones that ran: a skipped
+        # up-to-date channel and a channel whose run was stopped both have
+        # something to say now.
+        self._clear_pending_signatures()
+        self._refresh_all_channel_states()
 
     def _on_batch_canceled(self):
         self._proc_status.setText("Stopped.")
         self._proc_status.setStyleSheet("color:#ffb86c;font-size:10px;")
         self._btn_process.setEnabled(True)
         self._btn_stop_process.setEnabled(False)
+        self._clear_pending_signatures()
 
     def _on_batch_error(self, ch, p_idx, msg):
         print(f"[Batch Error] ch={ch} p_idx={p_idx}\n{msg}")
@@ -5120,60 +5478,39 @@ class Step0Page(QWidget):
             self._proc_status.setStyleSheet("color:#ff6b6b;font-size:10px;")
             self._btn_process.setEnabled(True)
             self._btn_stop_process.setEnabled(False)
+            self._clear_pending_signatures()
 
-    # ══ 按需计算（点击未计算通道）════════════════════════════════════
+    def _clear_pending_signatures(self):
+        """A run ended without delivering: drop what it PROMISED to produce.
 
-    def _start_ondemand(self, ch):
-        """为未计算的通道启动按需计算（所有patches）。"""
-        # The nucleus channel is never background-corrected. Until now this
-        # was only true by accident: `_on_channel_row_changed` returned early
-        # for DAPI before reaching here. Any other caller -- and the Display
-        # window, which must never start a computation -- gets the guard.
-        if ch == self.nucleus_channel:
-            print(f"[step0] on-demand skipped: {ch} is the nucleus channel", flush=True)
+        `_pending_signatures` is what makes a row read `computing`; a stop or
+        a global failure leaves entries behind that no result will ever
+        promote, and the row would spin for the rest of the session. The
+        channels that DID finish are unaffected -- `_on_batch_channel_done`
+        has already moved theirs into `_computed_signatures`.
+        """
+        if not self._pending_signatures:
             return
-        if not self.loader or not self.patches:
-            return
-        busy = self.production_correction_busy()
-        if busy:
-            # Now reachable during a Save: the progress dialog is no longer
-            # modal. Two GPU users at once is what the gate exists to stop.
-            self._preview_status.setText(
-                f"Waiting: {busy} is running. Click the channel again when it finishes.")
-            self._preview_status.setStyleSheet("color:#ffb86c;font-size:10px;")
-            return
-        # 从method_cb直接读（最可靠），_channel_methods作为备用，默认both
-        row_data = self._channel_rows.get(ch)
-        if row_data and "method_cb" in row_data:
-            method = row_data["method_cb"].currentText().lower()
-        else:
-            method = self._channel_methods.get(ch, "both")
-        if method not in {"tophat", "cucim", "both"}:
-            method = "both"
-        self._set_channel_computing(ch)
-        # On demand runs with the GLOBAL slider params (no channel_params), so
-        # record exactly those -- not the per-channel ones.
-        self._pending_signatures[ch] = self._channel_signature(
-            ch, method,
-            params=(self._tophat_slider.value(), self._cucim_slider.value()))
+        stalled = list(self._pending_signatures)
+        self._pending_signatures.clear()
+        for ch in stalled:
+            row = self._channel_rows.get(ch)
+            if row and row["status_lbl"].text() == "⟳":
+                row["status_lbl"].setText("")
+            self._refresh_channel_state(ch)
 
-        worker = BatchProcessWorker(
-            self.loader, self.patches,
-            {ch: method},
-            self.nucleus_channel,
-            self._tophat_slider.value(),
-            self._cucim_slider.value(),
-            max_gpu_workers=2,
-        )
-        worker.channel_patch_done.connect(self._gen_slot(self._on_batch_patch_done))
-        worker.channel_done.connect(self._gen_slot(self._on_batch_channel_done))
-        worker.all_done.connect(self._gen_slot(lambda: None))
-        worker.error_signal.connect(self._gen_slot(self._on_batch_error))
-        worker.canceled.connect(self._gen_slot(lambda: None))
-        self._ondemand_workers.append(worker)
-        self._release_explore_for_production("on-demand background correction")
-        self._watch_production_worker(worker)
-        worker.start()
+    # ══ on-demand computing: REMOVED ═════════════════════════════════
+    #
+    # `_start_ondemand` used to launch a `BatchProcessWorker` whenever an
+    # uncomputed channel's row was clicked after the first Process. It is
+    # gone, not merely unwired: a helper whose only job is to start a
+    # production run outside the Process button is the exact thing the
+    # "only the checkbox and Process compute" rule forbids, and leaving it
+    # in the class is an invitation to call it again.
+    #
+    # `_ondemand_workers` survives as an empty list. It is read by
+    # `production_correction_busy` and by teardown, and keeping the reads
+    # unconditional is cheaper than proving no worker can ever land there.
 
     # ══ 从缓存显示结果 ════════════════════════════════════════════════
 
@@ -5386,7 +5723,7 @@ class Step0Page(QWidget):
             "tophat_radius": int(self._dec_radius.value()),
             "cucim_sigma": int(self._dec_sigma.value()),
         }
-        self._refresh_channel_row(ch)
+        self._refresh_channel_row(ch)      # re-derives the row's state too
         self._decision_status.setText(
             f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
             f"σ={self._dec_sigma.value()})")
@@ -5650,16 +5987,49 @@ class Step0Page(QWidget):
         self._preview_req_id = 0
         self._applied_corrected_decisions = {}
         self._incremental_processed = None
-        # Full Image shows one source of the OLD dataset; go back to Compare so
-        # the new dataset starts from the neutral state.
+        # Full Image shows one source of the OLD dataset. Collapse to the
+        # compare page for the duration of the switch: this runs BEFORE the
+        # new loader is bound, so there is nothing to show a full image OF,
+        # and leaving the old one up would keep the previous slide's pixels
+        # on screen. `_enter_full_image_landing`, at the end of the load,
+        # opens the new slide's full image -- the landing state.
         self._full_image_source = "original"
         if hasattr(self, "_preview_stack"):
             self._return_to_compare()
+        self._refresh_all_channel_states()
 
     # (#5) The standalone "Run BG correction" preview-batch handlers
     # (_on_start_bg_correction / _bg_run_next / _finish_bg_start) were removed
     # with that button; the BG-tab Save (_save_and_continue) is the single
     # entry that runs correction + writes outputs + the handoff.
+
+    def _confirm_raw_channels(self):
+        """Name the channels Save will write as RAW, once, and ask.
+
+        Save is the moment the decision becomes an artifact, and the set it
+        writes raw is not visible anywhere else in one place: it is the
+        union of "never ticked", "assigned Original" and "ticked but never
+        actually computed" -- three different reasons, three different
+        corners of the UI. A run that silently writes half the panel raw is
+        the kind of thing found weeks later in Step 2.
+
+        Once: one dialog per Save press, listing channels, not one prompt
+        per channel. Returns True to go ahead.
+        """
+        raw = self._raw_save_channels()
+        if not raw:
+            return True
+        shown = ", ".join(raw[:12])
+        if len(raw) > 12:
+            shown += f", … (+{len(raw) - 12} more)"
+        answer = QMessageBox.question(
+            self, "Channels saved as raw",
+            f"{len(raw)} channel{'s' if len(raw) != 1 else ''} will be saved "
+            f"WITHOUT background correction:\n\n{shown}\n\n"
+            "A channel is saved raw when it is unticked, assigned Original, "
+            "or ticked but not computed. Continue?",
+            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Ok)
+        return answer == QMessageBox.Ok
 
     def _save_and_continue(self):
         if self.loader is None:
@@ -5682,6 +6052,10 @@ class Step0Page(QWidget):
             print("[Step0] analysis_region_type=roi")
         if not rois:
             QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
+            return
+
+        # What will NOT be corrected, said once, before anything is written.
+        if not self._confirm_raw_channels():
             return
 
         # (#1) REUSE the existing roi_context (-> same step0_dir / zarr_path)

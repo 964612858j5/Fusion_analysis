@@ -639,6 +639,14 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
     # keep a record, so a path that bailed out early is visible rather than
     # looking like a pass.
     class _Msg:
+        # The real button-role constants, so a page comparing an answer
+        # against `QMessageBox.Ok` gets a truthful match rather than an
+        # AttributeError.
+        Ok = 0x00000400
+        Cancel = 0x00400000
+        Yes = 0x00004000
+        No = 0x00010000
+
         @staticmethod
         def information(*a, **k):
             timeline.append(f"dialog:information:{a[2] if len(a) > 2 else ''}")
@@ -653,8 +661,11 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
 
         @staticmethod
         def question(*a, **k):
-            timeline.append("dialog:question")
-            return getattr(mod.QMessageBox, "Yes", 16384)
+            timeline.append(f"dialog:question:{a[1] if len(a) > 1 else ''}")
+            # Answer "go ahead" for both idioms the page uses (Yes/No and
+            # Ok/Cancel); a test about the GPU hand-off must not be stopped
+            # by a confirmation.
+            return _Msg.Ok
 
     monkeypatch.setattr(mod, "QMessageBox", _Msg)
     monkeypatch.setattr(mod, "BatchProcessWorker", _RecordingWorker)
@@ -733,7 +744,6 @@ class _GpuPathLoader:
 @pytest.mark.parametrize(
     ("path_name", "driver"),
     [("_on_process_clicked", lambda p: p._on_process_clicked()),
-     ("_start_ondemand", lambda p: p._start_ondemand("CD3")),
      ("_process_current_channel", lambda p: p._process_current_channel()),
      ("_save_and_continue", lambda p: p._save_and_continue())],
 )

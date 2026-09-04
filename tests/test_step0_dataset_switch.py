@@ -58,9 +58,17 @@ class _RecordingExploreTab:
         self._page = page
         self.calls = []          # [(path, loader_at_call_time)]
         self.released = []
+        self.shown = []          # [(channel, method, params)]
+        self.stack = None
 
     def set_dataset(self, path):
         self.calls.append((path, getattr(self._page, "loader", None)))
+
+    def show_source(self, channel, method, params=(), **_kw):
+        # The landing view opens the full image at the end of every load, so
+        # a stand-in for the Explore tab has to be able to be asked for one.
+        self.shown.append((channel, method, tuple(params)))
+        return True
 
     def release_for_production(self, reason):
         self.released.append(reason)
@@ -213,7 +221,9 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     # ...but a display preference is not dataset state and is left alone.
     assert page._channel_colors == {"CD3": (1.0, 0.0, 0.0)}
     assert page._full_image_source == "original"
-    assert page._preview_stack.currentIndex() == sp.PREVIEW_PAGE_COMPARE
+    # Full-image-first: a committed switch LANDS on the new slide's full
+    # image (raw, first marker), not on the compare panels.
+    assert page._preview_stack.currentIndex() == sp.PREVIEW_PAGE_FULL_IMAGE
 
 
 def test_the_clearing_happens_before_the_new_loader_is_bound(app, tmp_path,
@@ -330,9 +340,15 @@ def test_a_late_preview_result_cannot_write_the_new_datasets_display(
 
 def test_every_batch_worker_signal_is_connected_through_a_generation_slot(
         app, tmp_path, monkeypatch):
-    """Behavioural, not source-shaped: start a real on-demand worker, bump the
-    generation the way a switch does, then emit each of its signals and
-    require that none of them writes the page."""
+    """Behavioural, not source-shaped: start a real correction worker, bump
+    the generation the way a switch does, then emit each of its signals and
+    require that none of them writes the page.
+
+    Driven through `_process_current_channel` since on-demand computing was
+    removed (a row click no longer starts anything): the Per-Channel Process
+    path is now the shortest real route to a live `BatchProcessWorker` with
+    the full signal set connected.
+    """
     page = _fresh_page(tmp_path, monkeypatch)
 
     class _IdleBatch(QtCore.QThread):
@@ -350,8 +366,8 @@ def test_every_batch_worker_signal_is_connected_through_a_generation_slot(
             return
 
     monkeypatch.setattr(sp, "BatchProcessWorker", _IdleBatch)
-    page._start_ondemand("CD3")
-    worker = page._ondemand_workers[-1]
+    page._process_current_channel()
+    worker = page._batch_worker
 
     page._dataset_gen += 1          # what the commit block does
     status_before = page._proc_status.text()
@@ -505,8 +521,10 @@ def test_an_open_full_image_is_unbound_before_the_new_dataset_is_bound(
     assert tab.calls[0] == (None, old_loader)
     assert tab.calls[-1][0] == page.ome_path
     assert tab.calls[-1][1] is made
-    assert page._preview_stack.currentIndex() == sp.PREVIEW_PAGE_COMPARE
+    assert page._preview_stack.currentIndex() == sp.PREVIEW_PAGE_FULL_IMAGE
     assert page._full_image_source == "original"
+    # ...and it was reopened for the NEW dataset, as Original.
+    assert tab.shown and tab.shown[-1][1] is None
 
 
 # ── the queued-signal case ────────────────────────────────────────────────
@@ -557,8 +575,8 @@ class _EmitOnceBatch(QtCore.QThread):
 
 def _start_a_worker_that_has_already_emitted(page, monkeypatch):
     monkeypatch.setattr(sp, "BatchProcessWorker", _EmitOnceBatch)
-    page._start_ondemand("CD3")
-    worker = page._ondemand_workers[-1]
+    page._process_current_channel()
+    worker = page._batch_worker
     # Block the GUI thread WITHOUT pumping events: the emits land in the
     # queue and stay there.
     assert worker.emitted.wait(10)
@@ -595,13 +613,17 @@ def test_the_same_queued_signals_do_arrive_when_the_generation_holds(
 
     app.processEvents()
 
-    # The on-demand wiring's real writes: cache, displayed payload, metrics,
-    # and the global-error status line. (`all_done` is `lambda: None` on this
-    # path, so `_process_completed` is not one of them.)
-    assert ("CD3", 0) in page._preview_cache
+    # One footprint per signal, so a connection that quietly went missing
+    # is visible rather than masked by whichever handler wrote last.
+    assert ("CD3", 0) in page._preview_cache          # channel_patch_done
+    assert "CD3" in page._computed_channels           # channel_done
+    assert page._process_completed is True            # all_done
     assert page._last_payload is not None
     assert "8.00" in page._metrics_original.text()
-    assert "queued error" in page._proc_status.text()
+    assert page._proc_pbar.value() == 100             # progress, then all_done
+    # error_signal and canceled both write the status line; canceled is
+    # emitted last, so it is the one that shows.
+    assert page._proc_status.text() == "Stopped."
 
 
 # ── dataset-scoped state that is not pixels ──────────────────────────────

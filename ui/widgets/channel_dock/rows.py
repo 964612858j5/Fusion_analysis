@@ -122,11 +122,41 @@ class Step0ChannelRow(ChannelRowBase):
     the badge shows preview/compute status (e.g. "", computing, done, unsaved).
     Method parameters and Compare live in the selected-channel inspector, not
     in the row.
+
+    Next to the CHECKBOX -- not at the right edge with the legacy badge --
+    sits the compute-state glyph (`state_lbl`). The checkbox is what selects
+    a channel for the Process run, so "is this one already computed, and is
+    that result still current?" belongs beside it, where the eye already is
+    when ticking boxes. It is fed the same `status_changed` signal as the
+    legacy badge; the host decides the vocabulary (see `STATE_GLYPHS`).
     """
 
     method_changed = pyqtSignal(str, str)      # (channel_id, method text)
 
     METHODS = ["TopHat", "cucim", "Both", "Original"]
+
+    # state -> (glyph, stylesheet, tooltip). The three states the Background
+    # Correction page derives from its signature bookkeeping, plus the two
+    # transient/structural ones it already had.
+    STATE_GLYPHS = {
+        "": ("", "", ""),
+        "not-computed": (
+            "○", "color:#6d8196;font-size:11px;",
+            "not computed — tick this channel and press Process"),
+        "computed": (
+            "✓", "color:#56d990;font-size:11px;font-weight:bold;",
+            "computed — the cached result matches the current "
+            "method, parameters and patches"),
+        "stale": (
+            "!", "color:#f4c45e;font-size:12px;font-weight:bold;",
+            "stale — the method or parameters changed since this channel "
+            "was computed; Process recomputes it"),
+        "computing": (
+            "⟳", "color:#f4c45e;font-size:12px;", "computing…"),
+        "nucleus": (
+            "★", "color:#56b6c2;font-size:11px;",
+            "reference channel — never background-corrected"),
+    }
 
     def __init__(self, model, cid, parent=None):
         super().__init__(model, cid, parent)
@@ -138,6 +168,15 @@ class Step0ChannelRow(ChannelRowBase):
         # sits directly after the name. The host (adapter) sets one uniform
         # name width across rows — the longest name — so combos align.
         self.checkbox.setFixedSize(22, 18)
+
+        # The compute-state glyph, immediately after the checkbox. Fixed
+        # width so a state change never re-flows the row.
+        self.state_lbl = QtWidgets.QLabel("")
+        self.state_lbl.setAlignment(Qt.AlignCenter)
+        self.state_lbl.setFixedWidth(12)
+        self._extras_layout.insertWidget(1, self.state_lbl)
+        self.set_state(st.status if st else "")
+
         self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
                                       QtWidgets.QSizePolicy.Preferred)
         self.name_label.setFixedWidth(self.name_label.sizeHint().width() + 2)
@@ -184,9 +223,23 @@ class Step0ChannelRow(ChannelRowBase):
             self.method_cb.setCurrentIndex(idx)
             self.method_cb.blockSignals(False)
 
+    def set_state(self, state):
+        """Set the compute-state glyph beside the checkbox.
+
+        An unknown state shows nothing rather than a placeholder: the glyph
+        is a claim about the channel's result, and inventing one for a
+        vocabulary this row does not know would be a false claim.
+        """
+        glyph, style, tip = self.STATE_GLYPHS.get(str(state or ""),
+                                                  ("", "", ""))
+        self.state_lbl.setText(glyph)
+        self.state_lbl.setStyleSheet(style)
+        self.state_lbl.setToolTip(tip)
+
     def _on_model_status(self, cid, status):
         if cid != self._cid:
             return
+        self.set_state(status)
         style = {"computing": ("⟳", "color:#f4c45e;font-size:13px;"),
                  "done": ("✓", "color:#56d990;font-size:12px;"),
                  "unsaved": ("●", "color:#f4c45e;font-size:11px;"),

@@ -33,7 +33,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtCore  # noqa: E402
+from PyQt5 import QtCore, QtTest  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0.step0_page import (  # noqa: E402
@@ -180,26 +180,46 @@ def test_the_landing_view_does_not_need_the_reopen_placeholder(app,
     assert page._full_image_visible()
 
 
-def test_the_compare_panels_start_collapsed_and_expand_on_demand(app,
-                                                                monkeypatch):
-    """A2: the panels are a STRIP beside the image, not the other page of a
-    stack, so expanding one does not hide the other."""
+def test_the_landing_view_is_the_full_image_and_only_the_full_image(
+        app, monkeypatch):
+    """ONE viewing area, two exclusive modes: a loaded slide lands on the
+    full image with the compare panels not on screen at all, and there is
+    no button to put them beside it."""
     _no_workers(monkeypatch)
     page = _page(app)
     page._explore_tab = _RecordingExploreTab(stack=_FakeStack())
     page._enter_full_image_landing()
 
-    assert page._compare_strip_visible() is False
-    assert "Compare panels" in page._btn_show_compare.text()
+    assert page._compare_mode() is False
+    assert page._view_area.currentIndex() == page._VIEW_FULL
+    assert page._view_area.currentWidget() is not page._compare_strip
+    for gone in ("_btn_show_compare", "_preview_split",
+                 "_compare_strip_visible", "_set_compare_strip_visible",
+                 "_on_compare_strip_toggled"):
+        assert not hasattr(page, gone), gone
 
-    page._btn_show_compare.click()
 
-    assert page._compare_strip_visible() is True
-    assert page._full_image_visible(), "the image must stay on screen"
+def test_the_two_modes_are_exclusive(app, monkeypatch):
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack())
+    page._enter_full_image_landing()
+    page.resize(900, 700)
+    page.show()
+    QtTest.QTest.qWait(30)
+    full_page = page._view_area.widget(page._VIEW_FULL)
 
-    page._btn_show_compare.click()
+    page._set_compare_mode(True)
+    QtTest.QTest.qWait(30)
 
-    assert page._compare_strip_visible() is False
+    assert page._compare_strip.isVisible() and not full_page.isVisible()
+    # The panels have the WHOLE area now, which is the point of the change.
+    assert page._compare_strip.height() == page._view_area.height()
+
+    page._set_compare_mode(False)
+    QtTest.QTest.qWait(30)
+
+    assert full_page.isVisible() and not page._compare_strip.isVisible()
 
 
 def test_the_method_switch_keeps_the_image_on_screen(app, monkeypatch):

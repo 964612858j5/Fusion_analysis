@@ -40,7 +40,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtCore, QtTest  # noqa: E402
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.viewer.tile_types import effective_param  # noqa: E402
@@ -177,7 +177,7 @@ def _page(app, *, level=0, scale_width=1024.0, view_w=SLIDE_W):
 
 def _panel_px(page):
     """One panel's size in screen pixels, as the page measures it."""
-    page._set_compare_strip_visible(True)
+    page._set_compare_mode(True)
     QtTest.QTest.qWait(30)
     return page._compare_panel_px()
 
@@ -199,6 +199,15 @@ def _snapshot(page, x, y, timeout=5000):
         QtTest.QTest.qWait(10)
         assert deadline.elapsed() < timeout, "the snapshot never arrived"
     return page._last_payload
+
+
+def _right_click(widget):
+    """A real right-button press on `widget`, as Qt would deliver it."""
+    QtWidgets.QApplication.sendEvent(
+        widget,
+        QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress,
+                          QtCore.QPointF(5.0, 5.0), QtCore.Qt.RightButton,
+                          QtCore.Qt.RightButton, QtCore.Qt.NoModifier))
 
 
 def _no_workers(monkeypatch):
@@ -488,26 +497,98 @@ def test_the_original_panel_is_the_raw_crop(app):
                        payload["original_raw"] * 3.0)
 
 
-# ── 5. the strip ─────────────────────────────────────────────────────────
+# ── 5. the two exclusive modes ───────────────────────────────────────────
 
-def test_the_strip_expands_on_the_first_right_click(app):
+def test_the_right_click_replaces_the_image_with_the_panels(app):
     page = _page(app)
-    assert page._compare_strip_visible() is False
+    full_page = page._view_area.widget(page._VIEW_FULL)
+    assert page._compare_mode() is False
+    assert full_page.isVisible() and not page._compare_strip.isVisible()
 
     _snapshot(page, 2000, 1500)
 
-    assert page._compare_strip_visible() is True
-    assert page._full_image_visible(), "the image must stay on screen"
+    assert page._compare_mode() is True
+    assert page._compare_strip.isVisible(), "the panels are not on screen"
+    assert not full_page.isVisible(), "both views are sharing the area"
 
 
-def test_the_toolbar_button_still_collapses_it(app):
+def test_a_right_click_in_compare_mode_goes_back_to_the_image(app):
     page = _page(app)
     _snapshot(page, 2000, 1500)
+    camera = page._explore_tab.stack.view.view_box.viewRange()
 
-    page._btn_show_compare.click()
+    _right_click(page._preview_gv.viewport())
 
-    assert page._compare_strip_visible() is False
+    assert page._compare_mode() is False
+    assert page._explore_tab.stack.view.view_box.viewRange() == camera, (
+        "the camera moved on the way back")
     assert page._last_payload is not None, "the snapshot is kept"
+
+
+def test_escape_goes_back_to_the_image_too(app):
+    """A real key event, through the page's own handlers: there is no
+    QShortcut object, because a shortcut connected to a bound method of the
+    page closes a reference cycle the between-test gc walks into."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    assert not hasattr(page, "_compare_escape_shortcut")
+
+    QtWidgets.QApplication.sendEvent(
+        page._preview_gv.viewport(),
+        QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape,
+                        QtCore.Qt.NoModifier))
+
+    assert page._compare_mode() is False
+
+    _snapshot(page, 2000, 1500)
+    page.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress,
+                                       QtCore.Qt.Key_Escape,
+                                       QtCore.Qt.NoModifier))
+
+    assert page._compare_mode() is False
+
+
+def test_the_way_back_asks_the_viewer_for_nothing(app):
+    """Returning re-SHOWS a hidden page; it does not rebuild, re-select or
+    reload anything."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    tab = page._explore_tab
+    before = list(tab.calls)
+
+    page._on_compare_escape()
+
+    assert tab.calls == before
+
+
+def test_the_toggle_button_and_the_splitter_are_gone(app):
+    page = _page(app)
+    for gone in ("_btn_show_compare", "_preview_split",
+                 "_compare_strip_visible", "_set_compare_strip_visible",
+                 "_on_compare_strip_toggled"):
+        assert not hasattr(page, gone), gone
+
+
+def test_the_panels_get_the_whole_area(app):
+    """The crop is cut for the panel size AFTER the switch has been laid
+    out: the panels are the viewing area now, not a strip under it."""
+    page = _page(app)
+    area_h = page._view_area.height()
+
+    _snapshot(page, 2000, 1500)
+
+    assert page._compare_strip.height() == area_h
+    assert page._compare_panel_px()[1] > area_h / 2
+
+
+def test_the_downsampled_label_and_save_as_patch_stay_in_compare_mode(app):
+    page = _page(app, level=2)
+
+    _snapshot(page, 2000, 1500)
+
+    assert page._compare_level_lbl.isVisible()
+    assert page._btn_snapshot_patch.isVisible()
+    assert page._btn_snapshot_patch.isEnabled()
 
 
 def test_a_fine_level_says_nothing_about_downsampling(app):

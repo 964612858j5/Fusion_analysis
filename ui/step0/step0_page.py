@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QGroupBox, QSlider,
     QInputDialog, QMessageBox, QFileDialog,
     QComboBox, QFrame, QProgressBar, QSizePolicy,
-    QRadioButton, QButtonGroup, QSplitter,
+    QRadioButton, QButtonGroup, QSplitter, QStackedWidget,
 )
 import pyqtgraph as pg
 
@@ -263,11 +263,6 @@ class CompareSnapshotWorker(QThread):
         self.done.emit(self.req_id, payload)
 
 
-
-# The compare strip's height, in pixels, when a right-click expands it. Big
-# enough that a 3-across snapshot is worth looking at, small enough that the
-# full image above it stays the main view.
-COMPARE_STRIP_HEIGHT = 260
 
 # Which of the three compare results the full image shows. Ordered to match
 # the compare panels left to right.
@@ -1035,7 +1030,9 @@ class Step0Page(QWidget):
         # "downsampled xN" -- the same fact the full image's own header
         # states, measured the same way (the provider's level shapes, never
         # 2**level), because a snapshot taken at a coarse level IS the
-        # coarse correction and must not be read as the one Save writes.
+        # coarse correction and must not be read as the one Save writes. It
+        # lives on the panels' own header, so it is on screen for exactly as
+        # long as the snapshot it describes.
         self._compare_level_lbl = QLabel("")
         self._compare_level_lbl.setStyleSheet("color:#e5c07b;font-size:10px;")
         self._compare_level_lbl.setVisible(False)
@@ -1132,28 +1129,39 @@ class Step0Page(QWidget):
         self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
         pvl.addWidget(self._preview_status)
 
-        # -- the full image, with the compare strip BESIDE it -------------
+        # -- ONE viewing area, two exclusive modes ------------------------
         #
-        # A splitter, not a stack. The two used to be pages of one
-        # QStackedWidget, which made them alternatives: looking at a
-        # snapshot meant not looking at the slide it came from, and a
-        # snapshot's whole meaning is "this spot, in the image above". So
-        # the full image is permanently the top pane and the three panels
-        # are a strip under it, collapsed until the first right-click and
-        # collapsible again from the same toolbar button.
-        #
-        # Collapsed is `setVisible(False)` on the strip rather than a zero
-        # splitter size: a hidden pane cannot be dragged back open by
-        # accident, so the button is the only thing that decides.
+        # The full image and the compare panels are not shown together. The
+        # splitter that put a strip under the image split the scarcest thing
+        # on this page -- the area you look at pixels in -- and made both
+        # halves too small to judge a background in. So the area is a stack:
+        # right-clicking the image REPLACES it with the three panels, cut
+        # for their now much larger size, and a right-click (or Esc) in the
+        # panels puts the image back at the camera it had.
         self._compare_strip = prev_box
-        self._preview_split = QSplitter(Qt.Vertical)
-        self._preview_split.addWidget(self._build_full_image_page())
-        self._preview_split.addWidget(prev_box)
-        self._preview_split.setChildrenCollapsible(False)
-        self._preview_split.setStretchFactor(0, 3)
-        self._preview_split.setStretchFactor(1, 1)
-        prev_box.setVisible(False)
-        crl.addWidget(self._preview_split, stretch=3)
+        self._view_area = QStackedWidget()
+        self._view_area.addWidget(self._build_full_image_page())   # FULL
+        self._view_area.addWidget(prev_box)                        # COMPARE
+        self._view_area.setCurrentIndex(self._VIEW_FULL)
+        crl.addWidget(self._view_area, stretch=3)
+
+        # A right-click anywhere in the compare area goes back to the image.
+        # An event filter rather than a handler on the panels: the pyqtgraph
+        # ViewBoxes take no mouse input at all (a snapshot has no camera),
+        # and the gesture has to work on the whole area, header and status
+        # line included, not only where a panel happens to be.
+        for widget in (prev_box, self._preview_gv, self._preview_gv.viewport(),
+                       self._preview_status):
+            if widget is not None:
+                widget.installEventFilter(self)
+        # Esc is the same way out, for a hand already on the keyboard --
+        # handled in `keyPressEvent` / `eventFilter` rather than by a
+        # QShortcut. A shortcut has to be connected to something, and a
+        # bound method of this page closes a Python reference cycle through
+        # sip that the between-test `gc.collect()` then walks into: measured
+        # here as a deterministic segfault of test_step0_dataset_switch.py,
+        # the same failure fd205f2 hit connecting to a pyqtgraph scene
+        # signal. The event handlers need no connection at all.
 
         # Metrics + Decision 横排（都在右侧底部）
         bottom_row = QHBoxLayout()
@@ -1474,18 +1482,6 @@ class Step0Page(QWidget):
             "QPushButton:hover{border-color:#aaa;}"
             "QPushButton:disabled{color:#555;border-color:#333;}"
         )
-        # The compare panels are no longer the place the user starts from,
-        # so this reads as EXPANDING an area rather than going "back".
-        back = QPushButton("⊞ Compare panels")
-        back.setCheckable(True)
-        back.setToolTip("Show or hide the three-panel compare strip under "
-                        "the image. A right-click on the image opens it by "
-                        "itself and fills it with a snapshot of that spot.")
-        back.setStyleSheet(btn_style)
-        back.toggled.connect(self._on_compare_strip_toggled)
-        self._btn_show_compare = back
-        bar.addWidget(back)
-
         # ── the method switch, on top of the image it changes ───────────
         #
         # A PREVIEW, and nothing else: Original serves raw pixels, TopHat and
@@ -1808,7 +1804,12 @@ class Step0Page(QWidget):
             # before the first tile of it is painted.
             self._apply_full_image_display(explore_tab.stack)
 
-    # -- the compare strip -------------------------------------------------
+    # -- the compare mode ---------------------------------------------------
+    #
+    # ONE viewing area, two exclusive modes. A right-click on the image
+    # replaces it with the three panels; a right-click (or Esc) on the
+    # panels puts the image back, at the camera it had -- the stack is a
+    # hidden page, not a torn-down viewer, so nothing is reloaded.
     #
     # There is no drill-down left to support. The panels used to be a small
     # viewer you zoomed and then EXPANDED into the full image, which needed
@@ -1821,51 +1822,98 @@ class Step0Page(QWidget):
     # user is already in and the panels are a snapshot OF it, so the
     # direction of travel is the other way and needs no camera matching.
 
-    def _compare_strip_visible(self):
-        """True when the three compare panels are expanded."""
-        strip = getattr(self, "_compare_strip", None)
-        return strip is not None and not strip.isHidden()
+    def _compare_mode(self):
+        """True when the compare panels ARE the viewing area right now.
 
-    def _set_compare_strip_visible(self, visible):
-        """Expand or collapse the strip, keeping the toolbar button in step.
-
-        Cheap either way, and it recomputes nothing: the panels keep
-        whatever snapshot they hold while collapsed, and the full image
-        above them is not touched.
+        Exclusive with the full image by construction: they are the two
+        pages of one stack, so this is also "the full image is not on
+        screen".
         """
-        strip = getattr(self, "_compare_strip", None)
-        if strip is None:
+        area = getattr(self, "_view_area", None)
+        return area is not None and area.currentIndex() == self._VIEW_COMPARE
+
+    def _set_compare_mode(self, on):
+        """Switch the viewing area between the full image and the panels.
+
+        Cheap in both directions and it recomputes nothing. The viewer stack
+        is not torn down, suspended or re-issued: it is a hidden page of the
+        stack, so it comes back with the same camera, the same tiles and no
+        reload. The panels likewise keep whatever snapshot they hold.
+
+        Returning to the image also drops the "Save as patch" affordance?
+        No -- the snapshot outlives the mode, and so does its button.
+        """
+        area = getattr(self, "_view_area", None)
+        if area is None:
             return
-        visible = bool(visible)
-        strip.setVisible(visible)
-        button = getattr(self, "_btn_show_compare", None)
-        if button is not None:
-            was = button.blockSignals(True)
-            button.setChecked(visible)
-            button.blockSignals(was)
-            button.setText("⊟ Compare panels" if visible
-                           else "⊞ Compare panels")
-        split = getattr(self, "_preview_split", None)
-        if visible and split is not None:
-            total = max(split.height(), COMPARE_STRIP_HEIGHT * 2)
-            split.setSizes([total - COMPARE_STRIP_HEIGHT,
-                            COMPARE_STRIP_HEIGHT])
+        on = bool(on)
+        if area.currentIndex() == (self._VIEW_COMPARE if on
+                                   else self._VIEW_FULL):
+            return
+        area.setCurrentIndex(self._VIEW_COMPARE if on else self._VIEW_FULL)
+        if on:
             # Qt hands geometry out over several event-loop turns, and the
-            # panel's SIZE is the size of the crop the very next line of
-            # `_take_compare_snapshot` cuts. Measured on the real slide: the
-            # first right-click after an expand read the strip's stale
-            # geometry and cut a 799x214 frame where 1221x328 was wanted,
-            # so the panels showed it magnified 1.5x and the header's
-            # "same scale as the image" was false for exactly one click.
-            # `activate()` sets the children's geometry NOW, and a visible
-            # widget's setGeometry delivers its resize event synchronously,
-            # which is what gives the pyqtgraph ViewBoxes their rect.
-            layout = strip.layout()
+            # panel's SIZE is the size of the crop `_take_compare_snapshot`
+            # cuts. Measured on the real slide under the old strip: the
+            # first right-click read stale geometry and cut a 799x214
+            # level-1 frame where 1221x328 was wanted, so the panels showed
+            # it magnified 1.5x under a header claiming the image's own
+            # scale. `activate()` sets the children's geometry NOW, and a
+            # visible widget's setGeometry delivers its resize event
+            # synchronously, which is what gives the pyqtgraph ViewBoxes
+            # their rect. The caller still yields one turn before measuring
+            # (see `_take_compare_snapshot`), because pyqtgraph re-lays its
+            # ViewBoxes out on the resize that follows.
+            layout = self._compare_strip.layout()
             if layout is not None:
                 layout.activate()
 
-    def _on_compare_strip_toggled(self, checked):
-        self._set_compare_strip_visible(checked)
+    def _exit_compare_mode(self):
+        """Back to the full image, at the camera it had."""
+        if not self._compare_mode():
+            return False
+        self._set_compare_mode(False)
+        return True
+
+    def _on_compare_escape(self):
+        self._exit_compare_mode()
+
+    @staticmethod
+    def _is_compare_exit_event(event):
+        """True for the two gestures that leave compare mode: a right-click
+        and Esc."""
+        kind = event.type()
+        if kind == QtCore.QEvent.MouseButtonPress:
+            return event.button() == Qt.RightButton
+        if kind == QtCore.QEvent.KeyPress:
+            return event.key() == Qt.Key_Escape
+        return False
+
+    def eventFilter(self, obj, event):
+        """A right-click (or Esc) in the compare area returns to the image.
+
+        The same gesture in both directions -- right-click the image to
+        compare this spot, right-click the comparison to go back -- so the
+        way out is where the hand already is. Consumed here so nothing
+        underneath sees a stray press.
+        """
+        if self._compare_mode() and self._is_compare_exit_event(event):
+            self._exit_compare_mode()
+            return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        """Esc leaves compare mode, wherever the focus happens to be.
+
+        The panels take no input of their own, so a key press walks up to
+        this page unhandled; catching it here needs no shortcut object and
+        no connection to keep alive.
+        """
+        if self._compare_mode() and event.key() == Qt.Key_Escape:
+            self._exit_compare_mode()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _on_compare_nucleus_toggled(self):
         """The DAPI checkbox drives the panels as it drives the full image.
@@ -1882,6 +1930,12 @@ class Step0Page(QWidget):
         snapshot = getattr(self, "_compare_snapshot", None)
         payload = self._last_payload
         if not snapshot or not payload or not payload.get("snapshot"):
+            return
+        # Only while the panels ARE the view. Flipping the checkbox with the
+        # full image on screen must not drag the user into compare mode, and
+        # it need not: the only way back in is a right-click, which retakes
+        # the snapshot anyway.
+        if not self._compare_mode():
             return
         carries = payload.get("nucleus_raw") is not None
         wanted = bool(self.nucleus_channel and self._nucleus_layer_visible()
@@ -1902,7 +1956,7 @@ class Step0Page(QWidget):
     # is no camera to move and no zoom to lose, and the second right-click
     # replaces it wholesale.
     #
-    # RESIZING the strip therefore does not rescale a snapshot already
+    # RESIZING the window therefore does not rescale a snapshot already
     # taken -- the crop was cut for the panel size at the moment of the
     # click, and a resize simply shows it larger or smaller. The next
     # right-click cuts a new one for the new size. That is a deliberate
@@ -1919,6 +1973,11 @@ class Step0Page(QWidget):
     # panels then show it fitted -- honest about being approximate, and only
     # reachable in a page that was never shown (offscreen tests).
     _COMPARE_PANEL_FALLBACK_PX = 256.0
+
+    # The two pages of the ONE viewing area (`_view_area`), in the order
+    # they are added.
+    _VIEW_FULL = 0
+    _VIEW_COMPARE = 1
 
     def _full_image_scale(self):
         """Screen pixels per LEVEL-0 slide pixel in the full image, or None.
@@ -2060,25 +2119,32 @@ class Step0Page(QWidget):
     def _on_full_image_right_click(self, x_l0, y_l0):
         self._take_compare_snapshot(float(x_l0), float(y_l0))
 
-    def _take_compare_snapshot(self, x_l0, y_l0, _expanded=False):
+    def _take_compare_snapshot(self, x_l0, y_l0, _laid_out=False):
         """Fill the three panels with a static crop centred on `(x, y)`.
 
-        Order matters: the strip is expanded FIRST, because the crop's SIZE
-        is the panel's size and a collapsed panel has none. Then the level,
-        the scale and the centre fix the rectangle, and the only thing left
-        to do is read and correct it.
+        Order matters: the viewing area is SWITCHED to the panels first,
+        because the crop's size is the panel's size and the panels are much
+        larger now that they have the whole area -- measuring before the
+        switch would cut the frame for a widget nobody is looking at.
 
-        Expanding is not instantaneous, which is what `_expanded` is for. Qt
+        Switching is not instantaneous, which is what `_laid_out` is for. Qt
         hands geometry out over event-loop turns, and pyqtgraph re-lays its
         ViewBoxes out when the graphics widget is resized -- so on the click
-        that OPENS the strip, the panels still report the size they had
-        while collapsed. Measured on the real slide: the first right-click
-        cut a 799x214 level-1 frame where 1221x328 was wanted, and the
-        panels showed it 1.5x magnified while the header said "the full
-        image's own scale". So that click expands the strip, gives Qt one
-        turn, and comes back. Every later click, with the strip already
-        open, runs straight through -- there is no timer in the common
-        path, and this one is a single `singleShot(0)`, not a wait loop.
+        that ENTERS compare mode, the panels still report the size they had
+        before. Measured on the real slide under the old strip: the first
+        right-click cut a 799x214 level-1 frame where 1221x328 was wanted,
+        and the panels showed it 1.5x magnified while the header said "the
+        full image's own scale". So that click switches, gives Qt one turn,
+        and comes back. Every later click, already in compare mode, runs
+        straight through -- there is no timer in the common path, and this
+        one is a single `singleShot(0)`, not a wait loop.
+
+        The SCALE is read off the full image's ViewBox after the switch. A
+        hidden stack page keeps the geometry it was laid out with, so that
+        is still the scale the user was looking at when they clicked.
+
+        A pass that cannot cut a frame puts the full image back rather than
+        leaving the user in an empty comparison.
         """
         explore_tab = getattr(self, "_explore_tab", None)
         stack = getattr(explore_tab, "stack", None) if explore_tab else None
@@ -2090,18 +2156,19 @@ class Step0Page(QWidget):
             self._preview_status.setText(
                 f"A {busy} run is using the GPU — snapshot not taken.")
             return None
-        if not self._compare_strip_visible() and not _expanded:
-            self._set_compare_strip_visible(True)
+        if not self._compare_mode() and not _laid_out:
+            self._set_compare_mode(True)
             self._preview_status.setText("Taking snapshot…")
             QTimer.singleShot(0, lambda: self._take_compare_snapshot(
-                x_l0, y_l0, _expanded=True))
+                x_l0, y_l0, _laid_out=True))
             return None
         provider, controller = stack.provider, stack.controller
         scale = self._full_image_scale()
         if scale is None:
+            self._exit_compare_mode()
             return None
 
-        self._set_compare_strip_visible(True)
+        self._set_compare_mode(True)
         pw_px, ph_px = self._compare_panel_px()
 
         level = int(getattr(controller, "level", 0) or 0)
@@ -2109,8 +2176,10 @@ class Step0Page(QWidget):
             ds = float(provider.level_downsample(level))
             lh, lw = (int(v) for v in provider.level_shape(level))
         except Exception:                                   # noqa: BLE001
+            self._exit_compare_mode()
             return None
         if not (ds > 0 and lh > 0 and lw > 0):
+            self._exit_compare_mode()
             return None
         # The panel's own extent, in the pixels the crop is read in:
         # `scale * ds` is screen pixels per LEVEL pixel.
@@ -2222,7 +2291,7 @@ class Step0Page(QWidget):
             f"{int(rect[0])}..{int(rect[0] + rect[2])}.")
 
     def _update_compare_level_label(self, level):
-        """"downsampled xN" on the strip, exactly while it is true."""
+        """"downsampled xN" on the panels' header, exactly while it is true."""
         label = getattr(self, "_compare_level_lbl", None)
         if label is None:
             return
@@ -2279,7 +2348,7 @@ class Step0Page(QWidget):
         correction run holding the GPU): `_show_full_image` refuses on its
         own terms and the placeholder keeps saying why.
         """
-        if getattr(self, "_preview_split", None) is None:
+        if getattr(self, "_view_area", None) is None:
             return
         self._full_image_source = "original"
 
@@ -6287,7 +6356,7 @@ class Step0Page(QWidget):
         self._applied_corrected_decisions = {}
         self._incremental_processed = None
         # Full Image shows one source of the OLD dataset, and the compare
-        # strip a snapshot of it. Both are dropped here, BEFORE the new
+        # panels a snapshot of it. Both are dropped here, BEFORE the new
         # loader is bound: the viewer stack is torn down by the explore tab
         # itself, and a snapshot of the previous slide left on screen under
         # the new slide's name is the worst kind of wrong picture.
@@ -6301,8 +6370,8 @@ class Step0Page(QWidget):
             self._compare_where_lbl.setText(
                 "Right-click the full image to take a snapshot here.")
             self._update_compare_level_label(None)
-        if getattr(self, "_preview_split", None) is not None:
-            self._set_compare_strip_visible(False)
+        if getattr(self, "_view_area", None) is not None:
+            self._set_compare_mode(False)
 
         self._refresh_all_channel_states()
 

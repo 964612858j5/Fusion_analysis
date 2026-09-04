@@ -278,10 +278,10 @@ def test_the_compare_rect_path_defers_to_the_full_image_while_it_is_shown(app):
     assert popup.overview.current_view_rect() == (1000.0, 1500.0, 2000.0, 2800.0)
 
 
-def test_expanding_the_compare_strip_leaves_the_rectangle_alone(app):
-    """The strip has no camera, so opening it changes nothing about which
-    viewport the navigator draws: the full image is still the only thing
-    with one, and it is still on screen."""
+def test_entering_compare_mode_leaves_the_rectangle_alone(app):
+    """The panels have no camera, so switching to them changes nothing
+    about which viewport the navigator draws: the full image is still the
+    only thing with one, and it keeps it while it is off screen."""
     ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
     page = _page(app, ctl)
     popup = page._ensure_tissue_navigator()
@@ -289,7 +289,7 @@ def test_expanding_the_compare_strip_leaves_the_rectangle_alone(app):
     before = popup.overview.current_view_rect()
     assert before is not None
 
-    page._set_compare_strip_visible(True)
+    page._set_compare_mode(True)
 
     assert popup.overview.current_view_rect() == before
 

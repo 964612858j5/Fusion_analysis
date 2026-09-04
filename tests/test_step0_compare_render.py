@@ -39,7 +39,7 @@ def _page(app):
     page.current_channel = "CD3"
     # The compare strip is collapsed until a snapshot asks for it; these
     # tests are about what it PAINTS, so it is expanded by hand.
-    page._set_compare_strip_visible(True)
+    page._set_compare_mode(True)
     page.resize(1500, 900)
     page.show()
     QtTest.QTest.qWait(50)

@@ -224,7 +224,7 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     # Full-image-first: a committed switch LANDS on the new slide's full
     # image (raw, first marker), and the compare strip -- which could only
     # hold a snapshot of the OLD slide -- is collapsed.
-    assert page._compare_strip_visible() is False
+    assert page._compare_mode() is False
 
 
 def test_the_clearing_happens_before_the_new_loader_is_bound(app, tmp_path,
@@ -512,7 +512,7 @@ def test_an_open_full_image_is_unbound_before_the_new_dataset_is_bound(
     tab = _RecordingExploreTab(page)
     page._explore_tab = tab
     page._full_image_source = "tophat"
-    page._set_compare_strip_visible(True)
+    page._set_compare_mode(True)
     old_loader = page.loader
 
     made, _ = _switch_to_b(page, tmp_path, monkeypatch)
@@ -522,7 +522,7 @@ def test_an_open_full_image_is_unbound_before_the_new_dataset_is_bound(
     assert tab.calls[0] == (None, old_loader)
     assert tab.calls[-1][0] == page.ome_path
     assert tab.calls[-1][1] is made
-    assert page._compare_strip_visible() is False, (
+    assert page._compare_mode() is False, (
         "a snapshot of the previous slide must not survive the switch")
     assert page._full_image_source == "original"
     # ...and it was reopened for the NEW dataset, as Original.

@@ -121,8 +121,8 @@ def test_the_viewer_is_created_once_on_first_use_and_lives_in_the_stack(
     from block01.ui.step0.step0_explore_tab import Step0ExploreTab
 
     page = full_image_page
-    assert page._preview_split.count() == 2, (
-        "the workspace is the full image plus the compare strip")
+    assert page._view_area.count() == 2, (
+        "the viewing area is the full image and the compare panels")
 
     if page._explore_tab is None:
         assert page.findChildren(Step0ExploreTab) == [], (
@@ -134,7 +134,7 @@ def test_the_viewer_is_created_once_on_first_use_and_lives_in_the_stack(
     assert first is again, "a second viewer was created"
     found = page.findChildren(Step0ExploreTab)
     assert found == [first], f"expected exactly one, found {len(found)}"
-    full_page = page._preview_split.widget(0)
+    full_page = page._view_area.widget(page._VIEW_FULL)
     assert first in full_page.findChildren(Step0ExploreTab), (
         "the viewer is not inside the full-image page")
 
@@ -222,11 +222,11 @@ def test_collapsing_the_strip_changes_nothing_but_the_strip(full_image_page,
     calls_after = list(tab.calls)
     ranges_before = [vb.viewRange() for vb in page._preview_vbs]
 
-    page._set_compare_strip_visible(True)
-    page._set_compare_strip_visible(False)
+    page._set_compare_mode(True)
+    page._set_compare_mode(False)
 
-    assert page._compare_strip_visible() is False
-    assert tab.calls == calls_after, "collapsing asked the viewer again"
+    assert page._compare_mode() is False
+    assert tab.calls == calls_after, "the mode switch asked the viewer again"
     assert [vb.viewRange() for vb in page._preview_vbs] == ranges_before
     assert page._full_image_source == "cucim", "the choice is remembered"
 

@@ -237,6 +237,69 @@ def test_the_method_switch_keeps_the_image_on_screen(app, monkeypatch):
     assert tab.calls[-1][0] == "CD3" and tab.calls[-1][1] == "tophat"
 
 
+# ── 1b. the toolbar keeps one place ──────────────────────────────────────
+
+def _toolbar_y(page):
+    """The pinned bar's top, in page coordinates."""
+    return page._view_toolbar.mapTo(page, QtCore.QPoint(0, 0)).y()
+
+
+def test_the_toolbar_sits_in_the_same_place_in_every_state(app, monkeypatch):
+    """It used to live inside the full-image page, alone in that page's
+    layout until the viewer widget was created -- so with no dataset Qt
+    centred it and the bar sat halfway down the workspace, then jumped to
+    the top when a slide loaded."""
+    _no_workers(monkeypatch)
+    page = sp.Step0Page()
+    page.resize(900, 700)
+    page.show()
+    QtTest.QTest.qWait(30)
+    before_load = _toolbar_y(page)
+
+    page.loader = _GpuPathLoader()
+    page.ome_path = "/fake/slide.ome.tif"
+    page.patches = []
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page.current_channel = "CD3"
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack())
+    page._enter_full_image_landing()
+    QtTest.QTest.qWait(30)
+    after_load = _toolbar_y(page)
+
+    page._set_compare_mode(True)
+    QtTest.QTest.qWait(30)
+    in_compare = _toolbar_y(page)
+    assert page._view_toolbar.isVisible(), "the bar went away in compare mode"
+
+    page._set_compare_mode(False)
+    QtTest.QTest.qWait(30)
+    back = _toolbar_y(page)
+
+    assert before_load == after_load == in_compare == back, (
+        before_load, after_load, in_compare, back)
+
+
+def test_the_method_switch_is_disabled_while_the_panels_are_up(app,
+                                                               monkeypatch):
+    """Disabled, not hidden: the bar's geometry is identical in both modes,
+    and the buttons still say which source the image is on."""
+    _no_workers(monkeypatch)
+    page = _page(app)
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack())
+    page._enter_full_image_landing()
+    assert page._full_method_buttons["tophat"].isEnabled()
+
+    page._set_compare_mode(True)
+
+    assert not any(b.isEnabled() for b in page._full_method_buttons.values())
+    assert page._full_method_buttons["original"].isChecked()
+
+    page._set_compare_mode(False)
+
+    assert page._full_method_buttons["tophat"].isEnabled()
+
+
 # ── 2. the method buttons on top of the full image ───────────────────────
 
 def test_the_header_carries_three_exclusive_method_buttons(app):

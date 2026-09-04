@@ -1143,7 +1143,20 @@ class Step0Page(QWidget):
         self._view_area.addWidget(self._build_full_image_page())   # FULL
         self._view_area.addWidget(prev_box)                        # COMPARE
         self._view_area.setCurrentIndex(self._VIEW_FULL)
-        crl.addWidget(self._view_area, stretch=3)
+        # The toolbar is PINNED above the area, in every state. It used to
+        # live inside the full-image page, whose layout held nothing else
+        # until the viewer widget was created on first use -- so with no
+        # dataset loaded Qt centred it vertically and the bar sat in the
+        # middle of the workspace, then jumped to the top the moment a slide
+        # arrived. Built once, outside the stack, it cannot move: no
+        # dataset, full image and compare mode all put it in the same place.
+        view_box = QWidget()
+        view_lay = QVBoxLayout(view_box)
+        view_lay.setContentsMargins(0, 0, 0, 0)
+        view_lay.setSpacing(4)
+        view_lay.addWidget(self._build_view_toolbar())
+        view_lay.addWidget(self._view_area, stretch=1)
+        crl.addWidget(view_box, stretch=3)
 
         # A right-click anywhere in the compare area goes back to the image.
         # An event filter rather than a handler on the panels: the pyqtgraph
@@ -1454,27 +1467,49 @@ class Step0Page(QWidget):
     # `_queue_preview`, has no caller anywhere in the repo. Whoever
     # reconnects it must add it here in the same change.
 
-    # ── full image (Patch Preview page 1) ───────────────────────────────
+    # ── the viewing area: pinned toolbar + full-image page ──────────────
 
     def _build_full_image_page(self):
-        """The full-image page: a fixed toolbar plus the ONE Explore tab.
+        """The full-image page of the viewing area: the ONE Explore tab.
 
         This is the LANDING view of the Background Correction workspace: a
         loaded dataset opens here, on the whole slide, with no patch and no
         Process. The compare panels are the other page of the same stack,
-        expanded on demand by the "Compare panels" button.
+        and a right-click swaps them.
 
         The Explore tab is created here and nowhere else -- this page owns
-        it. The toolbar lives inside the page, so it is visible exactly when
-        the page is, and the way back to the panels can never be hidden by
-        the viewer's own placeholder swapping.
+        it. The toolbar is NOT in it: it is pinned above the whole area
+        (`_build_view_toolbar`), so it keeps one place in every state.
         """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(0)
+        # The viewer widget itself is created on FIRST USE, not here.
+        # Constructing this page is on the critical path of building
+        # Step0 -- every construction of the page would otherwise also
+        # construct the viewer widget, for a user who may never open the
+        # full image. (It also measurably worsened an existing
+        # pyqtgraph/offscreen crash in the Step0 test suite, which builds
+        # 32 pages in one process.) No new state is needed to defer it:
+        # the dataset path it needs already lives in `self.ome_path`.
+        self._explore_tab = None
+        self._full_image_host = layout
+        return page
 
-        bar = QHBoxLayout()
+    def _build_view_toolbar(self):
+        """The one bar above the viewing area, in every state.
+
+        Built once and never re-parented, so its geometry is the same with
+        no dataset, on the full image and in compare mode. What it can DO
+        changes with the mode -- the method switch drives the full image, so
+        it is disabled while the panels are up -- but where it is does not:
+        a control that moves when the view changes is a control the eye has
+        to find again every time.
+        """
+        bar_widget = QWidget()
+        bar = QHBoxLayout(bar_widget)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(6)
         btn_style = (
             "QPushButton{color:#ddd;border:1px solid #555;border-radius:3px;"
@@ -1593,19 +1628,8 @@ class Step0Page(QWidget):
         self._full_source_base_text = "—"
         bar.addWidget(self._full_source_lbl)
         bar.addStretch(1)
-        layout.addLayout(bar)
-
-        # The viewer widget itself is created on FIRST USE, not here.
-        # Constructing this page is on the critical path of building
-        # Step0 -- every construction of the page would otherwise also
-        # construct the viewer widget, for a user who may never open the
-        # full image. (It also measurably worsened an existing
-        # pyqtgraph/offscreen crash in the Step0 test suite, which builds
-        # 32 pages in one process.) No new state is needed to defer it:
-        # the dataset path it needs already lives in `self.ome_path`.
-        self._explore_tab = None
-        self._full_image_host = layout
-        return page
+        self._view_toolbar = bar_widget
+        return bar_widget
 
     def _ensure_explore_tab(self):
         """Create the ONE Explore tab, on first use."""
@@ -1867,6 +1891,9 @@ class Step0Page(QWidget):
             layout = self._compare_strip.layout()
             if layout is not None:
                 layout.activate()
+        # The method switch drives the full image; greyed while the panels
+        # are up, live again on the way back.
+        self._update_full_method_buttons()
 
     def _exit_compare_mode(self):
         """Back to the full image, at the camera it had."""
@@ -2547,18 +2574,26 @@ class Step0Page(QWidget):
         Checked state is driven from the page's state, never left to the
         click: `_show_full_image` can refuse (a busy GPU, no channel), and a
         button that stayed pressed would be claiming something false.
+
+        In compare mode the switch is DISABLED rather than hidden. It
+        changes what the full image serves, and the full image is not on
+        screen -- but the bar keeps its geometry in every state, so the
+        buttons keep their place and say, greyed, that they are about the
+        other view. They still show which source the image is on.
         """
         buttons = getattr(self, "_full_method_buttons", None)
         if not buttons:
             return
         blocked = self._full_image_preview_blocked()
+        comparing = self._compare_mode()
         ch = self.current_channel
         shown = "original" if blocked else self._full_image_source
         group = getattr(self, "_full_method_group", None)
         if group is not None:
             group.setExclusive(False)
         for source, button in buttons.items():
-            enabled = bool(ch) and (source == "original" or not blocked)
+            enabled = (bool(ch) and not comparing
+                       and (source == "original" or not blocked))
             button.setEnabled(enabled)
             button.setChecked(source == shown)
             if source != "original" and blocked and ch:

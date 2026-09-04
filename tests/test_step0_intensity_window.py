@@ -222,6 +222,53 @@ def test_the_widget_inside_is_the_workbenchs_own_inspector(app):
         assert ctrl in panel.findChildren(QtWidgets.QWidget), ctrl
 
 
+def test_the_button_restores_a_minimised_window(app):
+    """Reported from manual testing: minimise the Intensity window and the
+    button that opened it stops working.
+
+    A minimised window is still `isVisible()` -- Qt counts it as shown, just
+    shown as an icon -- so `show()` was a no-op and `raise_()` raised
+    something nobody could see. The minimised bit has to be cleared.
+    """
+    page = _page(app)
+    win = page.show_intensity_window()
+    panel = page.intensity_panel()
+    win.showMinimized()
+    assert win.isMinimized()
+
+    assert page.show_intensity_window() is win
+
+    assert not win.isMinimized(), "the window is still minimised"
+    assert win.isVisible()
+    # The detach state is untouched: it is still the workbench's inspector.
+    assert page.intensity_panel() is panel
+    assert page._cond_workbench.inspector_is_detached()
+
+
+def test_the_toggle_restores_a_minimised_window_rather_than_hiding_it(app):
+    """Toggling a minimised window into hidden would take away the only
+    thing left to click on."""
+    page = _page(app)
+    win = page.show_intensity_window()
+    win.showMinimized()
+
+    page.toggle_intensity_window()
+
+    assert not win.isMinimized()
+    assert win.isVisible()
+
+
+def test_the_button_reopens_a_closed_window(app):
+    page = _page(app)
+    win = page.show_intensity_window()
+    win.close()
+    assert not win.isVisible()
+
+    assert page.show_intensity_window() is win
+
+    assert win.isVisible()
+
+
 def test_toggle_hides_and_shows_the_same_window(app):
     page = _page(app)
     win = page.toggle_intensity_window()

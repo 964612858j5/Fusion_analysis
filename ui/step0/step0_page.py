@@ -4139,25 +4139,55 @@ class Step0Page(QWidget):
         None while the window has never been opened."""
         return getattr(self, "_intensity_panel", None)
 
+    @staticmethod
+    def _bring_to_front(win):
+        """Put `win` in front of the user, whatever state it was left in.
+
+        MINIMISED is the state that needed saying out loud. A minimised
+        window is still `isVisible()` -- Qt counts it as shown, just shown
+        as an icon -- so `show()` on it is a no-op and `raise_()` raises
+        something nobody can see. Which is exactly what the Intensity button
+        did: minimise the window, press the button, and nothing happened,
+        with no way back to it except the task bar.
+
+        So the minimised BIT is cleared first, and the active one set in the
+        same call -- `setWindowState` replaces the whole state word, so it
+        has to be built from the current one rather than assigned. Then
+        show / raise / activate, which are what a window that was hidden,
+        or behind something, or never opened, needs. Nothing here touches
+        the detach state: the window still hosts the workbench's inspector
+        and still does after being restored.
+        """
+        win.setWindowState(
+            (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
     def show_intensity_window(self):
         win = self._ensure_intensity_window()
         if win is None:
             return None
         self._sync_intensity_to_channel()
-        win.show()
-        win.raise_()
+        self._bring_to_front(win)
         return win
 
     def toggle_intensity_window(self):
+        """The button's other gesture: hide a window that is up, bring back
+        one that is not.
+
+        MINIMISED counts as "not up" here, whatever `isVisible()` says about
+        it. Toggling a minimised window into hidden would take the only
+        thing the user can click on away from them.
+        """
         win = self._ensure_intensity_window()
         if win is None:
             return None
-        if win.isVisible():
+        if win.isVisible() and not win.isMinimized():
             win.hide()
         else:
             self._sync_intensity_to_channel()
-            win.show()
-            win.raise_()
+            self._bring_to_front(win)
         return win
 
     def _engage_conditioning_workbench(self):

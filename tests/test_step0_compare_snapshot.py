@@ -108,6 +108,9 @@ class _Controller:
         self.compute = _Compute()
         self.grid = type("G", (), {"tile_size": 512})()
         self.view_rects = []
+        self.jumps = []
+        self._current_bbox = None
+        self.suspended = False
         self.view_box = None
 
     def set_marker_visible(self, _v):
@@ -116,8 +119,17 @@ class _Controller:
     def set_display_mapping(self, *_a, **_k):
         pass
 
+    def jump_to(self, y0, x0, w, h):
+        """The navigator's own path into the full image -- recorded so the
+        compare-mode jump can be told apart from it."""
+        self.jumps.append((y0, x0, w, h))
+        self._current_bbox = (y0, x0, y0 + h, x0 + w)
+        if self.view_box is not None:
+            self.view_box.set_rect(x0, y0, w, h)
+
     def set_view_rect_l0(self, x0, y0, w, h):
         self.view_rects.append((x0, y0, w, h))
+        self._current_bbox = (y0, x0, y0 + h, x0 + w)
         # The camera really MOVES, as the real controller's does: the
         # round-trip contract (enter compare mode, come back, and land on
         # the rectangle you left) is only checkable against a view box that
@@ -1383,3 +1395,118 @@ def test_the_dapi_underlay_follows_the_switch(app):
 
     assert all(item is None or not item.isVisible()
                for item in page._compare_under_nuc_imgs)
+
+
+# ── 10. the Tissue Preview navigates the panels too ──────────────────────
+#
+# Reported from manual testing: clicking a far point on the thumbnail jumped
+# the full image and did nothing at all in compare mode -- the one mode where
+# the visible slide is a few hundred microns wide and finding a spot by
+# dragging is hardest.
+
+
+def test_navigating_in_compare_mode_centres_the_panels_on_the_point(app):
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+    _cx, _cy, scale = page._compare_camera()
+
+    page._on_tissue_navigate(3300, 900)          # (y, x), full-image pixels
+
+    cx, cy, new_scale = page._compare_camera()
+    assert (cx, cy) == pytest.approx((900.0, 3300.0), rel=1e-9)
+    assert new_scale == pytest.approx(scale, rel=1e-9), (
+        "the jump changed the magnification")
+
+
+def test_navigating_in_compare_mode_asks_for_the_pixels(app):
+    """Immediately: this is a discrete jump, not a stream of drag events,
+    so there is nothing for the settle to debounce."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    req = page._compare_snapshot_req
+
+    page._on_tissue_navigate(3300, 900)
+
+    assert page._compare_snapshot_req == req + 1
+    _settle(page)
+    crop = page._compare_snapshot["rect_l0"]
+    view = _view(page)
+    assert crop[0] <= view[0] + 1.0 and crop[1] <= view[1] + 1.0
+    assert crop[0] + crop[2] >= view[0] + view[2] - 1.0
+    assert crop[1] + crop[3] >= view[1] + view[3] - 1.0
+
+
+def test_the_destination_is_on_screen_before_the_crop_arrives(app):
+    """The floor is what makes the jump feel instant: the panels are over
+    the new place, showing coarse slide, from the moment of the click."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    _underlay_ready(page)
+
+    page._on_tissue_navigate(3300, 900)
+
+    for idx in range(3):
+        assert _covered(page, idx), f"panel {idx} jumped onto background"
+
+
+def test_the_thumbnail_draws_the_panels_viewport_in_compare_mode(app):
+    page = _page(app)
+    popup = page._ensure_tissue_navigator()
+    _snapshot(page, 2000, 1500)
+
+    x0, y0, w, h = _view(page)
+    assert popup.overview.current_view_rect() == pytest.approx(
+        (y0, y0 + h, x0, x0 + w), rel=1e-9)
+
+    page._on_tissue_navigate(3300, 900)
+
+    x0, y0, w, h = _view(page)
+    assert popup.overview.current_view_rect() == pytest.approx(
+        (y0, y0 + h, x0, x0 + w), rel=1e-9)
+    # ...and it really moved to where the click was.
+    rect = popup.overview.current_view_rect()
+    assert ((rect[0] + rect[1]) / 2.0,
+            (rect[2] + rect[3]) / 2.0) == pytest.approx((3300.0, 900.0),
+                                                        rel=1e-9)
+
+
+def test_the_thumbnail_follows_a_zoom_of_the_panels(app):
+    page = _page(app)
+    popup = page._ensure_tissue_navigator()
+    _snapshot(page, 2000, 1500)
+    before = popup.overview.current_view_rect()
+
+    for _ in range(3):
+        page._preview_vbs[0].wheelEvent(_WheelEvent())
+
+    after = popup.overview.current_view_rect()
+    assert after != before
+    x0, y0, w, h = _view(page)
+    assert after == pytest.approx((y0, y0 + h, x0, x0 + w), rel=1e-9)
+
+
+def test_the_thumbnail_goes_back_to_the_full_image_on_the_way_out(app):
+    page = _page(app)
+    popup = page._ensure_tissue_navigator()
+    _snapshot(page, 2000, 1500)
+    for _ in range(3):
+        page._preview_vbs[0].wheelEvent(_WheelEvent())
+    panels = popup.overview.current_view_rect()
+
+    page._on_compare_escape()
+
+    back = popup.overview.current_view_rect()
+    assert back != panels, "the navigator still shows the panels' viewport"
+    (vx0, vx1), (vy0, vy1) = page._explore_tab.stack.view.view_box.viewRange()
+    assert back == pytest.approx((vy0, vy1, vx0, vx1), rel=1e-9)
+
+
+def test_navigating_outside_compare_mode_still_moves_the_full_image(app):
+    page = _page(app)
+    ctl = page._explore_tab.stack.controller
+
+    page._on_tissue_navigate(3300, 900)
+
+    assert page._compare_mode() is False
+    assert ctl.jumps, "the full image did not move"

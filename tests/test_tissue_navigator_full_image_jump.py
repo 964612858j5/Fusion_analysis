@@ -278,10 +278,12 @@ def test_the_compare_rect_path_defers_to_the_full_image_while_it_is_shown(app):
     assert popup.overview.current_view_rect() == (1000.0, 1500.0, 2000.0, 2800.0)
 
 
-def test_entering_compare_mode_leaves_the_rectangle_alone(app):
-    """The panels have no camera, so switching to them changes nothing
-    about which viewport the navigator draws: the full image is still the
-    only thing with one, and it keeps it while it is off screen."""
+def test_entering_compare_mode_without_a_snapshot_leaves_the_rectangle(app):
+    """The panels DO have a camera now, and while they are the view the
+    navigator draws theirs -- but only once they are looking at something.
+    Compare mode with no snapshot in it has a ViewBox range and not a view,
+    and the true rectangle is the full image's, which is where the user is
+    about to come back to."""
     ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
     page = _page(app, ctl)
     popup = page._ensure_tissue_navigator()

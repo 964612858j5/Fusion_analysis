@@ -2030,6 +2030,9 @@ class Step0Page(QWidget):
         # The method switch drives the full image; greyed while the panels
         # are up, live again on the way back.
         self._update_full_method_buttons()
+        # And the thumbnail's viewport rectangle changes subject with the
+        # mode, in both directions.
+        self._update_full_image_view_rect()
 
     def _exit_compare_mode(self):
         """Back to the full image, at the camera the PANELS were on.
@@ -2062,6 +2065,10 @@ class Step0Page(QWidget):
         self._set_compare_mode(False)
         if camera is not None:
             self._apply_full_image_camera(*camera)
+        # The full image is the view again, so the thumbnail's rectangle is
+        # its viewport again -- and it is the one the camera has just been
+        # moved to, not the one it had before.
+        self._update_full_image_view_rect()
         return True
 
     def _apply_full_image_view_rect(self, rect):
@@ -2302,6 +2309,7 @@ class Step0Page(QWidget):
         # held under the guard), and leaving a stale width behind would make
         # the next user gesture look like a zoom out of nowhere.
         self._compare_last_view_w = width or None
+        self._update_compare_view_rect()
         return True
 
     def _compare_panel_px(self):
@@ -2600,6 +2608,9 @@ class Step0Page(QWidget):
             "region": (y0, x0, h, w), "cached": sorted(cached),
             "keep_view": bool(keep_view),
         }
+        # The panels are now looking at something, which is what the
+        # thumbnail's viewport rectangle is allowed to describe.
+        self._update_compare_view_rect()
         self._compare_where_lbl.setText(
             f"Snapshot at ({int(y_l0)}, {int(x_l0)}) · level {level} · "
             f"{w}×{h} px")
@@ -2681,6 +2692,7 @@ class Step0Page(QWidget):
             self._compare_range_syncing = False
         if not self._compare_mode():
             return
+        self._update_compare_view_rect()
         # Zooming OUT across a pyramid boundary refills at once, without
         # waiting for the settle. The coarser level is the cheap direction
         # -- fewer level pixels for more slide -- and it is the direction
@@ -4267,16 +4279,52 @@ class Step0Page(QWidget):
             return None
         return (float(shape[0]) / h, float(shape[1]) / w)
 
+    def _navigate_compare_to(self, y, x):
+        """Move the three panels' shared camera onto slide point `(y, x)`.
+
+        The compare panels' answer to a click on the thumbnail. It used to
+        have none: `_on_tissue_navigate` returned early unless the full
+        image was the view, so clicking a far corner of the tissue while
+        comparing did exactly nothing -- in the one mode where the visible
+        slide is a few hundred microns wide and finding a spot by dragging
+        is hardest.
+
+        The SCALE is kept, and the centre is the clicked point: the same
+        contract the full image's jump has, which is what makes the
+        thumbnail one control rather than two that behave differently
+        depending on which mode is up. There is no "zoom in if the view is
+        the whole slide" case here, because the panels' view is never the
+        whole slide -- they are cut for a place.
+
+        The refill is asked for at once rather than through the settle: this
+        is a discrete jump, not a stream of drag events, and there is
+        nothing to debounce. The floor is already under the panels, so the
+        destination is on screen before the crop for it has been read.
+        """
+        camera = self._compare_camera()
+        if camera is None:
+            return False
+        _cx, _cy, scale = camera
+        if not self._apply_compare_camera(float(x), float(y), scale):
+            return False
+        self._update_compare_view_rect()
+        self._compare_refill_timer.stop()
+        self._maybe_refill_compare_snapshot()
+        return True
+
     def _on_tissue_navigate(self, y, x):
         """A click on the Tissue Preview at full-image `(y, x)`.
 
         With the full image on screen: move its camera so the clicked spot is
         centred, keeping the current viewport SIZE (the user's zoom), clamped
         to the slide. Nothing else changes -- selection, layers, parameters.
-        Ignored while a production run holds the camera (`suspended`), and
-        ignored when the full image is not on screen: the compare panels show
-        a fixed patch and have no camera to move.
+        Ignored while a production run holds the camera (`suspended`).
+
+        In COMPARE mode the panels are the view, and they have a camera of
+        their own; `_navigate_compare_to` moves that one instead.
         """
+        if self._compare_mode():
+            return self._navigate_compare_to(y, x)
         if not self._full_image_visible():
             return
         explore_tab = getattr(self, "_explore_tab", None)
@@ -4324,11 +4372,41 @@ class Step0Page(QWidget):
         self._update_full_image_view_rect()
         self._update_full_level_hint()
 
-    def _update_full_image_view_rect(self):
-        """Draw the full image's current viewport on the Tissue Preview --
-        only while the full image is what the user is looking at."""
+    def _update_compare_view_rect(self):
+        """Draw the PANELS' viewport on the Tissue Preview.
+
+        The rectangle has to describe what is on screen, and in compare mode
+        what is on screen is the panels. Leaving the full image's last
+        viewport up there would be a picture of a view nobody is looking at
+        -- and, now that the thumbnail navigates the panels too, a picture
+        that does not move when the click moves them.
+        """
         popup = getattr(self, "_tissue_navigator_popup", None)
-        if popup is None or not self._full_image_visible():
+        if popup is None or not self._compare_mode():
+            return
+        # Only once the panels are looking at something. Compare mode with
+        # no snapshot in it has a ViewBox range but not a VIEW, and drawing
+        # that on the thumbnail would replace a true rectangle -- the full
+        # image's, which is where the user is about to come back to -- with
+        # a meaningless one.
+        rect = (self._compare_view_rect_l0()
+                if getattr(self, "_compare_snapshot", None) else None)
+        if rect is None:
+            popup.overview.clear_current_view_rect()
+            return
+        x0, y0, w, h = (float(v) for v in rect)
+        popup.overview.set_current_view_rect((y0, y0 + h, x0, x0 + w))
+
+    def _update_full_image_view_rect(self):
+        """Draw the current viewport on the Tissue Preview -- the full
+        image's while it is the view, the panels' while they are."""
+        popup = getattr(self, "_tissue_navigator_popup", None)
+        if popup is None:
+            return
+        if self._compare_mode() and getattr(self, "_compare_snapshot", None):
+            self._update_compare_view_rect()
+            return
+        if not self._full_image_visible():
             return
         explore_tab = getattr(self, "_explore_tab", None)
         stack = explore_tab.stack if explore_tab is not None else None

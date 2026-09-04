@@ -342,20 +342,25 @@ def test_with_no_drawing_mode_a_left_drag_neither_pans_nor_navigates(app):
 
 
 def test_with_no_drawing_mode_the_middle_button_pans(app):
+    """The pan belongs to the ViewBox, not to the panel's event filter, so
+    the events are DELIVERED rather than handed to `eventFilter` -- calling
+    the filter directly would only ever test the filter, and the filter is
+    no longer where the gesture lives."""
     panel = _panel(None)
     panel.resize(400, 400)
     panel.show()
+    QtTest.QTest.qWaitForWindowExposed(panel)
     panel.vb.setRange(xRange=(0, 600), yRange=(0, 800), padding=0)
     QtTest.QTest.qWait(30)
     before = _viewrange(panel)
     panel._ov_pos = lambda _sp: (50, 50)
     vp = panel.gview.viewport()
-    press = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, QtCore.QPointF(50, 50),
-                              QtCore.Qt.MiddleButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier)
-    move = QtGui.QMouseEvent(QtCore.QEvent.MouseMove, QtCore.QPointF(90, 70),
-                             QtCore.Qt.NoButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier)
-    panel.eventFilter(vp, press)
-    panel.eventFilter(vp, move)
+    app.sendEvent(vp, QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonPress, QtCore.QPointF(50, 50),
+        QtCore.Qt.MiddleButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier))
+    app.sendEvent(vp, QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove, QtCore.QPointF(90, 70),
+        QtCore.Qt.NoButton, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier))
     assert _viewrange(panel) != before
     panel.close()
 

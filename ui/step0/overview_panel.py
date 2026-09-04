@@ -1053,6 +1053,51 @@ PATCH_BORDER_TOL_OV = 1.5
 #  Overview Panel  (ROI polygon + Patch rectangle dual-mode)
 # ══════════════════════════════════════════════════════════════════════
 
+class _PanViewBox(pg.ViewBox):
+    """The Tissue Preview's ViewBox, which pans itself on the middle button.
+
+    The thumbnail's LEFT button is spoken for in every mode -- it draws
+    rectangles, adds polygon vertices, navigates, and edits the selected
+    rectangle -- so this box has `setMouseEnabled(False, False)`: pyqtgraph
+    must not pan or zoom it behind the panel's back.
+
+    That switch is why the gesture has to live HERE. `ViewBox.mouseDragEvent`
+    accepts every button and THEN multiplies the translation by
+    `state['mouseEnabled']`, so with the mouse disabled a middle drag that
+    reaches the box is accepted and does nothing whatsoever -- it is
+    swallowed, silently, with no fallback and nothing to see. The panel used
+    to answer that by catching the gesture one layer higher, in an event
+    filter on `GraphicsLayoutWidget.viewport()`, and consuming the press. But
+    a filter on one widget only fires when the press is delivered to THAT
+    widget and no filter ahead of it takes it first, and every layer of
+    pyqtgraph's stack below it -- the graphics view, the scene, the item
+    under the cursor -- is a place the press can stop. When it stopped
+    anywhere else the gesture had no owner at all, and the middle button did
+    nothing: the defect this class fixes.
+
+    A ViewBox is reached from ANY of those paths, because that is how
+    pyqtgraph delivers a drag: the scene walks the items under the mouse and
+    the box is the one underneath them all. And it is the object that owns
+    the camera, so the pan is a `translateBy` on itself rather than
+    arithmetic somebody else does to its range.
+
+    The translation is pyqtgraph's own, from `ViewBox.mouseDragEvent`, with
+    the `mouseEnabled` mask left out -- that mask is about the LEFT button
+    this panel has taken over, and it is not allowed to disable this one.
+    """
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() != Qt.MiddleButton:
+            return super().mouseDragEvent(ev, axis=axis)
+        ev.accept()
+        dif = (ev.pos() - ev.lastPos()) * -1
+        tr = pg.functions.invertQTransform(self.childGroup.transform())
+        tr = tr.map(dif) - tr.map(pg.Point(0, 0))
+        self._resetTarget()
+        self.translateBy(x=tr.x(), y=tr.y())
+        self.sigRangeChangedManually.emit(self.state['mouseEnabled'])
+
+
 class OverviewPanel(QWidget):
     """
     Left panel showing the DAPI overview.
@@ -1115,7 +1160,6 @@ class OverviewPanel(QWidget):
         # ── Drawing state ─────────────────────────────────────────────
         self._mode            = 'patch'
         self._drag_start      = None
-        self._pan_last        = None
         self._nav_press       = None   # navigate/pan mode: (pos, r, c) of the press
         self._nav_moved       = False
         # An in-flight move/resize of the selected patch (mode None only):
@@ -1185,7 +1229,8 @@ class OverviewPanel(QWidget):
         self.gview.setBackground("#111")
         self.gview.setMinimumSize(240, 260)
         self.gview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.vb = self.gview.addViewBox(row=0, col=0)
+        self.vb = _PanViewBox()
+        self.gview.addItem(self.vb, row=0, col=0)
         self.vb.setAspectLocked(True)
         self.vb.invertY(True)
         self.vb.setMouseEnabled(x=False, y=False)
@@ -2372,33 +2417,27 @@ class OverviewPanel(QWidget):
         # middle button is the one gesture that means the same thing in all
         # four, so it is the one that pans.
         #
-        # It USED to be written out four times in the press branch and three
-        # times in the move branch, once per mode, which is four chances to
-        # leave it out of the next mode somebody adds and four places to fix
-        # a bug in. Hoisting it also settles the adjust state's version of
-        # the question in the same words as everyone else's: panning is not
-        # an edit, so it moves the map and leaves the selection alone.
+        # The handler is `_PanViewBox.mouseDragEvent`, one layer DOWN. This
+        # filter's whole job for the gesture is to get out of its way: it
+        # used to catch the middle button here and consume it, which meant
+        # the pan only ever happened when the press was delivered to this
+        # one widget with no filter ahead of it -- and when the press
+        # stopped anywhere else in pyqtgraph's stack the box's own
+        # `mouseDragEvent` swallowed the drag and did nothing, because this
+        # panel disables its mouse. Handing the gesture to the box makes
+        # every one of those paths pan; letting it PAST here is what puts it
+        # on the paths at all.
         #
-        # Every branch below is therefore reached only with the middle button
-        # up, and none of them has to know this gesture exists.
-        if t == QtCore.QEvent.MouseButtonPress \
+        # Passed through rather than ignored: every branch below is reached
+        # only with the middle button up, so none of them has to know this
+        # gesture exists, and `_adjust_swallow` is left alone -- it belongs
+        # to the press that ENDS an adjustment, and no middle press is that.
+        if t in (QtCore.QEvent.MouseButtonPress,
+                 QtCore.QEvent.MouseButtonRelease) \
                 and event.button() == Qt.MiddleButton:
-            self._pan_last = event.pos()
-            return True
+            return False
         if t == QtCore.QEvent.MouseMove and (event.buttons() & Qt.MiddleButton):
-            # `_pan_last` is None when the press went somewhere else (another
-            # widget, or before this filter was installed). Swallow the move
-            # rather than jumping the map to an arbitrary offset.
-            if self._pan_last is not None:
-                self._do_pan(event)
-            return True
-        if t == QtCore.QEvent.MouseButtonRelease \
-                and event.button() == Qt.MiddleButton:
-            # `_adjust_swallow` is deliberately NOT cleared here: it belongs
-            # to the press that ended an adjustment, and a middle release is
-            # not that press.
-            self._pan_last = None
-            return True
+            return False
 
         # ── Mouse press ───────────────────────────────────────────────
         # `if`, not `elif`: the wheel branch above returns unconditionally,
@@ -2607,24 +2646,6 @@ class OverviewPanel(QWidget):
                     return True
 
         return False
-
-    # ── Pan helper ────────────────────────────────────────────────────
-
-    def _do_pan(self, event):
-        dp  = event.pos() - self._pan_last
-        self._pan_last = event.pos()
-        vr  = self.vb.viewRange()
-        vpw = max(1, self.gview.viewport().width())
-        vph = max(1, self.gview.viewport().height())
-        dx  = -dp.x() * (vr[0][1]-vr[0][0]) / vpw
-        dy  = -dp.y() * (vr[1][1]-vr[1][0]) / vph
-        self.vb.disableAutoRange()
-        self.vb.setRange(
-            xRange=[vr[0][0]+dx, vr[0][1]+dx],
-            yRange=[vr[1][0]+dy, vr[1][1]+dy],
-            padding=0,
-        )
-
 
 
 # ══════════════════════════════════════════════════════════════════════

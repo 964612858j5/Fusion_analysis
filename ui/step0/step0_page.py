@@ -2229,7 +2229,49 @@ class Step0Page(QWidget):
         # which is visible.
         x0 = max(0, min(x0, lw - w))
         y0 = max(0, min(y0, lh - h))
+        return self._start_compare_snapshot(level, y0, x0, h, w,
+                                            (float(x_l0), float(y_l0)))
+
+    def _start_compare_snapshot(self, level, y0, x0, h, w, center_l0=None):
+        """Cut and compute a snapshot for an ALREADY-DECIDED region.
+
+        The half of `_take_compare_snapshot` that does not decide WHERE to
+        look: given a level and a rectangle in that level's pixels, it reads,
+        corrects, labels and hands the panels the result. Separate because
+        the region is now decided in more than one way -- a right-click picks
+        it from a point and the image's scale, and a retake (a channel switch
+        or a parameter edit while the panels are up) reuses the one already
+        on screen. Both must produce the same kind of snapshot, and one
+        function producing it is the only way to be sure they do.
+
+        A retake over the same rectangle is what makes "the panels show the
+        row you are on" true: the region, the level and therefore the scale
+        are exactly the ones the user is looking at, and only the pixels in
+        them change.
+        """
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        channel = self.current_channel
+        if stack is None or not channel:
+            return None
+        busy = self.production_correction_busy()
+        if busy:
+            self._preview_status.setText(
+                f"A {busy} run is using the GPU — snapshot not taken.")
+            return None
+        provider, controller = stack.provider, stack.controller
+        level, y0, x0, h, w = (int(level), int(y0), int(x0), int(h), int(w))
+        try:
+            ds = float(provider.level_downsample(level))
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not ds > 0:
+            return None
         rect_l0 = (x0 * ds, y0 * ds, w * ds, h * ds)
+        if center_l0 is None:
+            center_l0 = (rect_l0[0] + rect_l0[2] / 2.0,
+                         rect_l0[1] + rect_l0[3] / 2.0)
+        x_l0, y_l0 = (float(center_l0[0]), float(center_l0[1]))
 
         radius, sigma = self._effective_correction_params(channel)
         nucleus = (self.nucleus_channel
@@ -2279,6 +2321,39 @@ class Step0Page(QWidget):
             pass
         if worker.isRunning():
             worker.wait(5000)
+
+    def _retake_compare_snapshot(self):
+        """Recut the snapshot on screen for whatever the page shows NOW.
+
+        The panels are a snapshot of ONE channel with ONE pair of parameters,
+        and both can change while they are up: clicking another marker row
+        switches the Intensity window and the (hidden) full image, and
+        editing a radius or sigma changes what a TopHat/cuCIM panel is
+        previewing. Leaving the old pixels there made the panels quietly
+        describe a channel the rest of the page had moved on from -- the
+        header, the metrics and the row all said one thing and the three
+        images another.
+
+        The REGION is reused, not recomputed: the same rectangle at the same
+        level, so the retake is visibly the same place at the same scale and
+        only the subject changes. Recomputing it from the full image's scale
+        would be wrong twice over -- the image is hidden, and the user may
+        have zoomed the panels since.
+
+        Only while the panels ARE the view. In full-image mode there is
+        nothing on screen to keep in step, and the way back in (a
+        right-click) takes a fresh snapshot anyway.
+        """
+        if not self._compare_mode():
+            return None
+        snapshot = getattr(self, "_compare_snapshot", None)
+        region = (snapshot or {}).get("region")
+        if not region:
+            return None
+        y0, x0, h, w = (int(v) for v in region)
+        return self._start_compare_snapshot(
+            int(snapshot.get("level") or 0), y0, x0, h, w,
+            snapshot.get("center_l0"))
 
     def _on_compare_snapshot_failed(self, req_id, message):
         if int(req_id) != int(self._compare_snapshot_req):
@@ -5365,6 +5440,11 @@ class Step0Page(QWidget):
         # thrown away: the old result stays visible until a Process replaces
         # it, and the glyph is what says it was made with other parameters.
         self._refresh_channel_state(ch)
+        # The compare panels PREVIEW these two numbers -- the TopHat and
+        # cuCIM panels are computed with the row's current radius and sigma
+        # -- so while they are the view they are recut for the new ones.
+        # Nothing is computed in the page's sense; a snapshot never was.
+        self._retake_compare_snapshot()
 
     def _on_dec_param_entered(self):
         """Enter pressed in a per-channel param box.
@@ -5602,6 +5682,12 @@ class Step0Page(QWidget):
             cb.setChecked(m != "original")   # original = raw = not corrected
             cb.blockSignals(False)
         self._refresh_channel_state(ch)
+        # A method change moves which of the three panels the row is arguing
+        # for, and it moves what the caches can be reused from; while the
+        # panels are the view, recut them rather than leave the previous
+        # answer standing.
+        if ch == self.current_channel:
+            self._retake_compare_snapshot()
 
     def _on_channel_checkbox_toggled(self, ch, state):
         if ch == self.nucleus_channel:
@@ -5655,6 +5741,14 @@ class Step0Page(QWidget):
         # The full image follows the channel -- and it is the landing view,
         # so this is the main thing a row click does.
         self._sync_full_image_to_channel()
+        # ...and so do the compare panels, when THEY are the view. A row
+        # click used to move the Intensity window and the hidden full image
+        # while the three panels kept the previous channel's pixels: the
+        # header said one channel, the images showed another. Same region,
+        # same level, new subject (`_retake_compare_snapshot`). The DAPI row
+        # never reaches here -- it returns above, because it is a reference
+        # channel and selecting it only re-points the inspector.
+        self._retake_compare_snapshot()
 
         if not self.patches:
             self._preview_status.setText(

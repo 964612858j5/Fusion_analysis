@@ -689,3 +689,92 @@ def test_the_dapi_checkbox_puts_the_overlay_in_the_panels(app):
                        payload["original_raw"] + 1000.0)
     assert all(item is not None and item.isVisible()
                for item in page._preview_nuc_imgs)
+
+
+# ── 8. the panels follow the row the page is on ──────────────────────────
+#
+# A snapshot is a snapshot OF something, and while the panels are the view
+# that something can change under them: another marker row is clicked, or the
+# row's radius/sigma is edited. Both used to leave the three images showing
+# the previous channel's pixels while the header, the metrics, the Intensity
+# window and the hidden full image had all moved on.
+
+def _wait_for_retake(page, timeout=5000):
+    """Wait out the worker a retake started and return the new payload."""
+    worker = page._compare_snapshot_worker
+    assert worker is not None, "no snapshot was retaken"
+    assert worker.wait(timeout), "the snapshot worker never finished"
+    deadline = QtCore.QElapsedTimer()
+    deadline.start()
+    while page._last_payload is None or not page._last_payload.get("snapshot"):
+        QtTest.QTest.qWait(10)
+        assert deadline.elapsed() < timeout, "the snapshot never arrived"
+    QtTest.QTest.qWait(30)
+    return page._last_payload
+
+
+def test_a_row_change_in_compare_mode_recuts_the_same_frame(app):
+    page = _page(app)
+    first = dict(_snapshot(page, 2000, 1500))
+    assert page._compare_snapshot["channel"] == "CD3"
+    region = page._compare_snapshot["region"]
+    reads_before = len(page._explore_tab.stack.provider.reads)
+
+    page._last_payload = None
+    page._on_channel_selected_by_id("CD20")
+    payload = _wait_for_retake(page)
+
+    assert page.current_channel == "CD20"
+    assert page._compare_snapshot["channel"] == "CD20", (
+        "the panels kept the old channel")
+    # SAME place, SAME level, SAME scale: only the subject changed.
+    assert payload["snapshot_rect_l0"] == first["snapshot_rect_l0"]
+    assert page._compare_snapshot["region"] == region
+    assert page._compare_snapshot["level"] == first["snapshot_level"]
+    # It really re-read, for the new channel.
+    new_reads = page._explore_tab.stack.provider.reads[reads_before:]
+    assert new_reads, "nothing was read for the new channel"
+    assert {r[0] for r in new_reads} == {"CD20"}
+
+
+def test_the_dapi_row_does_not_retake_the_snapshot(app):
+    """DAPI is a reference channel: selecting its row re-points the
+    Intensity window and nothing else. The overlay's own checkbox is what
+    changes what the panels carry, and it still does."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    req_before = page._compare_snapshot_req
+
+    page._on_channel_selected_by_id("DAPI")
+
+    assert page._compare_snapshot_req == req_before, "DAPI retook the snapshot"
+    assert page._compare_snapshot["channel"] == "CD3"
+    assert page.current_channel == "CD3"
+
+
+def test_a_row_change_outside_compare_mode_takes_no_snapshot(app):
+    """The full image is the view; there are no panels on screen to keep in
+    step, and dragging the user into compare mode would be worse than
+    stale pixels."""
+    page = _page(app)
+    req_before = page._compare_snapshot_req
+
+    page._on_channel_selected_by_id("CD20")
+
+    assert page._compare_mode() is False
+    assert page._compare_snapshot_req == req_before
+
+
+def test_a_parameter_edit_recuts_the_panels(app):
+    """The TopHat and cuCIM panels PREVIEW the row's current numbers."""
+    page = _page(app)
+    _snapshot(page, 2000, 1500)
+    calls_before = len(page._explore_tab.stack.controller.compute.calls)
+
+    page._last_payload = None
+    page._dec_sigma.setValue(page._dec_sigma.value() + 7)
+    _wait_for_retake(page)
+
+    calls = page._explore_tab.stack.controller.compute.calls[calls_before:]
+    sigmas = [param for method, param, _shape in calls if method == "cucim"]
+    assert sigmas == [page._dec_sigma.value()]

@@ -490,7 +490,11 @@ def test_conditioning_tab_has_patch_selector(app):
     assert len(_row_buttons(p._patch_buttons_row)) == 3
 
 
-def test_conditioning_patch_button_switches_and_refreshes(app):
+def test_conditioning_patch_button_switches_without_resync(app):
+    """The conditioning row still selects the patch -- and does NOT re-feed
+    the workbench: its pixels are the whole slide, which the selected patch
+    does not change, and the rebuild would reset the per-channel params that
+    ARE the page's display mapping."""
     p = _page_with_patches(app, n=3)
     p._sync_step0_to_workbench()                 # engage conditioning
     calls = []
@@ -500,10 +504,14 @@ def test_conditioning_patch_button_switches_and_refreshes(app):
     btn = next(b for b in _row_buttons(p._cond_patch_buttons_row) if b.text() == "P3")
     btn.click()
     assert p.current_patch_idx == 2
-    assert calls == [2]                          # conditioning re-synced for P3
+    assert calls == []                           # no re-sync on a patch switch
 
 
-def test_new_patches_rebuild_buttons_and_refresh_conditioning(app):
+def test_new_patches_rebuild_buttons_without_resyncing_conditioning(app):
+    """Drawing or deleting patches rebuilds the patch buttons and nothing
+    else: the workbench reads the whole slide, so a patch change has nothing
+    to tell it -- and the re-sync it used to trigger reset every channel's
+    display window (six drawn patches turned the panels solid)."""
     p = _page_with_patches(app, n=3)
     p._sync_step0_to_workbench()                 # engage conditioning
     calls = []
@@ -511,30 +519,32 @@ def test_new_patches_rebuild_buttons_and_refresh_conditioning(app):
     p._on_patches_changed([(0, 40, 0, 40), (40, 80, 40, 80)])
     assert len(_row_buttons(p._patch_buttons_row)) == 2
     assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
-    assert calls != []                           # conditioning refreshed
+    assert calls == []                           # conditioning left alone
 
 
-def test_delete_all_then_recreate_refreshes_conditioning(app):
+def test_delete_all_patches_keeps_the_conditioning_view(app):
+    """Deleting every patch no longer empties the Channel Remap view. The
+    workbench shows the whole slide, which exists with no patch drawn at all
+    -- this page even lands in that state."""
     p = _page_with_patches(app, n=3)
     p._sync_step0_to_workbench()                 # engage -> sticky in-use flag
     assert p._conditioning_in_use is True
-    p._on_patches_changed([])                    # delete all (clears workbench)
-    assert p._cond_workbench.has_channel_data() is False
-    assert p._conditioning_in_use is True        # flag survives the clear
-    calls = []
-    p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx)
+    p._on_patches_changed([])                    # delete all
+    assert p._cond_workbench.has_channel_data() is True
+    assert p._conditioning_in_use is True
     p._on_patches_changed([(0, 30, 0, 30), (30, 60, 30, 60)])   # recreate
     assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
-    assert calls != []                           # re-populated despite prior clear
+    assert p._cond_workbench.has_channel_data() is True
 
 
-def test_patch_switch_still_lazy_loads_active_only(app):
+def test_patch_switch_reads_no_channel_for_the_workbench(app):
     p, ld = _fresh_page_with_counting_loader(app)
     p._sync_step0_to_workbench()
     ld.calls.clear()
     p._select_patch(1)                           # uses live _select_patch chain
-    # only the active channel is read on patch switch (lazy-load preserved)
-    assert len(ld.calls) == 1, ld.calls
+    # The workbench holds the whole slide: a patch switch re-reads nothing
+    # for it (and so cannot re-seed anyone's display window).
+    assert ld.calls == [], ld.calls
 
 
 # ── step0-preload-architecture: background preload + BG hot-swap ─────────────

@@ -1095,3 +1095,86 @@ def test_a_big_patch_histogram_is_subsampled_not_scanned_whole(app):
     small = np.linspace(0.0, 10.0, 100, dtype=np.float32).reshape(10, 10)
     panel.set_data(small)
     assert panel._data_bounds == (0.0, 10.0)
+
+
+# ── 9. a re-sync may never move a display window ─────────────────────────
+#
+# The severe bug: the workbench's per-channel params ARE the page's display
+# mapping, but `_sync_step0_to_workbench` rebuilt them from scratch on every
+# patches-changed event. A channel whose pixels are not loaded yet is fed to
+# the workbench as a LAZY placeholder, and its provisional params are
+# (0.0, 1.0) -- read back as a window, every pixel of an 8/16-bit channel
+# saturates. On the real slide, drawing six patches in compare mode turned
+# all three compare panels and the Tissue Preview thumbnail solid colour.
+
+def test_repeated_syncs_never_move_a_never_activated_channels_window(app):
+    """No Intensity window, no channel switch: re-syncing the workbench must
+    leave every channel's mapping exactly where it was."""
+    page = _bare_page(app, loader=_SeedLoader())
+    before = page._display_mapping_for("CD20")
+    assert before[1] > 1.0, "the fixture never produced a real window"
+
+    for i in range(6):                      # six patches drawn == six syncs
+        page._sync_step0_to_workbench()
+        assert page._display_mapping_for("CD20") == before, f"moved on sync {i}"
+
+
+def test_a_provisional_placeholder_is_seeded_not_read_as_a_window(app):
+    """The params key EXISTING is not enough: a lazy channel carries the
+    workbench's provisional 0..1 range until its pixels arrive. Asked for a
+    mapping, the page seeds it from the slide and writes that into the single
+    source of truth."""
+    from block01.core.display_mapping import seed_display_range
+    page = _page(app, loader=_SeedLoader())
+    wb = page._cond_workbench
+    assert wb._raw.get("CD20") is None, "CD20 was not lazy"
+    assert (wb._params["CD20"]["min"], wb._params["CD20"]["max"]) == (0.0, 1.0)
+    assert not wb.channel_params_seeded("CD20")
+
+    lo, hi, gamma = page._display_mapping_for("CD20")
+
+    seed_lo, seed_hi = seed_display_range(page._slide_lowres_array("CD20"))
+    assert (lo, hi, gamma) == (seed_lo, seed_hi, 1.0)
+    assert 300 <= lo < 400 and 3900 < hi <= 4000, (lo, hi)
+    assert wb.channel_params_seeded("CD20"), "the source of truth stayed provisional"
+    assert (wb._params["CD20"]["min"], wb._params["CD20"]["max"]) == (lo, hi)
+
+
+def test_drawing_patches_does_not_re_feed_the_workbench(app):
+    """Patches are not the workbench's pixel source any more (it reads the
+    whole slide), so a patch drawn or deleted must not rebuild it."""
+    page = _page(app, loader=_SeedLoader())
+    page._display_mapping_for("CD20")
+    calls = []
+    real = page._sync_step0_to_workbench
+    page._sync_step0_to_workbench = lambda: calls.append(1) or real()
+
+    for n in range(1, 7):                   # the user's six patches
+        page._on_patches_changed([(0, 32, 0, 32)] * n)
+
+    assert calls == [], "a patch change re-fed the workbench"
+
+
+def test_a_re_sync_preserves_a_user_edited_window(app):
+    page = _page(app, loader=_SeedLoader())
+    wb = page._cond_workbench
+    page.set_display_mapping("CD3", 120.0, 2500.0, 1.0)
+
+    page._sync_step0_to_workbench()
+
+    assert (wb._params["CD3"]["min"], wb._params["CD3"]["max"]) == (120.0, 2500.0)
+    assert page._display_mapping_for("CD3") == (120.0, 2500.0, 1.0)
+
+
+def test_a_dataset_switch_still_reseeds_the_workbench(app):
+    """Preserving params across a re-sync must not survive a NEW slide: two
+    slides of the same panel share every channel name."""
+    page = _page(app, loader=_SeedLoader())
+    wb = page._cond_workbench
+    page.set_display_mapping("CD3", 120.0, 2500.0, 1.0)
+    assert wb.has_channel_data()
+
+    page._reset_dataset_view_state()
+
+    assert not wb.has_channel_data()
+    assert wb._params == {} and wb._user_adjusted == {}

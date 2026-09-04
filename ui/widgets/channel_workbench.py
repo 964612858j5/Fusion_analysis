@@ -119,6 +119,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # being re-seeded from each new patch's pixels. Only channels never
         # adjusted get auto-seeded. Cleared on a new dataset (different names).
         self._user_adjusted = {}         # name -> bool (user changed its params)
+        # Channels whose params were seeded from REAL pixels (or from a host's
+        # own seed). A lazy channel that has never been loaded carries the
+        # provisional 0..1 placeholder instead, which is NOT a display window:
+        # hosts that read these params as their display mapping must ask
+        # `channel_params_seeded()` before trusting them.
+        self._seeded = set()             # name -> params come from real data
         self._colors = {}                # name -> hex
         self._visible = {}               # name -> bool
         self._active = None              # active channel name
@@ -699,6 +705,24 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return lo, float(max(finite.max(), lo + 1.0))
         return None
 
+    def channel_params_seeded(self, name):
+        """True when `name`'s params describe REAL data.
+
+        A lazy channel that has never been loaded holds the provisional
+        0..1 placeholder `set_channel_images` wrote for it; reading that
+        back as a display window saturates every pixel of an 8/16-bit
+        channel. Hosts that treat these params as their single display
+        mapping must gate on this.
+        """
+        return name in self._seeded
+
+    def note_params_seeded(self, name):
+        """Record that `name`'s params were seeded by the HOST (e.g. Step0's
+        whole-slide display seed written straight into `_params`), so this
+        widget neither re-seeds over them nor reports them as provisional."""
+        if name in self._params:
+            self._seeded.add(name)
+
     def active_channel(self):
         """The currently active channel name, or None."""
         return self._active
@@ -763,7 +787,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     def set_channel_images(self, channel_images, colors=None, context=None,
                            source="manual", source_policy=None,
-                           channel_metadata=None, active=None, visible=None):
+                           channel_metadata=None, active=None, visible=None,
+                           preserve_params=False):
         """Load a set of named channel preview patches.
 
         Parameters
@@ -789,6 +814,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
         channel_metadata : dict[str, dict], optional
             per-channel source metadata (e.g. source, intensity_space,
             normalization) merged into the saved per-channel params.
+        preserve_params : bool
+            The reload serves the SAME pixels as the previous call (Step0
+            re-feeds the workbench from the whole slide, which does not
+            change while the dataset does not). Every already-seeded
+            channel then keeps its Min/Max/Gamma/auto verbatim instead of
+            being re-seeded; only missing or never-seeded channels are
+            seeded here. Hosts whose reload really is new pixels (a patch
+            switch in Step1.5 / Step3) leave this False and keep the
+            re-seed. A new dataset (different channel set) always reseeds.
 
         Empty / all-invalid input is handled gracefully (no crash): the
         workbench clears and shows a friendly "no data" message.
@@ -837,6 +871,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # user's swatch colors (like _user_adjusted keeps params) and the list
         # scroll offset; a new dataset resets both.
         old_colors = self._colors
+        old_seeded = self._seeded
         if is_new_dataset:
             self._user_adjusted = {}
 
@@ -844,21 +879,31 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._raw = clean
         self._raw_dmax = {}
         self._params = {}
+        self._seeded = set()
         self._colors = {}
         self._visible = {}
         for i, n in enumerate(self._names):
-            if (not is_new_dataset) and self._user_adjusted.get(n) and n in old_params:
-                # User adjusted this channel earlier -> keep its params verbatim
-                # across the patch switch (global, not re-seeded from new pixels).
+            keep = (not is_new_dataset) and n in old_params and (
+                self._user_adjusted.get(n)
+                or (preserve_params and n in old_seeded))
+            if keep:
+                # Either the user adjusted this channel (params are global and
+                # survive a patch switch) or the reload serves the same pixels
+                # and the channel is already seeded -- re-seeding it would
+                # silently move a window the host is using as its display
+                # mapping. Keep the numbers verbatim.
                 params = dict(old_params[n])
+                self._seeded.add(n)
             else:
                 params = default_channel_remap_params()
                 seed = self._seed_range(n, self._raw[n])
                 if seed is not None:
                     params["min"], params["max"] = seed
+                    self._seeded.add(n)
                 else:
                     # Lazy / empty channel: provisional range, re-seeded from real
                     # pixels by _ensure_loaded when the channel is first activated.
+                    # NOT a display window -- `channel_params_seeded` says so.
                     params["min"], params["max"] = 0.0, 1.0
             self._params[n] = normalize_channel_remap_params(params)
             if (not is_new_dataset) and n in old_colors:
@@ -911,6 +956,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._raw_dmax = {}
         self._params = {}
         self._user_adjusted = {}
+        self._seeded = set()
         self._colors = {}
         self._visible = {}
         self._active = None
@@ -1130,6 +1176,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
             return
         self._raw[name] = None
         self._raw_dmax.pop(name, None)
+        # The pixels themselves changed (a correction landed), so the window
+        # seeded from the old ones is stale: allow one re-seed from the new
+        # pixels. (A user-adjusted channel still keeps its numbers.)
+        self._seeded.discard(name)
         if name == self._active or self._visible.get(name):
             self._ensure_loaded(name)
             if name == self._active:
@@ -1157,11 +1207,15 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._raw[name] = arr
         self._raw_dmax.pop(name, None)
         if self._user_adjusted.get(name):
+            self._seeded.add(name)
             return                              # (#2) keep user params; no re-seed
+        if name in self._seeded:
+            return          # already a real window (host seed / earlier load)
         params = dict(self._params.get(name, default_channel_remap_params()))
         seed = self._seed_range(name, arr)
         if seed is not None:
             params["min"], params["max"] = seed
+            self._seeded.add(name)
         self._params[name] = normalize_channel_remap_params(params)
 
     def _on_active_changed(self, name):
@@ -1339,6 +1393,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # (#2) Any control edit marks this channel user-adjusted -> its params
         # now stick across patch switches (also covers Auto, which calls here).
         self._user_adjusted[self._active] = True
+        self._seeded.add(self._active)
         if hasattr(self, "_chk_enabled"):
             p["enabled"] = self._chk_enabled.isChecked()
         # else: no fusion-enable surface (Step0) -> keep params' default
@@ -1436,6 +1491,7 @@ class ChannelWorkbench(QtWidgets.QWidget):
             p["min"], p["max"] = 0.0, 1.0
         self._params[self._active] = normalize_channel_remap_params(p)
         self._user_adjusted[self._active] = True   # (#2) reset is a deliberate edit
+        self._seeded.add(self._active)
         self._load_params_into_controls(self._active)
         self._layer_list.update_mini(self._active, p["weight"], "w")
         self._refresh_preview()

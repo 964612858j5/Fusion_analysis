@@ -3501,10 +3501,16 @@ class Step0Page(QWidget):
             f"{info['served_corrected_stage']}")
 
     def _maybe_refresh_conditioning(self):
-        """Re-feed the workbench from the current patch, once conditioning is in
-        use. Uses a sticky _conditioning_in_use flag rather than has_channel_data
-        so that deleting all patches (which clears the workbench) and creating
-        new ones still re-populates the conditioning view."""
+        """Re-feed the workbench from the whole slide, once conditioning is in
+        use. Uses a sticky _conditioning_in_use flag rather than
+        has_channel_data so that a cleared workbench is still re-populated.
+
+        NOT a patch hook any more: the workbench's pixels are the whole slide
+        (f34b497), so patches drawn, deleted or selected leave it unchanged.
+        The remaining caller is a corrected-store swap, where the pixels
+        really did change. The re-feed preserves every seeded channel's
+        params, which are this page's display mapping.
+        """
         wb = getattr(self, "_cond_workbench", None)
         if wb is None:
             return
@@ -3771,7 +3777,14 @@ class Step0Page(QWidget):
             images,
             context={"region": "whole_slide_overview", "step": "step0"},
             source="manual", source_policy=source_policy, channel_metadata=meta,
-            colors=colors, active=active, visible=visible)
+            colors=colors, active=active, visible=visible,
+            # The pixels are the whole slide's overview read, which does not
+            # change while the dataset does not, so a re-sync must NOT move
+            # any window it already handed out: these params ARE this page's
+            # display mapping (`_display_mapping_for`). Only channels that
+            # are missing or still provisional get seeded here. A dataset
+            # switch is a different channel set (or a clear), which reseeds.
+            preserve_params=True)
         # No separate DAPI reference read: DAPI is a normal channel in `images`
         # above and is lazy-loaded on demand like any other (#2-new).
         print(f"[Step0] conditioning workbench synced: {len(images)} channels "
@@ -4904,12 +4917,15 @@ class Step0Page(QWidget):
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             self._preview_status.setText("Select a channel and patch ROI to preview background correction.")
         # Patches changed (drawn/deleted in the navigator) -> (re)start the
-        # background preload of all patches × channels (cancels any running one,
-        # invalidates the cache), then refresh the conditioning view for the new
-        # current patch (defect B). _maybe_refresh is a no-op until conditioning
-        # has been engaged.
+        # background preload of all patches × channels (cancels any running
+        # one, invalidates the cache).
+        # NO conditioning re-sync: since f34b497 the workbench's pixels are the
+        # WHOLE SLIDE, not the current patch, so drawing or deleting a patch
+        # changes nothing it shows -- while the rebuild it used to trigger
+        # reset every channel's params, which ARE this page's display mapping
+        # (`_display_mapping_for`). That is how six drawn patches turned the
+        # compare panels and the Tissue Preview solid.
         self._start_preload()
-        self._maybe_refresh_conditioning()
 
     def _rebuild_patch_list(self):
         sel = self._patch_selected_idx
@@ -6208,14 +6224,39 @@ class Step0Page(QWidget):
             # pre-engagement fallback left behind, so no stale second copy of
             # the numbers shadows the source of truth.
             self._display_fallback.pop(ch, None)
-            if ch not in self._display_seeded:
+            # The key existing is NOT enough: a lazy channel the workbench has
+            # never loaded carries a provisional 0..1 placeholder, and reading
+            # that back as a display window saturates every pixel of an
+            # 8/16-bit channel (the severe bug: a re-sync turned the compare
+            # panels and the Tissue Preview solid). Seed such a channel HERE,
+            # from the same whole-slide seed, and write it into the single
+            # source so the workbench stops calling it provisional.
+            seeded = wb.channel_params_seeded(ch)
+            if ch not in self._display_seeded or not seeded:
                 self._display_seeded.add(ch)
-                if not wb._user_adjusted.get(ch):
-                    lo, hi = self._seed_display_mapping(
-                        ch, payload=payload, nucleus=nucleus)
+                if wb._user_adjusted.get(ch):
+                    # The user typed these numbers: they are real data, and
+                    # nothing may re-seed over them.
+                    wb.note_params_seeded(ch)
+                else:
+                    lo, hi, real = self._seed_display_mapping(
+                        ch, payload=payload, nucleus=nucleus, strict=True)
+                    if not real:
+                        # No pixels to seed from HERE. Never write the 0..1
+                        # last resort into the source of truth: it saturates
+                        # an 8/16-bit channel. If the workbench seeded this
+                        # channel from its own real pixels, those numbers
+                        # stand; otherwise the params stay provisional and
+                        # the `not seeded` half of the test above brings us
+                        # back here on the next read, when the slide array
+                        # may have arrived.
+                        p["brightness"], p["contrast"] = 0.0, 1.0
+                        return (float(p["min"]), float(p["max"]),
+                                float(p["gamma"]))
                     p.update({"min": float(lo), "max": float(hi), "gamma": 1.0,
                               "brightness": 0.0, "contrast": 1.0, "auto": True})
                     wb._params[ch] = normalize_channel_remap_params(p)
+                    wb.note_params_seeded(ch)
                     p = wb._params[ch]
                     if wb.active_channel() == ch:
                         # Numbers only: this wrote a new window over the same
@@ -6233,20 +6274,28 @@ class Step0Page(QWidget):
             self._set_display_silently(ch, *entry)
         return entry
 
-    def _seed_display_mapping(self, ch, payload=None, nucleus=False):
+    def _seed_display_mapping(self, ch, payload=None, nucleus=False,
+                              strict=False):
         """QuPath-style automatic window over the whole slide's tissue
         pixels (the viewer's overview level, zeros excluded) -- the same
         rule and level the full image seeds with. Falls back to the
-        payload's raw pixels when the loader cannot read a pyramid."""
+        payload's raw pixels when the loader cannot read a pyramid.
+
+        `strict=True` returns `(lo, hi, real)`, where `real` is False when
+        there were no pixels anywhere and `(0.0, 1.0)` is a placeholder
+        rather than a window. Callers that write the result into the single
+        source of truth MUST use it: 0..1 saturates an 8/16-bit channel.
+        """
         arr = self._slide_lowres_array(ch)
+        if arr is None:
+            payload = payload if payload is not None else self._last_payload
+            if payload is not None:
+                arr = self._payload_array(
+                    payload, "nucleus" if nucleus else "original")
         if arr is not None:
-            return seed_display_range(arr)
-        payload = payload if payload is not None else self._last_payload
-        if payload is not None:
-            arr = self._payload_array(payload, "nucleus" if nucleus else "original")
-            if arr is not None:
-                return seed_display_range(arr)
-        return (0.0, 1.0)
+            lo, hi = seed_display_range(arr)
+            return (lo, hi, True) if strict else (lo, hi)
+        return (0.0, 1.0, False) if strict else (0.0, 1.0)
 
     def _set_display_silently(self, ch, lo, hi, gamma):
         """Mirror a mapping into the channel model without the model
@@ -7159,9 +7208,9 @@ class Step0Page(QWidget):
         self._update_patch_info()
         if self.current_channel and self._has_any_cache(self.current_channel):
             self._show_channel_from_cache(self.current_channel)
-        # Keep the conditioning workbench in sync with the active patch (no-op
-        # until the workbench is actually in use).
-        self._maybe_refresh_conditioning()
+        # NO conditioning re-sync on a patch switch either: the workbench reads
+        # the whole slide, which the selected patch does not change. Only the
+        # patch-LOCAL viewport below follows the selection.
         # (#4) Viewport is patch-LOCAL: restore the entered patch's saved zoom/pan,
         # or fit-to-view if it was never visited (never inherit the prior patch's
         # zoom). Remap params (Min/Max/Gamma) stay channel-global, untouched here.
@@ -7578,6 +7627,15 @@ class Step0Page(QWidget):
         self._display_fallback = {}
         self._display_seeded = set()
         self._slide_lowres = {}
+        # The workbench's per-channel params ARE the display mapping and its
+        # pixels are the OLD slide's. Two slides of the same panel share every
+        # channel NAME, so the workbench cannot tell them apart on its own
+        # (its "new dataset" test is name-based, and Step0 now asks it to
+        # preserve params across a re-sync). Clear it here, on the one event
+        # that really is a new dataset; the load re-syncs it.
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None:
+            wb.clear_channel_images()
         # The DAPI layer is per-dataset display state: a new slide starts from
         # the default (off) rather than inheriting the previous slide's switch.
         self._reset_nucleus_layer_default()

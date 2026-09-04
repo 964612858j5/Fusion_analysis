@@ -351,6 +351,9 @@ class Step0Page(QWidget):
         # a channel before the Channels box is built, so both live here.
         self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
         self._display_seeded = set()     # channels whose slide-wide seed was applied
+        # ONE whole-slide low-resolution array per channel, shared by the
+        # display seed and the Intensity histogram (`_slide_lowres_array`).
+        self._slide_lowres = {}
         # Per-load guard for auto-opening the Tissue Navigator on data load:
         # re-armed at the start of each load, fired once at load-completion.
         self._navigator_auto_opened = False
@@ -1380,8 +1383,13 @@ class Step0Page(QWidget):
         from .preview_source_provider import (
             Step0PreviewSourceProvider, STAGE_CORRECTED)
         self._preview_provider = Step0PreviewSourceProvider(self)
-        self._cond_workbench.set_pixel_provider(
-            lambda name: self._preview_provider.get_pixels(name, STAGE_CORRECTED))
+        self._cond_workbench.set_pixel_provider(self._workbench_pixels)
+        # The window the sliders open on is the page's slide-wide seed, for
+        # every channel and however the workbench came by its pixels --
+        # otherwise a lazily loaded channel would open on the raw min/max of
+        # the array and disagree with `_display_mapping_for` on first sight.
+        self._cond_workbench.set_display_seed_provider(
+            lambda _name, arr: seed_display_range(arr))
         self._preview_provider.stage_invalidated.connect(
             self._on_stage_invalidated)
         # Mutual visibility: remap edits surface live in the BG tab's
@@ -2695,6 +2703,7 @@ class Step0Page(QWidget):
     def _on_stage_invalidated(self, channel, _stage):
         """A live corrected preview landed or a method changed: the remap view
         must re-pull that channel from the provider (no Save involved)."""
+        self._slide_lowres.pop(channel, None)
         wb = getattr(self, "_cond_workbench", None)
         if wb is not None and wb.has_channel_data():
             wb.invalidate_channel_pixels(channel)
@@ -2750,6 +2759,78 @@ class Step0Page(QWidget):
         """Marker channels + DAPI (the set the conditioning workbench shows)."""
         return [ch for ch in self._channel_order if not _is_non_marker_channel(ch)]
 
+    def _slide_lowres_array(self, ch):
+        """The WHOLE-SLIDE low-resolution read of `ch`, cached, or None.
+
+        One array per channel per dataset, and the only place this page
+        reads a whole channel. Two consumers share it, which is the point:
+        the display seed (`_seed_display_mapping`, tissue percentiles over
+        it) and the Channel Remap workbench's pixels -- the histogram, the
+        slider range and the inspector's Auto. A second read for the
+        histogram would be the same pixels decoded twice, and a different
+        array would be a second answer to "what is this channel's range".
+
+        The whole slide rather than the current patch, deliberately: this
+        page lands on the full image with no patch drawn at all, and a
+        window derived from a 2000-px square would move every time the user
+        panned. Returns None when the loader cannot serve a pyramid read;
+        the caller falls back to whatever it used before.
+        """
+        if not ch:
+            return None
+        cache = getattr(self, "_slide_lowres", None)
+        if cache is None:
+            cache = self._slide_lowres = {}
+        if ch in cache:
+            return cache[ch]
+        arr = None
+        loader = getattr(self, "loader", None)
+        read = getattr(loader, "read_region_lowres", None)
+        shape = getattr(loader, "shape", None)
+        if read is not None and shape and len(shape) >= 2 and int(shape[0]) > 0:
+            try:
+                ds = (loader.overview_downsample()
+                      if hasattr(loader, "overview_downsample") else 32)
+                a = np.asarray(read(ch, 0, int(shape[0]), 0, int(shape[1]),
+                                    ds, normalize=False), dtype=np.float32)
+                if a.ndim == 3 and a.shape[2] == 1:
+                    a = a[:, :, 0]
+                if a.ndim == 2 and a.size:
+                    arr = a
+            except Exception as exc:                # noqa: BLE001
+                print(f"[step0] slide low-res read failed for {ch!r}: {exc}",
+                      flush=True)
+        cache[ch] = arr
+        return arr
+
+    def _workbench_pixels(self, name):
+        """The pixels the Channel Remap workbench works on for `name`.
+
+        The whole slide at the overview level, not the current patch. The
+        Intensity window IS that workbench's inspector, and this page opens
+        with no patch drawn, so a patch-fed workbench had no channel data at
+        all on the landing view: no histogram, disabled sliders, and a
+        display mapping that fell back to the page-level copy -- the single
+        source of truth silently not in effect.
+
+        One rule whether or not a patch exists. A patch-based window would
+        be a different window for the same channel depending on where the
+        user happened to draw, and it would not match the seed the full
+        image is already drawn with.
+
+        Falls back to the Save-boundary patch source when the loader has no
+        pyramid read (fake loaders, a TIFF without levels), which is the
+        behaviour every caller had before.
+        """
+        arr = self._slide_lowres_array(name)
+        if arr is not None:
+            return arr
+        provider = getattr(self, "_preview_provider", None)
+        if provider is None:
+            return None
+        from .preview_source_provider import STAGE_CORRECTED
+        return provider.get_pixels(name, STAGE_CORRECTED)
+
     def _provide_channel_pixels(self, name):
         """Pixel provider for the workbench: serve from the preload cache (zero
         IO) when warm, else fall back to a single live read for the current
@@ -2798,19 +2879,28 @@ class Step0Page(QWidget):
         self._preload_worker = None
 
     def _sync_step0_to_workbench(self):
-        """Feed the workbench from Step0's loader + current patch + channel order.
+        """Feed the workbench from Step0's loader + the whole slide + channel order.
 
         Marker channels mirror self._channel_order (minus the nucleus/DAPI
         channel). DAPI is supplied as a reference layer only — never a marker.
         Mirrors the old Step1.5 _sync_step15_to_workbench exactly; only the host
         (Step0) and provenance labels differ.
+
+        The PIXELS are the whole slide's overview read (`_workbench_pixels`),
+        not the current patch: this page lands on the full image with no
+        patch drawn at all, and a workbench fed from a patch had nothing to
+        show there.
         """
         if not hasattr(self, "_cond_workbench"):
             return
         # Conditioning is engaged: keep refreshing it on patch changes even after
         # a clear (delete-all). Sticky flag read by _maybe_refresh_conditioning.
         self._conditioning_in_use = True
-        if not self.loader or not self.patches:
+        # NO patch requirement. The pixels are the whole slide's overview
+        # read (`_workbench_pixels`), so the workbench is feedable the
+        # moment a dataset is loaded -- which is the state this page lands
+        # in, and the state the Intensity window used to open empty in.
+        if not self.loader:
             self._cond_workbench.clear_channel_images()
             return
 
@@ -2855,13 +2945,16 @@ class Step0Page(QWidget):
         # Preload integration: serve every channel from the warm cache (zero IO →
         # All-toggle / patch-switch instant). Cold channels stay None (lazy); only
         # the active one is read eagerly so first paint is never blank.
-        patch_cache = self._preload_cache.get(self.current_patch_idx, {})
         images, meta = {}, {}
         for ch in channels:
-            arr = patch_cache.get(ch)       # warm: real array (no IO)
-            if arr is None and ch == active:
+            arr = None
+            if ch == active:
+                # Eager for the ACTIVE channel only, so the inspector is
+                # never blank on first open; every other channel is a lazy
+                # placeholder the provider fills when it is selected.
                 try:
-                    a = self._read_cond_patch_channel(ch, normalize=False)
+                    a = self._workbench_pixels(ch)
+                    a = np.asarray(a, np.float32) if a is not None else None
                     if a is not None and a.ndim == 2 and a.size:
                         arr = a
                 except Exception as exc:
@@ -2908,13 +3001,13 @@ class Step0Page(QWidget):
         source_policy.update(self._calibration_source_identity())
         self._cond_workbench.set_channel_images(
             images,
-            context={"patch": self.current_patch_idx + 1, "step": "step0"},
+            context={"region": "whole_slide_overview", "step": "step0"},
             source="manual", source_policy=source_policy, channel_metadata=meta,
             colors=colors, active=active, visible=visible)
         # No separate DAPI reference read: DAPI is a normal channel in `images`
         # above and is lazy-loaded on demand like any other (#2-new).
         print(f"[Step0] conditioning workbench synced: {len(images)} channels "
-              f"(markers + DAPI) patch={self.current_patch_idx + 1}")
+              f"(markers + DAPI) from the whole slide's overview level")
 
     def _calibration_source_identity(self):
         """Identity of the source the Step0 workbench actually calibrated on.
@@ -3302,7 +3395,7 @@ class Step0Page(QWidget):
         return win
 
     def _engage_conditioning_workbench(self):
-        """Populate the Channel Remap workbench for the current dataset/patch
+        """Populate the Channel Remap workbench for the current dataset
         WITHOUT showing its tab.
 
         The workbench used to be fed only when its tab was entered
@@ -3319,7 +3412,7 @@ class Step0Page(QWidget):
         pixel provider -- and starts no background correction.
         """
         wb = getattr(self, "_cond_workbench", None)
-        if wb is None or not self.loader or not self.patches:
+        if wb is None or not self.loader:
             return False
         if not wb.has_channel_data():
             self._sync_step0_to_workbench()
@@ -3330,9 +3423,9 @@ class Step0Page(QWidget):
         the Background Correction tab is SHOWING, or DAPI while its reference
         row is selected (`_inspector_channel`).
 
-        The histogram it draws is the WORKBENCH's own pixels for that channel,
-        i.e. the saved-corrected-or-raw preview patch served by
-        `Step0PreviewSourceProvider` -- not the compare panels' payload.
+        The histogram it draws is the WORKBENCH's own pixels for that channel:
+        the whole slide's overview read (`_workbench_pixels`) -- not the
+        compare panels' payload and not the current patch.
         Activating the channel is what pulls those pixels in (the workbench's
         `_ensure_loaded` calls the provider), so the histogram fills itself.
         """
@@ -3369,6 +3462,14 @@ class Step0Page(QWidget):
         image-local pixels are PATCH-LOCAL. Add the current patch origin to get
         full-image pixels. Patch convention is (y0, y1, x0, x1).
 
+        Case B, since the workbench eats the WHOLE SLIDE: when the pixels it
+        is showing ARE this page's slide overview array, the viewer's
+        image-local pixels are slide pixels DOWNSAMPLED by the ratio between
+        the loader's shape and that array's -- so the rect is scaled, not
+        offset, and there is no patch involved. Measured from the arrays
+        themselves rather than from `overview_downsample()`, which is only
+        the requested factor.
+
         Returns (y0, y1, x0, x1) full-image px, or None when no mapping is valid
         (no viewport, wrong coordinate_space, or no current patch — full-WSI mode
         has no patch crop to anchor the rect, so it returns None).
@@ -3377,12 +3478,40 @@ class Step0Page(QWidget):
             return None
         if vp.get("coordinate_space") != "image_local_pixels":
             return None
+        scale = self._workbench_slide_scale()
+        if scale is not None:
+            sy, sx = scale
+            return (float(vp["y0"]) * sy, float(vp["y1"]) * sy,
+                    float(vp["x0"]) * sx, float(vp["x1"]) * sx)
         if not self.patches or not (0 <= self.current_patch_idx < len(self.patches)):
             return None
         y0p, y1p, x0p, x1p = (int(v) for v in self.patches[self.current_patch_idx])
         fx0 = x0p + float(vp["x0"]); fx1 = x0p + float(vp["x1"])
         fy0 = y0p + float(vp["y0"]); fy1 = y0p + float(vp["y1"])
         return (fy0, fy1, fx0, fx1)
+
+    def _workbench_slide_scale(self):
+        """`(rows, cols)` full-image pixels per workbench pixel, or None.
+
+        None means the workbench is not showing this page's whole-slide
+        overview array for its active channel -- the fallback loaders that
+        cannot serve `read_region_lowres` still hand it patch pixels, and
+        those are mapped by the patch origin instead.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        active = wb.active_channel() if wb is not None else None
+        if not active:
+            return None
+        arr = wb._raw.get(active)
+        if arr is None or arr is not self._slide_lowres_array(active):
+            return None
+        shape = getattr(getattr(self, "loader", None), "shape", None)
+        if not shape or len(shape) < 2:
+            return None
+        h, w = (int(v) for v in arr.shape[:2])
+        if h <= 0 or w <= 0:
+            return None
+        return (float(shape[0]) / h, float(shape[1]) / w)
 
     def _on_tissue_navigate(self, y, x):
         """A click on the Tissue Preview at full-image `(y, x)`.
@@ -4795,10 +4924,12 @@ class Step0Page(QWidget):
 
         Seeding: the FIRST time a channel is shown its min/max come from the
         whole slide's tissue (`_seed_display_mapping`) -- a slide-wide window
-        that stays valid as the user pans. That is deliberately NOT what the
-        inspector's own "Auto" button does: Auto is QuPath auto-contrast on
-        the CURRENT PREVIEW PATCH, and it stays that way because the floating
-        window is a 1:1 replica of the Channel Remap inspector.
+        that stays valid as the user pans, over the very array the workbench
+        holds for that channel (`_workbench_pixels`), so the sliders and this
+        mapping open on the same numbers. The inspector's own "Auto" button
+        is unchanged and still QuPath auto-contrast over the workbench's
+        pixels; those pixels being the slide now, the two rules agree to
+        their zero handling rather than describing two different regions.
         """
         if not ch:
             return (0.0, 1.0, 1.0)
@@ -4839,16 +4970,9 @@ class Step0Page(QWidget):
         pixels (the viewer's overview level, zeros excluded) -- the same
         rule and level the full image seeds with. Falls back to the
         payload's raw pixels when the loader cannot read a pyramid."""
-        loader = getattr(self, "loader", None)
-        read = getattr(loader, "read_region_lowres", None)
-        shape = getattr(loader, "shape", None)
-        if read is not None and shape and len(shape) >= 2 and int(shape[0]) > 0:
-            try:
-                ds = loader.overview_downsample() if hasattr(loader, "overview_downsample") else 32
-                arr = read(ch, 0, int(shape[0]), 0, int(shape[1]), ds, normalize=False)
-                return seed_display_range(arr)
-            except Exception as exc:                   # noqa: BLE001 - fall back below
-                print(f"[step0] display seed from slide failed for {ch!r}: {exc}", flush=True)
+        arr = self._slide_lowres_array(ch)
+        if arr is not None:
+            return seed_display_range(arr)
         payload = payload if payload is not None else self._last_payload
         if payload is not None:
             arr = self._payload_array(payload, "nucleus" if nucleus else "original")
@@ -6153,6 +6277,7 @@ class Step0Page(QWidget):
         # The slide-wide display seed IS per-dataset: a new slide must re-seed.
         self._display_fallback = {}
         self._display_seeded = set()
+        self._slide_lowres = {}
         # The DAPI layer is per-dataset display state: a new slide starts from
         # the default (off) rather than inheriting the previous slide's switch.
         self._reset_nucleus_layer_default()

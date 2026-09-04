@@ -133,6 +133,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # were not pre-loaded (passed as None to set_channel_images) are read
         # on-demand the first time they become active. fn(name) -> 2D array|None.
         self._pixel_provider = None
+        # Optional host rule for a channel's initial Min/Max (see
+        # `set_display_seed_provider`). None = the plain data min/max.
+        self._seed_provider = None
         # Progressive overlay loading: when many channels become visible at once
         # (e.g. the All toggle), the composite shows already-loaded channels
         # immediately and this timer reads the rest one-per-tick so the UI never
@@ -662,6 +665,40 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """
         self._pixel_provider = fn
 
+    def set_display_seed_provider(self, fn):
+        """Register the host's rule for a channel's INITIAL Min/Max.
+
+        ``fn(name, array) -> (lo, hi) or None``. Without it a channel's
+        window opens at the plain min/max of whatever pixels arrived, which
+        is the right answer only when those pixels are the whole picture.
+        Step0 serves the workbench a whole-slide low-resolution read and
+        seeds from its tissue percentiles, and the page keeps the same
+        numbers as its own display mapping -- so the two would disagree on
+        every first open unless the workbench asks the host here.
+
+        Never consulted for a channel the user has adjusted; a provider
+        that returns None falls back to the data min/max.
+        """
+        self._seed_provider = fn
+
+    def _seed_range(self, name, arr):
+        """`(min, max)` a freshly loaded channel's window opens at."""
+        if self._seed_provider is not None and arr is not None:
+            try:
+                seed = self._seed_provider(name, arr)
+            except Exception as exc:                # noqa: BLE001
+                print(f"[ChannelWorkbench] seed provider failed for "
+                      f"{name}: {exc}")
+                seed = None
+            if seed is not None:
+                lo, hi = (float(v) for v in seed)
+                return lo, max(hi, lo + 1.0)
+        finite = arr[np.isfinite(arr)] if (arr is not None and arr.size) else None
+        if finite is not None and finite.size:
+            lo = float(finite.min())
+            return lo, float(max(finite.max(), lo + 1.0))
+        return None
+
     def active_channel(self):
         """The currently active channel name, or None."""
         return self._active
@@ -816,11 +853,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 params = dict(old_params[n])
             else:
                 params = default_channel_remap_params()
-                arr = self._raw[n]
-                finite = arr[np.isfinite(arr)] if (arr is not None and arr.size) else None
-                if finite is not None and finite.size:
-                    params["min"] = float(finite.min())
-                    params["max"] = float(max(finite.max(), finite.min() + 1.0))
+                seed = self._seed_range(n, self._raw[n])
+                if seed is not None:
+                    params["min"], params["max"] = seed
                 else:
                     # Lazy / empty channel: provisional range, re-seeded from real
                     # pixels by _ensure_loaded when the channel is first activated.
@@ -1124,10 +1159,9 @@ class ChannelWorkbench(QtWidgets.QWidget):
         if self._user_adjusted.get(name):
             return                              # (#2) keep user params; no re-seed
         params = dict(self._params.get(name, default_channel_remap_params()))
-        finite = arr[np.isfinite(arr)] if arr.size else None
-        if finite is not None and finite.size:
-            params["min"] = float(finite.min())
-            params["max"] = float(max(finite.max(), finite.min() + 1.0))
+        seed = self._seed_range(name, arr)
+        if seed is not None:
+            params["min"], params["max"] = seed
         self._params[name] = normalize_channel_remap_params(params)
 
     def _on_active_changed(self, name):

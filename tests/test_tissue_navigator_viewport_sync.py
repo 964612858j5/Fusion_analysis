@@ -63,6 +63,44 @@ def test_mapping_patch_local_to_full(app):
     assert full == (120.0, 170.0, 310.0, 360.0)
 
 
+# ── 2b. Case B: the workbench shows the whole slide, so the rect SCALES ─────
+def test_mapping_slide_local_to_full(app):
+    """The Channel Remap workbench eats the whole slide's overview read now,
+    so its image-local pixels are slide pixels downsampled -- multiplied by
+    the measured ratio, never offset by a patch."""
+    from block01.ui.step0.step0_page import Step0Page
+
+    class _Loader:
+        shape = (1000, 2000)
+
+        def channel_names(self):
+            return ["DAPI", "CD3"]
+
+        @property
+        def ch_map(self):
+            return {"DAPI": 0, "CD3": 1}
+
+        def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+            return np.full((100, 200), 7.0, np.float32)
+
+        def read_region(self, ch, y0, y1, x0, x1, **_kw):
+            return np.zeros((y1 - y0, x1 - x0), np.float32)
+
+    s = Step0Page()
+    s.loader = _Loader()
+    s.nucleus_channel = "DAPI"
+    s._channel_order = ["DAPI", "CD3"]
+    s.patches = [(100, 200, 300, 400)]     # a patch exists and is IGNORED
+    s.current_patch_idx = 0
+    s._sync_step0_to_workbench()
+    s._cond_workbench.set_active_channel("CD3")
+
+    full = s._map_viewport_to_full(_img_local(10, 60, 20, 70))
+
+    # x10 in rows and columns, no patch origin anywhere.
+    assert full == (200.0, 700.0, 100.0, 600.0)
+
+
 # ── 3. Changing current patch changes the mapped rectangle ───────────────────
 def test_patch_change_changes_rect(app):
     from block01.ui.step0.step0_page import Step0Page

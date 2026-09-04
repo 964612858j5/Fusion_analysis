@@ -617,16 +617,20 @@ def test_preload_cache_hit_zero_io(app):
     assert p.loader.calls == []
 
 
-def test_sync_warm_passes_all_real_arrays(app):
+def test_sync_passes_the_active_channel_eagerly_and_the_rest_lazily(app):
+    """The workbench eats the WHOLE SLIDE now, not the patch, so the warm
+    per-patch preload cache is no longer what it is fed: the active channel
+    is read eagerly (the inspector is never blank on first open) and every
+    other channel is a lazy placeholder the pixel provider fills when it is
+    selected or checked."""
     p = _page_for_preload(app)
     _warm_cache_sync(p)
     p._sync_step0_to_workbench()
     wb = p._cond_workbench
-    # every channel is a real array (no None lazy placeholders) when cache warm
-    assert all(wb._raw.get(n) is not None for n in wb._names)
-    # All toggle is then instant: no progressive timer needed
-    wb._on_all_toggled(True)
-    assert wb._progressive_timer is None
+    active = wb.active_channel()
+    assert active is not None
+    assert wb._raw.get(active) is not None, "the inspector opened empty"
+    assert [n for n in wb._names if wb._raw.get(n) is not None] == [active]
 
 
 def test_bg_hotswap_updates_corrected_only(app):

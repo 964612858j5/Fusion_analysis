@@ -273,10 +273,10 @@ def test_the_dapi_channels_mapping_reaches_the_overlay(app):
     assert stack.overlay.mappings[-1][1] == 444.0
 
 
-def test_auto_stays_the_patch_based_button(app):
+def test_auto_stays_the_workbenchs_own_button(app):
     """The window is a 1:1 replica, so its Auto is the workbench's QuPath
-    auto-contrast on the CURRENT PREVIEW PATCH -- not the page's slide-wide
-    seed. Both live side by side, deliberately."""
+    auto-contrast over the workbench's OWN pixels -- untouched by this page,
+    whatever those pixels are."""
     page = _page(app)
     wb = page._cond_workbench
     rng = np.random.default_rng(5)
@@ -401,6 +401,131 @@ def test_a_marker_row_takes_the_inspector_back(app):
     assert page._inspector_channel is None
     assert wb.active_channel() == "CD3"
     assert _hist_hex(wb) == page._channel_swatch_hex("CD3").lower()
+
+
+# ── 3b. the landing view has NO patch, and the window still works ────────
+#
+# The real state a slide loads into: the full image is up, no patch has
+# been drawn, and nothing has ever been computed. The workbench used to be
+# fed from the CURRENT PATCH, so on this page there was no channel data at
+# all -- the Intensity window opened with an empty histogram, disabled
+# sliders and an active channel of None, and every number it showed came
+# from the page-level fallback instead of the single source of truth.
+
+
+class _OutlierSeedLoader(_GpuPathLoader):
+    """A whole-slide low-resolution read with a few very bright pixels, so
+    the seeded window (p0.1/99.9 over tissue) is visibly NOT the array's
+    min/max."""
+
+    shape = (2048, 2048)
+
+    def overview_downsample(self):
+        return 32
+
+    def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+        arr = np.full((64, 64), 700.0, np.float32)
+        arr[0, :4] = 60000.0            # hot pixels, above the 99.9th pct
+        arr[1, :4] = 0.0                # background zeros, excluded
+        return arr
+
+
+def _landing_page(app, stack=None, loader=None):
+    """A freshly loaded slide on its landing view: dataset bound, full
+    image showing, NO patch drawn, workbench never engaged."""
+    page = _bare_page(app, stack, loader or _SeedLoader())
+    page.patches = []
+    page.current_patch_idx = 0
+    return page
+
+
+def test_with_no_patch_the_window_opens_on_the_current_channel(app):
+    page = _landing_page(app)
+    wb = page._cond_workbench
+    assert not page.patches and not wb.has_channel_data()
+
+    page.show_intensity_window()
+
+    assert wb.has_channel_data(), "no channel data with no patch drawn"
+    assert wb.active_channel() == "CD3"
+    assert wb._raw["CD3"] is not None, "the histogram has no pixels"
+    assert wb._sp_max.isEnabled() and wb._sp_min.isEnabled()
+
+
+def test_with_no_patch_moving_max_reaches_the_full_image(app):
+    stack = _Stack()
+    page = _landing_page(app, stack)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+
+    wb._sp_max.setValue(6.0)
+
+    assert page._display_mapping_for("CD3")[1] == pytest.approx(6.0)
+    assert stack.controller.mappings[-1][:3] == pytest.approx((
+        page._display_mapping_for("CD3")[0], 6.0,
+        page._display_mapping_for("CD3")[2]))
+    assert stack.controller.mappings[-1][3] == "CD3"
+
+
+def test_with_no_patch_selecting_a_row_moves_the_inspector(app):
+    page = _landing_page(app)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+
+    page._on_channel_selected_by_id("CD20")
+
+    assert page.current_channel == "CD20"
+    assert wb.active_channel() == "CD20"
+    assert wb._raw["CD20"] is not None, "the switched-to channel is empty"
+
+
+def test_with_no_patch_the_dapi_row_edits_the_overlay(app):
+    stack = _Stack()
+    page = _landing_page(app, stack)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+
+    page._on_channel_selected_by_id("DAPI")
+    wb._sp_max.setValue(444.0)
+
+    assert wb.active_channel() == "DAPI"
+    assert page.current_channel == "CD3", "the displayed channel was dropped"
+    assert page._display_mapping_for("DAPI")[1] == 444.0
+    assert stack.overlay.mappings[-1][1] == 444.0
+
+
+def test_the_workbench_pixels_are_the_slide_not_the_patch(app):
+    """One array per channel, read once: the same whole-slide low-resolution
+    read the display seed uses -- so the two cannot disagree, and there is
+    no second read."""
+    loader = _OutlierSeedLoader()
+    page = _landing_page(app, loader=loader)
+    wb = page._cond_workbench
+    page.show_intensity_window()
+
+    slide = page._slide_lowres_array("CD3")
+    assert wb._raw["CD3"] is slide, "the workbench read its own pixels"
+    lo, hi = sp.seed_display_range(slide)
+    assert wb._params["CD3"]["min"] == pytest.approx(lo)
+    assert wb._params["CD3"]["max"] == pytest.approx(hi)
+    assert hi < 60000.0, "the sliders opened on the array max, not the seed"
+    assert page._display_mapping_for("CD3")[:2] == pytest.approx((lo, hi))
+
+
+def test_a_drawn_patch_does_not_change_the_workbench_pixels(app):
+    """One rule on this page: the whole slide, patch or no patch."""
+    page = _landing_page(app, loader=_OutlierSeedLoader())
+    page.show_intensity_window()
+    before = page._cond_workbench._params["CD3"]["max"]
+
+    page.patches = [(0, 32, 0, 32)]
+    page.current_patch_idx = 0
+    page._sync_step0_to_workbench()
+
+    wb = page._cond_workbench
+    assert wb._raw["CD3"] is page._slide_lowres_array("CD3")
+    assert wb._params["CD3"]["max"] == pytest.approx(before)
+
 
 
 # ── 4. the compare header carries the snapshot's own controls ────────────

@@ -3913,3 +3913,169 @@ def test_no_raw_underlay_once_the_corrected_floor_hides_the_raw_layer(app):
     assert ctrl.stats["raw_underlay_issued"] == 0
 
     ctrl.teardown()
+
+
+# ── occlusion: not painting what nothing can see (module docstring) ──────────
+
+def _deliver_all_raw(scheduler, provider, ctrl):
+    for req, _cb in scheduler.pending_for(RawKey, include_underlay=True):
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(30)
+
+
+def test_overview_and_coarser_tiles_are_hidden_once_the_level_covers(app):
+    """A coarser pooled item stands in for a MISSING current-level tile;
+    the overview is the fallback of last resort. Once the current level
+    covers the whole viewport both are entirely behind it, and painting
+    them every frame is pure cost."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 1024, 100 + 1024)
+
+    # part-way: the level+1 underlay has landed but the current level has
+    # not, so both must still be drawn.
+    underlay = [(r, cb) for r, cb in scheduler.requests
+                if isinstance(r.key, RawKey) and r.key.tile.level == 1]
+    for req, _cb in underlay:
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(30)
+    assert not ctrl._level_covers_view(ctrl._raw_pool)
+    assert view.overview_item.isVisible() is True
+    assert any(e.item.isVisible() for e in ctrl._raw_pool.entries.values()
+               if e.level == 1)
+
+    _deliver_all_raw(scheduler, provider, ctrl)
+    assert ctrl._level_covers_view(ctrl._raw_pool)
+    assert view.overview_item.isVisible() is False
+    assert all(not e.item.isVisible() for e in ctrl._raw_pool.entries.values()
+               if e.level != ctrl.level)
+    assert all(e.item.isVisible() for e in ctrl._raw_pool.entries.values()
+               if e.level == ctrl.level)
+
+    ctrl.teardown()
+
+
+def test_exposing_a_new_tile_brings_the_fallbacks_back_in_the_same_handler(app):
+    """The occlusion rule may never open a hole: coverage is recomputed in
+    `_on_range_changed`, which runs on every range event BEFORE Qt paints,
+    so the frame that exposes an uncovered tile is also the frame in which
+    the underlay and the overview come back."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 1024, 100 + 1024)
+    _deliver_all_raw(scheduler, provider, ctrl)
+    assert view.overview_item.isVisible() is False
+
+    # Pan far enough to expose tiles that have never been read. No pumping
+    # of deliveries in between: the assertion is about the state the range
+    # handler leaves behind, synchronously.
+    view.view_box.setRange(xRange=(2600, 2600 + 1024), yRange=(2000, 2000 + 1024),
+                           padding=0)
+    assert not ctrl._level_covers_view(ctrl._raw_pool)
+    assert view.overview_item.isVisible() is True
+
+    ctrl.teardown()
+
+
+def test_the_corrected_floor_is_not_painted_under_a_covered_precise_level(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._floor_ready:
+        _pump(10)
+    assert ctrl._floor_ready
+    set_view_and_pump(view, 700, 100, 700 + 1024, 100 + 1024)
+
+    # floor ready, nothing corrected on screen yet -> the floor IS the
+    # picture and must be painted.
+    assert ctrl._coverage_complete() is False
+    assert view.corrected_floor_item.isVisible() is True
+    assert view.overview_item.isVisible() is False, \
+        "the floor covers the world rect; the overview under it is dead weight"
+
+    for req, _cb in scheduler.pending_for(CorrectionKey):
+        t = req.key.tile
+        if t.level != ctrl.level:
+            continue
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(40)
+    assert ctrl._coverage_complete() is True
+    assert view.corrected_floor_item.isVisible() is False
+    assert view.overview_item.isVisible() is False
+
+    ctrl.teardown()
+
+
+def test_no_op_level_and_lut_sets_are_skipped(app):
+    """`pg.ImageItem.setLevels`/`setLookupTable` unconditionally set
+    `_renderRequired` and call `update()`, so re-applying identical values
+    re-quantises every pooled tile and repaints the scene for nothing."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 1024, 100 + 1024)
+    _deliver_all_raw(scheduler, provider, ctrl)
+    entries = list(ctrl._raw_pool.entries.values())
+    assert entries
+
+    for e in entries:
+        e.item._renderRequired = False
+    lo, hi, gamma = ctrl.display_mapping
+    ctrl.set_display_mapping(lo, hi, gamma)          # identical values
+    assert not any(getattr(e.item, "_renderRequired", False) for e in entries), \
+        "a no-op mapping re-render was triggered"
+
+    # ...and a REAL change still goes through.
+    ctrl.set_display_mapping(lo + 1.0, hi + 2.0, gamma)
+    assert all(list(e.item.levels) == pytest.approx([lo + 1.0, hi + 2.0])
+               for e in entries)
+
+    # the same for the colour table: a NEW but identical array is a no-op.
+    ctrl.set_tint((255, 0, 0))
+    for e in entries:
+        e.item._renderRequired = False
+    ctrl.set_tint((255, 0, 0))
+    assert not any(getattr(e.item, "_renderRequired", False) for e in entries)
+    ctrl.set_tint((0, 255, 0))
+    assert any(getattr(e.item, "_renderRequired", False) for e in entries)
+
+    ctrl.teardown()
+
+
+def test_many_tile_arrivals_in_one_event_loop_turn_cost_one_repaint(app):
+    """Recorded as a measurement, not a mechanism this module implements:
+    Qt already coalesces `QGraphicsItem.update()` into one repaint per
+    event-loop pass, so there is nothing here to batch that Qt is not
+    batching already. The test exists so a future change that breaks the
+    coalescing (e.g. a synchronous repaint per delivered tile) is caught."""
+    import pyqtgraph as pg
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 2048, 100 + 2048)
+    view.graphics.repaint()
+
+    paints = [0]
+    orig = pg.GraphicsView.paintEvent
+
+    def counted(self, ev):
+        paints[0] += 1
+        return orig(self, ev)
+
+    pg.GraphicsView.paintEvent = counted
+    try:
+        reqs = scheduler.pending_for(RawKey, include_underlay=True)
+        assert len(reqs) >= 8
+        for req, _cb in reqs:
+            t = req.key.tile
+            scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+        _pump(40)
+        view.graphics.repaint()
+    finally:
+        pg.GraphicsView.paintEvent = orig
+
+    assert paints[0] <= 2, f"{len(reqs)} arrivals cost {paints[0]} repaints"
+
+    ctrl.teardown()

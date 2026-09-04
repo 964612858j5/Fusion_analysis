@@ -528,6 +528,92 @@ before, the intermediate corrected fallback at `level + 1`, the corrected
 floor, the overview -- and the target level's corrected tile appears only
 once it has actually been computed.
 
+## Not painting what nothing can see
+
+`QGraphicsScene` culls by exposed rect but does NOT do occlusion culling:
+an item that is entirely behind an opaque item in front of it is still
+painted, in full, every frame. This scene is built out of exactly that
+shape -- a pinned overview at z=0, a corrected floor above it, coarser
+pooled tiles above that, current-level tiles on top -- so the cost is paid
+on every frame of every gesture, for pixels no one can see.
+
+Measured on the real slide (TOX, 1400x1000 viewport, io=4/cw=2, a 60-step
+2s scripted pan, instrumenting `pg.ImageItem.paint` per item and
+`GraphicsView.paintEvent`), BEFORE:
+
+    raw mode      92 paints, 1878 ms total, 20.4 ms/paint
+      overview      92 paints   256.6 ms   (13.7% of paint time)
+      raw level 1  293 paints   463.2 ms   (24.7%)
+      raw level 0  984 paints  1075.9 ms
+    tophat       101 paints, 1773 ms total, 17.6 ms/paint
+      overview     101 paints   281.6 ms   (15.9%)
+      floor        101 paints   301.5 ms   (17.0%)
+      precise L1   346 paints   373.2 ms   (21.0%)
+      precise L0  1118 paints   702.9 ms
+
+The overview was painted on EVERY frame of a corrected-mode pan even
+though the docstring already says it "is never actually visible" once the
+floor covers the world rect, and the level+1 tiles were painted on every
+frame of a fully covered viewport even though a coarser tile exists only
+to stand in for a MISSING current-level one.
+
+So `_update_layer_visibility` now also decides what is OCCLUDED, from one
+predicate: `_level_covers_view(pool)` -- does that pool hold an item at the
+CURRENT level for every tile of the current wanted set? It is a pool
+membership test rather than a geometric one because the wanted set IS the
+tiling of the viewport at this level, and an item exists only once its
+pixels have landed. Given it:
+
+- coarser pooled items are hidden while the current level covers (both
+  pools);
+- the corrected floor item is hidden while the current precise level
+  covers (`floor_ok` still means READY and every other rule still reads
+  it -- only the item's paint is skipped);
+- the pinned overview is hidden when something both visible and known to
+  cover completely is in front of it: the corrected floor, a covering
+  visible raw level, or a covering visible precise level.
+
+There is no window where this can show a hole. Coverage is recomputed in
+`_on_range_changed`, which runs on every single range event BEFORE Qt
+paints, so the frame in which a camera move exposes an uncovered tile is
+also the frame in which the underlay, the floor and the overview come back.
+
+AFTER, same measurement:
+
+    raw mode     111 paints, 1547 ms total, 13.9 ms/paint  (-32% per paint)
+      overview      18 paints    51.7 ms   (-80%)
+      raw level 1   52 paints    94.0 ms   (-80%)
+    tophat       123 paints, 1444 ms total, 11.7 ms/paint  (-33% per paint)
+      overview       0 paints     0.0 ms
+      precise L1   182 paints   195.9 ms   (-47%)
+
+More paint EVENTS happen afterwards (92 -> 111, 101 -> 123) precisely
+because each is cheaper, so the event loop gets around to more of them in
+the same two seconds; total GUI-thread paint time still falls (1878 ->
+1547 ms, 1773 -> 1444 ms).
+
+Two things the plan for this work expected to find, and what measurement
+actually said about them:
+
+- "Batch tile arrivals within one event-loop turn into one `update()`."
+  ALREADY TRUE, and not by this module's doing: Qt coalesces
+  `QGraphicsItem.update()` into one repaint per event-loop pass. Measured
+  with the fake scheduler: 52 tile results delivered before a single drain
+  produce exactly ONE paintEvent; the same 19 results delivered with an
+  event-loop turn between each produce 10. There is nothing to batch here
+  that Qt is not batching already.
+- "Skip no-op level/LUT sets." Real, and fixed (`_set_levels_if_changed`,
+  `_set_lut_if_changed`, and the same test inside `TileItemPool.
+  set_levels_for_level` / `set_lookup_table`) -- `pg.ImageItem.setLevels`
+  and `setLookupTable` unconditionally set `_renderRequired` and call
+  `update()`, so re-applying identical numbers re-quantises every pooled
+  tile and repaints the scene; measured, `set_display_mapping` to the
+  values it already had costs a full extra paint. But it is NOT on the
+  motion path: across a 2s pan only 5 of 1383 item paints were
+  re-renders. Do not expect this half to show up in a pan or zoom
+  measurement; it pays on channel switches, overview installs and hosts
+  that re-push an unchanged mapping.
+
 ## Raw level+1 underlay
 
 The raw layer used to ask for exactly ONE level: `self.level`. That is the
@@ -856,6 +942,37 @@ def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
 OVERVIEW_CACHE_BYTES = 256 * 1024 * 1024
 
 
+def _luts_equal(a, b) -> bool:
+    """Whether two colour tables are the same BY VALUE (either may be
+    None). Used to skip no-op `setLookupTable` calls, which would otherwise
+    re-render and repaint every pooled item."""
+    if a is None or b is None:
+        return a is None and b is None
+    if a is b:
+        return True
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and bool(np.array_equal(a, b))
+
+
+def _set_levels_if_changed(item, levels) -> None:
+    """`ImageItem.setLevels` unconditionally re-renders and repaints; skip
+    it when the numbers are already what the item has."""
+    cur = item.levels
+    if cur is not None and len(cur) == 2 \
+            and float(cur[0]) == float(levels[0]) \
+            and float(cur[1]) == float(levels[1]):
+        return
+    item.setLevels(levels)
+
+
+def _set_lut_if_changed(item, lut) -> None:
+    """The `setLookupTable` counterpart of `_set_levels_if_changed`."""
+    if _luts_equal(item.lut, lut):
+        return
+    item.setLookupTable(lut)
+
+
 @dataclass(frozen=True)
 class OverviewRecord:
     """One channel's overview level, with the display range derived FROM it.
@@ -997,10 +1114,24 @@ class TileItemPool:
 
     def set_levels_for_level(self, fn) -> None:
         """`fn(level) -> (lo, hi)`: display levels for every item, now and
-        for items created later. Paint-time only: stored pixels untouched."""
+        for items created later. Paint-time only: stored pixels untouched.
+
+        An entry whose levels do not actually change is skipped: `pg.
+        ImageItem.setLevels` unconditionally sets `_renderRequired` and
+        calls `update()`, so re-applying identical numbers costs a full
+        re-quantisation of every pooled tile plus a repaint of the scene.
+        `fn` is a fresh closure on every call (`_corrected_levels_fn`
+        rebuilds it), so identity of the FUNCTION says nothing -- only the
+        resulting values can be compared."""
         self._levels_for_level = fn
         for entry in self.entries.values():
-            entry.item.setLevels(fn(entry.level))
+            new = fn(entry.level)
+            cur = entry.item.levels
+            if cur is not None and len(cur) == 2 \
+                    and float(cur[0]) == float(new[0]) \
+                    and float(cur[1]) == float(new[1]):
+                continue
+            entry.item.setLevels(new)
 
     def set_levels(self, levels) -> None:
         """Convenience: the same levels for every level."""
@@ -1010,7 +1141,14 @@ class TileItemPool:
     def set_lookup_table(self, lut) -> None:
         """Apply `lut` (or None for greyscale) to every item, now and on
         every item created later. Pure display: the stored uint8 pixels are
-        untouched, so this costs no re-quantisation and no re-read."""
+        untouched, so this costs no re-quantisation and no re-read.
+
+        Skipped entirely when the table is unchanged BY VALUE: a new but
+        identical 256x3 array is what a caller that rebuilds the table from
+        the same (tint, gamma) produces, and `setLookupTable` would then
+        re-render and repaint every pooled item for nothing."""
+        if _luts_equal(self._lut, lut):
+            return
         self._lut = lut
         for entry in self.entries.values():
             entry.item.setLookupTable(lut)
@@ -2163,11 +2301,12 @@ class ExploreController(QtCore.QObject):
         lut = (None if (self._tint is None and self._gamma == 1.0)
                else build_display_lut(self._tint, self._gamma))
         if self._overview_arr is not None:
-            self.view.overview_item.setLevels(self._raw_levels())
-        self.view.overview_item.setLookupTable(lut)
+            _set_levels_if_changed(self.view.overview_item, self._raw_levels())
+        _set_lut_if_changed(self.view.overview_item, lut)
         if self.view.corrected_floor_item.image is not None and self._floor_level is not None:
-            self.view.corrected_floor_item.setLevels(self._corrected_levels(self._floor_level))
-        self.view.corrected_floor_item.setLookupTable(lut)
+            _set_levels_if_changed(self.view.corrected_floor_item,
+                                   self._corrected_levels(self._floor_level))
+        _set_lut_if_changed(self.view.corrected_floor_item, lut)
         # Levels callbacks capture VALUES, never `self`: a closure over the
         # controller would put it, its pools and their items in a reference
         # cycle, and a torn-down controller would then die in a cyclic GC
@@ -2418,6 +2557,20 @@ class ExploreController(QtCore.QObject):
                 return False
         return True
 
+    def _level_covers_view(self, pool) -> bool:
+        """Whether `pool` has an item at the CURRENT level for every tile of
+        the current wanted set -- i.e. the current level alone already
+        paints the whole viewport, so anything behind it is invisible
+        (module docstring "Not painting what nothing can see").
+
+        Deliberately a pool-membership test and not a geometric one: the
+        wanted set IS the tiling of the viewport at this level, and an item
+        exists only once its pixels have landed."""
+        if not self._visible_tiles:
+            return False
+        return all(pool.get(self.level, tx, ty) is not None
+                   for tx, ty in self._visible_tiles)
+
     def _update_layer_visibility(self):
         """Display-policy gate (module docstring: anti-checkerboard +
         corrected floor + single-stage motion guarantee + progressive
@@ -2448,16 +2601,45 @@ class ExploreController(QtCore.QObject):
         self._precise_visible = covered
         self.view.precise_visible = covered
 
-        self.view.corrected_floor_item.setVisible(floor_ok)
+        # `floor_ok` remains the READINESS fact every other rule reads (the
+        # raw-layer suppression below still keys off it, unchanged). What
+        # changed is only whether the floor ITEM is worth painting: when
+        # the current precise level covers the viewport, the floor is
+        # entirely behind it (module docstring "Not painting what nothing
+        # can see").
+        # (`covered` alone is the test: `current_level_visible` below is
+        # `True if floor_ok else covered`, so a covered viewport always has
+        # its current-level precise items visible.)
+        self.view.corrected_floor_item.setVisible(floor_ok and not covered)
 
         raw_on = (not wants) or (not floor_ok)
+        # Occlusion (module docstring "Not painting what nothing can see").
+        # A coarser pooled item exists to stand in for a MISSING
+        # current-level tile; when none is missing it is behind an opaque,
+        # exactly-covering current level and painting it is pure cost.
+        raw_covers = self._level_covers_view(self._raw_pool)
         self._raw_pool.apply_visibility(
-            self.level, current_level_visible=raw_on, coarser_visible=raw_on)
+            self.level, current_level_visible=raw_on,
+            coarser_visible=raw_on and not raw_covers)
 
         current_level_visible = True if floor_ok else covered
         self._precise_pool.apply_visibility(
-            self.level, current_level_visible=current_level_visible, coarser_visible=True,
+            self.level, current_level_visible=current_level_visible,
+            coarser_visible=not covered,
             key_ok=self._precise_key_current_for_level)
+
+        # The pinned overview is the never-black-screen guarantee of last
+        # resort, at z=0 under everything. Hide it only when something that
+        # is BOTH visible and known to cover completely is in front of it:
+        # the corrected floor (covers the whole world rect by construction),
+        # a fully covering visible raw level, or a fully covering visible
+        # precise level. Anything less and it stays up.
+        overview_occluded = (
+            floor_ok
+            or (raw_on and raw_covers)
+            or (current_level_visible and covered))
+        self.view.overview_item.setVisible(
+            self._overview_arr is not None and not overview_occluded)
 
     # Backward-compatible alias (pre-rename name).
     _update_precise_visibility = _update_layer_visibility

@@ -2362,8 +2362,48 @@ class OverviewPanel(QWidget):
             )
             return True
 
+        # ── The middle button pans, in every mode ─────────────────────
+        #
+        # ONE handler, above every mode branch and above the adjust state.
+        # The thumbnail is a map you have to be able to move under a zoom,
+        # and the left button is spoken for everywhere -- it draws rectangles
+        # in patch mode, adds vertices in ROI mode, navigates with no tool
+        # out, and edits the selected rectangle in the adjust state. The
+        # middle button is the one gesture that means the same thing in all
+        # four, so it is the one that pans.
+        #
+        # It USED to be written out four times in the press branch and three
+        # times in the move branch, once per mode, which is four chances to
+        # leave it out of the next mode somebody adds and four places to fix
+        # a bug in. Hoisting it also settles the adjust state's version of
+        # the question in the same words as everyone else's: panning is not
+        # an edit, so it moves the map and leaves the selection alone.
+        #
+        # Every branch below is therefore reached only with the middle button
+        # up, and none of them has to know this gesture exists.
+        if t == QtCore.QEvent.MouseButtonPress \
+                and event.button() == Qt.MiddleButton:
+            self._pan_last = event.pos()
+            return True
+        if t == QtCore.QEvent.MouseMove and (event.buttons() & Qt.MiddleButton):
+            # `_pan_last` is None when the press went somewhere else (another
+            # widget, or before this filter was installed). Swallow the move
+            # rather than jumping the map to an arbitrary offset.
+            if self._pan_last is not None:
+                self._do_pan(event)
+            return True
+        if t == QtCore.QEvent.MouseButtonRelease \
+                and event.button() == Qt.MiddleButton:
+            # `_adjust_swallow` is deliberately NOT cleared here: it belongs
+            # to the press that ended an adjustment, and a middle release is
+            # not that press.
+            self._pan_last = None
+            return True
+
         # ── Mouse press ───────────────────────────────────────────────
-        elif t == QtCore.QEvent.MouseButtonPress:
+        # `if`, not `elif`: the wheel branch above returns unconditionally,
+        # and the middle-button handler sits between the two.
+        if t == QtCore.QEvent.MouseButtonPress:
             sp = self.gview.mapToScene(event.pos())
             r, c = self._ov_pos(sp)
             fr, fc = self._ov_pos_f(sp)
@@ -2375,9 +2415,6 @@ class OverviewPanel(QWidget):
             # also navigate, and it does not also start a rectangle. The mode
             # buttons get their say back on the NEXT click.
             if self._selected_patch_idx >= 0:
-                if event.button() == Qt.MiddleButton:
-                    self._pan_last = event.pos()   # panning is not an edit
-                    return True
                 hit = self._selected_patch_hit_test(fr, fc)
                 if hit is not None:
                     self._begin_patch_drag(hit[0], hit[1], fr, fc, event.pos())
@@ -2407,8 +2444,6 @@ class OverviewPanel(QWidget):
                 if event.button() == Qt.LeftButton:
                     self._nav_press = (event.pos(), r, c)
                     self._nav_moved = False
-                elif event.button() == Qt.MiddleButton:
-                    self._pan_last = event.pos()
                 return True
 
             if self._mode == 'roi':
@@ -2434,9 +2469,6 @@ class OverviewPanel(QWidget):
                     if len(self._cur_pts) >= 3:
                         self._finish_roi()
                     return True
-                elif event.button() == Qt.MiddleButton:
-                    self._pan_last = event.pos()
-                    return True
 
             else:  # patch mode
                 if event.button() == Qt.LeftButton:
@@ -2444,9 +2476,6 @@ class OverviewPanel(QWidget):
                     return True
                 elif event.button() == Qt.RightButton:
                     self._right_press_pos = event.pos()
-                    return True
-                elif event.button() == Qt.MiddleButton:
-                    self._pan_last = event.pos()
                     return True
 
         # ── Mouse move ────────────────────────────────────────────────
@@ -2472,16 +2501,11 @@ class OverviewPanel(QWidget):
                 press = getattr(self, "_nav_press", None)
                 if press is not None and (event.pos() - press[0]).manhattanLength() >= 3:
                     self._nav_moved = True
-                if (event.buttons() & Qt.MiddleButton) and self._pan_last:
-                    self._do_pan(event)
                 return True
 
             if self._mode == 'roi':
                 if self._cur_pts:
                     self._update_preview_line(r, c)
-                # Middle-drag pan
-                if event.buttons() & Qt.MiddleButton and self._pan_last:
-                    self._do_pan(event)
                 return True
 
             else:  # patch mode
@@ -2493,19 +2517,12 @@ class OverviewPanel(QWidget):
                     self._temp.setSize([max(1,cmax-cmin), max(1,rmax-rmin)])
                     self._temp.setVisible(True)
                     return True
-                elif event.buttons() & Qt.MiddleButton:
-                    if self._pan_last:
-                        self._do_pan(event)
-                    return True
 
         # ── Mouse release ─────────────────────────────────────────────
         elif t == QtCore.QEvent.MouseButtonRelease:
-            if event.button() == Qt.MiddleButton:
-                self._pan_last = None
             if self._adjust_swallow:
                 # The press that ended the adjustment ate the whole gesture.
-                if event.button() != Qt.MiddleButton:
-                    self._adjust_swallow = False
+                self._adjust_swallow = False
                 return True
             if event.button() == Qt.LeftButton and self._patch_drag is not None:
                 drag = self._patch_drag
@@ -2531,8 +2548,6 @@ class OverviewPanel(QWidget):
                 return True
 
             if self._mode == 'roi':
-                if event.button() == Qt.MiddleButton:
-                    self._pan_last = None
                 return True
 
             else:  # patch mode
@@ -2589,11 +2604,6 @@ class OverviewPanel(QWidget):
                         if abs(dp.x()) < 6 and abs(dp.y()) < 6:
                             self._remove_last_patch()
                     self._right_press_pos = None
-                    self._pan_last = None
-                    return True
-
-                elif event.button() == Qt.MiddleButton:
-                    self._pan_last = None
                     return True
 
         return False

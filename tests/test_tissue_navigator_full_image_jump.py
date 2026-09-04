@@ -171,7 +171,6 @@ def _page(app, ctl):
     page.current_channel = "CD3"
     page.nucleus_channel = "DAPI"
     page._explore_tab = _Tab(_Stack(ctl)) if ctl is not None else _Tab(None)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     return page
 
 
@@ -218,14 +217,14 @@ def test_a_jump_from_the_whole_slide_view_zooms_in(app):
     assert ctl.jumps[-1] == (30000 - d // 2, 12000 - d // 2, d, d)
 
 
-def test_ignored_while_the_full_image_is_not_on_screen(app):
-    ctl = _Ctl()
-    page = _page(app, ctl)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_COMPARE)
+def test_ignored_while_there_is_no_full_image(app):
+    """The full image is not a PAGE any more -- it is there whenever a
+    viewer stack is -- so the only state a jump has to be ignored in is
+    having no stack at all."""
+    page = _page(app, None)
 
     page._on_tissue_navigate(20000, 10000)
 
-    assert ctl.jumps == []
     assert page._explore_tab.calls == [], "must not build or switch anything"
 
 
@@ -279,17 +278,20 @@ def test_the_compare_rect_path_defers_to_the_full_image_while_it_is_shown(app):
     assert popup.overview.current_view_rect() == (1000.0, 1500.0, 2000.0, 2800.0)
 
 
-def test_returning_to_compare_hands_the_rectangle_back(app):
+def test_expanding_the_compare_strip_leaves_the_rectangle_alone(app):
+    """The strip has no camera, so opening it changes nothing about which
+    viewport the navigator draws: the full image is still the only thing
+    with one, and it is still on screen."""
     ctl = _Ctl(bbox=(1000, 2000, 1500, 2800))
     page = _page(app, ctl)
     popup = page._ensure_tissue_navigator()
     page._update_full_image_view_rect()
-    assert popup.overview.current_view_rect() is not None
+    before = popup.overview.current_view_rect()
+    assert before is not None
 
-    page._return_to_compare()
+    page._set_compare_strip_visible(True)
 
-    # No conditioning workbench in this page: the compare path clears it.
-    assert popup.overview.current_view_rect() is None
+    assert popup.overview.current_view_rect() == before
 
 
 # ── 4. no drawing mode: click jumps, drag pans; ROI mode: inside an ROI jumps ─

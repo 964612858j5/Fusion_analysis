@@ -1,4 +1,11 @@
-"""Full-image drill-down inside Background Correction.
+"""The full image of the Background Correction page.
+
+Since the compare panels became a snapshot STRIP beside the image rather
+than the other page of a stack, "opening" the full image is not a gesture
+any more: it is simply there whenever a viewer stack is. What is left to
+pin down is the SELECTION -- which channel, which method, which parameter,
+and where those numbers come from -- plus the lifecycle of the one viewer
+widget the page owns.
 
 Its own module, not appended to test_step0_background_correction_tab.py:
 that file already constructs 32 `Step0Page` instances, and one more was
@@ -21,11 +28,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from block01.ui.step0.step0_page import (  # noqa: E402
-    PREVIEW_PAGE_COMPARE,
-    PREVIEW_PAGE_FULL_IMAGE,
-)
-
 from test_step0_background_correction_tab import (  # noqa: E402
     _GpuPathLoader,
     app,            # noqa: F401  (pytest fixture)
@@ -46,18 +48,37 @@ def full_image_page(app):
     page._preload_cache = {0: {ch: np.zeros((32, 32), np.float32)
                                for ch in ("DAPI", "CD3", "CD20")}}
     page.current_channel = "CD3"
-    page._update_full_image_buttons()
+    page._update_full_method_buttons()
     return page
+
+
+class _FakeStack:
+    """The little of a stack the page touches after a successful show.
+
+    It has to exist at all because `_full_image_visible()` now means "there
+    is a live viewer": no page index decides it any more, so the only thing
+    that can make the full image absent is having no stack.
+    """
+
+    def __init__(self):
+        self.marker_visible = []
+        self.overlay = None
+        self.view = None
+        self.provider = None
+        self.controller = type("C", (), {
+            "set_marker_visible":
+                lambda _s, v: self.marker_visible.append(bool(v)),
+        })()
 
 
 class _RecordingExploreTab:
     """Stands in for Step0ExploreTab: records what it is asked to show."""
 
-    def __init__(self):
+    def __init__(self, stack=_FakeStack):
         self.calls = []
         self.viewports = []
         self.tints = []
-        self.stack = None
+        self.stack = stack() if callable(stack) else stack
         self.build_attempts = 0
         self.released = []
 
@@ -100,7 +121,8 @@ def test_the_viewer_is_created_once_on_first_use_and_lives_in_the_stack(
     from block01.ui.step0.step0_explore_tab import Step0ExploreTab
 
     page = full_image_page
-    assert page._preview_stack.count() == 2
+    assert page._preview_split.count() == 2, (
+        "the workspace is the full image plus the compare strip")
 
     if page._explore_tab is None:
         assert page.findChildren(Step0ExploreTab) == [], (
@@ -112,7 +134,7 @@ def test_the_viewer_is_created_once_on_first_use_and_lives_in_the_stack(
     assert first is again, "a second viewer was created"
     found = page.findChildren(Step0ExploreTab)
     assert found == [first], f"expected exactly one, found {len(found)}"
-    full_page = page._preview_stack.widget(PREVIEW_PAGE_FULL_IMAGE)
+    full_page = page._preview_split.widget(0)
     assert first in full_page.findChildren(Step0ExploreTab), (
         "the viewer is not inside the full-image page")
 
@@ -161,7 +183,7 @@ def test_each_button_maps_to_its_result_with_provider_parameters(
     monkeypatch.setattr(page.preview_source_provider, "describe",
                         sentinel_describe)
     try:
-        page._full_image_buttons[source].click()
+        page._on_full_method_clicked(source)
     finally:
         page._channel_params.pop("CD3", None)
 
@@ -171,9 +193,7 @@ def test_each_button_maps_to_its_result_with_provider_parameters(
     elif expected_key == "effective_cucim_sigma":
         expected_params = (888,)
     assert tab.calls == [("CD3", expected_method, expected_params)]
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE
     assert page._full_image_source == source
-    page._return_to_compare()
 
 
 def test_the_source_label_names_the_method_and_its_parameter(full_image_page,
@@ -181,32 +201,32 @@ def test_the_source_label_names_the_method_and_its_parameter(full_image_page,
     page = full_image_page
     monkeypatch.setattr(page, "_explore_tab", _RecordingExploreTab())
 
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
     text = page._full_source_lbl.text()
     radius = page.preview_source_provider.describe(
         "CD3")["correction"]["effective_tophat_radius"]
 
     assert "CD3" in text and "Top-hat" in text and str(radius) in text
-    page._return_to_compare()
 
 
-def test_returning_to_compare_changes_nothing_but_the_page(full_image_page,
-                                                           monkeypatch):
-    """No teardown, no set_selection, no recompute -- and the compare
-    ViewBoxes keep their own ranges while hidden, which is why nothing is
-    saved and restored."""
+def test_collapsing_the_strip_changes_nothing_but_the_strip(full_image_page,
+                                                            monkeypatch):
+    """Expanding or collapsing the compare strip is display only: no
+    teardown, no set_selection, no recompute, and the panels keep whatever
+    snapshot they hold."""
     page = full_image_page
     tab = _RecordingExploreTab()
     monkeypatch.setattr(page, "_explore_tab", tab)
 
+    page._on_full_method_clicked("cucim")
+    calls_after = list(tab.calls)
     ranges_before = [vb.viewRange() for vb in page._preview_vbs]
-    page._enter_full_image("cucim")
-    calls_after_enter = list(tab.calls)
 
-    page._return_to_compare()
+    page._set_compare_strip_visible(True)
+    page._set_compare_strip_visible(False)
 
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_COMPARE
-    assert tab.calls == calls_after_enter, "returning asked the viewer again"
+    assert page._compare_strip_visible() is False
+    assert tab.calls == calls_after, "collapsing asked the viewer again"
     assert [vb.viewRange() for vb in page._preview_vbs] == ranges_before
     assert page._full_image_source == "cucim", "the choice is remembered"
 
@@ -215,14 +235,13 @@ def test_reopening_reads_the_parameters_again(full_image_page, monkeypatch):
     page = full_image_page
     tab = _RecordingExploreTab()
     monkeypatch.setattr(page, "_explore_tab", tab)
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
 
     page._channel_params["CD3"] = {"tophat_radius": 41, "cucim_sigma": 7}
     page._reopen_full_image()
 
     assert tab.calls[-1] == ("CD3", "tophat", (41,)), (
         "reopening must re-read the effective parameters, not replay the old")
-    page._return_to_compare()
     page._channel_params.pop("CD3", None)
 
 
@@ -234,36 +253,35 @@ def test_a_busy_run_blocks_reopening_without_touching_the_viewer(
     monkeypatch.setattr(page, "production_correction_busy",
                         lambda: "patch background correction")
 
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
 
     assert tab.calls == [], "the viewer was asked to build during a run"
     assert tab.build_attempts == 0
     # The label still says what WOULD be shown, so the page is not blank.
     assert "Top-hat" in page._full_source_lbl.text()
-    page._return_to_compare()
 
 
-def test_a_channel_change_updates_the_full_image_only_when_visible(
+def test_a_channel_change_updates_the_full_image_only_when_there_is_one(
         full_image_page, monkeypatch):
     page = full_image_page
-    tab = _RecordingExploreTab()
+    tab = _RecordingExploreTab(stack=None)
     monkeypatch.setattr(page, "_explore_tab", tab)
 
-    # Hidden: nothing happens.
-    page._return_to_compare()
+    # No viewer stack: nothing to sync, and building one for a channel
+    # click is not this method's job.
     page.current_channel = "CD20"
     page._sync_full_image_to_channel()
     assert tab.calls == []
 
-    # Visible: it follows, keeping the chosen source.
-    page._enter_full_image("cucim")
+    # With a live stack it follows, keeping the chosen source.
+    tab.stack = _FakeStack()
+    page._on_full_method_clicked("cucim")
     tab.calls.clear()
     page.current_channel = "CD3"
     page._sync_full_image_to_channel()
     sigma = page.preview_source_provider.describe(
         "CD3")["correction"]["effective_cucim_sigma"]
     assert tab.calls == [("CD3", "cucim", (sigma,))]
-    page._return_to_compare()
 
 
 def test_a_channel_change_during_a_run_does_not_rebuild(full_image_page,
@@ -273,7 +291,7 @@ def test_a_channel_change_during_a_run_does_not_rebuild(full_image_page,
     page = full_image_page
     tab = _RecordingExploreTab()
     monkeypatch.setattr(page, "_explore_tab", tab)
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
     tab.calls.clear()
     monkeypatch.setattr(page, "production_correction_busy",
                         lambda: "on-demand background correction")
@@ -282,7 +300,6 @@ def test_a_channel_change_during_a_run_does_not_rebuild(full_image_page,
     page._sync_full_image_to_channel()
 
     assert tab.calls == []
-    page._return_to_compare()
 
 
 def test_the_nucleus_channel_shows_original_without_losing_the_choice(
@@ -290,11 +307,11 @@ def test_the_nucleus_channel_shows_original_without_losing_the_choice(
     page = full_image_page
     tab = _RecordingExploreTab()
     monkeypatch.setattr(page, "_explore_tab", tab)
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
     tab.calls.clear()
 
     page.current_channel = "DAPI"          # the nucleus channel
-    page._update_full_image_buttons()
+    page._update_full_method_buttons()
     page._sync_full_image_to_channel()
 
     assert tab.calls == [("DAPI", None, ())], (
@@ -302,20 +319,19 @@ def test_the_nucleus_channel_shows_original_without_losing_the_choice(
         "Original")
     assert page._full_image_source == "tophat", (
         "the user's choice must survive the detour")
-    assert page._full_image_buttons["tophat"].isEnabled() is False
-    assert page._full_image_buttons["cucim"].isEnabled() is False
-    assert page._full_image_buttons["original"].isEnabled() is True
+    assert page._full_method_buttons["tophat"].isEnabled() is False
+    assert page._full_method_buttons["cucim"].isEnabled() is False
+    assert page._full_method_buttons["original"].isEnabled() is True
 
     tab.calls.clear()
     page.current_channel = "CD3"
-    page._update_full_image_buttons()
+    page._update_full_method_buttons()
     page._sync_full_image_to_channel()
     radius = page.preview_source_provider.describe(
         "CD3")["correction"]["effective_tophat_radius"]
     assert tab.calls == [("CD3", "tophat", (radius,))], (
         "the chosen source must come back on an ordinary channel")
-    assert page._full_image_buttons["tophat"].isEnabled() is True
-    page._return_to_compare()
+    assert page._full_method_buttons["tophat"].isEnabled() is True
 
 
 def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
@@ -330,36 +346,26 @@ def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
         def setRange(self, **kwargs):
             self.calls.append(sorted(kwargs))
 
-    class _Stack:
+    class _Stack(_FakeStack):
         def __init__(self):
+            super().__init__()
             self.view = type("V", (), {"view_box": _ViewBox()})()
             self.provider = type("P", (), {
                 "level_shape": staticmethod(lambda _l: (4096, 2048))})()
-            # The page pushes the marker-toggle state into a live stack.
-            self.marker_visible = []
-            self.controller = type("C", (), {
-                "set_marker_visible": lambda _s, v:
-                    self.marker_visible.append(bool(v))})()
 
-    tab = _RecordingExploreTab()
-    tab.stack = _Stack()
+    tab = _RecordingExploreTab(stack=_Stack)
     monkeypatch.setattr(page, "_explore_tab", tab)
-    # Fitting is done FROM the full-image page, and must leave you there --
-    # it is not "back to compare" under another name.
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
 
     page._fit_full_image()
 
     assert tab.stack.view.view_box.calls == [["padding", "xRange", "yRange"]]
     assert [vb.viewRange() for vb in page._preview_vbs] == ranges_before
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE, (
-        "fitting must not change which page is shown")
-    page._return_to_compare()
 
 
 def test_fit_whole_slide_without_a_stack_is_a_no_op(full_image_page,
                                                     monkeypatch):
     page = full_image_page
-    tab = _RecordingExploreTab()          # stack is None
+    tab = _RecordingExploreTab(stack=None)
     monkeypatch.setattr(page, "_explore_tab", tab)
     page._fit_full_image()                 # must not raise

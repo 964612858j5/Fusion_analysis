@@ -40,13 +40,29 @@ from test_step0_background_correction_tab import app  # noqa: E402,F401
 
 # ── fakes ────────────────────────────────────────────────────────────────
 
+class _PageSideStack:
+    """The little of a stack the page touches after a successful show.
+
+    It exists because `_full_image_visible()` now means "there is a live
+    viewer": the full image is not a page of a stacked widget any more, so
+    having no stack is the only thing that can make it absent.
+    """
+
+    def __init__(self):
+        self.overlay = None
+        self.view = None
+        self.provider = None
+        self.controller = type("C", (), {
+            "set_marker_visible": lambda _s, _v: None})()
+
+
 class _RecordingTab:
     """Stands in for Step0ExploreTab on the page side."""
 
-    def __init__(self, released=False):
+    def __init__(self, released=False, stack=_PageSideStack):
         self.calls = []
         self.resume_calls = 0
-        self.stack = None
+        self.stack = stack() if callable(stack) else stack
         self.released = released
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
@@ -174,7 +190,7 @@ def test_the_toggles_have_a_checked_rule_in_their_stylesheet(app):
 
 def test_the_label_says_which_layers_are_hidden(app):
     page = _page(app)
-    page._enter_full_image("original")
+    page._show_full_image()
     # (v15) DAPI starts hidden; the "both layers visible" baseline this test
     # is about needs it switched on first.
     page._btn_full_nucleus.setChecked(True)
@@ -200,7 +216,7 @@ def test_reopening_keeps_the_hidden_layer_hint(app):
     page._btn_full_marker.setChecked(False)
     page._btn_full_nucleus.setChecked(False)
 
-    page._enter_full_image("original")
+    page._show_full_image()
 
     text = page._full_source_lbl.text()
     assert "CD3" in text and "Original" in text
@@ -215,7 +231,6 @@ def test_a_visible_suspended_view_is_resumed_and_its_selection_reapplied(app):
     rebuild. The camera is not moved."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     page._on_production_worker_finished()
 
@@ -225,13 +240,14 @@ def test_a_visible_suspended_view_is_resumed_and_its_selection_reapplied(app):
     assert tab.released is False
 
 
-def test_a_hidden_suspended_view_is_resumed_without_being_re_shown(app):
-    """Resuming is cheap wherever the view is -- the stack is live, nothing
-    is read -- so the hidden view is unlocked too. Re-applying the
-    selection is left to the next time it is shown."""
-    tab = _RecordingTab(released=True)
+def test_a_suspended_tab_with_no_stack_is_resumed_without_being_re_shown(app):
+    """Resuming is cheap wherever the view is -- nothing is read -- so a
+    tab whose stack is gone is unlocked too. Re-applying the selection is
+    left to the next time there is something to apply it to; there is no
+    "hidden full image" state left to distinguish, the image is either
+    live or it does not exist."""
+    tab = _RecordingTab(released=True, stack=None)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_COMPARE)
 
     page._on_production_worker_finished()
 
@@ -243,7 +259,6 @@ def test_nothing_happens_while_another_run_still_holds_the_gpu(
         app, monkeypatch):
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     monkeypatch.setattr(page, "production_correction_busy",
                         lambda: "on-demand background correction")
 
@@ -258,7 +273,6 @@ def test_a_view_that_was_never_suspended_is_left_alone(app):
     to build or to resume in either case."""
     tab = _RecordingTab(released=False)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     page._on_production_worker_finished()
 
@@ -280,7 +294,6 @@ def test_a_finishing_worker_thread_reaches_the_page_on_the_gui_thread(app):
     run on the GUI thread, because it touches widgets."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     seen = []
     real = page._on_production_worker_finished
 
@@ -305,7 +318,6 @@ def test_a_worker_from_a_previous_dataset_is_ignored(app):
     after the page moved to dataset B must not touch anything."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     worker = _Run()
     page._watch_production_worker(worker)
     page._dataset_gen += 1
@@ -554,7 +566,6 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
     monkeypatch.setattr(Step0Page, "_release_explore_for_production",
                         lambda self, reason: timeline.append("release"))
 
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
     page._save_and_continue()
     return page, timeline
 
@@ -607,7 +618,6 @@ def test_a_cancelled_or_failed_run_still_resumes_exactly_once(app):
     error need no separate wiring -- and must not double-resume."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     class _Cancelled(QtCore.QThread):
         canceled = QtCore.pyqtSignal(str)
@@ -633,7 +643,6 @@ def test_the_last_worker_to_finish_is_the_one_that_resumes(app):
     second still holds the GPU; the second must."""
     tab = _RecordingTab(released=True)
     page = _page(app, tab)
-    page._preview_stack.setCurrentIndex(sp.PREVIEW_PAGE_FULL_IMAGE)
 
     class _Held(QtCore.QThread):
         def __init__(self):

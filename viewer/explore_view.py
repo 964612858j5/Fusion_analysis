@@ -1267,6 +1267,47 @@ class TileItemPool:
 
 # ── ExploreView: the widget ─────────────────────────────────────────────────
 
+class RightClickViewBox(pg.ViewBox):
+    """A ViewBox that reports right-clicks instead of opening a menu.
+
+    A SUBCLASS rather than a connection to the graphics scene's own
+    `sigMouseClicked`. That connection has to be held by something, and
+    everything available to hold it -- the view, the scene, the widget --
+    is reachable from every other, so the connection closed a Python
+    reference cycle through a bound method and the cyclic collector then
+    tore the C++ objects down in an order Qt does not allow (measured:
+    test_explore_controller.py segfaulted inside `gc.collect()` between
+    tests, every run). Overriding the handler keeps the whole thing on the
+    C++ side, where the ViewBox already lives.
+
+    Taking the button here is also what suppresses the context menu.
+    `setMenuEnabled(False)` would be the obvious way and is the wrong one:
+    it drops the ViewBox's already-built `ViewBoxMenu`, and collecting that
+    parentless QMenu -- whose actions still point at the ViewBox --
+    segfaults the same suite in the same place (measured separately). Not
+    chaining to the base handler costs nothing and destroys nothing.
+
+    Pan and wheel-zoom are untouched: only the right button is taken, and
+    only to report it. Nothing here moves the camera or draws anything --
+    what a right-click MEANS belongs to whoever hosts the view.
+    """
+
+    # `(x, y)` of the click in this ViewBox's world coordinates.
+    sigRightClicked = QtCore.pyqtSignal(float, float)
+
+    def mouseClickEvent(self, ev):
+        if ev.button() == QtCore.Qt.RightButton:
+            ev.accept()
+            try:
+                point = self.mapToView(ev.pos())
+                x, y = float(point.x()), float(point.y())
+            except Exception:                               # noqa: BLE001
+                return
+            self.sigRightClicked.emit(x, y)
+            return
+        super().mouseClickEvent(ev)
+
+
 class ExploreView(QtWidgets.QWidget):
     """pyqtgraph GraphicsLayoutWidget hosting one ViewBox: one pinned
     overview ImageItem plus two per-tile TileItemPools (raw, precise), all
@@ -1275,6 +1316,20 @@ class ExploreView(QtWidgets.QWidget):
     Z-order (bottom to top): overview (0) < raw pool (RAW_BASE_Z..) <
     precise pool (PRECISE_BASE_Z..).
     """
+
+    # A right-click anywhere on the image, as `(x, y)` in LEVEL-0 world
+    # coordinates -- which is what this ViewBox's world already is (module
+    # docstring: every item is positioned in the full-resolution coordinate
+    # system), so the host needs no conversion.
+    #
+    # Forwarded straight from the ViewBox's own signal by a signal-to-signal
+    # connection, so no Python object holds the link (see
+    # `RightClickViewBox`). The view itself does nothing else with the
+    # click: it does not move the camera, change the selection or draw a
+    # marker. Deciding what a right-click means belongs to the host -- in
+    # Step0 it takes a compare snapshot -- and this widget must stay usable
+    # by a host that ignores it entirely.
+    sigRightClicked = QtCore.pyqtSignal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1298,7 +1353,11 @@ class ExploreView(QtWidgets.QWidget):
         self.graphics.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         layout.addWidget(self.graphics)
 
-        self.view_box: pg.ViewBox = self.graphics.addViewBox()
+        # `RightClickViewBox`, not `graphics.addViewBox()` -- see that
+        # class for why the gesture is a subclass rather than a connection.
+        self.view_box: pg.ViewBox = RightClickViewBox()
+        self.graphics.addItem(self.view_box)
+        self.view_box.sigRightClicked.connect(self.sigRightClicked)
         self.view_box.setAspectLocked(True)
         self.view_box.invertY(True)
         # The controller drives the viewport explicitly (pan/zoom/jump); a

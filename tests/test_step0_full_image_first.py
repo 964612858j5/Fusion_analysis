@@ -3,8 +3,9 @@
 What changed, and what these tests pin down:
 
 * a loaded dataset LANDS on the whole-slide full image -- raw, first marker
-  channel, no patch drawn, no Process run. The three compare panels moved
-  into a collapsible area that starts collapsed;
+  channel, no patch drawn, no Process run. The three compare panels are a
+  strip beside it that starts collapsed (A2 turned the collapsible page
+  into a splitter pane and made a right-click fill it);
 * the full image's own header carries an exclusive Original / TopHat /
   cuCIM switch. It is a PREVIEW: on-the-fly viewport correction with the
   row's current parameters, available for every marker channel whatever its
@@ -36,8 +37,6 @@ from PyQt5 import QtCore  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0.step0_page import (  # noqa: E402
-    PREVIEW_PAGE_COMPARE,
-    PREVIEW_PAGE_FULL_IMAGE,
     FULL_IMAGE_COARSE_LEVEL,
 )
 
@@ -113,7 +112,6 @@ def _page(app, *, patches=True):
     page._preload_cache = {0: {ch: np.zeros((32, 32), np.float32)
                                for ch in ("DAPI", "CD3", "CD20")}}
     page.current_channel = "CD3"
-    page._update_full_image_buttons()
     page._update_full_method_buttons()
     return page
 
@@ -153,12 +151,12 @@ def test_the_landing_view_is_the_full_image_with_no_patch_and_no_process(
     """The whole point of A1: a loaded slide opens on the whole slide."""
     started = _no_workers(monkeypatch)
     page = _page(app, patches=False)
-    tab = _RecordingExploreTab()
+    tab = _RecordingExploreTab(stack=_FakeStack())
     page._explore_tab = tab
 
     page._enter_full_image_landing()
 
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE
+    assert page._full_image_visible()
     assert page.patches == []                      # no patch was drawn
     assert page._computed_channels == set()        # no Process ran
     assert started == []
@@ -173,7 +171,7 @@ def test_the_landing_view_does_not_need_the_reopen_placeholder(app,
     path, not the way in."""
     _no_workers(monkeypatch)
     page = _page(app)
-    tab = _RecordingExploreTab()
+    tab = _RecordingExploreTab(stack=_FakeStack())
     page._explore_tab = tab
 
     page._enter_full_image_landing()
@@ -184,30 +182,37 @@ def test_the_landing_view_does_not_need_the_reopen_placeholder(app,
 
 def test_the_compare_panels_start_collapsed_and_expand_on_demand(app,
                                                                 monkeypatch):
+    """A2: the panels are a STRIP beside the image, not the other page of a
+    stack, so expanding one does not hide the other."""
     _no_workers(monkeypatch)
     page = _page(app)
-    page._explore_tab = _RecordingExploreTab()
+    page._explore_tab = _RecordingExploreTab(stack=_FakeStack())
     page._enter_full_image_landing()
 
-    assert not page._preview_stack.currentIndex() == PREVIEW_PAGE_COMPARE
+    assert page._compare_strip_visible() is False
     assert "Compare panels" in page._btn_show_compare.text()
 
     page._btn_show_compare.click()
 
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_COMPARE
+    assert page._compare_strip_visible() is True
+    assert page._full_image_visible(), "the image must stay on screen"
+
+    page._btn_show_compare.click()
+
+    assert page._compare_strip_visible() is False
 
 
-def test_entering_from_a_compare_panel_still_works(app, monkeypatch):
-    """A2 replaces the panels later; A1 must not break them now."""
+def test_the_method_switch_keeps_the_image_on_screen(app, monkeypatch):
+    """The switch used to have to bring the full-image PAGE forward. There
+    is no page to bring forward now."""
     _no_workers(monkeypatch)
     page = _page(app)
-    tab = _RecordingExploreTab()
+    tab = _RecordingExploreTab(stack=_FakeStack())
     page._explore_tab = tab
-    page._return_to_compare()
 
-    page._enter_full_image("tophat")
+    page._on_full_method_clicked("tophat")
 
-    assert page._preview_stack.currentIndex() == PREVIEW_PAGE_FULL_IMAGE
+    assert page._full_image_visible()
     assert page._full_image_source == "tophat"
     assert tab.calls[-1][0] == "CD3" and tab.calls[-1][1] == "tophat"
 

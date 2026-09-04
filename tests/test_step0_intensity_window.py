@@ -403,18 +403,24 @@ def test_a_marker_row_takes_the_inspector_back(app):
     assert _hist_hex(wb) == page._channel_swatch_hex("CD3").lower()
 
 
-# ── 4. the Patch Preview header keeps only lock + reset-all ──────────────
+# ── 4. the compare header carries the snapshot's own controls ────────────
 
-def test_the_preview_header_has_only_lock_and_reset(app):
+def test_the_compare_header_describes_the_snapshot_and_nothing_else(app):
+    """The panels stopped being a viewer, so the view controls went with
+    them: what is left says WHERE the snapshot is, whether it is
+    downsampled, and offers to keep it as a patch."""
     page = _page(app)
     row = page._preview_ctrl_row
     widgets = [row.itemAt(i).widget() for i in range(row.count())]
     widgets = [w for w in widgets if w is not None]
 
-    assert len(widgets) == 2, [w.__class__.__name__ for w in widgets]
-    assert widgets[0] is page._btn_lock_zoom
-    assert widgets[1].text() == "⊡ Reset All"
-    for gone in ("_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
+    assert widgets == [page._compare_where_lbl, page._compare_level_lbl,
+                       page._btn_snapshot_patch], (
+        [w.__class__.__name__ for w in widgets])
+    for gone in ("_btn_lock_zoom", "_reset_all_views", "_sync_zoom",
+                 "_reset_single_view", "_full_image_buttons",
+                 "_dec_process_btn", "_preview_stack",
+                 "_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
                  "_display_popup", "show_display_popup", "toggle_display_popup",
                  "_ensure_display_popup", "_use_display_as_segmentation_remap"):
         assert not hasattr(page, gone), gone

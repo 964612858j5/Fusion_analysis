@@ -1593,6 +1593,28 @@ class OverviewPanel(QWidget):
         self._update_info()
         self.patches_changed.emit(self._patch_coords())
 
+    def add_patch_rect(self, fy0, fy1, fx0, fx1, roi_idx=None):
+        """Add a patch from a FULL-RESOLUTION rectangle, with no drawing.
+
+        The public form of `_add_patch` for callers that already know the
+        level-0 rectangle they want -- Step 0's "Save as patch" on a compare
+        snapshot -- rather than a drag on this canvas. It goes through the
+        same list, the same artists and the same `patches_changed` signal,
+        so a patch made this way is indistinguishable from a drawn one
+        everywhere downstream.
+
+        Deliberately NOT subject to the per-ROI maximum: it belongs to no
+        ROI, and the limit exists for the drawing gesture.
+        """
+        coords = (int(fy0), int(fy1), int(fx0), int(fx1))
+        self._patches.append({"roi_idx": roi_idx, "coords": coords})
+        if roi_idx is not None and 0 <= roi_idx < len(self._rois):
+            self._rois[roi_idx]["patch_indices"].append(len(self._patches) - 1)
+        self._rebuild_patch_artists()
+        self._update_info()
+        self.patches_changed.emit(self._patch_coords())
+        return coords
+
     def _remove_last_patch(self):
         if not self._patches:
             return

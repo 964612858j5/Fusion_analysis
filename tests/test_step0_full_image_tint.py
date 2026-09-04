@@ -115,11 +115,11 @@ def test_an_uncoloured_channel_falls_back_to_the_marker_colour(app):
                                               (0.0, 1.0, 0.3))
 
 
-def test_opening_the_full_image_passes_the_tint(app):
+def test_showing_the_full_image_passes_the_tint(app):
     page = _page(app)
     page._channel_colors["CD3"] = (1.0, 0.5, 0.0)
 
-    page._enter_full_image("original")
+    page._show_full_image()
 
     assert page._explore_tab.calls[-1]["tint"] == (1.0, 0.5, 0.0)
 
@@ -256,7 +256,7 @@ def test_a_new_stack_is_told_the_toggle_state(app):
     page._btn_full_marker.setChecked(False)
     seen.clear()
 
-    page._enter_full_image("original")
+    page._show_full_image()
 
     assert seen == [False]
 

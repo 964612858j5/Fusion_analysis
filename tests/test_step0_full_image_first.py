@@ -2,10 +2,10 @@
 
 What changed, and what these tests pin down:
 
-* a loaded dataset LANDS on the whole-slide full image -- raw, first marker
-  channel, no patch drawn, no Process run. The three compare panels are a
-  strip beside it that starts collapsed (A2 turned the collapsible page
-  into a splitter pane and made a right-click fill it);
+* a loaded dataset LANDS on the whole-slide full image -- raw, the DAPI
+  (nucleus) channel, no patch drawn, no Process run. The three compare
+  panels are a strip beside it that starts collapsed (A2 turned the
+  collapsible page into a splitter pane and made a right-click fill it);
 * the full image's own header carries an exclusive Original / TopHat /
   cuCIM switch. It is a PREVIEW: on-the-fly viewport correction with the
   row's current parameters, available for every marker channel whatever its
@@ -83,8 +83,8 @@ class _FakeController:
     def set_marker_visible(self, _v):
         pass
 
-    def set_display_mapping(self, *_a, **_k):
-        pass
+    def set_display_mapping(self, *args, **kwargs):
+        self.mapping = tuple(args) + tuple(kwargs.values())
 
 
 class _FakeProvider:
@@ -101,7 +101,10 @@ class _FakeStack:
         self.overlay = None
 
 
-def _page(app, *, patches=True):
+def _page(app, *, patches=True, channel="CD3"):
+    """A loaded page. `channel=None` leaves the channel the load itself
+    chose -- the LANDING channel, which is DAPI; every other test here is
+    about a marker the user has since clicked, so they say which one."""
     page = sp.Step0Page()
     page.loader = _GpuPathLoader()
     page.ome_path = "/fake/slide.ome.tif"
@@ -111,7 +114,8 @@ def _page(app, *, patches=True):
     page._rebuild_channel_list()
     page._preload_cache = {0: {ch: np.zeros((32, 32), np.float32)
                                for ch in ("DAPI", "CD3", "CD20")}}
-    page.current_channel = "CD3"
+    if channel is not None:
+        page.current_channel = channel
     page._update_full_method_buttons()
     return page
 
@@ -160,7 +164,8 @@ def test_the_landing_view_is_the_full_image_with_no_patch_and_no_process(
     assert page.patches == []                      # no patch was drawn
     assert page._computed_channels == set()        # no Process ran
     assert started == []
-    # Raw, first marker channel, no viewport hand-off from a compare panel.
+    # Raw, the channel the user last had, no viewport hand-off from a
+    # compare panel.
     assert tab.calls == [("CD3", None, ())]
     assert tab.viewports == [None]
 
@@ -742,3 +747,121 @@ def test_no_confirmation_when_everything_is_corrected(app, monkeypatch):
     assert page._raw_save_channels() == []
     assert page._confirm_raw_channels() is True
     assert asked == []
+
+
+# ── 8. the landing channel is DAPI ───────────────────────────────────────
+#
+# A slide opens on the channel that shows where the tissue IS, not on
+# whichever marker happens to be first in the panel file. DAPI is a
+# REFERENCE channel everywhere else on this page -- the thing drawn on top
+# of a marker, and clicking its row only re-points the Intensity window --
+# but at the moment a slide loads there is no marker to be a reference FOR,
+# so DAPI is the subject. Choosing a marker row is the gesture that leaves
+# this state, and nothing about it changes.
+
+def _landed(app, monkeypatch, stack=None):
+    _no_workers(monkeypatch)
+    page = _page(app, patches=False, channel=None)
+    tab = _RecordingExploreTab(stack=stack or _FakeStack())
+    page._explore_tab = tab
+    page._enter_full_image_landing()
+    return page, tab
+
+
+def test_a_loaded_slide_lands_on_dapi(app, monkeypatch):
+    page, tab = _landed(app, monkeypatch)
+
+    assert page.current_channel == "DAPI"
+    assert page._showing_nucleus() is True
+    # Raw: no method, no parameters, no correction of any kind.
+    assert tab.calls == [("DAPI", None, ())]
+    assert tab.viewports == [None]
+
+
+def test_the_dapi_row_is_the_selected_one(app, monkeypatch):
+    """The list agrees with the picture. The DAPI row is what the dock has
+    to say "nothing chosen yet" WITH -- it is a real row, it is selectable,
+    and leaving no row selected would leave the shared dock in a state
+    (`selection_changed("")`) whose only meaning here is "no channel"."""
+    page, _tab = _landed(app, monkeypatch)
+
+    assert page._channel_list.currentRow() == page._channel_order.index("DAPI")
+    assert page._inspector_channel is None
+
+
+def test_the_landing_shows_dapi_in_dapis_own_colour(app, monkeypatch):
+    page, _tab = _landed(app, monkeypatch)
+
+    assert page._full_image_tint() == page._channel_color("DAPI")
+    assert page._full_image_tint() != page._channel_color("CD3")
+
+
+def test_the_landing_gives_the_viewer_dapis_display_mapping(app, monkeypatch):
+    stack = _FakeStack()
+    page, _tab = _landed(app, monkeypatch, stack=stack)
+
+    page._apply_full_image_display(stack)
+
+    assert stack.controller.mapping == (
+        page._display_mapping_for("DAPI") + ("DAPI",))
+
+
+def test_the_correction_switch_is_shut_while_dapi_is_the_picture(
+        app, monkeypatch):
+    """DAPI is never background-corrected, so there is nothing for TopHat or
+    cuCIM to preview -- and the switch says so rather than offering it."""
+    page, tab = _landed(app, monkeypatch)
+
+    assert page._full_method_buttons["original"].isEnabled()
+    assert page._full_method_buttons["original"].isChecked()
+    assert not page._full_method_buttons["tophat"].isEnabled()
+    assert not page._full_method_buttons["cucim"].isEnabled()
+
+    before = list(tab.calls)
+    page._on_full_method_clicked("tophat")
+    assert tab.calls == before
+    assert page._full_image_source == "original"
+
+
+def test_the_landing_never_draws_dapi_twice(app, monkeypatch):
+    """The DAPI checkbox means "add DAPI on top of the MARKER". With DAPI
+    itself on screen there is no marker under it, so the overlay would add
+    the channel to itself -- it is off, and the toggle is disabled."""
+    page, _tab = _landed(app, monkeypatch)
+    page._btn_full_nucleus.setChecked(True)      # the user's standing wish
+
+    assert page._full_image_nucleus_enabled() is False
+    assert page._full_image_nucleus_args()["nucleus_enabled"] is False
+    assert page._btn_full_nucleus.isEnabled() is False
+    # ...and the toolbar does not call the channel on screen a hidden layer.
+    assert "DAPI" not in page._hidden_full_layers()
+
+
+def test_choosing_a_marker_hands_the_overlay_back(app, monkeypatch):
+    """The checked state is the user's and is never touched: it comes back
+    whole the moment there is a marker to overlay."""
+    page, _tab = _landed(app, monkeypatch)
+    page._btn_full_nucleus.setChecked(True)
+
+    page._on_channel_selected_by_id("CD3")
+
+    assert page.current_channel == "CD3"
+    assert page._showing_nucleus() is False
+    assert page._btn_full_nucleus.isEnabled() is True
+    assert page._full_image_nucleus_enabled() is True
+    assert page._full_image_nucleus_args()["nucleus_enabled"] is True
+
+
+def test_the_dapi_row_keeps_its_reference_meaning_after_a_marker(
+        app, monkeypatch):
+    """Unchanged: once a marker is on screen, the DAPI row is the reference
+    row again -- it moves the Intensity window and leaves the picture."""
+    page, _tab = _landed(app, monkeypatch)
+    page._on_channel_selected_by_id("CD3")
+
+    page._on_channel_selected_by_id("DAPI")
+
+    assert page.current_channel == "CD3"          # display unchanged
+    assert page._inspector_channel == "DAPI"
+    assert page._showing_nucleus() is False
+    assert page._full_method_buttons["tophat"].isEnabled()

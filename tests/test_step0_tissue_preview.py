@@ -89,14 +89,17 @@ class _Tab:
         pass
 
 
-def _page(app):
+def _page(app, channel="CD3"):
+    """`channel=None` leaves the channel the load itself chose -- the
+    landing state, which is DAPI."""
     page = sp.Step0Page()
     page.loader = _LowresLoader()
     page.ome_path = "/fake/slide.ome.tif"
     page.patches = []
     page.nucleus_channel = "DAPI"
     page._rebuild_channel_list()
-    page.current_channel = "CD3"
+    if channel is not None:
+        page.current_channel = channel
     page._explore_tab = _Tab()
     # The Tissue Preview is drawn on the page's own overview panel; give it
     # the slide it is a preview OF.
@@ -382,3 +385,33 @@ def test_the_dapi_overview_is_kept_and_comes_back(app):
     panel.set_channel_image(None)
 
     assert panel.img_item.image.shape == overview.shape
+
+
+# ── the landing state: the thumbnail is DAPI, drawn once ─────────────────
+
+def test_on_the_landing_the_thumbnail_is_dapi(app):
+    """A freshly loaded slide shows DAPI everywhere it shows anything, and
+    the thumbnail is not an exception -- it draws `current_channel`, which
+    is DAPI until a marker row is clicked."""
+    page = _page(app, channel=None)
+    assert page.current_channel == "DAPI"
+
+    page._update_tissue_preview()
+
+    img = _thumb(page)
+    assert img is not None
+    dapi_alone = page._lowres_tinted(page._slide_lowres_array("DAPI"), "DAPI")
+    assert np.array_equal(img, dapi_alone)
+
+
+def test_the_landing_thumbnail_never_composites_dapi_onto_itself(app):
+    """The DAPI layer switch adds DAPI on top of a MARKER. With DAPI itself
+    on screen there is nothing to add it to, so turning the layer on must
+    not brighten the picture by drawing the channel twice."""
+    page = _page(app, channel=None)
+    page._update_tissue_preview()
+    off = _thumb(page).copy()
+
+    page._on_nucleus_visibility_toggled(True)
+
+    assert np.array_equal(_thumb(page), off)

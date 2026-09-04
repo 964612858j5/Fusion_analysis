@@ -24,6 +24,7 @@ pyqtgraph/offscreen segfault.
 No sleeps anywhere: the fake workers block on `threading.Event`.
 """
 
+import gc
 import os
 import threading
 
@@ -122,6 +123,29 @@ class _UnstoppableWorker(_BlockingWorker):
         return False
 
 
+@pytest.fixture(autouse=True)
+def _collect_before_the_flush():
+    """Collect this module's dead Qt objects BEFORE anything is flushed.
+
+    Every test here builds a Step0Page, loads a second dataset into it and
+    then simply drops it: the page dies by refcount when the test's frame
+    does, and pyqtgraph's `GraphicsScene` -- a Python object in a reference
+    cycle -- outlives the view that owned it, still holding items that are
+    already gone. The repo-wide fixture flushes the event loop FIRST (for a
+    different crash: a queued slot delivered to an object the collection
+    then destroys), and that flush delivers the scene's pending update into
+    those dead items -- a segfault in `QGraphicsScene::itemsBoundingRect`.
+
+    Collecting first takes the scene down WITH its items, so there is no
+    half-dead scene left for the flush to walk. Module-local because the
+    ordering it needs is the opposite of the repo-wide one, and autouse
+    fixtures declared here tear down before those from the conftest, which
+    is exactly the slot this needs.
+    """
+    yield
+    gc.collect()
+
+
 def _fresh_page(tmp_path, monkeypatch, loader=None):
     """A page in the state 'dataset A is loaded and displayed'."""
     page = sp.Step0Page()
@@ -160,6 +184,7 @@ def _switch_to_b(page, tmp_path, monkeypatch, *, new_loader=None, raises=None):
     behaviour: the loader constructor (no OME-TIFF on disk) and the
     post-commit navigator auto-open / overview repaint, which pull in
     unrelated widget machinery.
+
     """
     b = tmp_path / "B.tif"
     b.write_bytes(b"not-really-a-tiff")
@@ -225,7 +250,7 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert page._channel_colors == {"CD3": (1.0, 0.0, 0.0)}
     assert page._full_image_source == "original"
     # Full-image-first: a committed switch LANDS on the new slide's full
-    # image (raw, first marker), and the virtual patch -- which could only
+    # image (raw, DAPI), and the virtual patch -- which could only
     # hold the OLD slide's pixels -- is dropped, cache included: its keys
     # are (channel, rectangle, level, params) and every one of those can
     # repeat across two slides.
@@ -758,3 +783,25 @@ def test_patch_viewports_do_not_survive_into_the_next_dataset(app, tmp_path,
     page.current_patch_idx = 0
     assert page._conditioning_patch_viewports.get(
         page._conditioning_patch_key(0)) is None
+
+
+def test_a_committed_switch_lands_on_the_new_slides_dapi(app, tmp_path,
+                                                         monkeypatch):
+    """The landing is the same whether the slide is the first one or the
+    tenth: DAPI, with no marker chosen. A switch that kept the previous
+    slide's marker would be answering a question the user asked about a
+    different image -- and channel names repeat across datasets, so the
+    answer would even look plausible."""
+    page = _fresh_page(tmp_path, monkeypatch)
+    page._on_channel_selected_by_id("CD20")
+    assert page.current_channel == "CD20"
+
+    _switch_to_b(page, tmp_path, monkeypatch)
+
+    assert page.current_channel == "DAPI"
+    assert page._showing_nucleus() is True
+    assert page._inspector_channel is None
+    assert page._channel_list.currentRow() == page._channel_order.index("DAPI")
+    # ...and the correction switch is shut over it, as it is over any DAPI.
+    assert not page._full_method_buttons["tophat"].isEnabled()
+    assert not page._full_method_buttons["cucim"].isEnabled()

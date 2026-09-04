@@ -1706,13 +1706,10 @@ class Step0Page(QWidget):
         self._btn_full_nucleus.setCheckable(True)
         # Same default as the compare panels' holder: one state, both views.
         self._btn_full_nucleus.setChecked(DAPI_LAYER_DEFAULT_ON)
-        self._btn_full_nucleus.setToolTip(
-            "Show or hide the nucleus channel in the full image. It is drawn "
-            "ON TOP of the marker and ADDED to it, the same way the compare "
-            "panels combine the two. Hiding it also stops requesting its "
-            "tiles; showing it again resumes from the current view.")
         self._btn_full_nucleus.setStyleSheet(toggle_style)
         self._btn_full_nucleus.toggled.connect(self._on_full_nucleus_toggled)
+        # Enabled state and tooltip from the one place that decides them.
+        self._update_full_nucleus_button()
         bar.addWidget(self._btn_full_nucleus)
 
         self._full_source_lbl = QLabel("—")
@@ -1848,7 +1845,11 @@ class Step0Page(QWidget):
         if marker is not None and not marker.isChecked():
             hidden.append("Marker")
         nucleus = getattr(self, "_btn_full_nucleus", None)
-        if nucleus is not None and not nucleus.isChecked():
+        if (nucleus is not None and not nucleus.isChecked()
+                and not self._showing_nucleus()):
+            # While DAPI IS the picture the layer is not hidden -- it is the
+            # only thing on screen -- so saying "(DAPI hidden)" over it would
+            # be describing the overlay while the user looks at the channel.
             hidden.append("DAPI")
         return hidden
 
@@ -1886,12 +1887,10 @@ class Step0Page(QWidget):
         nucleus = self.nucleus_channel
         if not nucleus:
             return {}
-        checked = (self._btn_full_nucleus.isChecked()
-                   if hasattr(self, "_btn_full_nucleus") else False)
         return {
             "nucleus_channel": nucleus,
             "nucleus_tint": getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
-            "nucleus_enabled": bool(checked),
+            "nucleus_enabled": self._full_image_nucleus_enabled(),
         }
 
     def _full_image_overlay(self):
@@ -2823,8 +2822,8 @@ class Step0Page(QWidget):
             stack.controller.set_marker_visible(
                 self._btn_full_marker.isChecked())
         overlay = getattr(stack, "overlay", None) if stack is not None else None
-        if overlay is not None and hasattr(self, "_btn_full_nucleus"):
-            overlay.set_enabled(self._btn_full_nucleus.isChecked(),
+        if overlay is not None:
+            overlay.set_enabled(self._full_image_nucleus_enabled(),
                                 host=stack.controller)
         self._apply_full_image_display(stack)
         # The Tissue Preview follows the full image's camera while it is up.
@@ -2882,6 +2881,53 @@ class Step0Page(QWidget):
         ch = self.current_channel
         return (not ch) or ch == self.nucleus_channel
 
+    def _showing_nucleus(self):
+        """True while DAPI itself is the picture -- the landing state, and
+        nothing else.
+
+        DAPI is a REFERENCE channel: everywhere else on this page it is the
+        thing drawn ON TOP of a marker, and clicking its row only re-points
+        the Intensity window. The one exception is the moment a slide is
+        loaded and no marker has been chosen yet: then there is no marker to
+        be a reference FOR, and DAPI is what the user is looking at.
+        """
+        nucleus = self.nucleus_channel
+        return bool(nucleus) and self.current_channel == nucleus
+
+    def _landing_channel(self):
+        """The channel a slide is shown in before any marker is chosen.
+
+        DAPI. It is the channel every slide has, the one that shows where
+        the tissue IS, and the one a pathologist orients on -- so it is what
+        a freshly loaded slide opens on, and choosing a marker row is the
+        gesture that leaves it. It used to be the first marker in the panel,
+        which is an arbitrary channel the user never asked for and which,
+        being a marker, came up with the correction switch live.
+
+        Falls back to the first marker when the dataset names no nucleus
+        channel at all, so a slide without DAPI still lands on something.
+        """
+        nucleus = self.nucleus_channel
+        if nucleus and nucleus in self._channel_order:
+            return nucleus
+        return next((ch for ch in self._channel_order
+                     if ch != self.nucleus_channel), None)
+
+    def _full_image_nucleus_enabled(self):
+        """Whether the DAPI OVERLAY should be drawn over the full image.
+
+        The DAPI switch means "add DAPI on top of the MARKER", and while
+        DAPI is itself the picture there is no marker under it: the overlay
+        would draw the same channel a second time, in the same colour, added
+        to itself. So it is off in that state and the toggle is disabled --
+        without touching what the user last asked for, which comes back
+        whole the moment a marker is on screen again.
+        """
+        if self._showing_nucleus():
+            return False
+        button = getattr(self, "_btn_full_nucleus", None)
+        return bool(button.isChecked()) if button is not None else False
+
     def _update_full_method_buttons(self):
         """Reflect `_full_image_source` and what the current channel allows.
 
@@ -2918,7 +2964,39 @@ class Step0Page(QWidget):
                 button.setToolTip(FULL_IMAGE_SOURCE_TIPS[source])
         if group is not None:
             group.setExclusive(True)
+        self._update_full_nucleus_button()
         self._update_full_level_hint()
+
+    def _update_full_nucleus_button(self):
+        """The DAPI toggle says what it can do in the current state.
+
+        It rides with the method switch because the toolbar has ONE answer
+        to give -- what this view is showing and what may be done to it --
+        and every caller that re-states the switch is a caller that has just
+        changed that answer.
+
+        The toggle adds DAPI on top of a MARKER. While DAPI is the picture
+        there is no marker to add it to, so it is disabled and says so; its
+        CHECKED state is left exactly as the user left it, and comes back
+        whole with the next marker.
+        """
+        button = getattr(self, "_btn_full_nucleus", None)
+        if button is None:
+            return
+        showing = self._showing_nucleus()
+        button.setEnabled(not showing)
+        if showing:
+            button.setToolTip(
+                "DAPI is the channel on screen -- there is no marker to "
+                "overlay it on. Choose a marker row to get the overlay "
+                "back.")
+        else:
+            button.setToolTip(
+                "Show or hide the nucleus channel in the full image. It is "
+                "drawn ON TOP of the marker and ADDED to it, the same way "
+                "the compare panels combine the two. Hiding it also stops "
+                "requesting its tiles; showing it again resumes from the "
+                "current view.")
 
     def _full_image_level(self):
         """The pyramid level the full image is currently displaying, or
@@ -4962,11 +5040,12 @@ class Step0Page(QWidget):
             self._channel_list.setCurrentItem(self._channel_rows[current]["item"])
             self._channel_list.blockSignals(False)
         else:
-            first = next((ch for ch in self._channel_order if ch != self.nucleus_channel), None)
-            self.current_channel = first
-            if first:
+            landing = self._landing_channel()
+            self.current_channel = landing
+            if landing:
                 self._channel_list.blockSignals(True)
-                self._channel_list.setCurrentItem(self._channel_rows[first]["item"])
+                self._channel_list.setCurrentItem(
+                    self._channel_rows[landing]["item"])
                 self._channel_list.blockSignals(False)
 
     def _refresh_channel_row(self, ch):

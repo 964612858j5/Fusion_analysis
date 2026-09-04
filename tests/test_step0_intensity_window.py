@@ -138,22 +138,26 @@ class _SeedLoader(_GpuPathLoader):
         return rng.uniform(300.0, 4000.0, size=(32, 32)).astype(np.float32)
 
 
-def _bare_page(app, stack=None, loader=None):
+def _bare_page(app, stack=None, loader=None, channel="CD3"):
     """A page whose Channel Remap tab was NEVER shown -- the real-app state
-    the Intensity window has to cope with."""
+    the Intensity window has to cope with.
+
+    `channel=None` leaves the channel the load chose -- the landing state,
+    which is DAPI."""
     page = sp.Step0Page()
     page.loader = loader or _GpuPathLoader()
     page.patches = [(0, 32, 0, 32)]
     page.current_patch_idx = 0
     page.nucleus_channel = "DAPI"
     page._rebuild_channel_list()
-    page.current_channel = "CD3"
+    if channel is not None:
+        page.current_channel = channel
     page._explore_tab = _Tab(stack)
     return page
 
 
-def _page(app, stack=None, loader=None):
-    page = _bare_page(app, stack, loader)
+def _page(app, stack=None, loader=None, channel="CD3"):
+    page = _bare_page(app, stack, loader, channel)
     page._sync_step0_to_workbench()
     return page
 
@@ -1203,3 +1207,30 @@ def test_a_dataset_switch_still_reseeds_the_workbench(app):
 
     assert not wb.has_channel_data()
     assert wb._params == {} and wb._user_adjusted == {}
+
+
+# ── 8. the landing state: the window edits DAPI ─────────────────────────
+#
+# A freshly loaded slide shows DAPI and no marker has been chosen, so the
+# channel "the user is editing" is DAPI -- and the Intensity window, which
+# is the editor for exactly that, opens on it. No special case: the window
+# follows `current_channel` as it always has, and `current_channel` is DAPI.
+
+def test_on_the_landing_the_window_edits_dapi(app):
+    page = _page(app, channel=None)
+    assert page.current_channel == "DAPI"
+
+    page.show_intensity_window()
+
+    wb = page._cond_workbench
+    assert wb.active_channel() == "DAPI"
+
+
+def test_choosing_a_marker_moves_the_window_off_dapi(app):
+    page = _page(app, channel=None)
+    page.show_intensity_window()
+
+    page._on_channel_selected_by_id("CD3")
+
+    assert page._cond_workbench.active_channel() == "CD3"
+    assert page._inspector_channel is None

@@ -48,6 +48,18 @@ def _compute_state(page, ch) -> str:
     return "" if fn is None else str(fn(ch))
 
 
+def _landing_channel(page) -> str:
+    """The channel a slide with nothing chosen yet is shown in, asked of the
+    page when it can answer. Same shape as `_swatch_hex` / `_dapi_visible`:
+    the adapter describes the page, it does not decide for it, and a host
+    without the landing rule gets the pre-landing one (the first marker)."""
+    fn = getattr(page, "_landing_channel", None)
+    if fn is not None:
+        return fn()
+    return next((ch for ch in page._channel_order
+                 if ch != page.nucleus_channel), None)
+
+
 def _swatch_hex(page, ch) -> str:
     """The channel's swatch colour, asked of the page when it can answer."""
     fn = getattr(page, "_channel_swatch_hex", None)
@@ -177,10 +189,12 @@ class Step0ChannelDockAdapter(QObject):
             lw.setCurrentItem(page._channel_rows[current]["item"])
             lw.blockSignals(False)
         else:
-            first = next((ch for ch in page._channel_order
-                          if ch != page.nucleus_channel), None)
-            page.current_channel = first
-            if first:
+            # No channel chosen yet -- a freshly loaded slide. The page says
+            # what that lands on (`_landing_channel`: DAPI), and the row for
+            # it is selected, so the list agrees with the picture.
+            landing = _landing_channel(page)
+            page.current_channel = landing
+            if landing:
                 lw.blockSignals(True)
-                lw.setCurrentItem(page._channel_rows[first]["item"])
+                lw.setCurrentItem(page._channel_rows[landing]["item"])
                 lw.blockSignals(False)

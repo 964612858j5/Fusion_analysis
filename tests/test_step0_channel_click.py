@@ -66,7 +66,10 @@ def _finish_run(page, channels):
 
 def test_a_mouse_click_on_a_row_switches_the_channel(app):
     page = _page(app)
-    assert page.current_channel == "CD3"            # first non-nucleus row
+    assert page.current_channel == "DAPI"           # the landing channel
+
+    _click_row(page, "CD3")
+    assert page.current_channel == "CD3"
 
     _click_row(page, "CD20")
 
@@ -79,6 +82,7 @@ def test_rows_stay_clickable_after_a_multi_channel_run(app):
     one viewable."""
     page = _page(app)
     _finish_run(page, ["CD3", "CD20"])
+    _click_row(page, "CD3")
     assert page.current_channel == "CD3"
 
     _click_row(page, "CD20")

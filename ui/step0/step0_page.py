@@ -821,6 +821,12 @@ class Step0Page(QWidget):
             "QListWidget::item:selected{background:#2b1f2f;}"
         )
         self._patch_list.itemSelectionChanged.connect(self._on_patch_selection_changed)
+        # A click on a NAME is a decision, even when that row is already the
+        # current one: a rebuilt list always has a current row, and Qt emits
+        # no selection change for re-picking it, so the thumbnail would never
+        # hear about the click that was meant to put the patch under
+        # adjustment. itemClicked hears every one of them.
+        self._patch_list.itemClicked.connect(self._on_patch_item_clicked)
         ll_lay.addWidget(self._patch_list, stretch=1)   # Patch list ~1/5 of popup
 
         self._patch_warning = QLabel("")
@@ -4928,18 +4934,27 @@ class Step0Page(QWidget):
         self._start_preload()
 
     def _rebuild_patch_list(self):
+        # Rebuilding the list is bookkeeping, not a choice the user made: the
+        # clear() and the setCurrentRow() that puts a row back must not be
+        # mirrored onto the thumbnail, or every committed edit would re-arm
+        # the adjust state (and a delete would re-arm it on a neighbour).
         sel = self._patch_selected_idx
-        self._patch_list.clear()
-        for idx, patch in enumerate(self.overview._patches):
-            y0, y1, x0, x1 = patch["coords"]
-            roi_idx = patch.get("roi_idx")
-            roi_name = self.overview._rois[roi_idx]["name"] if roi_idx is not None and roi_idx < len(self.overview._rois) else "No ROI"
-            self._patch_list.addItem(f"P{idx+1}  {roi_name}  [{y1-y0}x{x1-x0}px]")
-        if self.overview._patches:
-            self._patch_selected_idx = min(max(sel, 0), len(self.overview._patches) - 1)
-            self._patch_list.setCurrentRow(self._patch_selected_idx)
-        else:
-            self._patch_selected_idx = -1
+        was_guarded = self._patch_sel_guard
+        self._patch_sel_guard = True
+        try:
+            self._patch_list.clear()
+            for idx, patch in enumerate(self.overview._patches):
+                y0, y1, x0, x1 = patch["coords"]
+                roi_idx = patch.get("roi_idx")
+                roi_name = self.overview._rois[roi_idx]["name"] if roi_idx is not None and roi_idx < len(self.overview._rois) else "No ROI"
+                self._patch_list.addItem(f"P{idx+1}  {roi_name}  [{y1-y0}x{x1-x0}px]")
+            if self.overview._patches:
+                self._patch_selected_idx = min(max(sel, 0), len(self.overview._patches) - 1)
+                self._patch_list.setCurrentRow(self._patch_selected_idx)
+            else:
+                self._patch_selected_idx = -1
+        finally:
+            self._patch_sel_guard = was_guarded
 
     def _on_roi_selection_changed(self):
         """ROI列表选择变化——记录所有选中行的索引"""
@@ -4966,6 +4981,22 @@ class Step0Page(QWidget):
         finally:
             self._patch_sel_guard = False
 
+    def _on_patch_item_clicked(self, item):
+        """The user clicked a patch's name: put that patch under adjustment
+        on the tissue thumbnail (the same state a click on its border there
+        enters)."""
+        if self._patch_sel_guard or item is None:
+            return
+        row = self._patch_list.row(item)
+        if row < 0:
+            return
+        self._patch_sel_guard = True
+        try:
+            for panel in self._registered_roi_overviews():
+                panel.select_patch(row)
+        finally:
+            self._patch_sel_guard = False
+
     def _on_patch_selection_changed(self):
         """Patch列表选择变化——记录所有选中行，跳转预览到最后一个"""
         rows = [self._patch_list.row(i)
@@ -4973,14 +5004,15 @@ class Step0Page(QWidget):
         self._patch_selected_idx = rows[-1] if rows else -1
         self._patch_selected_indices = rows
         if not self._patch_sel_guard:
-            # Mirror the list's selection onto the thumbnail. Only when the
-            # list HAS a selection: an empty list selection is not a statement
-            # that nothing on the thumbnail is being worked on.
+            # Mirror the list's selection onto the thumbnail: picking a name
+            # here puts that patch under adjustment there, and clearing the
+            # selection ends the adjustment. An empty list is not a choice --
+            # it is a list being rebuilt -- so that case says nothing.
             self._patch_sel_guard = True
             try:
-                if rows:
+                if rows or self._patch_list.count():
                     for panel in self._registered_roi_overviews():
-                        panel.select_patch(rows[-1])
+                        panel.select_patch(rows[-1] if rows else -1)
             finally:
                 self._patch_sel_guard = False
         if rows and rows[-1] < len(self.patches):

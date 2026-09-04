@@ -30,7 +30,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
+import numpy as np  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
+from PyQt5 import QtCore  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0 import step0_explore_tab as et  # noqa: E402
@@ -51,14 +53,24 @@ def _row_major():
 
 # ── 1. the compare items still say which way round they are ──────────────
 
-def test_the_compare_items_set_row_major_themselves(app):
-    """A snapshot places its arrays on a LEVEL-0 rectangle, so a
-    transposition would put the panels on a different part of the slide
-    from the full image they were cut out of. pyqtgraph captures
-    `axisOrder` once in `ImageItem.__init__` and its library default is
-    col-major, so this must not come from the process-global."""
-    page = sp.Step0Page()
-    assert [i.axisOrder for i in page._preview_imgs] == ["row-major"] * 3
+def test_every_tile_item_sets_row_major_itself(app):
+    """A tile is placed on a LEVEL-0 rectangle, so a transposition would put
+    it on a different part of the slide. pyqtgraph captures `axisOrder` once
+    in `ImageItem.__init__` and its library default is col-major, so this
+    must not come from the process-global -- which the fixture above has
+    deliberately set to the wrong value.
+
+    The compare panels are three of these viewers now rather than three
+    ImageItems of the page's own, so the guarantee is the pool's, in one
+    place, for every layer of both modes."""
+    from block01.viewer.explore_view import ExploreView, TileItemPool
+    view = ExploreView()
+    pool = TileItemPool(view.view_box, 100, 4)
+    entry = pool.put(0, 0, 0, QtCore.QRectF(0.0, 0.0, 4.0, 2.0),
+                     np.zeros((2, 4), np.uint8), key=("k",))
+    assert entry.item.axisOrder == "row-major"
+    assert view.overview_item.axisOrder == "row-major"
+    assert view.corrected_floor_item.axisOrder == "row-major"
     assert pg.getConfigOption("imageAxisOrder") == "col-major"
 
 

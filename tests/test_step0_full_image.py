@@ -209,25 +209,25 @@ def test_the_source_label_names_the_method_and_its_parameter(full_image_page,
     assert "CD3" in text and "Top-hat" in text and str(radius) in text
 
 
-def test_collapsing_the_strip_changes_nothing_but_the_strip(full_image_page,
-                                                            monkeypatch):
-    """Expanding or collapsing the compare strip is display only: no
-    teardown, no set_selection, no recompute, and the panels keep whatever
-    snapshot they hold."""
+def test_flipping_the_viewing_area_changes_nothing_but_which_page_is_up(
+        full_image_page, monkeypatch):
+    """Switching the viewing area between the two modes is display only: no
+    teardown, no `set_selection`, no recompute. The compare strip is built
+    lazily on a real entry, so flipping the stack alone must not build it
+    either."""
     page = full_image_page
     tab = _RecordingExploreTab()
     monkeypatch.setattr(page, "_explore_tab", tab)
 
     page._on_full_method_clicked("cucim")
     calls_after = list(tab.calls)
-    ranges_before = [vb.viewRange() for vb in page._preview_vbs]
 
     page._set_compare_mode(True)
     page._set_compare_mode(False)
 
     assert page._compare_mode() is False
     assert tab.calls == calls_after, "the mode switch asked the viewer again"
-    assert [vb.viewRange() for vb in page._preview_vbs] == ranges_before
+    assert page._compare_strip_widget.built is False
     assert page._full_image_source == "cucim", "the choice is remembered"
 
 
@@ -337,7 +337,6 @@ def test_the_nucleus_channel_shows_original_without_losing_the_choice(
 def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
                                                         monkeypatch):
     page = full_image_page
-    ranges_before = [vb.viewRange() for vb in page._preview_vbs]
 
     class _ViewBox:
         def __init__(self):
@@ -360,7 +359,8 @@ def test_fit_whole_slide_only_moves_the_full_image_view(full_image_page,
     page._fit_full_image()
 
     assert tab.stack.view.view_box.calls == [["padding", "xRange", "yRange"]]
-    assert [vb.viewRange() for vb in page._preview_vbs] == ranges_before
+    # And nothing else was opened: "fit" is the full image's own control.
+    assert page._compare_strip_widget.built is False
 
 
 def test_fit_whole_slide_without_a_stack_is_a_no_op(full_image_page,

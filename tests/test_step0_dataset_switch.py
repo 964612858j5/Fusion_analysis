@@ -201,13 +201,16 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     # Dataset A's batch selection: CD3 ticked, cucim. B has a CD3 too.
     page._channel_methods = {"CD3": "cucim"}
     page._channel_colors = {"CD3": (1.0, 0.0, 0.0)}
-    assert page._orig_img.image is not None
+    # A's result is what the page is holding. It is no longer PAINTED into
+    # three ImageItems of the page's own -- the viewing area is the full
+    # image or three tile viewers, and neither is a place to put a patch --
+    # but it is still the payload the metrics and the display seed read.
+    assert page._last_payload is not None
+    assert "SNR" in page._metrics_original.text()
 
     _switch_to_b(page, tmp_path, monkeypatch)
 
     assert page._last_payload is None
-    for img in (page._orig_img, page._top_img, page._cu_img):
-        assert img.image is None
     assert "—" in page._metrics_original.text()
     assert "—" in page._metrics_tophat.text()
     assert "—" in page._metrics_cucim.text()
@@ -223,8 +226,11 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert page._full_image_source == "original"
     # Full-image-first: a committed switch LANDS on the new slide's full
     # image (raw, first marker), and the compare strip -- which could only
-    # hold a snapshot of the OLD slide -- is collapsed.
+    # hold the OLD slide's pixels, its provider and its source identity --
+    # is torn down and put away.
     assert page._compare_mode() is False
+    assert page._compare_strip_widget.built is False
+    assert page._compare_opened is False
 
 
 def test_the_clearing_happens_before_the_new_loader_is_bound(app, tmp_path,
@@ -468,7 +474,7 @@ def test_a_failed_new_loader_leaves_the_current_dataset_valid(app, tmp_path,
     assert page.ome_path == old_path
     assert page._dataset_gen == gen_before
     assert page._last_payload is payload
-    assert page._orig_img.image is not None
+    assert "SNR" in page._metrics_original.text()
     assert page._computed_channels == {"CD3"}
 
 

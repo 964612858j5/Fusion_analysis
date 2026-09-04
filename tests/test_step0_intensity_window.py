@@ -286,6 +286,54 @@ def test_the_button_lives_next_to_the_channel_list(app):
     assert btn not in [row.itemAt(i).widget() for i in range(row.count())]
 
 
+class _CompareSpy:
+    """Stands in for a BUILT compare strip.
+
+    The three panels are tile viewers now, built lazily on a real entry into
+    compare mode with a slide behind them -- which these page fixtures have
+    no business doing. What they need to check is that the page PUSHES the
+    one mapping (and the one nucleus switch) onto them, which is this
+    object's whole surface.
+    """
+
+    def __init__(self):
+        self.built = True
+        self.tints = []
+        self.mappings = []
+        self.nucleus_mappings = []
+        self.nucleus_tints = []
+        self.nucleus_enabled = []
+        self.nucleus_suppressed = []
+        self.marker_visible = []
+
+    @classmethod
+    def install(cls, page):
+        spy = cls()
+        page._compare_strip_widget = spy
+        return spy
+
+    def set_tint(self, rgb):
+        self.tints.append(rgb)
+
+    def set_display_mapping(self, lo, hi, gamma=None, *, channel=None):
+        self.mappings.append((lo, hi, gamma, channel))
+
+    def set_marker_visible(self, visible):
+        self.marker_visible.append(bool(visible))
+
+    def set_nucleus_display_mapping(self, lo, hi, gamma=None):
+        self.nucleus_mappings.append((lo, hi, gamma))
+
+    def set_nucleus_tint(self, rgb):
+        self.nucleus_tints.append(rgb)
+
+    def set_nucleus_enabled(self, enabled):
+        self.nucleus_enabled.append(bool(enabled))
+
+    def set_nucleus_suppressed(self, suppressed):
+        self.nucleus_suppressed.append(bool(suppressed))
+
+
 # ── 2. the controls edit the one mapping every view reads ────────────────
 
 def test_moving_min_max_gamma_moves_every_view(app):
@@ -301,9 +349,11 @@ def test_moving_min_max_gamma_moves_every_view(app):
     wb._sp_gamma.setValue(1.75)
 
     assert page._display_mapping_for("CD3") == pytest.approx((120.0, 880.0, 1.75))
-    # the compare panels
-    assert list(page._preview_imgs[0].levels) == pytest.approx([120.0, 880.0])
-    assert page._preview_imgs[0].lut is not None
+    # the compare panels -- three tile viewers now, so the mapping is put on
+    # their controllers rather than composited into three ImageItems
+    strip = _CompareSpy.install(page)
+    page._refresh_preview_display(keep_zoom=True)
+    assert strip.mappings[-1] == pytest.approx((120.0, 880.0, 1.75, "CD3"))
     # the full image
     assert stack.controller.mappings[-1] == pytest.approx((120.0, 880.0, 1.75, "CD3"))
 
@@ -577,21 +627,24 @@ def test_a_drawn_patch_does_not_change_the_workbench_pixels(app):
 
 # ── 4. the compare header carries the snapshot's own controls ────────────
 
-def test_the_compare_header_describes_the_snapshot_and_nothing_else(app):
-    """The panels stopped being a viewer, so the view controls went with
-    them: what is left says WHERE the snapshot is, whether it is
-    downsampled, and offers to keep it as a patch."""
+def test_the_compare_header_says_where_and_offers_the_patch(app):
+    """The header carries what the three viewers need and nothing else.
+
+    The "downsampled xN" label went with the snapshot: it existed because a
+    snapshot was ONE pyramid level and the whole frame was that level, a
+    fact the user had to be told because Save writes level 0. These are the
+    viewer's own layers -- the level follows the camera and coarse tiles are
+    refined in place -- so there is no single level for a label to name."""
     page = _page(app)
     row = page._preview_ctrl_row
     widgets = [row.itemAt(i).widget() for i in range(row.count())]
     widgets = [w for w in widgets if w is not None]
 
-    assert widgets == [page._compare_where_lbl, page._compare_level_lbl,
-                       page._btn_snapshot_patch], (
+    assert widgets == [page._compare_where_lbl, page._btn_snapshot_patch], (
         [w.__class__.__name__ for w in widgets])
     for gone in ("_btn_lock_zoom", "_reset_all_views", "_sync_zoom",
                  "_reset_single_view", "_full_image_buttons",
-                 "_dec_process_btn", "_preview_stack",
+                 "_dec_process_btn", "_preview_stack", "_compare_level_lbl",
                  "_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
                  "_display_popup", "show_display_popup", "toggle_display_popup",
                  "_ensure_display_popup", "_use_display_as_segmentation_remap"):
@@ -635,11 +688,10 @@ def test_the_dapi_layer_starts_off_in_both_views(app):
     # Marker channels are untouched by the change.
     assert page._btn_show_marker.isChecked() is True
 
-    # compare panels: the nucleus item is not drawn
-    page._last_payload = _payload()
+    # compare panels: their overlays are asked to stay off
+    strip = _CompareSpy.install(page)
     page._refresh_preview_display()
-    assert all(item is None or not item.isVisible()
-               for item in page._preview_nuc_imgs)
+    assert strip.nucleus_enabled[-1] is False
 
     # full image: the overlay is asked to stay off
     page._show_full_image()
@@ -650,8 +702,7 @@ def test_the_dapi_layer_starts_off_in_both_views(app):
     assert page._btn_show_nucleus.isChecked() is True
     assert page._btn_full_nucleus.isChecked() is True
     page._refresh_preview_display()
-    assert any(item is not None and item.isVisible()
-               for item in page._preview_nuc_imgs)
+    assert strip.nucleus_enabled[-1] is True
     page._show_full_image()
     assert stack.overlay.enabled[-1] is True
 

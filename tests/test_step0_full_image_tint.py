@@ -9,9 +9,11 @@ Two claims:
   2. the marker layer can be turned OFF and back on without rebuilding,
      re-reading or re-quantising anything.
 
-The lookup table itself is checked against the compare panels' own
-compositing function rather than against hand-written numbers: the point
-is that the two agree, not that a particular byte is 0x7f.
+Claim 1 is now true by construction rather than by agreement: the compare
+panels ARE three of these controllers, so they colour through this same
+`build_tint_lut`. The table is checked against the ramp it is supposed to
+be rather than against a second implementation, because there is no longer
+a second implementation to disagree with.
 
 Own module for the reason the other full-image modules are separate: the
 Step0 page-heavy suites segfault when the background-correction module runs
@@ -63,18 +65,24 @@ def _page(app):
 
 # ── 1. the lookup table ──────────────────────────────────────────────────
 
-def test_the_lut_matches_the_compare_panels_own_colouring(app):
-    """One answer to 'what colour is this channel'. The table is compared
-    against `_make_colored_rgb`, the function the compare panels composite
-    with, over the whole 0..255 range."""
+def test_the_lut_is_the_grey_ramp_scaled_by_the_colour(app):
+    """One answer to 'what colour is this channel', and now literally one
+    implementation of it.
+
+    This used to be checked against `Step0Page._make_colored_rgb`, the numpy
+    composite the compare panels painted with -- two implementations that
+    had to agree. The panels are three of these same controllers now, so
+    that function is gone and there is no second answer left to compare
+    against; what is left to pin is the ramp itself, which is what both of
+    them computed: `grey * rgb`, over the whole 0..255 range."""
     rgb = (0.0, 0.75, 0.25)
     lut = ExploreController.build_tint_lut(rgb)
 
     assert lut.shape == (256, 3) and lut.dtype == np.uint8
     grey = np.arange(256, dtype=np.float32) / 255.0
-    expected = sp.Step0Page._make_colored_rgb(
-        grey.reshape(1, 256), None, marker_rgb=rgb, nucleus_rgb=(0, 0, 0))
-    expected = np.round(np.clip(expected[0], 0, 1) * 255).astype(np.uint8)
+    expected = np.round(
+        np.clip(grey[:, None] * np.asarray(rgb, np.float32)[None, :],
+                0, 1) * 255).astype(np.uint8)
     # Same ramp, within one count of rounding at every entry.
     assert np.max(np.abs(lut.astype(int) - expected.astype(int))) <= 1
 

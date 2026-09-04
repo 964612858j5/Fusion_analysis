@@ -528,6 +528,62 @@ before, the intermediate corrected fallback at `level + 1`, the corrected
 floor, the overview -- and the target level's corrected tile appears only
 once it has actually been computed.
 
+## Raw level+1 underlay
+
+The raw layer used to ask for exactly ONE level: `self.level`. That is the
+level the user wants, but it is also the most expensive one to fill, and
+until it lands there is nothing under it except the pinned overview -- so a
+fast zoom-out or a long pan showed a hard step from a 16x-blurred overview
+straight to full detail, with a hole in between whenever the target level
+could not keep up. Measured on the real slide (TOX, no correction method,
+60-step scripted zoom-out): 5 of 60 frames had ZERO coverage by any pooled
+tile (only the overview on screen), mean coverage 66.4%; at the slower
+2-second pace it was still 2 frames at zero and 93.9% mean.
+
+So every motion tick now issues, FIRST, the RAW pyramid at `self.level + 1`
+covering the same viewport (`_issue_raw_underlay`, priorities from
+`RAW_UNDERLAY_BASE_PRIORITY = 0`), and the current level's raw batch is
+re-based to `RAW_CURRENT_BASE_PRIORITY = 200` behind it. One coarser level
+is a QUARTER of the tiles and each one is a plain pyramid read with no
+correction kernel behind it, so the underlay completes in roughly one round
+of raw I/O; the current level then refines it tile by tile. Both bases stay
+below `OVERLAY_RAW_BASE_PRIORITY` (500) and `RAW_PREFETCH_RING_BASE_
+PRIORITY` (700) for any realistic viewport, so the existing priority tiers
+are untouched.
+
+Nothing else had to change to KEEP the underlay on screen: "Level switching
+without clearing" already keeps a coarser pooled item visible under the
+current level (`apply_visibility(coarser_visible=...)`), and `TileItemPool.
+prune` already spares anything intersecting the viewport plus
+`PRUNE_MARGIN_TILES`. `_on_range_changed` adds the live underlay set to the
+pool's `keep` set as an explicit statement of that intent; because the set
+is recomputed from the LIVE viewport on every range event, an underlay tile
+that leaves the view stops being kept and prunes on the existing margin
+like any other item. A level switch therefore never drops it.
+
+It is SKIPPED when the raw layer cannot reach the screen at all -- i.e. a
+correction method is selected and its corrected floor is ready, at which
+point `_update_layer_visibility` forces the entire raw layer invisible so
+no raw-stage pixel can sit beside corrected ones ("corrected floor"). That
+condition is `_raw_layer_visible()`, the single definition both the
+issuing path and the visibility policy read. Issuing there would be pure
+waste, and not even useful cache warming: a corrected tile stages its halo
+from its OWN level's raw, never from level+1. The corrected mode's
+equivalent of this feature is the intermediate corrected fallback at
+`level + 1`, which already exists (below).
+
+Delivery is guarded the same way the corrected fallback's is:
+`_handle_raw_result` accepts `tile.level == self.level` (tested against
+`_visible_tiles`) or `tile.level == self._raw_underlay_level ==
+self.level + 1` (tested against `_raw_underlay_tiles`, the set recorded
+when the batch was issued). The two sets are in DIFFERENT levels' tile
+coordinates, so each address is only ever tested against its own -- testing
+an underlay tile against `_visible_tiles` would either reject all of them
+or accept one whose `(tx, ty)` merely collided with a current-level
+address. `stats["raw_tiles_blitted"]` keeps its old meaning (current-level
+raw on screen); underlay tiles are counted in `raw_underlay_issued` /
+`raw_underlay_blitted`.
+
 ## Directional prefetch (pan only)
 
 The intermediate corrected fallback (above) removed the harsh level-2
@@ -1200,6 +1256,18 @@ RAW_PREFETCH_RING_TILES = 1
 RAW_PREFETCH_RING_BASE_PRIORITY = 700
 RAW_PREFETCH_RING_MAX = 64
 
+# Raw level+1 UNDERLAY (module docstring "Raw level+1 underlay"): the
+# coarser-level raw batch is issued FIRST, at priorities starting at 0, and
+# the current level's raw batch is re-based above it. The underlay is a
+# quarter of the tiles (one coarser pyramid level) and each tile is a plain
+# pyramid read, so putting it first costs the current level almost nothing
+# while guaranteeing the whole viewport has correct-intensity pixels after
+# one round of raw reads. Both bases stay well below OVERLAY_RAW_BASE_
+# PRIORITY (500) and RAW_PREFETCH_RING_BASE_PRIORITY (700) for a realistic
+# viewport tile count, so the existing priority tiers are unchanged.
+RAW_UNDERLAY_BASE_PRIORITY = 0
+RAW_CURRENT_BASE_PRIORITY = 200
+
 # Z base for the overlay's tile pool. Above PRECISE_BASE_Z plus the largest
 # per-level offset any pool can add (`base_z + num_levels - level`), so an
 # overlay tile always paints after every marker layer. Asserted against the
@@ -1712,6 +1780,12 @@ class ExploreController(QtCore.QObject):
         # level exists.
         self._fallback_level: Optional[int] = None
         self._fallback_visible_tiles = set()
+        # RAW level+1 underlay (module docstring "Raw level+1 underlay"):
+        # the same shape of state as the corrected fallback above -- the
+        # coarser-level tile set computed at issue time, kept for the
+        # delivery-side membership test in `_handle_raw_result`.
+        self._raw_underlay_level: Optional[int] = None
+        self._raw_underlay_tiles = set()
         self._prev_world_area = None
         self._viewport_shrinking = False
         self._viewport_zooming = False
@@ -1847,6 +1921,11 @@ class ExploreController(QtCore.QObject):
         # ── stats (exposed for tests / probe) ──
         self.stats = {
             "raw_tiles_blitted": 0,
+            # Raw level+1 underlay (module docstring): counted separately
+            # from `raw_tiles_blitted`, which stays "current-level raw
+            # tiles on screen" so every existing reading of it is unchanged.
+            "raw_underlay_issued": 0,
+            "raw_underlay_blitted": 0,
             "precise_tiles_blitted": 0,
             "mid_tiles_blitted": 0,
             "mid_requests_issued": 0,
@@ -1987,9 +2066,13 @@ class ExploreController(QtCore.QObject):
         # before this was factored out.
         return sorted(self._visible_tiles, key=dist)
 
-    def _make_raw_key(self, tx: int, ty: int) -> RawKey:
+    def _make_raw_key(self, tx: int, ty: int, level: Optional[int] = None) -> RawKey:
+        """`level` defaults to `self.level` so every existing call site is
+        unchanged; the raw level+1 underlay passes its own coarser level."""
         source = self.provider.source_identity()
-        addr = TileAddress(grid=self.grid, level=self.level, tx=tx, ty=ty)
+        addr = TileAddress(grid=self.grid,
+                           level=self.level if level is None else level,
+                           tx=tx, ty=ty)
         return RawKey(source=source, channel=self.channel, tile=addr)
 
     # ── selection ─────────────────────────────────────────────────────────
@@ -3282,7 +3365,18 @@ class ExploreController(QtCore.QObject):
         viewport_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
         margin_world = self.grid.tile_size * ds * PRUNE_MARGIN_TILES
         keep = {(self.level, tx, ty) for tx, ty in self._visible_tiles}
-        self._raw_pool.prune(self.level, viewport_rect, margin_world, keep)
+        # The raw level+1 UNDERLAY must survive a level switch (module
+        # docstring "Raw level+1 underlay"): its whole point is to be there
+        # already when the target level is not. `TileItemPool.prune`
+        # already spares anything intersecting the viewport plus margin, so
+        # this is the explicit statement of the same intent rather than a
+        # new rule -- and it is recomputed from the LIVE viewport every
+        # range event, so an underlay tile that leaves the view stops being
+        # kept and prunes on the existing margin like everything else.
+        underlay_level, underlay_tiles = self._raw_underlay_tiles_for_view()
+        keep_raw = keep if underlay_level is None else keep | {
+            (underlay_level, tx, ty) for tx, ty in underlay_tiles}
+        self._raw_pool.prune(self.level, viewport_rect, margin_world, keep_raw)
         self._precise_pool.prune(self.level, viewport_rect, margin_world, keep)
         self.stats["items_created"] = self._raw_pool.items_created + self._precise_pool.items_created
         self.stats["items_pruned"] = self._raw_pool.items_pruned + self._precise_pool.items_pruned
@@ -3349,16 +3443,27 @@ class ExploreController(QtCore.QObject):
                 "first": False, "full": False,
             }
 
+        gen = self.view_generation
+
+        # ── (0) RAW level+1 UNDERLAY, issued FIRST (module docstring "Raw
+        # level+1 underlay"). One coarser pyramid level covering the SAME
+        # viewport: a quarter of the tiles, each a plain pyramid read, so
+        # the whole view has correct-intensity pixels after one round of
+        # raw I/O instead of jumping straight from the overview to full
+        # detail. Kept pooled and visible under the target level by the
+        # existing coarser-fallback rules; pruned only once out of view. ──
+        self._issue_raw_underlay(gen)
+
         # ONE centre-out ordering, computed here and reused by the overlay
         # (module docstring "RawOverlayLayer"): two copies of this sort is
         # how the two channels would end up fetching in different orders.
         ordered = self._visible_tiles_center_out()
         missing = [coord for coord in ordered
                    if self._raw_pool.get(self.level, *coord) is None]
-        gen = self.view_generation
         for i, (tx, ty) in enumerate(missing):
             key = self._make_raw_key(tx, ty)
-            req = TileRequest(key=key, generation=gen, priority=i)
+            req = TileRequest(key=key, generation=gen,
+                              priority=RAW_CURRENT_BASE_PRIORITY + i)
             self.scheduler.request(req, self._on_raw_result)
 
         # Mount point 2 (module docstring "RawOverlayLayer"): AFTER the
@@ -3387,6 +3492,80 @@ class ExploreController(QtCore.QObject):
         # priority base sits above all of them regardless of order, but
         # issuing last keeps this call site's ordering self-documenting.
         self._issue_directional_prefetch()
+
+    def _raw_layer_visible(self) -> bool:
+        """Whether the raw layer can currently reach the screen at all --
+        the same expression `_update_layer_visibility` computes for
+        `raw_on`, kept in one place so the underlay issuing path and the
+        visibility policy can never disagree. False exactly when a
+        correction method is selected AND its corrected floor is ready, at
+        which point the whole raw layer is forced invisible (module
+        docstring "corrected floor")."""
+        wants = self._wants_precise()
+        if not wants:
+            return True
+        floor_ctx = self._current_floor_ctx(self._floor_level, self._floor_stride)
+        floor_ok = self._floor_ready and self._floor_ctx == floor_ctx
+        return not floor_ok
+
+    def _raw_underlay_tiles_for_view(self):
+        """`(level, {(tx, ty), ...})` for the raw level+1 underlay covering
+        the current viewport, or `(None, set())` when there is no coarser
+        level or no viewport yet."""
+        if self._current_bbox is None:
+            return None, set()
+        level = self.level + 1
+        if level >= self.provider.num_levels:
+            return None, set()
+        ds = self.provider.level_downsample(level)
+        bbox_level = planning.bbox_to_level(self._current_bbox, ds)
+        return level, tiles_covering(bbox_level, self.grid.tile_size)
+
+    def _issue_raw_underlay(self, gen):
+        """Request the RAW pyramid at `self.level + 1` over the current
+        viewport, ahead of everything else in this tick (module docstring
+        "Raw level+1 underlay").
+
+        Skipped when the raw layer cannot be seen at all -- i.e. a
+        correction method is selected and its corrected floor is ready, so
+        `_update_layer_visibility` forces the whole raw layer invisible.
+        Issuing there would be pure waste: a corrected tile stages its halo
+        from its OWN level's raw, never level+1, so these reads would not
+        even warm anything the corrected path uses.
+
+        The tile set is recorded on the controller for the delivery-side
+        membership test, exactly as the intermediate CORRECTED fallback
+        does, so a result that arrives after the camera moved on is
+        dropped rather than pooled at a coordinate nothing wants."""
+        if self._suspended or not self._raw_layer_visible():
+            self._raw_underlay_level = None
+            self._raw_underlay_tiles = set()
+            return
+        level, tiles = self._raw_underlay_tiles_for_view()
+        self._raw_underlay_level = level
+        self._raw_underlay_tiles = set(tiles)
+        if level is None or not tiles:
+            return
+
+        ts = self.grid.tile_size
+        ds = self.provider.level_downsample(level)
+        y0, x0, y1, x1 = planning.bbox_to_level(self._current_bbox, ds)
+        cy, cx = (y0 + y1) / 2.0, (x0 + x1) / 2.0
+
+        def dist(coord):
+            tx, ty = coord
+            return ((ty * ts + ts / 2.0 - cy) ** 2 + (tx * ts + ts / 2.0 - cx) ** 2)
+
+        missing = [c for c in tiles if self._raw_pool.get(level, *c) is None]
+        issued = 0
+        for i, (tx, ty) in enumerate(sorted(missing, key=dist)):
+            key = self._make_raw_key(tx, ty, level=level)
+            req = TileRequest(key=key, generation=gen,
+                              priority=RAW_UNDERLAY_BASE_PRIORITY + i)
+            self.scheduler.request(req, self._on_raw_result)
+            issued += 1
+        self.stats["raw_underlay_issued"] = (
+            self.stats.get("raw_underlay_issued", 0) + issued)
 
     def _ring_tiles_center_out(self, bbox_level, visible):
         """The tiles of the band `RAW_PREFETCH_RING_TILES` wide around
@@ -3962,12 +4141,28 @@ class ExploreController(QtCore.QObject):
             return
         tile = key.tile
         current_source = self.provider.source_identity()
-        if key.channel != self.channel or key.source != current_source or \
-                tile.level != self.level:
+        if key.channel != self.channel or key.source != current_source:
             self.stats["mismatched_raw_dropped"] += 1
             return
-        if (tile.tx, tile.ty) not in self._visible_tiles:
-            self.stats["late_raw_rejected"] += 1
+        # Two accepted levels: the current one, and the level+1 UNDERLAY
+        # (module docstring "Raw level+1 underlay"). Each has its OWN
+        # membership test against the set that was computed when the batch
+        # was issued -- an underlay tile is not in `_visible_tiles` (that
+        # set is in the CURRENT level's tile coordinates), so testing it
+        # there would reject every underlay tile or, worse, accept one
+        # whose (tx, ty) happens to collide with a current-level address.
+        if tile.level == self.level:
+            if (tile.tx, tile.ty) not in self._visible_tiles:
+                self.stats["late_raw_rejected"] += 1
+                return
+        elif (self._raw_underlay_level is not None
+                and tile.level == self._raw_underlay_level
+                and self._raw_underlay_level == self.level + 1):
+            if (tile.tx, tile.ty) not in self._raw_underlay_tiles:
+                self.stats["late_raw_rejected"] += 1
+                return
+        else:
+            self.stats["mismatched_raw_dropped"] += 1
             return
 
         t0 = time.perf_counter() if self.probe else None
@@ -3978,13 +4173,19 @@ class ExploreController(QtCore.QObject):
             tile.ty * self.grid.tile_size, tile.tx * self.grid.tile_size,
             arr.shape[0], arr.shape[1], ds_y, ds_x)
         self._raw_pool.put(tile.level, tile.tx, tile.ty, rect, rgba_or_gray, key)
-        self.stats["raw_tiles_blitted"] += 1
+        if tile.level == self.level:
+            self.stats["raw_tiles_blitted"] += 1
+        else:
+            self.stats["raw_underlay_blitted"] += 1
         self.stats["items_created"] = self._raw_pool.items_created + self._precise_pool.items_created
         if self.probe and t0 is not None:
             dt_ms = (time.perf_counter() - t0) * 1000.0
             self.timings["tile_item_update_ms"].append(dt_ms)
             self.timings["frame_events"].append((time.perf_counter(), dt_ms))
-            self._probe_note_raw_progress(tile.tx, tile.ty)
+            # Viewport-fill probing is defined against the CURRENT level's
+            # wanted set; an underlay tile is not a member of it.
+            if tile.level == self.level:
+                self._probe_note_raw_progress(tile.tx, tile.ty)
 
         self._update_layer_visibility()
 

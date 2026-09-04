@@ -167,12 +167,25 @@ class FakeScheduler:
     def shutdown(self):
         self.shutdown_called = True
 
-    def pending_for(self, key_type=None, include_ring=False):
-        """Requests by key type. The raw prefetch RING (priority >=
-        RAW_PREFETCH_RING_BASE_PRIORITY, speculative, never pooled) is left
-        out by default: every assertion here about "what was requested" is
-        about the VISIBLE set. `include_ring=True` returns everything."""
-        from block01.viewer.explore_view import RAW_PREFETCH_RING_BASE_PRIORITY
+    def pending_for(self, key_type=None, include_ring=False,
+                    include_underlay=False):
+        """Requests by key type, restricted BY DEFAULT to the CURRENT
+        level's visible batch, because every assertion here about "what was
+        requested" is about the visible set:
+
+        - the raw prefetch RING (priority >= RAW_PREFETCH_RING_BASE_
+          PRIORITY) is speculative and never pooled -- `include_ring=True`
+          keeps it;
+        - the raw level+1 UNDERLAY (priority < RAW_CURRENT_BASE_PRIORITY)
+          is a different LEVEL's tile coordinates, so mixing it into a
+          comparison against the current level's wanted set is a category
+          error -- `include_underlay=True` keeps it.
+
+        Priority tier is the discriminator because a `TileRequest` carries
+        no other marker of which batch issued it, and the three bases are
+        disjoint by construction (0.., 200.., 700..)."""
+        from block01.viewer.explore_view import (
+            RAW_CURRENT_BASE_PRIORITY, RAW_PREFETCH_RING_BASE_PRIORITY)
         reqs = list(self.requests)
         if key_type is not None:
             reqs = [(r, cb) for r, cb in reqs if isinstance(r.key, key_type)]
@@ -180,6 +193,10 @@ class FakeScheduler:
             reqs = [(r, cb) for r, cb in reqs
                     if not (isinstance(r.key, RawKey)
                             and r.priority >= RAW_PREFETCH_RING_BASE_PRIORITY)]
+        if not include_underlay:
+            reqs = [(r, cb) for r, cb in reqs
+                    if not (isinstance(r.key, RawKey)
+                            and r.priority < RAW_CURRENT_BASE_PRIORITY)]
         return reqs
 
     def deliver(self, req, arr, error=None):
@@ -3766,4 +3783,133 @@ def test_overlay_mapping_is_its_own(app):
     assert overlay.pool._levels_for_level(0) == (0.0, 900.0)
     assert ctrl._raw_pool._levels_for_level(0) == pytest.approx((5.0, 50.0))
     assert overlay.calibrated
+    ctrl.teardown()
+
+
+# ── raw level+1 underlay (module docstring "Raw level+1 underlay") ───────────
+
+def _underlay_requests(scheduler):
+    from block01.viewer.explore_view import RAW_CURRENT_BASE_PRIORITY
+    return [(r, cb) for r, cb in scheduler.requests
+            if isinstance(r.key, RawKey) and r.priority < RAW_CURRENT_BASE_PRIORITY]
+
+
+def test_view_change_requests_the_level_plus_one_raw_underlay_first(app):
+    """A camera move must ask for the COARSER raw level covering the same
+    viewport before it asks for anything expensive, so the whole view has
+    correct-intensity pixels after one round of raw reads instead of
+    stepping straight from the overview to full detail."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    scheduler.requests.clear()
+
+    set_view_and_pump(view, 700, 100, 700 + 2048, 100 + 2048)
+
+    underlay = _underlay_requests(scheduler)
+    assert underlay, "no level+1 raw underlay was requested"
+    assert ctrl.level == 0
+    assert {r.key.tile.level for r, _cb in underlay} == {1}
+
+    # the underlay covers the SAME viewport, expressed at level 1
+    ds = provider.level_downsample(1)
+    bbox = ctrl._current_bbox
+    expected = tiles_covering(
+        (int(bbox[0] / ds), int(bbox[1] / ds), int(bbox[2] / ds), int(bbox[3] / ds)),
+        ctrl.grid.tile_size)
+    assert {(r.key.tile.tx, r.key.tile.ty) for r, _cb in underlay} == expected
+
+    # ORDER, not merely presence: every underlay request is submitted
+    # before the first corrected request of the same tick, and before the
+    # current level's raw batch.
+    order = [(i, r) for i, (r, _cb) in enumerate(scheduler.requests)]
+    first_corrected = min(i for i, r in order if isinstance(r.key, CorrectionKey))
+    last_underlay = max(i for i, r in order
+                        if isinstance(r.key, RawKey) and r.key.tile.level == 1)
+    first_current_raw = min(i for i, r in order
+                            if isinstance(r.key, RawKey) and r.key.tile.level == 0)
+    assert last_underlay < first_corrected
+    assert last_underlay < first_current_raw
+
+    ctrl.teardown()
+
+
+def test_level_plus_one_raw_underlay_is_blitted_and_drawn_under_the_target(app):
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 2048, 100 + 2048)
+
+    for req, _cb in _underlay_requests(scheduler):
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(30)
+
+    coarse = [e for e in ctrl._raw_pool.entries.values() if e.level == 1]
+    assert coarse, "no level+1 underlay item was pooled"
+    assert ctrl.stats["raw_underlay_blitted"] == len(coarse)
+    assert ctrl.stats["raw_tiles_blitted"] == 0, \
+        "an underlay tile must not be counted as a current-level raw tile"
+    # coarser => LOWER z than the current level, so the target level draws
+    # over it as it lands (module docstring "Level switching without
+    # clearing").
+    assert all(e.item.isVisible() for e in coarse)
+    assert all(e.item.zValue() < ctrl._raw_pool._z_for_level(0) for e in coarse)
+
+    ctrl.teardown()
+
+
+def test_level_plus_one_raw_underlay_survives_the_level_switch_while_in_view(app):
+    """The underlay's whole purpose is to be there when the target level is
+    not, so a level switch must not evict it. Pruning stays governed by the
+    existing rule -- out of the viewport by PRUNE_MARGIN_TILES -- which is
+    forced here by dropping the pool budget to zero."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    set_view_and_pump(view, 700, 100, 700 + 2048, 100 + 2048)
+    for req, _cb in _underlay_requests(scheduler):
+        t = req.key.tile
+        scheduler.deliver(req, raw_arr_for(provider, t.level, t.tx, t.ty))
+    _pump(30)
+
+    in_view = {(e.level, e.tx, e.ty) for e in ctrl._raw_pool.entries.values()
+               if e.level == 1}
+    assert in_view
+
+    # zoom OUT far enough to switch the display level to 1: the underlay's
+    # tiles are now the CURRENT level and must all still be pooled.
+    ctrl._raw_pool.budget = 0
+    set_view_and_pump(view, 0, 0, 4096, 4096)
+    assert ctrl.level == 1
+    still = {(e.level, e.tx, e.ty) for e in ctrl._raw_pool.entries.values()}
+    assert in_view <= still, "a level+1 underlay item was pruned across the switch"
+
+    # ...and the rule that DOES evict them is still "outside the viewport":
+    # pan far away and they go, budget being zero.
+    set_view_and_pump(view, 0, 0, 512, 512)
+    set_view_and_pump(view, 3500, 3500, 4096, 4096)
+    gone = {(e.level, e.tx, e.ty) for e in ctrl._raw_pool.entries.values()}
+    assert not (in_view <= gone)
+
+    ctrl.teardown()
+
+
+def test_no_raw_underlay_once_the_corrected_floor_hides_the_raw_layer(app):
+    """With a method selected and its floor ready the whole raw layer is
+    forced invisible, so an underlay read could never reach the screen --
+    and it would not even warm anything, since a corrected tile stages its
+    halo from its OWN level's raw."""
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not ctrl._floor_ready:
+        _pump(10)
+    assert ctrl._floor_ready, "floor did not become ready; test premise gone"
+    scheduler.requests.clear()
+
+    set_view_and_pump(view, 700, 100, 700 + 2048, 100 + 2048)
+    assert not ctrl._raw_layer_visible()
+    assert _underlay_requests(scheduler) == []
+    assert ctrl.stats["raw_underlay_issued"] == 0
+
     ctrl.teardown()

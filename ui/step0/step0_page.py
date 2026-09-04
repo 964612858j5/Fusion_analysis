@@ -431,6 +431,8 @@ class Step0Page(QWidget):
         self._analysis_region_mode = "roi"
         self._patch_selected_idx = -1
         self._roi_selected_indices = []
+        # Re-entrancy guard for the patch-list <-> thumbnail selection mirror.
+        self._patch_sel_guard = False
         self._patch_selected_indices = []
         self._bg_queue = []
         self._bg_queue_idx = 0
@@ -746,7 +748,10 @@ class Step0Page(QWidget):
             lambda *_: self._reconcile_roi_edit(self.overview))
         self.overview.rois_changed.connect(
             lambda *_: self._reconcile_roi_edit(self.overview))
-        self._wrap_overview_patch_limit()
+        # The thumbnail can select a patch itself now (click it); keep the
+        # patch LIST showing whatever the thumbnail highlights.
+        self.overview.patch_selection_changed.connect(
+            self._on_overview_patch_selected)
         bl.addWidget(self.overview, stretch=3)   # overview 占大部分高度
 
         # (navigator-layout) ROI/Patch LISTS live in their own container, hosted
@@ -4019,6 +4024,10 @@ class Step0Page(QWidget):
                 lambda *_: self._reconcile_roi_edit(popup.overview))
             # A click on the tissue -> the full image jumps there.
             popup.overview.navigate_requested.connect(self._on_tissue_navigate)
+            # Clicking a patch in the navigator highlights it in the patch list
+            # (the navigator's overview is the one the user actually draws on).
+            popup.overview.patch_selection_changed.connect(
+                self._on_overview_patch_selected)
             # A panel built after the page already has a channel starts on
             # that channel rather than on a DAPI thumbnail nothing asked for.
             self._update_tissue_preview()
@@ -4809,19 +4818,6 @@ class Step0Page(QWidget):
         # to fire once per load.
         self._auto_open_tissue_navigator()
 
-    def _wrap_overview_patch_limit(self):
-        original = self.overview._add_patch
-
-        def wrapped(fy0, fy1, fx0, fx1, rmin, rmax, cmin, cmax, roi_idx):
-            if self.overview._patches_in_roi(roi_idx) >= self.overview._max_patches_for_roi(roi_idx):
-                self._patch_warning.setText("Max 4 patches per ROI")
-                self._patch_warning.setVisible(True)
-                return
-            self._patch_warning.setVisible(False)
-            return original(fy0, fy1, fx0, fx1, rmin, rmax, cmin, cmax, roi_idx)
-
-        self.overview._add_patch = wrapped
-
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when
         it exists, else the page's), falling back to `self.rois`."""
@@ -4882,7 +4878,7 @@ class Step0Page(QWidget):
         self._roi_list.clear()
         for idx, roi in enumerate(self.rois):
             n_p = len(roi.get("patch_indices", []))
-            self._roi_list.addItem(f'{roi["name"]} [{n_p}/4]')
+            self._roi_list.addItem(f'{roi["name"]} [{n_p}]')
         if self.rois:
             self._roi_selected_idx = min(max(sel, 0), len(self.rois) - 1)
             self._roi_list.setCurrentRow(self._roi_selected_idx)
@@ -4936,12 +4932,41 @@ class Step0Page(QWidget):
         self._roi_selected_idx = rows[-1] if rows else -1
         self._roi_selected_indices = rows
 
+    def _on_overview_patch_selected(self, idx):
+        """The tissue thumbnail highlights a different patch (-1 = none).
+
+        The list follows the thumbnail, and `_on_patch_selection_changed`
+        below makes the thumbnail follow the list — one guard keeps the two
+        from bouncing the selection back at each other.
+        """
+        if self._patch_sel_guard:
+            return
+        self._patch_sel_guard = True
+        try:
+            if idx is None or idx < 0:
+                self._patch_list.clearSelection()
+            elif idx < self._patch_list.count():
+                self._patch_list.setCurrentRow(idx)
+        finally:
+            self._patch_sel_guard = False
+
     def _on_patch_selection_changed(self):
         """Patch列表选择变化——记录所有选中行，跳转预览到最后一个"""
         rows = [self._patch_list.row(i)
                 for i in self._patch_list.selectedItems()]
         self._patch_selected_idx = rows[-1] if rows else -1
         self._patch_selected_indices = rows
+        if not self._patch_sel_guard:
+            # Mirror the list's selection onto the thumbnail. Only when the
+            # list HAS a selection: an empty list selection is not a statement
+            # that nothing on the thumbnail is being worked on.
+            self._patch_sel_guard = True
+            try:
+                if rows:
+                    for panel in self._registered_roi_overviews():
+                        panel.select_patch(rows[-1])
+            finally:
+                self._patch_sel_guard = False
         if rows and rows[-1] < len(self.patches):
             self.current_patch_idx = rows[-1]
             self._sync_patch_buttons()

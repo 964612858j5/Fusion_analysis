@@ -1028,6 +1028,21 @@ class ConfigPanel(QWidget):
         }
 
 
+# ── Direct patch editing on the tissue thumbnail ──────────────────────
+# The eight resize grips of the selected patch, as (dy, dx) directions:
+# four corners and four edge midpoints. dy/dx of -1 moves the low edge,
+# +1 the high edge, 0 leaves that axis alone.
+PATCH_HANDLE_DIRS = (
+    (-1, -1), (-1, 0), (-1, 1),
+    (0, -1),           (0, 1),
+    (1, -1),  (1, 0),  (1, 1),
+)
+PATCH_HANDLE_MIN_OV = 2.0    # grip half-width, overview px: still grabbable
+PATCH_HANDLE_MAX_OV = 5.0    #                              never enormous
+PATCH_MIN_FULL_PX   = 32     # a patch smaller than this is not a patch
+PATCH_DRAG_SLOP_PX  = 3      # widget px before a press counts as a drag
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Overview Panel  (ROI polygon + Patch rectangle dual-mode)
 # ══════════════════════════════════════════════════════════════════════
@@ -1052,6 +1067,12 @@ class OverviewPanel(QWidget):
     ───────
     patches_changed(list)  — list of (y0,y1,x0,x1) tuples, one per patch
     rois_changed(list)     — list of roi dicts
+    patch_selection_changed(int) — which patch is highlighted (-1 = none)
+
+    There is no limit on how many patches an ROI may hold, and a patch is
+    editable where it is drawn: in navigate mode (no drawing tool) a click
+    selects one, dragging its body moves it, dragging a grip resizes it and
+    Delete removes it -- see `_patch_hit_test` and `_commit_patch_geometry`.
     """
 
     patches_changed = pyqtSignal(list)   # [(y0,y1,x0,x1), ...]
@@ -1063,6 +1084,10 @@ class OverviewPanel(QWidget):
     # drag shorter than 3 overview pixels was discarded as too small for a
     # patch, and Ctrl+click added no vertex.
     navigate_requested = pyqtSignal(int, int)
+    # The patch the thumbnail highlights changed (index, or -1 for none).
+    # Selection is a VIEW state, not part of the patch model, so it travels
+    # on its own signal and never disturbs `patches_changed`.
+    patch_selection_changed = pyqtSignal(int)
 
     def __init__(self, loader, nuc_ch: str, lazy: bool = False):
         super().__init__()
@@ -1085,6 +1110,10 @@ class OverviewPanel(QWidget):
         self._pan_last        = None
         self._nav_press       = None   # navigate/pan mode: (pos, r, c) of the press
         self._nav_moved       = False
+        # An in-flight move/resize of the selected patch (mode None only):
+        # {"idx", "handle", "start" (row,col in overview px), "press" (widget
+        #  pos), "coords" (the patch rect the gesture started from), "moved"}.
+        self._patch_drag      = None
         self._right_press_pos = None
 
         # ROI in-progress drawing
@@ -1351,6 +1380,19 @@ class OverviewPanel(QWidget):
         c = int(np.clip(p.x(), 0, self.ov_w - 1))
         return r, c   # (row, col)
 
+    def _ov_pos_f(self, scene_pos):
+        """Like `_ov_pos`, but WITHOUT rounding to whole overview pixels.
+
+        A drag has to be measured at better than one overview pixel (one
+        overview pixel is `self.ds` = 32 full-image pixels), so the patch
+        editing maths works in these floats and rounds only once, at the
+        end, when it writes level-0 integers back into the model.
+        """
+        if not hasattr(self, 'ov_h'):
+            return 0.0, 0.0
+        p = self.vb.mapSceneToView(scene_pos)
+        return float(p.y()), float(p.x())
+
     def _to_fullres(self, r, c):
         """Overview (row,col) → full-res (y, x)."""
         return int(r * self.ds), int(c * self.ds)
@@ -1374,7 +1416,8 @@ class OverviewPanel(QWidget):
             self.hint.setStyleSheet("color:#6bcb77;font-size:10px;")
         elif mode is None:
             self.hint.setText(
-                "Click = Jump the full image there  |  Scroll = Zoom  "
+                "Click = Jump the full image there  |  Click a patch = Select "
+                "(drag = Move, handles = Resize, Del = Remove)  |  Scroll = Zoom  "
                 "|  Middle-drag = Pan  |  Double-click = Reset"
             )
             self.hint.setStyleSheet("color:#19e0e0;font-size:10px;")
@@ -1635,25 +1678,16 @@ class OverviewPanel(QWidget):
 
     # ── Patch helpers ─────────────────────────────────────────────────
 
-    def _max_patches_for_roi(self, roi_idx):
-        """Max 4 per ROI (or total 4 if no ROIs)."""
-        if roi_idx is None:
-            return 4
-        return 4
-
     def _patches_in_roi(self, roi_idx):
         return sum(1 for p in self._patches if p["roi_idx"] == roi_idx)
 
     def _add_patch(self, fy0, fy1, fx0, fx1, rmin, rmax, cmin, cmax, roi_idx):
-        """Add a new patch, draw its visual, update info."""
-        # Check per-ROI limit
-        if self._patches_in_roi(roi_idx) >= self._max_patches_for_roi(roi_idx):
-            who = f"ROI {self._rois[roi_idx]['name']}" if roi_idx is not None else "the canvas"
-            self.status.setText(
-                f"⚠ Maximum 4 patches reached for {who}"
-            )
-            return
+        """Add a new patch, draw its visual, update info.
 
+        There is no cap on how many patches an ROI (or the bare canvas) may
+        hold: how many places on the slide are worth measuring is the user's
+        judgement, not this panel's.
+        """
         self._patches.append({
             "roi_idx": roi_idx,
             "coords":  (fy0, fy1, fx0, fx1),
@@ -1677,8 +1711,6 @@ class OverviewPanel(QWidget):
         so a patch made this way is indistinguishable from a drawn one
         everywhere downstream.
 
-        Deliberately NOT subject to the per-ROI maximum: it belongs to no
-        ROI, and the limit exists for the drawing gesture.
         """
         coords = (int(fy0), int(fy1), int(fx0), int(fx1))
         self._patches.append({"roi_idx": roi_idx, "coords": coords})
@@ -1729,31 +1761,134 @@ class OverviewPanel(QWidget):
         self.patches_changed.emit(self._patch_coords())
 
     def _select_patch_artist(self, patch_idx):
+        """Highlight one patch (-1 = none) and tell the host about it."""
+        if patch_idx < -1 or patch_idx >= len(self._patches):
+            patch_idx = -1
+        if patch_idx == self._selected_patch_idx:
+            return
         self._selected_patch_idx = patch_idx
         self._rebuild_patch_artists()
+        self.patch_selection_changed.emit(patch_idx)
 
-    def _on_patch_roi_changed(self, patch_idx, rect):
+    # ── Direct patch editing on the thumbnail ─────────────────
+    #
+    # A patch is a rectangle on the tissue, so the honest way to move or
+    # resize one is to drag it where it is drawn. The panel does its own
+    # hit-testing rather than leaning on interactive pyqtgraph items: the
+    # viewport event filter below swallows the mouse before the scene ever
+    # sees it (it has to — it owns drawing, panning and navigation), so an
+    # item that "handles clicks itself" would simply never be told.
+    #
+    # Only the SELECTED patch is editable, and only when no drawing tool is
+    # active (mode None): in ROI/patch mode, drawing a new shape wins.
+
+    def _patch_display_rect(self, patch_idx):
+        """The patch's rectangle in overview (display) coordinates, as
+        (left, top, width, height) floats."""
+        fy0, fy1, fx0, fx1 = self._patches[patch_idx]["coords"]
+        ds = float(self.ds or 1)
+        return (fx0 / ds, fy0 / ds, (fx1 - fx0) / ds, (fy1 - fy0) / ds)
+
+    def _patch_handle_size(self, w, h):
+        """Half-width of a resize handle, in overview pixels: big enough to
+        grab on a small patch, never big enough to swallow the patch."""
+        return float(min(PATCH_HANDLE_MAX_OV,
+                         max(PATCH_HANDLE_MIN_OV, min(w, h) * 0.18)))
+
+    @staticmethod
+    def _patch_handle_center(x, y, w, h, dy, dx):
+        return (x + (dx + 1) * 0.5 * w, y + (dy + 1) * 0.5 * h)
+
+    def _patch_hit_test(self, r, c):
+        """What is under the overview point (row, col)?
+
+        Returns (patch_idx, handle) — handle is a (dy, dx) direction pair for
+        a resize grip, or None for the body of the patch — or None for empty
+        space. The selected patch's handles win over everything (they stick
+        out past its outline), then patches from the top of the stack down.
+        """
+        sel = self._selected_patch_idx
+        if 0 <= sel < len(self._patches):
+            x, y, w, h = self._patch_display_rect(sel)
+            hs = self._patch_handle_size(w, h)
+            for dy, dx in PATCH_HANDLE_DIRS:
+                hx, hy = self._patch_handle_center(x, y, w, h, dy, dx)
+                if abs(c - hx) <= hs and abs(r - hy) <= hs:
+                    return sel, (dy, dx)
+        for i in range(len(self._patches) - 1, -1, -1):
+            x, y, w, h = self._patch_display_rect(i)
+            if x <= c <= x + w and y <= r <= y + h:
+                return i, None
+        return None
+
+    def _patch_geometry_for_drag(self, drag, r, c):
+        """The level-0 rect a move/resize gesture has reached, clamped to the
+        slide and to a minimum size, rounded to whole level-0 pixels."""
+        y0, y1, x0, x1 = drag["coords"]
+        ds = float(self.ds or 1)
+        dy = (r - drag["start"][0]) * ds
+        dx = (c - drag["start"][1]) * ds
+        m = PATCH_MIN_FULL_PX
+        H, W = int(self.full_h), int(self.full_w)
+
+        if drag["handle"] is None:            # move the whole rectangle
+            dy = int(round(dy))
+            dx = int(round(dx))
+            dy = max(-y0, min(H - y1, dy))
+            dx = max(-x0, min(W - x1, dx))
+            return (y0 + dy, y1 + dy, x0 + dx, x1 + dx)
+
+        hy, hx = drag["handle"]
+        ny0, ny1, nx0, nx1 = y0, y1, x0, x1
+        if hy < 0:
+            ny0 = min(max(0, int(round(y0 + dy))), ny1 - m)
+        elif hy > 0:
+            ny1 = max(min(H, int(round(y1 + dy))), ny0 + m)
+        if hx < 0:
+            nx0 = min(max(0, int(round(x0 + dx))), nx1 - m)
+        elif hx > 0:
+            nx1 = max(min(W, int(round(x1 + dx))), nx0 + m)
+        # A minimum size that would push an edge off the slide pulls the
+        # OTHER edge in instead, so the rect never leaves the picture.
+        if ny1 > H:
+            ny1, ny0 = H, min(ny0, H - m)
+        if nx1 > W:
+            nx1, nx0 = W, min(nx0, W - m)
+        return (max(0, ny0), ny1, max(0, nx0), nx1)
+
+    def _commit_patch_geometry(self, patch_idx, coords, revert_to=None):
+        """Write an edited rectangle back into the patch model.
+
+        The single write-back path for every geometry edit (drag, resize and
+        the pyqtgraph-ROI callback): it clamps, re-homes the patch in whatever
+        ROI now contains its centre, relinks `patch_indices`, redraws and emits
+        `patches_changed` exactly ONCE — the same signal a drawn patch emits,
+        so the patch list, Step 1 and every other listener see no difference.
+        Returns True when the edit was accepted.
+        """
         if patch_idx < 0 or patch_idx >= len(self._patches):
-            return
-        pos = rect.pos()
-        size = rect.size()
-        c0 = max(0.0, float(pos.x()))
-        r0 = max(0.0, float(pos.y()))
-        c1 = min(float(getattr(self, "ov_w", 1)), c0 + max(1.0, float(size.x())))
-        r1 = min(float(getattr(self, "ov_h", 1)), r0 + max(1.0, float(size.y())))
-        fy0 = int(max(0, round(r0 * self.ds)))
-        fy1 = int(min(self.full_h, round(r1 * self.ds)))
-        fx0 = int(max(0, round(c0 * self.ds)))
-        fx1 = int(min(self.full_w, round(c1 * self.ds)))
+            return False
+        fy0, fy1, fx0, fx1 = [int(round(v)) for v in coords]
+        fy0 = max(0, min(int(self.full_h), fy0))
+        fy1 = max(0, min(int(self.full_h), fy1))
+        fx0 = max(0, min(int(self.full_w), fx0))
+        fx1 = max(0, min(int(self.full_w), fx1))
         if fy1 <= fy0 or fx1 <= fx0:
-            return
-        roi_idx = None
+            if revert_to is not None:
+                self._patches[patch_idx]["coords"] = tuple(revert_to)
+                self._rebuild_patch_artists()
+            return False
+        ds = float(self.ds or 1)
+        roi_idx = self._patches[patch_idx].get("roi_idx")
         if self._rois and not getattr(self, "full_wsi_mode", False):
-            roi_idx = self._find_roi_for_patch((r0 + r1) / 2.0, (c0 + c1) / 2.0)
+            roi_idx = self._find_roi_for_patch(
+                ((fy0 + fy1) / 2.0) / ds, ((fx0 + fx1) / 2.0) / ds)
             if roi_idx is None:
                 self.status.setText("⚠ Patch centre is outside all ROIs")
+                if revert_to is not None:
+                    self._patches[patch_idx]["coords"] = tuple(revert_to)
                 self._rebuild_patch_artists()
-                return
+                return False
         self._patches[patch_idx] = {
             "roi_idx": roi_idx,
             "coords": (fy0, fy1, fx0, fx1),
@@ -1764,8 +1899,37 @@ class OverviewPanel(QWidget):
             ri = patch.get("roi_idx")
             if ri is not None and 0 <= ri < len(self._rois):
                 self._rois[ri].setdefault("patch_indices", []).append(i)
+        self._rebuild_patch_artists()
         self._update_info()
         self.patches_changed.emit(self._patch_coords())
+        return True
+
+    def _preview_patch_geometry(self, patch_idx, coords):
+        """Show where a gesture currently is, without telling anybody.
+
+        Mid-drag the model carries the provisional rectangle so the redraw
+        stays trivial; nothing is emitted until the button comes up.
+        """
+        if 0 <= patch_idx < len(self._patches):
+            self._patches[patch_idx]["coords"] = tuple(int(v) for v in coords)
+            self._rebuild_patch_artists()
+
+    def _on_patch_roi_changed(self, patch_idx, rect):
+        """A pyqtgraph RectROI reported new geometry (kept for hosts that put
+        their own interactive items over this panel)."""
+        if patch_idx < 0 or patch_idx >= len(self._patches):
+            return
+        pos = rect.pos()
+        size = rect.size()
+        c0 = max(0.0, float(pos.x()))
+        r0 = max(0.0, float(pos.y()))
+        c1 = min(float(getattr(self, "ov_w", 1)), c0 + max(1.0, float(size.x())))
+        r1 = min(float(getattr(self, "ov_h", 1)), r0 + max(1.0, float(size.y())))
+        self._commit_patch_geometry(
+            patch_idx,
+            (round(r0 * self.ds), round(r1 * self.ds),
+             round(c0 * self.ds), round(c1 * self.ds)),
+        )
 
     def _rebuild_patch_artists(self):
         """Remove all patch visuals and redraw from scratch (after any delete/renumber)."""
@@ -1775,27 +1939,31 @@ class OverviewPanel(QWidget):
         self._patch_artists.clear()
 
         for i, pd in enumerate(self._patches):
-            fy0, fy1, fx0, fx1 = pd["coords"]
-            rmin = fy0 // self.ds
-            rmax = fy1 // self.ds
-            cmin = fx0 // self.ds
-            cmax = fx1 // self.ds
+            x, y, w, h = self._patch_display_rect(i)
             color = PATCH_COLORS[i % len(PATCH_COLORS)]
-            width = 3 if i == self._selected_patch_idx else 2
-            rect  = pg.RectROI(
-                [cmin, rmin], [cmax - cmin, rmax - rmin],
-                pen=pg.mkPen(color, width=width),
-                movable=True, resizable=True,
-            )
+            selected = (i == self._selected_patch_idx)
+            # A plain rect item, not an interactive pyqtgraph ROI: every patch
+            # but the selected one is pure decoration, and the selected one is
+            # driven by this panel's own event filter (see _patch_hit_test).
+            rect = QtWidgets.QGraphicsRectItem(QRectF(x, y, w, h))
+            rect.setPen(pg.mkPen(color, width=3 if selected else 2))
+            rect.setBrush(pg.mkBrush(color + ("33" if selected else "00")))
             rect.setZValue(20)
-            rect.addScaleHandle([1, 1], [0, 0])
-            rect.addScaleHandle([0, 0], [1, 1])
-            rect.sigRegionChangeFinished.connect(
-                lambda roi, idx=i: self._on_patch_roi_changed(idx, roi)
-            )
-            rect.sigClicked.connect(lambda _roi, _ev, idx=i: self._select_patch_artist(idx))
+            rect.setAcceptedMouseButtons(Qt.NoButton)
+            if selected:
+                # The grips are CHILDREN of the outline, so they follow it and
+                # are torn down with it — no second bookkeeping list to leak.
+                hs = self._patch_handle_size(w, h)
+                for dy, dx in PATCH_HANDLE_DIRS:
+                    hx, hy = self._patch_handle_center(x, y, w, h, dy, dx)
+                    grip = QtWidgets.QGraphicsRectItem(
+                        QRectF(hx - hs, hy - hs, hs * 2, hs * 2), rect)
+                    grip.setPen(pg.mkPen(color, width=1))
+                    grip.setBrush(pg.mkBrush(color))
+                    grip.setZValue(22)
+                    grip.setAcceptedMouseButtons(Qt.NoButton)
             lbl = pg.TextItem(f"P{i+1}", color=color, anchor=(0, 1))
-            lbl.setPos(cmin, rmin)
+            lbl.setPos(x, y)
             lbl.setZValue(21)
             self.vb.addItem(rect)
             self.vb.addItem(lbl)
@@ -1831,7 +1999,7 @@ class OverviewPanel(QWidget):
                     f"▶ {roi['name']}  "
                     f"{len(roi['polygon_display'])} pts  "
                     f"{bb[1]-bb[0]}×{bb[3]-bb[2]}px  "
-                    f"patches:{n_p}/4"
+                    f"patches:{n_p}"
                     f"</span>"
                 )
         if self._patches:
@@ -2044,6 +2212,14 @@ class OverviewPanel(QWidget):
             elif key in (Qt.Key_Return, Qt.Key_Enter):
                 self._finish_roi(); return True
 
+        # Navigate mode: Delete removes the patch the thumbnail highlights,
+        # through the very same removal path the toolbar's Del button uses.
+        if t == QtCore.QEvent.KeyPress and self._mode is None:
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                if self._selected_patch_idx >= 0:
+                    self._remove_patch(self._selected_patch_idx)
+                    return True
+
         if t == QtCore.QEvent.KeyPress and self._mode == 'patch':
             key = event.key()
             if key in (Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_D):
@@ -2079,7 +2255,26 @@ class OverviewPanel(QWidget):
                 # (< 3 px) is a click, and the release navigates. A left
                 # drag does nothing (no left-drag pan, by request); the
                 # middle button pans as in the other modes.
+                #
+                # A press ON a patch is not navigation: it picks that patch up
+                # (select, then move or resize it), because the patch is the
+                # nearer thing under the cursor.
                 if event.button() == Qt.LeftButton:
+                    fr, fc = self._ov_pos_f(sp)
+                    hit = self._patch_hit_test(fr, fc)
+                    if hit is not None:
+                        idx, handle = hit
+                        self._select_patch_artist(idx)
+                        self._patch_drag = {
+                            "idx":    idx,
+                            "handle": handle,
+                            "start":  (fr, fc),
+                            "press":  event.pos(),
+                            "coords": tuple(self._patches[idx]["coords"]),
+                            "moved":  False,
+                        }
+                        self._nav_press = None
+                        return True
                     self._nav_press = (event.pos(), r, c)
                     self._nav_moved = False
                 elif event.button() == Qt.MiddleButton:
@@ -2130,6 +2325,17 @@ class OverviewPanel(QWidget):
             r, c = self._ov_pos(sp)
 
             if self._mode is None:
+                drag = self._patch_drag
+                if drag is not None and (event.buttons() & Qt.LeftButton):
+                    if (event.pos() - drag["press"]).manhattanLength() \
+                            >= PATCH_DRAG_SLOP_PX:
+                        drag["moved"] = True
+                    if drag["moved"]:
+                        fr, fc = self._ov_pos_f(sp)
+                        self._preview_patch_geometry(
+                            drag["idx"],
+                            self._patch_geometry_for_drag(drag, fr, fc))
+                    return True
                 press = getattr(self, "_nav_press", None)
                 if press is not None and (event.pos() - press[0]).manhattanLength() >= 3:
                     self._nav_moved = True
@@ -2165,9 +2371,25 @@ class OverviewPanel(QWidget):
                 if event.button() == Qt.MiddleButton:
                     self._pan_last = None
                 if event.button() == Qt.LeftButton:
+                    drag = self._patch_drag
+                    self._patch_drag = None
+                    if drag is not None:
+                        # The gesture commits on release, once: a patch that
+                        # is dragged through ten mouse-moves is still one edit.
+                        if drag["moved"]:
+                            sp = self.gview.mapToScene(event.pos())
+                            fr, fc = self._ov_pos_f(sp)
+                            self._commit_patch_geometry(
+                                drag["idx"],
+                                self._patch_geometry_for_drag(drag, fr, fc),
+                                revert_to=drag["coords"])
+                        return True
                     press = getattr(self, "_nav_press", None)
                     self._nav_press = None
                     if press is not None and not getattr(self, "_nav_moved", False):
+                        # A click on bare tissue means "take me there" — and
+                        # nothing on the thumbnail is under edit any more.
+                        self._select_patch_artist(-1)
                         self._emit_navigate(press[1], press[2])
                 return True
 

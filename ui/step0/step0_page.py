@@ -399,6 +399,13 @@ class Step0Page(QWidget):
         # The guard is also held while the page sets the panels' range
         # ITSELF, so a programmatic pin neither mirrors nor asks for pixels.
         self._compare_range_syncing = False
+        # The Tissue Preview draws the CURRENT channel, so a Min/Max drag
+        # would re-render it once per slider step. Debounced; every other
+        # trigger (a row click, a colour, the DAPI switch) is a single
+        # discrete event and goes straight through.
+        self._tissue_preview_timer = QTimer(self)
+        self._tissue_preview_timer.setSingleShot(True)
+        self._tissue_preview_timer.timeout.connect(self._update_tissue_preview)
         self._compare_refill_timer = QTimer(self)
         self._compare_refill_timer.setSingleShot(True)
         self._compare_refill_timer.timeout.connect(
@@ -2869,6 +2876,9 @@ class Step0Page(QWidget):
         # The pyramid level the new selection lands on decides whether the
         # coarse-preview hint applies.
         self._update_full_level_hint()
+        # A dataset load lands here too, which is where the thumbnail first
+        # gets a channel to draw.
+        self._queue_tissue_preview()
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
@@ -3706,6 +3716,9 @@ class Step0Page(QWidget):
                 lambda *_: self._reconcile_roi_edit(popup.overview))
             # A click on the tissue -> the full image jumps there.
             popup.overview.navigate_requested.connect(self._on_tissue_navigate)
+            # A panel built after the page already has a channel starts on
+            # that channel rather than on a DAPI thumbnail nothing asked for.
+            self._update_tissue_preview()
         return self._tissue_navigator_popup
 
     # ── v14.2b single-model ROI bridge ───────────────────────────────────────
@@ -5055,6 +5068,8 @@ class Step0Page(QWidget):
             set_tint = getattr(getattr(stack, "controller", None), "set_tint", None)
             if set_tint is not None:
                 set_tint(self._full_image_tint(ch))
+            # ...and so does the Tissue Preview.
+            self._update_tissue_preview()
 
     def _pick_channel_color(self, ch, btn=None):
         """弹颜色对话框，让用户选择通道显示颜色。"""
@@ -5108,6 +5123,9 @@ class Step0Page(QWidget):
         overlay = self._full_image_overlay()
         if overlay is not None:
             overlay.set_tint(self._nuc_color)
+        # The thumbnail's DAPI composite is in this colour too, when the
+        # layer is on.
+        self._update_tissue_preview()
 
     # ── the DAPI layer switch (the nucleus row's checkbox) ───────────────
     def _sync_nucleus_row_checkbox(self, on):
@@ -5170,6 +5188,9 @@ class Step0Page(QWidget):
             print(f"[step0] DAPI layer {'shown' if on else 'hidden'}", flush=True)
         finally:
             self._nucleus_vis_syncing = False
+        # One switch, every view: the thumbnail's DAPI composite appears and
+        # disappears with the full image's overlay and the panels'.
+        self._update_tissue_preview()
 
     def _rebuild_payload_rgb_from(self, payload, ch, nucleus_rgb, marker_rgb):
         """Record `marker_rgb` as the channel's colour.
@@ -5325,6 +5346,90 @@ class Step0Page(QWidget):
                     vb.autoRange()
         finally:
             self._compare_range_syncing = False
+
+    # ── the Tissue Preview's pixels ──────────────────────────────────────
+    #
+    # The thumbnail used to be DAPI, always, whatever the page was working
+    # on -- a picture of where the tissue is, in a workspace whose whole
+    # question is what ONE channel looks like. It now shows that channel,
+    # through the same display mapping and the same colour the full image
+    # and the compare panels draw it with, so the three views of a channel
+    # cannot disagree about its brightness or its colour.
+    #
+    # The pixels are the whole-slide low-resolution array the page already
+    # holds (`_slide_lowres_array`, ~923x555 on the real slide, one read per
+    # channel per dataset, shared with the display seed and the Intensity
+    # histogram). No new read, ever.
+
+    # How long the slider stream is allowed to settle before the thumbnail
+    # is re-rendered.
+    _TISSUE_PREVIEW_DEBOUNCE_MS = 100
+
+    def _lowres_tinted(self, arr, ch, nucleus=False):
+        """`arr` through `ch`'s display mapping and colour, as uint8 RGB.
+
+        The LUT is `build_display_lut` -- the SAME table the image items are
+        given -- indexed by the same `(value - min) / (max - min)` the
+        `levels` pair means. Doing it in numpy rather than trusting a second
+        formula is what makes "the thumbnail is the channel as you are
+        seeing it" checkable rather than approximately true.
+        """
+        lo, hi, gamma = self._display_mapping_for(ch, nucleus=nucleus)
+        span = float(hi) - float(lo)
+        if not (span > 0 and math.isfinite(span)):
+            span = 1.0
+        a = np.asarray(arr, dtype=np.float32)
+        idx = np.clip((a - float(lo)) * (255.0 / span), 0.0, 255.0)
+        lut = build_display_lut(self._channel_color(ch), gamma)
+        return lut[idx.astype(np.uint8)]
+
+    def _tissue_preview_rgb(self):
+        """The thumbnail image, or None when there is nothing to draw."""
+        ch = self.current_channel
+        if not ch:
+            return None
+        arr = self._slide_lowres_array(ch)
+        if arr is None:
+            return None
+        rgb = self._lowres_tinted(arr, ch)
+        nuc = self.nucleus_channel
+        # DAPI is composited ADDITIVELY, in its own colour and under its own
+        # mapping -- the numpy form of the CompositionMode_Plus overlay the
+        # full image and the compare panels draw, so the same switch gives
+        # the same picture in all three.
+        if nuc and nuc != ch and self._nucleus_layer_visible():
+            nuc_arr = self._slide_lowres_array(nuc)
+            if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
+                rgb = np.clip(
+                    rgb.astype(np.uint16)
+                    + self._lowres_tinted(nuc_arr, nuc, nucleus=True),
+                    0, 255).astype(np.uint8)
+        return rgb
+
+    def _queue_tissue_preview(self):
+        """Re-render the thumbnail after the current stream of edits."""
+        timer = getattr(self, "_tissue_preview_timer", None)
+        if timer is not None:
+            timer.start(self._TISSUE_PREVIEW_DEBOUNCE_MS)
+
+    def _update_tissue_preview(self):
+        """Push the current channel's picture to every Tissue Preview.
+
+        Every overview panel that is a view over the one ROI model -- the
+        Step0 one and the floating navigator's -- so the two never show
+        different channels.
+        """
+        timer = getattr(self, "_tissue_preview_timer", None)
+        if timer is not None:
+            timer.stop()
+        rgb = self._tissue_preview_rgb()
+        if rgb is None:
+            return None
+        for panel in self._registered_roi_overviews():
+            setter = getattr(panel, "set_channel_image", None)
+            if callable(setter):
+                setter(rgb)
+        return rgb
 
     def _place_preview_item(self, item, arr, payload):
         """Put `item`'s pixels where the payload says they are.
@@ -5493,6 +5598,14 @@ class Step0Page(QWidget):
         if cid in (self.current_channel, self.nucleus_channel):
             if self._last_payload is not None and hasattr(self, "_preview_imgs"):
                 self._refresh_preview_display(keep_zoom=True)
+            # The Tissue Preview is drawn with the same numbers, but it is a
+            # whole-slide re-render in numpy rather than a levels swap, so it
+            # waits for the slider to stop moving. Hooked HERE rather than on
+            # `params_changed`, so that the fallback path -- a page whose
+            # Channel Remap workbench has never been engaged, which is every
+            # page until the Intensity window is first opened -- reaches it
+            # too; that path calls this method directly and emits nothing.
+            self._queue_tissue_preview()
         explore_tab = getattr(self, "_explore_tab", None)
         stack = explore_tab.stack if explore_tab is not None else None
         if stack is None:
@@ -6034,6 +6147,9 @@ class Step0Page(QWidget):
         # never reaches here -- it returns above, because it is a reference
         # channel and selecting it only re-points the inspector.
         self._retake_compare_snapshot()
+        # The Tissue Preview draws the channel the page is on, so it follows
+        # the row too -- in whichever mode the viewing area happens to be.
+        self._update_tissue_preview()
 
         if not self.patches:
             self._preview_status.setText(

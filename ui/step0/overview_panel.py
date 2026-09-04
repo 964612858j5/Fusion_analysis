@@ -1102,6 +1102,17 @@ class OverviewPanel(QWidget):
         self._current_view_item = None
         self._current_view_full = None   # (y0, y1, x0, x1) full-image px, or None
 
+        # The thumbnail's pixels. `_overview_arr` is the DAPI overview this
+        # panel loads for itself; `_channel_rgb` is an RGB image a HOST has
+        # pushed in (Step0 pushes the channel the user is working on, in its
+        # own colour). The host's image WINS whenever there is one, and both
+        # are kept, so an overview landing after a push does not silently
+        # replace the picture the page put there -- the two arrive in either
+        # order and the load is asynchronous.
+        self._overview_arr = None
+        self._channel_rgb = None
+        self._thumb_fitted = None    # the (w, h) the view was last fitted to
+
         self._setup_ui()
         if not lazy:
             self._load_overview()
@@ -1245,6 +1256,9 @@ class OverviewPanel(QWidget):
             self.status.setText("Please select an OME-TIFF and click Load.")
             return
         self.status.setText("Loading overview, please wait...")
+        # A load is a new slide: whatever is on screen is about to be
+        # replaced, and the view is re-fitted to what arrives.
+        self._thumb_fitted = None
         self._t0 = time.time()
         self._ov_thread = OverviewLoaderThread(
             self.loader, self.nuc_ch, self.ds
@@ -1255,12 +1269,66 @@ class OverviewPanel(QWidget):
         )
         self._ov_thread.start()
 
+    def set_channel_image(self, rgb):
+        """Show `rgb` -- an (H, W, 3) uint8 image of the WHOLE slide -- as the
+        thumbnail, in place of the DAPI overview.
+
+        The host renders it (Step0: the current channel through its display
+        mapping and colour, with DAPI composited additively when its layer is
+        on), because the host is the only thing that knows what "the current
+        channel" and "its colour" mean. This panel only has to draw it.
+
+        `rgb` need not have the overview's own shape -- Step0's whole-slide
+        arrays come off a different pyramid level -- so it is stretched onto
+        the overview's rectangle rather than replacing it. Everything else
+        here (ROIs, patches, the viewport rectangle, click-to-navigate)
+        works in overview pixels, and none of it moves.
+
+        `None` gives the DAPI overview back.
+        """
+        self._channel_rgb = None if rgb is None else np.asarray(rgb)
+        self._apply_thumbnail()
+
+    def _thumb_rect(self):
+        """The overview's own rectangle, in overview pixels.
+
+        Derived from the slide and the downsample when no overview has
+        landed yet: the load is asynchronous and a host may push a channel
+        image first, and every coordinate on this panel is already defined
+        by `ds` rather than by the array that happens to be on screen.
+        """
+        if not hasattr(self, "ov_h"):
+            if not (self.full_h and self.full_w and self.ds):
+                return None
+            self.ov_h = max(1, int(round(self.full_h / float(self.ds))))
+            self.ov_w = max(1, int(round(self.full_w / float(self.ds))))
+        return QRectF(0, 0, self.ov_w, self.ov_h)
+
+    def _apply_thumbnail(self):
+        """Draw whichever thumbnail is current, and fit the view once."""
+        rect = self._thumb_rect()
+        if rect is None:
+            return
+        rgb = self._channel_rgb
+        if rgb is not None:
+            self.img_item.setImage(rgb, autoLevels=False)
+            self.img_item.setRect(rect)
+        elif self._overview_arr is not None:
+            self.img_item.setImage(self._overview_arr, autoLevels=True)
+            self.img_item.setRect(rect)
+        else:
+            return
+        # Fit ONCE per overview geometry. The old code re-fitted on every
+        # overview load, which is once per slide; a channel image pushed in
+        # afterwards must not throw away a zoom the user has since made.
+        if self._thumb_fitted != (self.ov_w, self.ov_h):
+            self._thumb_fitted = (self.ov_w, self.ov_h)
+            self.vb.setRange(rect, padding=0.01)
+
     def _on_overview_loaded(self, arr):
         self.ov_h, self.ov_w = arr.shape
-        self.img_item.setImage(arr, autoLevels=True)
-        self.vb.setRange(
-            QRectF(0, 0, self.ov_w, self.ov_h), padding=0.01
-        )
+        self._overview_arr = arr
+        self._apply_thumbnail()
         self.status.setText(
             f"Full image {self.full_h}×{self.full_w} px  |  "
             f"Overview {self.ov_h}×{self.ov_w} px  "
@@ -1272,7 +1340,13 @@ class OverviewPanel(QWidget):
     def _ov_pos(self, scene_pos):
         if not hasattr(self, 'ov_h'):
             return 0, 0
-        p = self.img_item.mapFromScene(scene_pos)
+        # Through the VIEW, not through the image item: the item now
+        # carries a rect (a host-pushed channel image is a different shape
+        # from the overview and is stretched onto the overview's rectangle),
+        # so its local coordinates are its own pixels rather than overview
+        # ones. The view's coordinates ARE overview pixels, always -- which
+        # is what every other coordinate here is in.
+        p = self.vb.mapSceneToView(scene_pos)
         r = int(np.clip(p.y(), 0, self.ov_h - 1))
         c = int(np.clip(p.x(), 0, self.ov_w - 1))
         return r, c   # (row, col)
@@ -1984,7 +2058,7 @@ class OverviewPanel(QWidget):
             delta  = event.angleDelta().y()
             factor = 1.15 ** (delta / 120.0)
             sp = self.gview.mapToScene(event.pos())
-            ip = self.img_item.mapFromScene(sp)
+            ip = self.vb.mapSceneToView(sp)     # overview pixels (see _ov_pos)
             cx, cy = ip.x(), ip.y()
             vr = self.vb.viewRange()
             self.vb.disableAutoRange()

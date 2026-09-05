@@ -1054,48 +1054,36 @@ PATCH_BORDER_TOL_OV = 1.5
 # ══════════════════════════════════════════════════════════════════════
 
 class _PanViewBox(pg.ViewBox):
-    """The Tissue Preview's ViewBox, which pans itself on the middle button.
+    """The Tissue Preview's ViewBox.
 
-    The thumbnail's LEFT button is spoken for in every mode -- it draws
-    rectangles, adds polygon vertices, navigates, and edits the selected
-    rectangle -- so this box has `setMouseEnabled(False, False)`: pyqtgraph
-    must not pan or zoom it behind the panel's back.
+    It owns the camera and nothing else. The thumbnail's LEFT button is
+    spoken for in every mode -- it draws rectangles, adds polygon vertices,
+    navigates, and edits the selected rectangle -- so this box keeps
+    `setMouseEnabled(False, False)`: pyqtgraph must not pan or zoom it
+    behind the panel's back.
 
-    That switch is why the gesture has to live HERE. `ViewBox.mouseDragEvent`
-    accepts every button and THEN multiplies the translation by
-    `state['mouseEnabled']`, so with the mouse disabled a middle drag that
-    reaches the box is accepted and does nothing whatsoever -- it is
-    swallowed, silently, with no fallback and nothing to see. The panel used
-    to answer that by catching the gesture one layer higher, in an event
-    filter on `GraphicsLayoutWidget.viewport()`, and consuming the press. But
-    a filter on one widget only fires when the press is delivered to THAT
-    widget and no filter ahead of it takes it first, and every layer of
-    pyqtgraph's stack below it -- the graphics view, the scene, the item
-    under the cursor -- is a place the press can stop. When it stopped
-    anywhere else the gesture had no owner at all, and the middle button did
-    nothing: the defect this class fixes.
+    The middle-button pan is NOT here, and the reason is measured. A drag
+    only reaches `ViewBox.mouseDragEvent` if pyqtgraph's `GraphicsScene`
+    decides to build a `MouseDragEvent` for it, which depends on which item
+    accepted the press and on click/drag bookkeeping that is written around
+    the left button. Logging the real hierarchy -- the assembled page's own
+    thumbnail and the Tissue Navigator popup's -- with a four-move middle
+    drag delivered to the WINDOW showed:
 
-    A ViewBox is reached from ANY of those paths, because that is how
-    pyqtgraph delivers a drag: the scene walks the items under the mouse and
-    the box is the one underneath them all. And it is the object that owns
-    the camera, so the pan is a `translateBy` on itself rather than
-    arithmetic somebody else does to its range.
+        gview.viewport()   press=1  move=4  release=1
+        window / gview     press=1  move=0  release=0
+        scene              press=0  move=0  release=0
+        ViewBox.mouseDragEvent(middle) reached: 2 times
 
-    The translation is pyqtgraph's own, from `ViewBox.mouseDragEvent`, with
-    the `mouseEnabled` mask left out -- that mask is about the LEFT button
-    this panel has taken over, and it is not allowed to disable this one.
+    Two things follow. The viewport is the ONLY object that sees the whole
+    gesture -- once the press lands, Qt's implicit grab sends every move and
+    the release straight to it, so a release outside the widget cannot be
+    lost. And the scene's drag dispatch DROPPED half the moves: four moves
+    produced two translations, which is the stutter, and on the user's
+    machine it produced none at all for the popup. So the gesture is owned
+    at the viewport, in `OverviewPanel.eventFilter`, where the events
+    provably are; see `_middle_pan_*` there.
     """
-
-    def mouseDragEvent(self, ev, axis=None):
-        if ev.button() != Qt.MiddleButton:
-            return super().mouseDragEvent(ev, axis=axis)
-        ev.accept()
-        dif = (ev.pos() - ev.lastPos()) * -1
-        tr = pg.functions.invertQTransform(self.childGroup.transform())
-        tr = tr.map(dif) - tr.map(pg.Point(0, 0))
-        self._resetTarget()
-        self.translateBy(x=tr.x(), y=tr.y())
-        self.sigRangeChangedManually.emit(self.state['mouseEnabled'])
 
 
 class OverviewPanel(QWidget):
@@ -1241,6 +1229,13 @@ class OverviewPanel(QWidget):
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
 
+        # The middle-drag pan's whole state: the last point the gesture was
+        # seen at, in SCENE coordinates, or None when no middle press is
+        # being held. Scene and not view coordinates -- see
+        # `_middle_pan_move`, which is where that distinction is the whole
+        # correctness of the gesture.
+        self._mid_pan_last = None
+
         # Temp rect for patch drag
         self._temp = pg.RectROI(
             [0, 0], [1, 1],
@@ -1332,8 +1327,6 @@ class OverviewPanel(QWidget):
         pc.addWidget(btn_clr_p)
         pc.addStretch()
         lay.addWidget(self._patch_ctrl)
-
-        self.gview.viewport().installEventFilter(self)
 
     # ── Overview loading ──────────────────────────────────────────────
 
@@ -2359,6 +2352,79 @@ class OverviewPanel(QWidget):
 
     # ── Event filter ─────────────────────────────────────────────────
 
+    # ── the middle-drag pan ───────────────────────────────────────────
+    #
+    # Three short handlers rather than one, so that "a press starts it, each
+    # move pans once, the release ends it" is a property of the code and not
+    # of a state machine that has to be read to be believed.
+
+    def _middle_pan_press(self, event):
+        """Take the gesture. From here until the release this panel owns
+        the pointer, and no other branch of the filter runs for it."""
+        self._mid_pan_last = self._mid_pan_scene_pos(event)
+        return True
+
+    def _middle_pan_move(self, event):
+        """Pan by exactly this move's displacement.
+
+        The anchor is kept in SCENE coordinates and both ends of the step
+        are mapped into view coordinates HERE, in the same frame, just
+        before the translation. That ordering is the whole correctness of
+        the gesture: view coordinates are defined by the camera, so an
+        anchor stored as a view point silently means something different
+        once the camera has moved, and the drag comes out longer than the
+        cursor travelled. Measured, storing the view point overshot a 60 px
+        drag by a quarter of itself.
+
+        Panning the camera by the negative of the step is what makes the
+        picture follow the cursor. The anchor then becomes this point, so
+        the next move measures from here: each move translates once, and the
+        steps telescope to exactly the whole drag.
+
+        A move whose buttons no longer include the middle one ends the
+        gesture. A release delivered somewhere this filter never sees is not
+        supposed to be possible under an implicit grab, but this costs one
+        comparison and makes a stuck pan impossible.
+        """
+        if not (event.buttons() & Qt.MiddleButton):
+            self._mid_pan_last = None
+            return True
+        last_scene = self._mid_pan_last
+        now_scene = self._mid_pan_scene_pos(event)
+        if last_scene is None or now_scene is None:
+            self._mid_pan_last = now_scene
+            return True
+        try:
+            last = self.vb.mapSceneToView(last_scene)
+            now = self.vb.mapSceneToView(now_scene)
+        except Exception:                                   # noqa: BLE001
+            self._mid_pan_last = now_scene
+            return True
+        dx = now.x() - last.x()
+        dy = now.y() - last.y()
+        self._mid_pan_last = now_scene
+        if dx or dy:
+            self.vb._resetTarget()
+            self.vb.translateBy(x=-dx, y=-dy)
+            self.vb.sigRangeChangedManually.emit((True, True))
+        return True
+
+    def _middle_pan_release(self, _event):
+        self._mid_pan_last = None
+        return True
+
+    def _mid_pan_scene_pos(self, event):
+        """`event`'s position in SCENE coordinates.
+
+        The scene is the frame the gesture is anchored in because it does
+        not move when the camera does -- which is exactly what a pan makes
+        happen between one move and the next.
+        """
+        try:
+            return self.gview.mapToScene(event.pos())
+        except Exception:                                   # noqa: BLE001
+            return None
+
     def eventFilter(self, obj, event):
         if obj is not self.gview.viewport():
             return super().eventFilter(obj, event)
@@ -2409,35 +2475,38 @@ class OverviewPanel(QWidget):
 
         # ── The middle button pans, in every mode ─────────────────────
         #
-        # ONE handler, above every mode branch and above the adjust state.
-        # The thumbnail is a map you have to be able to move under a zoom,
-        # and the left button is spoken for everywhere -- it draws rectangles
-        # in patch mode, adds vertices in ROI mode, navigates with no tool
-        # out, and edits the selected rectangle in the adjust state. The
-        # middle button is the one gesture that means the same thing in all
-        # four, so it is the one that pans.
+        # ONE handler, above every mode branch and above the adjust state,
+        # in the ONE class both thumbnails are instances of -- the page's
+        # own and the Tissue Navigator popup's. The thumbnail is a map you
+        # have to be able to move under a zoom, and the left button is
+        # spoken for everywhere: it draws rectangles in patch mode, adds
+        # vertices in ROI mode, navigates with no tool out, and edits the
+        # selected rectangle in the adjust state. The middle button is the
+        # one gesture that means the same thing in all four, so it is the
+        # one that pans.
         #
-        # The handler is `_PanViewBox.mouseDragEvent`, one layer DOWN. This
-        # filter's whole job for the gesture is to get out of its way: it
-        # used to catch the middle button here and consume it, which meant
-        # the pan only ever happened when the press was delivered to this
-        # one widget with no filter ahead of it -- and when the press
-        # stopped anywhere else in pyqtgraph's stack the box's own
-        # `mouseDragEvent` swallowed the drag and did nothing, because this
-        # panel disables its mouse. Handing the gesture to the box makes
-        # every one of those paths pan; letting it PAST here is what puts it
-        # on the paths at all.
+        # It is owned HERE, at the viewport, and not one layer down in
+        # `ViewBox.mouseDragEvent`, because this is where the events
+        # measurably are. A four-move middle drag delivered to the window in
+        # the real hierarchy reaches this viewport as press=1 move=4
+        # release=1, while pyqtgraph's scene built a drag event for only two
+        # of those four moves -- and on the user's machine, for the popup,
+        # none. Qt's implicit grab is what makes this reliable: the press
+        # binds the pointer to this widget, so every later move and the
+        # release come here even when the cursor has left the thumbnail.
         #
-        # Passed through rather than ignored: every branch below is reached
+        # Consumed rather than passed on: every branch below is then reached
         # only with the middle button up, so none of them has to know this
         # gesture exists, and `_adjust_swallow` is left alone -- it belongs
         # to the press that ENDS an adjustment, and no middle press is that.
-        if t in (QtCore.QEvent.MouseButtonPress,
-                 QtCore.QEvent.MouseButtonRelease) \
+        if t == QtCore.QEvent.MouseButtonPress \
                 and event.button() == Qt.MiddleButton:
-            return False
-        if t == QtCore.QEvent.MouseMove and (event.buttons() & Qt.MiddleButton):
-            return False
+            return self._middle_pan_press(event)
+        if t == QtCore.QEvent.MouseMove and self._mid_pan_last is not None:
+            return self._middle_pan_move(event)
+        if t == QtCore.QEvent.MouseButtonRelease \
+                and event.button() == Qt.MiddleButton:
+            return self._middle_pan_release(event)
 
         # ── Mouse press ───────────────────────────────────────────────
         # `if`, not `elif`: the wheel branch above returns unconditionally,

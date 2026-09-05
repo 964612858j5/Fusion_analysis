@@ -10,13 +10,22 @@ Pinned here because it is a cross-cutting gesture: every branch of the event
 filter has to let it through, and none of them may let it also draw, also
 navigate or also edit.
 
-The gesture belongs to the ViewBox (`_PanViewBox.mouseDragEvent`), so these
-drags are delivered the way the platform delivers them and walk pyqtgraph's
-whole stack -- viewport, graphics view, scene, the items under the cursor --
-before anything pans. That is the point: the panel used to catch the middle
-press in its viewport filter and consume it, which worked only on the one
-path that reaches that filter, and the last section here drives the gesture
-through a real assembled page and a real window to say so.
+The gesture belongs to the VIEWPORT -- `OverviewPanel.eventFilter` on
+`gview.viewport()` -- and the choice is measured rather than assumed. A
+four-move middle drag delivered to the window in the real assembled
+hierarchy reaches the viewport as press=1, move=4, release=1, while every
+other object on the path (the window, the graphics view, the panel, the
+scene) sees at most the press. pyqtgraph's `GraphicsScene` built a drag
+event for only two of those four moves, which is the stutter; on the user's
+machine, for the Tissue Navigator popup, it built none and the middle button
+did nothing at all.
+
+So the tests below pin the entry point itself, not just the outcome: that
+the viewport receives the whole sequence, that each move pans exactly once,
+and that the picture follows the cursor 1:1 rather than at some multiple of
+it. `OverviewPanel` is one class with two instances -- the page's own
+thumbnail and the popup's -- so there is one implementation to test, and the
+last section drives both of them through a real window to say so.
 """
 
 import os
@@ -380,3 +389,168 @@ class _StubDrag:
     def lastPos(self):
         from pyqtgraph.Point import Point
         return Point(0, 0)
+
+
+# ── the entry point, and what each move is worth ─────────────────────────
+#
+# The three properties the gesture was rebuilt for. They are about the
+# mechanism rather than the outcome, because "the range changed" was true of
+# the broken version too -- it changed by the wrong amount, on half the
+# moves, and on only one of the two thumbnails.
+
+
+def _spy_on(obj):
+    """Record the middle-button mouse events `obj` receives.
+
+    Installed AFTER the panel's own filter, so it runs FIRST and sees the
+    event whether or not the panel goes on to consume it.
+    """
+    seen = []
+
+    class _Spy(QtCore.QObject):
+        def eventFilter(self, _o, ev):
+            t = ev.type()
+            if t in (QtCore.QEvent.MouseButtonPress,
+                     QtCore.QEvent.MouseButtonRelease,
+                     QtCore.QEvent.MouseMove):
+                try:
+                    mid = (ev.button() == Qt.MiddleButton
+                           or bool(ev.buttons() & Qt.MiddleButton))
+                except RuntimeError:
+                    mid = False
+                if mid:
+                    seen.append(t)
+            return False
+
+    spy = _Spy()
+    obj.installEventFilter(spy)
+    return seen, spy
+
+
+def test_the_viewport_receives_the_whole_gesture():
+    """One press, every move, one release -- all at the object that owns
+    the pan. This is the measurement the design rests on."""
+    panel = _panel()
+    seen, spy = _spy_on(panel.gview.viewport())
+    try:
+        _middle_drag(panel, 60, 40, steps=4)
+    finally:
+        panel.gview.viewport().removeEventFilter(spy)
+    assert seen.count(QtCore.QEvent.MouseButtonPress) == 1
+    assert seen.count(QtCore.QEvent.MouseMove) == 4
+    assert seen.count(QtCore.QEvent.MouseButtonRelease) == 1
+
+
+def test_each_move_pans_exactly_once():
+    """Four moves, four translations.
+
+    The version this replaced went through pyqtgraph's scene, which built a
+    drag event for two of the four and then double-counted each one. Both
+    halves of that are wrong and only this assertion catches the first.
+    """
+    panel = _panel()
+    calls = []
+    orig = panel.vb.translateBy
+
+    def counting(*a, **kw):
+        calls.append((a, kw))
+        return orig(*a, **kw)
+
+    panel.vb.translateBy = counting
+    try:
+        _middle_drag(panel, 80, 40, steps=4)
+    finally:
+        panel.vb.translateBy = orig
+    assert len(calls) == 4
+
+
+def test_a_move_that_goes_nowhere_pans_nothing():
+    """A move event at the same point is not a pan. Qt sends these, and a
+    handler that translated by zero would still reset the target and emit a
+    range change for a gesture that did not happen."""
+    panel = _panel()
+    p0 = QtCore.QPoint(250, 250)
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)
+    calls = []
+    orig = panel.vb.translateBy
+    panel.vb.translateBy = lambda *a, **kw: (calls.append(1),
+                                             orig(*a, **kw))[1]
+    try:
+        for _ in range(3):
+            _send(panel, QtCore.QEvent.MouseMove, p0,
+                  button=Qt.NoButton, buttons=Qt.MiddleButton)
+    finally:
+        panel.vb.translateBy = orig
+    _send(panel, QtCore.QEvent.MouseButtonRelease, p0,
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+    assert calls == []
+
+
+def test_the_picture_follows_the_cursor_one_to_one():
+    """The slide point under the cursor at the press is under it at the
+    release.
+
+    This is what "drag the map" means, and it is the property the previous
+    version got wrong: going through the scene it panned twice as far as the
+    cursor moved, which is why the gesture felt like it was running away.
+    """
+    panel = _panel()
+    start = QtCore.QPoint(250, 250)
+    dx, dy = 60, 40
+    grabbed = panel.vb.mapSceneToView(panel.gview.mapToScene(start))
+    _middle_drag(panel, dx, dy, steps=4, start=(start.x(), start.y()))
+    end = QtCore.QPoint(start.x() + dx, start.y() + dy)
+    under_cursor = panel.vb.mapSceneToView(panel.gview.mapToScene(end))
+    assert under_cursor.x() == pytest.approx(grabbed.x(), abs=0.5)
+    assert under_cursor.y() == pytest.approx(grabbed.y(), abs=0.5)
+
+
+def test_a_release_outside_the_thumbnail_still_ends_the_gesture():
+    """Qt's implicit grab delivers the release here wherever the cursor is,
+    and the gesture must not survive it: a later move with no button down
+    would otherwise keep panning."""
+    panel = _panel()
+    p0 = QtCore.QPoint(250, 250)
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300, 280),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    # Well outside the 500x500 widget.
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(9000, 9000),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+    assert panel._mid_pan_last is None
+    settled = _range(panel)
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(400, 400),
+          button=Qt.NoButton, buttons=Qt.NoButton)
+    assert _range(panel) == settled
+
+
+def test_a_move_with_the_button_lost_ends_the_gesture():
+    """A move whose buttons no longer carry the middle one means the
+    release was never seen. Ending there is what stops a pan sticking to
+    the cursor for the rest of the session."""
+    panel = _panel()
+    p0 = QtCore.QPoint(250, 250)
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300, 280),
+          button=Qt.NoButton, buttons=Qt.NoButton)
+    assert panel._mid_pan_last is None
+
+
+def test_both_thumbnails_run_the_same_implementation():
+    """The page's own and the popup's are two instances of ONE class, which
+    is what makes "one gesture, not two copies" checkable rather than a
+    claim about how the code looks."""
+    page = _loaded_page()
+    page._ensure_tissue_navigator()
+    popup = page._tissue_navigator_popup
+    assert popup is not None
+    assert type(popup.overview) is type(page.overview)
+    assert (type(popup.overview)._middle_pan_move
+            is type(page.overview)._middle_pan_move)
+    assert popup.overview is not page.overview
+
+
+def test_the_viewbox_no_longer_takes_the_gesture():
+    """The pan is owned in one place. If the ViewBox grew its own middle
+    handler again there would be two, and they would both fire."""
+    assert "mouseDragEvent" not in vars(ovp._PanViewBox)

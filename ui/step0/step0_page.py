@@ -4857,13 +4857,16 @@ class Step0Page(QWidget):
             finally:
                 self._patch_sel_guard = False
         if rows and rows[-1] < len(self.patches):
-            self.current_patch_idx = rows[-1]
-            self._sync_patch_buttons()
-            self._update_patch_info()
-            # 有缓存则立刻显示新patch的结果
-            if self.current_channel and self.current_channel != self.nucleus_channel:
-                if self._has_any_cache(self.current_channel):
-                    self._show_channel_from_cache(self.current_channel)
+            # THE SAME ENTRY the Pn buttons use. This used to be its own
+            # copy of "index, buttons, info line, cached preview", which is
+            # how clicking a name in the list and clicking its button came
+            # to do two different things -- the list did not move the
+            # compare panels because this branch knew nothing about them.
+            #
+            # `navigate` is off while `_patch_sel_guard` is held, because
+            # the one caller that holds it here is `_rebuild_patch_list`
+            # putting a row back after a clear(): bookkeeping, not a choice.
+            self._select_patch(rows[-1], navigate=not self._patch_sel_guard)
 
     def _on_roi_selected(self, row):
         """兼容旧代码的单选回调"""
@@ -6578,13 +6581,13 @@ class Step0Page(QWidget):
                 if isinstance(widget, QPushButton):
                     widget.repaint()
 
-    def _select_patch(self, idx):
-        self.current_patch_idx = idx
-        self._patch_selected_idx = idx
-        if self._patch_list.count() > idx:
-            self._patch_list.setCurrentRow(idx)
-        self._sync_patch_buttons()
-        self._update_patch_info()
+    # NOTE: `_select_patch` used to be defined TWICE in this class -- once
+    # here and once beside the conditioning-viewport helpers. Python keeps
+    # the last definition, so this one was dead code that nothing could
+    # ever call, and reading it gave a false account of what selecting a
+    # patch does. The two are now ONE authoritative implementation, kept
+    # with the viewport helpers it uses; everything this copy did (index,
+    # list row, button sync, info line) survives there.
 
     def _update_patch_info(self):
         if not self.patches:
@@ -7025,7 +7028,40 @@ class Step0Page(QWidget):
 
     # ══ 切换patch时直接从缓存取 ═══════════════════════════════════════
 
-    def _select_patch(self, idx):
+    def _select_patch(self, idx, *, navigate=True):
+        """THE one entry for "the user picked patch `idx`".
+
+        Both ways in reach it: the Pn buttons (`_rebuild_patch_buttons`)
+        and the patch list (`_on_patch_selection_changed`). There is no
+        second definition of this method any more -- there used to be, up
+        beside `_repaint_patch_buttons`, and Python kept only the later
+        one, so half of what the class appeared to do on a patch click was
+        unreachable.
+
+        A Preview Patch is a NAVIGATION SHORTCUT. Picking one updates the
+        selection state -- index, list row, buttons, cached preview,
+        patch-local conditioning viewport, the navigator's view rectangle
+        -- and, WHEN THE COMPARE PANELS ARE THE VIEW, flies the three of
+        them to that patch (`_navigate_compare_to_patch`). Selecting a
+        patch while the full image is up moves nothing: the full image is
+        the whole-slide landing view and the user did not ask to leave it.
+
+        `navigate` is False for the one caller that is not a user choice:
+        `_rebuild_patch_list` puts a row back after a clear(), which
+        arrives here through the same selection signal, and bookkeeping
+        must not fly the camera anywhere.
+        """
+        # Re-entrancy: `setCurrentRow` below re-emits the list's selection
+        # signal, which comes straight back here. One pass per choice.
+        if getattr(self, "_patch_entry_guard", False):
+            return
+        self._patch_entry_guard = True
+        try:
+            self._select_patch_locked(idx, navigate=navigate)
+        finally:
+            self._patch_entry_guard = False
+
+    def _select_patch_locked(self, idx, *, navigate=True):
         # (#4 patch-local viewport) Save the LEAVING patch's conditioning zoom/pan
         # before switching, so returning restores it. Must read it while that
         # patch is still displayed (before current_patch_idx changes).
@@ -7051,6 +7087,126 @@ class Step0Page(QWidget):
         self._restore_or_fit_conditioning_viewport()
         # v14.2c: current patch changed → remap the Tissue Navigator view rect.
         self._update_tissue_view_rect()
+        # ...and, in compare mode, the three panels go to the patch. Last,
+        # because the camera move emits `camera_changed`, which redraws the
+        # navigator's rectangle over whatever `_update_tissue_view_rect`
+        # just put there -- and in compare mode the panels' viewport is the
+        # rectangle that rectangle is supposed to be.
+        if navigate:
+            self._navigate_compare_to_patch(idx)
+
+    # ── Preview Patch → the compare camera ───────────────────────────────
+    #
+    # The patch is a place on the slide, and the compare panels are three
+    # cameras on that same slide, so "go to P2" is a camera move and
+    # nothing else: no Process, no preview worker, no backend rebuild, no
+    # cropped array. The panels ask for the tiles of where they land the
+    # moment they land, exactly as a pan or a wheel-zoom does, and the
+    # picture sharpens block by block.
+
+    # A patch fitted EXACTLY to a panel touches all four edges, and the
+    # aspect lock plus a pixel of rounding then puts a sliver of it off the
+    # end. The margin is what makes "the patch is entirely visible" true
+    # rather than nearly true; it is not a compensation constant -- it is
+    # the border the fit is solved with.
+    _PATCH_FIT_MARGIN = 0.94
+
+    def _compare_panel_sizes(self):
+        """Every compare panel's `(w_px, h_px)` in SCREEN pixels.
+
+        All three, not just the first: they are aspect-locked columns of
+        one layout whose widths differ by a pixel or two, and the whole
+        point of the fit below is that the patch is inside the SMALLEST of
+        them as well as the largest.
+        """
+        strip = getattr(self, "_compare_strip_widget", None)
+        sizes = []
+        if strip is not None:
+            for i in range(len(getattr(strip, "view_boxes", ()) or ())):
+                size = strip.panel_px(i)
+                if size is not None:
+                    sizes.append(size)
+        return sizes or [self._compare_panel_px()]
+
+    def _patch_fit_camera(self, patch):
+        """The `(cx, cy, scale)` that shows `patch` WHOLE in every panel.
+
+        `patch` is level-0 `(y0, y1, x0, x1)`, half-open, as `self.patches`
+        stores it.
+
+        The centre is the patch's centre. The scale is ONE number for all
+        three panels -- screen pixels per level-0 pixel, the same
+        measurement `CompareStrip.camera` and `_full_image_scale` make --
+        and it is the smallest of each panel's own fit:
+
+            scale = MARGIN * min over panels of min(w_px / pw, h_px / ph)
+
+        Fitting each panel separately would give three different
+        magnifications, which is the one thing three compare panels must
+        never have: a structure that looks bigger in the TopHat column
+        than in the Original column is a correction artefact that isn't
+        there. Taking the minimum makes the tightest panel the one that
+        decides, so the patch is inside all three.
+        """
+        try:
+            y0, y1, x0, x1 = (float(v) for v in patch)
+        except (TypeError, ValueError):
+            return None
+        pw, ph = x1 - x0, y1 - y0
+        if not (pw > 0 and ph > 0 and math.isfinite(pw) and math.isfinite(ph)):
+            return None
+        shape = self._slide_shape_l0()
+        if shape is not None:
+            h0, w0 = shape
+            if x0 < 0 or y0 < 0 or x1 > w0 or y1 > h0:
+                return None
+        scale = None
+        for w_px, h_px in self._compare_panel_sizes():
+            w_px, h_px = float(w_px), float(h_px)
+            if not (w_px > 0 and h_px > 0):
+                continue
+            fit = min(w_px / pw, h_px / ph) * self._PATCH_FIT_MARGIN
+            scale = fit if scale is None else min(scale, fit)
+        if scale is None or not (scale > 0 and math.isfinite(scale)):
+            return None
+        return ((x0 + x1) / 2.0, (y0 + y1) / 2.0, scale)
+
+    def _navigate_compare_to_patch(self, idx):
+        """Fly the three compare panels to patch `idx`. True if they moved.
+
+        A no-op, moving NOTHING, whenever the request cannot be honoured:
+        the full image is the view (the full image keeps its camera --
+        selecting a patch is not a request to leave the whole slide), the
+        strip was never built, the index is not a patch, or the patch is
+        degenerate or off the slide. Every one of those used to be a
+        silent half-move; here they are one early return each.
+        """
+        if not self._compare_mode():
+            return False
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is None or not getattr(strip, "built", False):
+            return False
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            return False
+        if not (0 <= idx < len(self.patches)):
+            return False
+        camera = self._patch_fit_camera(self.patches[idx])
+        if camera is None:
+            return False
+        # Through the strip's own `set_camera` -- the one camera seam --
+        # and not the three ViewBoxes directly: it solves each panel's
+        # rectangle from that panel's real width and moves each controller
+        # through `set_view_rect_l0`, which is what issues the tile
+        # requests for where they are going.
+        if not self._apply_compare_camera(*camera):
+            return False
+        cx, cy, _scale = camera
+        self._compare_where_lbl.setText(
+            f"Comparing patch P{idx+1} around ({int(round(cx))}, "
+            f"{int(round(cy))}) — right-click or Esc to go back.")
+        return True
 
     # ── conditioning patch-local viewport (zoom/pan) ─────────────────────────
     def _conditioning_patch_key(self, idx):

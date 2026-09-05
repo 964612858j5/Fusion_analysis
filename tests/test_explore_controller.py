@@ -4473,4 +4473,3 @@ def test_a_forgotten_waiter_is_still_not_woken_when_another_fails(app):
     assert bad.calls == 1
     assert len(good.woken) == 1
     store.shutdown()
-

@@ -2378,6 +2378,13 @@ class Step0Page(QWidget):
         # fallback for a way out with no panels' camera to adopt.
         self._compare_entry_full_camera = (cx, cy, scale)
         self._hand_gpu_to_compare()
+        # Neighbour preparation starts once compare HAS the GPU and never
+        # before: the channel the user is looking at is what the panels owe
+        # them, and a background channel must never be computed ahead of it.
+        # `_hand_gpu_to_compare` is also what clears the suspended flag the
+        # strip refuses to mount HOT under.
+        strip.set_hot_specs_provider(self._compare_hot_specs)
+        strip.start_hot()
         # The SAME scale, not a rectangle. The panels are a third as wide,
         # so at the full image's magnification each shows a third of the
         # geography -- which is the point of comparing, and the opposite of
@@ -2513,6 +2520,37 @@ class Step0Page(QWidget):
         if source == "cucim":
             return (int(sigma),)
         return ()
+
+    def _compare_hot_specs(self):
+        """What the compare strip's neighbour preparation should prepare.
+
+        One `ChannelCorrectionSpec` per SWITCHABLE channel, in the order of
+        the channel list -- which is the order that makes "the channel above
+        this one" mean anything. The nucleus row is dropped: it is a
+        reference channel, selecting it never moves the panels (see
+        `_on_channel_row_changed`), and a slot spent preparing it is a slot
+        not spent on a channel the user can actually reach.
+
+        The numbers come from `_effective_correction_params`, i.e. from the
+        preview source provider's `effective_tophat_radius` /
+        `effective_cucim_sigma`, which is the same single answer the panels
+        themselves are rendered with (`_compare_params_for`). Reading the
+        page's own last-known fields instead would let the two drift, and a
+        prefetch that prepares parameters nothing will ask for is worse than
+        no prefetch at all: it costs the GPU and delivers nothing.
+        """
+        from ...viewer.prefetch_policy import ChannelCorrectionSpec
+
+        nucleus = self.nucleus_channel
+        specs = []
+        for channel in (getattr(self, "_channel_order", None) or ()):
+            if not channel or channel == nucleus:
+                continue
+            radius, sigma = self._effective_correction_params(channel)
+            specs.append(ChannelCorrectionSpec(channel=channel,
+                                               tophat_radius=int(radius),
+                                               cucim_sigma=int(sigma)))
+        return specs
 
     def _connect_compare_right_click(self, strip):
         """Once per strip: a right-click in any of the three views goes back
@@ -2779,10 +2817,22 @@ class Step0Page(QWidget):
         not suspended in the first place (never opened, or torn down for a
         dataset switch).
         """
+        if self.production_correction_busy():
+            return
+        # The strip's neighbour preparation was stopped for the run (see
+        # `_release_explore_for_production`). It comes back only when
+        # compare is the view, and it re-plans from the parameters as they
+        # are NOW -- an Apply during the run may have changed them.
+        # Deliberately outside the `released` gate below: HOT is stopped for
+        # a production run whether or not the full image had a stack to
+        # release.
+        if self._compare_mode():
+            strip = getattr(self, "_compare_strip_widget", None)
+            if strip is not None and strip.built:
+                strip.set_hot_specs_provider(self._compare_hot_specs)
+                strip.start_hot()
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or not getattr(explore_tab, "released", False):
-            return
-        if self.production_correction_busy():
             return
         explore_tab.resume_from_production()
         if self._full_image_visible():
@@ -3171,6 +3221,15 @@ class Step0Page(QWidget):
         Idempotent, and a no-op when no stack exists. The stack is resumed
         in place by `_on_production_worker_finished` when the run ends.
         """
+        # The compare strip's neighbour preparation goes too, whether or not
+        # the full image has a stack: it is background work on the same GPU,
+        # for a mode the production run does not even need on screen, and a
+        # run that starts while compare is up would otherwise share the
+        # device with it. Only HOT -- the strip itself is not suspended
+        # here, because a production run does not take the panels away.
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None:
+            strip.stop_hot()
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or explore_tab.stack is None:
             return

@@ -242,6 +242,12 @@ class _Tab:
     def __init__(self, stack):
         self.stack = stack
         self.calls = []
+        # The production hand-off the page performs on the full image's
+        # side. Recorded rather than acted on: what the compare tests care
+        # about is what the page does to the STRIP around it.
+        self.released = False
+        self.releases = []
+        self.resumes = 0
 
     def show_source(self, channel, method, params=(), **_kw):
         self.calls.append((channel, method, tuple(params)))
@@ -249,6 +255,14 @@ class _Tab:
 
     def set_dataset(self, _p):
         pass
+
+    def release_for_production(self, reason):
+        self.released = True
+        self.releases.append(reason)
+
+    def resume_from_production(self):
+        self.released = False
+        self.resumes += 1
 
     def teardown(self, **_kw):
         pass
@@ -1219,12 +1233,43 @@ class _RealishProvider(_Provider):
     def __init__(self):
         super().__init__()
         self.closed = 0
+        # Tile reads are kept APART from `reads`, which the tests above use
+        # to count whole-LEVEL reads. On this 4096-square fake slide the
+        # coarsest level is exactly one 512 tile, so a tile read of (0, 0)
+        # there is indistinguishable from a whole-level read by its
+        # coordinates alone -- and counting one as the other made "the
+        # overview was read once" fail for a strip that had read it once.
+        self.tile_reads = []
 
     def close(self):
         self.closed += 1
 
     def source_identity(self):
         return ("fake", "slide")
+
+    def level_downsample_yx(self, level):
+        return (float(1 << int(level)), float(1 << int(level)))
+
+    def read_tile(self, channel, tile):
+        """One tile, in the source's own dtype -- the entry point the
+        CORRECTED path uses (`Assembler.assemble`).
+
+        Without it every corrected tile in this fixture failed with an
+        AttributeError on the compute worker, which the scheduler reports
+        as an error rather than raising: the strip built, drew its raw
+        layers and looked healthy while the corrected cache stayed empty
+        for the whole suite. Anything that asks what the corrected cache
+        holds needs this to exist.
+        """
+        h, w = self.level_shape(tile.level)
+        ts = tile.grid.tile_size
+        cy0, cx0 = tile.ty * ts, tile.tx * ts
+        cy1, cx1 = min(cy0 + ts, h), min(cx0 + ts, w)
+        self.tile_reads.append((channel, tile.level, cy0, cy1, cx0, cx1))
+        ys = np.arange(cy0, cy1, dtype=np.float32)[:, None]
+        xs = np.arange(cx0, cx1, dtype=np.float32)[None, :]
+        base = 1000.0 if channel == "DAPI" else 0.0
+        return (ys * 10000.0 + xs + base), 0.0
 
 
 @pytest.fixture
@@ -1251,6 +1296,28 @@ def real_strip(app, monkeypatch):
             strip.teardown(wait_for_floor=False)
         except Exception:                                   # noqa: BLE001
             pass
+
+
+def _cold(strip, channel):
+    """Make `channel` genuinely cold again, and keep it that way.
+
+    The strip prepares the channels NEXT to the one on screen in the
+    background (`CompareStrip.start_hot`), and this fixture's slide has
+    three channels of which one is the nucleus -- so "the neighbour" is
+    exactly the channel the cold-switch tests below switch to. Left alone,
+    those tests would still pass while testing nothing: the record they
+    expect to see read on the switch would already be resident.
+
+    The cold path has not gone anywhere -- any channel HOT has not reached
+    yet, and every channel at all before HOT has settled, still takes it --
+    and it is what these tests are for. So they turn the preparation off
+    and drop what it warmed, rather than being weakened to accept either
+    outcome.
+    """
+    strip.stop_hot()
+    store = strip.controllers[0]._overview_store
+    for key in [k for k in store.cache if k[1] == channel]:
+        del store.cache[key]
 
 
 def _drain(ms=400, step=20):
@@ -1376,12 +1443,21 @@ def test_entering_does_not_wait_for_the_three_pictures(real_strip):
 
 def test_the_overview_is_read_once_for_the_three(real_strip):
     """The shared store is what makes a channel switch one disk read rather
-    than three -- measured here as one key in the store, not three."""
+    than three -- measured here as ONE record per channel, not three.
+
+    Per channel, and not "CD3 is the only channel in the store": the strip
+    also prepares its neighbours in the background, so another channel
+    being resident is the prefetch working. What would be the bug is the
+    same channel appearing three times, once per panel.
+    """
     _page_, strip, _provider = real_strip
     _drain()
     store = strip.controllers[0]._overview_store
-    channels = {k[1] for k in store.cache.keys()}
-    assert channels == {"CD3"}, store.cache.keys()
+    per_channel = {}
+    for key in store.cache.keys():
+        per_channel[key[1]] = per_channel.get(key[1], 0) + 1
+    assert per_channel.get("CD3") == 1, store.cache.keys()
+    assert all(n == 1 for n in per_channel.values()), store.cache.keys()
 
 
 def test_a_channel_switch_reads_the_new_overview_once(real_strip):
@@ -1496,6 +1572,7 @@ def test_a_cold_channel_switch_wakes_all_three_panels(real_strip):
     """
     page, strip, _provider = real_strip
     _drain()
+    _cold(strip, "CD20")
     store = strip.controllers[0]._overview_store
     assert not any(k[1] == "CD20" for k in store.cache), "CD20 was not cold"
 
@@ -1514,6 +1591,7 @@ def test_a_cold_switch_reads_the_new_channel_once_for_all_three(real_strip):
     where a duplicate read would actually cost something."""
     page, strip, provider = real_strip
     _drain()
+    _cold(strip, "CD20")
     level = strip.controllers[0]._pick_overview_level()
     before = len([r for r in provider.reads
                   if r[0] == "CD20" and r[1] == level])
@@ -1671,6 +1749,7 @@ def test_the_seed_does_not_read_while_a_viewer_is_reading(real_strip):
     thread."""
     page, strip, provider = real_strip
     _drain()
+    _cold(strip, "CD20")
     page._slide_lowres.clear()
     level = strip.controllers[0]._pick_overview_level()
 
@@ -2484,3 +2563,359 @@ def test_the_quiet_timer_is_a_child_of_the_page(app):
     timer = page._compare_metrics_timer
     assert timer.parent() is page
     assert timer.isSingleShot() is True
+
+
+
+# ── 20. neighbour preparation (HOT) over the real backend ────────────────
+#
+# The user's complaint: "switching channels in Compare, you plainly watch
+# TopHat and cuCIM load, one after the other, every time -- including
+# switching back to a channel you were just on, at the same place and with
+# the same parameters." The design answer had existed for a while and was
+# connected to nothing: `MultiChannelPrefetchController`, the HOT
+# neighbourhood (i-1, i+1, i-2, i+2), was a viewer-level component with no
+# caller in Step0 at all.
+#
+# It is mounted here, ONCE, on the strip: one coordinator over the strip's
+# own scheduler, corrected cache and overview store, with the TopHat panel
+# as the host that reports the camera and the selection. What it produces
+# is CACHE -- the corrected tiles for both methods and the overview record
+# a switch needs. Nothing about how a panel draws changes.
+#
+# Measured on the real 59040x35520 slide at level 0 over a 9-tile viewport
+# (the table is in the commit message): an unprepared neighbour cost 36
+# corrected computes, ~550 ms to its first corrected pixel and ~810 ms to a
+# complete precise viewport. A prepared one is a cache read.
+
+
+def _hot_settle(strip, ms=700):
+    """Let HOT confirm its settle and spend its queue."""
+    _drain(ms)
+    return strip.hot
+
+
+def _corrected_keys(strip):
+    cache = strip.stacks.scheduler.corrected_cache
+    with cache._lock:
+        return list(cache._store.keys())
+
+
+def test_the_strip_mounts_exactly_one_hot_coordinator(real_strip):
+    """One per strip, not one per panel: the three panels are one camera
+    and one channel, so "prepare the neighbours" is one question with one
+    answer, and three coordinators would ask it three times and spend three
+    times the budget racing each other for the same scheduler."""
+    _page_, strip, _provider = real_strip
+    from block01.viewer.multichannel_prefetch import (
+        MultiChannelPrefetchController)
+
+    hot = strip.hot
+    assert isinstance(hot, MultiChannelPrefetchController)
+    # ...on the strip's OWN backend, and hosted by the TopHat panel.
+    assert hot.scheduler is strip.stacks.scheduler
+    assert hot.grid is strip.stacks.grid
+    assert hot.controller is strip.controllers[1]
+    assert strip.controllers[1].method == "tophat"
+
+
+def test_hot_is_not_handed_the_full_images_scheduler(real_strip):
+    """The ownership boundary `build_compare_stacks` documents is not
+    quietly crossed by the prefetch: a shared scheduler would make
+    `suspend_for_production`'s wait-until-idle mean "wait for the other
+    mode too", which is a GUI-thread wait on somebody else's work."""
+    page, strip, _provider = real_strip
+    full_stack = page._explore_tab.stack
+    assert strip.hot.scheduler is not getattr(full_stack, "scheduler", None)
+
+
+def test_the_neighbourhood_is_the_switchable_channels_in_row_order(
+        real_strip):
+    """Row order, because that is what "the channel above this one" means,
+    and without the nucleus row -- selecting it never moves the panels, so
+    a slot spent preparing it is a slot the user can never collect."""
+    page, strip, _provider = real_strip
+    assert page.nucleus_channel == "DAPI"
+    assert [s.channel for s in strip.hot.specs] == ["CD3", "CD20"]
+
+
+def test_the_specs_carry_the_providers_effective_parameters(real_strip):
+    """From the preview source provider's `effective_*`, which is the same
+    single answer the panels themselves are rendered with -- never the
+    page's own last-known fields, which would be free to drift."""
+    page, strip, _provider = real_strip
+    provider = page.preview_source_provider
+    assert provider is not None
+    for spec in strip.hot.specs:
+        correction = provider.describe(spec.channel)["correction"]
+        assert spec.tophat_radius == correction["effective_tophat_radius"]
+        assert spec.cucim_sigma == correction["effective_cucim_sigma"]
+
+
+def test_hot_prepares_the_neighbour_for_both_methods_and_its_overview(
+        real_strip):
+    """THE product statement, measured at the cache. After settling on CD3
+    the neighbour CD20 is switch-ready: its overview record is resident and
+    its visible corrected tiles are cached for TopHat AND cuCIM.
+
+    MUTATION this catches: never mounting HOT, or mounting it and leaving
+    it stopped, leaves CD20 with neither.
+    """
+    _page_, strip, _provider = real_strip
+    hot = _hot_settle(strip)
+    snapshot = strip.controllers[1].snapshot()
+
+    assert hot.is_channel_ready("CD20", snapshot) is True
+    assert hot.stats["hot_tiles_completed"] > 0
+    assert strip.controllers[0].has_overview_record("CD20") is True
+
+    methods = {k.method for k in _corrected_keys(strip)
+               if k.channel == "CD20"}
+    assert methods == {"tophat", "cucim"}
+
+
+def test_hot_never_paints_the_neighbour_into_a_panel(real_strip):
+    """Cache-only: preparing CD20 must not make any panel show CD20, and
+    must not disturb the overview the three are displaying."""
+    _page_, strip, _provider = real_strip
+    _hot_settle(strip)
+    assert [c.channel for c in strip.controllers] == ["CD3"] * 3
+    for controller in strip.controllers:
+        assert controller._overview_identity[1] == "CD3"
+
+
+def test_switching_to_a_prepared_neighbour_finds_every_tile_cached(
+        real_strip):
+    """The point of the preparation, counted where a miss would cost
+    something: every level-0 visible tile of the two corrected panels was
+    already in the cache before the switch was made."""
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    prepared = set(_corrected_keys(strip))
+
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    _drain(400)
+
+    assert [c.channel for c in strip.controllers] == ["CD20"] * 3
+    checked = 0
+    for controller in strip.controllers[1:]:
+        for tx, ty in controller._visible_tiles:
+            key = controller._make_correction_key(tx, ty)
+            assert key in prepared, key
+            checked += 1
+    assert checked > 0
+
+
+def test_the_second_visit_to_a_channel_recomputes_no_corrected_tile(
+        real_strip):
+    """CD3 -> CD20 -> CD3 at one viewport and one set of parameters. The
+    second CD3 must not compute a corrected tile that is already cached --
+    that round trip is exactly what the user reported feeling recomputed."""
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    computes = []
+    real_compute = strip.stacks.compute.compute
+
+    def counting(key):
+        computes.append(key)
+        return real_compute(key)
+
+    strip.stacks.compute.compute = counting
+    try:
+        page.current_channel = "CD20"
+        page._sync_compare_to_channel()
+        _drain(500)
+        page.current_channel = "CD3"
+        page._sync_compare_to_channel()
+        _drain(500)
+    finally:
+        strip.stacks.compute.compute = real_compute
+
+    assert [c.channel for c in strip.controllers] == ["CD3"] * 3
+    level = strip.controllers[1].level
+    back = [k for k in computes
+            if k.channel == "CD3" and k.tile.level == level]
+    assert back == [], back
+
+
+def test_a_parameter_change_re_plans_hot_under_the_new_numbers(real_strip):
+    """A retune moves no camera, so nothing else would ever tell HOT its
+    plan had gone stale. The new numbers must reach it, and the results
+    cached under the OLD parameter must never be reported as ready.
+
+    MUTATION this catches: freezing the specs at construction (the state
+    before this change) leaves `is_channel_ready` answering about the old
+    parameters for the rest of the session.
+    """
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    host = strip.controllers[1]
+    assert strip.hot.is_channel_ready("CD20", host.snapshot()) is True
+    old = strip.hot._spec_by_channel["CD20"]
+
+    page._channel_params["CD20"] = {
+        "tophat_radius": int(old.tophat_radius) + 7,
+        "cucim_sigma": int(old.cucim_sigma)}
+    page._sync_compare_params()
+
+    assert (strip.hot._spec_by_channel["CD20"].tophat_radius
+            == old.tophat_radius + 7)
+    # The parameter is part of the CorrectionKey, so the old results are
+    # simply never asked for again -- they are not served as new ones.
+    assert strip.hot.is_channel_ready("CD20", host.snapshot()) is False
+
+    _hot_settle(strip, 900)
+    assert strip.hot.is_channel_ready("CD20", host.snapshot()) is True
+
+
+def test_an_unchanged_parameter_edit_does_not_churn_hots_generation(
+        real_strip):
+    """`refresh_hot` runs on every selection change; it has to be free when
+    nothing HOT cares about actually moved."""
+    _page_, strip, _provider = real_strip
+    _hot_settle(strip)
+    generation = strip.hot._hot_generation
+    strip.refresh_hot()
+    assert strip.hot._hot_generation == generation
+
+
+def test_leaving_compare_stops_hot(real_strip):
+    """Off screen, the prefetch goes with it: nothing may be issued for a
+    mode nobody is looking at, and the strip's suspend waits the scheduler
+    idle -- which a producer still refilling would keep from ever
+    happening.
+
+    MUTATION this catches: not stopping HOT on the way out leaves the
+    coordinator connected to the host, with a live queue.
+    """
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    hot = strip.hot
+    requested = hot.stats["hot_tiles_requested"]
+
+    page._exit_compare_mode()
+    _drain(400)
+
+    assert strip.hot is None
+    assert hot._stopped is True
+    assert len(hot._tile_queue) == 0
+    assert hot.stats["hot_tiles_requested"] == requested
+
+
+def test_coming_back_to_compare_plans_again(real_strip):
+    """Stopped is not disabled. Re-entering plans from the channel, the
+    viewport and the parameters as they are THEN."""
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    page._exit_compare_mode()
+    _drain(200)
+    assert strip.hot is None
+
+    _enter(page)
+    _hot_settle(strip)
+
+    assert strip.hot is not None
+    assert strip.hot.is_channel_ready(
+        "CD20", strip.controllers[1].snapshot()) is True
+
+
+def test_a_production_run_takes_hot_off_the_device_and_gives_it_back(
+        real_strip):
+    """Process/Save own the GPU. HOT is background work on the same device
+    and stops for the run -- without taking the panels away, because a
+    production run does not take the view."""
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+    assert strip.hot is not None
+
+    page._release_explore_for_production("whole-slide correction (Save)")
+    assert strip.hot is None
+    assert strip.built is True
+
+    page._on_production_worker_finished()
+    _drain(300)
+    assert strip.hot is not None
+
+
+def test_a_dataset_switch_leaves_no_hot_behind(real_strip):
+    """No leaked background HOT, and no way for the previous dataset to be
+    prepared into the next one."""
+    _page_, strip, _provider = real_strip
+    _hot_settle(strip)
+    hot = strip.hot
+
+    strip.set_dataset("/fake/other.ome.tif")
+
+    assert strip.hot is None
+    assert hot._stopped is True
+    assert strip.built is False
+
+
+def test_teardown_stops_hot_before_the_scheduler_goes(real_strip):
+    """Order, not merely eventual cleanup: HOT must stop issuing before the
+    scheduler joins its workers and the provider is closed, or a request
+    can be handed to a scheduler that is already shutting down."""
+    _page_, strip, _provider = real_strip
+    _hot_settle(strip)
+    hot = strip.hot
+    order = []
+    real_stop = hot.stop
+    real_shutdown = strip.stacks.scheduler.shutdown
+
+    hot.stop = lambda: (order.append("hot"), real_stop())[1]
+    strip.stacks.scheduler.shutdown = lambda: (
+        order.append("scheduler"), real_shutdown())[1]
+
+    strip.teardown(wait_for_floor=False)
+
+    assert order[:2] == ["hot", "scheduler"], order
+
+
+def test_ten_rapid_channel_clicks_leave_hot_planning_only_the_last(
+        real_strip):
+    """Latest-wins. Ten switches must not leave ten plans' worth of
+    background work behind, and the plan that survives belongs to the
+    tenth channel."""
+    page, strip, _provider = real_strip
+    _hot_settle(strip)
+
+    for channel in ("CD20", "CD3") * 5:
+        page.current_channel = channel
+        page._sync_compare_to_channel()
+
+    _hot_settle(strip, 900)
+
+    assert [c.channel for c in strip.controllers] == ["CD3"] * 3
+    hot = strip.hot
+    assert hot._hot_snapshot is not None
+    assert hot._hot_snapshot.channel == "CD3"
+    assert all(item[0] == hot._hot_generation for item in hot._tile_queue)
+
+
+def test_hot_requests_never_outrank_the_foreground(real_strip):
+    """Strict priority: whatever the user is looking at is asked for in a
+    band the background can never enter."""
+    from block01.viewer.multichannel_prefetch import HOT_PRIORITY_BASE
+
+    _page_, strip, _provider = real_strip
+    scheduler = strip.stacks.scheduler
+    seen = []
+    real_request = scheduler.request
+
+    def watching(req, callback):
+        seen.append(req.priority)
+        return real_request(req, callback)
+
+    scheduler.request = watching
+    try:
+        # A camera nudge, so the window carries FOREGROUND traffic as well
+        # as HOT's -- otherwise "HOT is above the band" would be a claim
+        # about a band nothing else was in.
+        cx, cy, scale = strip.camera(0)
+        strip.set_camera(cx + 40.0, cy + 40.0, scale)
+        _hot_settle(strip)
+    finally:
+        scheduler.request = real_request
+
+    assert any(p >= HOT_PRIORITY_BASE for p in seen), "no HOT request at all"
+    assert any(p < HOT_PRIORITY_BASE for p in seen), "no foreground request"

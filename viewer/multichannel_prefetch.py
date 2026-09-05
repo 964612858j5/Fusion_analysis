@@ -115,6 +115,67 @@ class MultiChannelPrefetchController(QtCore.QObject):
 
     # ── public API ──────────────────────────────────────────────────────
 
+    def replan(self, snapshot=None):
+        """Re-plan HOT around the host's CURRENT viewport and channel.
+
+        The ordinary way a plan is made is the host's own settle: a gesture
+        goes quiet, the confirmation timer survives `settle_confirm_ms`, and
+        `_confirm_settle` builds the neighbourhood. That covers everything
+        the user does with the camera and with the channel list, because
+        both start the host's settle timer.
+
+        It does NOT cover the two moments a mounting host has to announce
+        itself: a controller that has just been (re-)connected to a display
+        that is already sitting still, and a parameter edit -- which changes
+        what "prepared" MEANS for every channel without moving anything and
+        so starts no settle of its own. This is the explicit entry point for
+        those, and it goes through exactly the same path as a real settle
+        (abort the old generation first, then arm the confirmation), so a
+        caller cannot obtain a plan on any terms the settle path would not
+        also grant: still latest-wins, still confirmed after a quiet period,
+        never issuing straight from the caller's thread.
+        """
+        if self._stopped:
+            return
+        if snapshot is None:
+            try:
+                snapshot = self.controller.snapshot()
+            except Exception:                               # noqa: BLE001
+                snapshot = self._latest_snapshot
+        if snapshot is None:
+            return
+        self._abort_hot()
+        self._on_gesture_quiet(snapshot)
+
+    def set_specs(self, specs):
+        """Replace the per-channel correction parameters, then re-plan.
+
+        The specs were a constructor argument only, which silently assumed
+        the parameters a host was built with are the parameters it will
+        prepare with for the rest of the session. They are not: the user can
+        retune a channel's TopHat radius or cuCIM sigma at any time, and a
+        frozen spec would go on filling the cache with keys nobody will ever
+        ask for again -- while `is_channel_ready` kept answering about the
+        OLD parameters.
+
+        Nothing here can serve a stale result: the parameters live inside
+        the `CorrectionKey`, so a changed parameter is a different key. The
+        results already computed under the old one stay in the LRU until
+        they are evicted, and are simply never asked for again.
+
+        A no-op when the specs are unchanged, so a host may call this on
+        every selection change without churning HOT's generation.
+        """
+        specs = tuple(specs)
+        if specs == self.specs:
+            return
+        self.specs = specs
+        self._spec_by_channel = {spec.channel: spec for spec in specs}
+        self._index_by_channel = {
+            spec.channel: index for index, spec in enumerate(specs)
+        }
+        self.replan()
+
     def is_channel_ready(self, channel, snapshot) -> bool:
         """Return whether ``channel`` has its exact HOT identity cached."""
         spec = self._spec_by_channel.get(channel)

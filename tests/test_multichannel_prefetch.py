@@ -53,7 +53,15 @@ class FakeController(QtCore.QObject):
         self.precise_pool = []
         self.display_state = {"channel": channels[0], "changed": False}
 
+    # What `snapshot()` answers. Settable, because the two entry points
+    # that re-plan without an interaction (`replan`, `set_specs`) ask the
+    # HOST what is on screen rather than replaying the last signal, and a
+    # test of them has to be able to say what that is.
+    live_snapshot = None
+
     def snapshot(self):
+        if self.live_snapshot is not None:
+            return self.live_snapshot
         return SimpleNamespace(
             epoch=-1,
             source=self.source,
@@ -788,3 +796,166 @@ def test_hot_request_sequence_matches_the_pre_extraction_golden(app):
             assert {k: v for k, v in hot.stats.items()} == expected["stats"]
         finally:
             hot.stop()
+
+
+# ── the two entry points a MOUNTED host needs ────────────────────────────
+#
+# The controller used to learn about the world through the host's four
+# signals only, which is enough while the host is a camera: everything a
+# user does with it moves something, and moving something ends in a settle.
+#
+# Mounting it on the compare strip made two moments visible that no signal
+# covers. A coordinator connected to a display that is ALREADY sitting
+# still has no gesture left to go quiet, and would sit un-planned until the
+# user touched the camera. And a parameter edit changes what "prepared"
+# means for every channel without moving anything at all -- the specs were
+# a constructor argument, so a retune left the prefetch preparing numbers
+# nobody would ever ask for again while `is_channel_ready` went on
+# answering about the old ones.
+#
+# `replan()` and `set_specs()` are those two entry points, and both go
+# through the ordinary settle path: abort first, then arm the same
+# confirmation a real quiet period arms. Neither can obtain a plan on terms
+# the settle path would not also grant.
+
+def test_replan_arms_the_same_confirmation_a_settle_does(app):
+    controller, scheduler, hot = _make()
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller, channel="c2")
+        controller.live_snapshot = snapshot
+
+        hot.replan()
+        # Armed, NOT settled: a caller cannot skip the quiet period.
+        assert hot._settled is False
+        assert hot._confirm_pending is True
+        assert scheduler.requests == []
+
+        _fire_confirm(hot)
+        assert hot._settled is True
+        assert ({r["request"].key.channel for r in scheduler.requests}
+                == {"c1"})
+        assert len(scheduler.requests) == HOT_INFLIGHT
+    finally:
+        hot.stop()
+
+
+def test_replan_is_latest_wins_over_the_plan_it_replaces(app):
+    controller, scheduler, hot = _make()
+    try:
+        _ready_overviews(controller)
+        controller.gesture_quiet.emit(_snapshot(controller, channel="c2"))
+        _fire_confirm(hot)
+        generation = hot._hot_generation
+        queued = len(hot._tile_queue)
+        assert queued > 0
+
+        controller.live_snapshot = _snapshot(controller, channel="c0")
+        hot.replan()
+
+        assert hot._hot_generation != generation
+        assert generation in scheduler.cancelled_generations
+        assert not hot._tile_queue
+        _fire_confirm(hot)
+        # ...and the plan that exists now is the NEW centre's.
+        assert hot._hot_snapshot.channel == "c0"
+    finally:
+        hot.stop()
+
+
+def test_replan_after_stop_does_nothing(app):
+    controller, scheduler, hot = _make()
+    _ready_overviews(controller)
+    controller.live_snapshot = _snapshot(controller, channel="c2")
+    hot.stop()
+
+    hot.replan()
+
+    assert hot._confirm_pending is False
+    assert hot._settled is False
+    assert scheduler.requests == []
+
+
+def test_set_specs_changes_the_parameters_the_keys_are_built_from(app):
+    """The parameter lives inside the `CorrectionKey`, so a retune is a
+    different key: the old results stay in the LRU until they are evicted
+    and are simply never asked for again."""
+    controller, scheduler, hot = _make()
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller, channel="c2", level=0)
+        controller.live_snapshot = snapshot
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        before = {(r["request"].key.method, r["request"].key.params)
+                  for r in scheduler.requests}
+        assert before == {("tophat", (9,)), ("cucim", (13,))}
+        # Physically finish them first: HOT's in-flight cap is a PHYSICAL
+        # one that spans generations on purpose, so a new plan issues
+        # nothing until the abandoned work has actually reported back.
+        _drain_requests(scheduler)
+        scheduler.requests.clear()
+
+        hot.set_specs([ChannelCorrectionSpec(c, 21, 33)
+                       for c in controller.channels])
+        _fire_confirm(hot)
+
+        after = {(r["request"].key.method, r["request"].key.params)
+                 for r in scheduler.requests}
+        assert after == {("tophat", (21,)), ("cucim", (33,))}
+    finally:
+        hot.stop()
+
+
+def test_set_specs_makes_a_channel_prepared_under_the_old_numbers_unready(
+        app):
+    controller, scheduler, hot = _make()
+    try:
+        _ready_overviews(controller)
+        snapshot = _snapshot(controller, channel="c2", level=0)
+        controller.live_snapshot = snapshot
+        controller.gesture_quiet.emit(snapshot)
+        _fire_confirm(hot)
+        _drain_requests(scheduler)
+        assert hot.is_channel_ready("c1", snapshot) is True
+
+        hot.set_specs([ChannelCorrectionSpec(c, 21, 13)
+                       for c in controller.channels])
+
+        assert hot.is_channel_ready("c1", snapshot) is False
+    finally:
+        hot.stop()
+
+
+def test_set_specs_with_the_same_specs_changes_nothing(app):
+    """It is called on every selection change; when nothing it cares about
+    moved it must not churn the generation or throw away a live plan."""
+    controller, scheduler, hot = _make()
+    try:
+        _ready_overviews(controller)
+        controller.gesture_quiet.emit(_snapshot(controller, channel="c2"))
+        _fire_confirm(hot)
+        generation = hot._hot_generation
+        queued = len(hot._tile_queue)
+
+        hot.set_specs(list(hot.specs))
+
+        assert hot._hot_generation == generation
+        assert len(hot._tile_queue) == queued
+        assert hot._settled is True
+    finally:
+        hot.stop()
+
+
+def test_set_specs_after_stop_does_not_reconnect(app):
+    controller, scheduler, hot = _make()
+    _ready_overviews(controller)
+    controller.live_snapshot = _snapshot(controller, channel="c2")
+    hot.stop()
+
+    hot.set_specs([ChannelCorrectionSpec(c, 21, 33)
+                   for c in controller.channels])
+
+    assert hot._spec_by_channel["c1"].tophat_radius == 21
+    assert hot._confirm_pending is False
+    assert scheduler.requests == []

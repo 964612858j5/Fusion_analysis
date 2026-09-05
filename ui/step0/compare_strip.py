@@ -324,6 +324,11 @@ class CompareStrip(QtWidgets.QWidget):
         # Set while the strip is off screen: the pools and the camera are
         # kept, the GPU is not.
         self._suspended = False
+        # The strip's ONE HOT coordinator and the callback that tells it
+        # what the neighbourhood is. See the "neighbour preparation"
+        # section below.
+        self._hot = None
+        self._hot_specs_provider = None
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -440,6 +445,12 @@ class CompareStrip(QtWidgets.QWidget):
         return stacks
 
     def teardown(self, *, wait_for_floor: bool = False):
+        # BEFORE the controllers: HOT holds a host controller and four of
+        # its signals, and its queue is spent through the scheduler the
+        # teardown below shuts down. Stopping it first means no request can
+        # be issued into a scheduler that is joining its workers, and no
+        # slot fires on a controller that is being destroyed.
+        self.stop_hot()
         stacks, self._stacks = self._stacks, None
         self._suspended = False
         if stacks is None:
@@ -619,6 +630,12 @@ class CompareStrip(QtWidgets.QWidget):
                                      params=params)
             if tint is not None:
                 controller.set_tint(tint)
+        # AFTER all three, so the specs HOT is given are read once the new
+        # channel is the strip's channel. The channel change itself already
+        # reaches HOT through the host controller's own signals; this call
+        # exists for the case where the row the user clicked also carries
+        # different per-channel parameters.
+        self.refresh_hot()
 
     def set_params(self, params_for):
         """A parameter edit re-selects TopHat and cuCIM. Original has no
@@ -630,6 +647,10 @@ class CompareStrip(QtWidgets.QWidget):
                 continue
             controller.set_selection(method=method,
                                      params=tuple(params_for(source)))
+        # A parameter edit changes what "prepared" means for EVERY channel,
+        # and moves nothing -- so it starts no settle of its own and would
+        # otherwise leave HOT preparing the old numbers indefinitely.
+        self.refresh_hot()
 
     def set_tint(self, rgb):
         for controller in self.controllers:
@@ -695,6 +716,12 @@ class CompareStrip(QtWidgets.QWidget):
         if self._suspended or not self.controllers:
             return {}
         self._suspended = True
+        # FIRST, and before `suspend_for_production` waits the scheduler
+        # idle: HOT is a producer of scheduler work, and a producer that is
+        # still refilling while somebody waits for idle is a wait that need
+        # not end. This is also the one place that covers every way compare
+        # leaves the screen, because all of them come through here.
+        self.stop_hot()
         timings = {}
         for source, controller in zip(COMPARE_SOURCES, self.controllers):
             if controller is None:
@@ -717,7 +744,138 @@ class CompareStrip(QtWidgets.QWidget):
                 controller.resume_from_production()
             except Exception:                               # noqa: BLE001
                 pass
+        # Back on screen: plan again, from the channel, the viewport and
+        # the effective parameters as they are NOW -- not from whatever was
+        # true when the strip was put away.
+        self.start_hot()
 
     @property
     def suspended(self):
         return self._suspended
+
+    # ── neighbour preparation (HOT) ──────────────────────────────────────
+    #
+    # ONE coordinator for the whole strip, not one per panel. The three
+    # panels are one instrument -- one camera, one channel, one backend --
+    # so "prepare the neighbouring channels" is one question with one
+    # answer, and three coordinators would ask it three times and spend
+    # three times the budget racing each other for the same scheduler.
+    #
+    # It is `viewer.multichannel_prefetch.MultiChannelPrefetchController`,
+    # the production HOT implementation, mounted on THIS backend: the
+    # strip's own scheduler, its own corrected cache and the overview store
+    # the strip is using. Nothing is shared with the full image beyond the
+    # overview store the strip already borrowed -- sharing the scheduler
+    # would make `suspend_for_production`'s "wait until idle" mean "wait for
+    # the other mode too", and sharing the corrected cache would make the
+    # two modes evict each other (see `build_compare_stacks`).
+    #
+    # HOT writes CACHES ONLY. It never touches a view, a pool or a camera:
+    # a prepared channel is one whose corrected tiles and overview record
+    # are resident, so that switching to it is a cache read rather than a
+    # computation. What the user sees is still produced by the three
+    # controllers, from the same code path as an unprepared channel.
+    #
+    # HOST CONTROLLER: the TopHat panel, deliberately one of the three and
+    # not all of them. The three cameras are the same camera, so any of
+    # them reports the same viewport, level and visible tile set; the
+    # difference is that Original carries no method and no parameters, so a
+    # parameter edit is invisible in its selection context and HOT would
+    # not learn that its plan had gone stale. TopHat has both.
+
+    HOT_HOST_SOURCE = "tophat"
+
+    def set_hot_specs_provider(self, provider):
+        """Install the callback that answers "what is the neighbourhood?".
+
+        `provider()` returns the `ChannelCorrectionSpec`s for every channel
+        the user can switch to, IN THE ORDER THE USER SEES THEM -- that
+        order is what "the channel above" and "the channel below" mean, and
+        it is the page's to know, not the strip's.
+
+        A callback rather than a list because the parameters in it are
+        live: the answer is re-read every time HOT re-plans, so a spec can
+        never be older than the last plan.
+        """
+        self._hot_specs_provider = provider
+
+    @property
+    def hot(self):
+        """The live HOT coordinator, or None. For tests and measurement."""
+        return self._hot
+
+    def hot_stats(self):
+        """HOT's counters, or None when it is not running."""
+        return dict(self._hot.stats) if self._hot is not None else None
+
+    def _hot_host(self):
+        for source, controller in zip(COMPARE_SOURCES, self.controllers):
+            if source == self.HOT_HOST_SOURCE and controller is not None:
+                return controller
+        return None
+
+    def _hot_specs(self):
+        provider = self._hot_specs_provider
+        if provider is None:
+            return ()
+        try:
+            return tuple(provider() or ())
+        except Exception:                                   # noqa: BLE001
+            return ()
+
+    def start_hot(self):
+        """Mount HOT, or re-plan the one already mounted.
+
+        Refuses while the strip is suspended or unbuilt: HOT off screen
+        would be spending the GPU on channels of a mode nobody is looking
+        at, and that is exactly what the suspend contract exists to stop.
+        """
+        if self._stacks is None or self._suspended:
+            return None
+        specs = self._hot_specs()
+        if not specs:
+            return None
+        if self._hot is not None:
+            self._hot.set_specs(specs)
+            self._hot.replan()
+            return self._hot
+        host = self._hot_host()
+        if host is None:
+            return None
+        from ...viewer.multichannel_prefetch import (
+            MultiChannelPrefetchController)
+        try:
+            hot = MultiChannelPrefetchController(
+                host, self._stacks.scheduler, specs, self._stacks.grid,
+                parent=self)
+        except Exception:                                   # noqa: BLE001
+            # A strip that cannot prepare its neighbours is a slower strip,
+            # never a broken one.
+            return None
+        self._hot = hot
+        # The camera is already sitting where the user put it, so there is
+        # no gesture left to go quiet on its own. `replan` arms the same
+        # confirmation a real settle would.
+        hot.replan()
+        return hot
+
+    def stop_hot(self):
+        """Cancel HOT and let go of the host. Idempotent."""
+        hot, self._hot = self._hot, None
+        if hot is None:
+            return
+        try:
+            hot.stop()
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            hot.setParent(None)
+            hot.deleteLater()
+        except RuntimeError:
+            pass
+
+    def refresh_hot(self):
+        """Re-read the specs. A no-op when nothing HOT cares about moved."""
+        if self._hot is None:
+            return
+        self._hot.set_specs(self._hot_specs())

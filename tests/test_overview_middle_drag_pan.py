@@ -554,3 +554,206 @@ def test_the_viewbox_no_longer_takes_the_gesture():
     """The pan is owned in one place. If the ViewBox grew its own middle
     handler again there would be two, and they would both fire."""
     assert "mouseDragEvent" not in vars(ovp._PanViewBox)
+
+
+# ── the pointer is OWNED, not assumed ────────────────────────────────────
+#
+# The gesture used to rely on Qt's implicit grab: consume the press in the
+# filter and trust that the viewport is bound to the pointer for the rest of
+# the drag. The desk disproved it -- six consecutive middle drags produced
+# two pans -- and it was always the wrong thing to rely on: the implicit
+# grab is given to the widget that ACCEPTS the press in its own
+# `mousePressEvent`, and a press consumed by an event filter never reaches
+# that handler.
+#
+# So the panel takes the grab itself, and these tests ask Qt who holds it
+# rather than asking whether the range happened to change. `mouseGrabber()`
+# is a static of `QWidget` in PyQt5 and it is Qt's own bookkeeping, so it is
+# truthful offscreen even though the offscreen platform warns that it cannot
+# take a platform-level grab.
+#
+# The one thing these cannot do is the acceptance gate itself: twenty
+# consecutive drags on the real machine, with a real pointer. Offscreen
+# there is no cursor and every event is synthetic. What is checkable here is
+# the mechanism that failed -- who holds the pointer, and that nothing can
+# leave it held.
+
+def _grabber():
+    return QtWidgets.QWidget.mouseGrabber()
+
+
+def test_the_press_takes_the_mouse_grab(app):
+    """After the press, the application's mouse grabber IS this thumbnail's
+    viewport -- named, not inferred from a side effect."""
+    panel = _panel()
+    assert _grabber() is None
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    try:
+        assert _grabber() is panel.gview.viewport()
+        assert panel._mid_pan_grab is panel.gview.viewport()
+    finally:
+        panel._middle_pan_cancel()
+
+
+def test_the_release_gives_the_mouse_grab_back(app):
+    panel = _panel()
+    _middle_drag(panel, -50, -30)
+    assert _grabber() is None
+    assert panel._mid_pan_grab is None
+    assert panel._mid_pan_last is None
+
+
+def test_a_lost_button_gives_the_mouse_grab_back(app):
+    """A move with the middle button no longer down means the release was
+    never seen. A grab left standing there is not a stuck map, it is an
+    application that answers no further input at all."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    assert _grabber() is panel.gview.viewport()
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300, 280),
+          button=Qt.NoButton, buttons=Qt.NoButton)
+    assert _grabber() is None
+    assert panel._mid_pan_grab is None
+
+
+def test_hiding_the_thumbnail_gives_the_mouse_grab_back(app):
+    """The Tissue Navigator is a popup: closing it while a drag is held is
+    an ordinary thing for a user to do."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    assert _grabber() is panel.gview.viewport()
+    panel.hide()
+    QtWidgets.QApplication.instance().processEvents()
+    assert _grabber() is None
+    assert panel._mid_pan_grab is None
+
+
+def test_closing_the_thumbnail_gives_the_mouse_grab_back(app):
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    panel.close()
+    QtWidgets.QApplication.instance().processEvents()
+    assert _grabber() is None
+    assert panel._mid_pan_grab is None
+
+
+def test_a_grab_taken_away_mid_gesture_stops_the_pan(app):
+    """Somebody else grabbed the pointer -- a modal dialog, a menu. The
+    moves that follow are not ours, and panning on them would drag the map
+    under a cursor that is somewhere else."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    thief = QtWidgets.QWidget()
+    thief.resize(10, 10)
+    thief.show()
+    thief.grabMouse()
+    assert _grabber() is thief
+    before = _range(panel)
+
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(320, 300),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+
+    assert _range(panel) == before, "panned on somebody else's pointer"
+    assert panel._mid_pan_grab is None
+    thief.releaseMouse()
+    thief.hide()
+
+
+def test_a_second_gesture_starts_from_its_own_press(app):
+    """Two drags in a row: the second must measure from where IT started.
+
+    An inherited anchor would make the second drag's first move jump by the
+    distance between the two presses -- which, at a zoom, is the whole
+    thumbnail.
+    """
+    panel = _panel()
+    _middle_drag(panel, -40, -20, start=(250, 250))
+    after_first = _range(panel)
+
+    # The second gesture starts a long way from where the first ended.
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(100, 100),
+          button=Qt.MiddleButton)
+    assert panel._mid_pan_last is not None
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(110, 100),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    moved = _range(panel)
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(110, 100),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+
+    # 10 viewport pixels, at this panel's scale, and nothing like the 150
+    # an inherited anchor would have produced.
+    per_px = (after_first[1] - after_first[0]) / panel.gview.viewport().width()
+    assert (after_first[0] - moved[0]) == pytest.approx(10 * per_px, rel=0.2)
+
+
+def test_twenty_consecutive_gestures_all_pan(app):
+    """The acceptance gate, in the only form offscreen can express it:
+    twenty drags in a row, each one taking the grab, panning by its own
+    displacement, and giving the grab back.
+
+    Not "the range ended up different": every single one is counted. The
+    version this replaced passed a test that only looked at the final
+    range, because two working drags out of six still move the map.
+    """
+    panel = _panel()
+    panned = 0
+    for i in range(20):
+        before = _range(panel)
+        _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+              button=Qt.MiddleButton)
+        assert _grabber() is panel.gview.viewport(), f"drag {i}: no grab"
+        _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(240, 244),
+              button=Qt.NoButton, buttons=Qt.MiddleButton)
+        _send(panel, QtCore.QEvent.MouseButtonRelease,
+              QtCore.QPoint(240, 244),
+              button=Qt.MiddleButton, buttons=Qt.NoButton)
+        assert _grabber() is None, f"drag {i}: grab not returned"
+        if _range(panel) != before:
+            panned += 1
+    assert panned == 20
+
+
+def test_the_popups_thumbnail_owns_its_own_grab(app):
+    """Both instances, separately: the popup's viewport is the grabber for
+    a gesture on the popup, and the page's for one on the page."""
+    page = _loaded_page()
+    popup = page._ensure_tissue_navigator()
+    _give_slide(popup.overview, page.loader)
+    popup.show()
+    QtTest.QTest.qWaitForWindowExposed(popup)
+    try:
+        for panel in (page.overview, popup.overview):
+            _send(panel, QtCore.QEvent.MouseButtonPress,
+                  QtCore.QPoint(50, 50), button=Qt.MiddleButton)
+            assert _grabber() is panel.gview.viewport()
+            _send(panel, QtCore.QEvent.MouseButtonRelease,
+                  QtCore.QPoint(50, 50),
+                  button=Qt.MiddleButton, buttons=Qt.NoButton)
+            assert _grabber() is None
+    finally:
+        popup.hide()
+        page.hide()
+
+
+def test_the_grab_is_released_on_the_widget_it_was_taken_on(app):
+    """The grabbed widget is remembered, not re-derived. Re-deriving it
+    would release the WRONG widget when a viewport is swapped underneath,
+    and the real grab would stand forever."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    held = panel._mid_pan_grab
+    assert held is panel.gview.viewport()
+    released = []
+    held.releaseMouse = lambda *_a: (released.append(1),
+                                     QtWidgets.QWidget.releaseMouse(held))[1]
+
+    panel._middle_pan_cancel()
+
+    assert released == [1]
+    assert _grabber() is None

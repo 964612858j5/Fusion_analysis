@@ -13,6 +13,42 @@ pytest.importorskip("PyQt5")
 zarr = pytest.importorskip("zarr")
 
 
+_LIVE_PAGES = []
+
+
+@pytest.fixture(autouse=True)
+def _tear_pages_down_before_the_flush():
+    """Close this module's pages BEFORE the repo-wide fixture flushes the
+    event loop.
+
+    Every test here builds a Step0Page (the full-image landing shows a
+    pyqtgraph view) and simply drops it. The page then dies whenever the
+    cyclic collector happens to run, which depends on allocation timing
+    (measured: the module passes cold, aborts on every warm run with
+    `__pycache__` present, and flips between commits that never touch it).
+    When that collection lands inside the repo-wide fixture's first
+    `processEvents()`, a still-shown GraphicsView paints items whose
+    Python wrappers are already gone -- a segfault with no Python frame.
+
+    Same remedy as test_step0_dataset_switch.py / test_step0_intensity_window.py:
+    tear the pages down deterministically, then collect, before the flush.
+    Module-local autouse fixtures tear down before the conftest one.
+    """
+    yield
+    pages, _LIVE_PAGES[:] = list(_LIVE_PAGES), []
+    for page in pages:
+        try:
+            teardown = getattr(page, "teardown", None)
+            if callable(teardown):
+                teardown()
+            page.close()
+            page.deleteLater()
+        except RuntimeError:
+            pass  # already gone on the C++ side
+    import gc
+    gc.collect()
+
+
 @pytest.fixture(scope="module")
 def app():
     from PyQt5 import QtWidgets
@@ -48,6 +84,7 @@ def _corrected_zarr(tmp_path, channels=("CD68",), shape=(64, 64)):
 def _step0(app, corrected_path=None):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
+    _LIVE_PAGES.append(s)
     s.loader = _FakeLoader(corrected_path)
     s.patches = [(0, 64, 0, 64)]
     s.current_patch_idx = 0
@@ -245,6 +282,7 @@ class _BadLoader(_FakeLoader):
 def _step0_bad(app, bad_channel):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
+    _LIVE_PAGES.append(s)
     s.loader = _BadLoader(bad_channel)
     s.patches = [(0, 64, 0, 64)]
     s.current_patch_idx = 0
@@ -284,6 +322,7 @@ def test_save_writes_no_file_on_identity_failure(app, tmp_path, monkeypatch):
     from block01.utils.calibration_source import SourceAwareIdentityError
 
     s = sp.Step0Page()
+    _LIVE_PAGES.append(s)
 
     # stub workbench: has data, returns a minimal config
     class _WB:

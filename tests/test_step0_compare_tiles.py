@@ -2198,3 +2198,289 @@ def test_the_full_image_and_the_panels_cannot_cancel_each_other(real_strip):
         type("C", (), {"_gen_ns": None})(), "raw", 5)
     assert plain == ("raw", 5)
     assert all(plain != t for t in tokens)
+
+
+# ── 22. the metrics are coalesced behind a quiet period ──────────────────
+#
+# A row click used to measure the three panels synchronously, inside the
+# handler. Measured on the real 29-channel slide with every tile already
+# resident: `_update_compare_metrics` cost 108-290 ms per click, and ten
+# consecutive marker clicks spent ~1.4 s inside the handlers with the event
+# loop never entered -- the panels had switched channel and the window was
+# frozen. Nine of those ten measurements were painted and replaced before
+# anybody could read them.
+#
+# So the click switches the image and PLANS the measurement; one page-level
+# single-shot timer, restarted by every change, runs the last one. What this
+# section pins is the product statement, driven through the real entry
+# points: the image switch is accepted immediately, and after the quiet
+# period exactly one measurement has run, for the channel the user stopped
+# on.
+
+
+class _TenChannelLoader(_LowresLoader):
+    """DAPI plus ten markers -- enough to click down a real marker list."""
+
+    _CHANNELS = ["DAPI"] + [f"M{i}" for i in range(1, 11)]
+
+
+def _page10(app):
+    page = sp.Step0Page()
+    page.loader = _TenChannelLoader()
+    page.ome_path = "/fake/slide.ome.tif"
+    page.patches = []
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page.current_channel = "M1"
+    page._explore_tab = _Tab(_Stack())
+    page._compare_builds = []
+    page._compare_strip_widget._stack_factory = _fake_compare_factory(
+        page._compare_builds)
+    page.resize(1200, 800)
+    page.show()
+    QtTest.QTest.qWait(30)
+    return page
+
+
+def _count_metrics(page):
+    """Record every `_update_compare_metrics` that actually runs, with the
+    channel it ran for."""
+    runs = []
+    real = page._update_compare_metrics
+
+    def counted():
+        strip = page._compare_strip_widget
+        runs.append((page.current_channel,
+                     tuple(c.channel for c in strip.controllers)))
+        return real()
+
+    page._update_compare_metrics = counted
+    return runs
+
+
+def _click(page, channel):
+    page._on_channel_row_changed(page._channel_order.index(channel))
+
+
+def _quiet(ms=None):
+    """Let the quiet timer fire."""
+    QtTest.QTest.qWait(sp.Step0Page._COMPARE_METRICS_QUIET_MS * 2 + 60
+                       if ms is None else ms)
+
+
+MARKERS = [f"M{i}" for i in range(1, 11)]
+
+
+def test_ten_quick_channel_clicks_measure_once_for_the_last_one(app):
+    """THE product statement. Ten clicks: ten image switches, ONE
+    measurement, and it belongs to the tenth channel."""
+    page = _page10(app)
+    strip = _enter(page)
+    runs = _count_metrics(page)
+    before = len(strip.controllers[0].selections)
+
+    for channel in MARKERS:
+        _click(page, channel)
+
+    # the image side is finished already, before any waiting at all
+    assert page.current_channel == "M10"
+    assert [c.channel for c in strip.controllers] == ["M10"] * 3
+    assert len(strip.controllers[0].selections) - before == len(MARKERS)
+    # ...and nothing has been measured yet
+    assert runs == []
+
+    _quiet()
+    assert len(runs) == 1, runs
+    assert runs[0] == ("M10", ("M10", "M10", "M10"))
+
+
+def test_a_channel_click_does_not_measure_inside_the_handler(app):
+    """The handler itself must not reach the measurement -- not once, not
+    for the first click."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M2")
+    assert runs == []
+
+
+def test_the_metrics_go_to_a_dash_the_moment_the_channel_changes(app):
+    """The numbers on screen belong to the previous channel from the
+    instant the panels leave it, so they come down with the switch rather
+    than standing until the new ones are ready."""
+    page = _page10(app)
+    _enter(page)
+    page._metrics_tophat.setText("TopHat     → SNR: 9.99  BG-CV: 0.01")
+    _click(page, "M2")
+    assert page._metrics_tophat.text() == "TopHat → —"
+    assert page._compare_metrics_pending() is True
+
+
+def test_a_single_click_left_alone_still_ends_up_measured(app):
+    """Coalescing is not dropping: click once, wait, and the numbers are
+    there for that channel."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M4")
+    _quiet()
+    assert len(runs) == 1
+    assert runs[0][0] == "M4"
+    assert page._compare_metrics_pending() is False
+
+
+def test_another_click_inside_the_quiet_period_voids_the_first_plan(app):
+    """LATEST-WINS. The plan made by the first click is not merely
+    superseded in time -- it must not be able to write M2's numbers under
+    M5's labels."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M2")
+    first = page._compare_metrics_plan
+    QtTest.QTest.qWait(20)
+    _click(page, "M5")
+    assert page._compare_metrics_plan != first
+    _quiet()
+    assert len(runs) == 1, runs
+    assert runs[0] == ("M5", ("M5", "M5", "M5"))
+
+
+def test_the_quiet_period_starts_again_with_every_click(app):
+    """A restart, not a first-one-wins deadline.
+
+    Clicks spaced a little under the quiet period are the ordinary case: a
+    user reading down a marker list clicks faster than they think. A timer
+    that only started when idle would fire in the MIDDLE of that stream --
+    measuring a channel the user has already left, and paying the 100-290 ms
+    for it inside the run they are still making. Restarting means the one
+    measurement happens once the clicking has actually stopped.
+    """
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    gap = int(sp.Step0Page._COMPARE_METRICS_QUIET_MS * 0.7)
+    for channel in MARKERS[:5]:
+        _click(page, channel)
+        QtTest.QTest.qWait(gap)
+    assert runs == [], "measured in the middle of the click stream"
+    _quiet()
+    assert len(runs) == 1, runs
+    assert runs[0][0] == "M5"
+
+
+def test_a_stale_plan_is_dropped_rather_than_measured(app):
+    """The guard itself, driven directly: a plan whose channel no longer
+    matches the panels is thrown away when the timer fires."""
+    page = _page10(app)
+    strip = _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M2")
+    # the panels move on without going through the scheduling entry --
+    # whatever moved them, the pending plan is now about something else
+    strip.set_channel("M7", params_for=page._compare_params_for)
+    page._on_compare_metrics_quiet()
+    assert runs == []
+
+
+def test_a_dataset_switch_inside_the_quiet_period_lands_nothing(app):
+    """The dataset generation is in the plan. A measurement planned for the
+    previous dataset must not be written into the new one's labels."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M3")
+    assert page._compare_metrics_pending() is True
+    page._dataset_gen += 1          # what a COMMITTED dataset switch does
+    _quiet()
+    assert runs == []
+
+
+def test_leaving_compare_inside_the_quiet_period_measures_nothing(app):
+    """The panels are not on screen any more, so there is nothing to
+    measure and the hidden page's labels are left alone."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    _click(page, "M3")
+    page._exit_compare_mode()
+    assert page._compare_mode() is False
+    _quiet()
+    assert runs == []
+
+
+def test_a_run_of_parameter_edits_measures_the_last_one_once(app):
+    """The parameter path shares the entry, so a dragged spinner coalesces
+    exactly as a run of clicks does -- and there is no second timer that
+    could be holding a different answer."""
+    page = _page10(app)
+    strip = _enter(page)
+    runs = _count_metrics(page)
+    for radius in (11, 13, 15, 17, 19):
+        page._channel_params.setdefault(page.current_channel, {})
+        page._channel_params[page.current_channel]["tophat_radius"] = radius
+        page._sync_compare_params()
+    assert runs == []
+    _quiet()
+    assert len(runs) == 1, runs
+    assert strip.controllers[1].params == (19,)
+
+
+def test_a_parameter_edit_then_a_channel_click_share_one_pending_state(app):
+    """One timer, one plan. A parameter edit followed by a row click inside
+    the quiet period leaves ONE measurement, of the click."""
+    page = _page10(app)
+    _enter(page)
+    runs = _count_metrics(page)
+    page._channel_params.setdefault("M1", {})["tophat_radius"] = 21
+    page._sync_compare_params()
+    QtTest.QTest.qWait(20)
+    _click(page, "M6")
+    _quiet()
+    assert len(runs) == 1, runs
+    assert runs[0][0] == "M6"
+
+
+def test_a_panel_with_nothing_cached_still_shows_only_a_dash(app):
+    """The quiet period does not license a number computed from a hole: an
+    incomplete cache is still a dash after the timer has run."""
+    page = _page10(app)
+    _enter(page)
+    page._snapshot_from_caches = lambda *_a, **_k: {}
+    _click(page, "M2")
+    _quiet()
+    assert page._metrics_tophat.text() == "TopHat → —"
+    assert page._metrics_original.text() == "Original → —"
+    assert page._metrics_cucim.text() == "cucim → —"
+
+
+def test_the_coalescing_changes_nothing_the_panels_show(app):
+    """Ten clicks still move the panels the same way: same camera, same
+    three methods, same colour per click, same order of selections. The
+    measurement is the only thing that was taken out of the handler."""
+    page = _page10(app)
+    strip = _enter(page)
+    camera_before = [strip.camera(i) for i in range(3)]
+    tints_before = [len(c.tints) for c in strip.controllers]
+    _count_metrics(page)
+
+    for channel in MARKERS:
+        _click(page, channel)
+
+    assert [strip.camera(i) for i in range(3)] == camera_before
+    assert [c.method for c in strip.controllers] == [None, "tophat", "cucim"]
+    for controller, before in zip(strip.controllers, tints_before):
+        assert len(controller.tints) > before
+        assert controller.tints[-1] == page._full_image_tint()
+        assert [s[0] for s in controller.selections[-len(MARKERS):]] == MARKERS
+    _quiet()
+    assert [strip.camera(i) for i in range(3)] == camera_before
+
+
+def test_the_quiet_timer_is_a_child_of_the_page(app):
+    """Owned by Qt, not by the garbage collector, and single-shot -- which
+    is what makes `start()` a restart rather than a second measurement."""
+    page = _page10(app)
+    timer = page._compare_metrics_timer
+    assert timer.parent() is page
+    assert timer.isSingleShot() is True

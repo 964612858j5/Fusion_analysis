@@ -336,6 +336,23 @@ class Step0Page(QWidget):
         self._tissue_preview_timer = QTimer(self)
         self._tissue_preview_timer.setSingleShot(True)
         self._tissue_preview_timer.timeout.connect(self._update_tissue_preview)
+        # The compare metrics are COALESCED behind a quiet period: measured
+        # on the real slide with the tiles already resident, one
+        # `_update_compare_metrics` costs ~110-290 ms, and it used to run
+        # inside every row click. Ten quick clicks therefore spent ~1.4 s
+        # with the event loop never entered -- the image had switched but
+        # the window was frozen. The timer is a child of the page (so Qt,
+        # not the garbage collector, owns it) and is restarted by every
+        # channel or parameter change; only the last one is measured. See
+        # `_schedule_compare_metrics`.
+        self._compare_metrics_timer = QTimer(self)
+        self._compare_metrics_timer.setSingleShot(True)
+        self._compare_metrics_timer.timeout.connect(
+            self._on_compare_metrics_quiet)
+        # The identity the pending measurement is FOR, or None when nothing
+        # is pending. Re-derived and compared at fire time -- see
+        # `_compare_metrics_plan_now`.
+        self._compare_metrics_plan = None
         # 预览结果缓存：key=(channel, patch_idx) → payload dict
         self._preview_cache: dict = {}
         # 通道颜色：key=channel_name → (R,G,B) float 0-1
@@ -2494,7 +2511,12 @@ class Step0Page(QWidget):
         if strip is None or not strip.built:
             return
         strip.set_params(self._compare_params_for)
-        self._update_compare_metrics()
+        # Through the SAME coalescing entry as a channel change: dragging a
+        # radius spinner is a stream of parameter edits exactly as clicking
+        # down a marker list is a stream of channel changes, and a second
+        # pending state for it would be a second thing that could be holding
+        # the wrong answer.
+        self._schedule_compare_metrics()
 
     def _sync_compare_to_channel(self):
         """A row click: all three panels move to the new channel together,
@@ -2515,7 +2537,10 @@ class Step0Page(QWidget):
         strip.set_channel(channel, params_for=self._compare_params_for,
                           tint=self._full_image_tint())
         self._refresh_preview_display(keep_zoom=True)
-        self._update_compare_metrics()
+        # The IMAGE switch above is the whole of what a row click owes the
+        # user, and it is finished before this returns. The measurement is
+        # not: it is planned here and runs once the clicking stops.
+        self._schedule_compare_metrics()
 
     def _on_compare_right_click(self, _x_l0=None, _y_l0=None):
         self._exit_compare_mode()
@@ -5590,6 +5615,132 @@ class Step0Page(QWidget):
             strip.set_nucleus_suppressed(nucleus == channel)
             strip.set_nucleus_enabled(self._nucleus_layer_visible())
 
+    # ── the metrics, and when they are allowed to run ────────────────────
+    #
+    # `_update_compare_metrics` is not cheap: it assembles each panel's whole
+    # visible region out of tiles and computes two statistics over it. On the
+    # real slide, with every tile already resident, ten consecutive marker
+    # clicks measured 108-290 ms EACH inside the click handler -- 1.4 s in
+    # which the row click had already moved the three panels but the event
+    # loop was never entered, which is the "the image switched and then the
+    # window froze" the user reported.
+    #
+    # Nine of those ten measurements were never read by anybody: they were
+    # painted and replaced before the next click returned. So the click no
+    # longer measures. It marks the labels pending and (re)starts ONE
+    # page-level single-shot timer; a stream of clicks keeps pushing the
+    # deadline out and only the channel the user stopped on is measured.
+    #
+    # The timer coalesces INPUT and nothing else. It does not make the
+    # measurement asynchronous -- it still runs on the GUI thread, reading
+    # the controllers and their caches on the thread that owns them -- and
+    # there is no `processEvents`, no sleep and no polling anywhere in it.
+    # What it buys is that the ten clicks cost ten image switches plus ONE
+    # measurement instead of ten.
+    #
+    # Because time passes between planning and measuring, the plan carries
+    # WHAT IT IS FOR and the fire re-derives the same thing from live state.
+    # Anything that has moved in between -- the dataset, the mode, the
+    # channel, a panel's method or parameter -- and the measurement is
+    # dropped rather than written under a label that now names something
+    # else. See `_compare_metrics_plan_now`.
+
+    # How long the click stream is allowed to settle before the panels are
+    # measured. Long enough to swallow a run of clicks, short enough that a
+    # single click feels like it answered immediately.
+    _COMPARE_METRICS_QUIET_MS = 150
+
+    def _compare_metric_labels(self):
+        """`(label, source, display name)` for the three metric lines."""
+        return ((self._metrics_original, "original", "Original"),
+                (self._metrics_tophat, "tophat", "TopHat"),
+                (self._metrics_cucim, "cucim", "cucim"))
+
+    def _compare_metrics_plan_now(self):
+        """What a measurement started RIGHT NOW would be a measurement of,
+        or None when there is nothing measurable.
+
+        Everything in here is a reason an old result would be WRONG under
+        the current labels rather than merely stale: the dataset generation,
+        that the panels are the view at all, the channel the page is on, and
+        each panel's own channel, method and parameter. Two plans that
+        compare equal describe the same three pictures.
+
+        The panels' RECTANGLE is deliberately not in it. A pan during the
+        quiet period does not invalidate anything -- the metric is "what the
+        three panels are showing", so it is measured over wherever they are
+        when it runs. What IS required is that each panel has a viewport at
+        all: a controller that has not been given one yet has no pixels on
+        screen to measure and no plan can name it.
+        """
+        if not self._compare_mode():
+            return None
+        channel = self.current_channel
+        strip = getattr(self, "_compare_strip_widget", None)
+        if not channel or strip is None or not strip.built:
+            return None
+        panels = []
+        for controller in strip.controllers:
+            if controller is None:
+                return None
+            if getattr(controller, "_current_bbox", None) is None:
+                return None
+            panels.append((getattr(controller, "channel", None),
+                           getattr(controller, "method", None),
+                           tuple(getattr(controller, "params", ()) or ())))
+        if len(panels) != len(COMPARE_SOURCES):
+            return None
+        return (int(self._dataset_gen), channel, tuple(panels))
+
+    def _schedule_compare_metrics(self):
+        """The ONE way the metrics are asked for.
+
+        Both things that change what is being measured -- a row click and a
+        parameter edit -- come through here, so there is a single pending
+        state and a single timer rather than two that could each be holding
+        a different answer.
+
+        Restarting is the point: `QTimer.start` on a running single-shot
+        timer moves the deadline, so a run of clicks leaves exactly one
+        measurement, of the last one.
+        """
+        timer = getattr(self, "_compare_metrics_timer", None)
+        plan = self._compare_metrics_plan_now()
+        self._compare_metrics_plan = plan
+        if plan is None:
+            # Nothing to measure (no panels, not in compare mode, no
+            # viewport yet). Anything already pending is abandoned rather
+            # than left to fire into a page that has moved on.
+            if timer is not None:
+                timer.stop()
+            return
+        # The numbers on screen belong to the PREVIOUS channel from the
+        # instant the panels move off it, so they come down now. A dash is
+        # what a panel with no number to show has always said.
+        for label, _source, name in self._compare_metric_labels():
+            label.setText(f"{name} \u2192 \u2014")
+        if timer is not None:
+            timer.start(self._COMPARE_METRICS_QUIET_MS)
+
+    def _compare_metrics_pending(self):
+        """True while a measurement is planned and has not run yet."""
+        return self._compare_metrics_plan is not None
+
+    def _on_compare_metrics_quiet(self):
+        """The click stream stopped. Measure -- if the plan still holds.
+
+        The plan is consumed either way: a fire that finds the world has
+        moved drops it, and the next real change will make a new one. What
+        must never happen is the previous channel's numbers appearing under
+        the current channel's labels, and that is exactly what the equality
+        below rules out.
+        """
+        plan = self._compare_metrics_plan
+        self._compare_metrics_plan = None
+        if plan is None or plan != self._compare_metrics_plan_now():
+            return
+        self._update_compare_metrics()
+
     def _update_compare_metrics(self):
         """SNR / BG-CV for what the three panels are showing.
 
@@ -5600,14 +5751,14 @@ class Step0Page(QWidget):
         whose viewport is not wholly cached yet shows a dash rather than a
         number computed from a hole.
 
-        No read and no kernel: it measures exactly the pixels on screen. It
-        is called when the panels open and whenever the thing being measured
-        changes, and deliberately NOT per range event -- a drag would
-        otherwise recompute two whole-viewport statistics per mouse move.
+        No read and no kernel: it measures exactly the pixels on screen --
+        and it is not cheap for that reason. It is reached only from
+        `_on_compare_metrics_quiet`, once the stream of changes to what is
+        being measured has stopped, and deliberately NOT per range event: a
+        drag would otherwise recompute two whole-viewport statistics per
+        mouse move.
         """
-        labels = ((self._metrics_original, "original", "Original"),
-                  (self._metrics_tophat, "tophat", "TopHat"),
-                  (self._metrics_cucim, "cucim", "cucim"))
+        labels = self._compare_metric_labels()
         strip = getattr(self, "_compare_strip_widget", None)
         stacks = getattr(strip, "stacks", None) if strip is not None else None
         for label, source, name in labels:

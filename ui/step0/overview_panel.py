@@ -1049,6 +1049,24 @@ PATCH_BORDER_TOL_PX = 4.0
 PATCH_BORDER_TOL_OV = 1.5
 
 
+def _view_range_moved(before, after, rel=1e-9):
+    """Did the camera actually go somewhere between these two view ranges?
+
+    Not `!=`. Re-setting an aspect-locked ViewBox to the range it is
+    already in comes back differing in the last bit or two of a double
+    (measured: 5.7e-14 view units on a 982-unit span, one part in 1e16),
+    so an exact comparison calls a zero-delta wheel a zoom. The bound is
+    relative to the span and enormously smaller than anything an eye or a
+    tile request could tell apart: on a thousand-pixel view it is a
+    millionth of a pixel.
+    """
+    for (b0, b1), (a0, a1) in zip(before, after):
+        tol = abs(b1 - b0) * rel
+        if abs(a0 - b0) > tol or abs(a1 - b1) > tol:
+            return True
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Overview Panel  (ROI polygon + Patch rectangle dual-mode)
 # ══════════════════════════════════════════════════════════════════════
@@ -1184,6 +1202,26 @@ class OverviewPanel(QWidget):
         self._overview_arr = None
         self._channel_rgb = None
         self._thumb_fitted = None    # the (w, h) the view was last fitted to
+        # Whether the USER has moved this panel's camera on the CURRENT
+        # dataset. One bit, per panel -- the page's thumbnail and the
+        # Tissue Navigator popup's are two instances of this class and each
+        # answers for its own camera.
+        #
+        # It is the answer to "whose camera is this", and everything that
+        # arrives after the first picture reads it: the real overview
+        # landing, a channel picture pushed in, a patch drawn or moved or
+        # deleted, the page/popup model sync. None of those is a request to
+        # go anywhere, so none of them may re-fit a view the user placed by
+        # hand. See `_apply_thumbnail`.
+        #
+        # Set ONLY where the camera measurably CHANGED -- a wheel zoom that
+        # altered the range, a middle-drag step that translated by a
+        # non-zero amount -- and never merely because a button went down: a
+        # stray click on a half-loaded thumbnail must not cancel that
+        # slide's one automatic fit. Cleared in `_load_overview` (a new
+        # dataset is the panel's camera again) and by the double-click
+        # reset (the user handing it back).
+        self._thumbnail_camera_touched = False
         self._mode_hint = ("", "")   # the hint the current mode wants shown
 
         self._setup_ui()
@@ -1343,8 +1381,12 @@ class OverviewPanel(QWidget):
             return
         self.status.setText("Loading overview, please wait...")
         # A load is a new slide: whatever is on screen is about to be
-        # replaced, and the view is re-fitted to what arrives.
+        # replaced, and the view is re-fitted to what arrives. The camera
+        # goes back to the panel with it -- a zoom the user made into the
+        # PREVIOUS slide is not a place on this one, and inheriting the
+        # ownership would leave the new slide's first picture unfitted.
         self._thumb_fitted = None
+        self._thumbnail_camera_touched = False
         self._t0 = time.time()
         self._ov_thread = OverviewLoaderThread(
             self.loader, self.nuc_ch, self.ds
@@ -1404,12 +1446,32 @@ class OverviewPanel(QWidget):
             self.img_item.setRect(rect)
         else:
             return
-        # Fit ONCE per overview geometry. The old code re-fitted on every
-        # overview load, which is once per slide; a channel image pushed in
-        # afterwards must not throw away a zoom the user has since made.
+        # Fit ONCE per overview geometry, and only while the camera is
+        # still the PANEL's.
+        #
+        # "Once per geometry" alone was not enough, and the gap is one
+        # pixel of arithmetic. Before an overview lands, `_thumb_rect`
+        # ESTIMATES the geometry as `round(full / ds)` so that a
+        # host-pushed channel picture has a rectangle to be stretched onto;
+        # the real overview is `read_region(..., ds)`, i.e. `arr[::ds,
+        # ::ds]`, whose shape is `ceil(full / ds)`. On a slide whose height
+        # or width is not an exact multiple of the downsample those differ,
+        # so `_thumb_fitted` "changed" and the late overview re-fitted the
+        # whole slide -- over the zoom or pan the user had made in the
+        # meantime, while the status line still said "Loading". That is the
+        # reported "the thumbnail is there but the wheel does nothing": the
+        # wheel did work, and was undone a moment later.
+        #
+        # The geometry is recorded either way, so the two pieces of state
+        # never contradict each other: after this call `_thumb_fitted`
+        # means "the panel has seen this geometry", and
+        # `_thumbnail_camera_touched` alone decides whose the camera is. A
+        # double-click reset clears the bit, which is what earns a later
+        # shape correction its one exact fit.
         if self._thumb_fitted != (self.ov_w, self.ov_h):
             self._thumb_fitted = (self.ov_w, self.ov_h)
-            self.vb.setRange(rect, padding=0.01)
+            if not self._thumbnail_camera_touched:
+                self.vb.setRange(rect, padding=0.01)
 
     def _on_overview_loaded(self, arr):
         self.ov_h, self.ov_w = arr.shape
@@ -1489,12 +1551,23 @@ class OverviewPanel(QWidget):
             self._redraw_cur_polygon()
 
     def _on_overview_click(self, event):
-        """Reset view to full image on double-click."""
+        """Reset view to full image on double-click.
+
+        This is the user handing the camera BACK: the whole thumbnail is
+        fitted now, and the panel owns it again, so the state left behind
+        is exactly the state a slide that had never been touched would be
+        in -- fitted to the geometry that is on screen, not touched. A
+        later shape correction (the real overview landing after an
+        estimate) therefore still gets its one exact fit, and nothing else
+        moves the view until the user does.
+        """
         if event.double():
             if hasattr(self, 'ov_h') and hasattr(self, 'ov_w'):
                 self.vb.setRange(
                     QRectF(0, 0, self.ov_w, self.ov_h), padding=0.01
                 )
+                self._thumbnail_camera_touched = False
+                self._thumb_fitted = (self.ov_w, self.ov_h)
 
     # ── ROI polygon helpers ───────────────────────────────────────────
 
@@ -2511,6 +2584,12 @@ class OverviewPanel(QWidget):
             self.vb._resetTarget()
             self.vb.translateBy(x=-dx, y=-dy)
             self.vb.sigRangeChangedManually.emit((True, True))
+            # A step that translated is a camera the user has moved. The
+            # PRESS is not: a middle click that never moved anywhere leaves
+            # the panel owning the camera, so a stray click on a
+            # half-loaded thumbnail does not cost that slide its one
+            # automatic fit.
+            self._thumbnail_camera_touched = True
         return True
 
     def _middle_pan_release(self, event):
@@ -2609,6 +2688,13 @@ class OverviewPanel(QWidget):
                 yRange=[cy + (vr[1][0]-cy)/factor, cy + (vr[1][1]-cy)/factor],
                 padding=0,
             )
+            # The camera is the user's from the first turn of the wheel that
+            # actually MOVED it. Compared against the range this branch
+            # started from, not assumed from the event: a wheel with no
+            # delta, or one an aspect-locked box clamps to where it already
+            # was, changed nothing and is not a claim on the camera.
+            if _view_range_moved(vr, self.vb.viewRange()):
+                self._thumbnail_camera_touched = True
             return True
 
         # ── The middle button pans, in every mode ─────────────────────

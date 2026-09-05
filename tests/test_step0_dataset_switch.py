@@ -250,17 +250,17 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert page._channel_colors == {"CD3": (1.0, 0.0, 0.0)}
     assert page._full_image_source == "original"
     # Full-image-first: a committed switch LANDS on the new slide's full
-    # image (raw, DAPI), and the virtual patch -- which could only
-    # hold the OLD slide's pixels -- is dropped, cache included: its keys
-    # are (channel, rectangle, level, params) and every one of those can
-    # repeat across two slides.
+    # image, and the compare strip -- a whole second backend holding the
+    # OLD slide's provider, three controllers, their tile pools and two
+    # caches whose keys carry a channel and a method but say nothing about
+    # which SLIDE they came from -- is torn down entirely.
     assert page._compare_mode() is False
-    assert page._compare_region is None
-    assert page._compare_payload is None
-    assert page._compare_cache == {}
+    assert page._compare_strip_widget.built is False
+    assert page._compare_strip_widget.stacks is None
     assert page._compare_opened is False
-    assert page._compare_entry_view_rect is None
-    assert page._compare_opened is False
+    assert page._compare_entry_full_camera is None
+    assert page._compare_entry_point is None
+    assert page._compare_entry_scale is None
 
 
 def test_the_clearing_happens_before_the_new_loader_is_bound(app, tmp_path,

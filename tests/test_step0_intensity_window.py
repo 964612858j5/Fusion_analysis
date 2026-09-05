@@ -291,20 +291,6 @@ def test_the_button_lives_next_to_the_channel_list(app):
     assert btn not in [row.itemAt(i).widget() for i in range(row.count())]
 
 
-def _show_virtual_patch(page, payload=None):
-    """Put a virtual patch on the three panels and render it.
-
-    The panels hold ONE in-memory array each, so "did the page push the
-    mapping onto them" is answered by looking at the real `ImageItem`s --
-    their levels and their lookup table -- rather than at a stand-in for a
-    strip object. `_refresh_preview_display` needs nothing else: no slide,
-    no provider, no worker.
-    """
-    page._compare_payload = payload if payload is not None else _payload()
-    page._refresh_preview_display(keep_zoom=True)
-    return page._compare_payload
-
-
 # ── 2. the controls edit the one mapping every view reads ────────────────
 
 def test_moving_min_max_gamma_moves_every_view(app):
@@ -320,15 +306,12 @@ def test_moving_min_max_gamma_moves_every_view(app):
     wb._sp_gamma.setValue(1.75)
 
     assert page._display_mapping_for("CD3") == pytest.approx((120.0, 880.0, 1.75))
-    # the compare panels -- one in-memory array each, so the mapping is
-    # `levels` on the item and the gamma is baked into its lookup table
-    _show_virtual_patch(page)
-    expected_lut = build_display_lut(page._channel_color("CD3"), 1.75)
-    for item in page._preview_imgs:
-        assert tuple(item.levels) == pytest.approx((120.0, 880.0))
-        assert np.array_equal(item.lut, expected_lut)
     # the full image
     assert stack.controller.mappings[-1] == pytest.approx((120.0, 880.0, 1.75, "CD3"))
+    # The compare panels read the same mapping. They are three tile viewers
+    # now rather than three in-memory arrays, so the assertion that the page
+    # pushes it onto them lives with them, in
+    # test_step0_compare_tiles.py::test_the_display_mapping_reaches_all_three.
 
 
 def test_the_dapi_channels_mapping_reaches_the_overlay(app):
@@ -615,11 +598,11 @@ def test_the_compare_header_says_where_and_offers_the_patch(app):
 
     assert widgets == [page._compare_where_lbl, page._btn_snapshot_patch], (
         [w.__class__.__name__ for w in widgets])
-    # `_sync_zoom` is NOT in this list: the three panels are one camera and
-    # the mirroring that makes them one is the panel design, not a control.
-    # What is gone is the BUTTONS -- the lock is permanent and has no switch,
-    # and there is no per-panel reset and no per-panel ⤢.
-    for gone in ("_btn_lock_zoom", "_reset_all_views",
+    # The three panels are one camera; the mirroring that makes them one is
+    # the strip's, not a control on this row. What is gone is the BUTTONS --
+    # the lock is permanent and has no switch, and there is no per-panel
+    # reset and no per-panel ⤢.
+    for gone in ("_btn_lock_zoom", "_reset_all_views", "_sync_zoom",
                  "_reset_single_view", "_full_image_buttons",
                  "_dec_process_btn", "_preview_stack", "_compare_level_lbl",
                  "_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
@@ -665,24 +648,19 @@ def test_the_dapi_layer_starts_on_in_both_views(app):
     # Marker channels are untouched by the change.
     assert page._btn_show_marker.isChecked() is True
 
-    # compare panels: the nucleus is drawn
-    _show_virtual_patch(page)
-    assert all(it is not None and it.isVisible()
-               for it in page._preview_nuc_imgs)
-
     # full image: the overlay is asked for
     page._show_full_image()
     assert stack.overlay.enabled and stack.overlay.enabled[-1] is True
 
-    # ...and clearing the row turns the layer off in BOTH views.
+    # ...and clearing the row turns the layer off.
     cb.setChecked(False)
     assert page._btn_show_nucleus.isChecked() is False
     assert page._btn_full_nucleus.isChecked() is False
-    _show_virtual_patch(page)
-    assert all(it is None or not it.isVisible()
-               for it in page._preview_nuc_imgs)
     page._show_full_image()
     assert stack.overlay.enabled[-1] is False
+    # The three compare panels follow the same switch; asserted over their
+    # own `RawOverlayLayer`s in
+    # test_step0_compare_tiles.py::test_the_dapi_checkbox_drives_all_three_panels.
 
 
 def test_a_dataset_reload_puts_the_dapi_layer_back_to_on(app):

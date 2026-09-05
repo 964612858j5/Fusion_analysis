@@ -2718,6 +2718,7 @@ class ExploreController(QtCore.QObject):
         pixel is simply the wrong data -- unlike a method/param change,
         there is no "still technically raw and fine" fallback)."""
         channel_changed = channel is not _UNSET and channel != self.channel
+        atomic_kind = None
         atomic_swapped = False
         overview_ready = True
         if channel is not _UNSET:
@@ -2750,7 +2751,8 @@ class ExploreController(QtCore.QObject):
                 # visibility update, with no queued signal in between. The
                 # normal request path would leave at least one painted
                 # frame showing raw before the corrected tiles land.
-                atomic_swapped = self._try_atomic_cached_channel_swap()
+                atomic_kind = self._try_atomic_cached_channel_swap()
+                atomic_swapped = atomic_kind is not None
                 if not atomic_swapped:
                     self._raw_pool.clear()
                     self._precise_pool.clear()
@@ -2788,7 +2790,15 @@ class ExploreController(QtCore.QObject):
             # generation twice and register duplicate waiters for the same
             # keys. Harmless -- the scheduler is single-flight -- but it
             # muddles the raw-before-precise ordering the tick relies on.
-            need_raw = channel_changed and not atomic_swapped
+            #
+            # A RAW atomic swap (a method-less selection, whose visible
+            # image IS the raw layer) still comes through here: what it
+            # filled is the current level's visible set, and this call's
+            # own missing-tiles filter turns that into zero visible reads
+            # while still issuing the level+1 underlay and the prefetch
+            # ring -- neither of which the swap can supply and both of
+            # which the next zoom-out depends on.
+            need_raw = channel_changed and atomic_kind != "precise"
             if need_raw:
                 # Do not wait for the next motion tick: the new channel has
                 # nothing pooled, so its raw tiles must be asked for now.
@@ -2821,66 +2831,98 @@ class ExploreController(QtCore.QObject):
             # consumer can never reach its own SETTLED.
             self._settle_timer.start(self.settle_ms)
 
-    def _try_atomic_cached_channel_swap(self) -> bool:
-        """If every visible tile of the NEW selection is already in the
-        corrected cache, replace the display in one GUI event: clear the old
-        channel's layers and pool the cached results synchronously, so the
-        single `_update_layer_visibility()` at the end of `set_selection`
-        publishes them. Returns True when it did.
+    def _try_atomic_cached_channel_swap(self):
+        """If every visible tile of the NEW selection is already cached,
+        replace the display in one GUI event: clear the old channel's
+        layers and pool the cached tiles synchronously, so the single
+        `_update_layer_visibility()` at the end of `set_selection`
+        publishes them.
+
+        Returns `"precise"`, `"raw"` or None -- WHICH layer was filled, not
+        merely whether one was, because `set_selection` treats the two
+        differently (see its `need_raw`). Both count as a swap and both are
+        truthy, so a caller that only asks "did it swap?" is unchanged.
 
         Why synchronous: the normal path issues requests and receives them
-        through a queued signal, so at least one frame can be painted with
-        the raw layer showing before the corrected tiles arrive -- a raw
-        flash on a switch to a channel that was already fully prepared.
+        through a queued signal, so even a pure cache HIT lands in a later
+        GUI turn and is painted in a later frame. That is the whole of the
+        "the three compare panels appear one after another" the compare
+        strip's staged publication exists to remove -- measured on the real
+        59040x35520 slide with every CorrectionKey resident and correction
+        compute 0, the three final images still reached the screen 173 ms
+        apart at level 1.
 
-        Restricted to `self.level == 0` deliberately. These tiles are
-        quantised now and a pooled tile keeps its quantisation; the new
-        channel's gain table is not calibrated yet, so
-        `_display_gain_for_level` returns 1.0 for every level. At level 0
-        that is also the FINAL answer -- level 0's calibrated gain is 1.0 by
-        construction -- so nothing shifts later. At a coarser level the
-        eventual gain would differ and these tiles would sit at a different
-        brightness from their neighbours, so there we fall through to the
-        normal path.
+        WHICH LAYER. A selection with a method wants corrected pixels, so
+        its visible image is the precise pool and the corrected cache is
+        what has to be complete. A selection WITHOUT one (the compare
+        strip's Original panel) never produces a precise tile at all --
+        `_wants_precise()` is false, so `covered` is false and `raw_on` is
+        true forever -- and its visible image IS the raw pool. Refusing to
+        swap it, as this used to, left that panel taking the queued raw
+        path while the other two swapped: 71.4 ms behind them at level 0
+        with everything prepared.
 
-        SCOPE, stated so it is not over-claimed: "switching to a fully
-        cached corrected channel shows no raw flash" holds at LEVEL 0 ONLY.
-        At a coarser level the switch takes the ordinary raw/provisional
-        path, which is the safe behaviour, not the seamless one. Any
-        acceptance run that exercises coarser levels must say so.
+        NO LEVEL RESTRICTION. This used to refuse anything but level 0, on
+        the grounds that "these tiles are quantised now and a pooled tile
+        keeps its quantisation" while the new channel's gain table is not
+        calibrated yet. That has not been true since the corrected pixels
+        became float32: `_prepare_corrected` stores the corrected values
+        WITHOUT the per-level display gain, the gain lives in the item's
+        `levels` (`_corrected_levels`), and `_handle_floor_result`
+        re-applies `_corrected_levels_fn()` to every pooled entry the
+        moment the new channel's gain table lands. A coarse-level tile
+        swapped in here is therefore displayed at gain 1.0 until the floor
+        arrives and then re-levelled -- which is EXACTLY what the same tile
+        arriving through the queued path does, since it too lands before
+        the floor. The restriction was buying nothing and costing the
+        seamless switch at every level but one.
         """
-        if not self._wants_precise() or self.level != 0:
-            return False
         if not self._overview_matches_selection():
-            # The range these would be quantised against is not this
+            # The range these would be displayed against is not this
             # channel's; see `_blocked_on_overview`.
-            return False
+            return None
         if not self._visible_tiles or self._current_bbox is None:
-            return False
-        cache = getattr(self.scheduler, "corrected_cache", None)
+            return None
+
+        wants_precise = self._wants_precise()
+        cache = getattr(self.scheduler,
+                        "corrected_cache" if wants_precise else "raw_cache",
+                        None)
         if cache is None:
-            return False
+            return None
 
         pending = []
         for tx, ty in self._visible_tiles:
-            key = self._make_correction_key(tx, ty)
+            key = (self._make_correction_key(tx, ty) if wants_precise
+                   else self._make_raw_key(tx, ty))
             arr = cache.get(key)
             if arr is None:
-                return False
+                return None
             pending.append((tx, ty, key, arr))
 
+        # Nothing above this line mutates anything: the probe is read-only
+        # and every failure returns before the old channel's pixels are
+        # touched, so a refused swap leaves the caller free to take the
+        # ordinary path with the display exactly as it found it.
         self._raw_pool.clear()
         self._precise_pool.clear()
         ts = self.grid.tile_size
         ds_y, ds_x = self._downsample_yx(self.level)
+        pool = self._precise_pool if wants_precise else self._raw_pool
+        prepare = self._prepare_corrected if wants_precise else self._prepare_raw
         for tx, ty, key, arr in pending:
-            gray = self._prepare_corrected(arr)
+            gray = prepare(arr)
             rect = ExploreView.world_rect(
                 ty * ts, tx * ts, arr.shape[0], arr.shape[1], ds_y, ds_x)
-            self._precise_pool.put(self.level, tx, ty, rect, gray, key)
-        self.stats["precise_tiles_blitted"] += len(pending)
-        self.stats["atomic_channel_swaps"] = self.stats.get("atomic_channel_swaps", 0) + 1
-        return True
+            pool.put(self.level, tx, ty, rect, gray, key)
+        self.stats["precise_tiles_blitted" if wants_precise
+                   else "raw_tiles_blitted"] += len(pending)
+        self.stats["atomic_channel_swaps"] = self.stats.get(
+            "atomic_channel_swaps", 0) + 1
+        if not wants_precise:
+            self.stats["atomic_raw_channel_swaps"] = self.stats.get(
+                "atomic_raw_channel_swaps", 0) + 1
+        return "precise" if wants_precise else "raw"
 
     def _enter_provisional(self):
         self._provisional = True

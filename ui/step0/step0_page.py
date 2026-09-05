@@ -1077,6 +1077,22 @@ class Step0Page(QWidget):
                 page._on_compare_camera_changed()
 
         self._compare_strip_widget.camera_changed.connect(_on_compare_camera)
+
+        # The panels were measured when the row was clicked, which is right
+        # only while a click and a publication are the same event. They are
+        # not any more: a switch to a channel that is not fully prepared
+        # keeps the PREVIOUS channel on screen until all three panels can
+        # change together, so a measurement taken at click time would be
+        # the previous channel's numbers under the new channel's labels.
+        # The strip says when the three pictures have actually committed,
+        # and that -- not the click -- is what plans a measurement.
+        def _on_compare_published(_ref=_page_ref):
+            page = _ref()
+            if page is not None:
+                page._schedule_compare_metrics()
+
+        self._compare_strip_widget.publication_changed.connect(
+            _on_compare_published)
         pvl.addWidget(self._compare_strip_widget, stretch=1)
 
         self._preview_status = QLabel(
@@ -5823,6 +5839,13 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         if not channel or strip is None or not strip.built:
             return None
+        if getattr(strip, "pending", False):
+            # A switch is prepared but not published: the three panels are
+            # still on the PREVIOUS channel, and this page's labels already
+            # name the new one. There is nothing here that can honestly be
+            # measured, so the labels stay at a dash and the strip's
+            # `publication_changed` plans the one measurement that counts.
+            return None
         panels = []
         for controller in strip.controllers:
             if controller is None:
@@ -5833,6 +5856,14 @@ class Step0Page(QWidget):
                            getattr(controller, "method", None),
                            tuple(getattr(controller, "params", ()) or ())))
         if len(panels) != len(COMPARE_SOURCES):
+            return None
+        if any(panel[0] != channel for panel in panels):
+            # The panels are not showing the channel these labels name.
+            # The tuple would still be self-consistent -- it carries both
+            # facts -- so it would compare equal to itself at fire time and
+            # write one channel's numbers under another's heading. Whatever
+            # moved the panels out from under the page, there is nothing
+            # here that can honestly be measured.
             return None
         return (int(self._dataset_gen), channel, tuple(panels))
 
@@ -5857,6 +5888,15 @@ class Step0Page(QWidget):
             # than left to fire into a page that has moved on.
             if timer is not None:
                 timer.stop()
+            strip = getattr(self, "_compare_strip_widget", None)
+            if strip is not None and getattr(strip, "pending", False):
+                # Except for the one case where there IS something on
+                # screen and it is not what the labels name: a pending
+                # channel switch. The numbers must come down, or they sit
+                # there describing the previous channel under the new
+                # channel's heading.
+                for label, _source, name in self._compare_metric_labels():
+                    label.setText(f"{name} → —")
             return
         # The numbers on screen belong to the PREVIOUS channel from the
         # instant the panels move off it, so they come down now. A dash is

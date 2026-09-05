@@ -1569,6 +1569,12 @@ def test_a_cold_channel_switch_wakes_all_three_panels(real_strip):
 
     Before the fix the first assertion passed and the loop failed on panels
     1 and 2 -- for good, not just for a moment.
+
+    The switch is now STAGED (`CompareStrip.set_channel`), so a cold target
+    reaches the panels after its preparation rather than during it -- which
+    is why this drains until the publication instead of a fixed 800 ms. The
+    thing under test is unchanged: all three end up holding the new
+    channel's overview, and none of them is left behind.
     """
     page, strip, _provider = real_strip
     _drain()
@@ -1578,7 +1584,11 @@ def test_a_cold_channel_switch_wakes_all_three_panels(real_strip):
 
     page.current_channel = "CD20"
     page._sync_compare_to_channel()
-    _drain(800)
+    for _ in range(40):
+        if strip.displayed_channel == "CD20":
+            break
+        _drain(100)
+    _drain(200)
 
     for i, controller in enumerate(strip.controllers):
         assert controller.channel == "CD20"
@@ -2919,3 +2929,630 @@ def test_hot_requests_never_outrank_the_foreground(real_strip):
 
     assert any(p >= HOT_PRIORITY_BASE for p in seen), "no HOT request at all"
     assert any(p < HOT_PRIORITY_BASE for p in seen), "no foreground request"
+
+
+# ── 15. the staged publication: three final images, one moment ───────────
+#
+# Compare exists so three results of the SAME pixels can be judged against
+# each other. A channel switch that reaches the three panels one at a time
+# breaks exactly that: "TopHat came up first" is read as "TopHat is
+# different", and the user reported it in those words.
+#
+# Measured on the real 59040x35520 slide (29 channels, CD22 -> TIM3) with a
+# paint-level probe and a 16 ms sampler, on the code this section replaced:
+#
+#     level 0, everything HOT-prepared    401 / 401 / 473 ms   spread  71 ms
+#     level 1, everything HOT-prepared    445 / 523 / 618 ms   spread 173 ms
+#     level 0, cuCIM evicted              413 / 518 / 700 ms   spread 287 ms
+#     level 1, cuCIM+TopHat evicted       376 / 577 / 577 ms   spread 200 ms
+#
+# The first two rows had correction compute 0 and every CorrectionKey a
+# cache hit: nothing was computed and nothing was slow. The serialisation
+# was in DELIVERY -- three `set_selection` calls, three queued cache-hit
+# callbacks, three GUI turns, three frames. `_try_atomic_cached_channel_swap`
+# removed it for TopHat and cuCIM at level 0 only, and never for Original,
+# which has no method and whose visible image is its raw layer.
+#
+# So: a read-only preflight decides whether the target is completely ready;
+# if it is, all three move in ONE GUI turn; if it is not, the three panels
+# keep the OLD channel's three complete images and say so, the missing
+# tiles are fetched at foreground priority into the shared caches only, and
+# the same one-turn publication runs when the last of them lands.
+
+
+class _StagedLoader(_LowresLoader):
+    _CHANNELS = ["DAPI", "CD22", "TIM3", "PD1"]
+
+
+class _StagedProvider(_RealishProvider):
+    channel_names = ["DAPI", "CD22", "TIM3", "PD1"]
+
+
+@pytest.fixture
+def staged(app, monkeypatch):
+    """A real three-controller strip over four channels, HOT stopped.
+
+    HOT is off because it is not what this section is about and because it
+    would keep re-warming the very caches these tests empty to create a
+    cold target. The preparation under test is the strip's OWN, foreground
+    one.
+    """
+    from block01.viewer import raw_tile_provider as rtp
+
+    provider = _StagedProvider()
+    monkeypatch.setattr(rtp, "RawTileProvider", lambda _path: provider)
+
+    page = sp.Step0Page()
+    page.loader = _StagedLoader()
+    page.ome_path = "/fake/slide.ome.tif"
+    page.patches = []
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page.current_channel = "CD22"
+    page._explore_tab = _Tab(_Stack())
+    page.resize(1200, 800)
+    page.show()
+    QtTest.QTest.qWait(30)
+    page._compare_strip_widget._stack_factory = cs.build_compare_stacks
+    strip = _enter(page)
+    QtTest.QTest.qWait(60)
+    strip.stop_hot()
+    _drain(200)
+    try:
+        yield page, strip, provider
+    finally:
+        try:
+            strip.teardown(wait_for_floor=False)
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+def _channels(strip):
+    return [c.channel for c in strip.controllers]
+
+
+def _params_for(page):
+    return page._compare_params_for
+
+
+def _publish_and_wait(strip, page, channel, ms=4000):
+    strip.set_channel(channel, params_for=_params_for(page))
+    for _ in range(max(1, ms // 100)):
+        if not strip.pending:
+            break
+        _drain(100)
+    _drain(120)
+    return strip.displayed_channel == channel
+
+
+def _warm(strip, page, channel, ms=4000):
+    """Drive a switch to `channel` through to publication, then come back.
+
+    Leaves `channel` fully prepared in the shared caches and the panels
+    where they started, which is the state a "HOT has already prepared it"
+    test needs and the only honest way to reach it: the same requests, the
+    same keys, the same publication.
+    """
+    was = strip.displayed_channel
+    assert _publish_and_wait(strip, page, channel, ms), (
+        f"warming {channel} never published")
+    if was is not None and was != channel:
+        assert _publish_and_wait(strip, page, was, ms)
+
+
+class _Sampler(QtCore.QObject):
+    """Every 16 ms, what channel is each of the three panels showing?"""
+
+    def __init__(self, strip, parent=None):
+        super().__init__(parent)
+        self._strip = strip
+        self.frames = []
+        self._timer = QtCore.QTimer(self)
+        self._timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        self._tick()
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self._tick()
+
+    def _tick(self):
+        self.frames.append(tuple(_channels(self._strip)))
+
+    @property
+    def mixed(self):
+        return [f for f in self.frames if len(set(f)) != 1]
+
+
+def _drop_corrected(strip, channel, methods=("tophat", "cucim")):
+    """Evict `channel`'s corrected tiles for `methods`. Returns how many."""
+    cache = strip.stacks.scheduler.corrected_cache
+    dropped = 0
+    with cache._lock:
+        for key in [k for k in list(cache._store)
+                    if getattr(k, "channel", None) == channel
+                    and getattr(k, "method", None) in methods]:
+            arr = cache._store.pop(key)
+            cache._bytes -= arr.nbytes
+            dropped += 1
+    return dropped
+
+
+def _drop_raw(strip, channel):
+    cache = strip.stacks.scheduler.raw_cache
+    dropped = 0
+    with cache._lock:
+        for key in [k for k in list(cache._store)
+                    if getattr(k, "channel", None) == channel]:
+            arr = cache._store.pop(key)
+            cache._bytes -= arr.nbytes
+            dropped += 1
+    return dropped
+
+
+# -- 15.1  a prepared target: one GUI turn, no mixed frame ----------------
+
+def test_a_prepared_switch_moves_all_three_inside_one_call(staged):
+    """The fast path IS the atomicity: the three `set_selection` calls
+    happen inside `set_channel`, with nothing between them."""
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    assert not strip.pending
+
+    turns = []
+    for controller in strip.controllers:
+        real = controller.set_selection
+
+        def watched(*a, _r=real, **k):
+            turns.append(len(turns))
+            return _r(*a, **k)
+
+        controller.set_selection = watched
+
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert not strip.pending, "a prepared target went through the cold path"
+    assert len(turns) == 3, "not all three panels were moved"
+    assert _channels(strip) == ["TIM3"] * 3
+
+
+def test_no_16ms_sample_ever_catches_two_channels_in_the_panels(staged):
+    """The product statement, sampled the way the user's eye would."""
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    sampler = _Sampler(strip, parent=strip)
+    sampler.start()
+    _drain(120)
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    _drain(400)
+    sampler.stop()
+    assert sampler.frames, "the sampler never ran"
+    assert not sampler.mixed, f"mixed frames: {sampler.mixed[:5]}"
+    assert sampler.frames[-1] == ("TIM3",) * 3
+
+
+def test_a_prepared_switch_computes_nothing(staged):
+    """Cache hit means cache hit: no CorrectionKey is recomputed, and the
+    provider is not asked for a tile it has already given."""
+    page, strip, provider = staged
+    _warm(strip, page, "TIM3")
+    before = len(provider.tile_reads)
+    keys_before = set(_corrected_keys(strip))
+
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    _drain(150)
+
+    assert not strip.pending
+    assert _channels(strip) == ["TIM3"] * 3
+    new = set(_corrected_keys(strip)) - keys_before
+    assert not [k for k in new if k.channel == "TIM3"], (
+        "a prepared channel was corrected again")
+    assert len(provider.tile_reads) == before, (
+        "a prepared channel was read again")
+
+
+# -- 15.2/15.3/15.4  partial readiness never publishes early --------------
+
+@pytest.mark.parametrize("missing", ["cucim", "tophat", "both", "raw"])
+def test_a_partly_ready_target_keeps_the_old_three_images(staged, missing):
+    """Original ready and TopHat/cuCIM not, TopHat ready and cuCIM not, and
+    the raw-only case the Original panel owns: none of them may put one or
+    two panels on the new channel."""
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    if missing == "both":
+        assert _drop_corrected(strip, "TIM3")
+    elif missing == "raw":
+        assert _drop_raw(strip, "TIM3")
+    else:
+        assert _drop_corrected(strip, "TIM3", methods=(missing,))
+
+    sampler = _Sampler(strip, parent=strip)
+    sampler.start()
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending, "a target with a hole in it published anyway"
+    assert _channels(strip) == ["CD22"] * 3
+    assert strip.displayed_channel == "CD22"
+    assert strip.pending_text() == "Preparing TIM3 — still showing CD22"
+    _drain(150)
+    sampler.stop()
+    assert not sampler.mixed, f"mixed frames: {sampler.mixed[:5]}"
+
+
+def test_the_publication_waits_for_the_last_of_the_three(staged):
+    """Scrambled completion order: whatever lands first, nothing is
+    published until nothing is missing."""
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+
+    seen = []
+    real = strip._settle_pending
+
+    def watched():
+        if strip.pending:
+            missing = strip._missing_for("TIM3", _params_for(page))
+            seen.append((len(missing or ()), tuple(_channels(strip))))
+        return real()
+
+    strip._settle_pending = watched
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    for _ in range(40):
+        if not strip.pending:
+            break
+        _drain(100)
+    _drain(150)
+
+    assert _channels(strip) == ["TIM3"] * 3
+    assert seen, "nothing was ever delivered"
+    assert all(panels == ("CD22",) * 3 for _n, panels in seen), (
+        "a panel moved to TIM3 while the plan was still short")
+
+
+# -- 15.5  latest wins ----------------------------------------------------
+
+def test_a_third_click_wins_and_the_second_never_publishes(staged):
+    """CD22 -> TIM3 -> PD1: TIM3 is dropped, only PD1 is published."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    published = []
+    strip.publication_changed.connect(
+        lambda: published.append(strip.displayed_channel))
+
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending and strip.pending_channel == "TIM3"
+    strip.set_channel("PD1", params_for=_params_for(page))
+    assert strip.pending_channel == "PD1"
+    for _ in range(40):
+        if not strip.pending:
+            break
+        _drain(100)
+    _drain(200)
+
+    assert _channels(strip) == ["PD1"] * 3
+    assert "TIM3" not in published, (
+        f"a superseded target was published: {published}")
+
+
+def test_a_superseded_targets_failure_does_not_sink_the_current_one(staged):
+    """The serial is not decoration. A delivery belongs to the plan that
+    asked for it, and a FAILING one from a plan the user has moved off
+    would otherwise take down the plan they are actually waiting for --
+    the panels would stop preparing PD1 and say a preparation had failed,
+    because a TIM3 tile the scheduler was already running came back with
+    an error."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    stale_serial = strip._pending["serial"]
+
+    _drop_corrected(strip, "PD1")
+    _drop_raw(strip, "PD1")
+    strip.set_channel("PD1", params_for=_params_for(page))
+    assert strip.pending and strip.pending_channel == "PD1"
+
+    class _Failed:
+        error = "the reader gave up"
+
+    strip._on_pending_tile(stale_serial, _Failed())
+
+    assert strip.pending, "a superseded plan's failure cancelled the live one"
+    assert strip.pending_channel == "PD1"
+    assert strip.pending_text() == "Preparing PD1 — still showing CD22"
+
+
+# -- 15.6/15.7  a pending plan is only good for where it was made ---------
+
+def test_a_pan_during_a_pending_switch_replans_for_the_new_viewport(staged):
+    """Publishing from a stale viewport would put the tiles of where the
+    panels WERE on a camera that has moved."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    before = strip._pending["token"]
+    generation = strip._pending["generation"]
+
+    cx, cy, scale = strip.camera(0)
+    strip.set_camera(cx + 900.0, cy + 700.0, scale)
+    QtTest.QTest.qWait(20)
+
+    if strip.pending:
+        assert strip._pending["token"] != before, "the plan was not re-made"
+        assert strip._pending["generation"] != generation
+    assert _channels(strip) in (["CD22"] * 3, ["TIM3"] * 3)
+    if strip.displayed_channel == "TIM3":
+        # If it did publish, it published for the viewport it is on NOW.
+        assert not strip._missing_for("TIM3", _params_for(page))
+
+
+def test_a_parameter_edit_during_a_pending_switch_voids_the_old_numbers(staged):
+    """The parameters are in the CorrectionKey, so an edit makes every key
+    the plan prepared a key nobody will ask for again."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    before = strip._pending["token"]
+
+    def other_params(source):
+        base = page._compare_params_for(source)
+        return tuple(int(v) + 7 for v in base)
+
+    strip.set_params(other_params)
+    assert strip.pending, "a parameter edit published a half-prepared target"
+    assert strip._pending["token"] != before
+    assert _channels(strip) == ["CD22"] * 3
+    # ...and the plan the strip is now working to is the NEW numbers'.
+    assert strip._missing_for("TIM3", other_params) is not None
+
+
+# -- 15.8  every way compare stops being the view -------------------------
+
+@pytest.mark.parametrize("stop", ["suspend", "leave", "teardown", "dataset"])
+def test_a_pending_switch_is_cancelled_when_compare_stops(staged, stop):
+    """Leaving, a Process/Save hand-off, a dataset switch and teardown all
+    have to leave nothing behind that could publish later."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+
+    if stop == "suspend":
+        strip.suspend("a run", badge="Paused")
+    elif stop == "leave":
+        page._exit_compare_mode()
+    elif stop == "teardown":
+        strip.teardown(wait_for_floor=False)
+    else:
+        strip.set_dataset("/fake/other.ome.tif")
+
+    assert not strip.pending
+    assert strip.pending_text() is None
+    _drain(400)
+    assert not strip.pending
+    if strip.built:
+        assert _channels(strip) == ["CD22"] * 3
+
+
+# -- 15.9/15.10  every level, not just level 0 ----------------------------
+
+@pytest.mark.parametrize("scale", [1.0, 0.5, 0.2])
+def test_a_prepared_switch_is_atomic_at_every_level(staged, scale):
+    """The old atomic swap was LEVEL 0 ONLY, which is why level 1 measured
+    a 173 ms spread on the real slide with nothing left to compute."""
+    page, strip, _p = staged
+    cx, cy, _s = strip.camera(0)
+    strip.set_camera(cx, cy, scale)
+    _drain(300)
+    levels = {c.level for c in strip.controllers}
+    assert len(levels) == 1
+    _warm(strip, page, "TIM3")
+
+    sampler = _Sampler(strip, parent=strip)
+    sampler.start()
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    published_at_once = not strip.pending
+    _drain(200)
+    sampler.stop()
+
+    assert published_at_once, f"level {levels} took the cold path when ready"
+    assert not sampler.mixed
+    assert _channels(strip) == ["TIM3"] * 3
+    swaps = [c.stats.get("atomic_channel_swaps", 0) for c in strip.controllers]
+    assert all(s >= 1 for s in swaps), (
+        f"level {levels}: some panel did not swap synchronously ({swaps})")
+
+
+# -- 15.11  the nucleus overlay is not part of this -----------------------
+
+def test_the_dapi_overlay_is_untouched_by_a_pending_switch(staged):
+    page, strip, _p = staged
+    before = [(o.effective_enabled, o.channel) for o in strip.overlays]
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    assert [(o.effective_enabled, o.channel) for o in strip.overlays] == before
+    for _ in range(40):
+        if not strip.pending:
+            break
+        _drain(100)
+    assert [(o.effective_enabled, o.channel) for o in strip.overlays] == before
+
+
+# -- 15.12  one measurement, and only after the publication ---------------
+
+def test_the_metrics_wait_for_the_publication_and_then_run_once(staged):
+    page, strip, _p = staged
+    runs = _count_metrics(page)
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+
+    page.current_channel = "TIM3"
+    page._sync_compare_to_channel()
+    assert strip.pending
+    assert page._compare_metrics_plan_now() is None, (
+        "a pending switch planned a measurement of the old channel")
+    assert not page._compare_metrics_pending()
+    assert runs == [], "the old channel was measured under the new label"
+
+    for _ in range(40):
+        if not strip.pending:
+            break
+        _drain(100)
+    assert _channels(strip) == ["TIM3"] * 3
+    _quiet()
+    assert len(runs) == 1, f"expected exactly one measurement, got {runs}"
+    assert runs[0] == ("TIM3", ("TIM3", "TIM3", "TIM3"))
+
+
+def test_a_pending_switch_puts_the_numbers_back_to_a_dash(staged):
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    page.current_channel = "TIM3"
+    page._sync_compare_to_channel()
+    _quiet()
+    _drop_corrected(strip, "PD1")
+    _drop_raw(strip, "PD1")
+    page.current_channel = "PD1"
+    page._sync_compare_to_channel()
+    assert strip.pending
+    for label, _source, name in page._compare_metric_labels():
+        assert label.text() == f"{name} → —"
+
+
+# -- 15.13  the words, and the invariant behind them ----------------------
+
+def test_the_panels_never_disagree_with_the_strips_own_heading(staged):
+    """Either the three panels are the displayed channel, or the strip says
+    in words that they are not. There is no third state."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    seen = []
+    for _ in range(40):
+        seen.append((tuple(_channels(strip)), strip.displayed_channel,
+                     strip.pending_text()))
+        if not strip.pending:
+            break
+        _drain(100)
+    _drain(150)
+    seen.append((tuple(_channels(strip)), strip.displayed_channel,
+                 strip.pending_text()))
+    for panels, displayed, words in seen:
+        assert len(set(panels)) == 1, f"panels disagreed: {panels}"
+        assert panels[0] == displayed, (
+            f"panels on {panels[0]} while the strip says {displayed}")
+        if displayed != "TIM3":
+            assert words == "Preparing TIM3 — still showing CD22"
+
+
+def test_a_pending_target_never_writes_into_a_visible_pool(staged):
+    """The preparation is CACHES ONLY: nothing it fetches may be pooled,
+    because a pooled tile is a painted tile."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    for _ in range(6):
+        _drain(60)
+        if not strip.pending:
+            break
+        for controller in strip.controllers:
+            for pool in (controller._raw_pool, controller._precise_pool):
+                for entry in pool.entries.values():
+                    key = entry.key
+                    if key is not None:
+                        assert getattr(key, "channel", None) != "TIM3", (
+                            "a pending target's tile was pooled")
+
+
+# -- 15.14  the preflight itself ------------------------------------------
+
+def test_the_preflight_names_the_overview_as_well_as_the_tiles(staged):
+    """Cached tiles are not enough: without the target's overview record
+    its display range is unknown and nothing may be drawn."""
+    page, strip, _p = staged
+    _warm(strip, page, "TIM3")
+    assert not strip._missing_for("TIM3", _params_for(page))
+
+    store = strip.controllers[0]._overview_store
+    for key in [k for k in store.cache if k[1] == "TIM3"]:
+        del store.cache[key]
+
+    missing = strip._missing_for("TIM3", _params_for(page))
+    assert missing, "an evicted overview record left the target 'ready'"
+    assert ("overview", "TIM3") in missing
+
+
+def test_the_preflight_reads_nothing_and_requests_nothing(staged):
+    """It is a cache probe. If it were not, running it would be a cost the
+    fast path could not afford."""
+    page, strip, provider = staged
+    _drop_corrected(strip, "TIM3")
+    reads = len(provider.reads) + len(provider.tile_reads)
+    asked = []
+    real_request = strip.stacks.scheduler.request
+    strip.stacks.scheduler.request = lambda r, cb: asked.append(r)
+    try:
+        strip._missing_for("TIM3", _params_for(page))
+        strip.pending_token("TIM3", _params_for(page))
+    finally:
+        strip.stacks.scheduler.request = real_request
+    assert asked == []
+    assert len(provider.reads) + len(provider.tile_reads) == reads
+
+
+def test_a_pending_target_is_asked_for_above_the_neighbour_band(staged):
+    """Foreground: the user is waiting on this channel, so nothing HOT
+    queues may be served before it."""
+    from block01.viewer.multichannel_prefetch import HOT_PRIORITY_BASE
+
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    seen = []
+    real_request = strip.stacks.scheduler.request
+
+    def watching(req, callback):
+        seen.append(req.priority)
+        return real_request(req, callback)
+
+    strip.stacks.scheduler.request = watching
+    try:
+        strip.set_channel("TIM3", params_for=_params_for(page))
+    finally:
+        strip.stacks.scheduler.request = real_request
+
+    assert seen, "a cold target asked for nothing"
+    assert max(seen) < HOT_PRIORITY_BASE, (
+        f"a pending target was queued in the neighbour band: {seen}")
+
+
+def test_a_failed_preparation_keeps_the_old_three_images(staged):
+    """A target that cannot be prepared must not take the panels down with
+    it, and must not leave two channels mixed across the three."""
+    page, strip, _p = staged
+    _drop_corrected(strip, "TIM3")
+    _drop_raw(strip, "TIM3")
+    strip.set_channel("TIM3", params_for=_params_for(page))
+    assert strip.pending
+    strip._fail_pending("the reader said no")
+
+    assert not strip.pending
+    assert _channels(strip) == ["CD22"] * 3
+    assert "still showing CD22" in strip.pending_text()
+    _drain(300)
+    assert _channels(strip) == ["CD22"] * 3

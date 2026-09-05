@@ -48,6 +48,9 @@ import weakref
 
 from PyQt5 import QtCore, QtWidgets
 
+from ...viewer.tile_types import (CorrectionKey, RawKey, TileAddress,
+                                  TileRequest, effective_param)
+
 # Left to right, and the same order (and the same names) as the full
 # image's own method switch, so "the middle panel" and "the TopHat button"
 # cannot come to mean different things.
@@ -55,6 +58,17 @@ COMPARE_SOURCES = ("original", "tophat", "cucim")
 COMPARE_METHODS = {"original": None, "tophat": "tophat", "cucim": "cucim"}
 COMPARE_TITLES = {"original": "Original", "tophat": "TopHat",
                   "cucim": "cucim"}
+
+# The priority a PENDING channel switch's own tiles are asked for at.
+#
+# Zero is the top tier of the strip's shared scheduler -- ahead of the
+# visible corrected batch (`PRECISE_CURRENT_BASE_PRIORITY` 100), the
+# current level's raw batch (`RAW_CURRENT_BASE_PRIORITY` 200) and, by three
+# orders of magnitude, of neighbour preparation (`HOT_PRIORITY_BASE`
+# 5000). It is the foreground: the user is looking at a strip that says it
+# is preparing this channel, and nothing else queued on this scheduler is
+# more urgent than the thing they are waiting for.
+COMPARE_PENDING_PRIORITY = 0
 
 
 class CompareStacks:
@@ -308,6 +322,25 @@ class CompareStrip(QtWidgets.QWidget):
     # each produce a page-level redraw.
     camera_changed = QtCore.pyqtSignal()
 
+    # ONE notification per COMMITTED channel switch, emitted after all three
+    # panels have been moved and before the event loop gets a chance to
+    # paint. It is what the page hangs "measure the panels" off: while a
+    # switch is pending the three panels are showing the PREVIOUS channel,
+    # and a measurement taken then would be the previous channel's numbers
+    # under the new channel's labels.
+    publication_changed = QtCore.pyqtSignal()
+
+    # The pending state was entered, re-planned or left. Carries nothing:
+    # `pending_text()` is the question a listener actually has.
+    pending_changed = QtCore.pyqtSignal()
+
+    # A pending tile came back. Scheduler callbacks fire on a COMPUTE WORKER
+    # thread; every other path in this viewer marshals such a callback to
+    # the GUI thread through a queued signal before touching state, and this
+    # one must too -- `_on_pending_tile` re-runs the readiness probe and can
+    # publish, which touches three views.
+    _pending_tile = QtCore.pyqtSignal(int, object)
+
     def __init__(self, page=None, stack_factory=build_compare_stacks,
                  parent=None):
         super().__init__(parent)
@@ -330,6 +363,27 @@ class CompareStrip(QtWidgets.QWidget):
         self._hot = None
         self._hot_specs_provider = None
 
+        # ── the staged publication (see the "one selection" section) ─────
+        # What the three panels ARE showing, as opposed to what the page
+        # has asked for. They differ only while a switch is pending.
+        self._displayed_channel = None
+        self._displayed_params_for = None
+        self._displayed_tint = None
+        # The pending switch, or None. `_pending_serial` is the latest-wins
+        # token: every plan carries the serial it was made under and a
+        # delivery whose serial has moved on is dropped, so a run of clicks
+        # can only ever publish the last one.
+        self._pending = None
+        self._pending_serial = 0
+        self._pending_gen_n = 0
+        self._pending_error = None
+        # The controller whose `overview_prepared` a pending switch is
+        # listening to, or None. Held so the connection is made at most
+        # once and dropped before the controllers are.
+        self._overview_watch = None
+        self._pending_tile.connect(self._on_pending_tile,
+                                   QtCore.Qt.QueuedConnection)
+
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(2)
@@ -341,6 +395,21 @@ class CompareStrip(QtWidgets.QWidget):
         self._placeholder.setWordWrap(True)
         self._placeholder.setStyleSheet("color:#bbb; background:#1c1c1c;")
         self._layout.addWidget(self._placeholder)
+
+        # The one place the strip says, in words, that what is on screen is
+        # NOT what the page's channel list says. Hidden unless a switch is
+        # pending: three panels showing CD22 under a page that has moved to
+        # TIM3 is only honest if it is labelled, and a title that says TIM3
+        # over CD22 pixels with no hint is the state this exists to
+        # prevent.
+        self._pending_lbl = QtWidgets.QLabel("")
+        self._pending_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self._pending_lbl.setWordWrap(True)
+        self._pending_lbl.setStyleSheet(
+            "color:#ffd479;font-size:11px;font-weight:bold;background:#2a2418;"
+            "padding:2px;")
+        self._pending_lbl.setVisible(False)
+        self._layout.addWidget(self._pending_lbl)
 
         self._panes = QtWidgets.QWidget(self)
         panes_lay = QtWidgets.QHBoxLayout(self._panes)
@@ -436,6 +505,12 @@ class CompareStrip(QtWidgets.QWidget):
                 "The full image is unaffected.")
             return None
         self._stacks = stacks
+        # The build IS a publication: the three panels come up on `channel`
+        # already, so that is what they are displaying and what a later
+        # switch is a switch FROM.
+        self._displayed_channel = channel
+        self._displayed_params_for = params_for
+        self._displayed_tint = tint
         for (column, col_lay), view in zip(self._columns, stacks.views):
             view.setParent(column)
             col_lay.addWidget(view, stretch=1)
@@ -451,7 +526,14 @@ class CompareStrip(QtWidgets.QWidget):
         # be issued into a scheduler that is joining its workers, and no
         # slot fires on a controller that is being destroyed.
         self.stop_hot()
+        # Before the scheduler is asked to join its workers: a pending
+        # switch owns a generation on it and a queued `_pending_tile`
+        # delivery that must not reach a strip whose stacks are gone.
+        self._cancel_pending()
         stacks, self._stacks = self._stacks, None
+        self._displayed_channel = None
+        self._displayed_params_for = None
+        self._displayed_tint = None
         self._suspended = False
         if stacks is None:
             return
@@ -507,6 +589,12 @@ class CompareStrip(QtWidgets.QWidget):
             self._apply_camera_to(camera, skip=idx)
         finally:
             self._linking = False
+        # A pending switch was planned for where the panels WERE. This is
+        # the single place every pan, zoom, navigator jump and patch
+        # navigation of the compare panels comes through, so it is the
+        # single place a stale plan is caught -- and it is a no-op when the
+        # token has not actually moved.
+        self._invalidate_pending_on_move()
         self.camera_changed.emit()
 
     def camera(self, idx=0):
@@ -618,8 +706,93 @@ class CompareStrip(QtWidgets.QWidget):
     # ── the shared selection ─────────────────────────────────────────────
 
     def set_channel(self, channel, *, params_for=None, tint=None):
-        """Every panel moves to `channel` together, each keeping its own
-        method and taking that method's current parameter."""
+        """Every panel moves to `channel` TOGETHER, in one publication.
+
+        Three panels exist to be compared, so a channel switch that reaches
+        them one at a time makes "this one loaded first" look like "this
+        algorithm is different". Measured on the real 59040x35520 slide,
+        with 16 ms scene sampling and a paint-level probe, the old
+        one-call-per-panel loop published the three final images:
+
+            level 0, everything HOT-prepared   401 / 401 / 473 ms  (71 ms)
+            level 1, everything HOT-prepared   445 / 523 / 618 ms  (173 ms)
+            level 0, cuCIM evicted             413 / 518 / 700 ms  (287 ms)
+
+        -- with correction compute 0 in the first two. The serialisation
+        was never in the compute layer and never in the paint layer: it was
+        in DELIVERY. Three separate `set_selection` calls each hand their
+        cache hits back through a queued signal, so each lands in its own
+        GUI turn and is painted in its own frame.
+
+        So this is a two-path publication:
+
+        FAST PATH. A read-only preflight (`_missing_for`) asks whether the
+        target is completely ready -- overview record resident, Original's
+        raw tiles for the viewport in the raw cache, TopHat's and cuCIM's
+        exact `CorrectionKey`s in the corrected cache, all at the level the
+        panels are actually on. If it is, the three controllers are moved
+        in ONE GUI turn (`_publish`), each of them swapping its cached
+        viewport in synchronously, with no `processEvents` between them and
+        one label/metrics update at the end. The preflight touches no
+        pixels and issues no request, so this is not slower than the old
+        loop: it is the old loop with a cache probe in front of it.
+
+        COLD/PARTIAL PATH. Otherwise NOTHING on screen changes. The three
+        panels keep the previous channel's three complete images, the strip
+        says `Preparing TIM3 -- still showing CD22` in words, and the
+        missing tiles are asked for at FOREGROUND priority
+        (`COMPARE_PENDING_PRIORITY`) on the strip's own scheduler, under
+        the strip's own generation. Those requests write only to the shared
+        caches and the shared overview store -- never into a visible pool --
+        because a pending target that could paint would be exactly the
+        partial reveal this is here to stop. When the last one lands the
+        fast path runs and all three change at once.
+        """
+        self._pending_serial += 1
+        serial = self._pending_serial
+        self._cancel_pending()
+        if not self.controllers:
+            return
+        params_for = params_for or self._displayed_params_for
+        if tint is None:
+            tint = self._displayed_tint
+
+        if channel == self._displayed_channel:
+            # Not a switch. The row the user clicked may carry different
+            # parameters or a different colour, and those are applied the
+            # way they always were -- there is nothing to stage, and
+            # "Preparing CD22 -- still showing CD22" would be nonsense.
+            self._publish(channel, params_for, tint)
+            return
+
+        missing = self._missing_for(channel, params_for)
+        if missing is None or not missing:
+            # None: readiness is not answerable (no viewport yet, a fake
+            # backend in a test). Publishing straight through is what this
+            # method has always done and is still the right answer -- a
+            # strip that cannot preflight must not become a strip that
+            # cannot switch.
+            self._publish(channel, params_for, tint)
+            return
+        self._enter_pending(serial, channel, params_for, tint, missing)
+
+    # ── the staged publication ───────────────────────────────────────────
+
+    def _publish(self, channel, params_for, tint):
+        """Move all three panels to `channel` in ONE GUI turn.
+
+        The loop itself is unchanged -- it is the same three
+        `set_selection` calls in the same order -- and that is deliberate:
+        atomicity here is a property of the TURN, not of a new mechanism.
+        What makes the turn produce one frame instead of three is that
+        every one of the three finds its tiles in the cache and swaps them
+        in synchronously (`ExploreController._try_atomic_cached_channel_swap`),
+        so no queued delivery is left to arrive afterwards.
+
+        No `processEvents`, no timer, no yield: from the first
+        `set_selection` to the last, Qt is never given the chance to paint.
+        """
+        self._disconnect_overview_watch()
         for source, controller in zip(COMPARE_SOURCES, self.controllers):
             if controller is None:
                 continue
@@ -630,17 +803,431 @@ class CompareStrip(QtWidgets.QWidget):
                                      params=params)
             if tint is not None:
                 controller.set_tint(tint)
+        self._displayed_channel = channel
+        self._displayed_params_for = params_for
+        self._displayed_tint = tint
+        self._clear_pending_banner()
         # AFTER all three, so the specs HOT is given are read once the new
         # channel is the strip's channel. The channel change itself already
         # reaches HOT through the host controller's own signals; this call
         # exists for the case where the row the user clicked also carries
         # different per-channel parameters.
         self.refresh_hot()
+        # A cold publication stopped HOT to give the pending target the
+        # device. Now that the target IS the strip's channel, HOT comes
+        # back and plans the +-1/+-2 neighbourhood around it. Only when it
+        # is actually gone: a live coordinator has already been told, by
+        # the three `set_selection` calls above, that its plan is stale,
+        # and re-mounting logic must not turn every row click into an extra
+        # `replan`.
+        if self._hot is None:
+            self.start_hot()
+        self.publication_changed.emit()
+
+    def pending_text(self):
+        """The words the strip is showing about a pending switch, or None."""
+        if self._pending_error is not None:
+            return self._pending_error
+        if self._pending is None:
+            return None
+        return "Preparing %s — still showing %s" % (
+            self._pending["channel"], self._displayed_channel or "the previous channel")
+
+    @property
+    def pending(self):
+        """True while a channel switch is prepared but not yet published."""
+        return self._pending is not None
+
+    @property
+    def pending_channel(self):
+        return self._pending["channel"] if self._pending else None
+
+    @property
+    def displayed_channel(self):
+        """The channel the three panels ARE showing. Never the pending one."""
+        return self._displayed_channel
+
+    def _enter_pending(self, serial, channel, params_for, tint, missing):
+        """Keep the old three images up and prepare `channel` in the back."""
+        # HOT is a producer of work on the very scheduler the pending
+        # target now needs, and it is the LOW-priority producer: stopping
+        # it cancels its generation, so its queued neighbour tiles are
+        # dropped rather than left competing with the thing the user is
+        # waiting for. It comes back, re-planned around the new channel,
+        # in `_publish`.
+        self.stop_hot()
+        self._pending_gen_n += 1
+        generation = ("compare_pending", self._pending_gen_n)
+        self._pending = {
+            "serial": serial,
+            "channel": channel,
+            "params_for": params_for,
+            "tint": tint,
+            "generation": generation,
+            "overview_wanted": False,
+            "asked": set(),
+            "token": self.pending_token(channel, params_for),
+        }
+        self._pending_error = None
+        self._show_pending_banner()
+        self._request_missing(missing)
+
+    def _request_missing(self, missing):
+        """Ask for exactly what the preflight said was not there.
+
+        CACHES ONLY. These requests are the strip's, not a controller's:
+        nothing they deliver is pooled, drawn or given to a view. The
+        scheduler writes the result into the shared raw/corrected cache and
+        the callback's only job is to re-run the preflight.
+        """
+        pending = self._pending
+        if pending is None:
+            return
+        stacks = self._stacks
+        if stacks is None:
+            return
+        serial = pending["serial"]
+        generation = pending["generation"]
+        overview_channel = None
+        keys = []
+        for item in missing:
+            if item[0] == "overview":
+                overview_channel = item[1]
+            else:
+                keys.append(item[1])
+        if overview_channel is not None and not pending["overview_wanted"]:
+            # A record read is not a scheduler request and so never reaches
+            # `_pending_tile`. Without this the one case where the ONLY
+            # thing missing is the overview -- every tile of the target
+            # already cached, which is precisely what HOT leaves behind for
+            # a channel whose record was evicted -- would wait for a
+            # delivery that is never coming.
+            self._connect_overview_watch()
+            # The one-at-a-time shared overview worker. `live=False`: this
+            # is not the channel any controller is displaying yet, so it
+            # must not evict a displayed controller's own live interest.
+            pending["overview_wanted"] = True
+            host = self._hot_host() or self.controllers[0]
+            try:
+                host.prepare_overview_async(overview_channel)
+            except Exception:                               # noqa: BLE001
+                pass
+        # ONCE PER KEY PER GENERATION. The scheduler is single-flight, so a
+        # second request for a key already in flight is not a second read --
+        # it is a second WAITER, and therefore a second callback, and
+        # therefore a second settle, which asks again for everything still
+        # missing. That feedback loop multiplies the callbacks on every
+        # delivery. `asked` is what breaks it; a re-plan makes a new
+        # generation and starts it empty.
+        asked = pending["asked"]
+        for key in keys:
+            if key in asked:
+                continue
+            request = TileRequest(key=key, generation=generation,
+                                  priority=COMPARE_PENDING_PRIORITY + len(asked))
+            asked.add(key)
+            # Worker thread: emit only (see `_pending_tile`).
+            callback = (lambda result, _serial=serial:
+                        self._pending_tile.emit(_serial, result))
+            try:
+                stacks.scheduler.request(request, callback)
+            except Exception:                               # noqa: BLE001
+                asked.discard(key)
+
+    def _connect_overview_watch(self):
+        """Listen for the shared overview worker's answer, once."""
+        if self._overview_watch is not None:
+            return
+        host = self._hot_host() or (self.controllers or [None])[0]
+        if host is None:
+            return
+        try:
+            host.overview_prepared.connect(self._on_overview_prepared)
+        except Exception:                                   # noqa: BLE001
+            return
+        self._overview_watch = host
+
+    def _disconnect_overview_watch(self):
+        host, self._overview_watch = self._overview_watch, None
+        if host is None:
+            return
+        try:
+            host.overview_prepared.disconnect(self._on_overview_prepared)
+        except (TypeError, RuntimeError):
+            pass
+
+    def _on_overview_prepared(self, _source, channel, _level, ok):
+        pending = self._pending
+        if pending is None or channel != pending["channel"]:
+            return
+        if not ok:
+            self._fail_pending("its overview could not be read")
+            return
+        self._settle_pending()
+
+    def _on_pending_tile(self, serial, result):
+        """GUI thread. One pending tile is in the cache (or failed)."""
+        pending = self._pending
+        if pending is None or serial != pending["serial"]:
+            return
+        error = getattr(result, "error", None)
+        if error is not None and error not in ("cancelled", "stale"):
+            # A target that cannot be prepared must not take the panels
+            # down with it: the old channel's three complete images stay
+            # up, and the words say why.
+            self._fail_pending(error)
+            return
+        self._settle_pending()
+
+    def _settle_pending(self):
+        """Re-run the preflight; publish when nothing is missing."""
+        pending = self._pending
+        if pending is None:
+            return
+        missing = self._missing_for(pending["channel"], pending["params_for"])
+        if missing is None or not missing:
+            channel = pending["channel"]
+            params_for = pending["params_for"]
+            tint = pending["tint"]
+            self._pending = None
+            self._publish(channel, params_for, tint)
+            return
+        # Still short. Nothing already asked for under this generation is
+        # asked for again (see `_request_missing`); this call exists for
+        # the keys a re-plan added.
+        self._request_missing(missing)
+
+    def _fail_pending(self, error):
+        self._pending = None
+        self._disconnect_overview_watch()
+        self._pending_error = (
+            "Preparing failed — still showing %s (%s)"
+            % (self._displayed_channel or "the previous channel", error))
+        self._show_pending_banner()
+
+    def _cancel_pending(self):
+        """Drop a pending switch. Idempotent.
+
+        The generation is cancelled at the scheduler, so queued-but-unstarted
+        work for it is dropped; work already RUNNING is left to finish into
+        the cache, where it is simply a tile somebody may want later. No
+        result of a cancelled generation can publish: `_on_pending_tile`
+        compares serials, and the serial has moved.
+        """
+        pending, self._pending = self._pending, None
+        self._pending_error = None
+        self._disconnect_overview_watch()
+        if pending is not None and self._stacks is not None:
+            try:
+                self._stacks.scheduler.cancel_generation(pending["generation"])
+            except Exception:                               # noqa: BLE001
+                pass
+        self._clear_pending_banner()
+
+    def _show_pending_banner(self):
+        text = self.pending_text()
+        self._pending_lbl.setText(text or "")
+        self._pending_lbl.setVisible(bool(text))
+        self.pending_changed.emit()
+
+    def _clear_pending_banner(self):
+        """Take the words down. Silent when there were none: this runs on
+        every publication, and a listener must not be woken by a state that
+        did not change."""
+        self._pending_error = None
+        if not (self._pending_lbl.isVisible() or self._pending_lbl.text()):
+            return
+        self._pending_lbl.setText("")
+        self._pending_lbl.setVisible(False)
+        self.pending_changed.emit()
+
+    # ── readiness ────────────────────────────────────────────────────────
+
+    def pending_token(self, channel, params_for=None):
+        """Everything a publication of `channel` depends on, as one value.
+
+        A pending plan is only valid while this is unchanged, so it names
+        every input whose movement would make an already-prepared result
+        the wrong thing to publish: the dataset's source identity, the
+        target channel, each panel's method and EFFECTIVE parameters, its
+        display level, its visible tile set (which is the camera, expressed
+        in the units the keys are actually built in) and its display
+        mapping. Returns None when the panels have no viewport yet and the
+        question has no answer.
+        """
+        plans = self._panel_plans(channel, params_for)
+        if plans is None:
+            return None
+        first = plans[0]
+        panels = tuple((p["method"], p["eff"], p["mapping"], p["level"],
+                        p["tiles"]) for p in plans)
+        return (first["source"], channel, panels, first["quality"],
+                first["algorithm_version"])
+
+    def _panel_plans(self, channel, params_for=None):
+        """Per panel: its method, effective params, level, tiles, mapping.
+
+        Read PER PANEL and not once from the first of the three. They are
+        one camera, but they are aspect-locked columns whose widths differ
+        by a pixel or two, so the tiling of "the same" viewport can differ
+        at its edge -- and it is each panel's OWN visible set that its own
+        publication has to be complete over. Reading panel 0's and using it
+        for all three would let a panel with one extra tile column be
+        called ready when it is not, and that panel would then fall back to
+        the queued path: one late frame, which is the whole of what this is
+        here to prevent.
+
+        This is also the single place those facts are read, so the
+        readiness probe and the invalidation token can never be answering
+        slightly different questions. None when any panel has no viewport
+        yet or cannot answer (a fake backend in a test).
+        """
+        controllers = self.controllers
+        if not controllers or any(c is None for c in controllers):
+            return None
+        plans = []
+        for source, controller in zip(COMPARE_SOURCES, controllers):
+            try:
+                snapshot = controller.snapshot()
+                downsample = controller.provider.level_downsample(snapshot.level)
+                mapping = tuple(controller.display_mapping)
+            except Exception:                               # noqa: BLE001
+                return None
+            if snapshot.bbox_l0 is None or not snapshot.visible_tiles:
+                return None
+            method = COMPARE_METHODS.get(source)
+            base = () if method is None else tuple(
+                params_for(source) if params_for is not None else ())
+            try:
+                eff = tuple(effective_param(p, snapshot.level, downsample)
+                            for p in base)
+            except Exception:                               # noqa: BLE001
+                return None
+            plans.append({
+                "controller": controller,
+                "method": method,
+                "eff": eff,
+                "mapping": mapping,
+                "level": snapshot.level,
+                "tiles": tuple(sorted(snapshot.visible_tiles)),
+                "source": snapshot.source,
+                "quality": snapshot.quality,
+                "algorithm_version": snapshot.algorithm_version,
+            })
+        return plans
+
+    def _missing_for(self, channel, params_for=None):
+        """READ-ONLY preflight: what `channel` still needs, as a list.
+
+        Entries are `("overview", channel)` or `("tile", key)`. An empty
+        list means the fast path is available. None means the question
+        cannot be answered here (no viewport, a fake backend), which the
+        caller treats as "publish the old way".
+
+        Nothing in here reads the slide, runs a correction or waits on a
+        worker: it is one cache lookup per visible tile per panel plus one
+        resident-record test, all on the GUI thread, all O(tiles).
+        """
+        stacks = self._stacks
+        if stacks is None:
+            return None
+        plans = self._panel_plans(channel, params_for)
+        if plans is None:
+            return None
+        scheduler = stacks.scheduler
+        raw_cache = getattr(scheduler, "raw_cache", None)
+        corrected_cache = getattr(scheduler, "corrected_cache", None)
+        if raw_cache is None or corrected_cache is None:
+            return None
+        first = plans[0]
+        try:
+            resident = first["controller"].has_overview_record(
+                channel, source=first["source"])
+        except Exception:                                   # noqa: BLE001
+            return None
+        missing = []
+        if not resident:
+            # THE gate, and the reason a cached-tile-only test is not
+            # enough: without this channel's overview record its display
+            # range is unknown, `_blocked_on_overview` refuses to draw, and
+            # `_try_atomic_cached_channel_swap` refuses to swap.
+            missing.append(("overview", channel))
+        grid = stacks.grid
+        for plan in plans:
+            method = plan["method"]
+            for tx, ty in plan["tiles"]:
+                address = TileAddress(grid=grid, level=plan["level"],
+                                      tx=tx, ty=ty)
+                if method is None:
+                    # The Original panel's visible image IS its raw layer:
+                    # it never produces a corrected tile, so the raw cache
+                    # is what has to be complete for it.
+                    key = RawKey(source=plan["source"], channel=channel,
+                                 tile=address)
+                    cache = raw_cache
+                else:
+                    key = CorrectionKey(
+                        source=plan["source"], channel=channel, tile=address,
+                        method=method, params=plan["eff"],
+                        algorithm_version=plan["algorithm_version"],
+                        quality=plan["quality"])
+                    cache = corrected_cache
+                if cache.get(key) is None:
+                    missing.append(("tile", key))
+        return missing
+
+    def _invalidate_pending_on_move(self):
+        """A camera move re-plans a pending switch against the new viewport.
+
+        Publishing from a stale viewport is the one thing a pending state
+        must never do: the tiles it prepared are for where the panels WERE.
+        The token is the test -- if it still matches, the same plan is
+        still the right one and nothing is disturbed.
+        """
+        pending = self._pending
+        if pending is None:
+            return
+        token = self.pending_token(pending["channel"], pending["params_for"])
+        if token == pending.get("token"):
+            return
+        pending["token"] = token
+        missing = self._missing_for(pending["channel"], pending["params_for"])
+        if missing is None:
+            return
+        try:
+            self._stacks.scheduler.cancel_generation(pending["generation"])
+        except Exception:                                   # noqa: BLE001
+            pass
+        self._pending_gen_n += 1
+        pending["generation"] = ("compare_pending", self._pending_gen_n)
+        pending["overview_wanted"] = False
+        # A new generation asks afresh: the keys of the OLD viewport were
+        # asked for under a generation that is now cancelled, and the new
+        # viewport's keys have never been asked for at all.
+        pending["asked"] = set()
+        if not missing:
+            channel = pending["channel"]
+            params_for = pending["params_for"]
+            tint = pending["tint"]
+            self._pending = None
+            self._publish(channel, params_for, tint)
+            return
+        self._request_missing(missing)
 
     def set_params(self, params_for):
         """A parameter edit re-selects TopHat and cuCIM. Original has no
         parameter and is deliberately left alone: re-selecting it would
         cancel and re-issue a batch of raw tiles that cannot have changed."""
+        self._displayed_params_for = params_for
+        if self._pending is not None:
+            # The parameters are IN the CorrectionKey, so an edit makes
+            # every key the pending plan prepared a key nobody will ask for
+            # again. Re-plan the same target under the new numbers rather
+            # than publish a result computed from the old ones.
+            pending = self._pending
+            pending["params_for"] = params_for
+            self._invalidate_pending_on_move()
+            return
         for source, controller in zip(COMPARE_SOURCES, self.controllers):
             method = COMPARE_METHODS.get(source)
             if controller is None or method is None:
@@ -722,6 +1309,12 @@ class CompareStrip(QtWidgets.QWidget):
         # not end. This is also the one place that covers every way compare
         # leaves the screen, because all of them come through here.
         self.stop_hot()
+        # And for the same reason, and through the same single door: a
+        # pending switch is a producer of scheduler work too, and one whose
+        # publication would land on panels nobody is looking at. Leaving
+        # compare, a Process or Save run and a dataset switch all arrive
+        # here, so this is where a pending target is dropped.
+        self._cancel_pending()
         timings = {}
         for source, controller in zip(COMPARE_SOURCES, self.controllers):
             if controller is None:

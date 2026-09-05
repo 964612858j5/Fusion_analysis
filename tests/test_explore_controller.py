@@ -15,6 +15,7 @@ now renders one persistent `pg.ImageItem` per delivered tile (a
 per-axis downsample factors, instead of blitting into a shared canvas.
 """
 
+import logging
 import os
 import threading
 import time
@@ -4304,3 +4305,172 @@ def test_a_request_after_shutdown_starts_nothing(app):
     _pump(50)
     assert reads == []
     assert w.woken == []
+
+
+# ── the store: one broken waiter does not silence the rest ───────────────
+#
+# "One read wakes everybody" is the contract the store exists for, and it
+# has to hold when one of the waiters is broken. The list is not a chain:
+# the three compare panels are independent objects that happen to have asked
+# for the same key, and a panel that throws while installing the record has
+# failed at its own job, not withdrawn the other two's interest.
+#
+# It used to be a chain for every exception but `RuntimeError`. By the time
+# the delivery loop runs the key is out of `inflight` and out of `_waiters`,
+# so there is no second delivery: the waiters the first one's `ValueError`
+# skipped past were blocked on that key for the rest of the session -- in
+# compare mode, TopHat and cuCIM blank on a channel whose overview is
+# already in the cache.
+
+
+class _BrokenWaiter(_Waiter):
+    """A waiter that fails to take the record, `n_failures` times."""
+
+    def __init__(self, exc, n_failures=1):
+        super().__init__()
+        self._exc = exc
+        self._left = n_failures
+        self.calls = 0
+
+    def on_overview_delivered(self, key, rec, err=None):
+        self.calls += 1
+        if self._left > 0:
+            self._left -= 1
+            raise self._exc
+        super().on_overview_delivered(key, rec, err)
+
+
+def test_a_waiter_that_raises_does_not_stop_the_others(app):
+    """Three waiters, ONE real delivery, and the first one raises a plain
+    `ValueError`. The second and third must each still be woken exactly
+    once, with the same record."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    reads = []
+
+    def read():
+        reads.append(1)
+        return _overview_record("CD3")
+
+    bad = _BrokenWaiter(ValueError("waiter is broken"))
+    b, c = _Waiter(), _Waiter()
+    assert store.request(key, read, bad) is True
+    assert store.request(key, read, b) is False
+    assert store.request(key, read, c) is False
+
+    assert _wait_for(lambda: b.woken and c.woken)
+    _pump(50)
+    # one read for the three -- the fix did not cost the single flight
+    assert reads == [1], reads
+    assert bad.calls == 1
+    assert len(b.woken) == 1 and len(c.woken) == 1
+    # ...and it is the SAME record, not two
+    assert b.woken[0][1] is c.woken[0][1]
+    assert b.woken[0][1].channel == "CD3"
+    assert b.woken[0][2] is None and c.woken[0][2] is None
+    store.shutdown()
+
+
+def test_a_waiter_failure_is_logged_with_the_key_and_the_waiter(app, caplog):
+    """Not swallowed. A panel that stays blank is otherwise
+    indistinguishable from a read that never landed, so the store says
+    which key, which waiter and what went wrong."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    bad = _BrokenWaiter(ValueError("waiter is broken"))
+    good = _Waiter()
+    with caplog.at_level(logging.ERROR, logger="block01.viewer.explore_view"):
+        store.request(key, lambda: _overview_record("CD3"), bad)
+        store.request(key, lambda: _overview_record("CD3"), good)
+        assert _wait_for(lambda: good.woken)
+        _pump(50)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "CD3" in text, text
+    assert "_BrokenWaiter" in text, text
+    assert "ValueError" in text, text
+    assert "waiter is broken" in text, text
+    store.shutdown()
+
+
+def test_the_normal_path_still_reads_once_and_logs_nothing(app, caplog):
+    """The isolation is not a licence to retry: no failure, one read, one
+    wake each, and a quiet log."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    reads = []
+
+    def read():
+        reads.append(1)
+        return _overview_record("CD3")
+
+    a, b, c = _Waiter(), _Waiter(), _Waiter()
+    with caplog.at_level(logging.ERROR, logger="block01.viewer.explore_view"):
+        for w in (a, b, c):
+            store.request(key, read, w)
+        assert _wait_for(lambda: a.woken and b.woken and c.woken)
+        _pump(50)
+    assert reads == [1], reads
+    assert [len(w.woken) for w in (a, b, c)] == [1, 1, 1]
+    assert caplog.records == []
+    store.shutdown()
+
+
+def test_a_deleted_qobject_waiter_still_does_not_stop_the_others(app):
+    """The case the old `except RuntimeError` was written for -- a waiter
+    whose C++ object went away between the read and the delivery -- keeps
+    working exactly as it did."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    bad = _BrokenWaiter(RuntimeError("wrapped C/C++ object has been deleted"))
+    b, c = _Waiter(), _Waiter()
+    for w in (bad, b, c):
+        store.request(key, lambda: _overview_record("CD3"), w)
+
+    assert _wait_for(lambda: b.woken and c.woken)
+    _pump(50)
+    assert bad.calls == 1 and bad.woken == []
+    assert len(b.woken) == 1 and len(c.woken) == 1
+    store.shutdown()
+
+
+def test_a_base_exception_from_a_waiter_is_not_swallowed(app):
+    """`Exception`, not `BaseException`. A `KeyboardInterrupt` arriving
+    through a waiter is the process being asked to stop, and catching it on
+    behalf of the next waiter would be the store deciding otherwise."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    bad = _BrokenWaiter(KeyboardInterrupt())
+    rec = _overview_record("CD3")
+    store._waiters[key] = [bad, _Waiter()]
+    with pytest.raises(KeyboardInterrupt):
+        store._deliver((key, rec, None))
+    store.shutdown()
+
+
+def test_a_forgotten_waiter_is_still_not_woken_when_another_fails(app):
+    """Teardown semantics are untouched by the isolation: a waiter that has
+    been forgotten is not in the list at all, so a later failure in the list
+    cannot resurrect it."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    gate = threading.Event()
+
+    def read():
+        gate.wait(5.0)
+        return _overview_record("CD3")
+
+    gone = _Waiter()
+    bad = _BrokenWaiter(ValueError("waiter is broken"))
+    good = _Waiter()
+    for w in (gone, bad, good):
+        store.request(key, read, w)
+    store.forget(gone)
+    gate.set()
+
+    assert _wait_for(lambda: good.woken)
+    _pump(50)
+    assert gone.woken == [], "a forgotten waiter was woken"
+    assert bad.calls == 1
+    assert len(good.woken) == 1
+    store.shutdown()
+

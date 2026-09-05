@@ -2211,10 +2211,23 @@ class Step0Page(QWidget):
         trigger and the centre -- "compare THIS spot" is what the gesture
         means.
 
-        Centring on P used to be what made the two modes drift, because the
-        panels were a camera on the slide and the way out adopted it. They
-        are a picture of a region now and the way out restores the saved
-        rectangle, so P moves nothing that has to come back.
+        Doc-only note on what happens to the camera, because this docstring
+        used to describe a design that is gone: it claimed the panels were
+        "a picture of a region" and that the way out "restores the saved
+        rectangle". Neither is true. The panels are a camera on the same
+        slide the full image is a camera on, and the round trip is a centre
+        and a scale:
+
+        * right-click at P: the panels open centred on P, at the full
+          image's magnification at that moment;
+        * move the panels to Q and leave: the full image comes back centred
+          on Q, taking the panels' CURRENT camera;
+        * `_compare_entry_full_camera`, saved on the way in, is only the
+          fallback for a way out that has no panels' camera to read.
+
+        So P does move something that comes back -- deliberately. Nothing
+        here is a camera change; see `_enter_compare_mode` and
+        `_exit_compare_mode` for the code that makes it.
         """
         self._enter_compare_mode(x_l0, y_l0)
 

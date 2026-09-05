@@ -763,6 +763,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 """
 
 import functools
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -791,6 +792,13 @@ from .tile_types import (
     tiles_covering,
 )
 from ..core.bg_correction import BG_CORRECTION_ALGO_VERSION
+
+
+# Where this module says something went wrong that it then carried on from.
+# Used by `SharedOverviewStore._deliver`, whose whole job is to keep going
+# past a broken waiter -- carrying on silently would be indistinguishable
+# from a read that never landed.
+_log = logging.getLogger(__name__)
 
 
 # Sentinel distinguishing "argument not passed" from "argument passed as
@@ -1150,7 +1158,34 @@ class SharedOverviewStore(QtCore.QObject):
         return True
 
     def _deliver(self, payload):
-        """GUI thread. Cache the record and wake EVERY waiter."""
+        """GUI thread. Cache the record and wake EVERY waiter.
+
+        EVERY is the contract, and it has to survive one of them being
+        broken. The waiters are independent objects -- three compare panels,
+        or a panel and a prefetch -- that happen to have asked for the same
+        key, and the only reason they are in one list is that one read
+        served them all. A waiter that raises has failed at ITS OWN
+        installation of the record; it has not withdrawn the others'
+        interest, and it must not be able to leave them blocked on an
+        overview that has already been read and will never be read again
+        (the key is out of `inflight` and out of `_waiters` by the time this
+        loop starts -- there is no second delivery).
+
+        That used to be true only of `RuntimeError`. Anything else -- a
+        `TypeError` from a signature that drifted, a `ValueError` out of an
+        array reshape -- propagated out of the first waiter and the rest of
+        the list was simply never reached, which in compare mode is the
+        TopHat and cuCIM panels sitting blank forever on a channel whose
+        overview is sitting in the cache.
+
+        `Exception`, not `BaseException`: a `KeyboardInterrupt` or a
+        `SystemExit` arriving through a waiter is the process being asked to
+        stop and is not something to swallow on behalf of the next waiter.
+        And nothing is swallowed silently -- a failed waiter is logged with
+        the key, the waiter's type and the exception, with the traceback,
+        because a panel that stays blank is otherwise indistinguishable from
+        a slow read.
+        """
         key, rec, err = payload
         with self._lock:
             self.inflight.discard(key)
@@ -1163,10 +1198,15 @@ class SharedOverviewStore(QtCore.QObject):
         for waiter in waiters:
             try:
                 waiter.on_overview_delivered(key, rec, err)
-            except RuntimeError:
+            except Exception as exc:                        # noqa: BLE001
                 # A waiter whose C++ object went away between the read and
-                # this delivery. The others still get theirs.
-                pass
+                # this delivery (RuntimeError), or one that failed to take
+                # the record for any other reason. The others still get
+                # theirs.
+                _log.exception(
+                    "SharedOverviewStore: waiter %s failed on key %r: "
+                    "%s: %s", type(waiter).__name__, key,
+                    type(exc).__name__, exc)
 
     def forget(self, waiter):
         """Drop `waiter` from every key. Called from `teardown`, so a

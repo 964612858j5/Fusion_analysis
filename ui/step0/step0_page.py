@@ -7110,10 +7110,11 @@ class Step0Page(QWidget):
         A Preview Patch is a NAVIGATION SHORTCUT. Picking one updates the
         selection state -- index, list row, buttons, cached preview,
         patch-local conditioning viewport, the navigator's view rectangle
-        -- and, WHEN THE COMPARE PANELS ARE THE VIEW, flies the three of
-        them to that patch (`_navigate_compare_to_patch`). Selecting a
-        patch while the full image is up moves nothing: the full image is
-        the whole-slide landing view and the user did not ask to leave it.
+        -- and takes THE VIEW THAT IS ON SCREEN to that patch, whichever it
+        is (`_navigate_active_view_to_patch`): the three compare panels
+        together, or the full image on its own. P1/P2/P3 are the way to a
+        place on the slide, and which viewer happens to be showing it is
+        not something the user should have to think about.
 
         `navigate` is False for the one caller that is not a user choice:
         `_rebuild_patch_list` puts a row back after a clear(), which
@@ -7156,13 +7157,99 @@ class Step0Page(QWidget):
         self._restore_or_fit_conditioning_viewport()
         # v14.2c: current patch changed → remap the Tissue Navigator view rect.
         self._update_tissue_view_rect()
-        # ...and, in compare mode, the three panels go to the patch. Last,
+        # ...and the view that is on screen goes to the patch. Last,
         # because the camera move emits `camera_changed`, which redraws the
         # navigator's rectangle over whatever `_update_tissue_view_rect`
-        # just put there -- and in compare mode the panels' viewport is the
+        # just put there -- and the moved viewer's viewport IS the
         # rectangle that rectangle is supposed to be.
         if navigate:
-            self._navigate_compare_to_patch(idx)
+            self._navigate_active_view_to_patch(idx)
+
+    # ── Preview Patch → whichever camera is on screen ────────────────────
+
+    def _navigate_active_view_to_patch(self, idx):
+        """Take the view the user is LOOKING AT to patch `idx`. True if it
+        moved.
+
+        The one place the choice is made. There are two viewers on this
+        page and they are exclusive -- the compare panels and the full
+        image are two pages of one stack -- so "go to P2" has exactly one
+        meaning at any moment, and it is decided here rather than in each
+        of the three UI callbacks that can ask for it (the Pn buttons, the
+        patch list, and the Tissue Preview's own selection sync). Those
+        three all arrive through the single `_select_patch`, which calls
+        this; a fourth entry added later gets the same answer for free.
+
+        Neither branch is anything but a camera move: no channel change, no
+        method change, no parameter change, no stack rebuild, no Process,
+        no preview worker. Each viewer asks for the tiles of where it lands
+        the moment it lands, exactly as a pan or a wheel-zoom does, and the
+        picture sharpens block by block.
+
+        With neither viewer on screen this does nothing at all, and says so.
+        """
+        if self._compare_mode():
+            return self._navigate_compare_to_patch(idx)
+        return self._navigate_full_image_to_patch(idx)
+
+    def _navigate_full_image_to_patch(self, idx):
+        """Fit the full image to patch `idx`. True if the camera moved.
+
+        The full image used to keep its camera when a patch was picked, on
+        the reasoning that the whole slide is the landing view and picking
+        a patch is not a request to leave it. That is wrong about what the
+        Pn buttons ARE: they are the shortcut to a place on the slide, and
+        a shortcut that works in one of the two viewers and silently does
+        nothing in the other is a button whose meaning depends on a mode
+        the user is not looking at.
+
+        `controller.jump_to` is the existing public camera entry -- the one
+        a Tissue Preview click already uses -- and it hands the ViewBox a
+        level-0 rect, which an aspect-locked box FITS. That is exactly what
+        is wanted here: the patch is shown WHOLE, at the full image's own
+        aspect ratio, and nothing else about the viewer changes.
+
+        A no-op, moving nothing, whenever the request cannot be honoured:
+        no viewer stack (never opened, torn down for a dataset switch, or a
+        build that was refused), a camera a production run is holding
+        (`suspended`), an index that is not a patch, or a patch that is
+        degenerate or off the slide. One early return each, no half-moves.
+        """
+        if not self._full_image_visible():
+            return False
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None)
+        controller = getattr(stack, "controller", None)
+        if controller is None:
+            return False
+        # A production run owns the camera while it holds it. Moving the
+        # viewer under it would fight the run for tiles and leave the badge
+        # describing a place the user is no longer at.
+        if getattr(controller, "suspended", False):
+            return False
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            return False
+        if not (0 <= idx < len(self.patches)):
+            return False
+        try:
+            y0, y1, x0, x1 = (int(v) for v in self.patches[idx])
+        except (TypeError, ValueError):
+            return False
+        h, w = y1 - y0, x1 - x0
+        if h <= 0 or w <= 0:
+            return False
+        shape = self._slide_shape_l0()
+        if shape is not None:
+            h0, w0 = shape
+            if x0 < 0 or y0 < 0 or x1 > w0 or y1 > h0:
+                return False
+        controller.jump_to(y0, x0, w, h)
+        # The dashed rectangle on the Tissue Preview is the full image's
+        # viewport, so it follows it here as it does after any other jump.
+        self._update_full_image_view_rect()
+        return True
 
     # ── Preview Patch → the compare camera ───────────────────────────────
     #

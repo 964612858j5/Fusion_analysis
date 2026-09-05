@@ -21,8 +21,13 @@ What "go to the patch" means here:
 * through `CompareStrip.set_camera`, so the panels ask for the tiles of
   where they land in the same turn and sharpen block by block;
 * no Process, no preview worker, no backend rebuild;
-* on the FULL IMAGE, selecting a patch moves nothing -- the whole slide is
-  the landing view and picking a patch is not a request to leave it.
+* and the same, in its own way, on the FULL IMAGE -- see
+  `test_step0_patch_full_image_navigation`. Pn is the shortcut to a place
+  on the slide, and the earlier rule "the full image keeps its camera" is
+  revoked: a button that works in one of the two viewers and silently does
+  nothing in the other has a meaning that depends on a mode the user is
+  not looking at. The dispatch between the two lives in ONE method,
+  `_navigate_active_view_to_patch`.
 
 Own module, like the other page-heavy Step0 suites: combined runs segfault
 in offscreen pyqtgraph.
@@ -273,19 +278,28 @@ def test_the_panels_ask_for_the_tiles_of_where_they_land(app):
         assert by0 <= y0 and by1 >= y1
 
 
-# ── 4. the full image keeps its camera ───────────────────────────────────
+# ── 4. the compare branch is the one the compare mode takes ─────────────
 
-def test_selecting_a_patch_on_the_full_image_moves_nothing(app):
+def test_the_dispatch_sends_the_compare_mode_to_the_compare_panels(app):
+    """`_select_patch` does not know which viewer is up; one method does.
+    In compare mode that method must reach the panels and leave the full
+    image's own camera exactly where it was."""
     page = _with_patches(app)
-    before = page._full_image_camera()
-    rects = len(page._explore_tab.stack.controller.view_rects)
-    page._select_patch(2)
+    strip = _enter(page, 4000.0, 200.0)
+    assert page._compare_mode() is True
+    full_before = page._full_image_camera()
+    jumps = len(page._explore_tab.stack.controller.jumps)
+
+    assert page._navigate_active_view_to_patch(2) is True
+
     QtTest.QTest.qWait(20)
-    assert page._compare_mode() is False
-    assert page._full_image_camera() == pytest.approx(before)
-    assert len(page._explore_tab.stack.controller.view_rects) == rects
-    # ...but the SELECTION state did change.
-    assert page.current_patch_idx == 2
+    want_x, want_y = _centre_of(P3)
+    cam = strip.camera(0)
+    assert cam[0] == pytest.approx(want_x, abs=1.0)
+    assert cam[1] == pytest.approx(want_y, abs=1.0)
+    # The full image is not on screen: it was not moved.
+    assert page._full_image_camera() == pytest.approx(full_before)
+    assert len(page._explore_tab.stack.controller.jumps) == jumps
 
 
 # ── 5. safe no-ops ───────────────────────────────────────────────────────

@@ -267,6 +267,19 @@ class CompareStrip(QtWidgets.QWidget):
     bound to a new dataset.
     """
 
+    # ONE notification per camera change, whichever of the three moved and
+    # however many of them the mirroring then moves. The page draws the
+    # panels' viewport on the Tissue Preview from it; before this existed
+    # nothing was connected to `_on_compare_range_changed` at all, so the
+    # dashed rectangle was set once on entry and never again -- it did not
+    # follow a pan and it did not change size under a zoom.
+    #
+    # Emitted AFTER the mirroring has finished and the re-entrancy guard is
+    # down, so a listener that reads the camera reads the settled one, and
+    # the two followers' own range signals (which the guard swallows) do not
+    # each produce a page-level redraw.
+    camera_changed = QtCore.pyqtSignal()
+
     def __init__(self, page=None, stack_factory=build_compare_stacks,
                  parent=None):
         super().__init__(parent)
@@ -454,6 +467,7 @@ class CompareStrip(QtWidgets.QWidget):
             self._apply_camera_to(camera, skip=idx)
         finally:
             self._linking = False
+        self.camera_changed.emit()
 
     def camera(self, idx=0):
         """`(cx, cy, scale)` of panel `idx`, or None.
@@ -514,9 +528,12 @@ class CompareStrip(QtWidgets.QWidget):
             return False
         self._linking = True
         try:
-            return self._apply_camera_to((cx, cy, scale), skip=None)
+            applied = self._apply_camera_to((cx, cy, scale), skip=None)
         finally:
             self._linking = False
+        if applied:
+            self.camera_changed.emit()
+        return applied
 
     def _apply_camera_to(self, camera, skip=None):
         cx, cy, scale = camera

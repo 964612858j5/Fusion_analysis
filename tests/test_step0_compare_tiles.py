@@ -538,52 +538,70 @@ def test_a_panel_is_narrower_than_the_full_image_at_the_same_scale(app):
     assert pw < (fx1 - fx0)
 
 
-def test_the_entry_camera_and_the_point_are_remembered(app):
+def test_the_entry_camera_is_remembered_as_a_fallback(app):
+    """The full image's camera at the moment compare mode opened. It is no
+    longer the basis of the way back -- the panels' camera is -- but it is
+    what a way back with no panels' camera falls back to."""
     page = _page(app)
     cam = page._full_image_camera()
     _enter(page, cam[0] + 250, cam[1] + 125)
     assert page._compare_entry_full_camera == pytest.approx(cam, rel=1e-12)
-    assert page._compare_entry_point == pytest.approx(
-        (cam[0] + 250, cam[1] + 125))
-    assert page._compare_entry_scale == pytest.approx(cam[2])
 
 
-# ── 4. leaving: the saved camera plus the delta ──────────────────────────
+# ── 4. leaving: the panels' camera, directly ─────────────────────────────
+#
+# The product rule, in the user's words: right-click at P and the panels
+# open on P, so leaving without moving puts the full image on P; move the
+# panels to Q and leaving puts it on Q; and the magnification you were
+# comparing at is the one you come back to. The full image is three times as
+# wide as one panel, so at that same magnification it shows more of the
+# surroundings, which is what going back to look around means.
+#
+# It used to be a DELTA -- the saved entry camera plus
+# `(compare_now - P)` -- which agrees with the rule only while nothing
+# moves. Right-click away from the centre, leave, and the delta version came
+# back centred on the old centre rather than on the spot that had just been
+# compared. That is what the acceptance run reported.
 
 def _full_rect(page):
     (x0, x1), (y0, y1) = page._explore_tab.stack.view.view_box.viewRange()
     return (x0, y0, x1 - x0, y1 - y0)
 
 
-def test_five_toggles_with_the_mouse_still_move_nothing(app):
-    """THE contract. Entering centres on P, which on its own would walk the
-    view by `P - centre` every cycle; the delta rule cancels it exactly."""
+def test_leaving_without_moving_comes_back_centred_on_the_clicked_point(app):
+    """THE rule, and the assertion the delta algorithm fails: P is where
+    the panels opened, so P is where the full image comes back to."""
     page = _page(app)
     cam = page._full_image_camera()
     P = (cam[0] + 700.0, cam[1] - 400.0)
-    before = _full_rect(page)
-    for _ in range(5):
-        _enter(page, *P)
-        page._exit_compare_mode()
-        QtTest.QTest.qWait(10)
-    after = _full_rect(page)
-    for a, b in zip(before, after):
-        assert b == pytest.approx(a, rel=1e-9, abs=1e-6)
+
+    _enter(page, *P)
+    page._exit_compare_mode()
+    QtTest.QTest.qWait(10)
+
+    back = page._full_image_camera()
+    assert back[0] == pytest.approx(P[0], abs=1.0)
+    assert back[1] == pytest.approx(P[1], abs=1.0)
+    assert back[2] == pytest.approx(cam[2], rel=1e-6)
 
 
-def test_a_pan_in_compare_mode_shifts_the_full_image_by_the_same_delta(app):
+def test_a_pan_in_compare_mode_comes_back_centred_where_it_ended(app):
+    """Not shifted by the pan -- AT the panels' centre."""
     page = _page(app)
     cam = page._full_image_camera()
     P = (cam[0] + 300.0, cam[1] + 200.0)
     strip = _enter(page, *P)
     now = strip.camera(0)
-    page._apply_compare_camera(now[0] + 900.0, now[1] - 500.0, now[2])
+    Q = (now[0] + 900.0, now[1] - 500.0)
+    page._apply_compare_camera(Q[0], Q[1], now[2])
     QtTest.QTest.qWait(10)
+
     page._exit_compare_mode()
     QtTest.QTest.qWait(10)
+
     back = page._full_image_camera()
-    assert back[0] == pytest.approx(cam[0] + 900.0, abs=1.0)
-    assert back[1] == pytest.approx(cam[1] - 500.0, abs=1.0)
+    assert back[0] == pytest.approx(Q[0], abs=1.0)
+    assert back[1] == pytest.approx(Q[1], abs=1.0)
     assert back[2] == pytest.approx(cam[2], rel=1e-6)
 
 
@@ -600,6 +618,35 @@ def test_a_zoom_in_compare_mode_comes_back_as_that_magnification(app):
                                                          rel=1e-6)
 
 
+def test_the_full_image_shows_more_ground_at_the_same_magnification(app):
+    """Why adopting the panels' camera is not a zoom-out: same
+    magnification, wider widget, more surroundings."""
+    page = _page(app)
+    strip = _enter(page)
+    panel_w = strip.view_rect_l0(0)[2]
+    page._exit_compare_mode()
+    QtTest.QTest.qWait(10)
+    _fx, _fy, full_w, _fh = _full_rect(page)
+    assert full_w > panel_w * 2.0
+
+
+def test_ten_entries_and_exits_at_the_same_point_do_not_drift(app):
+    """The panels always open on the point under the cursor and the full
+    image always comes back to the panels' centre, so the cycle is a fixed
+    point rather than a walk."""
+    page = _page(app)
+    cam = page._full_image_camera()
+    P = (cam[0] + 700.0, cam[1] - 400.0)
+    for _ in range(10):
+        _enter(page, *P)
+        page._exit_compare_mode()
+        QtTest.QTest.qWait(10)
+    back = page._full_image_camera()
+    assert back[0] == pytest.approx(P[0], abs=1.0)
+    assert back[1] == pytest.approx(P[1], abs=1.0)
+    assert back[2] == pytest.approx(cam[2], rel=1e-6)
+
+
 def test_flipping_modes_without_ever_entering_moves_no_camera(app):
     page = _page(app)
     before = _full_rect(page)
@@ -609,10 +656,22 @@ def test_flipping_modes_without_ever_entering_moves_no_camera(app):
     assert _full_rect(page) == pytest.approx(before)
 
 
-def test_the_returning_camera_is_the_saved_one_when_nothing_moved(app):
+def test_the_returning_camera_is_the_panels_own(app):
+    page = _page(app)
+    strip = _enter(page)
+    strip.set_camera(1234.0, 2345.0, strip.camera(0)[2] * 2.0)
+    QtTest.QTest.qWait(10)
+    assert page._returning_full_camera() == pytest.approx(strip.camera(0),
+                                                          rel=1e-9)
+
+
+def test_the_entry_camera_is_used_only_when_the_panels_have_none(app):
+    """The fallback, exercised: no strip, so no camera to adopt."""
     page = _page(app)
     cam = page._full_image_camera()
-    _enter(page, cam[0] + 900.0, cam[1])
+    _enter(page)
+    page._compare_strip_widget.teardown()
+    assert page._compare_camera() is None
     assert page._returning_full_camera() == pytest.approx(cam, rel=1e-9)
 
 
@@ -1580,3 +1639,185 @@ def test_a_channel_no_viewer_is_reading_is_still_seeded_at_once(app):
     page._slide_lowres.clear()
     assert page._overview_read_pending("CD20") is False
     assert page._slide_lowres_array("CD20", blocking=False) is not None
+
+
+# ── 17. the dashed rectangle follows the panels' camera ──────────────────
+#
+# The page had `_on_compare_range_changed` and nothing was connected to it.
+# So the Tissue Preview's dashed rectangle was drawn once, on entry, and
+# then stayed exactly where and what size it was: it did not move with a pan
+# and it did not shrink under a zoom. The strip emits ONE `camera_changed`
+# per camera change now, after the mirroring has finished, and the page
+# redraws from it.
+
+def test_the_strip_announces_a_camera_change(app):
+    page = _page(app)
+    strip = _enter(page)
+    seen = []
+    strip.camera_changed.connect(lambda: seen.append(1))
+
+    now = strip.camera(0)
+    strip.set_camera(now[0] + 500.0, now[1], now[2])
+    QtTest.QTest.qWait(10)
+
+    assert seen, "moving the panels announced nothing"
+
+
+def test_three_followers_do_not_cause_three_page_redraws(app):
+    """One camera change, one page-level redraw. The two panels the strip
+    mirrors onto emit their own range signals; those must not each reach
+    the page."""
+    page = _page(app)
+    strip = _enter(page)
+    popup = _navigator(page)
+    before = len(popup.overview.rects)
+
+    now = strip.camera(0)
+    strip.set_camera(now[0] + 500.0, now[1], now[2])
+    QtTest.QTest.qWait(10)
+
+    assert len(popup.overview.rects) - before == 1, popup.overview.rects
+
+
+def test_a_pan_of_the_panels_moves_the_dashed_rectangle(app):
+    """No explicit redraw call: the signal is the whole mechanism."""
+    page = _page(app)
+    strip = _enter(page)
+    popup = _navigator(page)
+    page._update_compare_view_rect()
+    first = popup.overview.rects[-1]
+
+    now = strip.camera(0)
+    strip.set_camera(now[0] + 800.0, now[1] + 400.0, now[2])
+    QtTest.QTest.qWait(10)
+
+    last = popup.overview.rects[-1]
+    assert last != first
+    # A pan: the centre moved, the size did not.
+    assert (last[1] - last[0]) == pytest.approx(first[1] - first[0], rel=1e-6)
+    assert (last[3] - last[2]) == pytest.approx(first[3] - first[2], rel=1e-6)
+    assert (last[2] - first[2]) == pytest.approx(800.0, rel=0.05)
+    assert (last[0] - first[0]) == pytest.approx(400.0, rel=0.05)
+
+
+def test_a_four_times_zoom_makes_the_dashed_rectangle_a_quarter_as_wide(app):
+    """The number the acceptance run asks for: zoom in 4x and the rectangle
+    is about a quarter of its width and a quarter of its height."""
+    page = _page(app)
+    strip = _enter(page)
+    popup = _navigator(page)
+    page._update_compare_view_rect()
+    first = popup.overview.rects[-1]
+
+    now = strip.camera(0)
+    strip.set_camera(now[0], now[1], now[2] * 4.0)
+    QtTest.QTest.qWait(10)
+
+    last = popup.overview.rects[-1]
+    assert (last[3] - last[2]) == pytest.approx((first[3] - first[2]) / 4.0,
+                                                rel=0.02)
+    assert (last[1] - last[0]) == pytest.approx((first[1] - first[0]) / 4.0,
+                                                rel=0.02)
+
+
+def test_a_wheel_zoom_on_a_real_panel_moves_the_rectangle(real_strip):
+    """Through the REAL ViewBox and its real range signal, so the path
+    under test is the one a wheel actually takes -- not a page method
+    called by hand."""
+    page, strip, _provider = real_strip
+    popup = _navigator(page)
+    _drain(100)
+    page._update_compare_view_rect()
+    first = popup.overview.rects[-1]
+
+    box = strip.view_boxes[1]
+    (x0, x1), (y0, y1) = box.viewRange()
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    w, h = (x1 - x0) / 4.0, (y1 - y0) / 4.0
+    box.setRange(xRange=(cx - w / 2.0, cx + w / 2.0),
+                 yRange=(cy - h / 2.0, cy + h / 2.0), padding=0)
+    _drain(200)
+
+    last = popup.overview.rects[-1]
+    assert (last[3] - last[2]) < (first[3] - first[2]) * 0.5
+
+
+# ── 18. a far jump keeps the magnification the user chose ────────────────
+#
+# `_navigate_compare_to` went back through `_enter_compare_mode`, which
+# reads the camera off the FULL IMAGE -- hidden, and still at whatever scale
+# it had when compare mode opened. So a click on the thumbnail silently
+# threw away a zoom made in compare mode. It recentres now, and nothing
+# else.
+
+def test_a_jump_after_a_zoom_keeps_the_zoom(app):
+    """The killing case. The old implementation passed the plain jump test
+    because the full image happened to be at the entry scale; zoom the
+    panels first and the two answers separate."""
+    page = _page(app)
+    strip = _enter(page)
+    _navigator(page)
+    entry_scale = strip.camera(0)[2]
+    now = strip.camera(0)
+    page._apply_compare_camera(now[0], now[1], entry_scale * 4.0)
+    QtTest.QTest.qWait(10)
+    zoomed = strip.camera(0)[2]
+    assert zoomed == pytest.approx(entry_scale * 4.0, rel=1e-6)
+
+    assert page._navigate_compare_to(3000.0, 1500.0) is True
+
+    after = strip.camera(0)
+    assert after[2] == pytest.approx(zoomed, rel=1e-6), (
+        "the jump reset the magnification to the full image's")
+    assert after[0] == pytest.approx(1500.0, abs=1.0)
+    assert after[1] == pytest.approx(3000.0, abs=1.0)
+
+
+def test_a_jump_does_not_rebuild_the_strip(app):
+    """A move is a move. Re-entering compare mode would re-run the whole
+    entry path -- the GPU hand-over, the status text, the ensure-built --
+    for a click that only means "look over there"."""
+    page = _page(app)
+    strip = _enter(page)
+    _navigator(page)
+    builds_before = len(page._compare_builds)
+    stacks_before = strip.stacks
+
+    page._navigate_compare_to(3000.0, 1500.0)
+
+    assert len(page._compare_builds) == builds_before
+    assert strip.stacks is stacks_before
+
+
+def test_a_jump_updates_the_dashed_rectangle_at_once(app):
+    page = _page(app)
+    strip = _enter(page)
+    popup = _navigator(page)
+    page._update_compare_view_rect()
+    before = popup.overview.rects[-1]
+
+    page._navigate_compare_to(3000.0, 1500.0)
+
+    last = popup.overview.rects[-1]
+    assert last != before
+    assert (last[0] + last[1]) / 2.0 == pytest.approx(3000.0, abs=2.0)
+    assert (last[2] + last[3]) / 2.0 == pytest.approx(1500.0, abs=2.0)
+
+
+def test_a_zoomed_jump_on_real_panels_keeps_the_scale(real_strip):
+    """Same property, through three real controllers and real ViewBoxes."""
+    page, strip, _provider = real_strip
+    _drain()
+    now = strip.camera(0)
+    strip.set_camera(now[0], now[1], now[2] * 4.0)
+    _drain(200)
+    zoomed = strip.camera(0)[2]
+
+    assert page._navigate_compare_to(SLIDE_H * 0.9, SLIDE_W * 0.1) is True
+    _drain(400)
+
+    for i in range(3):
+        cam = strip.camera(i)
+        assert cam[2] == pytest.approx(zoomed, rel=1e-6)
+        assert cam[0] == pytest.approx(SLIDE_W * 0.1, abs=2.0)
+        assert cam[1] == pytest.approx(SLIDE_H * 0.9, abs=2.0)

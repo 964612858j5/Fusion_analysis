@@ -315,16 +315,12 @@ class Step0Page(QWidget):
         # between them would be reshaped by one of the two locks and walk
         # the view away a little on every cycle.
         #
-        # Reversibility is held by taking the DELTA rather than the panels'
-        # camera. Entering centres the panels on the clicked point P, so
-        # adopting their centre on the way out would move the image by
-        # `P - saved_centre` every time; instead the way out restores
-        # `saved + (now - entry)`, which is the identity when the user did
-        # nothing and carries the navigation back when they did. See
+        # The full image's camera at the moment compare mode opened, kept
+        # as the FALLBACK for a way out that has no panels' camera to adopt
+        # (a build that failed, a flip on a page that has never compared).
+        # The normal way out takes the panels' camera directly -- see
         # `_exit_compare_mode`.
         self._compare_entry_full_camera = None
-        self._compare_entry_point = None
-        self._compare_entry_scale = None
         # True while the full image is behind the channel the page is on,
         # because compare mode was up when the row changed. See
         # `_sync_full_image_to_channel`.
@@ -1050,6 +1046,19 @@ class Step0Page(QWidget):
         # differently. The panels drifted apart because of the words written
         # over them.
         self._compare_strip_widget = CompareStrip(page=self)
+        # The panels' camera drives the Tissue Preview's dashed rectangle.
+        # A value-capturing weak closure rather than a bound method: a bound
+        # method of this page on a signal owned by a widget this page owns
+        # closes a reference cycle through sip, which is the exact shape of
+        # the offscreen collector crashes this codebase has measured twice.
+        _page_ref = weakref.ref(self)
+
+        def _on_compare_camera(_ref=_page_ref):
+            page = _ref()
+            if page is not None:
+                page._on_compare_camera_changed()
+
+        self._compare_strip_widget.camera_changed.connect(_on_compare_camera)
         pvl.addWidget(self._compare_strip_widget, stretch=1)
 
         self._preview_status = QLabel(
@@ -1846,31 +1855,30 @@ class Step0Page(QWidget):
         self._update_full_image_view_rect()
 
     def _exit_compare_mode(self):
-        """Back to the full image, at the camera it left with PLUS whatever
-        the user did in compare mode.
+        """Back to the full image, AT THE PANELS' CAMERA.
 
-        Not "the panels' camera". Entering centres the panels on the clicked
-        point P, so adopting their centre on the way out would move the full
-        image by `P - saved_centre` every cycle -- and the next right-click,
-        at the same screen pixel over a view that has moved, names a
-        different slide point, so the error compounds instead of cancelling.
-        That is the drift the user reported as a displacement on entry.
+        The product rule, in the user's words: right-clicking at P opens
+        the panels centred on P, so leaving without moving puts the full
+        image back centred on P; move the panels to Q and leaving puts it
+        on Q; and the magnification you were comparing at is the
+        magnification you come back to. The full image is three times as
+        wide as one panel, so at that same magnification it simply shows
+        more of the surroundings -- which is exactly what "go back and look
+        around" should do.
 
-        So the two requirements are held apart. P is where the panels OPEN.
-        The DELTA the user then makes in compare mode is what comes back:
+        This used to be a DELTA: save the full image's camera on the way
+        in, and on the way out add `(compare_now - P)` to its centre and
+        `(compare_scale_now / entry_scale)` to its scale. The two agree
+        while nothing moves and disagree the moment anything does, and the
+        disagreement is the wrong way round -- pan the panels to Q and the
+        delta version comes back centred on `old_centre + (Q - P)`, which
+        is the point the user was looking at only if they had never
+        right-clicked away from the centre in the first place.
 
-            new_centre = saved_centre + (compare_centre_now - P)
-            new_scale  = saved_scale * (compare_scale_now / entry_scale)
-
-        Do nothing while comparing and both corrections are identities --
-        `compare_centre_now` is P and `compare_scale_now` is `entry_scale` --
-        so the full image is restored to the saved camera EXACTLY and P is
-        still under the mouse for the next click. Pan by 300 slide pixels
-        and the full image comes back shifted by 300; zoom in 4x and it
-        comes back 4x closer, around the point the panels were centred on.
-
-        Only when there IS an entry camera: flipping modes on a page that
-        has never been in compare mode must not move the image.
+        The entry camera survives as a FALLBACK and nothing more: a page
+        whose panels never got a camera (a build that failed, a flip on a
+        page that has never compared) must still come back to something,
+        and coming back to where it was is the only defensible answer.
         """
         if not self._compare_mode():
             return False
@@ -1892,32 +1900,26 @@ class Step0Page(QWidget):
         return True
 
     def _returning_full_camera(self):
-        """The full image's camera on the way out of compare mode, as
-        `(cx, cy, scale)`, or None when there is nothing to restore.
+        """The camera the full image takes on the way out of compare mode,
+        as `(cx, cy, scale)`, or None when there is nothing to restore.
 
-        See `_exit_compare_mode` for why it is a delta and not the panels'
-        camera. Both corrections degrade gracefully: with no entry point
-        recorded the centre is restored unshifted, and with no entry scale
-        the magnification is restored unchanged.
+        The panels' own camera, directly -- see `_exit_compare_mode`. A
+        centre and a scale and not a rectangle, because the full image is
+        three times as wide as one panel and a rectangle handed between the
+        two would be reshaped by one of the aspect locks.
+
+        The entry camera is the fallback for the one case that has no
+        panels' camera to adopt.
         """
+        now = self._compare_camera()
+        if now is not None:
+            cx, cy, scale = (float(v) for v in now)
+            if scale > 0 and math.isfinite(scale):
+                return (cx, cy, scale)
         saved = getattr(self, "_compare_entry_full_camera", None)
         if saved is None:
             return None
-        cx, cy, scale = (float(v) for v in saved)
-        now = self._compare_camera()
-        point = getattr(self, "_compare_entry_point", None)
-        if now is not None and point is not None:
-            cx += float(now[0]) - float(point[0])
-            cy += float(now[1]) - float(point[1])
-        entry_scale = getattr(self, "_compare_entry_scale", None)
-        if now is not None and entry_scale:
-            try:
-                ratio = float(now[2]) / float(entry_scale)
-            except ZeroDivisionError:
-                ratio = 1.0
-            if math.isfinite(ratio) and ratio > 0:
-                scale *= ratio
-        return (cx, cy, scale)
+        return tuple(float(v) for v in saved)
 
     def _apply_full_image_view_rect(self, rect):
         """Put level-0 `(x, y, w, h)` on the full image's camera.
@@ -2143,10 +2145,10 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         if strip is None:
             return False
-        moved = strip.set_camera(cx, cy, scale)
-        if moved:
-            self._update_compare_view_rect()
-        return moved
+        # The dashed rectangle follows through `camera_changed`, which
+        # `set_camera` emits. Redrawing it here as well would be the same
+        # rectangle computed twice for one move.
+        return strip.set_camera(cx, cy, scale)
 
     def _compare_panel_px(self):
         """One compare panel's size in screen pixels, as `(w, h)`."""
@@ -2281,11 +2283,9 @@ class Step0Page(QWidget):
         if strip is None:
             self._exit_compare_mode()
             return None
-        # Saved once the strip is up and BEFORE the panels are moved: this
-        # is the camera the way back is measured against.
+        # Saved once the strip is up and BEFORE the panels are moved: the
+        # fallback for a way out with no panels' camera to adopt.
         self._compare_entry_full_camera = (cx, cy, scale)
-        self._compare_entry_point = (px, py)
-        self._compare_entry_scale = scale
         self._hand_gpu_to_compare()
         # The SAME scale, not a rectangle. The panels are a third as wide,
         # so at the full image's magnification each shows a third of the
@@ -2467,14 +2467,20 @@ class Step0Page(QWidget):
     def _on_compare_right_click(self, _x_l0=None, _y_l0=None):
         self._exit_compare_mode()
 
-    def _on_compare_range_changed(self, idx):
-        """Panel `idx` moved.
+    def _on_compare_camera_changed(self):
+        """The panels' camera settled somewhere new.
 
-        The MIRRORING is the strip's own -- one camera across three views,
-        guarded against re-entrancy where the signal is, which is also where
-        the weak-reference closure that carries it lives. What is left for
-        the page is the one thing outside the strip that follows the panels:
-        the viewport rectangle drawn on the Tissue Preview.
+        ONE notification for the whole change, from `CompareStrip`'s
+        `camera_changed`, which the strip emits after it has mirrored the
+        moved panel onto the other two. The mirroring itself is the strip's
+        -- one camera across three views, guarded against re-entrancy where
+        the signal is -- so what is left for the page is the one thing
+        outside the strip that follows the panels: the viewport rectangle
+        drawn on the Tissue Preview.
+
+        Nothing was connected to this before, which is why the dashed
+        rectangle was drawn once on entry and then never moved and never
+        changed size: it was a picture of where the panels had STARTED.
 
         There is no settle and no refill any more. A range change on a tile
         viewer already issues its own requests, at its own level, and the
@@ -4040,17 +4046,30 @@ class Step0Page(QWidget):
         return (float(shape[0]) / h, float(shape[1]) / w)
 
     def _navigate_compare_to(self, y, x):
-        """Re-open the panels on slide point `(y, x)`.
+        """RECENTRE the panels on slide point `(y, x)`, at the
+        magnification they are already at.
 
-        The compare panels' answer to a click on the thumbnail. They cannot
-        be PANNED there: they hold one region and nothing outside it exists,
-        so moving their camera to a distant point would show background.
-        What a click on the thumbnail means is the same thing a right-click
-        on the full image means -- compare that spot -- so it re-cuts the
-        virtual patch around it, at the same size, and the panels open on
-        the new region fitted.
+        A jump is a move, not a re-entry. The panels are three cameras on
+        the whole slide, so there is nothing to re-cut and nowhere they
+        cannot go: `set_camera` moves all three to the new centre and the
+        tiles for it are asked for in the same turn.
+
+        The magnification is the USER'S. This used to go back through
+        `_enter_compare_mode`, which reads the camera off the full image --
+        hidden, and still at whatever scale it had when compare mode
+        opened -- so a click on the thumbnail silently threw away a zoom the
+        user had made in compare mode and put the panels back at the entry
+        magnification. Only the centre changes here.
+
+        Falls back to opening compare mode when there is no camera to keep,
+        which is the case a click can reach before the strip has ever been
+        built.
         """
-        return self._enter_compare_mode(float(x), float(y)) is not None
+        camera = self._compare_camera()
+        if camera is None:
+            return self._enter_compare_mode(float(x), float(y)) is not None
+        _cx, _cy, scale = camera
+        return bool(self._apply_compare_camera(float(x), float(y), scale))
 
     def _on_tissue_navigate(self, y, x):
         """A click on the Tissue Preview at full-image `(y, x)`.
@@ -7267,8 +7286,6 @@ class Step0Page(QWidget):
             strip.set_dataset(None)
         self._compare_opened = False
         self._compare_entry_full_camera = None
-        self._compare_entry_point = None
-        self._compare_entry_scale = None
         # True while the full image is behind the channel the page is on,
         # because compare mode was up when the row changed. See
         # `_sync_full_image_to_channel`.

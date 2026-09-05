@@ -259,8 +259,6 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert page._compare_strip_widget.stacks is None
     assert page._compare_opened is False
     assert page._compare_entry_full_camera is None
-    assert page._compare_entry_point is None
-    assert page._compare_entry_scale is None
 
 
 def test_the_clearing_happens_before_the_new_loader_is_bound(app, tmp_path,

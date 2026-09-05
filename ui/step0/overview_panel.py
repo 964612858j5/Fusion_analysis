@@ -2439,21 +2439,23 @@ class OverviewPanel(QWidget):
     # of a state machine that has to be read to be believed.
 
     def _middle_pan_press(self, event):
-        """Take the gesture EXPLICITLY. From here until the release this
-        viewport owns the pointer, and no other branch of the filter runs
-        for it.
+        """Open the gesture. From here until the release this viewport owns
+        the pointer, and no other branch of the filter runs for it.
 
-        `grabMouse()` and not Qt's implicit grab. The implicit grab is
-        given to the widget that ACCEPTS the press inside its own
-        `mousePressEvent`; a press consumed by an event filter -- which
-        returns True before the widget's handler is ever called -- is not
-        guaranteed to establish one, and the desk disproved the assumption
-        that it did: six consecutive middle drags produced two pans. An
-        explicit grab is not an assumption. It routes every subsequent
-        move and the release to this viewport whatever they are over,
-        including outside the window, and `QApplication.mouseGrabber()`
-        names it, so the claim "this panel owns the pointer" is one a test
-        can check rather than one this comment can only assert.
+        The gesture is OPEN from the moment this anchor is recorded, and
+        from nothing else. `_mid_pan_last` is set BEFORE the grab is
+        attempted and is not conditional on it, so a press whose grab is
+        refused -- the offscreen platform says so out loud, and a
+        real X server can refuse or transfer one at any moment -- still
+        starts a drag that the moves and the release complete. That
+        ordering is the whole fix for "the middle button only pans after I
+        left-click first": the gesture now depends on this viewport's own
+        press, not on a process-wide singleton some popup owns.
+
+        `grabMouse()` is then an ENHANCEMENT, taken best-effort: it routes
+        moves and the release here even after the cursor has left the
+        window, which is what a drag that runs off the edge of a small
+        thumbnail needs. Failure to take it costs that and nothing else.
 
         The grabbed widget is REMEMBERED rather than re-derived at release
         time: `gview.viewport()` can be replaced under us (Qt does it when
@@ -2492,51 +2494,61 @@ class OverviewPanel(QWidget):
             return None
 
     def _middle_pan_holding(self):
-        """True while THIS panel is the one holding the pointer for a
-        middle drag.
+        """True while a middle press taken at THIS viewport is still open.
 
-        Both halves are required. `_mid_pan_last is not None` says a press
-        was taken; the grabber test says the pointer is still ours. A grab
-        can be taken away -- a modal dialog, another widget grabbing, the
-        window being closed -- and a move arriving after that is not part
-        of this gesture, so panning on it would move the map under a
-        pointer that is somewhere else entirely.
+        One fact, and it is this panel's own: a press was seen here and
+        neither a release nor a cancellation has closed it. Whether the
+        gesture may continue is then decided by the only other thing that
+        is actually true of the pointer -- the middle button still being
+        down in the move that just arrived, which `_middle_pan_move`
+        checks.
 
-        With no grab (a headless press that could not take one, or a Qt
-        build that refuses), the press bookkeeping alone decides, which is
-        the behaviour this had before the grab existed.
+        `QWidget.mouseGrabber()` is deliberately NOT consulted. It used to
+        be the second half of this test, and that is the bug the desk kept
+        reporting as "the middle button only works after I left-click
+        first". `mouseGrabber()` is a process-wide singleton that this
+        panel neither owns nor can keep: any Qt popup takes it (a menu, a
+        combo box, a tooltip's popup window all grab and then hand it
+        back, and the hand-back clears it rather than restoring ours), a
+        modal takes it, and a platform grab that is refused or transferred
+        leaves it saying something else entirely. In every one of those
+        cases the middle moves still ARRIVE here, with the middle button
+        still down -- and the gate threw them away from the very first
+        one, so the drag did nothing at all. Discarding an event this
+        widget legitimately received, because of a global that says
+        nothing about that event, is never right; a move that is not ours
+        does not reach us in the first place.
 
-        `QWidget.mouseGrabber()` is where PyQt5 exposes the application's
-        one mouse grabber -- it is a static of `QWidget`, not of
-        `QApplication`. It is Qt's OWN bookkeeping, so it answers
-        truthfully even on the offscreen platform, which warns that it
-        cannot take a platform-level grab and records the widget anyway.
+        The grab is still TAKEN at the press -- see `_middle_pan_press` --
+        because it is what keeps the drag alive once the cursor leaves the
+        window. It is an enhancement, and enhancements are not
+        preconditions.
         """
-        if self._mid_pan_last is None:
-            return False
-        held = self._mid_pan_grab
-        if held is None:
-            return True
-        try:
-            return QtWidgets.QWidget.mouseGrabber() is held
-        except RuntimeError:
-            return False
+        return self._mid_pan_last is not None
 
     def _middle_pan_cancel(self):
         """End the gesture and give the pointer back, from wherever.
 
         The one place the grab is released, so there is exactly one answer
         to "who releases it" -- the release event, a lost button, a hidden
-        or closed window, a lost focus, a dataset reload that replaces the
-        viewport, and teardown all come here. Releasing an already-released
-        grab is a no-op, so this is safe to call unconditionally.
+        or deactivated or closed window, a dataset reload that replaces the
+        viewport, and teardown all come here. Safe to call unconditionally.
+
+        The release is CONDITIONAL on still BEING the grabber, and that is
+        measured rather than assumed: `QWidget.releaseMouse()` clears the
+        application's one grabber even when called on a widget that is not
+        holding it. An unconditional release here would therefore take the
+        pointer away from whoever took it from us -- a menu, a modal -- and
+        leave that widget waiting for events it will never get. We give
+        back exactly what we still hold, and nothing else.
         """
         held, self._mid_pan_grab = self._mid_pan_grab, None
         self._mid_pan_last = None
         if held is None:
             return
         try:
-            held.releaseMouse()
+            if QtWidgets.QWidget.mouseGrabber() is held:
+                held.releaseMouse()
         except RuntimeError:
             pass
 
@@ -2558,10 +2570,12 @@ class OverviewPanel(QWidget):
         steps telescope to exactly the whole drag.
 
         A move whose buttons no longer include the middle one ends the
-        gesture, grab and all. Under an explicit grab a lost release should
-        not be possible, but this costs one comparison and makes a stuck
-        pan -- which, with a grab held, is a frozen application rather than
-        merely a stuck map -- impossible.
+        gesture, grab and all. This is the ONLY thing that can contradict
+        an open press, and it is a fact carried by the event itself rather
+        than read out of a global: the release was missed, so the drag is
+        over. Without it a pan would stick to the cursor for the rest of
+        the session, and with a grab held that is a frozen application
+        rather than merely a stuck map.
         """
         if not (event.buttons() & Qt.MiddleButton):
             self._middle_pan_cancel()
@@ -2644,8 +2658,15 @@ class OverviewPanel(QWidget):
         # closed widget answers no further input at all. Checked before
         # every other branch, and NOT consumed -- these are the viewport's
         # own events and it still has to process them.
+        #
+        # `FocusOut` is deliberately NOT one of them. Which widget holds the
+        # keyboard is not a fact about the pointer, and cancelling a live
+        # middle drag on a focus change is the same mistake the grabber gate
+        # was: it ends a gesture the user is still making, for a reason that
+        # has nothing to do with the gesture. A window going away or going
+        # inactive is different -- there the pointer really is gone.
         if t in (QtCore.QEvent.Hide, QtCore.QEvent.Close,
-                 QtCore.QEvent.FocusOut, QtCore.QEvent.WindowDeactivate):
+                 QtCore.QEvent.WindowDeactivate):
             self._middle_pan_cancel()
 
         # ── Key press (ROI mode) ──────────────────────────────────────
@@ -2715,9 +2736,11 @@ class OverviewPanel(QWidget):
         # the real hierarchy reaches this viewport as press=1 move=4
         # release=1, while pyqtgraph's scene built a drag event for only two
         # of those four moves -- and on the user's machine, for the popup,
-        # none. Qt's implicit grab is what makes this reliable: the press
-        # binds the pointer to this widget, so every later move and the
-        # release come here even when the cursor has left the thumbnail.
+        # none. The press opening the gesture is what makes this reliable:
+        # the moves and the release that arrive HERE are the gesture, and no
+        # global state gets a vote on whether they count. A grab is taken as
+        # well, so that a drag which runs off the edge of the thumbnail keeps
+        # coming here -- but it is an enhancement, not a precondition.
         #
         # Consumed rather than passed on: every branch below is then reached
         # only with the middle button up, so none of them has to know this
@@ -2726,12 +2749,11 @@ class OverviewPanel(QWidget):
         if t == QtCore.QEvent.MouseButtonPress \
                 and event.button() == Qt.MiddleButton:
             return self._middle_pan_press(event)
-        if t == QtCore.QEvent.MouseMove and self._mid_pan_last is not None:
-            if not self._middle_pan_holding():
-                # The pointer was taken from us mid-gesture. End it here
-                # rather than pan on somebody else's move.
-                self._middle_pan_cancel()
-                return True
+        if t == QtCore.QEvent.MouseMove and self._middle_pan_holding():
+            # A move that reached this viewport with our own press still
+            # open IS this gesture's move. `_middle_pan_move` decides on the
+            # one thing that can still contradict that -- the middle button
+            # no longer being down -- and on nothing else.
             return self._middle_pan_move(event)
         if t == QtCore.QEvent.MouseButtonRelease \
                 and event.button() == Qt.MiddleButton:

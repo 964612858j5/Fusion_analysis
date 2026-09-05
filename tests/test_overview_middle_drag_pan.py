@@ -641,10 +641,22 @@ def test_closing_the_thumbnail_gives_the_mouse_grab_back(app):
     assert panel._mid_pan_grab is None
 
 
-def test_a_grab_taken_away_mid_gesture_stops_the_pan(app):
-    """Somebody else grabbed the pointer -- a modal dialog, a menu. The
-    moves that follow are not ours, and panning on them would drag the map
-    under a cursor that is somewhere else."""
+def test_a_transferred_grab_does_not_throw_away_the_drag(app):
+    """THE REGRESSION TEST for the reported bug.
+
+    `QWidget.mouseGrabber()` is a process-wide singleton this panel neither
+    owns nor can keep: every Qt popup takes it and clears it again on the
+    way out, a modal takes it, and a platform grab can be refused or
+    transferred at any moment. The gesture used to require that singleton
+    to still name this viewport before it would honour a move -- so from
+    the first move after any of that, middle moves this viewport had
+    legitimately RECEIVED, with the middle button still down, were thrown
+    away and the thumbnail did not move. That is the "the middle button
+    only works after I left-click somewhere first" report.
+
+    Restore the gate -- put `QWidget.mouseGrabber() is self._mid_pan_grab`
+    back into `_middle_pan_holding` -- and this test fails.
+    """
     panel = _panel()
     _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
           button=Qt.MiddleButton)
@@ -652,16 +664,154 @@ def test_a_grab_taken_away_mid_gesture_stops_the_pan(app):
     thief.resize(10, 10)
     thief.show()
     thief.grabMouse()
-    assert _grabber() is thief
+    assert _grabber() is thief, "the fixture did not take the grab"
     before = _range(panel)
 
     _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(320, 300),
           button=Qt.NoButton, buttons=Qt.MiddleButton)
 
-    assert _range(panel) == before, "panned on somebody else's pointer"
+    assert _range(panel) != before, \
+        "a legitimate middle move was dropped because of a global grab"
+
+    # ...and the pointer someone else holds is still theirs: ending our
+    # gesture must not release a grab we are not the owner of.
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(320, 300),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+    assert _grabber() is thief, "released somebody else's grab"
+    assert panel._mid_pan_last is None
     assert panel._mid_pan_grab is None
     thief.releaseMouse()
     thief.hide()
+
+
+def test_a_press_whose_grab_is_refused_still_pans(app):
+    """The grab is an enhancement -- it keeps the drag alive once the cursor
+    leaves the thumbnail -- and a platform that refuses it (the offscreen
+    one says so out loud; a real X server can refuse or transfer one at any
+    moment) must cost that and nothing else."""
+    panel = _panel()
+    vp = panel.gview.viewport()
+    orig = vp.grabMouse
+
+    def refuse():
+        raise RuntimeError("the platform refused the grab")
+
+    vp.grabMouse = refuse
+    try:
+        before = _range(panel)
+        _middle_drag(panel, -60, -40)
+    finally:
+        vp.grabMouse = orig
+    assert _range(panel) != before, "a refused grab killed the whole gesture"
+    assert panel._mid_pan_grab is None
+    assert panel._mid_pan_last is None
+
+
+def test_a_focus_change_does_not_end_a_live_drag(app):
+    """Which widget holds the KEYBOARD is not a fact about the pointer. A
+    drag that is cancelled by a focus change is cancelled for a reason that
+    has nothing to do with the gesture the hand is making."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    before = _range(panel)
+
+    QtWidgets.QApplication.instance().sendEvent(
+        panel.gview.viewport(),
+        QtGui.QFocusEvent(QtCore.QEvent.FocusOut, Qt.OtherFocusReason))
+
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(320, 300),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    assert _range(panel) != before, "a focus change killed a live drag"
+    panel._middle_pan_cancel()
+
+
+def test_deactivating_the_window_ends_the_gesture(app):
+    """A window that is no longer active does not have the pointer, and a
+    grab left standing on one is an application that answers nothing."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
+    assert _grabber() is panel.gview.viewport()
+
+    QtWidgets.QApplication.instance().sendEvent(
+        panel.gview.viewport(),
+        QtCore.QEvent(QtCore.QEvent.WindowDeactivate))
+
+    assert panel._mid_pan_last is None
+    assert panel._mid_pan_grab is None
+    assert _grabber() is None
+    settled = _range(panel)
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(320, 300),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    assert _range(panel) == settled
+
+
+# ── the two states the desk reported it failing in ───────────────────────
+
+
+@pytest.mark.parametrize("mode", [None, "patch", "roi"])
+def test_a_middle_drag_pans_while_the_status_still_says_loading(app, mode):
+    """"Loading" is a LABEL. Once there is a thumbnail on screen it is a map,
+    and the wheel already treated it as one -- zoom worked in this state and
+    the middle button did not, which is what said the picture was never the
+    problem.
+
+    Nothing has been left-clicked in this panel: the gesture may not need an
+    activating click, because the left button is not free to give one (it
+    draws, it navigates, it edits)."""
+    panel = _panel(mode)
+    panel.status.setText("Loading overview, please wait...")
+    before = _range(panel)
+
+    _middle_drag(panel, -60, -40)
+
+    assert "Loading" in panel.status.text()
+    assert _range(panel) != before, "the thumbnail did not move while loading"
+    assert after_is_a_translation(before, _range(panel))
+
+
+def after_is_a_translation(before, after):
+    return ((after[1] - after[0]) == pytest.approx(before[1] - before[0])
+            and (after[3] - after[2]) == pytest.approx(before[3] - before[2]))
+
+
+def test_a_middle_drag_pans_immediately_after_a_patch_is_drawn(app):
+    """Draw a rectangle with the left button and reach straight for the
+    middle one. No intervening click of any kind."""
+    panel = _panel("patch")
+    a, b = QtCore.QPoint(120, 120), QtCore.QPoint(220, 220)
+    _send(panel, QtCore.QEvent.MouseButtonPress, a, button=Qt.LeftButton)
+    for i in range(1, 4):
+        _send(panel, QtCore.QEvent.MouseMove,
+              QtCore.QPoint(a.x() + (b.x() - a.x()) * i // 3,
+                            a.y() + (b.y() - a.y()) * i // 3),
+              button=Qt.NoButton, buttons=Qt.LeftButton)
+    _send(panel, QtCore.QEvent.MouseButtonRelease, b,
+          button=Qt.LeftButton, buttons=Qt.NoButton)
+    assert len(panel._patches) == 1, "the fixture did not draw a patch"
+    rect_before = tuple(panel._patches[0]["coords"])
+    before = _range(panel)
+
+    _middle_drag(panel, -60, -40, start=(300, 300))
+
+    assert _range(panel) != before, "the thumbnail did not move after a draw"
+    assert len(panel._patches) == 1
+    assert tuple(panel._patches[0]["coords"]) == rect_before
+
+
+def test_a_middle_drag_changes_no_patches_and_no_rois(app):
+    """The gesture is a camera move. Nothing downstream may hear about it."""
+    panel = _panel("patch")
+    panel.add_patch_rect(*P1)
+    seen = []
+    panel.patches_changed.connect(lambda *_a: seen.append("patches"))
+    panel.rois_changed.connect(lambda *_a: seen.append("rois"))
+    panel.navigate_requested.connect(lambda *_a: seen.append("navigate"))
+
+    _middle_drag(panel, -60, -40)
+
+    assert seen == []
 
 
 def test_a_second_gesture_starts_from_its_own_press(app):

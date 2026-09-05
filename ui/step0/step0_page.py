@@ -994,7 +994,8 @@ class Step0Page(QWidget):
         # coarse tiles are refined in place, and the full image's header
         # already states the level for the mode that has one frame.
         self._compare_where_lbl = QLabel(
-            "Right-click the full image to compare that spot.")
+            "Right-click the full image to compare that spot, or use "
+                "\u201cCompare current center\u201d for the middle of the view.")
         self._compare_where_lbl.setStyleSheet("color:#888;font-size:10px;")
         ctrl_row.addWidget(self._compare_where_lbl)
         ctrl_row.addStretch()
@@ -1532,6 +1533,30 @@ class Step0Page(QWidget):
         self._full_level_hint.setVisible(False)
         bar.addWidget(self._full_level_hint)
 
+        # ── the DRIFT-FREE mode switch ──────────────────────────────────
+        #
+        # A right-click means "compare HERE": the point under the cursor
+        # becomes the panels' centre, so the view moves -- by design, and
+        # by exactly the offset between the cursor and the centre. Leaving
+        # adopts the panels' current camera, so it moves back by whatever
+        # the panels were moved by. Both are right, and together they mean
+        # that holding the mouse still off-centre and right-clicking over
+        # and over WALKS the view: each entry re-centres on a point that
+        # the previous entry moved under the cursor. That is not a bug to
+        # be compensated away -- it is what "compare here" says.
+        #
+        # So this button is the other gesture, the one that has no "here"
+        # in it: compare the CENTRE, come back to the CENTRE. It never
+        # reads the mouse. It is not a second camera state machine either
+        # -- it calls the same `_enter_compare_mode` / `_exit_compare_mode`
+        # the right-click and Esc call, with no point, and entering with no
+        # point already means "the middle of the view".
+        self._btn_compare_toggle = QPushButton(self._COMPARE_TOGGLE_TO_COMPARE)
+        self._btn_compare_toggle.setStyleSheet(btn_style)
+        self._btn_compare_toggle.clicked.connect(self._on_compare_toggle_clicked)
+        bar.addWidget(self._btn_compare_toggle)
+        self._update_compare_toggle_button()
+
         self._btn_full_reopen = QPushButton("Reopen full image")
         self._btn_full_reopen.setToolTip(
             "Rebuild the full image for the current channel and the current "
@@ -1863,9 +1888,52 @@ class Step0Page(QWidget):
         # The method switch drives the full image; greyed while the panels
         # are up, live again on the way back.
         self._update_full_method_buttons()
+        # ...and the one mode button is named after where it goes, so it
+        # is renamed by the page change itself -- here, the ONE place the
+        # page changes -- rather than by each of the callers that cause it.
+        self._update_compare_toggle_button()
         # And the thumbnail's viewport rectangle changes subject with the
         # mode, in both directions.
         self._update_full_image_view_rect()
+
+    # The two faces of the one toolbar button, by the page that is up.
+    _COMPARE_TOGGLE_TO_COMPARE = "Compare current center"
+    _COMPARE_TOGGLE_TO_FULL = "Back to full image"
+
+    def _on_compare_toggle_clicked(self):
+        """The toolbar button: swap pages using the CURRENT CAMERA.
+
+        No mouse position is read on either side. Going in,
+        `_enter_compare_mode()` with no point centres the panels on the
+        full image's own centre at the full image's own scale; coming out,
+        `_exit_compare_mode()` is the very same call Esc and the compare
+        right-click make. Because the entry point IS the centre, the round
+        trip is the identity: press it ten times without touching anything
+        else and neither centre nor scale moves.
+        """
+        if self._compare_mode():
+            self._exit_compare_mode()
+        else:
+            self._enter_compare_mode()
+
+    def _update_compare_toggle_button(self):
+        """Name the button after where it GOES, not where you are."""
+        btn = getattr(self, "_btn_compare_toggle", None)
+        if btn is None:
+            return
+        if self._compare_mode():
+            btn.setText(self._COMPARE_TOGGLE_TO_FULL)
+            btn.setToolTip(
+                "Return to the full image, centred where the compare "
+                "panels are now, at their magnification. The same way back "
+                "as a right-click or Esc.")
+        else:
+            btn.setText(self._COMPARE_TOGGLE_TO_COMPARE)
+            btn.setToolTip(
+                "Open the compare panels on the CENTRE of the full image, "
+                "at its current magnification. Unlike a right-click -- "
+                "which compares the point under the cursor -- this reads no "
+                "mouse position, so switching back and forth moves nothing.")
 
     def _exit_compare_mode(self):
         """Back to the full image, AT THE PANELS' CAMERA.
@@ -2322,7 +2390,8 @@ class Step0Page(QWidget):
             "\u2014 right-click or Esc to go back.")
         self._preview_status.setText(
             "Original | TopHat | cucim, one camera. Wheel to zoom, drag to "
-            "pan; right-click or Esc returns to the full image.")
+            "pan; right-click, Esc or \u201cBack to full image\u201d returns "
+            "to the full image.")
         self._refresh_preview_display(keep_zoom=True)
         self._update_compare_view_rect()
         return strip
@@ -7684,7 +7753,8 @@ class Step0Page(QWidget):
         if hasattr(self, "_btn_snapshot_patch"):
             self._btn_snapshot_patch.setEnabled(False)
             self._compare_where_lbl.setText(
-                "Right-click the full image to compare that spot.")
+                "Right-click the full image to compare that spot, or use "
+                "\u201cCompare current center\u201d for the middle of the view.")
         if getattr(self, "_view_area", None) is not None:
             self._set_compare_mode(False)
 

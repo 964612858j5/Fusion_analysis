@@ -6499,17 +6499,39 @@ class Step0Page(QWidget):
         self._sync_compare_params()
 
     def _on_dec_param_entered(self):
-        """Enter pressed in a per-channel param box.
+        """Enter pressed in a per-channel param box: recompute THIS channel
+        with the number that was just typed.
 
-        Records the value and marks the channel stale -- it no longer starts
-        a run. A parameter change is not a request to compute: the checkbox
-        plus the Process button are the only path to a correction run, so
-        that pressing Enter while tuning a number cannot put the GPU to work
-        behind the user's back.
+        Enter is the deliberate act. Typing into the box on its own still
+        computes nothing -- `_on_dec_param_changed` only records the value
+        and marks the row stale -- so a half-typed number, or a number
+        being tuned by eye against the compare panels, never puts the GPU
+        to work behind the user's back. Pressing Enter says the tuning is
+        finished, and it is the only keystroke that says it.
+
+        `interpretText()` on BOTH boxes first, so the run uses the value
+        that is on screen rather than the one that was there before the
+        edit. `QAbstractSpinBox` already interprets on Return before it
+        emits, and this call is a no-op when it has -- but the guarantee
+        belongs here, next to the code that reads the values, rather than
+        in an ordering inside Qt that this handler cannot see. Both boxes
+        because the signal does not say which one it came from, and
+        committing an unedited box is free.
+
+        Then the ONE authoritative path, `_process_current_channel`: the
+        production busy guard, the Explore/Compare release, the
+        release -> watch -> start ordering, the dataset generation and the
+        channel-cache invalidation are all its, and there is no second
+        copy of them here to drift out of step. It computes both methods,
+        which is what the compare panels need: the radio picks the final
+        result, it is not a prerequisite for recomputing.
         """
         if getattr(self, "_loading_decision", False):
             return
+        for sb in (self._dec_radius, self._dec_sigma):
+            sb.interpretText()
         self._on_dec_param_changed()
+        self._process_current_channel()
 
     def _update_decision_ui(self):
         ch = self.current_channel
@@ -7509,15 +7531,20 @@ class Step0Page(QWidget):
     def _process_current_channel(self):
         """Recompute ONE channel across all patches with its Per-Channel params.
 
-        NO LONGER REACHABLE FROM THE UI. The "Process" button that lived in
-        the Per-Channel Decision panel is gone: the checkbox plus the one
-        Process button in Method Parameters is the only way a correction run
-        starts, so that "which channels did this page compute" has a single
-        answer. What is left here is the incremental single-channel run
-        itself, kept because it is the shortest honest driver of that worker
-        path and several suites (dataset switch, WSI cancel, incremental
-        Process, the GPU hand-off parametrization) exercise it as one.
-        Nothing in the page calls it.
+        The single entry point for "this one channel, again, with the
+        numbers that are in the Per-Channel Decision boxes now". The
+        "Process" button that used to sit in that panel is gone -- the
+        checkbox plus the one Process button in Method Parameters is how a
+        WHOLE RUN starts, so that "which channels did this page compute"
+        has a single answer -- and Enter in a param box is what reaches
+        this: an explicit request about one channel, not a batch.
+
+        Everything a run has to respect lives here and only here: the
+        production busy guard, the patch precondition, dropping this
+        channel's preview cache and signature, registering the pending
+        signature, and the release -> watch -> start ordering that hands
+        the GPU over from Explore/Compare. Callers do not reimplement any
+        of it; they call this.
 
         Computes BOTH TopHat and cucim (method='both') so the two results can be
         compared and the final one picked via the radio. The radio is the

@@ -138,6 +138,49 @@ class _SeedLoader(_GpuPathLoader):
         return rng.uniform(300.0, 4000.0, size=(32, 32)).astype(np.float32)
 
 
+_LIVE_PAGES = []
+
+
+@pytest.fixture(autouse=True)
+def _tear_pages_down_before_the_flush():
+    """Close this module's pages -- and their floating Intensity windows --
+    BEFORE the repo-wide fixture flushes the event loop.
+
+    Every test here builds a Step0Page, usually opens the Intensity window
+    (a SHOWN top-level widget hosting a pyqtgraph inspector) and then simply
+    drops the page. Nothing closes that window: it dies whenever the cyclic
+    collector happens to run, which depends on allocation timing (measured:
+    identical trees pass with no `__pycache__` and abort once bytecode is
+    present, and pass or abort by checkout path). When the collector fires
+    inside the repo-wide fixture's first `processEvents()`, the still-shown
+    GraphicsView is asked to paint items whose Python wrappers are already
+    gone -- a native pure-virtual call in `initStyleOption`, i.e. an abort
+    with no traceback into our code.
+
+    Tearing the pages down deterministically here removes the shown widget
+    before anything is flushed; the `gc.collect()` then takes the scenes
+    down with their items, as `test_step0_dataset_switch.py` already does.
+    Module-local autouse fixtures tear down before the conftest one, which
+    is exactly the slot this needs.
+    """
+    yield
+    pages, _LIVE_PAGES[:] = list(_LIVE_PAGES), []
+    for page in pages:
+        try:
+            win = getattr(page, "_intensity_window", None)
+            if win is not None:
+                win.close()
+            teardown = getattr(page, "teardown", None)
+            if callable(teardown):
+                teardown()
+            page.close()
+            page.deleteLater()
+        except RuntimeError:
+            pass  # already gone on the C++ side: nothing left to close
+    import gc
+    gc.collect()
+
+
 def _bare_page(app, stack=None, loader=None, channel="CD3"):
     """A page whose Channel Remap tab was NEVER shown -- the real-app state
     the Intensity window has to cope with.
@@ -153,6 +196,7 @@ def _bare_page(app, stack=None, loader=None, channel="CD3"):
     if channel is not None:
         page.current_channel = channel
     page._explore_tab = _Tab(stack)
+    _LIVE_PAGES.append(page)
     return page
 
 

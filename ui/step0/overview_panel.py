@@ -2504,20 +2504,25 @@ class OverviewPanel(QWidget):
         checks.
 
         `QWidget.mouseGrabber()` is deliberately NOT consulted. It used to
-        be the second half of this test, and that is the bug the desk kept
-        reporting as "the middle button only works after I left-click
-        first". `mouseGrabber()` is a process-wide singleton that this
-        panel neither owns nor can keep: any Qt popup takes it (a menu, a
-        combo box, a tooltip's popup window all grab and then hand it
-        back, and the hand-back clears it rather than restoring ours), a
-        modal takes it, and a platform grab that is refused or transferred
-        leaves it saying something else entirely. In every one of those
+        be the second half of this test, and it is the wrong kind of fact
+        to hang a gesture on: a process-wide singleton, describing the
+        application rather than the event in hand, that this panel neither
+        owns nor can keep. Any other widget calling `grabMouse()` replaces
+        it -- Qt releases the previous grabber first -- and a platform grab
+        can be refused or transferred, which the offscreen plugin says out
+        loud every time it records one it could not take. In each of those
         cases the middle moves still ARRIVE here, with the middle button
-        still down -- and the gate threw them away from the very first
-        one, so the drag did nothing at all. Discarding an event this
-        widget legitimately received, because of a global that says
-        nothing about that event, is never right; a move that is not ours
-        does not reach us in the first place.
+        still down, and the gate threw them away from the very first one,
+        so the drag did nothing at all. Discarding an event this widget
+        legitimately received, because of a global that says nothing about
+        that event, is never right; a move that is not ours does not reach
+        us in the first place.
+
+        (Qt's own popups are NOT among the thieves, measured rather than
+        assumed: a menu or a combo box opened over a standing grab takes
+        it and gives it back to the same widget on the way out. What is
+        left is enough -- the gate is unsound whether or not any one
+        caller trips it.)
 
         The grab is still TAKEN at the press -- see `_middle_pan_press` --
         because it is what keeps the drag alive once the cursor leaves the
@@ -2538,9 +2543,9 @@ class OverviewPanel(QWidget):
         measured rather than assumed: `QWidget.releaseMouse()` clears the
         application's one grabber even when called on a widget that is not
         holding it. An unconditional release here would therefore take the
-        pointer away from whoever took it from us -- a menu, a modal -- and
-        leave that widget waiting for events it will never get. We give
-        back exactly what we still hold, and nothing else.
+        pointer away from whoever took it from us and leave that widget
+        waiting for events it will never get. We give back exactly what we
+        still hold, and nothing else.
         """
         held, self._mid_pan_grab = self._mid_pan_grab, None
         self._mid_pan_last = None

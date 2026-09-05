@@ -645,14 +645,15 @@ def test_a_transferred_grab_does_not_throw_away_the_drag(app):
     """THE REGRESSION TEST for the reported bug.
 
     `QWidget.mouseGrabber()` is a process-wide singleton this panel neither
-    owns nor can keep: every Qt popup takes it and clears it again on the
-    way out, a modal takes it, and a platform grab can be refused or
-    transferred at any moment. The gesture used to require that singleton
-    to still name this viewport before it would honour a move -- so from
-    the first move after any of that, middle moves this viewport had
-    legitimately RECEIVED, with the middle button still down, were thrown
-    away and the thumbnail did not move. That is the "the middle button
-    only works after I left-click somewhere first" report.
+    owns nor can keep: any other widget calling `grabMouse()` replaces it
+    (Qt releases the previous grabber first, which is what this test does),
+    and a platform grab can be refused or transferred at any moment. The
+    gesture used to require that singleton to still name this viewport
+    before it would honour a move -- so from the first move after any of
+    that, middle moves this viewport had legitimately RECEIVED, with the
+    middle button still down, were thrown away and the thumbnail did not
+    move. That is the "the middle button only works after I left-click
+    somewhere first" report.
 
     Restore the gate -- put `QWidget.mouseGrabber() is self._mid_pan_grab`
     back into `_middle_pan_holding` -- and this test fails.

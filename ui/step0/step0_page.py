@@ -2256,8 +2256,13 @@ class Step0Page(QWidget):
             camera = self._full_image_camera()
             if camera is None:
                 return None
-            self._set_compare_mode(True)
-            self._preview_status.setText("Opening\u2026")
+            # The FULL IMAGE STAYS ON SCREEN, with a badge over it, and the
+            # turn is yielded so that badge is actually painted before the
+            # strip is built. Switching first is what made a cold entry a
+            # blank text page for two seconds: the compare page has nothing
+            # on it until the three stacks exist, and building them takes
+            # long enough to see.
+            self._show_preparing_compare()
             QTimer.singleShot(0, lambda: self._enter_compare_mode(
                 x_l0, y_l0, _laid_out=camera))
             return None
@@ -2269,7 +2274,7 @@ class Step0Page(QWidget):
         camera = (_laid_out if isinstance(_laid_out, tuple)
                   else self._full_image_camera())
         if camera is None:
-            self._exit_compare_mode()
+            self._abort_compare_entry()
             return None
         cx, cy, scale = (float(v) for v in camera)
         # A right-click that carried no point -- a test, or a caller that
@@ -2278,11 +2283,20 @@ class Step0Page(QWidget):
         px = float(x_l0) if x_l0 is not None else cx
         py = float(y_l0) if y_l0 is not None else cy
 
-        self._set_compare_mode(True)
+        # BUILT FIRST, SWITCHED AFTER. The panels are only put up once
+        # there is something on them; until then the user keeps looking at
+        # the full image. On the cold path the strip has never been laid
+        # out, so `_compare_panel_px` answers with its fallback and the
+        # opening viewport is approximate -- which costs a handful of tile
+        # requests and nothing else, because `_apply_compare_camera` below
+        # re-solves each panel's rectangle from its REAL width the moment
+        # the panels are on screen.
         strip = self._ensure_compare_strip(channel, (px, py), scale)
         if strip is None:
-            self._exit_compare_mode()
+            self._abort_compare_entry()
             return None
+        self._set_compare_mode(True)
+        self._clear_preparing_compare()
         # Saved once the strip is up and BEFORE the panels are moved: the
         # fallback for a way out with no panels' camera to adopt.
         self._compare_entry_full_camera = (cx, cy, scale)
@@ -2304,6 +2318,58 @@ class Step0Page(QWidget):
         self._update_compare_view_rect()
         return strip
 
+    # -- "Preparing Compare..." -------------------------------------------
+    #
+    # A cold entry has to build three tile stacks, and building QWidgets
+    # cannot leave the GUI thread. What CAN be arranged is what the user is
+    # looking at while it happens, and the answer is not a blank page: it
+    # is the picture that was already there, with a badge saying what is
+    # going on. Measured on the real 59040x35520 slide the wait is 686 ms
+    # cold (of which 426 ms is the build itself) and 174 ms warm; it was
+    # 2050 ms of blank text page before the full image's overview store was
+    # lent to the strip.
+
+    _PREPARING_COMPARE_BADGE = "Preparing Compare…"
+
+    def _full_image_view(self):
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        return getattr(stack, "view", None)
+
+    def _show_preparing_compare(self):
+        """Say what is about to happen, over the image that is still up."""
+        view = self._full_image_view()
+        setter = getattr(view, "set_status_text", None)
+        if callable(setter):
+            setter(self._PREPARING_COMPARE_BADGE)
+        self._preview_status.setText(
+            "Preparing Compare… the full image stays up until the "
+            "three panels have something on them.")
+
+    def _clear_preparing_compare(self):
+        """Take the badge down. Only ours: a badge somebody else put up --
+        a production run's, or the compare-mode pause the hand-off is about
+        to set -- must not be cleared by this."""
+        view = self._full_image_view()
+        label = getattr(view, "status_label", None)
+        setter = getattr(view, "set_status_text", None)
+        if not callable(setter):
+            return
+        try:
+            mine = (label is not None and label.isVisible()
+                    and label.text() == self._PREPARING_COMPARE_BADGE)
+        except RuntimeError:
+            return
+        if mine:
+            setter(None)
+
+    def _abort_compare_entry(self):
+        """A cold entry that could not be finished. The full image is still
+        the view -- nothing was switched -- so this only has to take the
+        badge down and say why."""
+        self._clear_preparing_compare()
+        self._exit_compare_mode()
+
     def _ensure_compare_strip(self, channel, centre_l0, scale):
         """Build the three tile stacks on first use, then keep them.
 
@@ -2315,6 +2381,9 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         if strip is None:
             return None
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack_for_store = (getattr(explore_tab, "stack", None)
+                           if explore_tab is not None else None)
         strip.set_dataset(self.ome_path)
         if strip.built:
             controllers = strip.controllers
@@ -2328,11 +2397,19 @@ class Step0Page(QWidget):
         h = max(1, int(round(ph / scale))) if scale > 0 else 1024
         viewport = (int(round(centre_l0[1] - h / 2.0)),
                     int(round(centre_l0[0] - w / 2.0)), w, h)
+        # The full image's overview store, LENT. See
+        # `build_compare_stacks`: without it the first `load_overview` of
+        # the strip re-read a whole pyramid level the full image was
+        # already holding, synchronously, on the GUI thread -- 1110 ms of
+        # the 1622 ms a cold entry cost, and the whole of the blank page
+        # the user was looking at. The full image remains the owner; the
+        # strip is torn down before it.
         built = strip.ensure_built(
             channel, params_for=self._compare_params_for,
             tint=self._full_image_tint(),
             nucleus=self._full_image_nucleus_args(),
-            viewport_l0=viewport)
+            viewport_l0=viewport,
+            overview_store=getattr(stack_for_store, "overview_store", None))
         if built is None:
             self._preview_status.setText(
                 "Compare could not be opened \u2014 the full image is "
@@ -4467,9 +4544,7 @@ class Step0Page(QWidget):
         # moves, so neither its pixels nor its source identity can survive --
         # and so a Full Image that is open right now is unbound before
         # anything of the new dataset exists.
-        explore_tab = getattr(self, "_explore_tab", None)
-        if explore_tab is not None:
-            explore_tab.set_dataset(None)
+        self._unbind_viewers_for_dataset_switch()
         # Drop the old dataset's on-screen pixels, metrics and caches.
         self._reset_dataset_view_state()
         old_loader = getattr(self, "loader", None)
@@ -4529,6 +4604,7 @@ class Step0Page(QWidget):
 
         # Bind Explore to the NEW dataset (the stack itself is built lazily,
         # on the next activation of the Explore view).
+        explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is not None:
             explore_tab.set_dataset(self.ome_path)
         self.current_patch_idx = 0
@@ -7186,6 +7262,25 @@ class Step0Page(QWidget):
         if "ondemand" not in stuck:
             self._ondemand_workers = []
         return stuck
+
+    def _unbind_viewers_for_dataset_switch(self):
+        """Unbind both viewers from the outgoing dataset, STRIP FIRST.
+
+        The order is a requirement, not a preference. The strip borrows the
+        full image stack's overview store, and `ExploreController.teardown`
+        shuts that store's reader pool down; unbinding the full image first
+        would leave the strip holding a dead pool for as long as it took to
+        reach its own teardown.
+
+        Both calls are idempotent, so the one `_reset_dataset_view_state`
+        makes afterwards is a no-op.
+        """
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None:
+            strip.set_dataset(None)
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is not None:
+            explore_tab.set_dataset(None)
 
     def _reset_dataset_view_state(self):
         """Drop every pixel, metric and cache that belongs to the OLD dataset.

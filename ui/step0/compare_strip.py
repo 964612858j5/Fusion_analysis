@@ -65,13 +65,18 @@ class CompareStacks:
     """
 
     def __init__(self, provider, scheduler, compute, grid, caches,
-                 overview_store, controllers, views, overlays):
+                 overview_store, controllers, views, overlays,
+                 owns_overview_store=True):
         self.provider = provider
         self.scheduler = scheduler
         self.compute = compute
         self.grid = grid
         self.caches = caches
         self.overview_store = overview_store
+        # False when the store was BORROWED from the full image's stack.
+        # Shutting a borrowed pool down would leave the full image unable
+        # to switch channels for the rest of the session.
+        self.owns_overview_store = bool(owns_overview_store)
         self.controllers = list(controllers)
         self.views = list(views)
         self.overlays = list(overlays)
@@ -103,7 +108,7 @@ class CompareStacks:
                 except Exception:                           # noqa: BLE001
                     pass
             store = self.overview_store
-            if store is not None:
+            if store is not None and self.owns_overview_store:
                 try:
                     store.shutdown()
                 except Exception:                           # noqa: BLE001
@@ -122,8 +127,28 @@ class CompareStacks:
 def build_compare_stacks(path, channel, parent_widget=None, *,
                          sources=COMPARE_SOURCES, params_for=None,
                          tint=None, nucleus_channel=None, nucleus_tint=None,
-                         nucleus_enabled=False, viewport_l0=None):
+                         nucleus_enabled=False, viewport_l0=None,
+                         overview_store=None):
     """Build the three tile stacks for `path` over ONE backend.
+
+    `overview_store` is the FULL IMAGE's whole-slide overview store, lent
+    for the duration. It is the one piece of the full image's backend the
+    strip borrows, and the reason is measured: building the strip cost
+    1622 ms on the real 59040x35520 slide, of which the provider, the
+    scheduler, three views and three controllers were 163 ms and the first
+    `load_overview` was 1110 ms -- a synchronous, GUI-thread re-read of a
+    whole pyramid level the full image had already read and still held.
+    Sharing the store turns that read into a memcpy.
+
+    Only the store. The provider, the scheduler and the two tile caches
+    stay the strip's own: sharing the scheduler would make
+    `suspend_for_production`'s "wait until idle" mean "wait for the other
+    mode too", which is a GUI-thread wait on somebody else's work, and
+    sharing the 2 GB corrected cache would make the two modes evict each
+    other's tiles. Neither is worth 163 ms.
+
+    None means the strip makes and owns a private store, which is what a
+    strip built with no full image behind it must do.
 
     `params_for(source)` returns the parameter tuple that source should come
     up with -- `()` for Original, `(radius,)` for TopHat, `(sigma,)` for
@@ -171,7 +196,8 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
                                   corrected_cache)
         grid = TileGridSpec(tile_size=TILE_SIZE, source_chunk_shape=(),
                             grid_version="v1")
-        store = SharedOverviewStore()
+        owns_store = overview_store is None
+        store = SharedOverviewStore() if owns_store else overview_store
 
         for source in sources:
             method = COMPARE_METHODS.get(source)
@@ -220,9 +246,11 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
                                        padding=0)
         return CompareStacks(provider, scheduler, compute, grid,
                              (raw_cache, corrected_cache), store,
-                             controllers, views, overlays)
+                             controllers, views, overlays,
+                             owns_overview_store=owns_store)
     except Exception:
-        _cleanup_partial(controllers, store, scheduler, provider, views)
+        _cleanup_partial(controllers, store if owns_store else None,
+                         scheduler, provider, views)
         raise
 
 
@@ -379,7 +407,7 @@ class CompareStrip(QtWidgets.QWidget):
         self._build_error = None
 
     def ensure_built(self, channel, *, params_for=None, tint=None,
-                     nucleus=None, viewport_l0=None):
+                     nucleus=None, viewport_l0=None, overview_store=None):
         """Build on first use; afterwards return what is already there.
 
         Returns the `CompareStacks`, or None when there is no dataset or the
@@ -393,7 +421,8 @@ class CompareStrip(QtWidgets.QWidget):
             stacks = self._stack_factory(
                 self._dataset_path, channel, self,
                 params_for=params_for, tint=tint,
-                viewport_l0=viewport_l0, **dict(nucleus or {}))
+                viewport_l0=viewport_l0, overview_store=overview_store,
+                **dict(nucleus or {}))
         except Exception as exc:                            # noqa: BLE001
             self._build_error = str(exc)
             self._placeholder.setText(

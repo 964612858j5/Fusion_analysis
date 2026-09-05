@@ -36,6 +36,7 @@ ones -- driven by recording controllers.
 """
 
 import os
+import time
 
 import numpy as np
 import pytest
@@ -47,6 +48,8 @@ pytest.importorskip("PyQt5")
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import compare_strip as cs  # noqa: E402
+from block01.viewer.explore_view import (  # noqa: E402
+    SharedOverviewStore as _SharedOverviewStore)
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 
 from test_step0_background_correction_tab import (  # noqa: E402
@@ -169,6 +172,53 @@ class _ViewBox:
                        (float(y0), float(y0) + float(h)))
 
 
+class _Store(_SharedOverviewStore):
+    """A REAL `SharedOverviewStore` that counts its own shutdowns.
+
+    Real, not a stand-in, because the page LENDS the full image's store to
+    the strip and the real `build_compare_stacks` builds three real
+    controllers on whatever it is given. A stand-in here would only mean
+    the fixture could not build.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.shutdowns = 0
+
+    def shutdown(self):
+        self.shutdowns += 1
+        super().shutdown()
+
+
+class _StatusLabel:
+    """The in-view badge `ExploreView` puts over the picture."""
+
+    def __init__(self):
+        self._text = ""
+        self._visible = False
+
+    def text(self):
+        return self._text
+
+    def isVisible(self):
+        return self._visible
+
+
+class _FullView:
+    """Enough of `ExploreView` for the page: a camera and a status badge."""
+
+    def __init__(self, view_box):
+        self.view_box = view_box
+        self.status_label = _StatusLabel()
+
+    def set_status_text(self, text):
+        if not text:
+            self.status_label._visible = False
+            return
+        self.status_label._text = text
+        self.status_label._visible = True
+
+
 class _Stack:
     def __init__(self, level=0, scale_width=1024.0, view_w=SLIDE_W):
         self.controller = _FullController(level)
@@ -176,9 +226,16 @@ class _Stack:
         self.scheduler = type("S", (), {"raw_cache": None,
                                         "corrected_cache": None})()
         self.overlay = None
-        self.view = type("V", (), {"view_box": _ViewBox(0.0, view_w,
-                                                        scale_width)})()
+        self.view = _FullView(_ViewBox(0.0, view_w, scale_width))
         self.controller.view_box = self.view.view_box
+        # The full image's stack is the OWNER of the overview store the
+        # compare strip borrows.
+        self.controller._owns_overview_store = True
+        self.controller._overview_store = _Store()
+
+    @property
+    def overview_store(self):
+        return getattr(self.controller, "_overview_store", None)
 
 
 class _Tab:
@@ -316,21 +373,13 @@ class _Overlay:
         self.mappings.append((lo, hi, gamma))
 
 
-class _Store:
-    def __init__(self):
-        self.cache = {}
-        self.shutdowns = 0
-
-    def shutdown(self):
-        self.shutdowns += 1
-
-
 def _fake_compare_factory(record):
     """A `build_compare_stacks` stand-in that makes real `ExploreView`s."""
 
     def factory(path, channel, parent_widget=None, *, sources=cs.COMPARE_SOURCES,
                 params_for=None, tint=None, nucleus_channel=None,
-                nucleus_tint=None, nucleus_enabled=False, viewport_l0=None):
+                nucleus_tint=None, nucleus_enabled=False, viewport_l0=None,
+                overview_store=None):
         from block01.viewer.explore_view import ExploreView
         controllers, views, overlays = [], [], []
         for source in sources:
@@ -348,10 +397,14 @@ def _fake_compare_factory(record):
             views.append(view)
             overlays.append(overlay)
         provider = _Provider()
-        stacks = cs.CompareStacks(provider, object(), object(), object(),
-                                  (), _Store(), controllers, views, overlays)
+        stacks = cs.CompareStacks(
+            provider, object(), object(), object(), (),
+            overview_store if overview_store is not None else _Store(),
+            controllers, views, overlays,
+            owns_overview_store=overview_store is None)
         record.append({"path": path, "channel": channel, "tint": tint,
                        "viewport_l0": viewport_l0,
+                       "overview_store": overview_store,
                        "nucleus_channel": nucleus_channel,
                        "nucleus_enabled": nucleus_enabled, "stacks": stacks})
         if viewport_l0 is not None:
@@ -792,7 +845,12 @@ def test_teardown_shuts_the_shared_backend_down_exactly_once(app):
     store = stacks.overview_store
     strip.teardown()
     assert [c.torn_down for c in controllers] == [True, False, False]
-    assert store.shutdowns == 1
+    # The overview store is the FULL IMAGE's, lent for the duration, so the
+    # strip does not shut it down at all -- doing so would leave the lender
+    # unable to read another channel's overview.
+    assert stacks.owns_overview_store is False
+    assert store.shutdowns == 0
+    assert store is page._explore_tab.stack.overview_store
 
 
 # ── 8. the channel, the parameters and the mapping follow the page ───────
@@ -1821,3 +1879,306 @@ def test_a_zoomed_jump_on_real_panels_keeps_the_scale(real_strip):
         assert cam[2] == pytest.approx(zoomed, rel=1e-6)
         assert cam[0] == pytest.approx(SLIDE_W * 0.1, abs=2.0)
         assert cam[1] == pytest.approx(SLIDE_H * 0.9, abs=2.0)
+
+
+# ── 19. a cold entry keeps the picture that is already there ─────────────
+#
+# The measurement, on the real 59040x35520 slide, before this section:
+#
+#   right-click -> three panels on screen      2050 ms
+#     of which build_compare_stacks            1622 ms
+#       RawTileProvider(path)                    95 ms
+#       TileScheduler                            24 ms
+#       three ExploreViews + three controllers   44 ms
+#       the FIRST load_overview                1110 ms
+#   and the compare page was switched to at the START of that, so all
+#   2050 ms of it were a page with nothing on it but a sentence.
+#
+# So the second backend was never the cost -- 163 ms of it was. The cost
+# was a synchronous, GUI-thread re-read of a whole pyramid level the full
+# image had already read and was still holding, because the strip made its
+# own `SharedOverviewStore`. The strip borrows the full image's now; that is
+# the ONLY thing it borrows.
+#
+# What is left cannot leave the GUI thread -- building QWidgets is the GUI
+# thread's work -- so the other half of the fix is about what the user is
+# looking at while it happens: the full image, with a badge, until the
+# panels have something on them. 686 ms cold and 174 ms warm, measured.
+
+def test_the_strip_borrows_the_full_images_overview_store(app):
+    page = _page(app)
+    _enter(page)
+    build = page._compare_builds[-1]
+    assert build["overview_store"] is not None
+    assert build["overview_store"] is page._explore_tab.stack.overview_store
+
+
+def test_the_full_image_stack_owns_the_store_it_lends(app):
+    """`overview_store` is the controller's own -- the object it created
+    and shuts down at teardown. Lending it is lending, not transferring."""
+    page = _page(app)
+    stack = page._explore_tab.stack
+    assert stack.overview_store is not None
+    assert stack.controller._owns_overview_store is True
+    # ...and the real thing agrees: a controller built with no store makes
+    # and owns one.
+    from block01.viewer.explore_view import SharedOverviewStore
+    from block01.ui.step0 import step0_explore_tab as et
+    assert "overview_store" in et.ExploreStack.__dict__
+    assert SharedOverviewStore is not None
+
+
+def test_a_borrowed_store_is_not_shut_down_with_the_strip(real_strip):
+    """Shutting a borrowed pool down would leave the LENDER unable to read
+    another channel's overview for the rest of the session."""
+    from block01.viewer.explore_view import SharedOverviewStore
+
+    page, strip, _provider = real_strip
+    _drain()
+    lender = SharedOverviewStore()
+    strip.stacks.overview_store = lender
+    strip.stacks.owns_overview_store = False
+
+    strip.teardown()
+
+    # Still usable: a request on it still starts a read.
+    reads = []
+
+    class _W:
+        def on_overview_delivered(self, *_a):
+            reads.append("woken")
+
+    started = strip is not None and lender.request(
+        (("fake", "slide"), "CD3", 0),
+        lambda: _overview_record_for_test("CD3"), _W())
+    assert started is True
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not reads:
+        _drain(20)
+    assert reads == ["woken"]
+    lender.shutdown()
+
+
+def _overview_record_for_test(channel):
+    from block01.viewer.explore_view import OverviewRecord
+    arr = np.zeros((4, 4), dtype=np.float32)
+    return OverviewRecord(source=("fake", "slide"), channel=channel, level=0,
+                          arr=arr, display_lo=0.0, display_hi=1.0,
+                          shape=(4, 4))
+
+
+def test_a_strip_with_nobody_to_borrow_from_makes_its_own(app, monkeypatch):
+    """The strip must still work standing alone -- a build with no full
+    image behind it -- and then it OWNS what it made and shuts it down."""
+    from block01.viewer import raw_tile_provider as rtp
+    from block01.viewer.explore_view import SharedOverviewStore
+
+    provider = _RealishProvider()
+    monkeypatch.setattr(rtp, "RawTileProvider", lambda _path: provider)
+
+    stacks = cs.build_compare_stacks("/fake/slide.ome.tif", "CD3")
+    try:
+        assert stacks.owns_overview_store is True
+        assert isinstance(stacks.overview_store, SharedOverviewStore)
+        # ...and every controller knows it is a borrower of THAT store.
+        for controller in stacks.controllers:
+            assert controller._overview_store is stacks.overview_store
+            assert controller._owns_overview_store is False
+    finally:
+        stacks.teardown()
+    assert provider.closed == 1
+
+
+def test_the_click_does_not_put_a_blank_page_up(app):
+    """THE fix for the 2.7 s blank. After the right-click returns, the full
+    image is still what is on screen -- and it says why."""
+    page = _page(app)
+    assert page._compare_mode() is False
+
+    page._on_full_image_right_click(1000.0, 1000.0)
+
+    # ...still the full image, still its pixels, with a badge over them.
+    assert page._compare_mode() is False, "switched to an empty compare page"
+    assert page._explore_tab.stack.view.status_label.text() == \
+        page._PREPARING_COMPARE_BADGE
+    assert page._explore_tab.stack.view.status_label.isVisible() is True
+
+    QtTest.QTest.qWait(30)
+    QtTest.QTest.qWait(10)
+    assert page._compare_mode() is True
+    assert page._compare_strip_widget.built is True
+
+
+def test_the_panels_are_never_shown_before_they_are_built(app):
+    """The order is build-then-switch. A switch first is a blank page for
+    as long as the build takes, which is the whole complaint."""
+    page = _page(app)
+    seen = []
+    real_factory = page._compare_strip_widget._stack_factory
+
+    def watching(*a, **k):
+        seen.append(page._compare_mode())
+        return real_factory(*a, **k)
+
+    page._compare_strip_widget._stack_factory = watching
+    _enter(page)
+
+    assert seen == [False], (
+        "the compare page was already showing when the strip was built")
+
+
+def test_the_preparing_badge_is_taken_down_once_the_panels_are_up(app):
+    page = _page(app)
+    _enter(page)
+    label = page._explore_tab.stack.view.status_label
+    # The GPU hand-off replaces it with the pause badge; either way the
+    # "Preparing" badge must not still be standing.
+    assert not (label.isVisible()
+                and label.text() == page._PREPARING_COMPARE_BADGE)
+
+
+def test_a_failed_build_leaves_the_full_image_up(app):
+    """No blank compare page to be stranded on: the switch never happened,
+    so a failure has nothing to undo."""
+    page = _page(app)
+
+    def failing(*_a, **_k):
+        raise RuntimeError("no provider")
+
+    page._compare_strip_widget._stack_factory = failing
+    page._on_full_image_right_click(1000.0, 1000.0)
+    QtTest.QTest.qWait(30)
+    QtTest.QTest.qWait(10)
+
+    assert page._compare_mode() is False
+    assert page._compare_strip_widget.built is False
+    label = page._explore_tab.stack.view.status_label
+    assert not (label.isVisible()
+                and label.text() == page._PREPARING_COMPARE_BADGE)
+
+
+def test_opening_compare_on_the_shown_channel_reads_no_overview(real_strip):
+    """The point of the lending, measured where it costs: the channel the
+    full image is already showing is a cache hit, not a whole-level read."""
+    page, strip, provider = real_strip
+    _drain()
+    level = strip.controllers[0]._pick_overview_level()
+    channel = strip.controllers[0].channel
+    whole_level = [r for r in provider.reads
+                   if r[0] == channel and r[1] == level
+                   and r[2] == 0 and r[4] == 0]
+    assert len(whole_level) == 1, (
+        f"the strip re-read {channel}'s overview level: {whole_level}")
+
+
+def test_the_page_tears_the_strip_down_before_the_explore_tab(app):
+    """`Step0Page.teardown`, the deterministic path."""
+    page = _page(app)
+    _enter(page)
+    order = []
+    strip = page._compare_strip_widget
+    tab = page._explore_tab
+    real_strip_td = strip.teardown
+    real_tab_td = tab.teardown
+    strip.teardown = lambda *a, **k: (order.append("strip"),
+                                      real_strip_td(*a, **k))[1]
+    tab.teardown = lambda *a, **k: (order.append("tab"),
+                                    real_tab_td(*a, **k))[1]
+
+    page.teardown()
+
+    assert order == ["strip", "tab"], order
+
+
+# -- 20. lending is only safe with an ownership rule ----------------------
+
+def test_the_compare_controllers_do_not_own_the_store_they_are_given(app):
+    """The rule that makes lending safe at the controller level: a
+    controller given a store never shuts its pool down."""
+    page = _page(app)
+    _enter(page)
+    build = page._compare_builds[-1]
+    assert build["overview_store"] is page._explore_tab.stack.overview_store
+
+
+def test_a_dataset_switch_unbinds_the_strip_before_the_full_image(app):
+    """Ordering, at the commit path. The full image's teardown shuts the
+    borrowed pool down, so the borrower has to be unbound first."""
+    page = _page(app)
+    _enter(page)
+    order = []
+    strip = page._compare_strip_widget
+    tab = page._explore_tab
+    real_strip_sd = strip.set_dataset
+    real_tab_sd = tab.set_dataset
+    strip.set_dataset = lambda p: (order.append("strip"), real_strip_sd(p))[1]
+    tab.set_dataset = lambda p: (order.append("tab"), real_tab_sd(p))[1]
+
+    page._unbind_viewers_for_dataset_switch()
+
+    assert order == ["strip", "tab"], order
+
+
+def test_the_shared_backend_is_closed_exactly_once_on_a_switch(real_strip):
+    """The strip's OWN provider -- which it does own -- is closed once and
+    only once when the dataset goes."""
+    page, strip, provider = real_strip
+    _drain()
+    assert provider.closed == 0
+
+    strip.set_dataset(None)
+    _drain(200)
+
+    assert provider.closed == 1
+    # Idempotent: a second unbind must not close it again.
+    strip.set_dataset(None)
+    strip.teardown()
+    assert provider.closed == 1
+
+
+def test_the_borrowed_store_survives_the_strip_and_still_serves(real_strip):
+    """After compare mode is gone the LENDER must still be able to read a
+    channel it has never seen."""
+    page, strip, _provider = real_strip
+    _drain()
+    store = strip.stacks.overview_store
+    strip.teardown()
+    _drain(100)
+
+    woken = []
+
+    class _W:
+        def on_overview_delivered(self, key, rec, err=None):
+            woken.append((key, rec))
+
+    started = store.request((("fake", "slide"), "DAPI", 0),
+                            lambda: _overview_record_for_test("DAPI"), _W())
+    assert started is True
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not woken:
+        _drain(20)
+    assert woken and woken[0][1] is not None
+
+
+# -- 21. the two sets of generation tokens cannot collide -----------------
+#
+# Checked because sharing the store is the beginning of sharing, and the
+# next question anybody asks is whether the SCHEDULER could be shared too.
+# It could not, for a different reason (see `build_compare_stacks`), but the
+# token namespacing that would be needed is already correct and is worth
+# pinning.
+
+def test_the_full_image_and_the_panels_cannot_cancel_each_other(real_strip):
+    """The full image's tokens are 2-tuples and a compare panel's are
+    3-tuples, so no equality between them is possible whatever the counters
+    do."""
+    page, strip, _provider = real_strip
+    _drain()
+    tokens = [c.view_generation for c in strip.controllers]
+    assert all(len(t) == 3 for t in tokens), tokens
+    assert len({t[1] for t in tokens}) == 3, tokens
+    from block01.viewer.explore_view import ExploreController
+    plain = ExploreController._gen_token(
+        type("C", (), {"_gen_ns": None})(), "raw", 5)
+    assert plain == ("raw", 5)
+    assert all(plain != t for t in tokens)

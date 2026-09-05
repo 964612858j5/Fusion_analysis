@@ -107,6 +107,25 @@ class ExploreStack:
         self.overlay = overlay
         self.torn_down = False
 
+    @property
+    def overview_store(self):
+        """The whole-slide overview cache + reader this stack owns.
+
+        Exposed because the compare strip BORROWS it. The overview level of
+        a channel is the same pixels whichever viewer asks for it -- the
+        cache key is `(source_identity, channel, level)` and
+        `source_identity` is derived from the path and the file's stat, so
+        two `RawTileProvider`s over the same slide agree on it. Without the
+        sharing, opening compare mode on the channel the full image was
+        already showing re-read that whole level from disk, synchronously,
+        on the GUI thread: 1110 ms of the 1622 ms a cold entry cost, and
+        the whole of the blank page the user was looking at.
+
+        This stack OWNS it -- `ExploreController.teardown` shuts the pool
+        down -- which is why the strip must be torn down before this one.
+        """
+        return getattr(self.controller, "_overview_store", None)
+
     def teardown(self, *, wait_for_floor: bool = False):
         """Idempotent. `ExploreController.teardown` performs, in order,
         `scheduler.shutdown()` (which joins the worker threads) and then

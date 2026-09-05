@@ -524,15 +524,35 @@ def test_a_release_outside_the_thumbnail_still_ends_the_gesture():
     assert _range(panel) == settled
 
 
-def test_a_move_with_the_button_lost_ends_the_gesture():
-    """A move whose buttons no longer carry the middle one means the
-    release was never seen. Ending there is what stops a pan sticking to
-    the cursor for the rest of the session."""
+def test_a_sustained_loss_of_the_button_ends_the_gesture():
+    """Moves that stop carrying the middle button mean the release was
+    never seen. Ending there is what stops a pan sticking to the cursor for
+    the rest of the session -- but it takes a RUN of them, and only after
+    the platform has proved in this same gesture that it does report the
+    button. One blank move is an anomaly, not a release; see
+    `test_a_first_move_reporting_no_button_does_not_kill_the_gesture`."""
     panel = _panel()
     p0 = QtCore.QPoint(250, 250)
     _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)
+    # The platform reports the button once: from here a blank move means
+    # something.
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(290, 275),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    for i in range(ovp.MID_PAN_BLANK_MOVE_TOLERANCE + 1):
+        _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300 + i, 280),
+              button=Qt.NoButton, buttons=Qt.NoButton)
+    assert panel._mid_pan_last is None
+
+
+def test_a_move_reporting_another_button_ends_the_gesture():
+    """A platform that is reporting buttons, and is not reporting ours, is
+    a positive contradiction rather than an absence of evidence -- and it
+    ends the gesture at once, with no tolerance at all."""
+    panel = _panel()
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
+          button=Qt.MiddleButton)
     _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300, 280),
-          button=Qt.NoButton, buttons=Qt.NoButton)
+          button=Qt.NoButton, buttons=Qt.LeftButton)
     assert panel._mid_pan_last is None
 
 
@@ -605,15 +625,18 @@ def test_the_release_gives_the_mouse_grab_back(app):
 
 
 def test_a_lost_button_gives_the_mouse_grab_back(app):
-    """A move with the middle button no longer down means the release was
+    """Moves that stop reporting the middle button mean the release was
     never seen. A grab left standing there is not a stuck map, it is an
     application that answers no further input at all."""
     panel = _panel()
     _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(250, 250),
           button=Qt.MiddleButton)
     assert _grabber() is panel.gview.viewport()
-    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300, 280),
-          button=Qt.NoButton, buttons=Qt.NoButton)
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(290, 275),
+          button=Qt.NoButton, buttons=Qt.MiddleButton)
+    for i in range(ovp.MID_PAN_BLANK_MOVE_TOLERANCE + 1):
+        _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(300 + i, 280),
+              button=Qt.NoButton, buttons=Qt.NoButton)
     assert _grabber() is None
     assert panel._mid_pan_grab is None
 
@@ -908,3 +931,430 @@ def test_the_grab_is_released_on_the_widget_it_was_taken_on(app):
 
     assert released == [1]
     assert _grabber() is None
+
+
+# ── press, then move AT ONCE ─────────────────────────────────────────────
+#
+# The report this section answers: on the real machine, pressing the middle
+# button and moving immediately does nothing at all, while pressing, waiting
+# about a second and then moving pans normally. There is no timer anywhere
+# in this code, so nothing is being enabled by the wait -- what the wait
+# gives is time for the platform's button state to settle. The rule that
+# used to end the gesture,
+#
+#     if not (event.buttons() & Qt.MiddleButton): cancel()
+#
+# takes that one bit as decisive, so a first move that arrives carrying
+# NoButton killed the whole drag on its first event, permanently, which is
+# precisely the symptom.
+#
+# Offscreen CANNOT reproduce a platform's button-state race: every event
+# here is one we constructed, and `QApplication.mouseButtons()` is NoButton
+# throughout because no real button is down. What offscreen CAN do -- and
+# what these tests do -- is construct the exact sequence the desk observed,
+# first move NoButton and later moves MiddleButton, and pin that the
+# gesture survives it and pans from the very first move. Which cause
+# actually produces that sequence on the affected machine is a question for
+# the diagnostic switch (`BLOCK01_MIDPAN_DEBUG=1`), not for this file.
+
+
+def _press(panel, at=(250, 250)):
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(*at),
+          button=Qt.MiddleButton)
+
+
+def _move(panel, at, buttons=Qt.MiddleButton):
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(*at),
+          button=Qt.NoButton, buttons=buttons)
+
+
+def _release(panel, at=(240, 244)):
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(*at),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+
+
+def _observed_drag(panel, start=(250, 250), dx=-40, dy=-24, steps=4):
+    """The sequence the desk actually saw: press, then a first move that
+    reports NO buttons, then moves that report the middle button."""
+    x0, y0 = start
+    _press(panel, start)
+    _move(panel, (x0 + dx // steps, y0 + dy // steps), buttons=Qt.NoButton)
+    for i in range(2, steps + 1):
+        _move(panel, (x0 + dx * i // steps, y0 + dy * i // steps))
+    _release(panel, (x0 + dx, y0 + dy))
+
+
+# 1. ── the first move pans, with nothing in between ─────────────────────
+
+@pytest.mark.parametrize("mode", [None, "patch", "roi"])
+def test_the_very_first_move_after_the_press_pans(app, mode):
+    """No wait, no second move, no left click: press, move once, moved."""
+    panel = _panel(mode)
+    before = _range(panel)
+
+    _press(panel)
+    _move(panel, (240, 244))
+
+    assert _range(panel) != before, "the first move after the press did nothing"
+    panel._middle_pan_cancel("test")
+
+
+# 2. ── the exact observed sequence ──────────────────────────────────────
+
+@pytest.mark.parametrize("mode", [None, "patch", "roi"])
+def test_a_first_move_reporting_no_button_does_not_kill_the_gesture(app, mode):
+    """THE REGRESSION TEST for "I have to hold it for a second".
+
+    First move: NoButton -- the state the platform is suspected of
+    reporting before it has settled. It must still pan, and above all it
+    must not end the gesture, because the moves that follow it DO carry the
+    middle button and they are the rest of the user's drag.
+
+    Restore `if not (event.buttons() & Qt.MiddleButton): cancel()` in
+    `_middle_pan_move` and this test fails: the range stops at whatever the
+    first move did (nothing), and `_mid_pan_last` is already None.
+    """
+    panel = _panel(mode)
+    before = _range(panel)
+
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    after_first = _range(panel)
+    assert after_first != before, "the blank first move did not pan"
+    assert panel._mid_pan_last is not None, \
+        "one blank move ended a press we had seen ourselves"
+
+    _move(panel, (230, 238))
+    assert _range(panel) != after_first, "the gesture was lost after move one"
+
+    _release(panel, (230, 238))
+    assert panel._mid_pan_last is None
+
+
+def test_the_whole_observed_sequence_pans_the_full_distance(app):
+    """Blank first move and all, the drag comes out 1:1 with the cursor --
+    the tolerated move is panned, not merely survived."""
+    panel = _panel()
+    before = _range(panel)
+
+    _observed_drag(panel, dx=-40, dy=-24)
+
+    after = _range(panel)
+    per_px = (before[1] - before[0]) / panel.gview.viewport().width()
+    assert (after[0] - before[0]) == pytest.approx(40 * per_px, rel=0.05)
+
+
+# 3./4. ── and it still ends ─────────────────────────────────────────────
+
+def test_the_release_ends_a_gesture_that_began_with_a_blank_move(app):
+    panel = _panel()
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    _release(panel, (240, 244))
+
+    settled = _range(panel)
+    assert panel._mid_pan_last is None
+    assert panel._mid_pan_watch is None
+    _move(panel, (200, 200))
+    assert _range(panel) == settled
+
+
+def test_a_release_delivered_to_another_widget_still_ends_the_gesture(app):
+    """The gesture no longer ends itself on the first blank move, so what
+    guarantees it ends at all is that the RELEASE is caught wherever it
+    lands. A grab that was refused, transferred or broken by a popup sends
+    it to whatever is under the cursor instead -- so the panel watches the
+    application for it, for the drag's lifetime and not one event longer."""
+    panel = _panel()
+    stranger = QtWidgets.QWidget()
+    stranger.resize(10, 10)
+    stranger.show()
+    try:
+        _press(panel)
+        _move(panel, (240, 244))
+        assert panel._mid_pan_watch is not None, "no application watcher"
+
+        ev = QtGui.QMouseEvent(
+            QtCore.QEvent.MouseButtonRelease, QtCore.QPointF(1, 1),
+            Qt.MiddleButton, Qt.NoButton, Qt.NoModifier)
+        QtWidgets.QApplication.instance().sendEvent(stranger, ev)
+
+        assert panel._mid_pan_last is None, "a release elsewhere was missed"
+        assert panel._mid_pan_grab is None
+        assert panel._mid_pan_watch is None
+        settled = _range(panel)
+        _move(panel, (100, 100))
+        assert _range(panel) == settled
+    finally:
+        stranger.hide()
+        panel._middle_pan_cancel("test")
+
+
+def test_no_application_filter_is_left_installed_between_gestures(app):
+    """Outside a drag the panel filters nothing application-wide at all."""
+    panel = _panel()
+    assert panel._mid_pan_watch is None
+    _press(panel)
+    assert panel._mid_pan_watch is not None
+    _release(panel, (250, 250))
+    assert panel._mid_pan_watch is None
+
+
+# 5.-8. ── the four states the desk reported it failing in ───────────────
+
+@pytest.mark.parametrize("mode", [None, "patch", "roi"])
+def test_the_first_move_pans_while_the_status_still_says_loading(app, mode):
+    panel = _panel(mode)
+    panel.status.setText("Loading overview, please wait...")
+    before = _range(panel)
+
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+
+    assert "Loading" in panel.status.text()
+    assert _range(panel) != before, "no pan while the label said Loading"
+    panel._middle_pan_cancel("test")
+
+
+def test_the_first_move_pans_immediately_after_a_patch_is_drawn(app):
+    """Draw a rectangle with the left button and reach straight for the
+    middle one -- no intervening click, and the first middle move blank."""
+    panel = _panel("patch")
+    a, b = QtCore.QPoint(120, 120), QtCore.QPoint(220, 220)
+    _send(panel, QtCore.QEvent.MouseButtonPress, a, button=Qt.LeftButton)
+    for i in range(1, 4):
+        _send(panel, QtCore.QEvent.MouseMove,
+              QtCore.QPoint(a.x() + (b.x() - a.x()) * i // 3,
+                            a.y() + (b.y() - a.y()) * i // 3),
+              button=Qt.NoButton, buttons=Qt.LeftButton)
+    _send(panel, QtCore.QEvent.MouseButtonRelease, b,
+          button=Qt.LeftButton, buttons=Qt.NoButton)
+    assert len(panel._patches) == 1
+    rect_before = tuple(panel._patches[0]["coords"])
+    before = _range(panel)
+
+    _press(panel, (300, 300))
+    _move(panel, (290, 294), buttons=Qt.NoButton)
+
+    assert _range(panel) != before, "no pan straight after drawing a patch"
+    assert tuple(panel._patches[0]["coords"]) == rect_before
+    panel._middle_pan_cancel("test")
+
+
+def test_the_first_move_pans_with_a_patch_selected(app):
+    panel = _panel("patch")
+    panel.add_patch_rect(*P1)
+    panel._select_patch_artist(0)
+    assert panel.is_adjusting_patch() is True
+    before = _range(panel)
+
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+
+    assert _range(panel) != before, "no pan with a patch selected"
+    assert panel.is_adjusting_patch() is True
+    panel._middle_pan_cancel("test")
+
+
+def test_the_first_move_pans_straight_after_an_adjustment(app):
+    """Drag the selected rectangle by its border, let go, and reach for the
+    middle button with no click in between: `_adjust_swallow` and the patch
+    drag both belong to the LEFT button and neither may touch this."""
+    panel = _panel("patch")
+    panel.add_patch_rect(*P1)
+    panel._select_patch_artist(0)
+    edge = _viewport_pos(panel, 100, 100)
+    _send(panel, QtCore.QEvent.MouseButtonPress, edge, button=Qt.LeftButton)
+    for i in range(1, 4):
+        _send(panel, QtCore.QEvent.MouseMove,
+              QtCore.QPoint(edge.x() + 5 * i, edge.y() + 5 * i),
+              button=Qt.NoButton, buttons=Qt.LeftButton)
+    _send(panel, QtCore.QEvent.MouseButtonRelease,
+          QtCore.QPoint(edge.x() + 15, edge.y() + 15),
+          button=Qt.LeftButton, buttons=Qt.NoButton)
+    assert panel._patch_drag is None
+    before = _range(panel)
+    coords_before = tuple(panel._patches[0]["coords"])
+
+    _press(panel, (300, 300))
+    _move(panel, (290, 294), buttons=Qt.NoButton)
+
+    assert _range(panel) != before, "no pan straight after an adjustment"
+    assert tuple(panel._patches[0]["coords"]) == coords_before
+    panel._middle_pan_cancel("test")
+
+
+# 10. ── both thumbnails, through a real window ───────────────────────────
+
+def _window_observed_drag(panel, dx, dy, steps=4):
+    """`_window_drag`, but with the first move reporting NoButton."""
+    host = panel.window()
+    handle = host.windowHandle()
+    assert handle is not None
+    vp = panel.gview.viewport()
+    p0 = vp.mapTo(host, QtCore.QPoint(vp.width() // 2, vp.height() // 2))
+    app_ = QtWidgets.QApplication.instance()
+
+    def deliver(kind, pos, button, buttons):
+        ev = QtGui.QMouseEvent(
+            kind, QtCore.QPointF(pos),
+            QtCore.QPointF(host.mapToGlobal(pos)), button, buttons,
+            Qt.NoModifier)
+        app_.sendEvent(handle, ev)
+        app_.processEvents()
+
+    deliver(QtCore.QEvent.MouseButtonPress, p0, Qt.MiddleButton,
+            Qt.MiddleButton)
+    for i in range(1, steps + 1):
+        deliver(QtCore.QEvent.MouseMove,
+                p0 + QtCore.QPoint(dx * i // steps, dy * i // steps),
+                Qt.NoButton, Qt.NoButton if i == 1 else Qt.MiddleButton)
+    deliver(QtCore.QEvent.MouseButtonRelease, p0 + QtCore.QPoint(dx, dy),
+            Qt.MiddleButton, Qt.NoButton)
+
+
+def test_both_thumbnails_survive_the_observed_sequence(app):
+    """The page's own Tissue Preview and the Tissue Navigator popup's, each
+    driven through its own real window."""
+    page = _loaded_page()
+    popup = page._ensure_tissue_navigator()
+    _give_slide(popup.overview, page.loader)
+    popup.show()
+    QtTest.QTest.qWaitForWindowExposed(popup)
+    try:
+        for panel, what in ((page.overview, "page"), (popup.overview, "popup")):
+            _zoom_in(panel)
+            before = _range(panel)
+            _window_observed_drag(panel, -60, -40)
+            assert _range(panel) != before, \
+                f"{what}: the blank first move lost the gesture"
+            assert panel._mid_pan_last is None
+            assert panel._mid_pan_watch is None
+    finally:
+        popup.hide()
+        page.hide()
+
+
+# 11.-12. ── the gate, and what it may not touch ─────────────────────────
+
+def test_twenty_immediate_gestures_all_pan(app):
+    """Twenty presses, each followed by ONE move at once -- the first of
+    them blank, as the desk saw it -- and twenty pans. Counted one by one:
+    "the range ended up different" was true of the broken version too."""
+    panel = _panel()
+    panned = 0
+    for i in range(20):
+        before = _range(panel)
+        _press(panel, (250, 250))
+        _move(panel, (240, 244), buttons=Qt.NoButton)
+        if _range(panel) != before:
+            panned += 1
+        _release(panel, (240, 244))
+        assert panel._mid_pan_last is None, f"drag {i}: gesture left open"
+        assert panel._mid_pan_watch is None, f"drag {i}: filter left installed"
+    assert panned == 20
+
+
+def test_the_observed_sequence_changes_no_patches_rois_or_navigation(app):
+    panel = _panel("patch")
+    panel.add_patch_rect(*P1)
+    seen = []
+    panel.patches_changed.connect(lambda *_a: seen.append("patches"))
+    panel.rois_changed.connect(lambda *_a: seen.append("rois"))
+    panel.navigate_requested.connect(lambda *_a: seen.append("navigate"))
+
+    _observed_drag(panel)
+
+    assert seen == []
+    assert len(panel._patches) == 1
+    assert panel.is_adjusting_patch() is False
+
+
+# 13. ── nothing is ever left held ────────────────────────────────────────
+
+@pytest.mark.parametrize("how", ["hide", "close", "deactivate", "teardown"])
+def test_nothing_is_left_holding_the_pointer(app, how):
+    """Grab and application filter both, on every way out."""
+    panel = _panel()
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    assert _grabber() is panel.gview.viewport()
+    assert panel._mid_pan_watch is not None
+    watch = panel._mid_pan_watch
+
+    if how == "hide":
+        panel.hide()
+    elif how == "close":
+        panel.close()
+    elif how == "deactivate":
+        QtWidgets.QApplication.instance().sendEvent(
+            panel.gview.viewport(),
+            QtCore.QEvent(QtCore.QEvent.WindowDeactivate))
+    else:
+        # Teardown: the watcher is the panel's CHILD, so it dies with it and
+        # Qt drops a destroyed filter itself -- there is no teardown hook to
+        # forget to call.
+        assert watch.parent() is panel
+        panel.hide()
+        panel.deleteLater()
+        QtWidgets.QApplication.instance().processEvents()
+        assert _grabber() is None
+        return
+
+    QtWidgets.QApplication.instance().processEvents()
+    assert _grabber() is None
+    assert panel._mid_pan_grab is None
+    assert panel._mid_pan_last is None
+    assert panel._mid_pan_watch is None
+
+
+def test_a_swapped_viewport_does_not_leave_a_gesture_open(app):
+    """A graphics view can replace its viewport underneath a drag, and a
+    gesture anchored to a widget the panel no longer owns can never be
+    completed by anything the panel will see again."""
+    panel = _panel()
+    _press(panel)
+    assert panel._mid_pan_last is not None
+    orphan = panel._mid_pan_grab
+
+    panel.gview.setViewport(QtWidgets.QWidget())
+    QtWidgets.QApplication.instance().processEvents()
+    # Any mouse event at all now tells the watcher the world has moved on.
+    _move(panel, (240, 244))
+
+    assert panel._mid_pan_last is None
+    assert panel._mid_pan_grab is None
+    assert panel._mid_pan_watch is None
+    assert QtWidgets.QWidget.mouseGrabber() is not orphan
+
+
+# ── the diagnostic switch ────────────────────────────────────────────────
+
+def test_the_diagnostic_is_off_by_default_and_speaks_when_asked(
+        app, capsys, monkeypatch):
+    """One switch, default off. The machine that has the bug is the
+    instrument: offscreen can construct the suspected sequence but only a
+    real X server can say which cause produces it."""
+    monkeypatch.delenv(ovp.MID_PAN_DEBUG_ENV, raising=False)
+    panel = _panel()
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    _release(panel, (240, 244))
+    assert "MIDPAN" not in capsys.readouterr().err
+
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    _press(panel)
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    _release(panel, (240, 244))
+    err = capsys.readouterr().err
+
+    lines = [ln for ln in err.splitlines() if ln.startswith("MIDPAN")]
+    assert len(lines) >= 3, err
+    whats = [ln.split(" what=")[1].split(" ")[0] for ln in lines]
+    assert "press" in whats and "move-blank" in whats
+    for field in ("app_buttons=", "grabber=", "scene_grab=", "focus=",
+                  "active=", "sel_patch=", "patch_drag=", "drag_start=",
+                  "swallow=", "since_press=", "buttons=", "button=", "type="):
+        assert field in lines[0], f"{field} missing from {lines[0]}"
+    assert any("closed_by=" in ln for ln in lines), \
+        "the log never says which line closed the gesture"

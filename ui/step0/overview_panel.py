@@ -3,6 +3,7 @@ block01/ui/step0/overview_panel.py — TileSelectDialog, FullFusionWorker, Overv
 """
 
 import os
+import sys
 import gc
 import json
 import time
@@ -1049,6 +1050,59 @@ PATCH_BORDER_TOL_PX = 4.0
 PATCH_BORDER_TOL_OV = 1.5
 
 
+# ── the middle-drag pan's diagnostics and its one tolerance ──────────
+#
+# MID_PAN_BLANK_MOVE_TOLERANCE is NOT a delay and NOT a distance
+# threshold: it does not decide WHEN a drag may start (a drag starts at
+# its press and pans on its first move, always). It decides only how much
+# missing evidence is allowed to accumulate before an open gesture is
+# presumed abandoned -- how many consecutive moves that carry NO button
+# information at all may pass, AFTER the platform has once reported the
+# middle button down in this same gesture, before we conclude the release
+# was never delivered. One such move is an anomaly; a run of them with a
+# platform that has proven it can report the button is a lost release.
+MID_PAN_BLANK_MOVE_TOLERANCE = 2
+
+# The one diagnostic switch, default off. Set BLOCK01_MIDPAN_DEBUG=1 in the
+# environment of a REAL desktop run to get one line per middle-button event
+# on stderr; see `_mid_pan_log`. It is read per event rather than captured
+# at import so it can be turned on for a single run without a code change,
+# and so the tests can drive it.
+MID_PAN_DEBUG_ENV = "BLOCK01_MIDPAN_DEBUG"
+
+
+def _mid_pan_debug_enabled():
+    return os.environ.get(MID_PAN_DEBUG_ENV, "") not in ("", "0", "false", "no")
+
+
+def _mid_pan_button_name(buttons):
+    try:
+        buttons = int(buttons)
+    except (TypeError, ValueError):
+        return repr(buttons)
+    if not buttons:
+        return "NoButton"
+    names = []
+    for bit, name in ((int(Qt.LeftButton), "Left"),
+                      (int(Qt.RightButton), "Right"),
+                      (int(Qt.MiddleButton), "Middle")):
+        if buttons & bit:
+            names.append(name)
+            buttons &= ~bit
+    if buttons:
+        names.append(hex(buttons))
+    return "|".join(names)
+
+
+def _mid_pan_widget_name(w):
+    if w is None:
+        return "None"
+    try:
+        return f"{type(w).__name__}@{hex(id(w))}"
+    except Exception:                                       # noqa: BLE001
+        return "<unreadable>"
+
+
 def _view_range_moved(before, after, rel=1e-9):
     """Did the camera actually go somewhere between these two view ranges?
 
@@ -1070,6 +1124,50 @@ def _view_range_moved(before, after, rel=1e-9):
 # ══════════════════════════════════════════════════════════════════════
 #  Overview Panel  (ROI polygon + Patch rectangle dual-mode)
 # ══════════════════════════════════════════════════════════════════════
+
+class _MidPanReleaseWatch(QtCore.QObject):
+    """The application-wide half of the middle-drag pan, alive only while a
+    drag is.
+
+    One job: see the RELEASE, wherever it is delivered. The viewport's own
+    filter sees it whenever Qt's implicit grab holds, and that is the normal
+    case -- but a grab that was refused, transferred, or broken by a popup
+    sends the release to whatever is under the cursor instead, and a gesture
+    that ends only on a release it never receives is a gesture that sticks.
+    Because the drag no longer ends itself on the first move that fails to
+    carry the button, this is what guarantees it ends at all.
+
+    Installed on the application at the press and removed at the cancel, so
+    it filters nothing at all when no middle button is down. Parented to the
+    panel, so a panel that is torn down takes it with it and Qt removes a
+    destroyed filter itself: there is no path on which it outlives the
+    thing it speaks for.
+    """
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+
+    def eventFilter(self, obj, event):
+        panel = self._panel
+        try:
+            t = event.type()
+        except RuntimeError:                                # noqa: BLE001
+            return False
+        try:
+            if t == QtCore.QEvent.MouseButtonRelease:
+                if event.button() == Qt.MiddleButton:
+                    panel._mid_pan_log("app-release", event, obj=obj)
+                    panel._middle_pan_cancel(
+                        "the release, caught by the application filter")
+            elif t in (QtCore.QEvent.MouseMove,
+                       QtCore.QEvent.MouseButtonPress):
+                panel._mid_pan_check_viewport()
+        except RuntimeError:                                # noqa: BLE001
+            pass
+        # Never consumed: this filter watches, it does not answer.
+        return False
+
 
 class _PanViewBox(pg.ViewBox):
     """The Tissue Preview's ViewBox.
@@ -1275,8 +1373,24 @@ class OverviewPanel(QWidget):
         # `_mid_pan_grab` is the widget this panel called `grabMouse()` on,
         # or None. The two are set and cleared together, and the grab is
         # what makes the gesture reliable: see `_middle_pan_press`.
+        #
+        # `_mid_pan_confirmed` remembers that the platform has, at least
+        # once during THIS gesture, reported the middle button down in a
+        # move. Until it has, a move carrying no buttons at all says
+        # nothing -- see `_middle_pan_move`.
+        #
+        # `_mid_pan_blank` counts consecutive such uninformative moves.
+        #
+        # `_mid_pan_watch` is the application-wide filter that catches the
+        # release wherever it lands; installed for the gesture's lifetime
+        # only.
         self._mid_pan_last = None
         self._mid_pan_grab = None
+        self._mid_pan_confirmed = False
+        self._mid_pan_blank = 0
+        self._mid_pan_watch = None
+        self._mid_pan_seq = 0
+        self._mid_pan_t0 = None
 
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
@@ -2466,9 +2580,13 @@ class OverviewPanel(QWidget):
         """
         # Defensive: a press arriving while a previous gesture is somehow
         # still held must not leak that grab.
-        self._middle_pan_cancel()
+        self._middle_pan_cancel("a new press arrived on an open gesture")
         viewport = self._mid_pan_viewport()
         self._mid_pan_last = self._mid_pan_scene_pos(event)
+        self._mid_pan_confirmed = False
+        self._mid_pan_blank = 0
+        self._mid_pan_seq += 1
+        self._mid_pan_t0 = time.monotonic()
         if viewport is not None:
             try:
                 viewport.grabMouse()
@@ -2476,11 +2594,102 @@ class OverviewPanel(QWidget):
                 viewport = None
             else:
                 self._mid_pan_grab = viewport
+        self._mid_pan_watch_start()
+        self._mid_pan_log("press", event)
         try:
             event.accept()
         except (AttributeError, RuntimeError):
             pass
         return True
+
+    # ── the diagnostic switch ────────────────────────────────────────
+    #
+    # Default off, one env var, one line per event, monotonic timestamps.
+    # It exists because the failure it is aimed at cannot be reproduced
+    # offscreen: the tests below can CONSTRUCT the sequence the desk
+    # reported, but only a real X server can say which of the possible
+    # causes actually produces it. So the machine that has the bug is the
+    # instrument, and this is its readout.
+
+    def _mid_pan_log(self, what, event=None, obj=None, reason=None):
+        if not _mid_pan_debug_enabled():
+            return
+        try:
+            self._mid_pan_log_line(what, event, obj, reason)
+        except Exception as exc:                            # noqa: BLE001
+            # A diagnostic that can break the gesture it is diagnosing is
+            # worse than no diagnostic.
+            try:
+                print(f"MIDPAN log-failed what={what} err={exc!r}",
+                      file=sys.stderr, flush=True)
+            except Exception:                               # noqa: BLE001
+                pass
+
+    def _mid_pan_log_line(self, what, event, obj, reason):
+        now = time.monotonic()
+        t0 = self._mid_pan_t0
+        since = "n/a" if t0 is None else f"{(now - t0) * 1000.0:.1f}ms"
+        app = QtWidgets.QApplication.instance()
+        ev_type = ev_btn = ev_buttons = "n/a"
+        if event is not None:
+            try:
+                ev_type = int(event.type())
+            except (AttributeError, RuntimeError):
+                pass
+            try:
+                ev_btn = _mid_pan_button_name(event.button())
+            except (AttributeError, RuntimeError):
+                pass
+            try:
+                ev_buttons = _mid_pan_button_name(event.buttons())
+            except (AttributeError, RuntimeError):
+                pass
+        try:
+            app_buttons = _mid_pan_button_name(
+                QtWidgets.QApplication.mouseButtons())
+        except Exception:                                   # noqa: BLE001
+            app_buttons = "n/a"
+        try:
+            scene_grab = _mid_pan_widget_name(
+                self.gview.scene().mouseGrabberItem())
+        except Exception:                                   # noqa: BLE001
+            scene_grab = "n/a"
+        try:
+            focus = _mid_pan_widget_name(app.focusWidget() if app else None)
+        except Exception:                                   # noqa: BLE001
+            focus = "n/a"
+        try:
+            active = self.window().isActiveWindow()
+        except Exception:                                   # noqa: BLE001
+            active = "n/a"
+        fields = [
+            f"MIDPAN t={now:.6f}",
+            f"gid={self._mid_pan_seq}",
+            f"panel={_mid_pan_widget_name(self)}",
+            f"what={what}",
+            f"obj={_mid_pan_widget_name(obj) if obj is not None else 'viewport'}",
+            f"type={ev_type}",
+            f"button={ev_btn}",
+            f"buttons={ev_buttons}",
+            f"app_buttons={app_buttons}",
+            f"grabber={_mid_pan_widget_name(QtWidgets.QWidget.mouseGrabber())}",
+            f"scene_grab={scene_grab}",
+            f"focus={focus}",
+            f"active={active}",
+            f"last={'set' if self._mid_pan_last is not None else 'None'}",
+            f"grab={_mid_pan_widget_name(self._mid_pan_grab)}",
+            f"confirmed={self._mid_pan_confirmed}",
+            f"blank={self._mid_pan_blank}",
+            f"watch={self._mid_pan_watch is not None}",
+            f"sel_patch={getattr(self, '_selected_patch_idx', 'n/a')}",
+            f"patch_drag={getattr(self, '_patch_drag', None) is not None}",
+            f"drag_start={getattr(self, '_drag_start', None)!r}",
+            f"swallow={getattr(self, '_adjust_swallow', 'n/a')}",
+            f"since_press={since}",
+        ]
+        if reason is not None:
+            fields.append(f"closed_by={reason}")
+        print(" ".join(str(f) for f in fields), file=sys.stderr, flush=True)
 
     def _mid_pan_viewport(self):
         """The viewport widget the gesture is owned at, or None once the
@@ -2497,11 +2706,10 @@ class OverviewPanel(QWidget):
         """True while a middle press taken at THIS viewport is still open.
 
         One fact, and it is this panel's own: a press was seen here and
-        neither a release nor a cancellation has closed it. Whether the
-        gesture may continue is then decided by the only other thing that
-        is actually true of the pointer -- the middle button still being
-        down in the move that just arrived, which `_middle_pan_move`
-        checks.
+        neither a release nor a cancellation has closed it. What may then
+        end it is weighed in `_middle_pan_move` -- a release, a positively
+        contradicting button state, or a sustained absence of one -- and
+        never a single missing flag on a single move.
 
         `QWidget.mouseGrabber()` is deliberately NOT consulted. It used to
         be the second half of this test, and it is the wrong kind of fact
@@ -2531,7 +2739,61 @@ class OverviewPanel(QWidget):
         """
         return self._mid_pan_last is not None
 
-    def _middle_pan_cancel(self):
+    def _mid_pan_watch_start(self):
+        """Watch the whole application for this gesture's release.
+
+        Installed at the press and removed at the cancel, so outside a
+        drag there is no application-wide filter at all. The watcher object
+        itself is created once and parented to this panel, which is what
+        makes "removed on destroy" true without a single line of teardown:
+        Qt drops a destroyed filter by itself.
+        """
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        if self._mid_pan_watch is not None:
+            return
+        watch = getattr(self, "_mid_pan_watch_obj", None)
+        if watch is None:
+            watch = _MidPanReleaseWatch(self)
+            self._mid_pan_watch_obj = watch
+        try:
+            app.installEventFilter(watch)
+        except RuntimeError:                                # noqa: BLE001
+            return
+        self._mid_pan_watch = watch
+
+    def _mid_pan_watch_stop(self):
+        watch, self._mid_pan_watch = self._mid_pan_watch, None
+        if watch is None:
+            return
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.removeEventFilter(watch)
+        except RuntimeError:                                # noqa: BLE001
+            pass
+
+    def _mid_pan_check_viewport(self):
+        """End an open gesture whose viewport has been swapped underneath.
+
+        A graphics view can replace its viewport at any time, and a gesture
+        anchored to a widget that is no longer the panel's own can never be
+        completed by anything the panel will see again. Checked from the
+        application watcher rather than on a timer, so it costs nothing
+        except while a drag is open.
+        """
+        if self._mid_pan_last is None:
+            return
+        held = self._mid_pan_grab
+        if held is None:
+            return
+        current = self._mid_pan_viewport()
+        if current is not None and held is not current:
+            self._middle_pan_cancel("the viewport was replaced under the drag")
+
+    def _middle_pan_cancel(self, reason=None):
         """End the gesture and give the pointer back, from wherever.
 
         The one place the grab is released, so there is exactly one answer
@@ -2547,8 +2809,14 @@ class OverviewPanel(QWidget):
         waiting for events it will never get. We give back exactly what we
         still hold, and nothing else.
         """
+        was_open = self._mid_pan_last is not None or self._mid_pan_grab is not None
+        if was_open and reason is not None:
+            self._mid_pan_log("cancel", reason=reason)
         held, self._mid_pan_grab = self._mid_pan_grab, None
         self._mid_pan_last = None
+        self._mid_pan_confirmed = False
+        self._mid_pan_blank = 0
+        self._mid_pan_watch_stop()
         if held is None:
             return
         try:
@@ -2574,17 +2842,78 @@ class OverviewPanel(QWidget):
         the next move measures from here: each move translates once, and the
         steps telescope to exactly the whole drag.
 
-        A move whose buttons no longer include the middle one ends the
-        gesture, grab and all. This is the ONLY thing that can contradict
-        an open press, and it is a fact carried by the event itself rather
-        than read out of a global: the release was missed, so the drag is
-        over. Without it a pan would stick to the cursor for the rest of
-        the session, and with a grab held that is a frozen application
-        rather than merely a stuck map.
+        WHICH moves count is the whole of the "I have to hold the button
+        for a second before it will drag" report, and the rule this used to
+        apply was:
+
+            if not (event.buttons() & Qt.MiddleButton): cancel()
+
+        -- one move without the flag killed the gesture permanently. That
+        is exactly one bit of evidence, taken as decisive, and the desk's
+        symptom is what a missing bit looks like: press, move at once,
+        nothing ever again; press, WAIT, move, and it works. Waiting does
+        not enable anything in this code -- there is no timer here -- but
+        it does give the platform time to settle the button state it
+        reports on the first moves after a press. So the suspicion under
+        test is that those first moves arrive with NoButton and the old
+        line threw the whole drag away on the first of them.
+
+        The rule now ranks the evidence instead of taking the first bit
+        that comes:
+
+          * `buttons()` (or the application's own view of the buttons)
+            carries the middle button -> the drag is confirmed and pans.
+          * `buttons()` is non-empty but has no middle button -- some OTHER
+            button is down and ours is not -- that is a POSITIVE
+            contradiction, reported by a platform that is demonstrably
+            telling us about buttons. The drag is over.
+          * `buttons()` is empty: the platform is telling us nothing at
+            all. A press we saw ourselves outranks an absence, so the move
+            pans. Only a RUN of such moves, and only after the middle
+            button has once been reported down in this same gesture, is
+            read as a release we never received.
+
+        A drag that is never confirmed therefore never ends on a move --
+        it ends on its release, which `_MidPanReleaseWatch` catches even
+        when it lands on another widget entirely. That is what makes it
+        safe to stop trusting a single blank move.
+
+        `QApplication.mouseButtons()` is consulted only as a SECOND way to
+        confirm, never to contradict. Whether it is more reliable than
+        `event.buttons()` on the affected machine is UNVERIFIED here: no
+        offscreen test can produce the disagreement, and only the log from
+        `BLOCK01_MIDPAN_DEBUG=1` on the real desk can say. Used this way
+        it cannot make things worse if it is wrong in the same direction,
+        because it can only ever add a reason to keep panning.
         """
-        if not (event.buttons() & Qt.MiddleButton):
-            self._middle_pan_cancel()
+        buttons = event.buttons()
+        if buttons & Qt.MiddleButton:
+            self._mid_pan_confirmed = True
+            self._mid_pan_blank = 0
+        elif buttons:
+            self._mid_pan_log("move-contradicted", event)
+            self._middle_pan_cancel(
+                "a move reported other buttons down and not the middle one")
             return True
+        else:
+            app_buttons = Qt.NoButton
+            try:
+                app_buttons = QtWidgets.QApplication.mouseButtons()
+            except Exception:                               # noqa: BLE001
+                pass
+            if app_buttons & Qt.MiddleButton:
+                self._mid_pan_confirmed = True
+                self._mid_pan_blank = 0
+            else:
+                self._mid_pan_blank += 1
+                self._mid_pan_log("move-blank", event)
+                if (self._mid_pan_confirmed
+                        and self._mid_pan_blank > MID_PAN_BLANK_MOVE_TOLERANCE):
+                    self._middle_pan_cancel(
+                        "a run of moves carried no buttons after the middle "
+                        "button had been reported down")
+                    return True
+        self._mid_pan_log("move", event)
         last_scene = self._mid_pan_last
         now_scene = self._mid_pan_scene_pos(event)
         if last_scene is None or now_scene is None:
@@ -2619,7 +2948,8 @@ class OverviewPanel(QWidget):
         first move of the second drag jump by the distance between the two
         drags.
         """
-        self._middle_pan_cancel()
+        self._mid_pan_log("release", event)
+        self._middle_pan_cancel("the middle button's release at the viewport")
         try:
             event.accept()
         except (AttributeError, RuntimeError):
@@ -2633,11 +2963,11 @@ class OverviewPanel(QWidget):
         hidden as a WINDOW, and a window hidden with a grab still standing
         takes the pointer away from the whole application.
         """
-        self._middle_pan_cancel()
+        self._middle_pan_cancel("the panel was hidden")
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        self._middle_pan_cancel()
+        self._middle_pan_cancel("the panel was closed")
         super().closeEvent(event)
 
     def _mid_pan_scene_pos(self, event):
@@ -2672,7 +3002,8 @@ class OverviewPanel(QWidget):
         # inactive is different -- there the pointer really is gone.
         if t in (QtCore.QEvent.Hide, QtCore.QEvent.Close,
                  QtCore.QEvent.WindowDeactivate):
-            self._middle_pan_cancel()
+            self._middle_pan_cancel(
+                "the viewport was hidden, closed or deactivated")
 
         # ── Key press (ROI mode) ──────────────────────────────────────
         if t == QtCore.QEvent.KeyPress and self._mode == 'roi':

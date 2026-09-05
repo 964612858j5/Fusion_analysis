@@ -106,7 +106,7 @@ def test_the_painted_pixel_is_the_mapping_of_the_raw_value(app):
     page = _page(app)
     page._channel_colors["CD3"] = (0.0, 1.0, 0.0)
     page._channel_colors["DAPI"] = (0.0, 0.5, 1.0)
-    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
+    page._on_nucleus_visibility_toggled(True)
     page.set_display_mapping("CD3", 100.0, 900.0, 1.0)
     page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
     _show(page, _payload(marker=500.0, nucleus=400.0))
@@ -126,7 +126,7 @@ def test_the_three_panels_share_one_mapping_so_a_darker_result_is_darker(app):
     page = _page(app)
     page._channel_colors["CD3"] = (1.0, 1.0, 1.0)
     page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
-    page._btn_show_nucleus.setChecked(False)
+    page._on_nucleus_visibility_toggled(False)
     _show(page, _payload(marker=600.0, tophat_scale=0.5))
 
     orig = _centre_pixel(page, 0)
@@ -140,7 +140,7 @@ def test_gamma_and_range_changes_are_table_and_level_swaps(app):
     page = _page(app)
     page._channel_colors["CD3"] = (1.0, 0.0, 0.0)
     page._channel_colors["DAPI"] = (0.0, 0.5, 1.0)
-    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
+    page._on_nucleus_visibility_toggled(True)
     page.set_display_mapping("CD3", 0.0, 1000.0, 1.0)
     page.set_display_mapping("DAPI", 0.0, 1000.0, 1.0)
     _show(page, _payload(marker=400.0, nucleus=200.0))
@@ -209,13 +209,13 @@ def test_the_switches_hide_and_show_each_layer(app):
     _show(page, _payload(marker=600.0, nucleus=400.0))
     maps = ((0.0, 1000.0, 1.0), (0.0, 1000.0, 1.0))
 
-    page._btn_show_nucleus.setChecked(False)
+    page._on_nucleus_visibility_toggled(False)
     QtTest.QTest.qWait(30)
     assert np.allclose(_centre_pixel(page, 0),
                        _expected(page, 600.0, 400.0, *maps, nucleus_on=False),
                        atol=2 / 255)
 
-    page._btn_show_nucleus.setChecked(True)
+    page._on_nucleus_visibility_toggled(True)
     page._btn_show_marker.setChecked(False)
     QtTest.QTest.qWait(30)
     assert np.allclose(_centre_pixel(page, 0),
@@ -223,7 +223,7 @@ def test_the_switches_hide_and_show_each_layer(app):
                        atol=2 / 255)
 
     page._btn_show_marker.setChecked(False)
-    page._btn_show_nucleus.setChecked(False)
+    page._on_nucleus_visibility_toggled(False)
     QtTest.QTest.qWait(30)
     assert np.allclose(_centre_pixel(page, 0), (0, 0, 0), atol=2 / 255)
 
@@ -233,7 +233,7 @@ def test_the_nucleus_is_never_added_to_itself(app):
     Adding the overlay on top of it would double every pixel."""
     page = _page(app)
     page.current_channel = "DAPI"
-    page._btn_show_nucleus.setChecked(True)
+    page._on_nucleus_visibility_toggled(True)
     _show(page, _payload(marker=500.0, nucleus=500.0))
 
     assert all(it is None or not it.isVisible()
@@ -265,7 +265,7 @@ def test_legacy_normalised_payloads_still_display(app):
 
 def test_nucleus_items_are_created_on_first_use_additive_and_row_major(app):
     page = _page(app)
-    page._btn_show_nucleus.setChecked(True)   # (v15) DAPI starts off
+    page._on_nucleus_visibility_toggled(True)
     assert page._preview_nuc_imgs == [None, None, None]
     _show(page, _payload(cucim=False))
     assert page._preview_nuc_imgs[0] is not None

@@ -634,10 +634,10 @@ def test_the_hidden_layer_holders_stay(app):
         assert btn.isCheckable()
         assert not btn.isVisible()
         assert btn.parentWidget() is page
-    # The marker layer is the page's subject and starts on; the DAPI layer
-    # is an aid the user opts into (v15 default-off).
+    # Both layers start ON: the marker is the page's subject and DAPI is
+    # the reference it is read against.
     assert page._btn_show_marker.isChecked() is True
-    assert page._btn_show_nucleus.isChecked() is False
+    assert page._btn_show_nucleus.isChecked() is True
 
 
 # ── 5. the DAPI checkbox is a layer switch, never a processing one ───────
@@ -647,53 +647,138 @@ def test_the_nucleus_row_is_checkable_and_its_combo_is_not(app):
     row = page._channel_rows["DAPI"]
     assert row["checkbox"].isEnabled(), "the DAPI show/hide switch is disabled"
     assert not row["method_cb"].isEnabled(), "DAPI must not get a method"
-    assert row["checkbox"].isChecked() is False, "DAPI starts hidden (v15)"
+    assert row["checkbox"].isChecked() is True, "DAPI starts shown"
 
 
-def test_the_dapi_layer_starts_off_in_both_views(app):
-    """(v15) DAPI is opt-in: on page creation and on every dataset (re)load
-    the nucleus row is UNCHECKED and no nucleus pixels are drawn -- not in
-    the compare panels, not in the full image -- until the user checks it."""
+def test_the_dapi_layer_starts_on_in_both_views(app):
+    """A newly loaded dataset shows DAPI. It is the reference the markers
+    are read against, so it is there from the first frame -- in the compare
+    panels and in the full image -- without the user asking."""
     stack = _Stack()
     page = _page(app, stack=stack)
     cb = page._channel_rows["DAPI"]["checkbox"]
 
-    assert cb.isChecked() is False
-    assert page._btn_show_nucleus.isChecked() is False
-    assert page._btn_full_nucleus.isChecked() is False
-    assert page._btn_full_nucleus.text().startswith("○")
+    assert cb.isChecked() is True
+    assert page._btn_show_nucleus.isChecked() is True
+    assert page._btn_full_nucleus.isChecked() is True
+    assert page._btn_full_nucleus.text().startswith("●")
     # Marker channels are untouched by the change.
     assert page._btn_show_marker.isChecked() is True
 
-    # compare panels: no nucleus item is drawn at all
-    _show_virtual_patch(page)
-    assert all(it is None or not it.isVisible()
-               for it in page._preview_nuc_imgs)
-
-    # full image: the overlay is asked to stay off
-    page._show_full_image()
-    assert stack.overlay.enabled and stack.overlay.enabled[-1] is False
-
-    # ...and checking the row turns the layer on in BOTH views.
-    cb.setChecked(True)
-    assert page._btn_show_nucleus.isChecked() is True
-    assert page._btn_full_nucleus.isChecked() is True
+    # compare panels: the nucleus is drawn
     _show_virtual_patch(page)
     assert all(it is not None and it.isVisible()
                for it in page._preview_nuc_imgs)
+
+    # full image: the overlay is asked for
     page._show_full_image()
-    assert stack.overlay.enabled[-1] is True
+    assert stack.overlay.enabled and stack.overlay.enabled[-1] is True
+
+    # ...and clearing the row turns the layer off in BOTH views.
+    cb.setChecked(False)
+    assert page._btn_show_nucleus.isChecked() is False
+    assert page._btn_full_nucleus.isChecked() is False
+    _show_virtual_patch(page)
+    assert all(it is None or not it.isVisible()
+               for it in page._preview_nuc_imgs)
+    page._show_full_image()
+    assert stack.overlay.enabled[-1] is False
 
 
-def test_a_dataset_reload_puts_the_dapi_layer_back_to_off(app):
+def test_a_dataset_reload_puts_the_dapi_layer_back_to_on(app):
+    """The user's "off" was about the slide they were looking at. A new one
+    starts from the default again rather than inheriting a decision made
+    about different pixels."""
     page = _page(app)
-    page._channel_rows["DAPI"]["checkbox"].setChecked(True)
-    assert page._btn_show_nucleus.isChecked() is True
+    page._channel_rows["DAPI"]["checkbox"].setChecked(False)
+    assert page._btn_show_nucleus.isChecked() is False
 
     page._reset_dataset_view_state()
 
-    assert page._btn_show_nucleus.isChecked() is False
-    assert page._btn_full_nucleus.isChecked() is False
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked() is True
+    assert page._btn_show_nucleus.isChecked() is True
+    assert page._btn_full_nucleus.isChecked() is True
+
+
+# ── the layer survives a marker choice ───────────────────────────────────
+#
+# The complaint this section exists for: DAPI was on, the user clicked a
+# marker row, and DAPI went away. It is the reference layer -- choosing
+# what to look at it AGAINST is not a reason to remove it.
+
+
+def test_choosing_a_marker_keeps_dapi_overlaid(app):
+    stack = _Stack()
+    page = _page(app, stack=stack)
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked() is True
+
+    page._on_channel_selected_by_id("CD3")
+    page._show_full_image()
+
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked() is True
+    assert page._nucleus_layer_visible() is True
+    assert stack.overlay.enabled[-1] is True
+
+
+def test_a_manual_off_survives_every_marker_switch(app):
+    """Turned off by hand, it STAYS off while the user moves around this
+    dataset -- nothing may quietly turn the reference layer back on."""
+    stack = _Stack()
+    page = _page(app, stack=stack)
+    page._channel_rows["DAPI"]["checkbox"].setChecked(False)
+
+    for ch in ("CD3", "CD20", "CD3"):
+        page._on_channel_selected_by_id(ch)
+        page._show_full_image()
+        assert page._nucleus_layer_visible() is False, ch
+        assert stack.overlay.enabled[-1] is False, ch
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked() is False
+
+
+def test_landing_on_dapi_suppresses_the_copy_without_unchecking_it(app):
+    """DAPI as the MAIN channel and DAPI as the overlay are two things.
+
+    While DAPI is the picture the overlay would add the channel to itself,
+    so it is not drawn -- but that is suppression, decided in the renderer,
+    and the switch the user owns is left alone. Writing it into the switch
+    is what used to lose the setting: landing on DAPI turned it off and
+    picking a marker did not bring it back.
+    """
+    stack = _Stack()
+    page = _page(app, stack=stack)
+    page.current_channel = page.nucleus_channel
+
+    assert page._showing_nucleus() is True
+    # not drawn ...
+    assert page._full_image_nucleus_enabled() is False
+    # ... but the switch is untouched, in the row and in both mirrors.
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked() is True
+    assert page._nucleus_layer_visible() is True
+    assert page._btn_full_nucleus.isChecked() is True
+    # and the layer is never told the channel's business
+    page._show_full_image()
+    assert stack.overlay.enabled[-1] is True
+
+    # moving to a marker draws it again, with no user action
+    page._on_channel_selected_by_id("CD3")
+    assert page._full_image_nucleus_enabled() is True
+
+
+def test_the_row_checkbox_is_the_one_state(app):
+    """`_nucleus_layer_visible` answers from the ROW, not from a mirror.
+
+    That is what makes the checkbox the source of truth rather than merely
+    the thing that is usually right: a mirror driven out of step is then a
+    display bug, and the behaviour still follows the checkbox.
+    """
+    page = _page(app)
+    cb = page._channel_rows["DAPI"]["checkbox"]
+
+    cb.blockSignals(True)
+    cb.setChecked(False)
+    cb.blockSignals(False)
+    assert page._btn_show_nucleus.isChecked() is True     # mirror left stale
+    assert page._nucleus_layer_visible() is False          # the row wins
 
 
 def test_the_dapi_checkbox_drives_both_views(app):
@@ -1234,3 +1319,44 @@ def test_choosing_a_marker_moves_the_window_off_dapi(app):
 
     assert page._cond_workbench.active_channel() == "CD3"
     assert page._inspector_channel is None
+
+
+def test_the_dapi_switch_settles_in_one_pass(app):
+    """The row checkbox, the hidden holder and the toolbar button move
+    together and STOP -- no ping-pong between the three.
+
+    Each of them writes the other two, so without the re-entrancy guard
+    this is an infinite signal loop. Counting each widget's own signal is
+    the only way to see the guard doing its job rather than the three
+    values happening to agree at the end.
+    """
+    page = _page(app)
+    cb = page._channel_rows["DAPI"]["checkbox"]
+    counts = {"cb": 0, "holder": 0, "toolbar": 0}
+    cb.stateChanged.connect(lambda *_a: counts.__setitem__("cb",
+                                                           counts["cb"] + 1))
+    page._btn_show_nucleus.toggled.connect(
+        lambda *_a: counts.__setitem__("holder", counts["holder"] + 1))
+    page._btn_full_nucleus.toggled.connect(
+        lambda *_a: counts.__setitem__("toolbar", counts["toolbar"] + 1))
+
+    cb.setChecked(False)
+
+    assert counts["holder"] == 1, counts
+    assert counts["toolbar"] == 1, counts
+    assert page._nucleus_layer_visible() is False
+    assert page._btn_show_nucleus.isChecked() is False
+    assert page._btn_full_nucleus.isChecked() is False
+
+    for k in counts:
+        counts[k] = 0
+    page._btn_full_nucleus.setChecked(True)
+
+    assert counts["toolbar"] == 1, counts
+    assert counts["holder"] == 1, counts
+    # The checkbox is written with its signal BLOCKED -- that is what stops
+    # the round trip re-entering. Its VALUE is the state, so that is what
+    # is checked; a signal here would be the loop.
+    assert counts["cb"] == 0, counts
+    assert cb.isChecked() is True
+    assert page._nucleus_layer_visible() is True

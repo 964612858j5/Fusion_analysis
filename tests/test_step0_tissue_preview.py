@@ -147,6 +147,13 @@ def test_it_reads_nothing_of_its_own(app):
 
 def test_the_thumbnail_takes_the_channels_colour(app):
     page = _page(app)
+    # DAPI is ON by default now and is composited into the thumbnail, so
+    # its blue would land in the mean this test reads. The subject here is
+    # the MARKER's colour, so the reference layer is turned off to leave it
+    # alone; `test_dapi_is_composited_in_while_its_layer_is_on` and
+    # `test_the_thumbnail_shows_dapi_from_the_first_frame` own the other
+    # half.
+    page._on_nucleus_visibility_toggled(False)
 
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
 
@@ -163,6 +170,13 @@ def test_a_colour_picked_anywhere_reaches_it(app):
     """All three colour writers funnel through `_apply_channel_color`; this
     drives the channel model's, the one furthest from the thumbnail."""
     page = _page(app)
+    # DAPI is ON by default now and is composited into the thumbnail, so
+    # its blue would land in the mean this test reads. The subject here is
+    # the MARKER's colour, so the reference layer is turned off to leave it
+    # alone; `test_dapi_is_composited_in_while_its_layer_is_on` and
+    # `test_the_thumbnail_shows_dapi_from_the_first_frame` own the other
+    # half.
+    page._on_nucleus_visibility_toggled(False)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
 
     page._on_model_color_changed("CD3", "#0000ff")
@@ -175,6 +189,13 @@ def test_a_colour_picked_anywhere_reaches_it(app):
 
 def test_switching_channel_switches_the_picture(app):
     page = _page(app)
+    # DAPI is ON by default now and is composited into the thumbnail, so
+    # its blue would land in the mean this test reads. The subject here is
+    # the MARKER's colour, so the reference layer is turned off to leave it
+    # alone; `test_dapi_is_composited_in_while_its_layer_is_on` and
+    # `test_the_thumbnail_shows_dapi_from_the_first_frame` own the other
+    # half.
+    page._on_nucleus_visibility_toggled(False)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._apply_channel_color("CD20", (0.0, 1.0, 0.0))
     page._update_tissue_preview()

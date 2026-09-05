@@ -105,12 +105,16 @@ from ...utils.calibration_source import (
 # so any present/future product layer is dropped while every real marker stays.
 _NON_MARKER_CHANNEL_KEYWORDS = ("mask", "fusion")
 
-# (v15) The DAPI/nucleus overlay is a display AID, not the subject of the
-# Background Correction page: it starts hidden in BOTH views (compare panels
-# and full image) and the nucleus row's checkbox in the Channels list is what
-# turns it on. One constant so the two hidden state holders, the full-image
-# toolbar button and the dataset reload can never disagree.
-DAPI_LAYER_DEFAULT_ON = False
+# (v15) The DAPI/nucleus overlay is the page's REFERENCE layer: a marker on
+# its own is a field of dots with nothing to place them against, so every
+# newly loaded dataset comes up with DAPI on, in both views, and it stays on
+# while the user moves from marker to marker. Turning it OFF is a decision
+# the user makes, and it then persists for that dataset -- until another
+# dataset is loaded, which starts again from this default.
+#
+# One constant so the row checkbox that OWNS this state, its two mirrors and
+# the dataset reload can never disagree about where it starts.
+DAPI_LAYER_DEFAULT_ON = True
 
 
 def _is_non_marker_channel(name):
@@ -1078,10 +1082,11 @@ class Step0Page(QWidget):
         # `toggled` connection intact.
         self._btn_show_nucleus = QPushButton("Nucleus", self)
         self._btn_show_nucleus.setCheckable(True)
-        # (v15) The DAPI layer starts OFF: the page is about the MARKER
-        # channel the user selected, and a nucleus layer added on top of it
-        # from the first frame is a second signal nobody asked for. The
-        # nucleus row's checkbox in the Channels list turns it on.
+        # (v15) A MIRROR of the nucleus row's checkbox, which is the one
+        # place this state lives. It exists so the readers that predate the
+        # Channels list keep working and so the value is still readable
+        # before the list has been built; it is never the answer when the
+        # row is there. See `_nucleus_layer_visible`.
         self._btn_show_nucleus.setChecked(DAPI_LAYER_DEFAULT_ON)
         self._btn_show_nucleus.setVisible(False)
 
@@ -1896,7 +1901,9 @@ class Step0Page(QWidget):
         return {
             "nucleus_channel": nucleus,
             "nucleus_tint": getattr(self, "_nuc_color", (0.0, 0.5, 1.0)),
-            "nucleus_enabled": self._full_image_nucleus_enabled(),
+            # The switch, for the same reason as `_show_full_image`: the
+            # stack builder sets suppression itself, from the channel.
+            "nucleus_enabled": self._nucleus_layer_visible(),
         }
 
     def _full_image_overlay(self):
@@ -2936,7 +2943,14 @@ class Step0Page(QWidget):
                 self._btn_full_marker.isChecked())
         overlay = getattr(stack, "overlay", None) if stack is not None else None
         if overlay is not None:
-            overlay.set_enabled(self._full_image_nucleus_enabled(),
+            # The user's SWITCH, not the effective visibility. "DAPI is
+            # itself the picture" is suppression, and suppression belongs to
+            # `set_suppressed` (which `show_source` re-evaluates on every
+            # channel change). Folding it in here wrote the current channel
+            # into the layer's `_enabled`, which is the user's state -- so
+            # landing on DAPI silently turned the switch off and choosing a
+            # marker did not bring it back.
+            overlay.set_enabled(self._nucleus_layer_visible(),
                                 host=stack.controller)
         self._apply_full_image_display(stack)
         # The Tissue Preview follows the full image's camera while it is up.
@@ -3027,19 +3041,23 @@ class Step0Page(QWidget):
                      if ch != self.nucleus_channel), None)
 
     def _full_image_nucleus_enabled(self):
-        """Whether the DAPI OVERLAY should be drawn over the full image.
+        """Whether the DAPI overlay is actually DRAWN over the full image.
 
-        The DAPI switch means "add DAPI on top of the MARKER", and while
-        DAPI is itself the picture there is no marker under it: the overlay
-        would draw the same channel a second time, in the same colour, added
-        to itself. So it is off in that state and the toggle is disabled --
-        without touching what the user last asked for, which comes back
-        whole the moment a marker is on screen again.
+        Derived, and for describing the view -- the "(DAPI hidden)" hint and
+        the source label. It is the switch AND not suppressed: the switch
+        means "add DAPI on top of the MARKER", and while DAPI is itself the
+        picture there is no marker under it, so the overlay would draw the
+        same channel a second time, in the same colour, added to itself.
+
+        This value must never be handed to `overlay.set_enabled`. That
+        setter holds what the USER asked for, and `RawOverlayLayer` keeps
+        the switch and the suppression apart precisely so the effective
+        state can be recomputed without the switch being lost. Writing this
+        into it collapses the two and loses the user's answer.
         """
         if self._showing_nucleus():
             return False
-        button = getattr(self, "_btn_full_nucleus", None)
-        return bool(button.isChecked()) if button is not None else False
+        return self._nucleus_layer_visible()
 
     def _update_full_method_buttons(self):
         """Reflect `_full_image_source` and what the current channel allows.
@@ -5437,11 +5455,37 @@ class Step0Page(QWidget):
             self._nucleus_vis_syncing = False
 
     def _nucleus_layer_visible(self):
+        """Whether the user wants the DAPI layer -- the ONE answer.
+
+        The nucleus row's checkbox in the Channels list is the state; the
+        hidden holder and the full-image toolbar button are mirrors of it,
+        kept by `_sync_nucleus_row_checkbox`. Reading the row rather than a
+        mirror is what makes it the source of truth instead of merely the
+        thing that is usually right: a mirror that fell out of step is then
+        a display bug and not a behaviour change.
+
+        The holder answers only before the Channels list exists -- a
+        half-built page, and the tests that drive one -- and the constant
+        answers before even that.
+        """
+        row = (getattr(self, "_channel_rows", None) or {}).get(
+            getattr(self, "nucleus_channel", None))
+        cb = row.get("checkbox") if row else None
+        if cb is not None:
+            try:
+                return bool(cb.isChecked())
+            except RuntimeError:
+                pass
         btn = getattr(self, "_btn_show_nucleus", None)
         return DAPI_LAYER_DEFAULT_ON if btn is None else bool(btn.isChecked())
 
     def _reset_nucleus_layer_default(self):
-        """Put the DAPI layer back to its default (off) in BOTH views.
+        """Put the DAPI layer back to its default (on) in BOTH views.
+
+        A new dataset forgets that the user turned DAPI off on the previous
+        one: the decision was about those pixels, and carrying it across
+        would leave a fresh slide missing its reference layer for no reason
+        the user could see.
 
         Called on a dataset (re)load. It goes through the same toggle that
         the checkbox uses, so the compare panels, the full-image toolbar
@@ -5457,9 +5501,20 @@ class Step0Page(QWidget):
         self._sync_nucleus_row_checkbox(DAPI_LAYER_DEFAULT_ON)
 
     def _on_nucleus_visibility_toggled(self, on):
-        """The nucleus row's checkbox is the DAPI layer's show/hide switch --
-        ONE state driving both views: the compare panels (via the hidden
-        `_btn_show_nucleus` holder) and the full image (`_btn_full_nucleus`).
+        """Put the DAPI layer's switch at `on`, everywhere.
+
+        The nucleus row's checkbox in the Channels list IS this state; the
+        hidden `_btn_show_nucleus` holder and the full-image toolbar's
+        `_btn_full_nucleus` are mirrors of it, and both views read the state
+        through `_nucleus_layer_visible`.
+
+        The checkbox is written here rather than only mirrored FROM here,
+        because this is the entry point in both directions: the checkbox's
+        own signal arrives here, where writing it back is a no-op, and so
+        does every programmatic set -- the dataset reset, and the tests. If
+        this only moved the mirrors, setting the state in code would leave
+        the source of truth saying the opposite, which is exactly the split
+        this method exists to prevent.
 
         It is purely a display switch: DAPI never enters Process/Apply/
         on-demand/Save, and no method is recorded for it.
@@ -5469,6 +5524,17 @@ class Step0Page(QWidget):
         self._nucleus_vis_syncing = True
         try:
             on = bool(on)
+            row = (getattr(self, "_channel_rows", None) or {}).get(
+                getattr(self, "nucleus_channel", None))
+            cb = row.get("checkbox") if row else None
+            if cb is not None:
+                try:
+                    if cb.isChecked() != on:
+                        cb.blockSignals(True)
+                        cb.setChecked(on)
+                        cb.blockSignals(False)
+                except RuntimeError:
+                    pass
             for btn in (getattr(self, "_btn_show_nucleus", None),
                         getattr(self, "_btn_full_nucleus", None)):
                 if btn is not None and btn.isChecked() != on:

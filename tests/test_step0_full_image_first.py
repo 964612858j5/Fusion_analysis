@@ -826,12 +826,23 @@ def test_the_correction_switch_is_shut_while_dapi_is_the_picture(
 def test_the_landing_never_draws_dapi_twice(app, monkeypatch):
     """The DAPI checkbox means "add DAPI on top of the MARKER". With DAPI
     itself on screen there is no marker under it, so the overlay would add
-    the channel to itself -- it is off, and the toggle is disabled."""
+    the channel to itself -- so it is not DRAWN.
+
+    Not drawn is suppression, and suppression is the renderer's: the
+    builder sets it from the channel (`set_suppressed(nucleus == channel)`)
+    and the layer ANDs it with the switch. So `nucleus_enabled` carries the
+    user's switch, unchanged, and it is `_full_image_nucleus_enabled` --
+    the derived "is it on screen" -- that goes false. Handing the derived
+    value to the builder instead is what used to lose the setting.
+    """
     page, _tab = _landed(app, monkeypatch)
     page._btn_full_nucleus.setChecked(True)      # the user's standing wish
 
     assert page._full_image_nucleus_enabled() is False
-    assert page._full_image_nucleus_args()["nucleus_enabled"] is False
+    # the switch travels intact ...
+    assert page._full_image_nucleus_args()["nucleus_enabled"] is True
+    assert page._nucleus_layer_visible() is True
+    # ... and the toggle is disabled while it could not mean anything
     assert page._btn_full_nucleus.isEnabled() is False
     # ...and the toolbar does not call the channel on screen a hidden layer.
     assert "DAPI" not in page._hidden_full_layers()

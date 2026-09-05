@@ -4079,3 +4079,228 @@ def test_many_tile_arrivals_in_one_event_loop_turn_cost_one_repaint(app):
     assert paints[0] <= 2, f"{len(reqs)} arrivals cost {paints[0]} repaints"
 
     ctrl.teardown()
+
+
+# ── SharedOverviewStore: one read, every waiter, latest wins ─────────────
+#
+# The store used to be a cache, a claim set and a thread pool with no
+# notification of its own: whichever controller submitted the read got the
+# result on its own Qt signal, and the others -- who had been told the key
+# was already in flight and had therefore done nothing -- were never told
+# anything. In compare mode that left two of the three panels blocked on an
+# overview record for the rest of the session (see
+# test_step0_compare_tiles.py section 14, and the real-slide measurement
+# quoted there).
+#
+# These drive the real store object. The waiters are small recorders,
+# because a waiter is by definition an observer -- but every assertion below
+# is about what the STORE did: how many times it called the reader, in what
+# order, and who it woke.
+
+def _overview_record(channel, level=0, value=1.0):
+    from block01.viewer.explore_view import OverviewRecord
+    arr = np.full((4, 4), float(value), dtype=np.float32)
+    return OverviewRecord(source=("fake", "slide"), channel=channel,
+                          level=level, arr=arr, display_lo=0.0,
+                          display_hi=float(value), shape=(4, 4))
+
+
+class _Waiter:
+    """Something that wants an overview record."""
+
+    def __init__(self):
+        self.woken = []
+        self._torn_down = False
+
+    def on_overview_delivered(self, key, rec, err=None):
+        self.woken.append((key, rec, err))
+
+
+def _store():
+    from block01.viewer.explore_view import SharedOverviewStore
+    return SharedOverviewStore()
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline and not predicate():
+        _pump(10)
+    return predicate()
+
+
+def test_the_store_wakes_every_waiter_from_one_read(app):
+    """THE fix. Three waiters ask for the same key; the reader runs once
+    and all three are woken with the record."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    reads = []
+
+    def read():
+        reads.append(1)
+        return _overview_record("CD3")
+
+    a, b, c = _Waiter(), _Waiter(), _Waiter()
+    assert store.request(key, read, a) is True
+    # The second and third find it in flight: no second read...
+    assert store.request(key, read, b) is False
+    assert store.request(key, read, c) is False
+
+    assert _wait_for(lambda: a.woken and b.woken and c.woken)
+    assert reads == [1], "the key was read more than once"
+    for waiter in (a, b, c):
+        assert waiter.woken[0][1].channel == "CD3"
+    store.shutdown()
+
+
+def test_the_store_caches_the_record_before_it_wakes_anybody(app):
+    """A woken waiter installs from the SHARED cache, so the record has to
+    be there by the time it is told."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    seen_cached = []
+
+    class _Checker(_Waiter):
+        def on_overview_delivered(self, k, rec, err=None):
+            seen_cached.append(store.get(k) is rec)
+            super().on_overview_delivered(k, rec, err)
+
+    w = _Checker()
+    store.request(key, lambda: _overview_record("CD3"), w)
+    assert _wait_for(lambda: w.woken)
+    assert seen_cached == [True]
+    store.shutdown()
+
+
+def test_a_forgotten_waiter_is_not_woken(app):
+    """`forget` is what teardown calls. A record landing afterwards must
+    not be delivered into a dismantled object."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+    gate = threading.Event()
+
+    def read():
+        gate.wait(5.0)
+        return _overview_record("CD3")
+
+    a, b = _Waiter(), _Waiter()
+    store.request(key, read, a)
+    store.request(key, read, b)
+    store.forget(a)
+    gate.set()
+
+    assert _wait_for(lambda: b.woken)
+    _pump(50)
+    assert a.woken == [], "a forgotten waiter was woken"
+    store.shutdown()
+
+
+def test_a_read_nobody_wants_any_more_is_never_started(app):
+    """LATEST-WINS. One worker thread, so a run of quick switches queues
+    reads behind the one in flight; the ones whose waiters have all moved
+    on are dropped BEFORE they touch the disk rather than run and thrown
+    away.
+
+    Without this, twenty quick marker clicks are twenty whole-level reads
+    in click order, and the channel the user is actually looking at is the
+    last one served.
+    """
+    store = _store()
+    started = []
+    gate = threading.Event()
+    src = ("fake", "slide")
+
+    def reader(name, hold=False):
+        def read():
+            started.append(name)
+            if hold:
+                gate.wait(5.0)
+            return _overview_record(name)
+        return read
+
+    w = _Waiter()
+    # A occupies the single worker...
+    store.request((src, "A", 0), reader("A", hold=True), w, live=True)
+    assert _wait_for(lambda: started == ["A"])
+    # ...B and C queue behind it, each superseding the previous LIVE
+    # interest, so by the time the worker is free only C is wanted.
+    store.request((src, "B", 0), reader("B"), w, live=True)
+    store.request((src, "C", 0), reader("C"), w, live=True)
+    gate.set()
+
+    assert _wait_for(lambda: "C" in started)
+    _pump(100)
+    assert started == ["A", "C"], started
+    # ...and the abandoned key left no claim behind.
+    assert (src, "B", 0) not in store.inflight
+    assert store.waiting_on((src, "B", 0)) == 0
+    store.shutdown()
+
+
+def test_a_background_interest_is_never_dropped(app):
+    """A prefetch asks for a channel precisely because nobody is looking at
+    it, so its interest must survive the live selection moving on --
+    otherwise warming a neighbour would be cancelled by the very switch it
+    exists to make instant."""
+    store = _store()
+    started = []
+    gate = threading.Event()
+    src = ("fake", "slide")
+
+    def reader(name, hold=False):
+        def read():
+            started.append(name)
+            if hold:
+                gate.wait(5.0)
+            return _overview_record(name)
+        return read
+
+    live, prefetch = _Waiter(), _Waiter()
+    store.request((src, "A", 0), reader("A", hold=True), live, live=True)
+    assert _wait_for(lambda: started == ["A"])
+    store.request((src, "B", 0), reader("B"), prefetch, live=False)
+    store.request((src, "C", 0), reader("C"), live, live=True)
+    gate.set()
+
+    assert _wait_for(lambda: prefetch.woken and live.woken)
+    assert sorted(started) == ["A", "B", "C"], started
+    assert prefetch.woken[0][1].channel == "B"
+    # `live` moved on twice, so it is woken only for where it ended up.
+    assert [w[0][1] for w in live.woken] == ["C"]
+    store.shutdown()
+
+
+def test_a_failed_read_wakes_every_waiter_too(app):
+    """A failure is an answer. A waiter left hanging on one would be
+    blocked on an overview for good."""
+    store = _store()
+    key = (("fake", "slide"), "CD3", 0)
+
+    def read():
+        raise OSError("disk gone")
+
+    a, b = _Waiter(), _Waiter()
+    store.request(key, read, a)
+    store.request(key, read, b)
+
+    assert _wait_for(lambda: a.woken and b.woken)
+    for waiter in (a, b):
+        assert waiter.woken[0][1] is None
+        assert isinstance(waiter.woken[0][2], OSError)
+    assert key not in store.inflight
+    store.shutdown()
+
+
+def test_a_request_after_shutdown_starts_nothing(app):
+    """Teardown races a switch. The claim must not be left standing and no
+    thread may be asked for."""
+    store = _store()
+    store.shutdown()
+    reads = []
+    w = _Waiter()
+
+    assert store.request((("fake", "slide"), "CD3", 0),
+                         lambda: reads.append(1), w) is False
+
+    _pump(50)
+    assert reads == []
+    assert w.woken == []

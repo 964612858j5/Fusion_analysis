@@ -411,6 +411,12 @@ class CompareStrip(QtWidgets.QWidget):
         try:
             stacks.teardown(wait_for_floor=wait_for_floor)
         finally:
+            # The page connects to the controllers this teardown destroys
+            # and guards those connections with a flag on THIS object. A
+            # rebuild makes new controllers, so the flags have to go with
+            # the old ones or the new strip is never connected at all.
+            self._exit_connected = False
+            self._seed_connected = False
             self._panes.setVisible(False)
             self._placeholder.setVisible(True)
 

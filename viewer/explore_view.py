@@ -762,6 +762,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 `dir_prefetch_direction_changes`.
 """
 
+import functools
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1008,10 +1009,10 @@ class OverviewRecord:
     shape: Tuple[int, int]
 
 
-class SharedOverviewStore:
-    """The overview cache, the in-flight claim set and the single reader
-    thread, factored out so SEVERAL controllers over one slide can hold
-    them in common.
+class SharedOverviewStore(QtCore.QObject):
+    """The overview cache, the in-flight claim set, the single reader
+    thread AND the completion notification, factored out so SEVERAL
+    controllers over one slide can hold them in common.
 
     A controller that is given one reads the whole-slide overview only if
     nobody has read it yet: `load_overview` consults the same
@@ -1021,22 +1022,177 @@ class SharedOverviewStore:
     same reason -- a rapid channel switch across three controllers must
     start one background read between them, not three.
 
+    THE NOTIFICATION IS THE STORE'S, and that is the correction this class
+    exists in its current form for. The read used to be submitted by
+    whichever controller got there first, and its result came back on THAT
+    controller's own Qt signal. The other two saw the key already in
+    `inflight`, did not submit, and were never told when the record
+    landed -- so in compare mode every channel switch left the TopHat and
+    cuCIM panels cleared, blocked on an overview they were waiting for and
+    nobody would ever hand them. Measured on the real 29-channel slide:
+    twenty consecutive switches, twenty times `panels_ready=[True, False,
+    False]`. One read, and everyone still waiting on that key is woken
+    from it: `request` registers a waiter, `_deliver` wakes the whole list
+    on the GUI thread.
+
+    LATEST-WINS is the second property. A waiter registers its interest as
+    LIVE (this is the channel I am showing) or as background (a prefetch
+    warming a neighbour). A controller has at most one live interest, so
+    moving to another channel drops the previous one, and a read that no
+    waiter is left interested in is DROPPED BEFORE IT STARTS rather than
+    run and thrown away. Click twenty markers quickly and the reader
+    thread does the work for the ones still wanted, not for all twenty in
+    order. A background interest is never dropped: a prefetch asks for a
+    channel precisely because nobody is looking at it.
+
     A controller constructed without one gets a private store that it also
     OWNS: it shuts the pool down in `teardown`. A shared store is owned by
     whoever built it (`ExploreStack`/the strip), and the controllers using
     it leave the pool alone.
     """
 
+    # Worker thread -> GUI thread. On the STORE, so a controller being torn
+    # down cannot take the delivery for the other waiters down with it.
+    _delivered = QtCore.pyqtSignal(object)
+
     def __init__(self, max_workers: int = 1):
+        super().__init__()
         # (source, channel, level) -> OverviewRecord, trimmed to
-        # OVERVIEW_CACHE_BYTES by whichever controller last wrote to it.
+        # OVERVIEW_CACHE_BYTES on every put.
         self.cache = OrderedDict()
-        # (source, channel, level) currently being read.
+        # (source, channel, level) currently claimed for reading.
         self.inflight = set()
         self.pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="explore-overview")
+        # Guards `inflight`, `_waiters` and `_live`. Taken on the GUI
+        # thread (register, deliver, forget) and on the reader thread (the
+        # "is this still wanted" check), which is the whole reason it
+        # exists: without it a waiter registering at the instant the reader
+        # decided nobody wanted the key would be lost.
+        self._lock = threading.RLock()
+        # key -> [waiter, ...], in registration order.
+        self._waiters = {}
+        # waiter -> the ONE key it is live-interested in.
+        self._live = {}
+        self._closed = False
+        self._delivered.connect(self._deliver, QtCore.Qt.QueuedConnection)
+
+    # ── the cache ────────────────────────────────────────────────────────
+
+    def get(self, key):
+        rec = self.cache.get(key)
+        if rec is not None:
+            self.cache.move_to_end(key)
+        return rec
+
+    def put(self, rec: OverviewRecord):
+        """Cache `rec`, then evict oldest-first until inside the byte
+        budget -- but never drop the last record: a single oversized
+        overview must still be usable."""
+        key = (rec.source, rec.channel, rec.level)
+        self.cache[key] = rec
+        self.cache.move_to_end(key)
+        total = sum(int(getattr(r.arr, "nbytes", 0))
+                    for r in self.cache.values())
+        while total > OVERVIEW_CACHE_BYTES and len(self.cache) > 1:
+            _k, dropped = self.cache.popitem(last=False)
+            total -= int(getattr(dropped.arr, "nbytes", 0))
+
+    # ── the single-flight read ───────────────────────────────────────────
+
+    def request(self, key, reader, waiter, *, live: bool = True):
+        """`waiter` wants `key`; `reader()` produces the record.
+
+        Single-flight per key: a repeat call while one is in flight only
+        adds a waiter. Returns True when THIS call started the read, which
+        is what a test needs to say "three panels, one read".
+        """
+        with self._lock:
+            if self._closed:
+                return False
+            if live:
+                previous = self._live.get(id(waiter))
+                if previous is not None and previous != key:
+                    self._drop_waiter_locked(previous, waiter)
+                self._live[id(waiter)] = key
+            waiters = self._waiters.setdefault(key, [])
+            if not any(w is waiter for w in waiters):
+                waiters.append(waiter)
+            if key in self.inflight:
+                return False
+            self.inflight.add(key)
+
+        def work():
+            with self._lock:
+                if not self._waiters.get(key):
+                    # Everybody moved on before this got a thread. The read
+                    # never happens -- that is what latest-wins means, and
+                    # it is decided under the lock so a waiter that
+                    # registers at this instant either gets counted here or
+                    # finds the claim gone and starts its own read.
+                    self.inflight.discard(key)
+                    return
+            try:
+                rec, err = reader(), None
+            except Exception as exc:        # noqa: BLE001 -- never raised on a worker
+                rec, err = None, exc
+            self._delivered.emit((key, rec, err))
+
+        try:
+            self.pool.submit(work)
+        except RuntimeError:
+            # Pool already shut down (teardown raced us) -- drop the claim
+            # so nothing is left permanently marked in flight.
+            with self._lock:
+                self.inflight.discard(key)
+                self._waiters.pop(key, None)
+            return False
+        return True
+
+    def _deliver(self, payload):
+        """GUI thread. Cache the record and wake EVERY waiter."""
+        key, rec, err = payload
+        with self._lock:
+            self.inflight.discard(key)
+            waiters = self._waiters.pop(key, [])
+            for w in waiters:
+                if self._live.get(id(w)) == key:
+                    self._live.pop(id(w), None)
+        if rec is not None:
+            self.put(rec)
+        for waiter in waiters:
+            try:
+                waiter.on_overview_delivered(key, rec, err)
+            except RuntimeError:
+                # A waiter whose C++ object went away between the read and
+                # this delivery. The others still get theirs.
+                pass
+
+    def forget(self, waiter):
+        """Drop `waiter` from every key. Called from `teardown`, so a
+        delivery can never reach an object that has been dismantled."""
+        with self._lock:
+            self._live.pop(id(waiter), None)
+            for key in list(self._waiters):
+                self._drop_waiter_locked(key, waiter)
+
+    def _drop_waiter_locked(self, key, waiter):
+        remaining = [w for w in self._waiters.get(key, ()) if w is not waiter]
+        if remaining:
+            self._waiters[key] = remaining
+        else:
+            self._waiters.pop(key, None)
+
+    def waiting_on(self, key):
+        """How many waiters `key` has. For tests and diagnostics."""
+        with self._lock:
+            return len(self._waiters.get(key, ()))
 
     def shutdown(self):
+        with self._lock:
+            self._closed = True
+            self._waiters.clear()
+            self._live.clear()
         self.pool.shutdown(wait=True)
 
 
@@ -2001,7 +2157,6 @@ class ExploreController(QtCore.QObject):
     _precise_delivered = QtCore.pyqtSignal(object)
     _floor_delivered = QtCore.pyqtSignal(object)
     _dirprefetch_delivered = QtCore.pyqtSignal(object)
-    _overview_delivered = QtCore.pyqtSignal(object)
 
     # Public: an overview record for (source, channel, level) finished
     # preparing; the bool is success. A background consumer needs this to
@@ -2272,7 +2427,6 @@ class ExploreController(QtCore.QObject):
         self._precise_delivered.connect(self._handle_precise_result, QtCore.Qt.QueuedConnection)
         self._floor_delivered.connect(self._handle_floor_result, QtCore.Qt.QueuedConnection)
         self._dirprefetch_delivered.connect(self._handle_dirprefetch_result, QtCore.Qt.QueuedConnection)
-        self._overview_delivered.connect(self._handle_overview_result, QtCore.Qt.QueuedConnection)
 
         self.view.view_box.sigRangeChanged.connect(self._on_range_changed)
 
@@ -2892,10 +3046,7 @@ class ExploreController(QtCore.QObject):
                               arr=arr, display_lo=lo, display_hi=hi, shape=(h, w))
 
     def _overview_cache_get(self, source, channel, level):
-        rec = self._overview_cache.get((source, channel, level))
-        if rec is not None:
-            self._overview_cache.move_to_end((source, channel, level))
-        return rec
+        return self._overview_store.get((source, channel, level))
 
     @staticmethod
     def _record_bytes(rec: OverviewRecord) -> int:
@@ -2903,15 +3054,39 @@ class ExploreController(QtCore.QObject):
         return int(getattr(arr, "nbytes", 0))
 
     def _overview_cache_put(self, rec: OverviewRecord):
-        key = (rec.source, rec.channel, rec.level)
-        self._overview_cache[key] = rec
-        self._overview_cache.move_to_end(key)
-        # Evict oldest-first until inside the byte budget, but never drop
-        # the last record: a single oversized overview must still be usable.
-        total = sum(self._record_bytes(r) for r in self._overview_cache.values())
-        while total > OVERVIEW_CACHE_BYTES and len(self._overview_cache) > 1:
-            _k, dropped = self._overview_cache.popitem(last=False)
-            total -= self._record_bytes(dropped)
+        """Cache and trim through the STORE, so controllers sharing one do
+        not each carry a copy of the eviction policy -- and so the copy a
+        waiter installs is the same object the initiator cached."""
+        self._overview_store.put(rec)
+
+    def overview_record(self, channel: str, level: Optional[int] = None,
+                        source=None):
+        """`channel`'s RESIDENT overview record, or None. No I/O, ever.
+
+        Public because the page's display seed wants exactly these pixels:
+        the whole slide at `_pick_overview_level`, which is the level the
+        loader's `overview_downsample()` names, and from which
+        `_read_overview_record` already derived `display_lo`/`display_hi`
+        with the same `seed_display_range` the page applies. A second read
+        of the same level for the same purpose is a duplicate, and it was
+        costing 170-230 ms on the GUI thread per channel switch.
+        """
+        src = source if source is not None else self.provider.source_identity()
+        lvl = self._pick_overview_level() if level is None else level
+        return self._overview_store.get((src, channel, lvl))
+
+    def overview_read_pending(self, channel: str, level: Optional[int] = None,
+                              source=None) -> bool:
+        """True when SOMEBODY is already reading `channel`'s overview into
+        the shared store.
+
+        The page asks this before deciding to read the same level itself:
+        a caller that can afford to wait must wait for the one read rather
+        than start a second one on the GUI thread.
+        """
+        src = source if source is not None else self.provider.source_identity()
+        lvl = self._pick_overview_level() if level is None else level
+        return (src, channel, lvl) in self._overview_store.inflight
 
     def has_overview_record(self, channel: str, level: Optional[int] = None,
                             source=None) -> bool:
@@ -3000,7 +3175,10 @@ class ExploreController(QtCore.QObject):
 
         self.stats["overview_cache_misses"] = self.stats.get("overview_cache_misses", 0) + 1
         self._clear_overview()
-        self.prepare_overview_async(self.channel)
+        # LIVE: this is the channel being shown, so an earlier live
+        # interest of this controller's is dropped and a queued read for it
+        # that no other waiter wants is skipped before it starts.
+        self.prepare_overview_async(self.channel, live=True)
         return False
 
     def _overview_ready_for_current(self) -> bool:
@@ -3031,8 +3209,8 @@ class ExploreController(QtCore.QObject):
         self.stats["blocked_on_overview"] = self.stats.get("blocked_on_overview", 0) + 1
         return True
 
-    def prepare_overview_async(self, channel: str):
-        """Read `channel`'s overview record on the single overview worker
+    def prepare_overview_async(self, channel: str, *, live: bool = False):
+        """Read `channel`'s overview record on the shared overview worker
         and cache it.
 
         Public because this is exactly what a background consumer must call
@@ -3041,40 +3219,42 @@ class ExploreController(QtCore.QObject):
         overview record the switch still stalls on a read, and this
         channel's display range is unknown until it lands.
 
-        Single-flight per (source, channel, level): a repeat call while one
-        is in flight is a no-op, so a settle, a rapid switch and a prefetch
-        all wanting the same channel cause one read, not three.
+        Single-flight per (source, channel, level) ACROSS EVERY CONTROLLER
+        sharing the store: a settle, a rapid switch, a prefetch and the two
+        other compare panels all wanting the same channel cause one read,
+        and every one of them is woken from it (`on_overview_delivered`).
+        This used to be single-flight only in the sense that the second and
+        third callers did nothing at all -- including never being told the
+        record had arrived.
+
+        `live=True` marks this as "the channel I am showing", of which a
+        controller has exactly one: moving on drops the previous interest,
+        and a queued read nobody is interested in any more is dropped
+        before it starts. The default is False, because the caller that is
+        not the live selection is the prefetch, and a prefetch's interest
+        must never be dropped -- it asks for a channel precisely because
+        nobody is looking at it.
         """
         source = self.provider.source_identity()
         level = self._pick_overview_level()
         key = (source, channel, level)
         if self._overview_cache_get(source, channel, level) is not None:
             return
-        if key in self._overview_inflight or self._torn_down:
+        if self._torn_down:
             return
-        self._overview_inflight.add(key)
-        provider = self.provider
+        reader = functools.partial(self._read_overview_record,
+                                   self.provider, source, channel, level)
+        self._overview_store.request(key, reader, self, live=live)
 
-        def work():
-            try:
-                rec = self._read_overview_record(provider, source, channel, level)
-                err = None
-            except Exception as exc:  # noqa: BLE001 -- reported, never raised on a worker
-                rec, err = None, exc
-            self._overview_delivered.emit((key, rec, err))
+    def on_overview_delivered(self, key, rec, err=None):
+        """The shared store's GUI-thread wake-up: the ONE read for `key`
+        has finished, and this controller was still waiting on it.
 
-        try:
-            self._overview_pool.submit(work)
-        except RuntimeError:
-            # Pool already shut down (teardown raced us) -- drop the claim
-            # so nothing is left permanently marked in flight.
-            self._overview_inflight.discard(key)
-
-    def _handle_overview_result(self, payload):
-        """GUI-thread delivery. Caches every successful read -- a record for
-        a channel the user has since left is still worth keeping, that is
-        the point of the cache -- but only INSTALLS one that still matches
-        the live selection.
+        Called for EVERY waiter, not only the controller that happened to
+        submit the read -- which is the whole point. The record is already
+        in the shared cache by the time this runs, so a waiter that has
+        since moved to another channel simply declines to install it and
+        keeps the cached copy for later.
 
         Installing is also what releases the work that a cold switch
         deliberately withheld. Until the record lands, this channel's
@@ -3083,17 +3263,13 @@ class ExploreController(QtCore.QObject):
         of the pooled tile (`_quantize_*` runs once, at arrival). So the
         cold path draws nothing and asks for nothing; it resumes here.
         """
-        key, rec, err = payload
-        self._overview_inflight.discard(key)
+        if self._torn_down:
+            return
         source_k, channel_k, level_k = key
         if rec is None:
             self.stats["overview_read_failed"] = self.stats.get("overview_read_failed", 0) + 1
-            if not self._torn_down:
-                self.overview_prepared.emit(source_k, channel_k, level_k, False)
+            self.overview_prepared.emit(source_k, channel_k, level_k, False)
             return
-        if self._torn_down:
-            return
-        self._overview_cache_put(rec)
         self.overview_prepared.emit(source_k, channel_k, level_k, True)
 
         source = self.provider.source_identity()
@@ -4763,6 +4939,17 @@ class ExploreController(QtCore.QObject):
         for t in self._floor_threads:
             if t.is_alive():
                 t.join(timeout=floor_join_timeout)
+        # Off every waiter list FIRST. A shared store outlives this
+        # controller and may deliver a record moments from now; the
+        # delivery must not reach an object that has been dismantled, and
+        # `_torn_down` alone is a guard rather than a guarantee.
+        store = getattr(self, "_overview_store", None)
+        if store is not None:
+            try:
+                store.forget(self)
+            except Exception:                               # noqa: BLE001
+                pass
+
         # Before `provider.close()` below: an overview read in flight would
         # otherwise touch a closed provider.
         # Only a store this controller OWNS. A shared one outlives it --

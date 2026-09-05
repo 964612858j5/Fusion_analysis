@@ -325,6 +325,10 @@ class Step0Page(QWidget):
         self._compare_entry_full_camera = None
         self._compare_entry_point = None
         self._compare_entry_scale = None
+        # True while the full image is behind the channel the page is on,
+        # because compare mode was up when the row changed. See
+        # `_sync_full_image_to_channel`.
+        self._full_image_channel_stale = False
         # True once the panels have been opened at least once on this
         # dataset: what "Save as patch" and the Tissue Preview rectangle need
         # before they can speak for the panels.
@@ -1873,6 +1877,12 @@ class Step0Page(QWidget):
         camera = self._returning_full_camera()
         self._hand_gpu_to_full_image()
         self._set_compare_mode(False)
+        # The channel the user settled on while comparing, applied ONCE and
+        # BEFORE the camera. `_show_full_image` leaves the camera where it
+        # is, so doing it first means the one repaint this handler produces
+        # already has both the right channel and the right place -- there
+        # is no frame showing the new channel at the old position.
+        self._sync_deferred_full_image_channel()
         if camera is not None:
             self._apply_full_image_camera(*camera)
         # The full image is the view again, so the thumbnail's rectangle is
@@ -2329,6 +2339,13 @@ class Step0Page(QWidget):
                 "unaffected.")
             return None
         self._connect_compare_right_click(strip)
+        # ONE of the three. They share a store, so they are all woken by
+        # the same read and all three would report the same record --
+        # three connections would mean three page-level re-seeds for one
+        # arrival.
+        controllers = strip.controllers
+        if controllers:
+            self._connect_overview_seed(controllers[0], owner=strip)
         return strip
 
     def _compare_params_for(self, source):
@@ -2684,6 +2701,8 @@ class Step0Page(QWidget):
         # The Tissue Preview follows the full image's camera while it is up.
         self._connect_full_image_right_click(stack)
         self._connect_full_image_view_rect(stack)
+        self._connect_overview_seed(
+            getattr(stack, "controller", None), owner=stack)
         self._update_full_image_view_rect()
         # The pyramid level the new selection lands on decides whether the
         # coarse-preview hint applies.
@@ -2695,15 +2714,51 @@ class Step0Page(QWidget):
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
 
-        Only when the full image is actually on screen: switching a hidden
-        viewer costs a synchronous overview read for something nobody is
-        looking at. `_show_full_image` refuses on its own while a production
-        run holds the GPU, so a rebuild can never undo the release that run
-        was given.
+        DEFERRED while the compare panels are the view. The full image is
+        then off screen AND suspended, and syncing it costs a whole
+        selection change -- pools cleared, generations cancelled, an
+        overview read started, a corrected floor re-requested -- for a
+        picture nobody can see. Compare mode is where a user tries markers
+        one after another, so that cost was being paid once per click:
+        measured on the real 29-channel slide it was 178-239 ms of the
+        200-270 ms each switch took, i.e. the great majority of a stall
+        that reads, after half a dozen clicks, as the application having
+        frozen.
+
+        Nothing is lost by deferring. `current_channel` is the page's, it
+        has already been set, and it is the FINAL one that matters:
+        `_exit_compare_mode` syncs the full image once, to wherever the
+        user ended up, so eighteen intermediate channels cost nothing at
+        all instead of eighteen selection changes.
+
+        With the full image on screen the sync is immediate, as it always
+        was. `_show_full_image` refuses on its own while a production run
+        holds the GPU, so a rebuild can never undo the release that run was
+        given.
         """
         if not self._full_image_visible():
             return
+        if self._compare_mode():
+            self._full_image_channel_stale = True
+            return
+        self._full_image_channel_stale = False
         self._show_full_image()
+
+    def _sync_deferred_full_image_channel(self):
+        """Apply the channel the user settled on while comparing -- once.
+
+        Called on the way out of compare mode, and only when something was
+        actually deferred: flipping back with no channel change must not
+        re-enter `_show_full_image` and re-issue a selection the controller
+        already holds.
+        """
+        if not getattr(self, "_full_image_channel_stale", False):
+            return False
+        self._full_image_channel_stale = False
+        if not self._full_image_visible():
+            return False
+        self._show_full_image()
+        return True
 
     # ── the full image's own method switch ──────────────────────────────
 
@@ -3120,8 +3175,61 @@ class Step0Page(QWidget):
         """Marker channels + DAPI (the set the conditioning workbench shows)."""
         return [ch for ch in self._channel_order if not _is_non_marker_channel(ch)]
 
-    def _slide_lowres_array(self, ch):
+    def _overview_hosts(self):
+        """The controllers whose shared overview store this page may read.
+
+        The full image's, then the compare panels'. They are reading the
+        SAME slide at the same pyramid level, so any of their records
+        answers "the whole slide at the overview level" for any channel.
+        """
+        hosts = []
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = getattr(explore_tab, "stack", None) if explore_tab else None
+        controller = getattr(stack, "controller", None)
+        if controller is not None:
+            hosts.append(controller)
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None and getattr(strip, "built", False):
+            hosts.extend(c for c in strip.controllers if c is not None)
+        return hosts
+
+    def _resident_overview_record(self, ch):
+        """`ch`'s whole-slide overview record if a viewer already holds it,
+        else None. Never reads."""
+        if not ch:
+            return None
+        for controller in self._overview_hosts():
+            try:
+                rec = controller.overview_record(ch)
+            except Exception:                               # noqa: BLE001
+                continue
+            if rec is not None:
+                return rec
+        return None
+
+    def _overview_read_pending(self, ch):
+        """True when a viewer is already reading `ch`'s overview level."""
+        if not ch:
+            return False
+        for controller in self._overview_hosts():
+            try:
+                if controller.overview_read_pending(ch):
+                    return True
+            except Exception:                               # noqa: BLE001
+                continue
+        return False
+
+    def _slide_lowres_array(self, ch, *, blocking=True):
         """The WHOLE-SLIDE low-resolution read of `ch`, cached, or None.
+
+        `blocking=False` means "do not start a read of your own if a viewer
+        is already doing it". The display seed passes it: a channel switch
+        has just told three tile controllers to fetch this very level, and
+        a second synchronous read of it on the GUI thread was the dominant
+        cost of every switch. The seed then stays PROVISIONAL until
+        `_on_channel_overview_ready` runs, which is honest -- the window is
+        not known yet -- and the viewers draw nothing in the meantime
+        because they are blocked on the same record.
 
         One array per channel per dataset, and the only place this page
         reads a whole channel. Two consumers share it, which is the point:
@@ -3144,6 +3252,19 @@ class Step0Page(QWidget):
             cache = self._slide_lowres = {}
         if ch in cache:
             return cache[ch]
+        # The viewers read exactly this array -- the whole slide at
+        # `overview_downsample()`, which is `_pick_overview_level` -- and
+        # they cache it in a shared store. Adopting theirs is not an
+        # optimisation of a read, it is the removal of a duplicate one.
+        rec = self._resident_overview_record(ch)
+        if rec is not None:
+            cache[ch] = rec.arr
+            return rec.arr
+        if not blocking and self._overview_read_pending(ch):
+            # Somebody is already reading it, on a worker. Waiting costs
+            # nothing; reading it a second time here costs 170-230 ms of
+            # the GUI thread, measured, per channel switch.
+            return None
         arr = None
         loader = getattr(self, "loader", None)
         read = getattr(loader, "read_region_lowres", None)
@@ -3990,6 +4111,56 @@ class Step0Page(QWidget):
     def _on_full_image_camera_moved(self):
         self._update_full_image_view_rect()
         self._update_full_level_hint()
+
+    def _connect_overview_seed(self, controller, owner=None):
+        """Once per controller: tell the page when a channel's whole-slide
+        overview record has been read.
+
+        That record is this page's display seed -- same level, same
+        `seed_display_range` -- so this is the signal that turns the
+        provisional window a cold channel switch leaves behind into the
+        real one, WITHOUT the page reading the slide a second time on the
+        GUI thread.
+        """
+        owner = controller if owner is None else owner
+        if controller is None or getattr(owner, "_seed_connected", False):
+            return
+        try:
+            controller.overview_prepared.connect(
+                self._on_channel_overview_ready)
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        try:
+            owner._seed_connected = True
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _on_channel_overview_ready(self, _source, channel, _level, ok):
+        """A viewer finished reading `channel`'s whole-slide overview.
+
+        Only the two channels the page is DRAWING matter -- the current one
+        and the nucleus reference -- and only to re-derive the display
+        window that could not be derived when the switch happened. A
+        prefetch warming a neighbour lands here too and is ignored: nothing
+        on screen is showing it.
+
+        Idempotent and cheap: `_display_mapping_for` finds the record
+        resident this time (`_slide_lowres_array` adopts it), so this is a
+        percentile over an array that is already in memory, not a read.
+        """
+        if not ok or not channel:
+            return
+        if channel not in (self.current_channel, self.nucleus_channel):
+            return
+        # Drop the provisional window so the seed is taken again.
+        self._display_fallback.pop(channel, None)
+        if self._compare_mode():
+            self._refresh_preview_display(keep_zoom=True)
+        else:
+            explore_tab = getattr(self, "_explore_tab", None)
+            self._apply_full_image_display(
+                getattr(explore_tab, "stack", None) if explore_tab else None)
+        self._queue_tissue_preview()
 
     def _update_compare_view_rect(self):
         """Draw the PANELS' viewport on the Tissue Preview.
@@ -5526,7 +5697,14 @@ class Step0Page(QWidget):
         ch = self.current_channel
         if not ch:
             return None
-        arr = self._slide_lowres_array(ch)
+        # Non-blocking, for the same reason the display seed is: a channel
+        # switch has just asked three tile controllers for this exact
+        # level, and reading it again here would put the whole 170-230 ms
+        # back on the GUI thread. Returning None leaves the thumbnail
+        # showing the previous channel for the ~150 ms the worker takes;
+        # `_on_channel_overview_ready` re-queues this render the moment the
+        # record lands.
+        arr = self._slide_lowres_array(ch, blocking=False)
         if arr is None:
             return None
         rgb = self._lowres_tinted(arr, ch)
@@ -5536,7 +5714,7 @@ class Step0Page(QWidget):
         # full image and the compare panels draw, so the same switch gives
         # the same picture in all three.
         if nuc and nuc != ch and self._nucleus_layer_visible():
-            nuc_arr = self._slide_lowres_array(nuc)
+            nuc_arr = self._slide_lowres_array(nuc, blocking=False)
             if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
                 rgb = np.clip(
                     rgb.astype(np.uint16)
@@ -5658,10 +5836,18 @@ class Step0Page(QWidget):
             return (float(p["min"]), float(p["max"]), float(p["gamma"]))
         entry = self._display_fallback.get(ch)
         if entry is None:
-            lo, hi = self._seed_display_mapping(ch, payload=payload, nucleus=nucleus)
+            lo, hi, real = self._seed_display_mapping(
+                ch, payload=payload, nucleus=nucleus, strict=True)
             entry = (lo, hi, 1.0)
-            self._display_fallback[ch] = entry
-            self._set_display_silently(ch, *entry)
+            if real:
+                # Only a window derived from real pixels is remembered.
+                # `(0.0, 1.0)` is the "no pixels yet" placeholder and
+                # caching it would freeze a saturated 8/16-bit channel in
+                # place; leaving it out brings us back here on the next
+                # read, which is what `_on_channel_overview_ready` triggers
+                # the moment the record lands.
+                self._display_fallback[ch] = entry
+                self._set_display_silently(ch, *entry)
         return entry
 
     def _seed_display_mapping(self, ch, payload=None, nucleus=False,
@@ -5676,7 +5862,12 @@ class Step0Page(QWidget):
         rather than a window. Callers that write the result into the single
         source of truth MUST use it: 0..1 saturates an 8/16-bit channel.
         """
-        arr = self._slide_lowres_array(ch)
+        # Non-blocking: a viewer that is already reading this very level
+        # will hand the record over through `_on_channel_overview_ready`,
+        # and a duplicate read here would block the GUI thread for the
+        # 170-230 ms that made a run of channel switches feel like a
+        # freeze. With nobody reading it, this still reads it itself.
+        arr = self._slide_lowres_array(ch, blocking=False)
         if arr is None:
             payload = payload if payload is not None else self._last_payload
             if payload is not None:
@@ -7078,6 +7269,10 @@ class Step0Page(QWidget):
         self._compare_entry_full_camera = None
         self._compare_entry_point = None
         self._compare_entry_scale = None
+        # True while the full image is behind the channel the page is on,
+        # because compare mode was up when the row changed. See
+        # `_sync_full_image_to_channel`.
+        self._full_image_channel_stale = False
         if hasattr(self, "_btn_snapshot_patch"):
             self._btn_snapshot_patch.setEnabled(False)
             self._compare_where_lbl.setText(

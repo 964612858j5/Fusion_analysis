@@ -1328,3 +1328,255 @@ def test_the_real_fixture_really_is_real(real_strip):
     assert all(isinstance(v, ExploreView) for v in strip.views)
     assert isinstance(strip.stacks.scheduler, TileScheduler)
     assert isinstance(strip.stacks.overview_store, SharedOverviewStore)
+
+
+# ── 14. one read, every waiter woken ─────────────────────────────────────
+#
+# The bug this section exists for, and the evidence it was found with.
+#
+# The three panels share a `SharedOverviewStore`. On a channel switch each
+# of them called `prepare_overview_async`; the FIRST submitted the read, and
+# the other two saw the key already in `inflight` and returned. The result
+# then came back on the submitting controller's own Qt signal, so only that
+# controller was told. TopHat and cuCIM were left with their overview
+# cleared, blocked on a record nobody would ever hand them: they drew
+# nothing and requested nothing for the rest of the session.
+#
+# Measured on the real 29-channel slide (59040x35520), twenty consecutive
+# marker clicks in compare mode: `panels_ready=[True, False, False]` on
+# every single switch. Not an intermittent race -- the invariable outcome.
+#
+# So the store owns the notification now: one read, and everybody still
+# waiting on that key is woken from it.
+
+def _overview_ready(controller, channel):
+    return controller._overview_identity == (
+        controller.provider.source_identity(), channel)
+
+
+def test_a_cold_channel_switch_wakes_all_three_panels(real_strip):
+    """THE regression. Three real controllers, a genuinely cold channel,
+    and all three end up holding the new channel's overview.
+
+    Before the fix the first assertion passed and the loop failed on panels
+    1 and 2 -- for good, not just for a moment.
+    """
+    page, strip, _provider = real_strip
+    _drain()
+    store = strip.controllers[0]._overview_store
+    assert not any(k[1] == "CD20" for k in store.cache), "CD20 was not cold"
+
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    _drain(800)
+
+    for i, controller in enumerate(strip.controllers):
+        assert controller.channel == "CD20"
+        assert _overview_ready(controller, "CD20"), (
+            f"panel {i} never received the shared overview record")
+
+
+def test_a_cold_switch_reads_the_new_channel_once_for_all_three(real_strip):
+    """Woken from ONE read, not three. Counted at the provider, which is
+    where a duplicate read would actually cost something."""
+    page, strip, provider = real_strip
+    _drain()
+    level = strip.controllers[0]._pick_overview_level()
+    before = len([r for r in provider.reads
+                  if r[0] == "CD20" and r[1] == level])
+
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    _drain(800)
+
+    whole_level_reads = [r for r in provider.reads
+                         if r[0] == "CD20" and r[1] == level
+                         and r[2] == 0 and r[4] == 0]
+    assert len(whole_level_reads) - before == 1, whole_level_reads
+
+
+def test_a_waiter_that_moved_on_does_not_install_the_old_record(real_strip):
+    """Woken is not the same as installing. A controller that has since
+    been put on another channel keeps the record in the shared cache and
+    leaves its own display alone."""
+    page, strip, _provider = real_strip
+    _drain()
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    # ...and immediately back, before the read can land.
+    page.current_channel = "CD3"
+    page._sync_compare_to_channel()
+    _drain(800)
+
+    for controller in strip.controllers:
+        assert controller.channel == "CD3"
+        assert _overview_ready(controller, "CD3")
+
+
+def test_a_torn_down_panel_is_off_the_waiter_list(real_strip):
+    """A shared store outlives its controllers. A record landing after one
+    of them has been torn down must not be delivered into it."""
+    page, strip, _provider = real_strip
+    _drain()
+    store = strip.controllers[0]._overview_store
+    victim = strip.controllers[2]
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    victim.teardown(shutdown_backend=False)
+    _drain(800)
+    assert victim._torn_down is True
+    for controller in strip.controllers[:2]:
+        assert _overview_ready(controller, "CD20")
+    assert store.waiting_on(
+        (strip.controllers[0].provider.source_identity(), "CD20",
+         strip.controllers[0]._pick_overview_level())) == 0
+
+
+# ── 15. the hidden full image stops following every channel ──────────────
+#
+# `_on_channel_row_changed` synced the full image first and the panels
+# second. In compare mode the full image is off screen AND suspended, and
+# that sync was the great majority of the click: 178-239 ms of the 200-270
+# ms a switch cost on the real slide, spent clearing pools, cancelling
+# generations, starting an overview read and re-requesting a corrected floor
+# for a picture nobody could see. Six or seven clicks of that in a row is
+# what the user reported as the application freezing.
+#
+# So it is deferred while comparing, and applied ONCE on the way out -- to
+# the channel the user actually settled on.
+
+def test_a_channel_click_in_compare_mode_leaves_the_full_image_alone(app):
+    page = _page(app)
+    strip = _enter(page)
+    tab = page._explore_tab
+    before = len(tab.calls)
+
+    page._on_channel_row_changed(page._channel_order.index("CD20"))
+
+    assert page.current_channel == "CD20"
+    assert [c.channel for c in strip.controllers] == ["CD20"] * 3
+    assert len(tab.calls) == before, (
+        "the hidden full image was re-selected while comparing")
+    assert page._full_image_channel_stale is True
+
+
+def test_leaving_compare_mode_syncs_the_full_image_once(app):
+    """Five channels tried while comparing cost the full image ONE
+    selection change, to the last of them."""
+    page = _page(app)
+    _enter(page)
+    tab = page._explore_tab
+    before = len(tab.calls)
+
+    for name in ("CD20", "CD3", "CD20", "CD3", "CD20"):
+        page._on_channel_row_changed(page._channel_order.index(name))
+    assert len(tab.calls) == before
+
+    page._exit_compare_mode()
+
+    assert len(tab.calls) == before + 1
+    assert tab.calls[-1][0] == "CD20"
+    assert page._full_image_channel_stale is False
+
+
+def test_leaving_compare_mode_with_no_channel_change_syncs_nothing(app):
+    """Flipping modes is not a selection change. Re-entering
+    `_show_full_image` for a selection the controller already holds costs a
+    provisional cycle and a directional-prefetch cancel for nothing."""
+    page = _page(app)
+    _enter(page)
+    tab = page._explore_tab
+    before = len(tab.calls)
+
+    page._exit_compare_mode()
+
+    assert len(tab.calls) == before
+
+
+def test_a_channel_click_with_the_full_image_up_still_syncs_at_once(app):
+    """The deferral is compare mode's alone. On the landing view the full
+    image IS the picture and must follow the row immediately."""
+    page = _page(app)
+    tab = page._explore_tab
+    before = len(tab.calls)
+
+    page._on_channel_row_changed(page._channel_order.index("CD20"))
+
+    assert len(tab.calls) == before + 1
+    assert tab.calls[-1][0] == "CD20"
+    assert page._full_image_channel_stale is False
+
+
+# ── 16. the display seed stops reading the slide twice ───────────────────
+#
+# `_display_mapping_for` seeds a channel's window from the whole slide at
+# `overview_downsample()`. That is the SAME pyramid level, read with the
+# same `seed_display_range`, that the tile controllers read into their
+# shared overview store -- so a channel switch was reading it twice: once on
+# a worker, for the viewers, and once synchronously on the GUI thread, for
+# the window. The synchronous one cost 166-230 ms per switch on the real
+# slide and was the whole of what was left of the stall once the hidden full
+# image stopped following every channel.
+
+def test_the_seed_adopts_a_record_a_viewer_has_already_read(real_strip):
+    """No second read: the page's low-res array for a channel IS the
+    viewer's overview record."""
+    page, strip, _provider = real_strip
+    _drain()
+    page._slide_lowres.clear()
+
+    arr = page._slide_lowres_array("CD3")
+
+    rec = strip.controllers[0].overview_record("CD3")
+    assert rec is not None
+    assert arr is rec.arr
+
+
+def test_the_seed_does_not_read_while_a_viewer_is_reading(real_strip):
+    """A cold switch has just asked three controllers for this level. The
+    page waits for that read instead of starting a second one on the GUI
+    thread."""
+    page, strip, provider = real_strip
+    _drain()
+    page._slide_lowres.clear()
+    level = strip.controllers[0]._pick_overview_level()
+
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    reads_during = [r for r in provider.reads
+                    if r[0] == "CD20" and r[1] == level]
+
+    assert page._overview_read_pending("CD20") is True
+    assert page._slide_lowres_array("CD20", blocking=False) is None
+    assert [r for r in provider.reads
+            if r[0] == "CD20" and r[1] == level] == reads_during, (
+        "the display seed read the overview level a second time")
+
+
+def test_the_window_is_seeded_when_the_record_lands(real_strip):
+    """Deferring the seed is only honest if it actually arrives. The
+    provisional window must be replaced from the record, without the page
+    ever reading the slide itself."""
+    page, strip, _provider = real_strip
+    _drain()
+    page._slide_lowres.clear()
+    page._display_fallback.pop("CD20", None)
+
+    page.current_channel = "CD20"
+    page._sync_compare_to_channel()
+    _drain(800)
+
+    rec = strip.controllers[0].overview_record("CD20")
+    assert rec is not None
+    lo, hi, _gamma = page._display_mapping_for("CD20")
+    assert (lo, hi) == pytest.approx((rec.display_lo, rec.display_hi))
+
+
+def test_a_channel_no_viewer_is_reading_is_still_seeded_at_once(app):
+    """The non-blocking rule is "somebody else is already doing it", not
+    "never read". With no viewer on that channel the page reads it, as it
+    always did."""
+    page = _page(app)
+    page._slide_lowres.clear()
+    assert page._overview_read_pending("CD20") is False
+    assert page._slide_lowres_array("CD20", blocking=False) is not None

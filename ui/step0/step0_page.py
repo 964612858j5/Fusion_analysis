@@ -1827,17 +1827,13 @@ class Step0Page(QWidget):
         """Switch the viewing area between the full image and the panels.
 
         Cheap in both directions and it rebuilds nothing. Neither side is
-        torn down: they are two pages of one stack, the full image keeps its
-        tiles and its camera, and the panels keep their arrays.
+        torn down: they are two pages of one stack, so the full image keeps
+        its tile pools and its camera and the panels keep theirs.
 
-        Nothing here waits for Qt to hand out geometry, and nothing needs
-        to. The region the panels show is solved from the FULL IMAGE's
-        rectangle, not from the panels' own size -- so a right-click on a
-        page whose compare panels have never been laid out asks for exactly
-        the same pixels as one on a page that has. The panel size decides
-        only how the region is fitted on screen, which happens when the
-        arrays arrive, a turn or more later, by which time the geometry is
-        real.
+        This only moves the page. Nothing here decides what is on screen:
+        `_enter_compare_mode` builds the strip BEFORE calling this, so the
+        panels are never shown empty, and the camera is applied after, from
+        each panel's own real width.
         """
         area = getattr(self, "_view_area", None)
         if area is None:
@@ -2000,26 +1996,14 @@ class Step0Page(QWidget):
                 and self.nucleus_channel == self.current_channel)
         self._refresh_preview_display(keep_zoom=True)
 
-    # -- the virtual patch ------------------------------------------------
+    # -- entering and leaving ---------------------------------------------
     #
-    # A right-click on the full image at slide point P defines the REGION R:
-    # the full image's current visible rectangle, re-centred on P and
-    # clamped to the slide. R is a patch that was never saved, and the
-    # panels treat it exactly as they treated a real one -- one array each,
-    # placed at the origin, aspect-locked, three cameras linked as one.
-    #
-    # R is computed at the FINEST pyramid level L whose crop of it is within
-    # `COMPARE_MAX_REGION_PX` on the longer side, in a worker, with the
-    # row's current parameters and the level-scaled correction the full
-    # image's own preview uses -- so the panels agree with the full image at
-    # that level rather than showing a second, differently-computed answer.
-    #
-    # NOTHING BEYOND R IS EVER FETCHED. Zoom out and the picture shrinks
-    # inside the panel with background around it. That is not a limitation
-    # being tolerated, it is the property being bought: there is no refill
-    # to wait for, no level to switch, no frame that can be replaced as a
-    # whole, and therefore none of the lag, the tearing between panels or
-    # the "pop" that every fetching design here has produced.
+    # A right-click on the full image at slide point P puts three tile
+    # viewers up, centred on P at the full image's own magnification. They
+    # are cameras on the WHOLE slide: there is no region, nothing is cut,
+    # and a pan or a zoom anywhere is served the way the full image serves
+    # one -- tile by tile, over the coarser layers, with no frame that is
+    # replaced as a whole.
 
     # The two pages of the ONE viewing area (`_view_area`), in the order
     # they are added.
@@ -2193,13 +2177,13 @@ class Step0Page(QWidget):
 
     def _connect_full_image_right_click(self, stack):
         """Once per stack: a right-click on the image opens the panels."""
-        if stack is None or getattr(stack, "_snapshot_connected", False):
+        if stack is None or getattr(stack, "_compare_entry_connected", False):
             return
         try:
             stack.view.sigRightClicked.connect(self._on_full_image_right_click)
         except (AttributeError, RuntimeError, TypeError):
             return
-        stack._snapshot_connected = True
+        stack._compare_entry_connected = True
 
     def _on_full_image_right_click(self, x_l0=None, y_l0=None):
         """A right-click on the full image at slide point P opens the panels
@@ -2220,19 +2204,14 @@ class Step0Page(QWidget):
     def _enter_compare_mode(self, x_l0=None, y_l0=None, _laid_out=None):
         """Put the three tile viewers up, centred on `(x_l0, y_l0)`.
 
-        Order matters, and it is the reverse of the virtual patch's. The
-        panels' SIZE decides the rectangle their camera covers at a given
-        scale, and the panels are much larger once they have the whole
-        viewing area -- so the area is switched FIRST and measured after.
-
-        Switching is not instantaneous, which is what `_laid_out` is for. Qt
-        hands geometry out over event-loop turns, and pyqtgraph re-lays its
-        ViewBoxes out when the graphics widget is resized, so on the click
-        that ENTERS compare mode the panels still report the size they had
-        while hidden. That click switches, yields one turn, and comes back
-        carrying the camera it measured BEFORE the switch; every later call,
-        already in compare mode, runs straight through. There is no timer in
-        the common path and this one is a single `singleShot(0)`.
+        BUILT FIRST, SWITCHED AFTER: the compare page has nothing on it
+        until the three stacks exist, so switching to it first is a blank
+        page for as long as the build takes. `_laid_out` is the one yielded
+        turn that gets the "Preparing Compare…" badge painted over the full
+        image before the build begins; it carries the camera measured
+        BEFORE the yield, and every later call, already in compare mode,
+        runs straight through. There is no timer in the common path and
+        this one is a single `singleShot(0)`.
 
         The UI and the camera are finished here. Nothing waits for pixels:
         the controllers issue their first requests from `jump_to` and the
@@ -2453,9 +2432,6 @@ class Step0Page(QWidget):
             except (AttributeError, RuntimeError, TypeError):
                 return
         strip._exit_connected = True
-
-    def _on_compare_right_click(self, _x_l0=None, _y_l0=None):
-        self._exit_compare_mode()
 
     # -- who has the GPU --------------------------------------------------
     #
@@ -4270,11 +4246,11 @@ class Step0Page(QWidget):
         popup = getattr(self, "_tissue_navigator_popup", None)
         if popup is None or not self._compare_mode():
             return
-        # Only once the panels are looking at something. Compare mode with
-        # no snapshot in it has a ViewBox range but not a VIEW, and drawing
-        # that on the thumbnail would replace a true rectangle -- the full
-        # image's, which is where the user is about to come back to -- with
-        # a meaningless one.
+        # Only once the panels have actually been opened. A compare page
+        # that has never been entered has a ViewBox range but not a VIEW,
+        # and drawing that on the thumbnail would replace a true rectangle
+        # -- the full image's, which is where the user is about to come
+        # back to -- with a meaningless one.
         rect = (self._compare_view_rect_l0()
                 if getattr(self, "_compare_opened", False) else None)
         if rect is None:
@@ -7360,11 +7336,11 @@ class Step0Page(QWidget):
         self._preview_req_id = 0
         self._applied_corrected_decisions = {}
         self._incremental_processed = None
-        # Full Image shows one source of the OLD dataset, and the compare
-        # panels a snapshot of it. Both are dropped here, BEFORE the new
-        # loader is bound: the viewer stack is torn down by the explore tab
-        # itself, and a snapshot of the previous slide left on screen under
-        # the new slide's name is the worst kind of wrong picture.
+        # Both viewers are showing the OLD dataset. They are unbound
+        # BEFORE the new loader is bound (`_unbind_viewers_for_dataset_
+        # switch`, which the commit path calls first): the previous slide's
+        # pixels left on screen under the new slide's name is the worst
+        # kind of wrong picture.
         # `_enter_full_image_landing`, at the end of the load, opens the new
         # slide's full image -- the landing state.
         self._full_image_source = "original"

@@ -801,27 +801,43 @@ def test_the_strip_is_not_built_until_it_is_needed(app):
 
 # ── 7. one backend ───────────────────────────────────────────────────────
 
-def test_the_three_controllers_share_one_provider_and_scheduler(app):
-    """Real factory, no page: three views of one slide must not open three
-    TIFF handles, three caches and three schedulers."""
-    from block01.ui.step0.compare_strip import build_compare_stacks
-    import inspect
-    src = inspect.getsource(build_compare_stacks)
-    assert src.count("RawTileProvider(") == 1
-    assert src.count("TileScheduler(") == 1
-    assert src.count("LRUByteCache(") == 2      # one raw, one corrected
-    assert src.count("SharedOverviewStore()") == 1
+def test_the_three_controllers_share_one_provider_and_scheduler(app, monkeypatch):
+    """Real factory, real objects: three views of one slide must not open
+    three TIFF handles, three caches and three schedulers.
+
+    Counted on the BUILT strip rather than in the source text. Counting
+    occurrences of `RawTileProvider(` in the function body said nothing
+    about what the three controllers ended up holding -- one call inside a
+    loop would have passed it -- and it broke on a comment.
+    """
+    from block01.viewer import raw_tile_provider as rtp
+    from block01.viewer.scheduler import TileScheduler
+
+    provider = _RealishProvider()
+    monkeypatch.setattr(rtp, "RawTileProvider", lambda _path: provider)
+    stacks = cs.build_compare_stacks("/fake/slide.ome.tif", "CD3")
+    try:
+        controllers = stacks.controllers
+        assert len(controllers) == 3
+        assert len({id(c.provider) for c in controllers}) == 1
+        assert len({id(c.scheduler) for c in controllers}) == 1
+        assert len({id(c.compute) for c in controllers}) == 1
+        assert len({id(c._overview_store) for c in controllers}) == 1
+        assert provider.open_count == 1
+        assert isinstance(stacks.scheduler, TileScheduler)
+        # One raw cache and one corrected cache, and they are the ones the
+        # scheduler is actually serving from.
+        assert len(stacks.caches) == 2
+        assert stacks.scheduler.raw_cache is stacks.caches[0]
+        assert stacks.scheduler.corrected_cache is stacks.caches[1]
+    finally:
+        stacks.teardown()
 
 
 def test_each_panel_issues_under_its_own_generation_namespace(app):
     """One scheduler between three controllers: `cancel_generation` matches
     by equality, so without a namespace all three reach `("raw", 5)` and one
     panel's cancel drops another's queued tiles."""
-    from block01.viewer.explore_view import ExploreController
-    import inspect
-    sig = inspect.signature(ExploreController.__init__)
-    assert "gen_ns" in sig.parameters
-    assert "overview_store" in sig.parameters
     page = _page(app)
     strip = _enter(page)
     gens = [c.view_generation for c in strip.controllers]

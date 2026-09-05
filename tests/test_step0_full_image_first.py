@@ -508,9 +508,20 @@ def test_no_helper_is_left_that_could_start_one(app):
      ("a method combo change",
       lambda p: p._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")),
      ("a sigma change", lambda p: p._dec_sigma.setValue(37)),
-     ("enter in the sigma box", lambda p: p._on_dec_param_entered()),
      ("a method preview", lambda p: p._full_method_buttons["tophat"].click())])
 def test_nothing_but_process_reaches_a_worker(app, monkeypatch, what, drive):
+    """None of these is a request to compute. Changing a number, moving to
+    another channel, previewing a method: they change what is DISPLAYED and
+    what a later Process would do, and none of them puts the GPU to work.
+
+    Pressing Enter in a param box is not on this list, and used to be. It
+    is the one deliberate "this channel, now" the page has -- the
+    per-channel Process button was removed in favour of the single one, so
+    without it there is no way to say it at all -- and it is pinned as
+    starting exactly one run, from the real keystroke on the real widget,
+    in `test_step0_decision_enter_recompute.py`. Note the case just above:
+    changing the sigma WITHOUT Enter is still nothing.
+    """
     started = _no_workers(monkeypatch)
     page = _page(app)
     page._explore_tab = _RecordingExploreTab()

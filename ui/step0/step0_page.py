@@ -44,6 +44,8 @@ from ...core.bg_correction import (
     _load_correction_config,
     stamp_corrected_zarr_provenance,
     corrected_zarr_report,
+    resolve_effective_correction_params,
+    CHANNEL_PARAM_OVERRIDES_SCHEMA,
     CORRECTED_ZARR_OUTPUT_KIND,
     CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
 )
@@ -1196,8 +1198,8 @@ class Step0Page(QWidget):
         dl.setContentsMargins(6, 4, 6, 4)
         dl.setSpacing(3)
 
-        # Per-channel params (override the global Method Parameters for THIS
-        # channel). Only the field matching the chosen method is enabled.
+        # Per-channel params inherit the global Method Parameters independently;
+        # editing one field overrides only that field for THIS channel.
         param_row = QHBoxLayout()
         param_row.setContentsMargins(0, 0, 0, 0)
         self._dec_radius = QtWidgets.QSpinBox()
@@ -5156,18 +5158,6 @@ class Step0Page(QWidget):
         self._prior_channel_decisions = {
             k: ("original" if v == "both" else v) for k, v in raw_decisions.items()}
         self._channel_decisions = {}
-        # Restore per-channel param overrides (int-normalized); channels absent
-        # fall back to the global method_params.
-        self._channel_params = {}
-        for ch, cp in ((self._loaded_config or {}).get("channel_params") or {}).items():
-            cp = cp or {}
-            try:
-                self._channel_params[str(ch)] = {
-                    "tophat_radius": int(cp["tophat_radius"]),
-                    "cucim_sigma": int(cp["cucim_sigma"]),
-                }
-            except (KeyError, TypeError, ValueError):
-                continue
         params = (self._loaded_config or {}).get("method_params") or {}
         self._tophat_slider.blockSignals(True)
         self._tophat_slider.setValue(int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)))
@@ -5175,6 +5165,41 @@ class Step0Page(QWidget):
         self._cucim_slider.blockSignals(True)
         self._cucim_slider.setValue(int(params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT)))
         self._cucim_slider.blockSignals(False)
+        # Restore independent per-channel overrides only after the global
+        # defaults are known. Older configs wrote both keys even when one was
+        # merely a copy of the global value; an equal key can safely return to
+        # inheritance without changing today's effective result.
+        global_params = {
+            "tophat_radius": int(self._tophat_slider.value()),
+            "cucim_sigma": int(self._cucim_slider.value()),
+        }
+        explicit_per_key = (
+            (self._loaded_config or {}).get("channel_param_overrides_schema")
+            == CHANNEL_PARAM_OVERRIDES_SCHEMA)
+        legacy_defaults = {
+            "tophat_radius": int(TOPHAT_RADIUS_DEFAULT),
+            "cucim_sigma": int(CUCIM_SIGMA_DEFAULT),
+        }
+        self._channel_params = {}
+        for ch, raw in ((self._loaded_config or {}).get("channel_params") or {}).items():
+            clean = {}
+            for name in ("tophat_radius", "cucim_sigma"):
+                try:
+                    value = int((raw or {})[name])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                # Before explicit-per-key provenance existed, Apply/Process
+                # wrote BOTH visible boxes. A module-default 15/50 can thus be
+                # an automatic residue rather than a user override (the real
+                # 35-vs-15 bug). Migrate that residue to inheritance. New files
+                # carry the schema marker, so an intentionally entered 15/50
+                # remains an exact local override forever.
+                if not explicit_per_key and value == legacy_defaults[name]:
+                    continue
+                if value != global_params[name]:
+                    clean[name] = value
+            if clean:
+                self._channel_params[str(ch)] = clean
         self._refresh_slider_labels()
 
     def _rebuild_channel_list(self):
@@ -6341,15 +6366,20 @@ class Step0Page(QWidget):
                 and shown_shape == self._payload_shape(incoming))
 
     def _resolve_channel_params(self, ch):
-        """(tophat_radius, cucim_sigma) for a channel — its OWN per-channel value.
+        """Return this channel's effective parameters.
 
-        Fully isolated from the global Method Parameters: an untuned channel falls
-        back to the module defaults (NOT the live global sliders), so the global
-        box can never bleed into / overwrite a channel's per-channel params."""
-        cp = self._channel_params.get(ch) or {}
-        tr = int(cp.get("tophat_radius", TOPHAT_RADIUS_DEFAULT))
-        cs = int(cp.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))
-        return tr, cs
+        Each missing per-channel key inherits the live Method Parameters value.
+        Radius and sigma are independent: tuning one locally does not freeze the
+        other, and a local override never writes back into the global controls.
+        """
+        return resolve_effective_correction_params(
+            {
+                "tophat_radius": self._tophat_slider.value(),
+                "cucim_sigma": self._cucim_slider.value(),
+            },
+            self._channel_params,
+            ch,
+        )
 
     def _patch_signature(self):
         """The patch list as a hashable, order-independent key."""
@@ -6531,19 +6561,34 @@ class Step0Page(QWidget):
         self._sync_dec_param_enabled()
 
     def _on_dec_param_changed(self, method=None, _val=None):
-        # Persist the typed value into the ISOLATED per-channel store immediately
-        # (so it survives patch/channel switches and is never overwritten by the
-        # global box). Do NOT compute — Enter or the Process button triggers the
-        # run. This is the fix for the auto-recompute + global-sync bug.
+        # Persist only the parameter the user changed. The other key stays
+        # absent and therefore continues to inherit its live global default.
+        # Do NOT start a legacy patch run here; Enter owns that action.
         if getattr(self, "_loading_decision", False):
             return
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
             return
-        self._channel_params[ch] = {
-            "tophat_radius": int(self._dec_radius.value()),
-            "cucim_sigma": int(self._dec_sigma.value()),
-        }
+        selected = ((method,) if method in {"tophat", "cucim"}
+                    else ("tophat", "cucim"))
+        overrides = dict(self._channel_params.get(ch) or {})
+        for name in selected:
+            if name == "tophat":
+                key = "tophat_radius"
+                value = int(self._dec_radius.value())
+                default = int(self._tophat_slider.value())
+            else:
+                key = "cucim_sigma"
+                value = int(self._dec_sigma.value())
+                default = int(self._cucim_slider.value())
+            if value == default:
+                overrides.pop(key, None)
+            else:
+                overrides[key] = value
+        if overrides:
+            self._channel_params[ch] = overrides
+        else:
+            self._channel_params.pop(ch, None)
         # The recorded signature no longer matches these numbers, so the
         # row's glyph turns `stale`. Nothing is recomputed and nothing is
         # thrown away: the old result stays visible until a Process replaces
@@ -7507,6 +7552,39 @@ class Step0Page(QWidget):
 
     def _on_slider_changed(self):
         self._refresh_slider_labels()
+        sender = self.sender()
+        if sender is self._tophat_slider:
+            changed = ("tophat",)
+        elif sender is self._cucim_slider:
+            changed = ("cucim",)
+        else:
+            # Stable programmatic entry used by older callers/tests.
+            changed = ("tophat", "cucim")
+
+        ch = self.current_channel
+        if ch and ch != self.nucleus_channel:
+            overrides = self._channel_params.get(ch) or {}
+            inherited = []
+            previous_loading = getattr(self, "_loading_decision", False)
+            self._loading_decision = True
+            try:
+                if "tophat" in changed and "tophat_radius" not in overrides:
+                    self._dec_radius.setValue(self._tophat_slider.value())
+                    inherited.append("tophat")
+                if "cucim" in changed and "cucim_sigma" not in overrides:
+                    self._dec_sigma.setValue(self._cucim_slider.value())
+                    inherited.append("cucim")
+            finally:
+                self._loading_decision = previous_loading
+
+            # The displayed current channel follows an inherited global change
+            # immediately. Local overrides are deliberately untouched.
+            for method in inherited:
+                if self._compare_mode():
+                    self._sync_compare_params(method=method)
+                else:
+                    self._sync_full_image_param(method=method)
+        self._refresh_all_channel_states()
         # Only a param change AFTER a completed run (with data loaded) means the
         # existing result is stale -> "Re-process". Before any run (or no data),
         # the button stays "▶ Process" (this is the initial run, not a re-run).
@@ -7600,11 +7678,9 @@ class Step0Page(QWidget):
             return
         decision = self._current_dec_method()
         self._channel_decisions[ch] = decision
-        # persist this channel's own params (override of the global defaults)
-        self._channel_params[ch] = {
-            "tophat_radius": int(self._dec_radius.value()),
-            "cucim_sigma": int(self._dec_sigma.value()),
-        }
+        # Parameter edits are already recorded per key by
+        # `_on_dec_param_changed`. Applying a METHOD must not freeze the other,
+        # inherited parameter as a local override.
         self._refresh_channel_row(ch)      # re-derives the row's state too
         self._decision_status.setText(
             f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
@@ -7654,12 +7730,9 @@ class Step0Page(QWidget):
             QMessageBox.information(
                 self, "Busy", f"A {busy} run is already in progress.")
             return
-        # Persist both displayed values, but recompute only the method named by
-        # the triggering box. A legacy `both` call still requests a fresh pair.
-        self._channel_params[ch] = {
-            "tophat_radius": int(self._dec_radius.value()),
-            "cucim_sigma": int(self._dec_sigma.value()),
-        }
+        # The triggering edit was persisted by `_on_dec_param_changed`.
+        # Dispatch a complete EFFECTIVE pair without materialising inherited
+        # globals as per-channel overrides.
         if method == "both":
             self._preview_cache = {
                 k: v for k, v in self._preview_cache.items() if k[0] != ch}
@@ -7671,7 +7744,11 @@ class Step0Page(QWidget):
             # `_record_channel_signature` merges the new half on channel_done.
             self._pending_signatures.pop(ch, None)
         self._pending_signatures[ch] = self._channel_signature(ch, method)
-        params = {ch: dict(self._channel_params.get(ch) or {})}
+        radius, sigma = self._resolve_channel_params(ch)
+        params = {ch: {
+            "tophat_radius": radius,
+            "cucim_sigma": sigma,
+        }}
         self._set_channel_computing(ch)
         self._proc_pbar.setVisible(True)
         self._proc_pbar.setValue(0)
@@ -7699,16 +7776,20 @@ class Step0Page(QWidget):
                 continue
             d = self._channel_decisions.get(ch, "original")
             decisions[ch] = "original" if d == "both" else d
-        # Per-channel param overrides (only channels the user tuned individually);
-        # channels absent here use method_params. Kept minimal + int-normalized.
+        # Per-parameter overrides only. Missing keys inherit method_params now
+        # and after reload; an equal value is not serialized as a fake override.
         channel_params = {}
         for ch in decisions:
             cp = self._channel_params.get(ch)
             if cp:
-                channel_params[ch] = {
-                    "tophat_radius": int(cp.get("tophat_radius", self._tophat_slider.value())),
-                    "cucim_sigma": int(cp.get("cucim_sigma", self._cucim_slider.value())),
-                }
+                clean = {}
+                for name, default in (
+                        ("tophat_radius", self._tophat_slider.value()),
+                        ("cucim_sigma", self._cucim_slider.value())):
+                    if name in cp and int(cp[name]) != int(default):
+                        clean[name] = int(cp[name])
+                if clean:
+                    channel_params[ch] = clean
         return {
             "method_params": {
                 "tophat_radius": int(self._tophat_slider.value()),
@@ -7716,6 +7797,7 @@ class Step0Page(QWidget):
             },
             "channel_decisions": decisions,
             "channel_params": channel_params,
+            "channel_param_overrides_schema": CHANNEL_PARAM_OVERRIDES_SCHEMA,
         }
 
     def teardown(self):
@@ -8096,14 +8178,11 @@ class Step0Page(QWidget):
         cp_all = config.get("channel_params") or {}
         def _cur_sig(ch, method):
             from ...core.bg_correction import BG_CORRECTION_ALGO_VERSION
-            pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
-            pdefault = (TOPHAT_RADIUS_DEFAULT if method == "tophat"
-                        else CUCIM_SIGMA_DEFAULT)
-            cp = cp_all.get(ch) or {}
+            radius, sigma = resolve_effective_correction_params(mp, cp_all, ch)
+            param = radius if method == "tophat" else sigma
             # (method, param, algorithm version): a channel saved by an older
             # numeric version never matches, so incremental save reprocesses it.
-            return (method, int(cp.get(pname, mp.get(pname, pdefault))),
-                    BG_CORRECTION_ALGO_VERSION)
+            return (method, param, BG_CORRECTION_ALGO_VERSION)
         current_sigs = {ch: _cur_sig(ch, m) for ch, m in corrected.items()}
 
         existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)

@@ -39,6 +39,7 @@ from ...core.bg_correction import (
     _tile_slices,
     method_overlap,
     BG_CORRECTION_ALGO_VERSION,
+    resolve_effective_correction_params,
     stamp_corrected_channel_identity,
 )
 from ...core.io_loader import OMETIFFLoader
@@ -1730,9 +1731,14 @@ class BatchProcessWorker(QThread):
                     self.canceled.emit(); return
 
                 # Per-channel param override (falls back to the global values).
-                _cp = self.channel_params.get(ch) or {}
-                _tr = int(_cp.get("tophat_radius", self.tophat_radius))
-                _cs = int(_cp.get("cucim_sigma", self.cucim_sigma))
+                _tr, _cs = resolve_effective_correction_params(
+                    {
+                        "tophat_radius": self.tophat_radius,
+                        "cucim_sigma": self.cucim_sigma,
+                    },
+                    self.channel_params,
+                    ch,
+                )
 
                 # GPU计算（并行，max_gpu_workers个同时跑）
                 # 用默认参数固定捕获method和raws，防止闭包引用变化
@@ -2046,10 +2052,9 @@ class WsiCorrectionWorker(QThread):
             ch_params = dict((self.correction_config.get("channel_params") or {}))
 
             def _param_for(ch, method):
-                pname = "tophat_radius" if method == "tophat" else "cucim_sigma"
-                pdefault = TOPHAT_RADIUS_DEFAULT if method == "tophat" else CUCIM_SIGMA_DEFAULT
-                cp = ch_params.get(ch) or {}
-                return int(cp.get(pname, params.get(pname, pdefault)))
+                radius, sigma = resolve_effective_correction_params(
+                    params, ch_params, ch)
+                return radius if method == "tophat" else sigma
             # All channels desired-corrected (the merged end-state of the zarr).
             desired = {
                 ch: method for ch, method in decisions.items()

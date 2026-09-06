@@ -20,6 +20,30 @@ from ..config import (
 # unchanged at 2*radius. Saved outputs produced by version "1" can differ
 # from "2" near internal tile borders of the gaussian method.
 BG_CORRECTION_ALGO_VERSION = "2"
+CHANNEL_PARAM_OVERRIDES_SCHEMA = "explicit_per_key_v1"
+
+
+def resolve_effective_correction_params(method_params=None, channel_params=None,
+                                        channel=None):
+    """Return the effective ``(tophat_radius, cucim_sigma)`` for a channel.
+
+    ``method_params`` owns the live global defaults.  ``channel_params`` may
+    override either parameter independently for one channel; a missing key
+    continues to inherit the corresponding global value.  Keeping this rule
+    here gives preview dispatch, full-slide Save, and the persisted artifact
+    identity one answer to the same question.
+    """
+    globals_ = dict(method_params or {})
+    overrides = dict((channel_params or {}).get(channel) or {})
+    radius = overrides.get(
+        "tophat_radius",
+        globals_.get("tophat_radius", TOPHAT_RADIUS_DEFAULT),
+    )
+    sigma = overrides.get(
+        "cucim_sigma",
+        globals_.get("cucim_sigma", CUCIM_SIGMA_DEFAULT),
+    )
+    return int(radius), int(sigma)
 
 
 def method_overlap(method, param):
@@ -119,6 +143,16 @@ def _normalize_correction_config(cfg):
         return None
     method_params = dict(cfg.get("method_params") or {})
     channel_decisions = dict(cfg.get("channel_decisions") or {})
+    channel_params = {}
+    for channel, raw in dict(cfg.get("channel_params") or {}).items():
+        clean = {}
+        for name in ("tophat_radius", "cucim_sigma"):
+            try:
+                clean[name] = int((raw or {})[name])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if clean:
+            channel_params[str(channel)] = clean
     return {
         "method_params": {
             "tophat_radius": int(method_params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)),
@@ -129,6 +163,9 @@ def _normalize_correction_config(cfg):
             for k, v in channel_decisions.items()
             if str(v).strip().lower() in {"tophat", "cucim", "original"}
         },
+        "channel_params": channel_params,
+        "channel_param_overrides_schema": str(
+            cfg.get("channel_param_overrides_schema") or ""),
     }
 
 

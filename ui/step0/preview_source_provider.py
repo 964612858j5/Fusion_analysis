@@ -127,10 +127,10 @@ class Step0PreviewSourceProvider(QObject):
 
         The effective values come from the page's own
         ``_resolve_channel_params``, which is also what the Per-Channel
-        Decision panel loads into its inputs, so the two cannot drift. The
-        fallback rule (module defaults, deliberately NOT the live global
-        sliders) lives there and is not repeated here -- a second copy of
-        it would be a second answer to the same question.
+        Decision panel loads into its inputs, so the two cannot drift. Each
+        missing local key inherits the matching live Method Parameters value;
+        that rule lives there and is not repeated here -- a second copy would
+        be a second answer to the same question.
 
         ``assigned_method`` and ``preview_method`` are passed through
         verbatim, "both" included; interpreting them is the caller's job.

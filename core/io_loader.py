@@ -8,11 +8,12 @@ import tifffile
 import zarr
 import xml.etree.ElementTree as ET
 
-from ..config import NORM_LOW, NORM_HIGH, TOPHAT_RADIUS_DEFAULT, CUCIM_SIGMA_DEFAULT
+from ..config import NORM_LOW, NORM_HIGH
 from .bg_correction import (
     CUCIM_AVAILABLE,
     _normalize_correction_config,
     _apply_background_method_tiled,
+    resolve_effective_correction_params,
 )
 
 
@@ -240,12 +241,14 @@ class OMETIFFLoader:
         if method not in {"tophat", "cucim"}:
             return region
 
-        params = correction_config.get("method_params") or {}
+        radius, sigma = resolve_effective_correction_params(
+            correction_config.get("method_params"),
+            correction_config.get("channel_params"),
+            channel_name,
+        )
         if method == "tophat":
-            radius = int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT))
             return _apply_background_method_tiled(region, "tophat", radius=radius)
 
-        sigma = int(params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))
         return _apply_background_method_tiled(
             region,
             "cucim",

@@ -303,3 +303,61 @@ def test_closing_the_window_leaves_no_running_thread_warning(app, tmp_path):
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
     assert log.thread_warnings() == []
+
+
+def test_a_job_started_for_another_raw_file_may_not_write(app, tmp_path):
+    """Same manifest path, different slide: the raw identity decides."""
+    w = _window(app, tmp_path)
+    worker = _FakeFusion()
+    seen = _record_callbacks(w)
+    try:
+        w.step0_output["source_identity"] = {
+            "dataset_path": "/tmp/a.ome.tiff", "dataset_fingerprint": "10:1",
+            "stage": "raw", "corrected_artifact": None}
+        w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
+        assert w._fusion_callback_allowed(w._fusion_token) is True
+
+        # The same directory now holds a different slide's handoff.
+        w.step0_output["source_identity"] = {
+            "dataset_path": "/tmp/b.ome.tiff", "dataset_fingerprint": "20:2",
+            "stage": "raw", "corrected_artifact": None}
+        assert w._fusion_callback_allowed(w._fusion_token) is False
+
+        worker.finished.emit("/tmp/a/fused.zarr")
+        for _ in range(20):
+            QtWidgets.QApplication.processEvents()
+        assert seen["done"] == []
+    finally:
+        _finish(worker)
+        w.close()
+
+
+def test_the_window_refuses_to_close_while_a_fusion_thread_is_alive(app, tmp_path):
+    w = _window(app, tmp_path)
+    worker = _FakeFusion(obeys_stop=False)
+    try:
+        w.show()
+        QtWidgets.QApplication.processEvents()
+        assert w.isVisible() is True
+        w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
+
+        w.close()
+        # Closing would destroy a running QThread, so the close is REFUSED and
+        # the window stays up holding a reference to the thread.
+        assert worker.stop_called is True
+        assert worker.isRunning() is True
+        assert w.isVisible() is True
+        assert worker in w._retired_fusion_workers
+
+        worker.release()
+        worker.wait(5000)
+        for _ in range(30):
+            QtWidgets.QApplication.processEvents()
+        assert worker.isRunning() is False
+
+        w.close()
+        assert w.isVisible() is False
+        assert w._retired_fusion_workers == []
+    finally:
+        _finish(worker)
+        w.close()

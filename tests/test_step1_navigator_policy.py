@@ -263,3 +263,79 @@ def test_round_trips_keep_one_popup_one_overview_and_the_camera(app, tmp_path):
         assert [list(r) for r in popup.overview.vb.viewRange()] == camera
     finally:
         w.close()
+
+
+def _downstream_steps():
+    return [2, 3, 4]
+
+
+@pytest.mark.parametrize("step", _downstream_steps())
+def test_steps_after_step1_get_a_read_only_navigator(app, tmp_path, step):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        ov = w._step0._tissue_navigator_popup.overview
+        w._set_step_active(step)
+        assert ov.edit_policy() == {"roi_create": False, "roi_delete": False,
+                                    "patch_edit": False}
+
+        rois_before = [dict(r) for r in ov._rois]
+        patches_before = [dict(p) for p in ov._patches]
+        disk_before = _published(step0_dir, "patch_config.json")
+
+        _draw_roi(ov)
+        ov._delete_last_roi()
+        ov._add_patch(40, 56, 40, 56, 10, 14, 10, 14, 0)
+        ov._remove_patch(0)
+        assert ov._commit_patch_geometry(0, (2, 14, 2, 14)) is False
+
+        assert [dict(r) for r in ov._rois] == rois_before
+        assert [dict(p) for p in ov._patches] == patches_before
+        assert _published(step0_dir, "patch_config.json") == disk_before
+    finally:
+        w.close()
+
+
+def test_the_roi_and_patch_lists_cannot_delete_downstream_either(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        ov = w._step0._tissue_navigator_popup.overview
+        w._set_step_active(2)
+        w._step0._roi_selected_indices = [0]
+        w._step0._patch_selected_indices = [0]
+
+        w._step0._delete_selected_rois()
+        w._step0._delete_selected_patches()
+
+        assert len(w._step0.overview._rois) == 1
+        assert len(w._step0.overview._patches) == 1
+    finally:
+        w.close()
+
+
+def test_step1_5_also_gets_a_read_only_navigator(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        ov = w._step0._tissue_navigator_popup.overview
+        w._go_to_step1_5()
+        assert w._stack.currentWidget() is w._step1_5
+        assert ov.edit_policy() == {"roi_create": False, "roi_delete": False,
+                                    "patch_edit": False}
+    finally:
+        w.close()
+
+
+def test_coming_back_to_step0_from_a_read_only_step_restores_everything(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        ov = w._step0._tissue_navigator_popup.overview
+        w._set_step_active(3)
+        assert ov.edit_policy()["patch_edit"] is False
+
+        w._go_to_step0()
+        assert ov.edit_policy() == {"roi_create": True, "roi_delete": True,
+                                    "patch_edit": True}
+        before = len(ov._rois)
+        _draw_roi(ov)
+        assert len(ov._rois) == before + 1
+    finally:
+        w.close()

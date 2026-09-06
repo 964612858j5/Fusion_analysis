@@ -4240,13 +4240,15 @@ class Step0Page(QWidget):
     def set_navigator_edit_policy(self, *, roi_policy=None, patch_editable=None):
         """Set which ROI/patch edits the shared navigator accepts.
 
-        `roi_policy` is "full" (Step0) or "delete_only" (Step1).  Applied to
-        every overview that renders the one ROI model and to the ROI-mode
-        button, immediately, whether or not the popup is open — a step change
-        must not need a click or a reopen to take effect.
+        `roi_policy` is "full" (Step0: create and delete), "delete_only"
+        (Step1: an ROI may be dropped, never drawn or reshaped) or "read_only"
+        (every step downstream of Step1: the navigator is a map, not an
+        editor).  Applied to every overview that renders the one ROI model and
+        to the ROI-mode button, immediately, whether or not the popup is open —
+        a step change must not need a click or a reopen to take effect.
         """
         if roi_policy is not None:
-            if roi_policy not in ("full", "delete_only"):
+            if roi_policy not in ("full", "delete_only", "read_only"):
                 raise ValueError(f"unknown roi_policy: {roi_policy!r}")
             self._navigator_roi_policy = roi_policy
         if patch_editable is not None:
@@ -4259,11 +4261,20 @@ class Step0Page(QWidget):
 
     def _apply_navigator_edit_policy(self):
         roi_create = (self._navigator_roi_policy == "full")
+        roi_delete = (self._navigator_roi_policy in ("full", "delete_only"))
         for panel in self._registered_roi_overviews():
             panel.set_edit_policy(
                 roi_create=roi_create,
-                roi_delete=True,          # deleting an ROI is allowed in both steps
+                roi_delete=roi_delete,
                 patch_edit=self._navigator_patch_editable)
+        del_btn = getattr(self, "_btn_delete_sel", None)
+        if del_btn is not None:
+            del_btn.setEnabled(roi_delete or self._navigator_patch_editable)
+        patch_btn = getattr(self, "_btn_mode_patch", None)
+        if patch_btn is not None:
+            patch_btn.setEnabled(self._navigator_patch_editable)
+            if not self._navigator_patch_editable and patch_btn.isChecked():
+                self._set_draw_mode(None)
         btn = getattr(self, "_btn_mode_roi", None)
         if btn is not None:
             btn.setEnabled(roi_create)
@@ -5332,7 +5343,16 @@ class Step0Page(QWidget):
                 "Select a ROI or Patch in the lists first.")
 
     def _delete_selected_rois(self):
-        """批量删除所有选中的ROI（及其patch），从大到小索引顺序删除避免偏移"""
+        """批量删除所有选中的ROI（及其patch），从大到小索引顺序删除避免偏移
+
+        This list-driven path writes the overview's model directly, so it needs
+        the same gate the canvas actions have — otherwise a step that may not
+        delete an ROI could still do it from the list.
+        """
+        if not self.overview._roi_delete_allowed:
+            self.overview.status.setText(
+                "Deleting an ROI is not available in this step.")
+            return
         idxs = sorted(
             getattr(self, '_roi_selected_indices', []),
             reverse=True)
@@ -5367,6 +5387,10 @@ class Step0Page(QWidget):
 
     def _delete_selected_patches(self):
         """批量删除所有选中的patch，从大到小索引顺序删除避免偏移"""
+        if not self.overview._patch_edit_allowed:
+            self.overview.status.setText(
+                "Patch editing is not available in this step.")
+            return
         idxs = sorted(
             getattr(self, '_patch_selected_indices', []),
             reverse=True)

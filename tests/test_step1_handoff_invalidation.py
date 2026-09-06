@@ -271,3 +271,46 @@ def test_an_invalidation_for_another_handoff_is_ignored(app, tmp_path):
         assert w._all_patches == [(0, 16, 0, 16)]
     finally:
         w.close()
+
+
+@pytest.mark.parametrize("step", [2, 3, 4])
+def test_an_invalidation_returns_from_any_downstream_step(app, tmp_path, step):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        w._stack.setCurrentIndex(step)
+        w._set_step_active(step)
+        ov = w._step0._tissue_navigator_popup.overview
+
+        # Step0 keeps its own rights while the user stands downstream: the
+        # policy follows the CURRENT step, and this edit is made from Step0's
+        # own overview.
+        w._set_step_active(0)
+        w._stack.setCurrentIndex(step)
+        w._current_step = step
+        _draw_roi(ov)
+
+        assert w._stack.currentWidget() is w._step0
+        assert w.step0_done is False
+        assert w._step1_context_ready is False
+    finally:
+        w.close()
+
+
+def test_an_invalidation_returns_from_step1_5_too(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        w._go_to_step1_5()
+        assert w._stack.currentWidget() is w._step1_5
+
+        w._step0.handoff_invalidated.emit({
+            "step0_manifest_path": w.step0_output["step0_manifest_path"],
+            "geometry_revision": 3,
+            "reason": "roi_changed",
+            "message": "ROI changed.",
+        })
+
+        assert w._stack.currentWidget() is w._step0
+        assert w.step0_done is False
+        assert w._step1_context_ready is False
+    finally:
+        w.close()

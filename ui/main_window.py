@@ -705,11 +705,10 @@ class MainWindow(QMainWindow):
         self._step1_context_ready = False
         self.step1_done = False
         self._discard_step1_dataset_state()
-        # Standing on a Step1 page whose every field was just cleared is not a
-        # locked Step1, it is an empty one.  Send the user back to the step that
-        # owns the new dataset.
-        if self._current_step == 1:
-            self._go_to_step0()
+        # Standing on a downstream page whose every field was just cleared is
+        # not a locked page, it is an empty one.  Send the user back to the step
+        # that owns the new dataset.
+        self._return_to_step0(f"dataset switch committed (gen={gen})")
         self._update_next_button()
         print(f"[Step1] dataset switch committed (gen={gen}); Step1 context invalidated")
 
@@ -737,8 +736,9 @@ class MainWindow(QMainWindow):
         self._step1_context_ready = False
         self.step1_done = False
         self._discard_step1_dataset_state(status_text=message)
-        if self._current_step == 1:
-            self._go_to_step0()
+        # Step2, Step3, Step4 and Step1.5 all consume this handoff too, so an
+        # invalidation returns to Step0 from any of them, not only from Step1.
+        self._return_to_step0(f"handoff invalidated ({reason})")
         self._update_next_button()
         print(f"[Step1] handoff invalidated ({reason}); Step1 locked")
 
@@ -2210,6 +2210,10 @@ class MainWindow(QMainWindow):
             nucleus_channel = self.config.nuc_combo.currentText() or ""
         self._step1_5.set_context(self.loader, step1_5_dir, patches, nucleus_channel)
         self._stack.setCurrentWidget(self._step1_5)
+        # Step1.5 is reached by widget and never updates `_current_step`, so the
+        # navigator policy is set explicitly here: downstream of Step1, the
+        # shared navigator is read-only.
+        self._apply_navigator_policy_for_step(2)
 
     def _go_to_step3(self, output_dir=None):
         if self._current_step == 1:
@@ -2315,16 +2319,46 @@ class MainWindow(QMainWindow):
                 'border:1px solid #3f3f3f;}'
             )
 
+    def _apply_navigator_policy_for_step(self, step):
+        """Give the shared navigator the rights the CURRENT step has.
+
+        Step0 owns the analysis region and edits it freely.  Step1 may drop an
+        ROI (which invalidates the handoff, deliberately) and may edit patches.
+        Every step downstream of Step1 consumes geometry it did not produce, so
+        the navigator there is a map: no ROI edit, no patch edit.
+        """
+        step0 = getattr(self, "_step0", None)
+        if step0 is None or not hasattr(step0, "set_navigator_edit_policy"):
+            return
+        if step == 0:
+            roi_policy, patch_editable = "full", True
+        elif step == 1:
+            roi_policy, patch_editable = "delete_only", True
+        else:
+            roi_policy, patch_editable = "read_only", False
+        step0.set_navigator_edit_policy(roi_policy=roi_policy,
+                                        patch_editable=patch_editable)
+
+    def _return_to_step0(self, reason):
+        """Send the user back to Step0 from wherever they are.
+
+        Used when the handoff every downstream step depends on has stopped
+        being valid.  Checked by widget, not by `_current_step`, because Step1.5
+        is reached with `setCurrentWidget` and never updates that counter.
+        """
+        if self._stack.currentWidget() is self._step0:
+            self._apply_navigator_policy_for_step(0)
+            return False
+        print(f"[Step1] returning to Step0: {reason}")
+        self._go_to_step0()
+        return True
+
     def _set_step_active(self, active):
         self._current_step = active
         # The ONE place the shared navigator's edit policy is decided.  Every
         # navigation path goes through here, so an already-open popup follows
         # the step immediately: no reopen, no extra click.
-        step0 = getattr(self, "_step0", None)
-        if step0 is not None and hasattr(step0, "set_navigator_edit_policy"):
-            step0.set_navigator_edit_policy(
-                roi_policy="full" if active == 0 else "delete_only",
-                patch_editable=True)
+        self._apply_navigator_policy_for_step(active)
         _on = ("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
                "background:#1a2a3a;border-radius:4px;")
         _off = "font-size:12px;color:#555;padding:4px 12px;"
@@ -2756,6 +2790,13 @@ class MainWindow(QMainWindow):
             if worker.isRunning():
                 worker.wait(3000)
             self._drop_retired_fusion_worker(worker)
+        if any(w.isRunning() for w in self._retired_fusion_workers):
+            # Closing now would destroy a QThread that is still running. Hold
+            # the window open and try again; the job was already asked to stop.
+            event.ignore()
+            self._fusion_lbl.setText("Waiting for the fusion job to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
         if self._patch_loaders:
             event.ignore()
             self.prev_status.setText("Waiting for preview loaders to stop…")
@@ -4076,6 +4117,11 @@ class MainWindow(QMainWindow):
         if expected:
             if not bound or os.path.abspath(expected) != os.path.abspath(bound):
                 return False
+        # The manifest path can be reused by a different slide written into the
+        # same directory, so the raw identity is compared as well: it is what
+        # the authoritative reader itself validates.
+        if token.get("source_identity") != (self.step0_output or {}).get("source_identity"):
+            return False
         return True
 
     def _guarded_fusion_callback(self, token, handler, label):

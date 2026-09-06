@@ -2253,6 +2253,8 @@ class OverviewPanel(QWidget):
         so the patch list, Step 1 and every other listener see no difference.
         Returns True when the edit was accepted.
         """
+        if not self._patch_edit_allowed:
+            return False
         if patch_idx < 0 or patch_idx >= len(self._patches):
             return False
         fy0, fy1, fx0, fx1 = [int(round(v)) for v in coords]

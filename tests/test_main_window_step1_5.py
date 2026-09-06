@@ -99,17 +99,24 @@ def test_step0_label_is_setup_and_preprocessing(window):
 
 # ── 4. Direct navigation to Step1-4 does not crash ───────────────────────────
 def test_direct_navigation_steps_1_to_4_do_not_crash(window):
-    # Step labels are the direct-nav entry points; their handlers must not raise.
-    window._go_to_step1()
-    assert window._stack.currentIndex() == 1
-    window._go_to_step2()
-    assert window._stack.currentIndex() == 2
-    window._go_to_step3()
-    assert window._stack.currentIndex() == 3
-    window._go_to_step4()
-    assert window._stack.currentIndex() == 4
-    window._go_to_step0()
-    assert window._stack.currentIndex() == 0
+    # Direct navigation is valid once an explicit ready context has been
+    # prepared.  The unready case is covered by the handoff contract suite;
+    # this test must not depend on module-test ordering to obtain readiness.
+    previous_ready = window._step1_context_ready
+    try:
+        window._step1_context_ready = True
+        window._go_to_step1()
+        assert window._stack.currentIndex() == 1
+        window._go_to_step2()
+        assert window._stack.currentIndex() == 2
+        window._go_to_step3()
+        assert window._stack.currentIndex() == 3
+        window._go_to_step4()
+        assert window._stack.currentIndex() == 4
+        window._go_to_step0()
+        assert window._stack.currentIndex() == 0
+    finally:
+        window._step1_context_ready = previous_ready
 
 
 # ── 5. Navigation alone creates no remap/step2_ready/corrected/seg outputs ───

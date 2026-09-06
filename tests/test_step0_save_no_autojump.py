@@ -57,7 +57,7 @@ def window(app, monkeypatch):
     # isolate the navigation/handoff-state logic from the deep Step1 ROI loader
     # (its own concern; unchanged here) so the test targets save-vs-jump.
     monkeypatch.setattr(type(w), "_load_step0_roi_result",
-                        lambda self, *a, **k: None)
+                        lambda self, *a, **k: True)
     w._stack.setCurrentIndex(0)
     w._current_step = 0
     yield w
@@ -70,11 +70,13 @@ def test_step0_complete_sets_handoff_state(window):
     # the Step0->Step1 data handoff state Step1 reads is still set
     assert window.step0_done is True
     assert window.loader is not None
-    assert window._corrected_zarr_path == "/x/corrected_channels.zarr"
-    assert window._corrected_decisions == {"CD68": "tophat"}
-    # the loader received the correction config + corrected store (handoff)
-    assert window.loader._cfg == {"method_params": {}}
-    assert window.loader._zarr == ("/x/corrected_channels.zarr", {"CD68": "tophat"})
+    assert window._step1_context_ready is True
+    # The in-memory payload is only a loader hint.  The authoritative reader
+    # (stubbed in this save-only test) owns correction/store state.
+    assert window._corrected_zarr_path == ""
+    assert window._corrected_decisions == {}
+    assert window.loader._cfg is None
+    assert window.loader._zarr is None
 
 
 def test_step0_complete_does_not_auto_jump(window):

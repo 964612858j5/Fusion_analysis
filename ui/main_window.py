@@ -114,6 +114,7 @@ class MainWindow(QMainWindow):
         self.step2_output        = None
         self.step3_output        = None
         self.step0_done          = False
+        self._step1_context_ready = False
         self.step1_done          = False
         self.step2_done          = False
         self.step3_done          = False
@@ -629,57 +630,67 @@ class MainWindow(QMainWindow):
 
     def _on_step0_complete(self, payload):
         global OME_TIFF_FILE, OUTPUT_DIR
-        self.step0_done = True
+        # The payload carries only a loader hint and the path to the committed
+        # manifest.  _load_step0_roi_result is the single authoritative reader.
         self.step0_output = dict(payload or {})
         self.loader = self.step0_output.get("loader")
-        self._all_patches = list(self.step0_output.get("patches") or [])
-        self._rois = list(self.step0_output.get("rois") or [])
         OME_TIFF_FILE = self.step0_output.get("ome_tiff_path", OME_TIFF_FILE)
         OUTPUT_DIR = self.step0_output.get("step1_dir") or self.step0_output.get("output_dir", OUTPUT_DIR)
+        self.step0_done = False
+        self._step1_context_ready = False
 
-        correction_config = self.step0_output.get("correction_config")
-        corrected_zarr_path = self.step0_output.get("corrected_zarr_path")
-        corrected_decisions = self.step0_output.get("corrected_decisions") or {}
-        if self.loader is not None:
-            self.loader.set_correction_config(correction_config)
-            self.loader.set_corrected_zarr_store(corrected_zarr_path, corrected_decisions)
-        self._corrected_zarr_path = corrected_zarr_path or ""
-        self._corrected_decisions = dict(corrected_decisions)
+        accepted = self._load_step0_roi_result(auto=True)
+        if accepted is True:
+            # Step0 is considered complete only after a valid handoff was
+            # accepted. Step1 readiness is tracked separately below.
+            self.step0_done = True
+            self._step1_context_ready = True
+        else:
+            self.step0_done = False
+            self._step1_context_ready = False
+            self.prev_status.setText("Step0 saved, but its handoff could not be loaded. Step1 is not ready.")
 
-        self._stop_all_loaders()
-        self._patch_channel_cache.clear()
-        self._patch_load_ready.clear()
-        self._preview_patch_idx = -1
-        self.prev_img.clear()
-        self.prev_status.setText("Preloading selected patches…")
-
-        if self.loader is not None:
-            self.config.all_channels = self.loader.channel_names()
-            self.config.nuc_combo.clear()
-            self.config.nuc_combo.addItems(self.loader.channel_names())
-            self.config.nuc_combo.setCurrentIndex(-1)
-            self.config.nuc_row.spin.setValue(1.0)   # DAPI/nucleus default weight = 1
-            self.config.load_panel(
-                self.step0_output.get("panel_groups") or {},
-                self.step0_output.get("panel_nucleus"),
-            )
-
-        self._load_step0_roi_result(auto=True)
         self.step1_done = False
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         self._step4._ome_edit.setText(OME_TIFF_FILE)
         self._step4._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
-        # (#9) SAVE-ONLY: all Step0 outputs are written and the Step0->Step1
-        # handoff state above is set, but we no longer AUTO-JUMP to Step1 (that
-        # could skip Channel Conditioning). The user stays in Step0 and navigates
-        # via the step names. (Removed: setCurrentIndex(1) + _set_step_active(1).)
+        # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
 
     def _load_step0_roi_result(self, _checked=False, auto=False):
         global OME_TIFF_FILE, OUTPUT_DIR
         print("[Step1] loading Step0 ROI result")
-        if self.loader is None:
+
+        def _schema(value, default=1):
+            try:
+                return int(value if value is not None else default)
+            except (TypeError, ValueError):
+                return None
+
+        def _path(value, base=None):
+            """Resolve a declared path without turning an empty value into cwd."""
+            if value is None:
+                return ""
+            try:
+                value = os.fspath(value).strip()
+            except (TypeError, ValueError):
+                return ""
+            if not value:
+                return ""
+            if base and not os.path.isabs(value):
+                value = os.path.join(base, value)
+            return os.path.abspath(value)
+
+        payload_schema = _schema(self.step0_output.get("handoff_schema_version", 1))
+        if payload_schema is None:
+            print("[Step1] invalid handoff schema hint")
+            return False
+        # A restart/manual v2 restore may provide only the exact manifest
+        # path.  Let this authoritative reader create the loader from that
+        # manifest; broad directory bootstrap is only a legacy fallback.
+        has_explicit_manifest = bool(self.step0_output.get("step0_manifest_path"))
+        if self.loader is None and not has_explicit_manifest:
             if not self._bootstrap_step1_context_from_disk(auto=auto):
                 if not auto:
                     QMessageBox.warning(
@@ -688,34 +699,104 @@ class MainWindow(QMainWindow):
                         "Load Step0 first, or select a Step0 output directory "
                         "that contains correction_config.json / roi_config.json / corrected_channels.zarr.",
                     )
-                return
+                return False
 
         out_dir = self.step0_output.get("step0_dir") or self.step0_output.get("output_dir") or OUTPUT_DIR
+        # The payload is only a hint. Once the manifest is read, its schema
+        # controls all path and artifact decisions, including restart/manual
+        # loads where the payload was reconstructed from disk.
+        declared_manifest = self.step0_output.get("step0_manifest_path")
         ctx = resolve_roi_context(out_dir, OUTPUT_DIR)
         step0_dir = (ctx or {}).get("step_dirs", {}).get("step0", out_dir)
         step1_dir = (ctx or {}).get("step_dirs", {}).get("step1", out_dir)
         step2_dir = (ctx or {}).get("step_dirs", {}).get("step2", out_dir)
-        manifest_path = (ctx or {}).get("step0_manifest_path") or os.path.join(step0_dir, "step0_roi_result.json")
+        # New handoffs name the exact manifest. Never re-resolve through the
+        # active-ROI index, which could point at a sibling ROI.
+        manifest_path = _path(declared_manifest) or _path(
+            (ctx or {}).get("step0_manifest_path")) or _path(
+                os.path.join(step0_dir, "step0_roi_result.json"))
         manifest = {}
-        if os.path.exists(manifest_path):
+        manifest_exists = os.path.isfile(manifest_path)
+        if payload_schema >= 2 and not manifest_exists:
+            print(f"[Step1] authoritative handoff manifest missing: {manifest_path}")
+            return False
+        if manifest_exists:
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
-                step0_dir = manifest.get("step0_dir") or manifest.get("output_dir") or step0_dir
-                if manifest.get("roi_dir"):
-                    step1_dir = os.path.join(manifest["roi_dir"], "step1")
-                    step2_dir = os.path.join(manifest["roi_dir"], "step2")
+                if not isinstance(manifest, dict):
+                    raise ValueError("manifest root must be an object")
+                # Schema-v2 manifest paths are authoritative; do not let an
+                # active-ROI resolver redirect this load to a sibling session.
+                manifest_base = os.path.dirname(manifest_path)
+                step0_dir = _path(manifest.get("step0_dir") or manifest.get("output_dir"), manifest_base) or step0_dir
+                step1_dir = _path(manifest.get("step1_dir"), manifest_base) or (
+                    os.path.join(_path(manifest["roi_dir"], manifest_base), "step1")
+                    if manifest.get("roi_dir") else step1_dir
+                )
+                step2_dir = _path(manifest.get("step2_dir"), manifest_base) or (
+                    os.path.join(_path(manifest["roi_dir"], manifest_base), "step2")
+                    if manifest.get("roi_dir") else step2_dir
+                )
                 out_dir = step0_dir
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json: {e}")
+                return False
+        manifest_schema = _schema(manifest.get("handoff_schema_version", 1)) if manifest_exists else payload_schema
+        if manifest_schema is None:
+            print("[Step1] invalid handoff schema in manifest")
+            return False
+        # A v1 manifest remains legacy-compatible even if a stale payload
+        # advertised v2 only when the payload itself was legacy. A payload
+        # that explicitly declares v2 must never be downgraded by a stale v1
+        # manifest.
+        handoff_schema = manifest_schema if manifest_exists else payload_schema
+        if payload_schema >= 2 and manifest_exists and handoff_schema < 2:
+            print("[Step1] v2 handoff payload cannot use a v1 manifest")
+            return False
+        if handoff_schema >= 2 and not manifest_exists:
+            print("[Step1] authoritative handoff requires a readable manifest")
+            return False
         print(f"[Step1] manifest found={bool(manifest)}")
+        if handoff_schema >= 2:
+            identity = manifest.get("source_identity")
+            if not isinstance(identity, dict):
+                print("[Step1] authoritative handoff has no source identity")
+                return False
+            manifest_base = os.path.dirname(manifest_path)
+            raw_identity_path = _path(identity.get("dataset_path"), manifest_base)
+            raw_manifest_path = _path(manifest.get("raw_ome_path"), manifest_base)
+            if not raw_identity_path or not raw_manifest_path or raw_identity_path != raw_manifest_path:
+                print("[Step1] authoritative handoff source paths disagree")
+                return False
+            if not identity.get("dataset_fingerprint") or not os.path.exists(raw_identity_path):
+                print("[Step1] authoritative handoff source is missing")
+                return False
+            try:
+                st = os.stat(raw_identity_path)
+                actual_fp = f"{st.st_size}:{st.st_mtime_ns}"
+            except OSError:
+                return False
+            if actual_fp != str(identity.get("dataset_fingerprint", "")):
+                print("[Step1] authoritative handoff source identity mismatch")
+                return False
         print("[Step1] loading ROI context")
         print(f"[Step1] roi_id={manifest.get('roi_id') or (ctx or {}).get('roi_id', '')}")
         print(f"[Step1] step0_result={manifest_path}")
 
-        raw_ome = manifest.get("raw_ome_path")
+        manifest_base = os.path.dirname(manifest_path)
+        raw_ome = _path(manifest.get("raw_ome_path"), manifest_base)
+        if handoff_schema >= 2:
+            # A v2 handoff cannot silently reuse a loader from another dataset.
+            if not raw_ome:
+                print("[Step1] authoritative handoff has no raw OME path")
+                return False
+            raw_ome = os.path.abspath(raw_ome)
+            if not os.path.exists(raw_ome):
+                print(f"[Step1] authoritative raw OME is missing: {raw_ome}")
+                return False
         if raw_ome and os.path.exists(raw_ome) and (
-            self.loader is None or getattr(self.loader, "filepath", "") != raw_ome
+            self.loader is None or _path(getattr(self.loader, "filepath", "")) != raw_ome
         ):
             try:
                 OME_TIFF_FILE = raw_ome
@@ -725,37 +806,93 @@ class MainWindow(QMainWindow):
                 self.step0_output["ome_tiff_path"] = raw_ome
             except Exception:
                 print(f"[Step1] failed to load raw OME from manifest:\n{traceback.format_exc()}")
+                if handoff_schema >= 2:
+                    return False
+        if handoff_schema >= 2 and self.loader is None:
+            print("[Step1] authoritative handoff has no usable loader")
+            return False
         print(f"[Step1] loader initialized={self.loader is not None}")
         if self.loader is not None:
-            print(f"[Step1] loader channels count={len(self.loader.channel_names())}")
+            try:
+                print(f"[Step1] loader channels count={len(self.loader.channel_names())}")
+            except Exception as e:
+                print(f"[Step1] loader channel parse failed: {e}")
+                if handoff_schema >= 2:
+                    return False
 
-        corr_path = (
-            manifest.get("corrected_zarr_path")
-            or self.step0_output.get("corrected_zarr_path")
-            or self._corrected_zarr_path
-            or os.path.join(out_dir, "corrected_channels.zarr")
-        )
-        cfg_path = manifest.get("correction_config_path") or os.path.join(out_dir, "correction_config.json")
-        roi_path = manifest.get("roi_config_path") or os.path.join(out_dir, "roi_config.json")
-        patch_path = manifest.get("patch_config_path") or os.path.join(out_dir, "patch_config.json")
+        if handoff_schema >= 2:
+            corr_path = _path(manifest.get("corrected_zarr_path"), manifest_base)
+            cfg_path = _path(manifest.get("correction_config_path"), manifest_base)
+            roi_path = _path(manifest.get("roi_config_path"), manifest_base)
+            patch_path = _path(manifest.get("patch_config_path"), manifest_base)
+            required_paths = (cfg_path, roi_path, patch_path, corr_path)
+            if any(not path or not os.path.exists(path) for path in required_paths):
+                print("[Step1] authoritative handoff artifact is missing")
+                return False
+            # Remap is optional, but when the manifest declares one both its
+            # path and semantic hash are authoritative.  Never substitute a
+            # Step0 widget/legacy Step1.5 path when this check fails.
+            remap_path = _path(manifest.get("channel_remap_config_path"), manifest_base)
+            remap_hash = str(manifest.get("channel_remap_config_hash") or "")
+            if not remap_path and not remap_hash:
+                print("[Step1] authoritative remap declaration is incomplete")
+                return False
+            if remap_path:
+                if not os.path.isfile(remap_path):
+                    if remap_hash:
+                        print("[Step1] authoritative remap config is missing")
+                        return False
+                else:
+                    try:
+                        from ..utils.channel_remap_config import (
+                            load_channel_remap_config, channel_remap_config_hash,
+                        )
+                        remap_cfg = load_channel_remap_config(remap_path)
+                        if not remap_hash or channel_remap_config_hash(remap_cfg) != remap_hash:
+                            print("[Step1] authoritative remap config hash mismatch")
+                            return False
+                    except Exception as e:
+                        print(f"[Step1] authoritative remap config failed: {e}")
+                        return False
+            elif remap_hash:
+                print("[Step1] authoritative remap hash has no path")
+                return False
+        else:
+            corr_path = (
+                manifest.get("corrected_zarr_path")
+                or self.step0_output.get("corrected_zarr_path")
+                or self._corrected_zarr_path
+                or os.path.join(out_dir, "corrected_channels.zarr")
+            )
+            cfg_path = manifest.get("correction_config_path") or os.path.join(out_dir, "correction_config.json")
+            roi_path = manifest.get("roi_config_path") or os.path.join(out_dir, "roi_config.json")
+            patch_path = manifest.get("patch_config_path") or os.path.join(out_dir, "patch_config.json")
         print(f"[Step1] raw_ome={getattr(self.loader, 'filepath', raw_ome or '')}")
         print(f"[Step1] corrected_zarr={corr_path}")
 
-        correction_config = self.step0_output.get("correction_config")
+        correction_config = None if handoff_schema >= 2 else self.step0_output.get("correction_config")
         if os.path.exists(cfg_path):
             try:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     correction_config = json.load(f)
+                if handoff_schema >= 2 and not isinstance(correction_config, dict):
+                    raise ValueError("correction config root must be an object")
             except Exception as e:
                 print(f"[Step1] failed to load correction_config.json: {e}")
+                if handoff_schema >= 2:
+                    return False
 
-        rois = list(self.step0_output.get("rois") or self._rois or [])
+        rois = [] if handoff_schema >= 2 else list(self.step0_output.get("rois") or self._rois or [])
         if os.path.exists(roi_path):
             try:
                 with open(roi_path, "r", encoding="utf-8") as f:
                     rois = json.load(f)
+                if handoff_schema >= 2 and not isinstance(rois, list):
+                    raise ValueError("ROI config root must be an array")
             except Exception as e:
                 print(f"[Step1] failed to load roi_config.json: {e}")
+                if handoff_schema >= 2:
+                    return False
 
         corrected_mode = ""
         if corr_path and os.path.exists(corr_path):
@@ -774,6 +911,8 @@ class MainWindow(QMainWindow):
                         })
             except Exception as e:
                 print(f"[Step1] failed to inspect corrected zarr: {e}")
+                if handoff_schema >= 2:
+                    return False
         self._corrected_zarr_path = corr_path if corr_path and os.path.exists(corr_path) else ""
         self._corrected_zarr_mode = corrected_mode
         print(f"[Step1] corrected_zarr_mode={corrected_mode or 'none'}")
@@ -785,10 +924,15 @@ class MainWindow(QMainWindow):
                 for ch, method in (correction_config.get("channel_decisions") or {}).items()
                 if str(method).strip().lower() in {"tophat", "cucim"}
             }
-        decisions.update(self.step0_output.get("corrected_decisions") or {})
+        decisions.update((manifest.get("corrected_decisions") if handoff_schema >= 2 else self.step0_output.get("corrected_decisions")) or {})
         self._corrected_decisions = decisions
-        self.loader.set_correction_config(correction_config)
-        self.loader.set_corrected_zarr_store(self._corrected_zarr_path, decisions)
+        try:
+            self.loader.set_correction_config(correction_config)
+            self.loader.set_corrected_zarr_store(self._corrected_zarr_path, decisions)
+        except Exception as e:
+            print(f"[Step1] loader correction handoff failed: {e}")
+            if handoff_schema >= 2:
+                return False
 
         self._rois = list(rois or [])
         self._active_roi = self._rois[0] if self._rois else None
@@ -797,13 +941,15 @@ class MainWindow(QMainWindow):
             print(f"[Step1] {msg}")
             if not auto:
                 QMessageBox.warning(self, "Step1", msg)
-            return
+            return False
 
-        patches = list(self.step0_output.get("patches") or self._all_patches or [])
+        patches = [] if handoff_schema >= 2 else list(self.step0_output.get("patches") or self._all_patches or [])
         if os.path.exists(patch_path):
             try:
                 with open(patch_path, "r", encoding="utf-8") as f:
                     patch_cfg = json.load(f)
+                if handoff_schema >= 2 and not isinstance(patch_cfg, list):
+                    raise ValueError("patch config root must be an array")
                 patches = []
                 for item in patch_cfg:
                     if isinstance(item, dict):
@@ -814,6 +960,8 @@ class MainWindow(QMainWindow):
                         patches.append(tuple(int(v) for v in coords))
             except Exception as e:
                 print(f"[Step1] failed to load patch_config.json: {e}")
+                if handoff_schema >= 2:
+                    return False
         print(f"[Step1] rois={len(rois or [])}")
         print(f"[Step1] patches={len(patches or [])}")
         if self._active_roi:
@@ -830,13 +978,19 @@ class MainWindow(QMainWindow):
             print("[Step1] No ROI found. Load full WSI mode.")
 
         if self.loader is not None:
-            channels = self.loader.channel_names()
+            try:
+                channels = self.loader.channel_names()
+            except Exception as e:
+                print(f"[Step1] loader channel list failed: {e}")
+                if handoff_schema >= 2:
+                    return False
+                channels = []
             nucleus_channel = self._choose_step1_nucleus_channel(
                 channels,
                 manifest=manifest,
                 correction_config=correction_config,
             )
-            panel_groups = self.step0_output.get("panel_groups") or {}
+            panel_groups = (manifest.get("panel_groups") if handoff_schema >= 2 else self.step0_output.get("panel_groups")) or {}
             source = "step0_panel"
             if not panel_groups:
                 panel_groups = {
@@ -866,9 +1020,22 @@ class MainWindow(QMainWindow):
         self._preview_patch_idx = -1
         self._on_rois_changed(self._rois)
         self._on_patches(patches)
+        # Keep the authoritative patch state populated even when a UI callback
+        # is unavailable during restart/test construction.
+        self._all_patches = list(patches or [])
         self._show_active_roi_preview()
         roi_id = manifest.get("roi_id") or (ctx or {}).get("roi_id", "")
-        roi_dir = manifest.get("roi_dir") or (ctx or {}).get("roi_dir", "")
+        # A v2 manifest's step directories are authoritative even when an
+        # older writer omitted roi_dir.  The resolver may synthesize a
+        # project/ROI location in that case, which must not redirect the
+        # handoff away from the manifest's own step0 directory.
+        roi_dir = manifest.get("roi_dir") or ""
+        if not roi_dir and handoff_schema >= 2:
+            step0_parent = os.path.dirname(os.path.abspath(step0_dir))
+            if os.path.basename(os.path.abspath(step0_dir)) == "step0":
+                roi_dir = step0_parent
+        if not roi_dir:
+            roi_dir = (ctx or {}).get("roi_dir", "")
         project_dir = manifest.get("project_output_dir") or (ctx or {}).get("project_dir", "")
         if step1_dir:
             os.makedirs(step1_dir, exist_ok=True)
@@ -886,7 +1053,18 @@ class MainWindow(QMainWindow):
             "step1_dir": step1_dir,
             "step2_dir": step2_dir,
             "step0_manifest_path": manifest_path,
+            "correction_config_path": cfg_path,
+            "roi_config_path": roi_path,
+            "patch_config_path": patch_path,
             "corrected_zarr_path": corr_path,
+            "channel_remap_config_path": _path(
+                manifest.get("channel_remap_config_path", self.step0_output.get("channel_remap_config_path", "")),
+                manifest_base),
+            "channel_remap_config_hash": manifest.get("channel_remap_config_hash", self.step0_output.get("channel_remap_config_hash", "")),
+            "source_identity": manifest.get("source_identity", self.step0_output.get("source_identity")),
+            "handoff_schema_version": manifest.get("handoff_schema_version", handoff_schema),
+            "panel_groups": (manifest.get("panel_groups") if handoff_schema >= 2 else self.step0_output.get("panel_groups")) or {},
+            "panel_nucleus": manifest.get("panel_nucleus", self.step0_output.get("panel_nucleus")),
             "rois": self._rois,
             "patches": list(patches or []),
         })
@@ -895,6 +1073,11 @@ class MainWindow(QMainWindow):
             self.prev_status.setText("Step0 ROI result loaded.")
         self._log_step1_layout("after loading ROI sizes")
         self._schedule_step1_session_save()
+        # Manual Load Step0 uses this same reader as the signal path.  Only a
+        # complete successful read establishes Step0/Step1 readiness.
+        self.step0_done = True
+        self._step1_context_ready = True
+        return True
 
     @staticmethod
     def _choose_step1_nucleus_channel(channels, manifest=None, correction_config=None):
@@ -967,18 +1150,34 @@ class MainWindow(QMainWindow):
         step2_dir = (ctx or {}).get("step_dirs", {}).get("step2", out_dir)
         manifest = {}
         manifest_path = (ctx or {}).get("step0_manifest_path") or os.path.join(step0_dir, "step0_roi_result.json")
-        if os.path.exists(manifest_path):
+        manifest_exists = os.path.exists(manifest_path)
+        if manifest_exists:
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
                 step0_dir = manifest.get("step0_dir") or manifest.get("output_dir") or step0_dir
-                if manifest.get("roi_dir"):
-                    step1_dir = os.path.join(manifest["roi_dir"], "step1")
-                    step2_dir = os.path.join(manifest["roi_dir"], "step2")
+                step1_dir = manifest.get("step1_dir") or (
+                    os.path.join(manifest["roi_dir"], "step1")
+                    if manifest.get("roi_dir") else step1_dir
+                )
+                step2_dir = manifest.get("step2_dir") or (
+                    os.path.join(manifest["roi_dir"], "step2")
+                    if manifest.get("roi_dir") else step2_dir
+                )
+                # The selected/context-resolved file is the manifest being
+                # read.  A self-reported path is metadata, never a redirect
+                # into another ROI/session.
+                manifest_path = os.path.abspath(manifest_path)
                 out_dir = step0_dir
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json during bootstrap: {e}")
+                return False
 
+        try:
+            manifest_schema = int(manifest.get("handoff_schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            print("[Step1] invalid handoff schema in bootstrap manifest")
+            return False
         ome_candidates = []
         for p in (
             manifest.get("raw_ome_path"),
@@ -988,11 +1187,14 @@ class MainWindow(QMainWindow):
             if p and p not in ome_candidates:
                 ome_candidates.append(p)
         parent = os.path.dirname(out_dir)
-        if parent and os.path.isdir(parent):
+        if manifest_schema < 2 and parent and os.path.isdir(parent):
             ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tif")))
             ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tiff")))
 
         ome_path = next((p for p in ome_candidates if p and os.path.exists(p)), "")
+        if manifest_schema >= 2 and (not manifest.get("raw_ome_path") or not ome_path):
+            print("[Step1] authoritative manifest has no usable raw OME path")
+            return False
         if not ome_path and not auto:
             ome_path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
@@ -1025,11 +1227,22 @@ class MainWindow(QMainWindow):
             "step0_dir": step0_dir,
             "step1_dir": step1_dir,
             "step2_dir": step2_dir,
-            "ome_tiff_path": ome_path,
+            "step0_manifest_path": manifest_path if manifest_exists else "",
+            "ome_tiff_path": os.path.abspath(ome_path) if ome_path else "",
             "loader": self.loader,
             "corrected_zarr_path": manifest.get("corrected_zarr_path") or os.path.join(step0_dir, "corrected_channels.zarr"),
+            "handoff_schema_version": manifest_schema,
+            "source_identity": manifest.get("source_identity"),
+            "channel_remap_config_path": manifest.get("channel_remap_config_path", ""),
+            "channel_remap_config_hash": manifest.get("channel_remap_config_hash", ""),
+            "panel_csv_path": manifest.get("panel_csv_path", ""),
+            "panel_groups": manifest.get("panel_groups") or {},
+            "panel_nucleus": manifest.get("panel_nucleus"),
         }
-        self.step0_done = True
+        # Bootstrap only supplies loader/manifest hints.  Step0 is not done
+        # until the authoritative reader accepts every required artifact.
+        self.step0_done = False
+        self._step1_context_ready = False
         self._step2._out_edit.setText(step2_dir or out_dir)
         self._step4._ome_edit.setText(ome_path)
         self._step4._out_edit.setText(step2_dir or out_dir)
@@ -1044,21 +1257,50 @@ class MainWindow(QMainWindow):
         return os.path.join(base, "step1_session.json")
 
     def _find_step1_session(self):
-        candidates = []
-        for base in {
-            OUTPUT_DIR,
-            (self.step0_output or {}).get("output_dir"),
-            self._out_path_edit.text().strip() if hasattr(self, "_out_path_edit") else "",
-        }:
-            if base:
-                candidates.append(os.path.join(base, "step1_session.json"))
-        parent = os.path.dirname(OUTPUT_DIR)
-        if parent and os.path.isdir(parent):
-            candidates.extend(glob.glob(os.path.join(parent, "*", "step1_session.json")))
-        existing = [p for p in candidates if p and os.path.exists(p)]
-        if not existing:
+        """Find only the session belonging to the current Step0 handoff.
+
+        Automatic restore must never choose a sibling ROI merely because its
+        session is newer.  Explicit ``path=`` loads remain the user's manual
+        Browse escape hatch.
+        """
+        handoff = self.step0_output or {}
+        step1_dir = handoff.get("step1_dir")
+        if not step1_dir:
             return ""
-        return max(existing, key=lambda p: os.path.getmtime(p))
+        candidate = os.path.join(os.path.abspath(step1_dir), "step1_session.json")
+        if not os.path.exists(candidate):
+            return ""
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                sess = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return ""
+        if not isinstance(sess, dict):
+            return ""
+        expected_manifest_raw = handoff.get("step0_manifest_path") or ""
+        expected_manifest = os.path.abspath(expected_manifest_raw) if expected_manifest_raw else ""
+        try:
+            handoff_schema = int(handoff.get("handoff_schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            return ""
+        if handoff_schema >= 2:
+            # A v2 session is restorable only when the current handoff itself
+            # is fully bound.  Never treat an absent manifest/identity as a
+            # wildcard that can match a sibling session.
+            if not expected_manifest or not isinstance(
+                    handoff.get("source_identity"), dict) or not handoff.get("source_identity"):
+                return ""
+            actual_manifest_raw = sess.get("step0_manifest_path") or ""
+            actual_manifest = os.path.abspath(actual_manifest_raw) if actual_manifest_raw else ""
+            if not actual_manifest or actual_manifest != expected_manifest:
+                return ""
+            expected_identity = handoff.get("source_identity") or {}
+            actual_identity = sess.get("source_identity") or {}
+            if not isinstance(actual_identity, dict) or not actual_identity:
+                return ""
+            if actual_identity != expected_identity:
+                return ""
+        return candidate
 
     def _step1_session_payload(self):
         if self.loader is None:
@@ -1109,6 +1351,9 @@ class MainWindow(QMainWindow):
             "corrected_zarr_mode": self._corrected_zarr_mode,
             "fusion_zarr_path": self._fused_zarr_path or (self.step1_output or {}).get("zarr_path", ""),
             "raw_ome_path": getattr(self.loader, "filepath", OME_TIFF_FILE),
+            "source_identity": (self.step0_output or {}).get("source_identity"),
+            "step0_manifest_path": (self.step0_output or {}).get("step0_manifest_path", ""),
+            "handoff_schema_version": (self.step0_output or {}).get("handoff_schema_version", 1),
             "output_dir": out_dir,
             "fusion_config": fusion_cfg,
             "channel_weights": channel_weights,
@@ -1291,6 +1536,130 @@ class MainWindow(QMainWindow):
                 panel.gw_row.spin.setValue(float(gdata.get("group_weight", 1.0)))
         self.config.config_changed.emit()
 
+    def _apply_step1_session_fields(self, sess, out_dir, raw_ome, roi_dir,
+                                    step2_dir, roi_id=""):
+        """Apply fields owned by Step1 after the Step0 handoff is loaded.
+
+        Geometry and data sources have already been populated by
+        :meth:`_load_step0_roi_result`.  This helper never reads session ROI,
+        patch, raw, corrected, or workspace path fields.
+        """
+        # v2 geometry/data is authoritative in the manifest reader.  Do not
+        # call _on_patches with session data or reconstruct an ROI.
+        patches = list(self._all_patches or [])
+
+        fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
+        self._apply_step1_fusion_config(fusion_cfg)
+
+        self._p2_params = sess.get("p2_params")
+        if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):
+            self.search.apply_seg_config_to_ui(self._p2_params)
+        self._seg_preview_history = dict(sess.get("segmentation_preview_history") or {})
+        self._active_segmentation_method = str(
+            sess.get("active_segmentation_method")
+            or (self._p2_params or {}).get("method")
+            or ""
+        )
+        self._active_preview_patch = str(sess.get("active_preview_patch") or "")
+        self._p1_diam = sess.get("p1_diam")
+        self._params_source = sess.get("params_source")
+        self._fused_zarr_path = sess.get("fusion_zarr_path") or None
+
+        self.step1_output = {
+            "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
+            "correction_config_path": self.step0_output.get("correction_config_path") or
+                                      os.path.join(out_dir, "correction_config.json"),
+            "zarr_path": self._fused_zarr_path,
+            "roi_info": self._rois,
+            "output_dir": out_dir,
+            "step2_dir": step2_dir,
+            "roi_id": roi_id,
+            "roi_dir": roi_dir,
+            "ome_tiff_path": raw_ome,
+        }
+
+        selected_name = sess.get("selected_patch")
+        if selected_name and selected_name.startswith("P"):
+            try:
+                sel_idx = int(selected_name[1:]) - 1
+                if 0 <= sel_idx < len(self._all_patches):
+                    self._select_preview_patch(sel_idx)
+            except Exception:
+                pass
+        self.step1_done = bool(self._fused_zarr_path)
+        if hasattr(self._step2, "set_roi_context"):
+            self._step2.set_roi_context(
+                roi_id=roi_id,
+                roi_dir=roi_dir,
+                step2_dir=step2_dir,
+            )
+        else:
+            self._step2._out_edit.setText(step2_dir or out_dir)
+        self._step4._ome_edit.setText(raw_ome)
+        self._step4._out_edit.setText(step2_dir or out_dir)
+        self._update_next_button()
+        self.prev_status.setText("Loaded previous Step1 session.")
+        print(f"[Step1] restored patches={len(patches)}")
+        print(f"[Step1] restored channel weights count={len(sess.get('channel_weights') or {})}")
+        # Publish readiness only after the complete Step1 overlay has been
+        # applied.  Any exception above therefore remains fail-closed.
+        self.step0_done = True
+        self._step1_context_ready = True
+        return True
+
+    def _restore_step1_session_v2(self, sess, manifest_path):
+        """Restore Step1 state on top of the single authoritative v2 reader."""
+        # A failed restore must never leave a previously accepted Step0/Step1
+        # context usable.  The reader sets these flags only after its complete
+        # handoff succeeds; keep them false while the session overlay is being
+        # validated and applied.
+        self.step0_done = False
+        self._step1_context_ready = False
+        if not manifest_path:
+            print("[Step1] v2 session has no exact Step0 manifest")
+            return False
+
+        # Preserve and validate an already-bound handoff before replacing the
+        # small payload used to invoke the authoritative reader.
+        current_handoff = self.step0_output or {}
+        expected_manifest = current_handoff.get("step0_manifest_path") or ""
+        if expected_manifest and os.path.abspath(expected_manifest) != os.path.abspath(manifest_path):
+            print("[Step1] session manifest does not match the current handoff")
+            return False
+        expected_identity = current_handoff.get("source_identity") or {}
+        if expected_identity and sess.get("source_identity") != expected_identity:
+            print("[Step1] session source identity does not match the current handoff")
+            return False
+
+        # The existing loader is only a hint.  The authoritative reader below
+        # compares it with the manifest raw path and replaces it if needed.
+        self.step0_output = {
+            "step0_dir": os.path.dirname(manifest_path),
+            "output_dir": os.path.dirname(manifest_path),
+            "step0_manifest_path": manifest_path,
+            "handoff_schema_version": 2,
+        }
+        if self._load_step0_roi_result(auto=True) is not True:
+            return False
+
+        # The authoritative reader marks the handoff ready on success.  The
+        # session overlay is not complete yet, so clear the ready state again
+        # until all Step1-owned fields have been restored successfully.
+        self.step0_done = False
+        self._step1_context_ready = False
+        authority = self.step0_output
+        if sess.get("source_identity") != authority.get("source_identity"):
+            print("[Step1] session source identity does not match the Step0 authority")
+            return False
+        out_dir = authority.get("output_dir") or OUTPUT_DIR
+        raw_ome = getattr(self.loader, "filepath", "") or authority.get("ome_tiff_path", "")
+        roi_dir = authority.get("roi_dir", "")
+        step2_dir = authority.get("step2_dir", "")
+        roi_id = authority.get("roi_id", "")
+        return self._apply_step1_session_fields(
+            sess, out_dir, raw_ome, roi_dir, step2_dir, roi_id=roi_id,
+        )
+
     def _fusion_config_from_flat_weights(self, sess):
         weights = dict(sess.get("channel_weights") or {})
         if not weights:
@@ -1335,14 +1704,95 @@ class MainWindow(QMainWindow):
             print(f"[Step1] loading session={session_path}")
             with open(session_path, "r", encoding="utf-8") as f:
                 sess = json.load(f)
+            if not isinstance(sess, dict):
+                raise ValueError("session root must be an object")
 
-            out_dir = sess.get("output_dir") or os.path.dirname(session_path)
+            session_manifest_raw = sess.get("step0_manifest_path") or ""
+            try:
+                session_schema_hint = int(sess.get("handoff_schema_version", 1) or 1)
+            except (TypeError, ValueError):
+                return False
+            # A v2 session must invalidate any previous readiness before the
+            # manifest binding checks below.  Leave the legacy compatibility
+            # branch isolated from this state transition.
+            if session_schema_hint >= 2:
+                self.step0_done = False
+                self._step1_context_ready = False
+            # Read only the manifest schema header to choose the restore
+            # protocol.  The v2 reader remains the sole owner of all manifest
+            # validation and artifact loading.
+            session_manifest_path = os.path.abspath(session_manifest_raw) if session_manifest_raw else ""
+            manifest_schema = session_schema_hint
+            manifest_header = {}
+            if session_manifest_path:
+                try:
+                    with open(session_manifest_path, "r", encoding="utf-8") as f:
+                        manifest_header = json.load(f)
+                    if not isinstance(manifest_header, dict):
+                        raise ValueError("manifest root must be an object")
+                    manifest_schema = int(
+                        manifest_header.get("handoff_schema_version", 1) or 1
+                    )
+                except Exception as e:
+                    print(f"[Step1] failed to read session manifest header: {e}")
+                    if session_schema_hint >= 2:
+                        return False
+                    manifest_schema = session_schema_hint
+            if manifest_schema >= 2 and session_schema_hint < 2:
+                # A legacy-looking session can still point at a v2 manifest;
+                # fail closed before any v2 binding check in that case too.
+                self.step0_done = False
+                self._step1_context_ready = False
+            if manifest_schema >= 2 and session_manifest_path:
+                # This is only a session-to-manifest binding check.  Artifact
+                # identity and all other validation remain in the authority
+                # reader below.
+                if sess.get("source_identity") != manifest_header.get("source_identity"):
+                    print("[Step1] session source identity does not match the manifest header")
+                    return False
+            if session_schema_hint >= 2 and manifest_schema < 2:
+                print("[Step1] v2 session hint cannot use a v1 manifest")
+                return False
+            # A manually browsed session is still not allowed to replace the
+            # active Step0 handoff with a sibling ROI.  When a handoff is
+            # already loaded, bind the session to its exact Step1 directory,
+            # manifest, and source identity.
+            current_handoff = self.step0_output or {}
+            expected_step1_dir = current_handoff.get("step1_dir") or ""
+            if expected_step1_dir:
+                expected_session_dir = os.path.abspath(expected_step1_dir)
+                if os.path.dirname(os.path.abspath(session_path)) != expected_session_dir:
+                    print("[Step1] session is outside the current Step1 directory")
+                    return False
+            expected_manifest = current_handoff.get("step0_manifest_path") or ""
+            actual_manifest = sess.get("step0_manifest_path") or ""
+            if expected_manifest and (not actual_manifest or
+                                      os.path.abspath(actual_manifest) != os.path.abspath(expected_manifest)):
+                print("[Step1] session manifest does not match the current handoff")
+                return False
+            expected_identity = current_handoff.get("source_identity") or {}
+            if expected_identity and sess.get("source_identity") != expected_identity:
+                print("[Step1] session source identity does not match the current handoff")
+                return False
+
+            # Schema-v2 sessions are state overlays on the committed Step0
+            # handoff.  The manifest reader owns raw/corrected/ROI/Patch,
+            # remap, and all workspace directories; the session contributes
+            # only Step1 UI/history state after that read succeeds.
+            if manifest_schema >= 2:
+                return self._restore_step1_session_v2(sess, session_manifest_path)
+
+            session_dir = os.path.dirname(os.path.abspath(session_path))
+            # Schema 1 sessions retain their historical self-contained
+            # geometry/data-source compatibility behavior.
+            out_dir = sess.get("output_dir") or session_dir
             raw_ome = sess.get("raw_ome_path") or OME_TIFF_FILE
             if not raw_ome or not os.path.exists(raw_ome):
                 QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing. Please load Step0 or edit the session.")
                 return False
             roi_dir = sess.get("roi_dir", "")
-            step2_dir = sess.get("step2_dir") or (os.path.join(roi_dir, "step2") if roi_dir else "")
+            step2_dir = (sess.get("step2_dir")
+                         or (os.path.join(roi_dir, "step2") if roi_dir else ""))
             if not step2_dir and os.path.basename(os.path.abspath(out_dir)) == "step1":
                 step2_dir = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "step2")
             OUTPUT_DIR = out_dir
@@ -1356,10 +1806,15 @@ class MainWindow(QMainWindow):
                 "step0_dir": sess.get("step0_dir", ""),
                 "step1_dir": sess.get("step1_dir", out_dir),
                 "step2_dir": step2_dir,
+                "step0_manifest_path": (os.path.abspath(session_manifest_raw)
+                                         if session_manifest_raw else ""),
+                "handoff_schema_version": session_schema_hint,
+                "source_identity": sess.get("source_identity"),
             }
             self.loader = OMETIFFLoader(raw_ome)
 
-            corr_path = sess.get("corrected_zarr_path") or os.path.join(out_dir, "corrected_channels.zarr")
+            corr_path = (sess.get("corrected_zarr_path")
+                         or os.path.join(out_dir, "corrected_channels.zarr"))
             if corr_path and not os.path.exists(corr_path):
                 QMessageBox.warning(self, "Step1", "Corrected channel source missing.")
                 corr_path = ""
@@ -1395,18 +1850,21 @@ class MainWindow(QMainWindow):
                 }]
             self._rois = rois
             active_name = sess.get("active_roi") or (rois[0].get("name") if rois else "")
-            self._active_roi = next((r for r in rois if r.get("name") == active_name), rois[0] if rois else None)
+            self._active_roi = next(
+                (r for r in rois if r.get("name") == active_name),
+                rois[0] if rois else None,
+            )
             print(f"[Step1] active_roi={active_name or 'none'}")
 
             patches = []
             ry0, _, rx0, _ = [0, 0, 0, 0]
             if self._active_roi and self._active_roi.get("bbox_fullres"):
                 ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
-            for p in sess.get("patches") or []:
-                if p.get("bbox_fullres"):
-                    patches.append(tuple(int(v) for v in p["bbox_fullres"]))
-                elif p.get("bbox_local"):
-                    y0, y1, x0, x1 = [int(v) for v in p["bbox_local"]]
+            for item in sess.get("patches") or []:
+                if item.get("bbox_fullres"):
+                    patches.append(tuple(int(v) for v in item["bbox_fullres"]))
+                elif item.get("bbox_local"):
+                    y0, y1, x0, x1 = [int(v) for v in item["bbox_local"]]
                     patches.append((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1))
             self._p2_params = sess.get("p2_params")
             if self._p2_params and hasattr(self.search, "apply_seg_config_to_ui"):
@@ -1449,6 +1907,7 @@ class MainWindow(QMainWindow):
                     pass
             self._show_active_roi_preview()
             self.step0_done = True
+            self._step1_context_ready = True
             self.step1_done = bool(self._fused_zarr_path)
             if hasattr(self._step2, "set_roi_context"):
                 self._step2.set_roi_context(
@@ -1522,11 +1981,27 @@ class MainWindow(QMainWindow):
         self._set_step_active(2)
 
     def _go_to_step1(self):
-        if not self.step0_done and self.loader is None:
-            if not self._load_previous_step1_session(auto=True):
+        if not getattr(self, "_step1_context_ready", False):
+            accepted = False
+            handoff = self.step0_output or {}
+            # A loader can survive a cancelled/partial load and must not make
+            # Step1 guess which ROI/session it belongs to.  Only an explicitly
+            # bound handoff (canonical manifest + step directories) may invoke
+            # the authoritative Step0 reader here.  Do not auto-restore a
+            # sibling/latest session from navigation.
+            has_bound_handoff = bool(
+                str(handoff.get("step0_manifest_path") or "").strip()
+                and str(handoff.get("step0_dir") or "").strip()
+                and str(handoff.get("step1_dir") or "").strip()
+            )
+            if has_bound_handoff:
+                accepted = self._load_step0_roi_result(auto=True) is True
+            if not accepted:
                 self.prev_status.setText(
-                    "No previous Step1 session found. Use Load Previous Step1 Session or run Step0 first."
+                    "Step1 is not ready: load a valid Step0 handoff or use Load Previous Step1 Session."
                 )
+                return
+            self._step1_context_ready = True
         self._stack.setCurrentIndex(1)
         self._set_step_active(1)
         self._log_step1_layout("enter Step1")
@@ -1713,8 +2188,13 @@ class MainWindow(QMainWindow):
     def _ensure_step1_patch_manager(self):
         if self.loader is None:
             return None
+        # Keep the handoff reader usable with lightweight/test loaders that
+        # expose channel_names() but not the production loader's ch_map.
+        ch_map = getattr(self.loader, "ch_map", None)
+        if ch_map is None:
+            return None
         nuc_ch, _ = self.config.get_nucleus()
-        if not nuc_ch or nuc_ch not in self.loader.ch_map:
+        if not nuc_ch or nuc_ch not in ch_map:
             nuc_ch = self._choose_step1_nucleus_channel(self.loader.channel_names())
         mgr = self._step1_patch_overview
         if mgr is not None and getattr(mgr, "loader", None) is self.loader and getattr(mgr, "nuc_ch", None) == nuc_ch:
@@ -1849,6 +2329,9 @@ class MainWindow(QMainWindow):
                 f"ROI overview: {roi.get('name', 'ROI_1')}  "
                 f"{ry1 - ry0}×{rx1 - rx0}px  patches={len(self._all_patches)}"
             )
+            return
+        if getattr(self.loader, "ch_map", None) is None:
+            self.roi_status.setText("ROI loaded; preview unavailable")
             return
         nuc_ch, _ = self.config.get_nucleus()
         if not nuc_ch or nuc_ch not in self.loader.ch_map:
@@ -3294,23 +3777,46 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}, ""
         cands = []
+        s0 = self.step0_output or {}
+        # Schema-v2 handoffs carry the canonical path and semantic hash.  This
+        # is the normal path: do not consult the Step0 widget or legacy folders,
+        # even when the declared file is absent.  A missing file means this
+        # handoff has no remap config, not that another ROI's config is suitable.
+        if int(s0.get("handoff_schema_version", 1) or 1) >= 2:
+            declared_raw = s0.get("channel_remap_config_path") or ""
+            if not declared_raw:
+                return {}, ""
+            declared = os.path.abspath(declared_raw)
+            if not os.path.exists(declared):
+                return {}, ""
+            expected_hash = str(s0.get("channel_remap_config_hash") or "")
+            try:
+                from ..utils.channel_remap_config import channel_remap_config_hash
+                cfg = load_channel_remap_config(declared)
+                actual_hash = channel_remap_config_hash(cfg)
+                if expected_hash and actual_hash != expected_hash:
+                    print(f"[Step1] remap hash mismatch for handoff: expected={expected_hash} actual={actual_hash}")
+                    return {}, ""
+                chans = cfg.get("channels") or {}
+                params = {str(n): dict(pr) for n, pr in chans.items()}
+                return params, declared
+            except Exception as exc:
+                print(f"[Step1] remap config load failed {declared}: {exc}")
+                return {}, ""
+
+        # Explicit legacy compatibility only.  Older manifests did not declare
+        # a canonical remap path; their fallback is intentionally isolated.
         st0 = getattr(self, "_step0", None)
-        # 1) The EXACT path Step0's last Channel Remap Save wrote to (remembered on
-        #    save — immune to any later ROI-context change).
         last = getattr(st0, "_last_saved_remap_path", "") if st0 is not None else ""
         if last:
             cands.append(last)
-        # 2) Re-resolve the canonical Step0 remap path (same logic as the save).
         if st0 is not None and hasattr(st0, "_step0_conditioning_config_path"):
             try:
                 cands.append(st0._step0_conditioning_config_path())
             except Exception:
                 pass
-        # 2) ROI step0 dir from the handoff.
-        s0 = self.step0_output or {}
         if s0.get("step0_dir"):
             cands.append(os.path.join(s0["step0_dir"], "step0_channel_remap.json"))
-        # 3) Legacy step1_5 location.
         out = s0.get("output_dir") or s0.get("project_output_dir") or OUTPUT_DIR
         cands.append(os.path.join(out, "step1_5", "channel_remap_configs",
                                   "step0_channel_remap.json"))

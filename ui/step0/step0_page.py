@@ -87,6 +87,7 @@ from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     normalize_channel_remap_params,
+    channel_remap_config_hash,
     CREATED_FROM_STEP0_CONDITIONING,
 )
 # v14.5b: source-aware preview-config primitives (schema + preview-time identity
@@ -8586,6 +8587,9 @@ class Step0Page(QWidget):
             self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
 
     def _write_step0_handoff(self, config, zarr_path):
+        raw_path = os.path.abspath(self.ome_path) if self.ome_path else ""
+        if not raw_path:
+            raise RuntimeError("raw OME-TIFF path is empty")
         step0_dir = os.path.dirname(zarr_path) if zarr_path else (
             self._roi_context["step_dirs"]["step0"] if self._roi_context else self.output_dir
         )
@@ -8647,14 +8651,36 @@ class Step0Page(QWidget):
                         group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
             except Exception as e:
                 print(f"[Step0] failed to update corrected zarr attrs: {e}")
+                raise RuntimeError("failed to commit corrected zarr handoff metadata") from e
 
         # v14.4: validate the corrected output (a directory existing is NOT proof
         # of a valid corrected zarr) and report it honestly to the UI + manifest.
         corrected_report = corrected_zarr_report(corrected_path)
         self._refresh_bg_corrected_status(corrected_report)
 
+        try:
+            raw_stat = os.stat(raw_path)
+            raw_fingerprint = f"{raw_stat.st_size}:{raw_stat.st_mtime_ns}"
+        except OSError as exc:
+            raise RuntimeError(f"raw OME-TIFF identity could not be read: {exc}") from exc
+        source_identity = {
+            "dataset_path": raw_path,
+            "dataset_fingerprint": raw_fingerprint,
+            "stage": "raw",
+            "corrected_artifact": None,
+        }
+        remap_path = os.path.abspath(os.path.join(step0_dir, "step0_channel_remap.json"))
+        remap_hash = ""
+        if os.path.exists(remap_path):
+            try:
+                with open(remap_path, "r", encoding="utf-8") as f:
+                    remap_hash = channel_remap_config_hash(json.load(f))
+            except Exception as exc:
+                raise RuntimeError(f"invalid Step0 remap config at {remap_path}: {exc}") from exc
+
         manifest = {
             "version": "v6_roi_handoff_1",
+            "handoff_schema_version": 2,
             "created_from_step": CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
             "output_kind": CORRECTED_ZARR_OUTPUT_KIND,
             "corrected_zarr_valid": bool(corrected_report["non_empty"]),
@@ -8669,7 +8695,18 @@ class Step0Page(QWidget):
             "step1_dir": os.path.abspath(self._roi_context["step_dirs"]["step1"]) if self._roi_context else "",
             "step2_dir": os.path.abspath(self._roi_context["step_dirs"]["step2"]) if self._roi_context else "",
             "output_dir": os.path.abspath(step0_dir),
-            "raw_ome_path": os.path.abspath(self.ome_path),
+            "raw_ome_path": raw_path,
+            "panel_csv_path": (os.path.abspath(self.panel_csv_path) if self.panel_csv_path else ""),
+            "panel_groups": dict(getattr(self, "panel_groups", {}) or {}),
+            "panel_nucleus": self.nucleus_channel,
+            "source_identity": source_identity,
+            "channel_remap_config_path": remap_path,
+            "channel_remap_config_hash": remap_hash,
+            "corrected_decisions": {
+                str(ch): str(method).strip().lower()
+                for ch, method in (config.get("channel_decisions") or {}).items()
+                if str(method).strip().lower() in {"tophat", "cucim"}
+            },
             "nucleus_channel": self.nucleus_channel,
             "corrected_zarr_path": os.path.abspath(corrected_path),
             "correction_config_path": os.path.abspath(corr_path),
@@ -8682,8 +8719,24 @@ class Step0Page(QWidget):
             "n_patches": len(patches),
         }
         manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        # The manifest is the final publication marker.  The individual JSON
+        # artifacts above are intentionally not described as one atomic
+        # transaction; only publication of this marker is atomic, so a
+        # reader never observes a truncated manifest file.
+        manifest_tmp = f"{manifest_path}.tmp.{os.getpid()}"
+        try:
+            with open(manifest_tmp, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(manifest_tmp, manifest_path)
+        except Exception:
+            try:
+                if os.path.exists(manifest_tmp):
+                    os.unlink(manifest_tmp)
+            except OSError:
+                pass
+            raise
         print(f"[Step0] correction_config={corr_path}")
         print(f"[Step0] roi_config={roi_path}")
         print(f"[Step0] patch_config={patch_path}")
@@ -8694,6 +8747,9 @@ class Step0Page(QWidget):
                 mark_roi_step(project_dir, roi_id, "step0", "done")
             except Exception as e:
                 print(f"[Step0] failed to update ROI index: {e}")
+                # The manifest above is the authoritative handoff commit
+                # marker.  ROI index bookkeeping is auxiliary; a stale index
+                # must not turn a durable handoff into a reported save failure.
         return config, rois, patches, manifest
 
     def _emit_complete(self, config, zarr_path, decisions):
@@ -8701,16 +8757,29 @@ class Step0Page(QWidget):
         self._btn_load.setEnabled(True)
         # Background Correction Save is the sole Step0 save boundary. Persist
         # and validate the remap before writing/emitting the downstream handoff.
-        if not self._persist_step0_remap_config():
+        try:
+            remap_accepted = self._persist_step0_remap_config()
+        except Exception as e:
+            print(f"[Step0] remap handoff failed; step0_complete not emitted: {e}")
+            traceback.print_exc()
+            QMessageBox.warning(
+                self, "Step0 Save failed",
+                "Step0 Intensity outputs could not be committed, so Step1 was not notified.\n\n"
+                f"Details: {e}")
+            return False
+        if remap_accepted is not True:
             print("[Step0] handoff stopped: channel remap was not saved")
             return False
         try:
             config, rois, patches, manifest = self._write_step0_handoff(config, zarr_path)
         except Exception as e:
-            rois = list(self.rois)
-            patches = [{"coords": p} for p in self.patches]
-            manifest = {}
-            print(f"[Step0] Auto-save ROI failed: {e}")
+            print(f"[Step0] handoff failed; step0_complete not emitted: {e}")
+            traceback.print_exc()
+            QMessageBox.warning(
+                self, "Step0 Save failed",
+                "Step0 outputs could not be committed, so Step1 was not notified.\n\n"
+                f"Details: {e}")
+            return False
         payload = {
             "loader": self.loader,
             "patches": list(self.patches),
@@ -8723,16 +8792,20 @@ class Step0Page(QWidget):
             "roi_dir": manifest.get("roi_dir", ""),
             "analysis_region_type": manifest.get("analysis_region_type", "roi"),
             "step0_dir": manifest.get("step0_dir", ""),
-            "step1_dir": (
+            "step1_dir": manifest.get("step1_dir", (
                 self._roi_context["step_dirs"]["step1"]
                 if self._roi_context else ""
-            ),
+            )),
             "ome_tiff_path": self.ome_path,
-            "panel_csv_path": self.panel_csv_path,
+            "panel_csv_path": (os.path.abspath(self.panel_csv_path) if self.panel_csv_path else ""),
             "panel_groups": dict(self.panel_groups),
             "panel_nucleus": self.nucleus_channel,
             "corrected_decisions": dict(decisions),
             "step0_manifest_path": manifest.get("step0_roi_result_path", os.path.join(self.output_dir, "step0_roi_result.json")),
+            "channel_remap_config_path": manifest.get("channel_remap_config_path", ""),
+            "channel_remap_config_hash": manifest.get("channel_remap_config_hash", ""),
+            "source_identity": manifest.get("source_identity"),
+            "handoff_schema_version": manifest.get("handoff_schema_version", 1),
         }
         self.step0_complete.emit(payload)
         return True

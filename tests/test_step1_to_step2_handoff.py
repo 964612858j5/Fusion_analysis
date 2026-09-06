@@ -31,7 +31,7 @@ def window(app, monkeypatch):
     from block01.ui.main_window import MainWindow
     w = MainWindow()
     monkeypatch.setattr(type(w), "_load_step0_roi_result",
-                        lambda self, *a, **k: None)
+                        lambda self, *a, **k: True)
     w._current_step = 1
     yield w
     w.close()

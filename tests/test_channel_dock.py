@@ -170,25 +170,6 @@ def test_weight_slider_spin_two_way_sync(app):
     assert r.slider.value() == 60 and abs(r.spin.value() - 0.6) < 1e-9
 
 
-# ── Step1 adapter: ConfigPanel ↔ dock mirror ──────────────────────────────────
-
-def test_step1_adapter_two_way_mirror(app):
-    from block01.ui.step0.config_panel import ConfigPanel
-    from block01.ui.step1_dock_adapter import Step1FusionDockAdapter
-    panel = ConfigPanel(["CH0", "CH1", "CH2"])
-    panel._add_group("Tumor", {"CH0": 0.4, "CH1": 0.6})
-    ad = Step1FusionDockAdapter(panel)
-    cid = ad.channel_key("Tumor", "CH0")
-    assert abs(ad.model.get(cid).weight - 0.4) < 1e-9
-    # dock -> panel
-    ad.model.set_weight(cid, 0.9)
-    assert abs(panel._panels["Tumor"]._rows["CH0"].weight() - 0.9) < 1e-9
-    # panel -> dock
-    panel._panels["Tumor"]._rows["CH1"].spin.setValue(0.1)
-    cid1 = ad.channel_key("Tumor", "CH1")
-    assert abs(ad.model.get(cid1).weight - 0.1) < 1e-9
-
-
 # ── Step0 adapter: legacy registry compatibility ─────────────────────────────
 
 def test_step0_adapter_legacy_registry(app):

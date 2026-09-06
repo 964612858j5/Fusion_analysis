@@ -459,12 +459,11 @@ class MainWindow(QMainWindow):
 
         right_tabs.addTab(method_params_tab, "Method & Parameters")
         right_tabs.addTab(patch_results_tab, "Patch Results")
-
-        # v15: shared-channel-dock flat weights view, additive (ConfigPanel
-        # stays the source of truth for fusion config).
-        from .step1_dock_adapter import Step1FusionDockAdapter
-        self._step1_dock_adapter = Step1FusionDockAdapter(self.config)
-        right_tabs.addTab(self._step1_dock_adapter.dock, "Channels")
+        # There is no second channel view here any more.  The mirrored
+        # "Channels" tab could not show the nucleus weight or any group weight,
+        # so its "1.00" was never the effective weight, and its checkbox and
+        # colour swatch wrote state nothing in Step1 read.  ConfigPanel is the
+        # one channel state owner.
         right_tabs.setCurrentWidget(method_params_tab)
         print("[Step1-Tabs] right tabs created")
         print("[Step1-Tabs] default tab=Method & Parameters")

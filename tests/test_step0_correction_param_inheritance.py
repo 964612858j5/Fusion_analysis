@@ -509,3 +509,100 @@ def test_no_patch_without_correction_gives_a_correction_message_not_patch_error(
     assert messages[-1][0] == "No background correction"
     assert "No channel is assigned TopHat or cuCIM" in messages[-1][1]
     assert "preview patch" not in messages[-1][1].lower()
+
+
+def _prepare_no_patch_intensity_save(page, monkeypatch):
+    """Give the real Save boundary stable whole-slide Intensity pixels."""
+    page._roi_context["step_dirs"].setdefault(
+        "step1", os.path.join(page.output_dir, "step1"))
+    pixels = {
+        "DAPI": np.arange(20, dtype=np.float32).reshape(4, 5),
+        "CD3": np.arange(20, 40, dtype=np.float32).reshape(4, 5),
+    }
+    page._cond_workbench.set_channel_images(
+        pixels, source="manual", active="DAPI", visible=["DAPI"])
+    page._confirm_raw_channels = lambda: True
+    page._apply_corrected_store = lambda path, decisions: None
+    page._write_step0_handoff = lambda config, zarr_path: (
+        config, [page._full_wsi_roi()], [], {
+            "corrected_zarr_path": zarr_path,
+            "step0_dir": os.path.dirname(zarr_path),
+            "analysis_region_type": "full_wsi",
+        })
+
+    class _MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "an unchanged/Intensity-only Save constructed a WSI worker")
+
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _MustNotRun)
+
+
+def test_a_second_identical_save_reports_no_changes_and_writes_nothing(
+        app, tmp_path, monkeypatch):
+    """A literal second Save is a visible no-op, not a silent handoff."""
+    page, _ = _no_patch_full_wsi_page_with_saved_correction(app, tmp_path)
+    _prepare_no_patch_intensity_save(page, monkeypatch)
+    emitted = []
+    page.step0_complete.connect(lambda payload: emitted.append(payload))
+    messages = []
+    monkeypatch.setattr(
+        sp.QMessageBox, "information",
+        lambda _parent, title, text: messages.append((title, text)))
+
+    page._save_and_continue()                 # first real Save writes configs
+    correction_path = os.path.join(
+        page._roi_context["step_dirs"]["step0"], "correction_config.json")
+    remap_path = page._step0_conditioning_config_path()
+    before = {
+        correction_path: open(correction_path, "rb").read(),
+        remap_path: open(remap_path, "rb").read(),
+    }
+    assert len(emitted) == 1
+
+    confirmations = []
+    page._confirm_raw_channels = lambda: confirmations.append(True) or True
+    page._save_and_continue()                 # no parameter changed
+
+    assert len(emitted) == 1
+    assert confirmations == []
+    assert messages[-1][0] == "No changes"
+    assert "nothing was saved" in messages[-1][1].lower()
+    assert {path: open(path, "rb").read() for path in before} == before
+
+
+def test_intensity_only_save_without_a_patch_persists_dapi_and_reuses_bg(
+        app, tmp_path, monkeypatch):
+    """DAPI's whole-slide calibration replaces the obsolete patch read."""
+    page, zarr_path = _no_patch_full_wsi_page_with_saved_correction(
+        app, tmp_path)
+    _prepare_no_patch_intensity_save(page, monkeypatch)
+    emitted = []
+    page.step0_complete.connect(lambda payload: emitted.append(payload))
+    warnings = []
+    messages = []
+    monkeypatch.setattr(
+        sp.QMessageBox, "warning",
+        lambda _parent, title, text: warnings.append((title, text)))
+    monkeypatch.setattr(
+        sp.QMessageBox, "information",
+        lambda _parent, title, text: messages.append((title, text)))
+
+    page._save_and_continue()
+    before_bg = read_corrected_zarr_state(zarr_path)
+    page._cond_workbench._params["DAPI"]["gamma"] = 1.7
+    page._save_and_continue()
+
+    with open(page._step0_conditioning_config_path(), "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["channels"]["DAPI"]["gamma"] == pytest.approx(1.7)
+    assert saved["channels"]["DAPI"]["source_request"][
+        "requested_source"] == "raw_ome"
+    assert saved["channels"]["DAPI"]["calibration_source_identity"][
+        "source_shape"] == [4, 5]
+    assert read_corrected_zarr_state(zarr_path) == before_bg
+    assert len(emitted) == 2
+    assert warnings == []
+    assert messages[-1][0] == "Intensity saved"
+    assert "parameters were saved" in messages[-1][1]
+    assert "existing corrected results were reused" in messages[-1][1]

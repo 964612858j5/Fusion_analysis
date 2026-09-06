@@ -134,6 +134,10 @@ def build_raw_calibration_identity(raw_array, raw_path, channel_name,
     shape/dtype grounded in the read array; path/channel_index from the loader.
     """
     arr = np.asarray(raw_array)
+    if arr.ndim < 2 or not arr.size:
+        raise ValueError(
+            f"raw calibration source for {channel_name!r} did not provide "
+            "a non-empty 2D image")
     return make_calibration_source_identity(
         actual_source_kind=ACTUAL_SOURCE_RAW_OME,
         channel_name=channel_name,

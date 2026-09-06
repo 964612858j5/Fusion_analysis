@@ -3772,7 +3772,19 @@ class Step0Page(QWidget):
         corrected_zarr = self._corrected_zarr_path()
 
         def _read_raw(ch):
-            return self._read_cond_patch_channel(ch, normalize=False)
+            # Source identity must describe the pixels Intensity was actually
+            # calibrated on.  That workspace is whole-slide/overview based and
+            # remains valid when no preview patch exists; the old patch reader
+            # returned None in that normal state and leaked an ``arr.shape[1]``
+            # IndexError from the schema helper during Save.
+            wb = getattr(self, "_cond_workbench", None)
+            raw = (getattr(wb, "_raw", {}) or {}).get(ch) if wb else None
+            if raw is None:
+                raw = self._workbench_pixels(ch)
+            if raw is None:
+                raise RuntimeError(
+                    f"no Intensity calibration pixels are available for {ch!r}")
+            return raw
 
         # Auto-source default: a channel with REAL corrected data defaults to
         # corrected_zarr; one without stays raw_ome. Availability is grounded in
@@ -3878,6 +3890,55 @@ class Step0Page(QWidget):
             QMessageBox.information(
                 self, "Saved", f"Saved channel remap:\n{path}")
         return True
+
+    @staticmethod
+    def _intensity_state_from_config(cfg):
+        """Return only user-controlled Intensity values from a remap config.
+
+        Source identities and observed pixel ranges are derived metadata.  They
+        must not turn an otherwise unchanged Save into a write.  Conversely,
+        every persisted display control participates in this comparison.
+        """
+        cfg = cfg or {}
+        keys = ("enabled", "min", "max", "brightness", "contrast", "gamma",
+                "opacity", "weight", "auto")
+        channels = {}
+        for name, params in sorted((cfg.get("channels") or {}).items()):
+            normalized = normalize_channel_remap_params(params)
+            channels[str(name)] = {key: normalized[key] for key in keys}
+        return {
+            "auto_saturation": float(cfg.get("auto_saturation", 0.1)),
+            "channels": channels,
+        }
+
+    def _intensity_settings_changed(self):
+        """Whether the visible Intensity controls differ from the saved file."""
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not wb.has_channel_data():
+            return False
+        current = self._intensity_state_from_config(wb.build_config())
+        path = self._step0_conditioning_config_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                saved = self._intensity_state_from_config(json.load(f))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+        return current != saved
+
+    def _correction_settings_changed(self, config, config_path):
+        """Whether the current correction controls differ from the saved file."""
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+        return self._clean_correction_config(config) != self._clean_correction_config(saved)
+
+    def _show_save_no_changes(self):
+        QMessageBox.information(
+            self, "No changes",
+            "No background-correction or Intensity parameters have changed.\n\n"
+            "The existing saved results will be reused; nothing was saved.")
 
     def _save_step0_remap_config(self):
         """Private compatibility entry; the visible Save uses `_emit_complete`."""
@@ -8110,10 +8171,6 @@ class Step0Page(QWidget):
             QMessageBox.warning(self, "Validation", "No ROI found. Draw ROI first.")
             return
 
-        # What will NOT be corrected, said once, before anything is written.
-        if not self._confirm_raw_channels():
-            return
-
         # (#1) REUSE the existing roi_context (-> same step0_dir / zarr_path)
         # when the analysis region is unchanged since the last Save. Otherwise
         # create_full_wsi_context / create_roi_context mint a fresh timestamped
@@ -8122,11 +8179,21 @@ class Step0Page(QWidget):
         # context only on the first Save or when the mode / ROI bbox changes.
         self._project_output_dir = self.output_dir
         sig = self._roi_context_signature(rois)
-        if (getattr(self, "_roi_context", None) is not None
-                and getattr(self, "_roi_context_sig", None) == sig):
+        context_reused = (
+            getattr(self, "_roi_context", None) is not None
+            and getattr(self, "_roi_context_sig", None) == sig)
+        raw_confirmed = False
+        if context_reused:
             print(f"[Step0] reusing roi_context roi_id={self._roi_context['roi_id']} "
                   f"(analysis region unchanged)")
         else:
+            # A first Save may create a new output tree.  Preserve the existing
+            # contract that canceling the raw-channel warning happens before
+            # that side effect.  Repeated Saves defer this confirmation until
+            # after no-change detection, so a no-op has only one dialog.
+            if not self._confirm_raw_channels():
+                return
+            raw_confirmed = True
             if self._is_full_wsi_mode():
                 self._roi_context = create_full_wsi_context(
                     self._project_output_dir, self.loader.shape, self.ome_path)
@@ -8142,9 +8209,17 @@ class Step0Page(QWidget):
 
         config = self._build_config()
         config_path = os.path.join(step0_dir, "correction_config.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        self.loader.set_correction_config(config)
+        correction_changed = self._correction_settings_changed(
+            config, config_path)
+        intensity_changed = self._intensity_settings_changed()
+
+        def _write_current_correction_config():
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            self.loader.set_correction_config(config)
+
+        def _confirm_actual_save():
+            return raw_confirmed or self._confirm_raw_channels()
 
         corrected = {
             ch: method
@@ -8158,7 +8233,17 @@ class Step0Page(QWidget):
             # This is a VALID choice (not an error): record the "no correction"
             # decision + handoff so downstream still works, and tell the user
             # plainly there is nothing to save + where to go next.
-            self._ensure_empty_corrected_zarr(zarr_path, rois)
+            if (not correction_changed and not intensity_changed
+                    and os.path.exists(zarr_path)):
+                self._show_save_no_changes()
+                return
+            # What will NOT be corrected, said once and only for a Save that
+            # will really write.  A no-op Save must show only "No changes".
+            if not _confirm_actual_save():
+                return
+            _write_current_correction_config()
+            if not os.path.exists(zarr_path):
+                self._ensure_empty_corrected_zarr(zarr_path, rois)
             # Reconciles the cache: previously corrected channels revert to raw.
             self._apply_corrected_store(None, {})
             if not self._emit_complete(config, zarr_path, {}):
@@ -8203,11 +8288,26 @@ class Step0Page(QWidget):
             # Everything already saved with the same method -> no reprocessing.
             # The zarr already holds every channel; (re)wire the handoff and
             # reconcile the cache (corrected re-read; withdrawn revert to raw).
+            if not correction_changed and not intensity_changed:
+                self._show_save_no_changes()
+                return
+            if not _confirm_actual_save():
+                return
+            _write_current_correction_config()
             self._apply_corrected_store(zarr_path, corrected)
-            self._emit_complete(config, zarr_path, corrected)
+            completed = self._emit_complete(config, zarr_path, corrected)
+            if completed and intensity_changed and not correction_changed:
+                QMessageBox.information(
+                    self, "Intensity saved",
+                    "Intensity/remap parameters were saved.\n\n"
+                    "Background-correction parameters did not change, so the "
+                    "existing corrected results were reused.")
             return
 
         # Hot-swap after the worker should touch ONLY the channels we reprocess.
+        if not _confirm_actual_save():
+            return
+        _write_current_correction_config()
         self._incremental_processed = set(to_process)
         self._btn_continue.setEnabled(False)
         self._btn_load.setEnabled(False)

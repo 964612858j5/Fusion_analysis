@@ -108,3 +108,36 @@ def test_the_shared_model_is_the_one_both_overviews_render(app):
         assert w._step0._tissue_navigator_popup.overview in panels
     finally:
         w.close()
+
+
+def test_step1_builds_no_tissue_thumbnail_of_its_own(app):
+    """Patches arrive and the selector buttons appear, with no Step1 overview."""
+    from block01.ui.step0.overview_panel import OverviewPanel
+
+    w = _window(app)
+    try:
+        w._active_roi = {"name": "ROI_1", "bbox_fullres": [0, 32, 0, 32]}
+        w._rois = [w._active_roi]
+        w._on_patches([(0, 16, 0, 16), (16, 32, 16, 32)])
+
+        assert len(w._patch_sel_btns) == 2
+        assert w._step1_page_widget.findChildren(OverviewPanel) == []
+        assert not hasattr(w, "_step1_patch_overview")
+        assert not hasattr(w, "roi_gv")
+        assert "patches=2" in w.roi_status.text()
+    finally:
+        w.close()
+
+
+def test_step1_offers_no_patch_geometry_editor(app):
+    w = _window(app)
+    try:
+        labels = {b.text() for b in w._step1_page_widget.findChildren(QtWidgets.QPushButton)}
+        assert "Add Patch" not in labels
+        assert "Delete Patch" not in labels
+        for gone in ("_add_step1_patch", "_delete_step1_patch",
+                     "_ensure_step1_patch_manager", "_sync_step1_patch_manager",
+                     "_on_step1_patch_roi_changed"):
+            assert not hasattr(w, gone), gone
+    finally:
+        w.close()

@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import (
-    OME_TIFF_FILE, OUTPUT_DIR, PREVIEW_DOWNSAMPLE,
+    OME_TIFF_FILE, OUTPUT_DIR,
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
 from ..core.fusion_engine import FusionEngine
@@ -60,7 +60,7 @@ from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
-from .step0.overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
+from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
 from .step2_page import Step2Page
 from .step3_page import Step3Page
@@ -90,12 +90,8 @@ class MainWindow(QMainWindow):
         self._patch_channel_cache: dict = {}
         self._patch_loaders: dict = {}
         self._patch_load_ready: set = set()
-        self._roi_patch_items: list = []
         self._patch_seg_results: dict = {}
-        self._step1_patch_overview = None
-        self._syncing_step1_patch_manager = False
         self._preserve_view_after_patch_load: dict = {}
-        self._step1_patch_display_origin = (0, 0)
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -284,35 +280,7 @@ class MainWindow(QMainWindow):
         )
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         ll.addWidget(self._btn_step1_tissue_nav)
-        self.roi_gv = pg.GraphicsLayoutWidget()
-        self.roi_gv.setBackground("#111")
-        self.roi_gv.setMinimumSize(240, 300)
-        self.roi_gv.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.roi_vb = self.roi_gv.addViewBox()
-        self.roi_vb.setAspectLocked(True)
-        self.roi_vb.invertY(True)
-        self.roi_img = pg.ImageItem()
-        self.roi_vb.addItem(self.roi_img)
-        ll.addWidget(self.roi_gv, stretch=1)
-        self.roi_gv.setVisible(False)
-        self._step1_patch_holder = QWidget()
-        self._step1_patch_holder.setMinimumSize(240, 300)
-        self._step1_patch_holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._step1_patch_holder_lay = QVBoxLayout(self._step1_patch_holder)
-        self._step1_patch_holder_lay.setContentsMargins(0, 0, 0, 0)
-        self._step1_patch_holder_lay.setSpacing(0)
-        ll.addWidget(self._step1_patch_holder, stretch=1)
-        patch_edit_row = QHBoxLayout()
-        btn_add_step1_patch = QPushButton("Add Patch")
-        btn_del_step1_patch = QPushButton("Delete Patch")
-        btn_add_step1_patch.setStyleSheet("font-size:10px;padding:2px 8px;")
-        btn_del_step1_patch.setStyleSheet("font-size:10px;padding:2px 8px;")
-        btn_add_step1_patch.clicked.connect(self._add_step1_patch)
-        btn_del_step1_patch.clicked.connect(self._delete_step1_patch)
-        patch_edit_row.addWidget(btn_add_step1_patch)
-        patch_edit_row.addWidget(btn_del_step1_patch)
-        patch_edit_row.addStretch()
-        ll.addLayout(patch_edit_row)
+        ll.addStretch(1)
         self.roi_status = QLabel("No ROI loaded")
         self.roi_status.setAlignment(Qt.AlignCenter)
         self.roi_status.setWordWrap(True)
@@ -634,7 +602,7 @@ class MainWindow(QMainWindow):
             print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
             print(f"[Layout] {where} main window minimumSize={self.minimumSize().width()}x{self.minimumSize().height()}")
             print(f"[Layout] {where} Step1 sizeHint={self._layout_desc(getattr(self, '_step1_page_widget', None))}")
-            print(f"[Layout] {where} ROI Overview sizeHint/min/max={self._layout_desc(getattr(self, '_step1_patch_holder', None))}")
+            print(f"[Layout] {where} left panel sizeHint/min/max={self._layout_desc(getattr(self, '_step1_left_panel', None))}")
             print(f"[Layout] {where} Fusion Preview sizeHint/min/max={self._layout_desc(getattr(self, 'prev_gv', None))}")
             print(f"[Layout] {where} Phase1 panel sizeHint/min/max={self._layout_desc(getattr(self, 'search', None))}")
             print(f"[Layout] {where} Phase2 panel sizeHint/min/max={self._layout_desc(getattr(self, 'result_grid', None))}")
@@ -2344,270 +2312,31 @@ class MainWindow(QMainWindow):
             print(f"[Step1] dropped {dropped} patch(es) outside active ROI bbox")
         return kept
 
-    def _clear_roi_patch_items(self):
-        for item in getattr(self, "_roi_patch_items", []):
-            try:
-                self.roi_vb.removeItem(item)
-            except Exception:
-                pass
-        self._roi_patch_items = []
-
-    def _ensure_step1_patch_manager(self):
-        if self.loader is None:
-            return None
-        # Keep the handoff reader usable with lightweight/test loaders that
-        # expose channel_names() but not the production loader's ch_map.
-        ch_map = getattr(self.loader, "ch_map", None)
-        if ch_map is None:
-            return None
-        nuc_ch, _ = self.config.get_nucleus()
-        if not nuc_ch or nuc_ch not in ch_map:
-            nuc_ch = self._choose_step1_nucleus_channel(self.loader.channel_names())
-        mgr = self._step1_patch_overview
-        if mgr is not None and getattr(mgr, "loader", None) is self.loader and getattr(mgr, "nuc_ch", None) == nuc_ch:
-            return mgr
-        if mgr is not None:
-            self._step1_patch_holder_lay.removeWidget(mgr)
-            mgr.deleteLater()
-        mgr = OverviewPanel(self.loader, nuc_ch, lazy=True)
-        mgr._set_mode("patch")
-        mgr.patches_changed.connect(self._on_step1_manager_patches_changed)
-        self._step1_patch_holder_lay.addWidget(mgr)
-        self._step1_patch_overview = mgr
-        print("[Step1] patch manager source=Step0 OverviewPanel")
-        return mgr
-
-    def _read_lowres(self, channel, y0, y1, x0, x1, ds):
-        """A downsampled nucleus crop for a preview: from the pyramid when
-        the loader offers it, else the plain (full-resolution) read that
-        every fake loader in the tests provides."""
-        fast = getattr(self.loader, "read_region_lowres", None)
-        if fast is not None:
-            return fast(channel, y0, y1, x0, x1, ds)
-        return self.loader.read_region(channel, y0, y1, x0, x1, downsample=ds)
-
-    def _load_step1_manager_roi_crop(self, mgr):
-        if mgr is None or self.loader is None:
-            return
-        roi = self._active_roi
-        if roi and roi.get("bbox_fullres"):
-            y0, y1, x0, x1 = [int(v) for v in roi["bbox_fullres"]]
-        elif self._all_patches:
-            idx = self._preview_patch_idx if 0 <= self._preview_patch_idx < len(self._all_patches) else 0
-            y0, y1, x0, x1 = [int(v) for v in self._all_patches[idx]]
-        else:
-            return
-        if y1 <= y0 or x1 <= x0:
-            return
-        self._step1_patch_display_origin = (y0, x0)
-        nuc_ch, _ = self.config.get_nucleus()
-        if not nuc_ch or nuc_ch not in self.loader.ch_map:
-            nuc_ch = self._choose_step1_nucleus_channel(self.loader.channel_names())
-        ds = max(PREVIEW_DOWNSAMPLE, int(max(y1 - y0, x1 - x0) / 1800) + 1)
-        key = (nuc_ch, y0, y1, x0, x1, ds)
-        if getattr(self, "_step1_manager_crop_key", None) == key:
-            return
-        print(f"[Step1-ROI] roi_bbox={[y0, y1, x0, x1]}")
-        print(f"[Step1-preview] roi_bbox={[y0, y1, x0, x1]}")
-        print(f"[Step1-preview] read_region y0,y1,x0,x1={[y0, y1, x0, x1]} downsample={ds}")
-        # Pyramid read, not a full-resolution decode: this runs on the GUI
-        # thread after every Save (step0_complete), and for a whole-slide
-        # ROI the full-resolution path froze the window for 15.6 s.
-        arr = self._read_lowres(nuc_ch, y0, y1, x0, x1, ds)
-        grey = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
-        rgb = np.stack([grey, grey, grey], axis=-1)
-        mgr.set_background_crop(rgb, y0, y1, x0, x1, ds)
-        self._step1_manager_crop_key = key
-        print(f"[Step1-preview] loaded_shape={rgb.shape}")
-        print("[Step1-preview] full_image_load=False")
-
-    def _sync_step1_patch_manager(self):
-        mgr = self._ensure_step1_patch_manager()
-        if mgr is None:
-            return
-        self._load_step1_manager_roi_crop(mgr)
-        oy, ox = self._step1_patch_display_origin
-        local_patches = []
-        for patch in self._all_patches:
-            y0, y1, x0, x1 = [int(v) for v in patch]
-            local = (y0 - oy, y1 - oy, x0 - ox, x1 - ox)
-            local_patches.append(local)
-        local_rois = []
-        if self._active_roi and self._active_roi.get("bbox_fullres"):
-            ly1 = max(1, int(self._active_roi["bbox_fullres"][1]) - int(self._active_roi["bbox_fullres"][0]))
-            lx1 = max(1, int(self._active_roi["bbox_fullres"][3]) - int(self._active_roi["bbox_fullres"][2]))
-            local_rois = [{
-                "name": self._active_roi.get("name", "ROI_1"),
-                "color": self._active_roi.get("color", "#6bcb77"),
-                "polygon_display": [(0, 0), (lx1 / float(mgr.ds), 0), (lx1 / float(mgr.ds), ly1 / float(mgr.ds)), (0, ly1 / float(mgr.ds))],
-                "polygon_fullres": [(0, 0), (lx1, 0), (lx1, ly1), (0, ly1)],
-                "bbox_fullres": [0, ly1, 0, lx1],
-            }]
-        print(f"[Step1-ROI] patch_count={len(local_patches)}")
-        self._syncing_step1_patch_manager = True
-        try:
-            mgr.set_rois_and_patches(
-                local_rois,
-                local_patches,
-                full_wsi_mode=not bool(local_rois),
-            )
-            mgr.select_patch(self._selected_step1_patch_idx)
-            for i, patch in enumerate(self._all_patches):
-                y0, y1, x0, x1 = [int(v) for v in patch]
-                local = local_patches[i]
-                print(f"[Step1-ROI] patch global bbox={[y0, y1, x0, x1]}")
-                print(f"[Step1-ROI] patch local bbox={list(local)}")
-                print("[Step1-ROI] patch rect added to ROI scene")
-            for rect, _lbl in getattr(mgr, "_patch_artists", []):
-                print(f"[Step1-ROI] patch rect zValue={rect.zValue()}")
-            print(f"[Step1-ROI] scene items count={len(mgr.gview.scene().items())}")
-        finally:
-            self._syncing_step1_patch_manager = False
-
-    def _on_step1_manager_patches_changed(self, patches):
-        if self._syncing_step1_patch_manager:
-            return
-        oy, ox = self._step1_patch_display_origin
-        global_patches = []
-        for p in patches:
-            y0, y1, x0, x1 = [int(v) for v in p]
-            global_patches.append((y0 + oy, y1 + oy, x0 + ox, x1 + ox))
-        self._on_patches(global_patches)
-
     def _show_active_roi_preview(self):
-        self._clear_roi_patch_items()
+        """Report the ROI/patch context Step1 is bound to.
+
+        Step1 no longer draws its own tissue thumbnail: ROI and patches are
+        viewed and edited in the one shared Tissue Preview, which Step0 owns.
+        This is a status line over the authoritative geometry, nothing else.
+        """
         roi = self._active_roi
         if self.loader is None:
             self.roi_status.setText("No ROI loaded")
             return
-        mgr = self._ensure_step1_patch_manager()
-        if mgr is not None:
-            self._sync_step1_patch_manager()
         if not roi:
-            self.roi_status.setText(f"Full WSI patch overview  patches={len(self._all_patches)}")
+            self.roi_status.setText(
+                f"Full WSI  patches={len(self._all_patches)}  "
+                "— open the Tissue Preview to view or edit them")
             return
         bbox = roi.get("bbox_fullres")
         if not bbox or len(bbox) != 4:
             self.roi_status.setText("No ROI bbox")
             return
-        if mgr is not None:
-            ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
-            self.roi_status.setText(
-                f"ROI overview: {roi.get('name', 'ROI_1')}  "
-                f"{ry1 - ry0}×{rx1 - rx0}px  patches={len(self._all_patches)}"
-            )
-            return
-        if getattr(self.loader, "ch_map", None) is None:
-            self.roi_status.setText("ROI loaded; preview unavailable")
-            return
-        nuc_ch, _ = self.config.get_nucleus()
-        if not nuc_ch or nuc_ch not in self.loader.ch_map:
-            self.roi_status.setText("No nucleus channel selected")
-            return
         ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
-        roi_h, roi_w = ry1 - ry0, rx1 - rx0
-        if roi_h <= 0 or roi_w <= 0:
-            return
-        ds = max(PREVIEW_DOWNSAMPLE, int(max(roi_h, roi_w) / 1800) + 1)
-        try:
-            arr = self._read_lowres(nuc_ch, ry0, ry1, rx0, rx1, ds)
-            grey = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
-            rgb = np.stack([grey, grey, grey], axis=-1)
-            self.roi_img.setImage(rgb, autoLevels=False)
-            self.roi_vb.autoRange()
-            print(f"[Step1] roi preview loaded shape={rgb.shape}")
-
-            for idx, patch in enumerate(self._all_patches):
-                if not self._patch_inside_roi_bbox(patch, roi):
-                    continue
-                y0, y1, x0, x1 = [int(v) for v in patch]
-                lx0 = (x0 - rx0) / ds
-                lx1 = (x1 - rx0) / ds
-                ly0 = (y0 - ry0) / ds
-                ly1 = (y1 - ry0) / ds
-                color = PATCH_COLORS[idx % len(PATCH_COLORS)]
-                width = 3 if idx == self._selected_step1_patch_idx else 2
-                item = pg.RectROI(
-                    [lx0, ly0],
-                    [max(1, lx1 - lx0), max(1, ly1 - ly0)],
-                    pen=pg.mkPen(color, width=width),
-                    movable=True,
-                    resizable=True,
-                )
-                item.addScaleHandle([1, 1], [0, 0])
-                item.addScaleHandle([0, 0], [1, 1])
-                item.sigRegionChangeFinished.connect(
-                    lambda roi_item, pidx=idx, scale=ds, origin=(ry0, rx0): self._on_step1_patch_roi_changed(pidx, roi_item, scale, origin)
-                )
-                item.sigClicked.connect(lambda _roi, _ev, pidx=idx: self._select_step1_patch_artist(pidx))
-                self.roi_vb.addItem(item)
-                self._roi_patch_items.append(item)
-
-            self.roi_status.setText(
-                f"ROI preview: {roi.get('name', 'ROI_1')}  "
-                f"{roi_h}×{roi_w}px  patches={len(self._all_patches)}"
-            )
-        except Exception as e:
-            self.roi_status.setText(f"⚠ ROI preview failed: {e}")
-            print(f"[Step1] ROI preview failed: {e}")
-
-    def _select_step1_patch_artist(self, patch_idx):
-        self._selected_step1_patch_idx = patch_idx
-        self._select_preview_patch(patch_idx)
-        mgr = self._step1_patch_overview
-        if mgr is not None:
-            mgr.select_patch(patch_idx)
-
-    def _on_step1_patch_roi_changed(self, patch_idx, roi_item, ds, roi_origin):
-        if patch_idx < 0 or patch_idx >= len(self._all_patches):
-            return
-        ry0, rx0 = roi_origin
-        pos = roi_item.pos()
-        size = roi_item.size()
-        y0 = int(ry0 + max(0, round(float(pos.y()) * ds)))
-        x0 = int(rx0 + max(0, round(float(pos.x()) * ds)))
-        y1 = int(ry0 + max(1, round((float(pos.y()) + float(size.y())) * ds)))
-        x1 = int(rx0 + max(1, round((float(pos.x()) + float(size.x())) * ds)))
-        if self._active_roi and self._active_roi.get("bbox_fullres"):
-            by0, by1, bx0, bx1 = [int(v) for v in self._active_roi["bbox_fullres"]]
-            y0, y1 = max(by0, y0), min(by1, y1)
-            x0, x1 = max(bx0, x0), min(bx1, x1)
-        if y1 <= y0 or x1 <= x0:
-            self._show_active_roi_preview()
-            return
-        patches = list(self._all_patches)
-        patches[patch_idx] = (y0, y1, x0, x1)
-        self._selected_step1_patch_idx = patch_idx
-        self._on_patches(patches)
-        self._show_active_roi_preview()
-
-    def _add_step1_patch(self):
-        mgr = self._ensure_step1_patch_manager()
-        if mgr is None:
-            self.roi_status.setText("Load an ROI before adding a patch.")
-            return
-        self._sync_step1_patch_manager()
-        local_roi = None
-        if self._active_roi and self._active_roi.get("bbox_fullres"):
-            y0, y1, x0, x1 = [int(v) for v in self._active_roi["bbox_fullres"]]
-            local_roi = {"bbox_fullres": [0, y1 - y0, 0, x1 - x0]}
-        mgr.add_center_patch(local_roi)
-
-    def _delete_step1_patch(self):
-        if not self._all_patches:
-            return
-        mgr = self._ensure_step1_patch_manager()
-        if mgr is not None:
-            if self._selected_step1_patch_idx >= 0:
-                mgr.select_patch(self._selected_step1_patch_idx)
-            mgr.delete_selected_or_last_patch()
-            return
-        idx = self._selected_step1_patch_idx
-        if idx < 0 or idx >= len(self._all_patches):
-            idx = self._preview_patch_idx if self._preview_patch_idx >= 0 else len(self._all_patches) - 1
-        patches = [p for i, p in enumerate(self._all_patches) if i != idx]
-        self._selected_step1_patch_idx = min(idx, len(patches) - 1)
-        self._on_patches(patches)
+        self.roi_status.setText(
+            f"{roi.get('name', 'ROI_1')}  {ry1 - ry0}×{rx1 - rx0}px  "
+            f"patches={len(self._all_patches)}  "
+            "— open the Tissue Preview to view or edit them")
 
     # ── Patch selector button management ────────────────────────────
 
@@ -2683,8 +2412,7 @@ class MainWindow(QMainWindow):
         old_rois = [p for p in self._all_patches]
         self._all_patches = list(patches)
         self._rebuild_patch_buttons(patches)
-        if not self._syncing_step1_patch_manager:
-            self._sync_step1_patch_manager()
+        self._show_active_roi_preview()
 
         if not patches:
             self._stop_all_loaders()
@@ -2764,11 +2492,8 @@ class MainWindow(QMainWindow):
             btn.setChecked(i == idx)
         self._preview_patch_idx = idx
         self._selected_step1_patch_idx = idx
-        mgr = self._step1_patch_overview
-        if mgr is not None:
-            mgr.select_patch(idx)
-            if not self._active_roi:
-                self._load_step1_manager_roi_crop(mgr)
+        # Selecting a patch switches the preview only.  Geometry belongs to the
+        # shared navigator and to Step0's published handoff.
         self._schedule_step1_session_save()
 
         if idx in self._patch_load_ready:

@@ -2478,62 +2478,6 @@ class OverviewPanel(QWidget):
         self._rebuild_patch_artists()
         self._update_info()
 
-    def set_background_crop(self, arr, y0, y1, x0, x1, downsample):
-        """Show a pre-read crop without changing Step0's global scene coords."""
-        if not hasattr(self, "_step1_bg_item"):
-            self._step1_bg_item = pg.ImageItem()
-            self.vb.addItem(self._step1_bg_item)
-            self._step1_bg_item.setZValue(-10)
-        self._step1_bg_item.setImage(arr, autoLevels=False)
-        ds = max(1, int(downsample or self.ds))
-        self.ds = ds
-        self.full_h = max(1, int(y1 - y0))
-        self.full_w = max(1, int(x1 - x0))
-        self._step1_bg_item.setRect(QRectF(0, 0, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)))
-        self.ov_h = max(1, int(np.ceil(self.full_h / float(self.ds))))
-        self.ov_w = max(1, int(np.ceil(self.full_w / float(self.ds))))
-        self.vb.setRange(
-            QRectF(0, 0, max(1, (x1 - x0) / ds), max(1, (y1 - y0) / ds)),
-            padding=0.02,
-        )
-
-    def add_center_patch(self, roi=None, size_px=512):
-        """Add a centered patch through the same Step0 add/rebuild path."""
-        if roi and roi.get("bbox_fullres"):
-            y0, y1, x0, x1 = [int(v) for v in roi["bbox_fullres"]]
-        else:
-            y0, y1, x0, x1 = 0, int(self.full_h), 0, int(self.full_w)
-        if y1 <= y0 or x1 <= x0:
-            return
-        size = int(min(size_px, max(64, y1 - y0), max(64, x1 - x0)))
-        cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
-        fy0 = max(y0, cy - size // 2)
-        fy1 = min(y1, fy0 + size)
-        fx0 = max(x0, cx - size // 2)
-        fx1 = min(x1, fx0 + size)
-        fy0 = max(y0, fy1 - size)
-        fx0 = max(x0, fx1 - size)
-        roi_idx = None
-        if self._rois and not getattr(self, "full_wsi_mode", False):
-            roi_idx = self._find_roi_for_patch(
-                ((fy0 + fy1) / 2.0) / float(self.ds),
-                ((fx0 + fx1) / 2.0) / float(self.ds),
-            )
-        self._add_patch(
-            fy0, fy1, fx0, fx1,
-            fy0 // self.ds, max(1, fy1 // self.ds),
-            fx0 // self.ds, max(1, fx1 // self.ds),
-            roi_idx,
-        )
-        self._selected_patch_idx = len(self._patches) - 1
-        self._rebuild_patch_artists()
-
-    def delete_selected_or_last_patch(self):
-        idx = self._selected_patch_idx
-        if idx < 0:
-            idx = len(self._patches) - 1
-        self._remove_patch(idx)
-
     def select_patch(self, patch_idx):
         """Enter the adjust state on `patch_idx` -- or leave it, with -1."""
         if -1 <= patch_idx < len(self._patches):

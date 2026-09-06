@@ -41,11 +41,35 @@ class Combo:
 
 class Config:
     all_channels = []
-    _panels = {}
     nuc_combo = Combo()
-    nuc_row = SimpleNamespace(spin=SimpleNamespace(setValue=lambda _v: None))
 
     def load_panel(self, *_args): pass
+
+    def set_channels(self, channels): self.all_channels = list(channels or [])
+
+    def set_nucleus_weight(self, _w): pass
+
+    def set_nucleus(self, _channel, _weight=None): pass
+
+    def nucleus_channel(self): return ""
+
+    def zero_marker_weights(self): pass
+
+    def apply_full_config(self, _cfg): pass
+
+    def get_groups(self): return {}
+
+    def visible_channels(self): return []
+
+    def current_channel(self): return ""
+
+    def channel_colors(self): return {}
+
+    def set_channel_color(self, _ch, _color): pass
+
+    def set_channel_visible(self, _ch, _v): pass
+
+    def set_current_channel(self, _ch): pass
 
 
 class StepPage:
@@ -132,6 +156,12 @@ def make_window(run, schema=1, loader_path=None):
     w._rois, w._active_roi = [], None
     w._all_patches = []
     w._patch_channel_cache, w._patch_load_ready = {}, set()
+    w._overlay_display_cache = {}
+    w._pending_channel_demand, w._loader_channels, w._failed_channels = {}, {}, {}
+    w._restoring_display_state = False
+    w._step1_preview_mode = "overlay"
+    w.prev_img = SimpleNamespace(image=None, clear=lambda: None,
+                                 setImage=lambda *a, **k: None)
     w._preview_patch_idx = -1
     w._step2, w._step4 = StepPage(), StepPage()
     w.config = Config()

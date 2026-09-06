@@ -63,11 +63,9 @@ def _window(app):
     w = MainWindow()
     w.loader = _Loader()
     chans = w.loader.channel_names()
-    w.config.all_channels = chans
-    w.config.nuc_combo.clear()
-    w.config.nuc_combo.addItems(chans)
+    w.config.set_channels(chans)
     w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
-    w.config.nuc_row.spin.setValue(1.0)
+    w.config.set_nucleus("DAPI", 1.0)
     return w
 
 
@@ -110,19 +108,16 @@ def test_switching_to_the_patch_results_tab_still_works(app):
 def test_nucleus_and_group_weights_survive_a_session_round_trip(app, tmp_path):
     w = _window(app)
     try:
-        w.config.nuc_row.spin.setValue(0.8)
-        w.config._panels["markers"].gw_row.spin.setValue(0.4)
-        w.config._panels["markers"]._rows["CD3"].spin.setValue(0.7)
+        w.config.set_group_weight("markers", 0.4)
+        w.config._rows["CD3"].spin.setValue(0.7)
         before = w.config.get_full_config()
 
-        # These are exactly the fields the session carries.
-        assert before["nucleus"] == {"channel": "DAPI", "weight": 0.8}
+        assert before["nucleus"] == {"channel": "DAPI", "weight": 1.0}
         assert before["groups"]["markers"]["group_weight"] == 0.4
         assert before["groups"]["markers"]["channels"]["CD3"] == 0.7
 
         payload = json.loads(json.dumps(before))
-        w.config.nuc_row.spin.setValue(0.0)
-        w.config._panels["markers"]._rows["CD3"].spin.setValue(0.0)
+        w.config._rows["CD3"].spin.setValue(0.0)
         w._apply_step1_fusion_config(payload)
 
         assert w.config.get_full_config() == before
@@ -134,10 +129,10 @@ def test_the_fusion_preview_arithmetic_is_unchanged(app):
     """Pins group_weight x channel_weight, group max, and the R/B colour map."""
     w = _window(app)
     try:
-        w.config._panels["markers"].gw_row.spin.setValue(0.5)
-        w.config._panels["markers"]._rows["CD3"].spin.setValue(0.4)
-        w.config._panels["markers"]._rows["CD8"].spin.setValue(0.0)
-        w.config.nuc_row.spin.setValue(1.0)
+        w.config.set_group_weight("markers", 0.5)
+        w.config._rows["CD3"].spin.setValue(0.4)
+        w.config._rows["CD8"].spin.setValue(0.0)
+        w.config.set_nucleus_weight(1.0)
 
         rng = np.random.default_rng(0)
         dapi = rng.random((32, 32), dtype=np.float32) + 0.1
@@ -203,8 +198,150 @@ def test_moving_the_panel_kept_it_wired_to_the_preview(app):
         before = w.prev_img.image.copy()
 
         # A weight edit in the moved panel still reaches the preview.
-        w.config._panels["markers"]._rows["CD3"].spin.setValue(0.9)
+        w.config._rows["CD3"].spin.setValue(0.9)
         w._render_current_patch(reset_view=False)
         assert not np.array_equal(w.prev_img.image, before)
+    finally:
+        w.close()
+
+
+def test_an_old_multi_group_config_round_trips_value_for_value(app):
+    """One row cannot show two numbers, but nothing may be rewritten by it."""
+    w = _window(app)
+    try:
+        cfg = {
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {
+                "a": {"group_weight": 0.5, "channels": {"CD3": 0.2, "CD8": 0.9}},
+                "b": {"group_weight": 0.25, "channels": {"CD3": 0.7}},
+            },
+        }
+        w._apply_step1_fusion_config(cfg)
+
+        # Nothing was edited, so every (group, channel) keeps its own value.
+        assert w.config.get_full_config() == cfg
+        assert w.config.ambiguous_channels() == {"CD3": [0.2, 0.7]}
+    finally:
+        w.close()
+
+
+def test_editing_a_shared_channel_applies_to_every_group_it_is_in(app):
+    w = _window(app)
+    try:
+        cfg = {
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {
+                "a": {"group_weight": 0.5, "channels": {"CD3": 0.2, "CD8": 0.9}},
+                "b": {"group_weight": 0.25, "channels": {"CD3": 0.7}},
+            },
+        }
+        w._apply_step1_fusion_config(cfg)
+        w.config._rows["CD3"].spin.setValue(0.4)
+
+        out = w.config.get_full_config()
+        assert out["groups"]["a"]["channels"]["CD3"] == 0.4
+        assert out["groups"]["b"]["channels"]["CD3"] == 0.4
+        # An untouched channel is still exactly what it was loaded with.
+        assert out["groups"]["a"]["channels"]["CD8"] == 0.9
+        # Group weights are never touched by a row edit.
+        assert out["groups"]["a"]["group_weight"] == 0.5
+        assert out["groups"]["b"]["group_weight"] == 0.25
+    finally:
+        w.close()
+
+
+def test_a_shared_channel_shows_one_value_and_says_which(app):
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config({
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {
+                "a": {"group_weight": 1.0, "channels": {"CD3": 0.2}},
+                "b": {"group_weight": 1.0, "channels": {"CD3": 0.7}},
+            },
+        })
+        row = w.config._rows["CD3"]
+        assert row.weight() == 0.7                  # the largest of the two
+        assert "*" in row.name_label.text()
+        assert "several groups" in row.toolTip()
+    finally:
+        w.close()
+
+
+def test_reset_weights_is_a_real_edit_not_a_repaint(app):
+    """What the row shows and what gets fused and saved must be one number."""
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config({
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {"a": {"group_weight": 1.0,
+                             "channels": {"CD3": 0.7, "CD8": 0.4}}},
+        })
+        assert w.config.get_groups()["a"]["CD3"] == 0.7
+
+        changes = []
+        w.config.config_changed.connect(lambda: changes.append(1))
+        w.config.zero_marker_weights()
+
+        assert w.config._rows["CD3"].weight() == 0.0
+        assert w.config.get_groups()["a"] == {"CD3": 0.0, "CD8": 0.0}
+        assert w.config.get_full_config()["groups"]["a"]["channels"]["CD3"] == 0.0
+        assert len(changes) == 1              # one signal, not one per row
+    finally:
+        w.close()
+
+
+def test_the_nucleus_is_read_only_and_comes_from_the_handoff(app):
+    w = _window(app)
+    try:
+        assert w.config.nucleus_channel() == "DAPI"
+        assert w.config.get_nucleus() == ("DAPI", 1.0)
+
+        row = w.config._rows["DAPI"]
+        assert row.slider.isEnabled() is False
+        assert row.spin.isReadOnly() is True
+        # Every other row stays editable.
+        assert w.config._rows["CD3"].slider.isEnabled() is True
+
+        # Zeroing markers never touches the nucleus.
+        w.config.zero_marker_weights()
+        assert w.config.get_nucleus() == ("DAPI", 1.0)
+    finally:
+        w.close()
+
+
+def test_a_session_cannot_replace_the_nucleus_step0_handed_over(app):
+    """The nucleus is read-only in Step1, so nothing invisible may change it."""
+    w = _window(app)
+    try:
+        assert w.config.get_nucleus() == ("DAPI", 1.0)
+
+        w._apply_step1_fusion_config({
+            "nucleus": {"channel": "CD3", "weight": 0.6},
+            "groups": {"a": {"group_weight": 1.0, "channels": {"CD8": 0.2}}},
+        })
+
+        assert w.config.nucleus_channel() == "DAPI"
+        assert w.config.get_nucleus() == ("DAPI", 1.0)
+        assert w.config._rows["DAPI"].spin.isReadOnly() is True
+        assert w.config._rows["CD3"].spin.isReadOnly() is False
+        # The groups it did carry are restored as saved.
+        assert w.config.get_groups() == {"a": {"CD8": 0.2}}
+    finally:
+        w.close()
+
+
+def test_the_nucleus_never_stays_inside_a_marker_group(app):
+    """Otherwise it contributes twice: once as blue, once as red."""
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config({
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {"a": {"group_weight": 1.0,
+                             "channels": {"DAPI": 0.9, "CD3": 0.3}}},
+        })
+
+        assert w.config.get_groups() == {"a": {"CD3": 0.3}}
+        assert w.config.get_nucleus() == ("DAPI", 1.0)
     finally:
         w.close()

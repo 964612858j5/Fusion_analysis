@@ -227,6 +227,10 @@ class Step0Page(QWidget):
     # made anywhere (this page, the navigator popup, Step1) have been written
     # through the one Step0 writer and a new manifest has been published.
     geometry_committed = pyqtSignal(dict)
+    # One channel's display mapping (Min/Max/Gamma) changed.  Narrow on
+    # purpose: it names the channel and nothing else, so another step can drop
+    # exactly that channel's derived pixels instead of everything it holds.
+    display_mapping_changed = pyqtSignal(str)
     # The published handoff no longer matches the geometry in memory and a
     # matching new manifest could NOT be published.  Separate from
     # `geometry_committed` (which means the opposite) and from
@@ -4390,6 +4394,29 @@ class Step0Page(QWidget):
         self._bring_to_front(win)
         return win
 
+    def focus_intensity_on(self, channel):
+        """Point the shared Intensity window at `channel` for another step.
+
+        Step1 has its own channel list but must not grow its own Min/Max/Gamma
+        controls: those numbers belong to this page's remap config, which the
+        handoff hashes.  This is the same narrow borrowing the Tissue Preview
+        uses — the window, the workbench and the params stay Step0's.
+        """
+        if not channel:
+            return False
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None:
+            return False
+        if getattr(self, "_intensity_window", None) is not None:
+            self._engage_conditioning_workbench()
+        try:
+            self._push_color_to_workbench(channel, self._channel_color(channel))
+            wb.set_active_channel(channel)
+        except Exception as exc:
+            print(f"[Step0] could not focus Intensity on {channel}: {exc}")
+            return False
+        return True
+
     def toggle_intensity_window(self):
         """The button's other gesture: hide a window that is up, bring back
         one that is not.
@@ -6640,6 +6667,9 @@ class Step0Page(QWidget):
     def _on_display_mapping_changed(self, cid):
         """A channel's mapping changed: the compare panels redraw (a levels
         and table swap), the full image and its overlay get the numbers."""
+        # Announced first, so a listener that caches remapped pixels drops the
+        # stale ones before anything else redraws from them.
+        self.display_mapping_changed.emit(cid)
         if cid in (self.current_channel, self.nucleus_channel):
             self._refresh_preview_display(keep_zoom=True)
             # The Tissue Preview is drawn with the same numbers, but it is a

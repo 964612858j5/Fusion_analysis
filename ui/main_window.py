@@ -30,7 +30,10 @@ from ..config import (
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
 from ..core.fusion_engine import FusionEngine
-from ..core.channel_remap import apply_channel_remap
+from ..core.channel_remap import (
+    apply_channel_remap, compose_multichannel_overlay,
+    compute_qupath_auto_minmax,
+)
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -68,6 +71,37 @@ from .step4_page import Step4Page
 
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
 
+# The overlay's channels are remapped BEFORE they are handed to the compositor
+# (so the expensive part can be cached), so the compositor itself must not remap
+# them again: this window is the identity transform on [0, 1].
+_IDENTITY_REMAP = {"min": 0.0, "max": 1.0, "brightness": 0.0,
+                   "contrast": 1.0, "gamma": 1.0}
+
+STEP1_PREVIEW_OVERLAY = "overlay"
+STEP1_PREVIEW_FUSION = "fusion"
+
+
+def _round_display_value(value):
+    """One display-parameter value, rounded so float noise cannot miss a cache
+    hit while a real edit still misses it."""
+    if value is None:
+        return None
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hex_to_rgb01(value):
+    """"#rrggbb" -> (r, g, b) floats in [0, 1]; white for anything unreadable."""
+    text = str(value or "").lstrip("#")
+    if len(text) != 6:
+        return (1.0, 1.0, 1.0)
+    try:
+        return tuple(int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return (1.0, 1.0, 1.0)
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -92,6 +126,29 @@ class MainWindow(QMainWindow):
         self._patch_load_ready: set = set()
         self._patch_seg_results: dict = {}
         self._preserve_view_after_patch_load: dict = {}
+        # Which preview the middle column shows.  Overlay is the landing view:
+        # a fresh dataset shows DAPI and nothing else, and ticking a channel
+        # changes the picture at once.
+        self._step1_preview_mode = STEP1_PREVIEW_OVERLAY
+        # Remapped [0,1] channel images for the overlay, keyed by
+        # (patch index, channel, display window).  This is what stops a tick
+        # from re-running a percentile over every channel: the blend itself is
+        # sub-millisecond, the mapping is not.  Cleared wherever the raw patch
+        # cache is cleared.
+        self._overlay_display_cache: dict = {}
+        # What each patch still wants that its RUNNING loader is not fetching.
+        # Per channel, not a flag: a read that fails must not take a tick made
+        # while it ran down with it.
+        self._pending_channel_demand: dict = {}   # patch -> {channel, ...}
+        # What each running loader was asked for, so a failure can be blamed on
+        # the right channels and nothing else.
+        self._loader_channels: dict = {}          # patch -> {channel, ...}
+        # Channels whose read failed for this patch.  Not retried on their own;
+        # a user ticking the channel again clears the mark.
+        self._failed_channels: dict = {}          # patch -> {channel, ...}
+        # True while a saved display state is being put back, so the per-change
+        # handlers stay quiet and the reconcile at the end is the only one.
+        self._restoring_display_state = False
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -250,6 +307,10 @@ class MainWindow(QMainWindow):
         # replacement could be published: fail closed rather than let Step1 keep
         # using results computed for geometry that is gone.
         self._step0.handoff_invalidated.connect(self._on_step0_handoff_invalidated)
+        # Min/Max/Gamma live in Step0's Intensity window; when they move, the
+        # overlay's remapped pixels for that ONE channel are stale.
+        self._step0.display_mapping_changed.connect(
+            self._on_display_mapping_changed)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -269,8 +330,10 @@ class MainWindow(QMainWindow):
         main_split.setChildrenCollapsible(False)
         self._step1_main_split = main_split
 
-        # Left: read-only ROI/patch overview for Step1. ROI and patches come
-        # from Step0; drawing/editing remains owned by Step0.
+        # Left: the channel panel, plus the entry to the shared Tissue Preview.
+        # ROI and patch geometry are Step0's to publish, but Step1 does edit
+        # patches and may delete an ROI — both go through Step0's one model and
+        # its writer, never through a Step1 copy.
         left = QWidget()
         # Wide enough for a channel row (name, slider, weight box) rather than
         # for a status line: the column's content changed, so its floor did.
@@ -297,6 +360,19 @@ class MainWindow(QMainWindow):
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         ll.addWidget(self._btn_step1_tissue_nav)
 
+        self._btn_step1_intensity = QPushButton("Intensity…")
+        self._btn_step1_intensity.setToolTip(
+            "Open the shared Intensity window on the current channel. "
+            "Min/Max/Gamma belong to Step0's remap config; this only points "
+            "them at a channel.")
+        self._btn_step1_intensity.setStyleSheet(
+            "QPushButton{color:#c678dd;font-size:10px;"
+            "border:1px solid #4a3a5a;border-radius:3px;padding:3px 8px;}"
+            "QPushButton:hover{background:#231a2a;}"
+        )
+        self._btn_step1_intensity.clicked.connect(self._show_intensity_window)
+        ll.addWidget(self._btn_step1_intensity)
+
         # The one channel panel lives here, in the column the removed tissue
         # thumbnail left empty.  It is constructed in its final home rather than
         # built elsewhere and reparented, so there is never a moment with two
@@ -306,6 +382,9 @@ class MainWindow(QMainWindow):
         self.config.setMinimumHeight(220)
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
+        self.config.visibility_changed.connect(self._on_channel_visibility_changed)
+        self.config.current_channel_changed.connect(self._on_current_channel_changed)
+        self.config.color_changed.connect(self._on_channel_color_changed)
         ll.addWidget(self.config, stretch=1)
 
         self.roi_status = QLabel("No ROI loaded")
@@ -323,10 +402,29 @@ class MainWindow(QMainWindow):
         pw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
-        pl.addWidget(self._make_label(
-            "③ Fusion Preview  Red=cyto  Blue=nucleus  (real-time update)",
-            bold=True,
-        ))
+        head_row = QHBoxLayout()
+        self._preview_title = self._make_label("③ Preview", bold=True)
+        head_row.addWidget(self._preview_title)
+        head_row.addStretch()
+        self._btn_mode_overlay = QPushButton("Overlay")
+        self._btn_mode_fusion = QPushButton("Fusion")
+        for btn, mode in ((self._btn_mode_overlay, STEP1_PREVIEW_OVERLAY),
+                          (self._btn_mode_fusion, STEP1_PREVIEW_FUSION)):
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                "QPushButton{color:#9bd0ff;background:#182230;"
+                "border:1px solid #354a63;border-radius:4px;"
+                "padding:2px 10px;font-size:10px;}"
+                "QPushButton:checked{background:#2a5;color:#111;font-weight:bold;}")
+            btn.clicked.connect(lambda _c, m=mode: self.set_preview_mode(m))
+            head_row.addWidget(btn)
+        self._btn_mode_overlay.setToolTip(
+            "Show the ticked channels in their own colours, using the Intensity "
+            "window's Min/Max/Gamma. Fusion weights are not used here.")
+        self._btn_mode_fusion.setToolTip(
+            "Show the Step1 fusion: nucleus, group and channel weights, "
+            "cyto in red and nucleus in blue.")
+        pl.addLayout(head_row)
 
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Preview patch:"))
@@ -563,6 +661,9 @@ class MainWindow(QMainWindow):
         self._step1_5 = Step15BackgroundCorrectionPage()
         self._stack.addWidget(self._step1_5)
 
+        # Land on the overlay: a fresh dataset shows DAPI and nothing else, so
+        # the first tick changes the picture rather than nothing.
+        self.set_preview_mode(STEP1_PREVIEW_OVERLAY, force=True)
         self._stack.setCurrentIndex(0)
         self._set_step_active(0)
 
@@ -784,11 +885,16 @@ class MainWindow(QMainWindow):
 
         # 4. Everything keyed by a patch index.
         self._patch_channel_cache.clear()
+        self._overlay_display_cache.clear()
         self._patch_load_ready.clear()
         self._patch_seg_results.clear()
         self._preserve_view_after_patch_load.clear()
+        self._pending_channel_demand.clear()
+        self._loader_channels.clear()
+        self._failed_channels.clear()
         self._preview_patch_idx = -1
         self._selected_step1_patch_idx = -1
+        self._step1_preview_mode = STEP1_PREVIEW_OVERLAY
 
         # 5. Everything keyed by a patch name / by the old dataset's results.
         self._seg_preview_history = {}
@@ -1187,21 +1293,17 @@ class MainWindow(QMainWindow):
                     }
                 }
                 source = "default_all_channels"
-            self.config.all_channels = channels
-            self.config.nuc_combo.clear()
-            self.config.nuc_combo.addItems(channels)
+            self.config.set_channels(channels)
             self.config.load_panel(panel_groups, nucleus_channel)
-            idx = self.config.nuc_combo.findText(nucleus_channel)
-            if idx >= 0:
-                self.config.nuc_combo.setCurrentIndex(idx)
-            self.config.nuc_row.spin.setValue(1.0)   # DAPI/nucleus default weight = 1
+            self.config.set_nucleus(nucleus_channel, 1.0)   # Step0's answer
             self._zero_marker_weights()
             print(f"[Step1] nucleus_channel={nucleus_channel}")
             print(f"[Step1] panel_groups source={source}")
-            print(f"[Step1] config panel initialized={bool(self.config._panels)}")
+            print(f"[Step1] config panel initialized={bool(self.config.get_groups())}")
 
         self._stop_all_loaders()
         self._patch_channel_cache.clear()
+        self._overlay_display_cache.clear()
         self._patch_load_ready.clear()
         self._preview_patch_idx = -1
         self._on_rois_changed(self._rois)
@@ -1510,15 +1612,17 @@ class MainWindow(QMainWindow):
 
         fusion_cfg = self.config.get_full_config()
         channel_weights = {}
-        channel_visibility = {}
         for gdata in fusion_cfg.get("groups", {}).values():
             for ch, weight in (gdata.get("channels") or {}).items():
                 channel_weights[ch] = float(weight)
-                channel_visibility[ch] = float(weight) > 0
         nuc = fusion_cfg.get("nucleus") or {}
         if nuc.get("channel"):
             channel_weights[nuc["channel"]] = float(nuc.get("weight", 0.0))
-            channel_visibility[nuc["channel"]] = float(nuc.get("weight", 0.0)) > 0
+        # Display state, Step1's own.  `channel_visibility` used to be a shadow
+        # of "weight > 0" that nothing read; it now carries the real ticks.
+        visible = set(self.config.visible_channels())
+        channel_visibility = {ch: (ch in visible)
+                              for ch in (self.config.all_channels or [])}
 
         return {
             "version": 1,
@@ -1544,7 +1648,9 @@ class MainWindow(QMainWindow):
             "fusion_config": fusion_cfg,
             "channel_weights": channel_weights,
             "channel_visibility": channel_visibility,
-            "channel_colors": {},
+            "channel_colors": self.config.channel_colors(),
+            "current_channel": self.config.current_channel(),
+            "preview_mode": self._step1_preview_mode,
             "p2_params": self._p2_params,
             "segmentation_preview_history": self._seg_preview_history,
             "active_segmentation_method": self._active_segmentation_method,
@@ -1697,30 +1803,61 @@ class MainWindow(QMainWindow):
             print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
 
     def _apply_step1_fusion_config(self, cfg):
+        """Restore the fusion config into the one channel panel.
+
+        Group membership and group weights are restored as they were saved:
+        the panel no longer SHOWS groups, but it still carries them, because a
+        folded weight would change old projects and everything downstream.
+        """
         cfg = dict(cfg or {})
-        nucleus_cfg = cfg.get("nucleus") or {}
-        groups_cfg = cfg.get("groups") or {}
-        for name in list(self.config._panels.keys()):
-            self.config._del_group(name)
+        names = self.loader.channel_names() if self.loader else []
+        self.config.set_channels(names)
+        self.config.apply_full_config(cfg)
 
-        nuc_ch = str(nucleus_cfg.get("channel") or "")
-        self.config.nuc_combo.clear()
-        self.config.nuc_combo.addItems(self.loader.channel_names() if self.loader else [])
-        idx = self.config.nuc_combo.findText(nuc_ch)
-        self.config.nuc_combo.setCurrentIndex(idx if idx >= 0 else -1)
-        self.config.nuc_row.spin.setValue(float(nucleus_cfg.get("weight", 0.0) or 0.0))
+    def _apply_step1_display_state(self, sess):
+        """Restore Step1's own display state: ticks, colours, current channel,
+        preview mode.
 
-        for gname, gdata in groups_cfg.items():
-            channels = {
-                str(ch): float(w)
-                for ch, w in (gdata.get("channels") or {}).items()
-                if not self.loader or ch in self.loader.channel_names()
-            }
-            self.config._add_group(str(gname), channels)
-            panel = self.config._panels.get(str(gname))
-            if panel:
-                panel.gw_row.spin.setValue(float(gdata.get("group_weight", 1.0)))
-        self.config.config_changed.emit()
+        Restoring is not clicking.  It goes through the panel's batch entry so
+        a channel the user deliberately left hidden comes back hidden even when
+        it is the current one, and so the preview is drawn once at the end
+        rather than once per channel.
+
+        None of this belongs to the Step0 handoff — it never touches the remap
+        config the manifest hashes — so it is restored here, after the
+        authoritative reader has settled geometry and data sources.  A dataset
+        with no session simply keeps the defaults.
+        """
+        sess = dict(sess or {})
+        # Everything is put back silently first — the mode included, because
+        # which channels the restored ticks require depends on it — and then
+        # reconciled once, so a restore is one load and one redraw rather than
+        # a chain of them.
+        mode = str(sess.get("preview_mode") or "")
+        if mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION):
+            self.set_preview_mode(mode, force=True, reconcile=False)
+
+        colors = sess.get("channel_colors")
+        visibility = sess.get("channel_visibility")
+        current = str(sess.get("current_channel") or "")
+        if colors or visibility or current:
+            self._restoring_display_state = True
+            try:
+                self.config.restore_display_state(
+                    colors=colors if isinstance(colors, dict) else None,
+                    visibility=visibility if isinstance(visibility, dict) else None,
+                    current_channel=current)
+            finally:
+                self._restoring_display_state = False
+            self._on_display_state_restored()
+        else:
+            self._on_display_state_restored()
+
+    def _on_display_state_restored(self):
+        """One load and one redraw after a bulk restore."""
+        self._ensure_channels_cached(self._preview_patch_idx)
+        self._refresh_patch_preview(reset_view=False)
+        self._schedule_step1_session_save()
 
     def _apply_step1_session_fields(self, sess, out_dir, raw_ome, roi_dir,
                                     step2_dir, roi_id=""):
@@ -1736,6 +1873,7 @@ class MainWindow(QMainWindow):
 
         fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
         self._apply_step1_fusion_config(fusion_cfg)
+        self._apply_step1_display_state(sess)
 
         self._p2_params = sess.get("p2_params")
         if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):
@@ -2022,7 +2160,7 @@ class MainWindow(QMainWindow):
             self._corrected_decisions = decisions
             self._corrected_zarr_mode = str(sess.get("corrected_zarr_mode") or "")
 
-            self.config.all_channels = self.loader.channel_names()
+            self.config.set_channels(self.loader.channel_names())
             fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
             self._apply_step1_fusion_config(fusion_cfg)
 
@@ -2079,6 +2217,7 @@ class MainWindow(QMainWindow):
 
             self._stop_all_loaders()
             self._patch_channel_cache.clear()
+            self._overlay_display_cache.clear()
             self._patch_load_ready.clear()
             self._preview_patch_idx = -1
             self._on_rois_changed(self._rois)
@@ -2210,8 +2349,8 @@ class MainWindow(QMainWindow):
                        else (ctx.get("output_dir") or OUTPUT_DIR))
         patches = list(ctx.get("patches") or self._all_patches or [])
         nucleus_channel = ""
-        if hasattr(self, "config") and getattr(self.config, "nuc_combo", None) is not None:
-            nucleus_channel = self.config.nuc_combo.currentText() or ""
+        if hasattr(self, "config"):
+            nucleus_channel = self.config.nucleus_channel() or ""
         self._step1_5.set_context(self.loader, step1_5_dir, patches, nucleus_channel)
         self._stack.setCurrentWidget(self._step1_5)
         # Step1.5 is reached by widget and never updates `_current_step`, so the
@@ -2384,10 +2523,7 @@ class MainWindow(QMainWindow):
         return lbl
 
     def _zero_marker_weights(self):
-        for panel in self.config._panels.values():
-            for row in panel._rows.values():
-                row.spin.setValue(0.0)
-        self.config.config_changed.emit()
+        self.config.zero_marker_weights()
 
     @staticmethod
     def _patch_inside_roi_bbox(patch, roi):
@@ -2510,6 +2646,7 @@ class MainWindow(QMainWindow):
         if not patches:
             self._stop_all_loaders()
             self._patch_channel_cache.clear()
+            self._overlay_display_cache.clear()
             self._patch_load_ready.clear()
             self._preview_patch_idx = -1
             self._selected_step1_patch_idx = -1
@@ -2522,6 +2659,7 @@ class MainWindow(QMainWindow):
         # Drop cache for patches whose ROI coordinates changed
         if len(patches) < len(old_rois):
             self._patch_channel_cache.clear()
+            self._overlay_display_cache.clear()
             self._patch_load_ready.clear()
             self._patch_seg_results = {
                 i: self._patch_seg_results.get(i, {})
@@ -2537,6 +2675,7 @@ class MainWindow(QMainWindow):
         for idx, roi in enumerate(patches):
             if idx < len(old_rois) and roi != old_rois[idx]:
                 self._patch_channel_cache.pop(idx, None)
+                self._drop_overlay_cache_for(idx)
                 self._patch_load_ready.discard(idx)
                 self._stop_loader_for(idx)
                 self._patch_seg_results.pop(idx, None)
@@ -2564,7 +2703,7 @@ class MainWindow(QMainWindow):
 
         # Show cached render instantly if available; otherwise wait for preload
         if self._preview_patch_idx in self._patch_load_ready:
-            self._render_current_patch(reset_view=True)
+            self._refresh_patch_preview(reset_view=True)
             self.patch_cache_status.setText(
                 f"P{self._preview_patch_idx+1} (cached) — "
                 f"preloading remaining patches in background…"
@@ -2590,16 +2729,11 @@ class MainWindow(QMainWindow):
         self._schedule_step1_session_save()
 
         if idx in self._patch_load_ready:
-            cache = self._patch_channel_cache.get(idx) or {}
-            missing = [ch for ch in self._needed_channels() if ch not in cache]
-            if missing:
-                self._patch_channel_cache.pop(idx, None)
-                self._patch_load_ready.discard(idx)
-                self.prev_img.clear()
-                self.patch_cache_status.setText("Loading patch...")
-                self._start_loader_for(idx)
-            else:
-                self._render_current_patch(reset_view=True)
+            # Only the channels this patch does not have yet are read, and the
+            # ones it does have stay: a missing channel is not a reason to drop
+            # everything already in memory.
+            self._ensure_channels_cached(idx)
+            self._refresh_patch_preview(reset_view=True)
         elif idx in self._patch_loaders:
             self.prev_img.clear()
             self.patch_cache_status.setText("Loading patch...")
@@ -2611,22 +2745,55 @@ class MainWindow(QMainWindow):
 
     # ── Background preloading ────────────────────────────────────────
 
-    def _needed_channels(self):
-        """Return only channels needed for the current Step1 weighted preview."""
+    def _fusion_weighted_channels(self):
+        """Channels the FUSION preview would actually use: the nucleus, and
+        every grouped channel whose effective weight is above zero."""
         if self.loader is None:
             return []
-        available = set(self.loader.channel_names())
-        needed = []
+        try:
+            available = set(self.loader.channel_names())
+        except Exception:
+            return []
+        wanted = []
         groups = self.config.get_groups()
-        for ch_weights in groups.values():
-            for ch, w in ch_weights.items():
-                if ch in available and float(w or 0) > 0:
-                    needed.append(ch)
-        nuc_ch, nuc_w = self.config.get_nucleus()
-        if nuc_ch in available and (float(nuc_w or 0) > 0 or not needed):
-            needed.append(nuc_ch)
-        seen = set()
-        return [ch for ch in needed if not (ch in seen or seen.add(ch))]
+        group_weights = self.config.get_group_weights()
+        for gname, ch_weights in groups.items():
+            if float(group_weights.get(gname, 1.0) or 0.0) <= 0:
+                continue
+            for ch, weight in ch_weights.items():
+                if ch in available and float(weight or 0) > 0 and ch not in wanted:
+                    wanted.append(ch)
+        nuc_ch, _nuc_w = self.config.get_nucleus()
+        if nuc_ch in available and nuc_ch not in wanted:
+            wanted.append(nuc_ch)
+        return wanted
+
+    def _needed_channels(self):
+        """The channels Step1 must hold pixels for, for the preview it is
+        showing.
+
+        Overlay draws what is ticked, so that is its set.  Fusion draws what it
+        weighs, so its set is the nucleus plus every channel with a live
+        weight.  The channel being edited is in both, because Intensity has to
+        have something to work on.  What is never in either is "everything":
+        a weight edit may pull in one channel that has just become necessary,
+        and must never re-read the ones already in hand.
+        """
+        if self.loader is None:
+            return []
+        try:
+            available = set(self.loader.channel_names())
+        except Exception:
+            return []
+        if self._step1_preview_mode == STEP1_PREVIEW_FUSION:
+            needed = [ch for ch in self._fusion_weighted_channels()]
+        else:
+            needed = [ch for ch in self.config.visible_channels()
+                      if ch in available]
+        current = self.config.current_channel()
+        if current and current in available and current not in needed:
+            needed.append(current)
+        return needed
 
     @staticmethod
     def _limited_patch_bbox(roi, max_px=STEP1_PATCH_PREVIEW_MAX_PX):
@@ -2649,9 +2816,7 @@ class MainWindow(QMainWindow):
         needed = self._needed_channels()
         if not needed:
             self.prev_status.setText(
-                "⚠ No loadable channels — check channel names match OME-TIFF\n"
-                f"Available: {self.loader.channel_names()}"
-            )
+                "No visible channels — tick a channel to show it.")
             return
 
         for idx, roi in enumerate(self._all_patches):
@@ -2661,6 +2826,51 @@ class MainWindow(QMainWindow):
             if idx in self._patch_loaders and self._patch_loaders[idx].isRunning():
                 continue   # already loading
             self._start_loader_for(idx, needed=needed)
+
+    def _connect_patch_loader(self, thread, idx):
+        """Wire one loader's signals so each answer carries its own identity.
+
+        Every callback is bound to the thread that will emit it.  Disconnecting
+        is not enough on its own: a queued signal already sitting in the event
+        loop is delivered whatever happens to the connection afterwards, so an
+        old worker's late `done` could write the previous dataset's pixels into
+        a patch that was cleared, and its late `error` could blame the channels
+        the CURRENT worker is reading.  `sender()` is not used for this; the
+        identity is captured here, where it is known.
+        """
+        thread.done.connect(
+            lambda patch_idx, cache, t=thread:
+                self._on_patch_loaded_from(t, patch_idx, cache))
+        thread.progress.connect(
+            lambda patch_idx, done, total, ch, t=thread:
+                self._on_patch_progress_from(t, patch_idx, done, total, ch))
+        thread.error.connect(
+            lambda patch_idx, msg, t=thread:
+                self._on_patch_error_from(t, patch_idx, msg))
+        thread.finished.connect(
+            lambda i=idx, t=thread: self._on_patch_loader_finished(i, t))
+
+    def _is_current_patch_loader(self, thread, patch_idx):
+        return self._patch_loaders.get(patch_idx) is thread
+
+    def _on_patch_loaded_from(self, thread, patch_idx, cache):
+        if not self._is_current_patch_loader(thread, patch_idx):
+            print(f"[Step1] dropped a late patch result for P{patch_idx+1}: "
+                  "it came from a loader that is no longer current")
+            return
+        self._on_patch_loaded(patch_idx, cache)
+
+    def _on_patch_progress_from(self, thread, patch_idx, done, total, ch):
+        if not self._is_current_patch_loader(thread, patch_idx):
+            return
+        self._on_patch_progress(patch_idx, done, total, ch)
+
+    def _on_patch_error_from(self, thread, patch_idx, msg):
+        if not self._is_current_patch_loader(thread, patch_idx):
+            print(f"[Step1] dropped a late patch error for P{patch_idx+1}: "
+                  "it came from a loader that is no longer current")
+            return
+        self._on_patch_error(patch_idx, msg)
 
     def _start_loader_for(self, idx, needed=None):
         """Start (or restart) the loader thread for patch `idx`."""
@@ -2687,16 +2897,25 @@ class MainWindow(QMainWindow):
         print("[Step1] patch preview source: fullres")
         print(f"[Step1] patch bbox: original={list(map(int, patch_bbox))} loaded={[y0, y1, x0, x1]}")
         print(f"[Step1] channels loaded for patch: {needed}")
-        t = PreviewLoaderThread(idx, self.loader, needed,
-                                y0, y1, x0, x1,
-                                downsample=1, normalize=False)
-        t.done.connect(self._on_patch_loaded)
-        t.progress.connect(self._on_patch_progress)
-        t.error.connect(self._on_patch_error)
-        t.finished.connect(lambda idx=idx, thread=t: self._on_patch_loader_finished(idx, thread))
-        self._patch_loaders[idx] = t
-        self._set_patch_btn_state(idx, 'loading')
-        t.start()
+        # Recorded HERE, not by the caller: `_stop_loader_for` above clears the
+        # previous thread's record, so anything written before it would be
+        # wiped, leaving a failure with no idea which channels it was reading.
+        try:
+            t = PreviewLoaderThread(idx, self.loader, needed,
+                                    y0, y1, x0, x1,
+                                    downsample=1, normalize=False)
+            self._connect_patch_loader(t, idx)
+            self._patch_loaders[idx] = t
+            self._loader_channels[idx] = set(needed)
+            self._set_patch_btn_state(idx, 'loading')
+            t.start()
+        except Exception:
+            # Nothing is in flight, so nothing may claim to be.
+            self._patch_loaders.pop(idx, None)
+            self._loader_channels.pop(idx, None)
+            print(f"[Step1] failed to start the loader for P{idx+1}:\n"
+                  f"{traceback.format_exc()}")
+            raise
         print("[Step1-preview] full_image_load=False")
 
     def _on_patch_progress(self, patch_idx, done, total, ch):
@@ -2706,8 +2925,13 @@ class MainWindow(QMainWindow):
             )
 
     def _on_patch_loaded(self, patch_idx, cache):
-        self._patch_channel_cache[patch_idx] = cache
-        self._patch_load_ready.add(patch_idx)
+        # Merge, do not replace: a loader may have been sent for one newly
+        # ticked channel, and the channels already in hand must survive it.
+        held = self._patch_channel_cache.setdefault(patch_idx, {})
+        held.update(cache)
+        needed = self._needed_channels()
+        if all(ch in held for ch in needed):
+            self._patch_load_ready.add(patch_idx)
         self._set_patch_btn_state(patch_idx, 'ready')
 
         nuc_ch, _ = self.config.get_nucleus()
@@ -2733,10 +2957,10 @@ class MainWindow(QMainWindow):
             )
             state = self._preserve_view_after_patch_load.pop(patch_idx, None)
             if state is not None:
-                self._render_current_patch(reset_view=False)
+                self._refresh_patch_preview(reset_view=False)
                 self._restore_patch_preview_view_state(state)
             else:
-                self._render_current_patch(reset_view=True)
+                self._refresh_patch_preview(reset_view=True)
 
         # Update global status once all patches are loaded
         n_ready = len(self._patch_load_ready)
@@ -2745,16 +2969,43 @@ class MainWindow(QMainWindow):
             self.patch_cache_status.setText(f"All {n_total} patches cached. Click P1-P{n_total} to switch instantly.")
 
     def _on_patch_error(self, patch_idx, msg):
+        # Blame the channels this loader was actually reading, and only those.
+        # A tick made while it ran asked for something else and is still owed.
+        failed = self._loader_channels.get(patch_idx, set())
+        if failed:
+            self._failed_channels.setdefault(patch_idx, set()).update(failed)
         self._set_patch_btn_state(patch_idx, 'error')
         if patch_idx == self._preview_patch_idx:
             self.patch_cache_status.setText(f"P{patch_idx+1} load error: {msg}")
         print(f"[Preview] P{patch_idx+1} error: {msg}")
 
     def _on_patch_loader_finished(self, patch_idx, thread):
-        if self._patch_loaders.get(patch_idx) is thread:
-            self._patch_loaders.pop(patch_idx, None)
+        """One loader ended.  Serve a demand that arrived while it ran — once.
+
+        Three things are deliberately NOT retried here: a thread that is no
+        longer the one in the slot (it was replaced or stopped, and its late
+        exit says nothing about what is wanted now), a patch nobody asked more
+        of, and a read that failed.  Any of those looping back into a new load
+        is how a failing channel becomes an endless restart, or an old
+        dataset's thread starts reading for the new one.
+        """
+        if self._patch_loaders.get(patch_idx) is not thread:
+            return
+        self._patch_loaders.pop(patch_idx, None)
+        self._loader_channels.pop(patch_idx, None)
+        pending = self._pending_channel_demand.pop(patch_idx, set())
+        if not pending:
+            return
+        if self.loader is None or patch_idx != self._preview_patch_idx:
+            return
+        # Whatever was asked for while this loader ran is still wanted, whether
+        # the load succeeded or failed; `_ensure_channels_cached` drops the
+        # channels that are now cached or have failed on their own.
+        self._ensure_channels_cached(patch_idx)
 
     def _stop_loader_for(self, idx, timeout_ms=3000):
+        self._pending_channel_demand.pop(idx, None)
+        self._loader_channels.pop(idx, None)
         thread = self._patch_loaders.get(idx)
         if thread is None:
             return True
@@ -2768,6 +3019,9 @@ class MainWindow(QMainWindow):
 
     def _stop_all_loaders(self):
         self._preload_debounce.stop()
+        self._pending_channel_demand.clear()
+        self._loader_channels.clear()
+        self._failed_channels.clear()
         survivors = {}
         for idx, t in list(self._patch_loaders.items()):
             if t.isRunning():
@@ -2817,6 +3071,7 @@ class MainWindow(QMainWindow):
             return
         self._stop_all_loaders()
         self._patch_channel_cache.clear()
+        self._overlay_display_cache.clear()
         self._patch_load_ready.clear()
         for i in range(len(self._all_patches)):
             self._set_patch_btn_state(i, 'idle')
@@ -2853,6 +3108,214 @@ class MainWindow(QMainWindow):
     def restore_patch_view_state(self, state):
         self._restore_patch_preview_view_state(state)
 
+    # ── preview mode, overlay rendering ────────────────────────────────
+    def set_preview_mode(self, mode, force=False, reconcile=True):
+        """Switch between the multi-channel overlay and the fusion preview.
+
+        Ticks, weights, colours, the current channel and the camera are left
+        alone; no fusion worker is started. The two modes do not need the same
+        channels, though, so entering one reads the ones it is missing —
+        unless `reconcile=False`, which is for a caller that is about to
+        restore more state and wants a single load and a single redraw at the
+        end of it.
+        """
+        mode = STEP1_PREVIEW_FUSION if mode == STEP1_PREVIEW_FUSION else STEP1_PREVIEW_OVERLAY
+        changed = (mode != self._step1_preview_mode)
+        self._step1_preview_mode = mode
+        self._btn_mode_overlay.setChecked(mode == STEP1_PREVIEW_OVERLAY)
+        self._btn_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
+        self._preview_title.setText(
+            "③ Overlay  (ticked channels, their colours and Intensity window)"
+            if mode == STEP1_PREVIEW_OVERLAY else
+            "③ Fusion Preview  Red=cyto  Blue=nucleus  (weights apply)")
+        if (changed or force) and reconcile:
+            # The two modes need different channels.  Arriving in fusion with
+            # only the overlay's channels in hand would sit on "Preparing"
+            # forever unless the missing ones are asked for here.
+            self._ensure_channels_cached(self._preview_patch_idx)
+            self._refresh_patch_preview(reset_view=False)
+            self._schedule_step1_session_save()
+
+    def _drop_overlay_cache_for(self, patch_idx):
+        """Forget one patch's remapped images; its raw pixels went too."""
+        self._overlay_display_cache = {
+            key: value for key, value in self._overlay_display_cache.items()
+            if key[0] != patch_idx}
+
+    def _refresh_patch_preview(self, reset_view=False):
+        """Draw whichever preview the current mode asks for."""
+        if self._step1_preview_mode == STEP1_PREVIEW_OVERLAY:
+            self._render_overlay_patch(reset_view=reset_view)
+        else:
+            self._render_current_patch(reset_view=reset_view)
+
+    _DISPLAY_KEYS = ("min", "max", "brightness", "contrast", "gamma")
+
+    def _display_window_for(self, channel, remap):
+        """The Min/Max/Gamma this channel is shown with, and a key for it.
+
+        The Step0 Intensity window owns these numbers when it has them.  A
+        channel it never touched gets a percentile window instead of the raw
+        full range, which would otherwise wash the overlay out.
+
+        The key carries the VALUES, not their provenance: a slider moved in the
+        Intensity window changes the numbers while the source stays "step0", so
+        a key made of labels would keep handing back yesterday's pixels.
+        """
+        params = (remap or {}).get(channel)
+        if params:
+            key = tuple((name, _round_display_value(params.get(name)))
+                        for name in self._DISPLAY_KEYS)
+            return dict(params), key
+        return None, ("auto",)
+
+    def _overlay_gray(self, patch_idx, channel, arr, remap):
+        """This channel as a [0,1] image, remapped once and kept.
+
+        Measured on a 1024x1024 patch: the percentile/remap is ~32 ms per
+        channel and the blend that follows is ~0.5 ms, so a tick that
+        recomposited from raw pixels would pay the whole mapping again for
+        every channel already on screen.
+        """
+        params, key_part = self._display_window_for(channel, remap)
+        key = (patch_idx, channel, key_part, arr.shape)
+        hit = self._overlay_display_cache.get(key)
+        if hit is not None:
+            return hit
+        if params is None:
+            lo, hi = compute_qupath_auto_minmax(arr, exclude_zero=True)
+            params = {"min": float(lo), "max": float(hi)}
+        gray = np.asarray(apply_channel_remap(arr, params), dtype=np.float32)
+        self._overlay_display_cache[key] = gray
+        return gray
+
+    def _render_overlay_patch(self, reset_view=False):
+        """Additively blend the ticked channels in their own colours.
+
+        Reads no fusion weight, by design: the overlay answers "what is in this
+        tissue", the fusion preview answers "what will Step1 fuse".
+        """
+        idx = self._preview_patch_idx
+        cache = self._patch_channel_cache.get(idx) or {}
+        ticked = self.config.visible_channels()
+        if not ticked:
+            self.prev_img.clear()
+            self.prev_status.setText(
+                "No visible channels — tick a channel to show it.")
+            return
+        ready = [ch for ch in ticked if ch in cache]
+        if not ready:
+            self.prev_img.clear()
+            self.prev_status.setText("Loading channels…")
+            return
+
+        remap = self._load_step0_remap_params()[0]
+        grays, colors, params = {}, {}, {}
+        for ch in ready:
+            grays[ch] = self._overlay_gray(idx, ch, cache[ch], remap)
+            colors[ch] = _hex_to_rgb01(self.config.channel_color(ch))
+            params[ch] = _IDENTITY_REMAP
+        rgb = compose_multichannel_overlay(grays, colors, params)
+        if rgb is None:
+            self.prev_img.clear()
+            self.prev_status.setText(
+                "No visible channels — tick a channel to show it.")
+            return
+
+        first_load = (self.prev_img.image is None)
+        preserve = not (first_load or reset_view)
+        state = self._save_patch_preview_view_state() if preserve else None
+        self.prev_img.setImage(
+            (np.clip(rgb, 0, 1) * 255).astype(np.uint8), autoLevels=False)
+        if first_load or reset_view:
+            self.prev_vb.autoRange()
+        else:
+            self._restore_patch_preview_view_state(state)
+        missing = [ch for ch in ticked if ch not in cache]
+        self.prev_status.setText(
+            f"Overlay: {len(ready)} channel(s)"
+            + (f"  ({len(missing)} still loading)" if missing else ""))
+
+    def _on_channel_visibility_changed(self, channel, visible):
+        """A tick changed which channels are in play."""
+        if self._restoring_display_state:
+            return
+        if visible:
+            # Ticking a channel again is the user asking for it, so a previous
+            # failure stops standing in the way.
+            for failed in self._failed_channels.values():
+                failed.discard(channel)
+            self._ensure_channels_cached(self._preview_patch_idx)
+        self._refresh_patch_preview(reset_view=False)
+        self._schedule_step1_session_save()
+
+    def _on_current_channel_changed(self, channel):
+        """The channel being edited changed: point Intensity at it."""
+        if self._restoring_display_state:
+            return
+        self._ensure_channels_cached(self._preview_patch_idx)
+        try:
+            self._step0.focus_intensity_on(channel)
+        except Exception as exc:
+            print(f"[Step1] could not point Intensity at {channel}: {exc}")
+        self._schedule_step1_session_save()
+
+    def _on_display_mapping_changed(self, channel):
+        """One channel's Min/Max/Gamma moved: drop only that channel's pixels."""
+        if not channel:
+            return
+        dropped = [key for key in self._overlay_display_cache if key[1] == channel]
+        for key in dropped:
+            self._overlay_display_cache.pop(key, None)
+        if (self._step1_preview_mode == STEP1_PREVIEW_OVERLAY
+                and channel in self.config.visible_channels()):
+            self._refresh_patch_preview(reset_view=False)
+
+    def _on_channel_color_changed(self, _channel, _color):
+        if self._restoring_display_state:
+            return
+        self._refresh_patch_preview(reset_view=False)
+        self._schedule_step1_session_save()
+
+    def _ensure_channels_cached(self, idx):
+        """Read what this patch is missing — only that, and only once.
+
+        A channel whose read already failed for this patch is left alone: the
+        retry would fail the same way.  A channel wanted while another load is
+        in flight is remembered BY NAME, so the outcome of that load, good or
+        bad, cannot take the new request with it.
+        """
+        if self.loader is None or idx < 0 or idx >= len(self._all_patches):
+            return
+        needed = self._needed_channels()
+        if not needed:
+            return
+        cache = self._patch_channel_cache.get(idx) or {}
+        failed = self._failed_channels.get(idx, set())
+        missing = [ch for ch in needed if ch not in cache and ch not in failed]
+        if not missing:
+            if all(ch in cache for ch in needed):
+                self._patch_load_ready.add(idx)
+            return
+        loader = self._patch_loaders.get(idx)
+        if loader is not None and loader.isRunning():
+            # One loader per patch.  Whatever this one is not fetching is
+            # remembered until it leaves the slot.
+            inflight = self._loader_channels.get(idx, set())
+            wanted = {ch for ch in missing if ch not in inflight}
+            if wanted:
+                self._pending_channel_demand.setdefault(idx, set()).update(wanted)
+            return
+        self._pending_channel_demand.pop(idx, None)
+        self._start_loader_for(idx, needed=missing)
+
+    def _show_intensity_window(self):
+        """Open the shared Intensity window on the current channel."""
+        self._step0.show_intensity_window()
+        current = self.config.current_channel()
+        if current:
+            self._step0.focus_intensity_on(current)
+
     def _render_current_patch(self, reset_view=False):
         """Compute and display fusion for the currently selected patch from cache.
 
@@ -2870,6 +3333,13 @@ class MainWindow(QMainWindow):
         cache = self._patch_channel_cache.get(idx)
         if not cache:
             self.prev_status.setText("Loading patch...")
+            return
+        missing = [ch for ch in self._needed_channels() if ch not in cache]
+        if missing:
+            # Drawing now would publish a nucleus-only picture that looks like
+            # the finished fusion.  Keep whatever is on screen and say so.
+            self.prev_status.setText(
+                f"Preparing fusion — {len(missing)} channel(s) still loading…")
             return
         groups = self.config.get_groups()
         group_weights = self.config.get_group_weights()
@@ -2931,17 +3401,16 @@ class MainWindow(QMainWindow):
             self._restore_patch_preview_view_state(state)
 
     def _on_cfg_changed(self):
-        """Weight/group changed: re-render from cache (no disk IO) after 300 ms debounce."""
-        if self._preview_patch_idx in self._patch_load_ready:
-            cache = self._patch_channel_cache.get(self._preview_patch_idx) or {}
-            missing = [ch for ch in self._needed_channels() if ch not in cache]
-            if missing:
-                self._preserve_view_after_patch_load[self._preview_patch_idx] = self._save_patch_preview_view_state()
-                self._patch_channel_cache.pop(self._preview_patch_idx, None)
-                self._patch_load_ready.discard(self._preview_patch_idx)
-                self._start_loader_for(self._preview_patch_idx)
-            else:
-                self._prev_timer.start(300)
+        """A weight or the nucleus channel changed.
+
+        Only fusion reads weights, so only fusion redraws.  A weight that has
+        just risen above zero can make one channel newly necessary, and that
+        one channel is read; everything already in hand stays, and nothing is
+        evicted.
+        """
+        if self._step1_preview_mode == STEP1_PREVIEW_FUSION:
+            self._ensure_channels_cached(self._preview_patch_idx)
+            self._prev_timer.start(300)
         self._schedule_step1_session_save()
 
     # ── Phase 1 ─────────────────────────────────────────────────────
@@ -3995,7 +4464,7 @@ class MainWindow(QMainWindow):
         if not is_wholecell:
             self._pending_fused_zarr_meta = None
             self._reused_fused_zarr_meta = False
-            nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nuc_combo.currentText()
+            nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nucleus_channel()
             worker_fcfg = dict(fcfg)
             # DAPI-only methods use channel 1 as segmentation input, but the
             # saved zarr remains a full fusion preview/QC source: ch0 marker

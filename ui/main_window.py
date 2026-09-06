@@ -272,7 +272,9 @@ class MainWindow(QMainWindow):
         # Left: read-only ROI/patch overview for Step1. ROI and patches come
         # from Step0; drawing/editing remains owned by Step0.
         left = QWidget()
-        left.setMinimumWidth(240)
+        # Wide enough for a channel row (name, slider, weight box) rather than
+        # for a status line: the column's content changed, so its floor did.
+        left.setMinimumWidth(300)
         left.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._step1_left_panel = left
         ll = QVBoxLayout(left)
@@ -294,7 +296,18 @@ class MainWindow(QMainWindow):
         )
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         ll.addWidget(self._btn_step1_tissue_nav)
-        ll.addStretch(1)
+
+        # The one channel panel lives here, in the column the removed tissue
+        # thumbnail left empty.  It is constructed in its final home rather than
+        # built elsewhere and reparented, so there is never a moment with two
+        # parents or two instances.
+        ll.addWidget(self._make_label("② Channels", bold=True))
+        self.config = ConfigPanel([])
+        self.config.setMinimumHeight(220)
+        self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.config.config_changed.connect(self._on_cfg_changed)
+        ll.addWidget(self.config, stretch=1)
+
         self.roi_status = QLabel("No ROI loaded")
         self.roi_status.setAlignment(Qt.AlignCenter)
         self.roi_status.setWordWrap(True)
@@ -311,7 +324,7 @@ class MainWindow(QMainWindow):
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.addWidget(self._make_label(
-            "② Fusion Preview  Red=cyto  Blue=nucleus  (real-time update)",
+            "③ Fusion Preview  Red=cyto  Blue=nucleus  (real-time update)",
             bold=True,
         ))
 
@@ -394,15 +407,7 @@ class MainWindow(QMainWindow):
         pl.addWidget(self.prev_gv, stretch=1)
         mid.addWidget(pw)
 
-        # Fusion config
-        self.config = ConfigPanel([])
-        self.config.setMinimumHeight(220)
-        self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.config.config_changed.connect(self._on_cfg_changed)
-        mid.addWidget(self.config)
-
         mid.setStretchFactor(0, 1)
-        mid.setStretchFactor(1, 1)
         main_split.addWidget(mid)
 
         right_tabs = QtWidgets.QTabWidget()
@@ -472,7 +477,7 @@ class MainWindow(QMainWindow):
         main_split.setStretchFactor(0, 2)
         main_split.setStretchFactor(1, 3)
         main_split.setStretchFactor(2, 4)
-        main_split.setSizes([280, 430, 520])
+        main_split.setSizes([320, 450, 450])
         root.addWidget(main_split, stretch=1)
 
         bot = QHBoxLayout()

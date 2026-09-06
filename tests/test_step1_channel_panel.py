@@ -168,3 +168,43 @@ def test_the_duplicated_channel_classes_are_gone_from_overview_panel(app):
     # The live exports are untouched.
     for name in ("OverviewPanel", "TileSelectDialog", "FullFusionWorker"):
         assert hasattr(overview_panel, name), name
+
+
+def test_the_channel_panel_lives_in_the_left_column(app):
+    from block01.ui.step0.config_panel import ConfigPanel
+
+    w = _window(app)
+    try:
+        # Still exactly one instance, now parented into the left column.
+        panels = w._step1_page_widget.findChildren(ConfigPanel)
+        assert len(panels) == 1
+        assert panels[0] is w.config
+        assert w._step1_left_panel.findChildren(ConfigPanel) == [w.config]
+        assert w._step1_mid_split.findChildren(ConfigPanel) == []
+        # The middle column keeps the preview and nothing else.
+        assert w._step1_mid_split.count() == 1
+        assert w._step1_left_panel.findChildren(type(w.prev_gv)) == []
+    finally:
+        w.close()
+
+
+def test_moving_the_panel_kept_it_wired_to_the_preview(app):
+    w = _window(app)
+    try:
+        rng = np.random.default_rng(1)
+        w._all_patches = [(0, 32, 0, 32)]
+        w._preview_patch_idx = 0
+        w._patch_channel_cache[0] = {
+            "DAPI": rng.random((32, 32), dtype=np.float32) + 0.1,
+            "CD3": rng.random((32, 32), dtype=np.float32) + 0.1,
+        }
+        w._patch_load_ready.add(0)
+        w._render_current_patch(reset_view=True)
+        before = w.prev_img.image.copy()
+
+        # A weight edit in the moved panel still reaches the preview.
+        w.config._panels["markers"]._rows["CD3"].spin.setValue(0.9)
+        w._render_current_patch(reset_view=False)
+        assert not np.array_equal(w.prev_img.image, before)
+    finally:
+        w.close()

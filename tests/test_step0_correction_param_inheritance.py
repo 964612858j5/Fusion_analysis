@@ -340,3 +340,172 @@ def test_a_global_change_dirties_only_channels_that_still_inherit_it(
         "incremental": True,
         "started": True,
     }
+
+
+def _no_patch_full_wsi_page_with_saved_correction(app, tmp_path):
+    """Build a page whose full-WSI artifact is real but has no preview patch."""
+    page = _page(app)
+    page.patches = []
+    page.current_patch_idx = 0
+    page.output_dir = str(tmp_path / "project")
+    page._channel_order = ["DAPI", "CD3"]
+    page._channel_decisions = {"CD3": "tophat"}
+    page._channel_params = {}
+    _set_global(page, 35, 61)
+
+    rois = [page._full_wsi_roi()]
+    step0_dir = tmp_path / "stable_roi" / "step0"
+    step0_dir.mkdir(parents=True)
+    page._roi_context = {
+        "roi_id": "stable_roi",
+        "step_dirs": {"step0": str(step0_dir)},
+    }
+    page._roi_context_sig = page._roi_context_signature(rois)
+    config = page._build_config()
+    zarr_path = _write_real_corrected_zarr(
+        step0_dir, page.loader, config, rois)
+    return page, zarr_path
+
+
+def test_save_without_preview_patches_reuses_a_valid_full_wsi_artifact(
+        app, tmp_path, monkeypatch):
+    """A patch is a locator, not a prerequisite for an unchanged Save."""
+    page, zarr_path = _no_patch_full_wsi_page_with_saved_correction(
+        app, tmp_path)
+    completed = []
+    page._confirm_raw_channels = lambda: True
+    page._apply_corrected_store = lambda path, decisions: None
+    page._emit_complete = (
+        lambda cfg, path, decisions:
+        (completed.append((cfg, path, decisions)) or True))
+
+    class _MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "unchanged no-patch Save constructed a WSI worker")
+
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _MustNotRun)
+    page._save_and_continue()
+
+    assert completed and completed[0][1] == zarr_path
+    assert completed[0][2] == {"CD3": "tophat"}
+    assert read_corrected_zarr_state(zarr_path)[0]["CD3"][1] == 35
+
+
+def test_intensity_only_save_without_preview_patches_does_not_reprocess(
+        app, tmp_path, monkeypatch):
+    """Changing only display intensity must reuse correction without a patch."""
+    page, zarr_path = _no_patch_full_wsi_page_with_saved_correction(
+        app, tmp_path)
+    page._cond_workbench._params["CD3"] = {
+        "min": 7.0, "max": 123.0, "gamma": 1.7,
+    }
+    completed = []
+    page._confirm_raw_channels = lambda: True
+    page._apply_corrected_store = lambda path, decisions: None
+    page._emit_complete = (
+        lambda cfg, path, decisions:
+        (completed.append((cfg, path, decisions)) or True))
+
+    class _MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "intensity-only no-patch Save constructed a WSI worker")
+
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _MustNotRun)
+    page._save_and_continue()
+
+    assert completed and completed[0][1] == zarr_path
+    assert read_corrected_zarr_state(zarr_path)[0]["CD3"][1] == 35
+
+
+def test_no_patch_background_change_processes_the_full_wsi_region(
+        app, tmp_path, monkeypatch):
+    """With no patch, a changed correction is saved over the full WSI ROI."""
+    page, zarr_path = _no_patch_full_wsi_page_with_saved_correction(
+        app, tmp_path)
+    page._tophat_slider.setValue(44)
+    captured = {}
+
+    class _Worker(QtCore.QThread):
+        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
+        finished = QtCore.pyqtSignal(str, dict)
+        canceled = QtCore.pyqtSignal(str)
+        error = QtCore.pyqtSignal(str)
+
+        def __init__(self, loader, out, cfg, rois=None, parent=None,
+                     process_channels=None, incremental=False):
+            super().__init__(parent)
+            captured["channels"] = set(process_channels or ())
+            captured["incremental"] = bool(incremental)
+            captured["rois"] = list(rois or [])
+
+        def start(self):
+            captured["started"] = True
+
+        def stop_after_current_channel(self):
+            pass
+
+    class _Dialog(QtCore.QObject):
+        cancel_requested = QtCore.pyqtSignal()
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+
+        def show(self):
+            pass
+
+        def set_progress(self, *args):
+            pass
+
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _Worker)
+    monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _Dialog)
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda zp: ({"CD3": ("tophat", 35,
+                                              BG_CORRECTION_ALGO_VERSION)},
+                                    [(0, 24, 0, 28)]))
+    page._confirm_raw_channels = lambda: True
+    page._apply_corrected_store = lambda path, decisions: None
+    page._emit_complete = lambda *args, **kwargs: True
+    page._release_explore_for_production = lambda reason: None
+    page._watch_production_worker = lambda worker: None
+
+    page._save_and_continue()
+
+    assert captured["started"] is True
+    assert captured["channels"] == {"CD3"}
+    assert captured["incremental"] is True
+    assert captured["rois"] == [page._full_wsi_roi()]
+    assert str(zarr_path).endswith("corrected_channels.zarr")
+
+
+def test_no_patch_without_correction_gives_a_correction_message_not_patch_error(
+        app, tmp_path, monkeypatch):
+    """No decisions is reported as no correction, not as missing a locator."""
+    page = _page(app)
+    page.patches = []
+    page.output_dir = str(tmp_path / "project")
+    page._channel_order = ["DAPI", "CD3"]
+    page._channel_decisions = {}
+    page._confirm_raw_channels = lambda: True
+    page._ensure_empty_corrected_zarr = lambda *args, **kwargs: None
+    page._apply_corrected_store = lambda *args, **kwargs: None
+    page._emit_complete = lambda *args, **kwargs: True
+    messages = []
+
+    class _Msg:
+        @staticmethod
+        def information(_parent, title, text):
+            messages.append((title, text))
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            raise AssertionError(f"unexpected validation warning: {args}")
+
+    monkeypatch.setattr(sp, "QMessageBox", _Msg)
+    page._save_and_continue()
+
+    assert messages
+    assert messages[-1][0] == "No background correction"
+    assert "No channel is assigned TopHat or cuCIM" in messages[-1][1]
+    assert "preview patch" not in messages[-1][1].lower()

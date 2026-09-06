@@ -8091,10 +8091,10 @@ class Step0Page(QWidget):
         if self.loader is None:
             QMessageBox.warning(self, "Validation", "Please load an OME-TIFF first.")
             return
-        if not self.patches:
-            QMessageBox.warning(self, "Validation", "Please define at least 1 preview patch before continuing.")
-            return
 
+        # Preview patches are navigation/preview bookmarks, not the analysis
+        # region.  With no bookmark, the existing ROI-or-full-WSI decision
+        # below still supplies a valid region for Save.
         if self._is_full_wsi_mode():
             rois = [self._full_wsi_roi()]
             self.rois = rois

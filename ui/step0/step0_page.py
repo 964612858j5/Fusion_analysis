@@ -2660,6 +2660,22 @@ class Step0Page(QWidget):
         # the wrong answer.
         self._schedule_compare_metrics()
 
+    def _sync_full_image_param(self, method=None):
+        """Refresh an edited method only when it is the visible full-image layer.
+
+        A parameter edit must not switch the user from TopHat to cuCIM (or
+        vice versa). When the edited method is already on screen,
+        ``show_source`` re-selects it on the existing camera and the ordinary
+        tile scheduler recomputes that viewport. No patch is involved.
+        """
+        if self._compare_mode() or not self._full_image_visible():
+            return False
+        _source, visible_method, _params = self._full_image_selection()
+        if method is not None and visible_method != method:
+            return False
+        self._show_full_image()
+        return True
+
     def _sync_compare_to_channel(self):
         """A row click: all three panels move to the new channel together,
         each keeping its own method and taking that method's current
@@ -6624,12 +6640,14 @@ class Step0Page(QWidget):
         # thrown away: the old result stays visible until a Process replaces
         # it, and the glyph is what says it was made with other parameters.
         self._refresh_channel_state(ch)
-        # The compare panels PREVIEW these two numbers -- the TopHat and
-        # cuCIM panels are corrected with the row's current radius and sigma
-        # -- so they re-select on the new ones. Original is left alone: it
-        # has no parameter, and re-selecting it would cancel and re-issue a
-        # batch of raw tiles that cannot have changed.
-        self._sync_compare_params(method=method)
+        # Recompute only the tiled view the user can currently see. Compare
+        # owns three visible method controllers; Full Image owns the one
+        # source chosen in its toolbar. Patches are navigation bookmarks, not
+        # an input requirement for either viewport scheduler.
+        if self._compare_mode():
+            self._sync_compare_params(method=method)
+        else:
+            self._sync_full_image_param(method=method)
 
     def _on_dec_param_entered(self, method="both"):
         """Enter in one parameter box recomputes only its correction method.
@@ -6649,7 +6667,9 @@ class Step0Page(QWidget):
         production busy guard, the Explore/Compare release, the
         release -> watch -> start ordering, the dataset generation and the
         channel-cache update are all its, and there is no second copy of
-        them here to drift out of step.
+        them here to drift out of step. With no patch bookmarks, the tiled
+        view above is the whole request and that path returns before creating
+        a worker -- viewport preview must not require a navigation bookmark.
         """
         if getattr(self, "_loading_decision", False):
             return
@@ -7710,8 +7730,16 @@ class Step0Page(QWidget):
         if not ch or ch == self.nucleus_channel:
             return
         if not self.patches:
-            QMessageBox.information(self, "No patches",
-                                    "Draw at least one patch in the navigator first.")
+            # The visible tiled viewer was already re-selected by
+            # `_on_dec_param_changed`; it computes its current viewport and
+            # surrounding tiles without a patch. Do not fall through into the
+            # legacy patch-batch worker, and do not claim completion evidence
+            # that Save/Process could mistake for an all-patch result.
+            label = {"tophat": "TopHat", "cucim": "cuCIM"}.get(
+                method, "Correction")
+            self._decision_status.setText(
+                f"{label} parameter saved. Current-viewport preview does not "
+                "require a patch; patches are optional navigation bookmarks.")
             return
         busy = self.production_correction_busy()
         if busy:

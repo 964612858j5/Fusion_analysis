@@ -247,6 +247,41 @@ def test_reopening_reads_the_parameters_again(full_image_page, monkeypatch):
     page._channel_params.pop("CD3", None)
 
 
+def test_a_parameter_edit_without_patches_recomputes_the_visible_full_view(
+        full_image_page, monkeypatch):
+    """Patches are navigation bookmarks, not an input to the tile scheduler."""
+    page = full_image_page
+    tab = _RecordingExploreTab()
+    monkeypatch.setattr(page, "_explore_tab", tab)
+    old_patches = page.patches
+    old_source = page._full_image_source
+    old_params = page._channel_params.get("CD3")
+    try:
+        page.patches = []
+        page.current_channel = "CD3"
+        page._view_area.setCurrentIndex(page._VIEW_FULL)
+        page._full_image_source = "cucim"
+        page._loading_decision = True
+        page._dec_radius.setValue(15)
+        page._dec_sigma.setValue(37)
+        page._loading_decision = False
+
+        page._on_dec_param_changed("cucim")
+
+        assert tab.calls[-1] == ("CD3", "cucim", (37,))
+        calls = list(tab.calls)
+        page._on_dec_param_changed("tophat")
+        assert tab.calls == calls, (
+            "editing a hidden method must not switch the full-image source")
+    finally:
+        page.patches = old_patches
+        page._full_image_source = old_source
+        if old_params is None:
+            page._channel_params.pop("CD3", None)
+        else:
+            page._channel_params["CD3"] = old_params
+
+
 def test_a_busy_run_blocks_reopening_without_touching_the_viewer(
         full_image_page, monkeypatch):
     page = full_image_page

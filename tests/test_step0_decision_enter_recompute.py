@@ -283,17 +283,26 @@ def test_enter_while_a_production_run_is_busy_starts_nothing(page, monkeypatch):
     assert shown, "the busy guard said nothing"
 
 
-def test_enter_with_no_patches_starts_nothing(page, monkeypatch):
+def test_enter_with_no_patches_updates_the_view_without_a_batch_or_popup(
+        page, monkeypatch):
     shown = []
     monkeypatch.setattr(sp.QMessageBox, "information",
                         lambda *a, **kw: shown.append(a[1:]))
+    selected = []
+    monkeypatch.setattr(
+        page, "_sync_compare_params",
+        lambda method=None: selected.append(method))
+    page._view_area.setCurrentIndex(page._VIEW_COMPARE)
     page.patches = []
 
     _type(page._dec_radius, "44")
     _enter(page._dec_radius)
 
     assert not _workers()
-    assert shown
+    assert shown == []
+    assert selected and set(selected) == {"tophat"}
+    assert "Current-viewport preview" in page._decision_status.text()
+    assert "navigation bookmarks" in page._decision_status.text()
 
 
 def test_enter_on_the_nucleus_channel_starts_nothing(page):

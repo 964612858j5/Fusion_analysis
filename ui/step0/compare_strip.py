@@ -1214,10 +1214,13 @@ class CompareStrip(QtWidgets.QWidget):
             return
         self._request_missing(missing)
 
-    def set_params(self, params_for):
-        """A parameter edit re-selects TopHat and cuCIM. Original has no
-        parameter and is deliberately left alone: re-selecting it would
-        cancel and re-issue a batch of raw tiles that cannot have changed."""
+    def set_params(self, params_for, *, method=None):
+        """Re-select the edited method, or both corrected methods if omitted.
+
+        Original has no parameter and is deliberately left alone. Keeping
+        the method identity here prevents a sigma edit from cancelling and
+        recomputing TopHat (and vice versa).
+        """
         self._displayed_params_for = params_for
         if self._pending is not None:
             # The parameters are IN the CorrectionKey, so an edit makes
@@ -1229,15 +1232,19 @@ class CompareStrip(QtWidgets.QWidget):
             self._invalidate_pending_on_move()
             return
         for source, controller in zip(COMPARE_SOURCES, self.controllers):
-            method = COMPARE_METHODS.get(source)
-            if controller is None or method is None:
+            source_method = COMPARE_METHODS.get(source)
+            if (controller is None or source_method is None
+                    or method is not None and source_method != method):
                 continue
-            controller.set_selection(method=method,
+            controller.set_selection(method=source_method,
                                      params=tuple(params_for(source)))
-        # A parameter edit changes what "prepared" means for EVERY channel,
-        # and moves nothing -- so it starts no settle of its own and would
-        # otherwise leave HOT preparing the old numbers indefinitely.
-        self.refresh_hot()
+        # A legacy/all-method refresh also updates HOT immediately. A named
+        # edit deliberately leaves its generation alone: cancelling one shared
+        # HOT generation for a sigma edit would abandon/requeue TopHat work too.
+        # Enter soon suspends HOT for the production worker; if the user instead
+        # changes channel, `_publish` re-reads all live specs before replanning.
+        if method is None:
+            self.refresh_hot()
 
     def set_tint(self, rgb):
         for controller in self.controllers:

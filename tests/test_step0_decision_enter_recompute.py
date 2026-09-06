@@ -1,4 +1,4 @@
-"""Enter in a Per-Channel Decision param box recomputes THAT channel.
+"""Enter in a Per-Channel Decision box recomputes only THAT method/channel.
 
 The two boxes -- TopHat radius and cuCIM sigma -- are where a channel's own
 correction parameters are tuned. Typing in them records the number and marks
@@ -192,7 +192,7 @@ def test_enter_in_the_radius_box_recomputes_with_the_new_radius(page):
     assert _last_params(page)["tophat_radius"] == 77, \
         "the worker got the value from before the edit"
     assert _workers()[0].started_flag is True
-    assert _workers()[0].channels == {"CD3": "both"}
+    assert _workers()[0].channels == {"CD3": "tophat"}
 
 
 def test_enter_in_the_sigma_box_recomputes_with_the_new_sigma(page):
@@ -205,6 +205,7 @@ def test_enter_in_the_sigma_box_recomputes_with_the_new_sigma(page):
     assert page._channel_params["CD3"]["cucim_sigma"] == 31
     assert len(_workers()) == 1
     assert _last_params(page)["cucim_sigma"] == 31
+    assert _workers()[0].channels == {"CD3": "cucim"}
 
 
 @pytest.mark.parametrize("key", [Qt.Key_Return, Qt.Key_Enter])
@@ -215,6 +216,7 @@ def test_both_enter_keys_recompute(page, key):
 
     assert len(_workers()) == 1
     assert _last_params(page)["tophat_radius"] == 64
+    assert _workers()[0].channels == {"CD3": "tophat"}
 
 
 # ── ...and nothing else does ──────────────────────────────────────────────
@@ -352,24 +354,112 @@ def test_enter_goes_through_the_pages_one_recompute_path(page, monkeypatch):
     calls = []
     orig = page._process_current_channel
     monkeypatch.setattr(page, "_process_current_channel",
-                        lambda: (calls.append(1), orig())[1])
+                        lambda method="both":
+                        (calls.append(method), orig(method))[1])
 
     _type(page._dec_radius, "58")
     _enter(page._dec_radius)
 
-    assert calls == [1], "Enter did not use the authoritative path exactly once"
+    assert calls == ["tophat"], \
+        "Enter did not use the authoritative path exactly once"
     assert len(_workers()) == 1
 
 
-def test_enter_invalidates_the_channels_cached_result(page):
-    """The old result was made with other numbers, so it may not be shown
-    as this run's answer."""
+def test_enter_preserves_the_other_methods_cached_result(page):
+    """A radius run must not throw away cuCIM while TopHat is in flight."""
     page._preview_cache[("CD3", 0)] = object()
     page._computed_channels.add("CD3")
+    old = page._channel_signature("CD3", "both")
+    page._computed_signatures["CD3"] = old
 
     _type(page._dec_radius, "81")
     _enter(page._dec_radius)
 
-    assert ("CD3", 0) not in page._preview_cache
-    assert "CD3" not in page._computed_channels
-    assert page._pending_signatures.get("CD3") is not None
+    assert ("CD3", 0) in page._preview_cache
+    assert "CD3" in page._computed_channels
+    assert page._computed_signatures["CD3"] == old
+    pending = page._pending_signatures["CD3"]
+    assert pending[0] == "tophat"
+    assert pending[1] == 81
+    assert pending[2] is None
+
+
+def test_a_single_method_payload_replaces_only_that_half(page):
+    old_top = object()
+    old_cucim = object()
+    new_cucim = object()
+    page.current_patch_idx = 0
+    page._preview_cache[("CD3", 1)] = {
+        "method": "both",
+        "original_disp": object(),
+        "tophat_disp": old_top,
+        "cucim_disp": old_cucim,
+        "tophat_metrics": {"snr": 11.0, "bg_cv": 1.0},
+        "cucim_metrics": {"snr": 22.0, "bg_cv": 2.0},
+    }
+    incoming = {
+        "method": "cucim",
+        "original_disp": object(),
+        "tophat_disp": None,
+        "cucim_disp": new_cucim,
+        "tophat_metrics": {"snr": 0.0, "bg_cv": 0.0},
+        "cucim_metrics": {"snr": 33.0, "bg_cv": 3.0},
+    }
+
+    page._on_batch_patch_done("CD3", 1, incoming)
+    merged = page._preview_cache[("CD3", 1)]
+
+    assert merged["method"] == "both"
+    assert merged["tophat_disp"] is old_top
+    assert merged["tophat_metrics"] == {"snr": 11.0, "bg_cv": 1.0}
+    assert merged["cucim_disp"] is new_cucim
+    assert merged["cucim_metrics"] == {"snr": 33.0, "bg_cv": 3.0}
+
+
+def test_separate_method_runs_merge_their_completion_evidence(page):
+    page._channel_params["CD3"] = {"tophat_radius": 15, "cucim_sigma": 50}
+    old = page._channel_signature("CD3", "both")
+    page._computed_signatures["CD3"] = old
+    page._computed_channels.add("CD3")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = object()
+
+    page._channel_params["CD3"]["cucim_sigma"] = 31
+    page._pending_signatures["CD3"] = page._channel_signature("CD3", "cucim")
+    page._record_channel_signature("CD3")
+
+    have = page._computed_signatures["CD3"]
+    assert have[:3] == ("both", 15, 31)
+    assert page._channel_is_up_to_date(
+        "CD3", page._channel_signature("CD3", "tophat"))
+    assert page._channel_is_up_to_date(
+        "CD3", page._channel_signature("CD3", "cucim"))
+    assert page._channel_is_up_to_date(
+        "CD3", page._channel_signature("CD3", "both"))
+
+
+@pytest.mark.parametrize(
+    ("requested", "changed_key", "changed_value"),
+    [("tophat", "cucim_sigma", 99),
+     ("cucim", "tophat_radius", 77)],
+)
+def test_the_other_methods_parameter_cannot_make_a_valid_result_stale(
+        page, requested, changed_key, changed_value):
+    page._channel_params["CD3"] = {"tophat_radius": 15, "cucim_sigma": 50}
+    page._computed_signatures["CD3"] = page._channel_signature("CD3", "both")
+    page._computed_channels.add("CD3")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = object()
+
+    page._channel_params["CD3"][changed_key] = changed_value
+
+    assert page._channel_is_up_to_date(
+        "CD3", page._channel_signature("CD3", requested))
+
+
+def test_a_partial_method_run_does_not_claim_every_patch_is_current(page):
+    page._pending_signatures["CD3"] = page._channel_signature("CD3", "cucim")
+    page.current_patch_idx = 0
+    page._on_batch_patch_done("CD3", 1, {"method": "cucim"})
+
+    assert "CD3" not in page._computed_signatures

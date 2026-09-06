@@ -12,6 +12,7 @@ import traceback
 import weakref
 import multiprocessing as mp
 from collections import OrderedDict
+from functools import partial
 from queue import Empty
 
 import numpy as np
@@ -1203,8 +1204,11 @@ class Step0Page(QWidget):
         self._dec_sigma = QtWidgets.QSpinBox()
         self._dec_sigma.setRange(int(CUCIM_SIGMA_RANGE[0]), int(CUCIM_SIGMA_RANGE[1]))
         self._dec_sigma.setValue(CUCIM_SIGMA_DEFAULT)
-        for sb, tip in ((self._dec_radius, "TopHat disk radius (px) for this channel"),
-                        (self._dec_sigma, "cucim Gaussian sigma (px) for this channel")):
+        for sb, method, tip in (
+                (self._dec_radius, "tophat",
+                 "TopHat disk radius (px) for this channel"),
+                (self._dec_sigma, "cucim",
+                 "cucim Gaussian sigma (px) for this channel")):
             sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
             sb.setAlignment(Qt.AlignRight)
             sb.setFixedWidth(56)
@@ -1215,8 +1219,10 @@ class Step0Page(QWidget):
                 "QSpinBox:disabled{color:#555;border-color:#2a2a2a;}"
             )
             sb.setKeyboardTracking(False)   # valueChanged once per committed edit
-            sb.valueChanged.connect(self._on_dec_param_changed)   # persist only
-            sb.lineEdit().returnPressed.connect(self._on_dec_param_entered)  # Enter -> run
+            sb.valueChanged.connect(
+                partial(self._on_dec_param_changed, method))  # persist only
+            sb.lineEdit().returnPressed.connect(
+                partial(self._on_dec_param_entered, method))  # Enter -> that method
         _rl = QLabel("radius:"); _rl.setStyleSheet("color:#ddd;font-size:11px;")
         _sl = QLabel("sigma:");  _sl.setStyleSheet("color:#ddd;font-size:11px;")
         param_row.addWidget(_rl); param_row.addWidget(self._dec_radius)
@@ -2633,8 +2639,8 @@ class Step0Page(QWidget):
             except Exception:                               # noqa: BLE001
                 pass
 
-    def _sync_compare_params(self):
-        """A parameter edit: TopHat and cuCIM re-select on the new numbers.
+    def _sync_compare_params(self, method=None):
+        """Re-select only the Compare method whose parameter was edited.
 
         Only once the strip has been built, and it does NOT touch the
         camera: a `set_selection` re-issues the visible tiles under the new
@@ -2646,7 +2652,7 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         if strip is None or not strip.built:
             return
-        strip.set_params(self._compare_params_for)
+        strip.set_params(self._compare_params_for, method=method)
         # Through the SAME coalescing entry as a channel change: dragging a
         # radius spinner is a stream of parameter edits exactly as clicking
         # down a marker list is a stream of channel changes, and a second
@@ -6425,13 +6431,38 @@ class Step0Page(QWidget):
         return tuple(sorted(tuple(int(v) for v in p) for p in self.patches))
 
     def _channel_signature(self, ch, method, params=None):
-        """Everything a channel's result depends on, as one comparable tuple.
+        """The parameters the requested method actually depends on.
 
-        (method, tophat_radius, cucim_sigma, patches). Anything else the worker
-        sees (loader, nucleus channel) changes only on a dataset switch, which
-        wipes the signatures wholesale."""
+        The tuple shape stays ``(method, radius, sigma, patches)``, but an
+        irrelevant parameter is ``None``.  A sigma edit therefore cannot make
+        a valid TopHat result stale, and a radius edit cannot invalidate cuCIM.
+        Dataset-bound inputs are still covered by the wholesale reset.
+        """
         tr, cs = params if params is not None else self._resolve_channel_params(ch)
-        return (str(method), int(tr), int(cs), self._patch_signature())
+        method = str(method)
+        return (
+            method,
+            int(tr) if method in ("tophat", "both") else None,
+            int(cs) if method in ("cucim", "both") else None,
+            self._patch_signature(),
+        )
+
+    @staticmethod
+    def _merge_channel_signatures(have, incoming):
+        """Combine independently completed TopHat/cuCIM evidence."""
+        if have is None or have[3] != incoming[3]:
+            return incoming
+        tr = incoming[1] if incoming[1] is not None else have[1]
+        cs = incoming[2] if incoming[2] is not None else have[2]
+        if tr is not None and cs is not None:
+            method = "both"
+        elif tr is not None:
+            method = "tophat"
+        elif cs is not None:
+            method = "cucim"
+        else:
+            method = incoming[0]
+        return (method, tr, cs, incoming[3])
 
     def _channel_is_up_to_date(self, ch, sig):
         """True when the cache really holds THIS channel's result for THIS sig.
@@ -6441,23 +6472,25 @@ class Step0Page(QWidget):
         have = self._computed_signatures.get(ch)
         if have is None:
             return False
-        if have != sig:
-            # A "both" result carries the TopHat AND the cuCIM output for the
-            # same params and patches, so it satisfies a request for either.
-            covers = (have[0] == "both" and sig[0] in ("tophat", "cucim")
-                      and have[1:] == sig[1:])
-            if not covers:
-                return False
+        if have[3] != sig[3]:
+            return False
+        # Every non-None field in the request must be present with that value.
+        # Extra evidence in `have` (for the other method) is harmless.
+        if sig[1] is not None and have[1] != sig[1]:
+            return False
+        if sig[2] is not None and have[2] != sig[2]:
+            return False
         if ch not in self._computed_channels:
             return False
         return all((ch, p_idx) in self._preview_cache
                    for p_idx in range(len(self.patches)))
 
     def _record_channel_signature(self, ch):
-        """Promote the in-flight signature of `ch` once its results arrive."""
+        """Merge a fully completed method into the channel's evidence."""
         sig = self._pending_signatures.get(ch)
         if sig is not None:
-            self._computed_signatures[ch] = sig
+            self._computed_signatures[ch] = self._merge_channel_signatures(
+                self._computed_signatures.get(ch), sig)
 
     def _invalidate_channel_signature(self, ch):
         self._computed_signatures.pop(ch, None)
@@ -6506,8 +6539,9 @@ class Step0Page(QWidget):
         if method == "original":
             # No correction is assigned, so there is nothing for the cached
             # result to be current WITH; report what actually exists.
-            method = self._computed_signatures[ch][0]
-        sig = self._channel_signature(ch, method)
+            sig = self._computed_signatures[ch]
+        else:
+            sig = self._channel_signature(ch, method)
         return "computed" if self._channel_is_up_to_date(ch, sig) else "stale"
 
     def _refresh_channel_state(self, ch):
@@ -6571,7 +6605,7 @@ class Step0Page(QWidget):
             return
         self._sync_dec_param_enabled()
 
-    def _on_dec_param_changed(self, _val=None):
+    def _on_dec_param_changed(self, method=None, _val=None):
         # Persist the typed value into the ISOLATED per-channel store immediately
         # (so it survives patch/channel switches and is never overwritten by the
         # global box). Do NOT compute — Enter or the Process button triggers the
@@ -6595,11 +6629,10 @@ class Step0Page(QWidget):
         # -- so they re-select on the new ones. Original is left alone: it
         # has no parameter, and re-selecting it would cancel and re-issue a
         # batch of raw tiles that cannot have changed.
-        self._sync_compare_params()
+        self._sync_compare_params(method=method)
 
-    def _on_dec_param_entered(self):
-        """Enter pressed in a per-channel param box: recompute THIS channel
-        with the number that was just typed.
+    def _on_dec_param_entered(self, method="both"):
+        """Enter in one parameter box recomputes only its correction method.
 
         Enter is the deliberate act. Typing into the box on its own still
         computes nothing -- `_on_dec_param_changed` only records the value
@@ -6608,29 +6641,28 @@ class Step0Page(QWidget):
         to work behind the user's back. Pressing Enter says the tuning is
         finished, and it is the only keystroke that says it.
 
-        `interpretText()` on BOTH boxes first, so the run uses the value
-        that is on screen rather than the one that was there before the
-        edit. `QAbstractSpinBox` already interprets on Return before it
-        emits, and this call is a no-op when it has -- but the guarantee
-        belongs here, next to the code that reads the values, rather than
-        in an ordering inside Qt that this handler cannot see. Both boxes
-        because the signal does not say which one it came from, and
-        committing an unedited box is free.
+        The signal connection names its box, so radius means TopHat and
+        sigma means cuCIM. `interpretText()` is applied only to that box;
+        the other method's parameter and cached result remain untouched.
 
         Then the ONE authoritative path, `_process_current_channel`: the
         production busy guard, the Explore/Compare release, the
         release -> watch -> start ordering, the dataset generation and the
-        channel-cache invalidation are all its, and there is no second
-        copy of them here to drift out of step. It computes both methods,
-        which is what the compare panels need: the radio picks the final
-        result, it is not a prerequisite for recomputing.
+        channel-cache update are all its, and there is no second copy of
+        them here to drift out of step.
         """
         if getattr(self, "_loading_decision", False):
             return
-        for sb in (self._dec_radius, self._dec_sigma):
-            sb.interpretText()
-        self._on_dec_param_changed()
-        self._process_current_channel()
+        boxes = {"tophat": self._dec_radius, "cucim": self._dec_sigma}
+        if method not in boxes:
+            # Backward-compatible programmatic call: commit both and run both.
+            for sb in boxes.values():
+                sb.interpretText()
+            method = "both"
+        else:
+            boxes[method].interpretText()
+        self._on_dec_param_changed(method)
+        self._process_current_channel(method)
 
     def _update_decision_ui(self):
         ch = self.current_channel
@@ -7063,11 +7095,31 @@ class Step0Page(QWidget):
         self._proc_pbar.setValue(pct)
         self._proc_status.setText(msg)
 
+    @staticmethod
+    def _merge_method_payload(existing, incoming):
+        """Replace one correction result without erasing the other one."""
+        method = incoming.get("method") if isinstance(incoming, dict) else None
+        if method not in ("tophat", "cucim") or not isinstance(existing, dict):
+            return incoming
+        other = "cucim" if method == "tophat" else "tophat"
+        merged = dict(existing)
+        for key, value in incoming.items():
+            # A single-method worker emits None/default placeholders for the
+            # method it did not run. Those placeholders must not erase the
+            # already displayed and cached result.
+            if not key.startswith(other + "_"):
+                merged[key] = value
+        has_tophat = merged.get("tophat_disp") is not None
+        has_cucim = merged.get("cucim_disp") is not None
+        merged["method"] = ("both" if has_tophat and has_cucim
+                            else "tophat" if has_tophat else "cucim")
+        return merged
+
     def _on_batch_patch_done(self, ch, p_idx, payload):
-        """一个patch计算完成，存入缓存。"""
-        self._preview_cache[(ch, p_idx)] = payload
-        # Evidence for the incremental Process: remember WHAT produced this.
-        self._record_channel_signature(ch)
+        """一个patch计算完成，合并进缓存。"""
+        key = (ch, p_idx)
+        payload = self._merge_method_payload(self._preview_cache.get(key), payload)
+        self._preview_cache[key] = payload
         # 如果当前正在查看这个通道的这个patch，立刻刷新
         if ch == self.current_channel and p_idx == self.current_patch_idx:
             keep_zoom = self._recompute_keeps_zoom(self._last_payload, payload)
@@ -7092,6 +7144,9 @@ class Step0Page(QWidget):
 
     def _on_batch_channel_done(self, ch):
         """一个通道的所有patches全部计算完成。"""
+        # Promote only here, after every patch completed. A canceled partial
+        # run may update pixels it actually produced, but must not claim that
+        # all current patches are valid for the new parameter.
         self._record_channel_signature(ch)
         self._pending_signatures.pop(ch, None)
         self._set_channel_done(ch)
@@ -7627,8 +7682,8 @@ class Step0Page(QWidget):
             f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
             f"σ={self._dec_sigma.value()})")
 
-    def _process_current_channel(self):
-        """Recompute ONE channel across all patches with its Per-Channel params.
+    def _process_current_channel(self, method="both"):
+        """Recompute one method for one channel across all patches.
 
         The single entry point for "this one channel, again, with the
         numbers that are in the Per-Channel Decision boxes now". The
@@ -7639,16 +7694,18 @@ class Step0Page(QWidget):
         this: an explicit request about one channel, not a batch.
 
         Everything a run has to respect lives here and only here: the
-        production busy guard, the patch precondition, dropping this
+        production busy guard, the patch precondition, updating this
         channel's preview cache and signature, registering the pending
         signature, and the release -> watch -> start ordering that hands
         the GPU over from Explore/Compare. Callers do not reimplement any
         of it; they call this.
 
-        Computes BOTH TopHat and cucim (method='both') so the two results can be
-        compared and the final one picked via the radio. The radio is the
-        final-result selector, NOT a prerequisite for recomputing (radius drives
-        TopHat, sigma drives cucim — both are always available)."""
+        Enter passes ``tophat`` for radius or ``cucim`` for sigma. The default
+        ``both`` remains for the legacy programmatic Apply path. A single-method
+        run preserves the other method's cached pixels and completion evidence.
+        """
+        if method not in {"tophat", "cucim", "both"}:
+            raise ValueError(f"unsupported correction method: {method!r}")
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
             return
@@ -7661,17 +7718,23 @@ class Step0Page(QWidget):
             QMessageBox.information(
                 self, "Busy", f"A {busy} run is already in progress.")
             return
-        # persist this channel's current params, then recompute just it (fresh cache)
+        # Persist both displayed values, but recompute only the method named by
+        # the triggering box. A legacy `both` call still requests a fresh pair.
         self._channel_params[ch] = {
             "tophat_radius": int(self._dec_radius.value()),
             "cucim_sigma": int(self._dec_sigma.value()),
         }
-        self._preview_cache = {k: v for k, v in self._preview_cache.items() if k[0] != ch}
-        self._computed_channels.discard(ch)
-        # Apply always recomputes: drop the old evidence and register what this
-        # run will produce, so a later Process sees it as up to date.
-        self._invalidate_channel_signature(ch)
-        self._pending_signatures[ch] = self._channel_signature(ch, "both")
+        if method == "both":
+            self._preview_cache = {
+                k: v for k, v in self._preview_cache.items() if k[0] != ch}
+            self._computed_channels.discard(ch)
+            self._invalidate_channel_signature(ch)
+        else:
+            # Do not throw away the other method while this one is in flight.
+            # Replace any stale pending request, but keep completed evidence;
+            # `_record_channel_signature` merges the new half on channel_done.
+            self._pending_signatures.pop(ch, None)
+        self._pending_signatures[ch] = self._channel_signature(ch, method)
         params = {ch: dict(self._channel_params.get(ch) or {})}
         self._set_channel_computing(ch)
         self._proc_pbar.setVisible(True)
@@ -7679,7 +7742,7 @@ class Step0Page(QWidget):
         self._btn_stop_process.setEnabled(True)
         self._process_completed = False
         self._batch_worker = BatchProcessWorker(
-            self.loader, self.patches, {ch: "both"}, self.nucleus_channel,
+            self.loader, self.patches, {ch: method}, self.nucleus_channel,
             self._tophat_slider.value(), self._cucim_slider.value(),
             channel_params=params, max_gpu_workers=4,
         )

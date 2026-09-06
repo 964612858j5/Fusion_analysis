@@ -897,12 +897,22 @@ def test_a_row_change_moves_all_three_panels(app):
 def test_a_parameter_edit_re_selects_tophat_and_cucim(app):
     page = _page(app)
     strip = _enter(page)
+    hot_refreshes = []
+    strip.refresh_hot = lambda: hot_refreshes.append(True)
     before = [len(c.selections) for c in strip.controllers]
     page._dec_radius.setValue(41)
+    after_radius = [len(c.selections) for c in strip.controllers]
+    assert after_radius == [before[0], before[1] + 1, before[2]], (
+        "a radius edit must not cancel/recompute the cuCIM panel")
     page._dec_sigma.setValue(19)
     QtTest.QTest.qWait(20)
+    after_sigma = [len(c.selections) for c in strip.controllers]
+    assert after_sigma == [before[0], before[1] + 1, before[2] + 1], (
+        "a sigma edit must not cancel/recompute the TopHat panel")
     assert strip.controllers[1].params == (41,)
     assert strip.controllers[2].params == (19,)
+    assert hot_refreshes == [], (
+        "a one-method edit must not cancel the shared HOT generation")
     # Original has no parameter: re-selecting it would cancel and re-issue a
     # batch of raw tiles that cannot have changed.
     assert len(strip.controllers[0].selections) == before[0]

@@ -236,6 +236,10 @@ class MainWindow(QMainWindow):
         # ROI/patch edits made anywhere are published by Step0's writer; Step1
         # re-reads them from that commit instead of keeping its own copy.
         self._step0.geometry_committed.connect(self._on_step0_geometry_committed)
+        # The published handoff stopped matching the geometry in memory and no
+        # replacement could be published: fail closed rather than let Step1 keep
+        # using results computed for geometry that is gone.
+        self._step0.handoff_invalidated.connect(self._on_step0_handoff_invalidated)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -629,7 +633,8 @@ class MainWindow(QMainWindow):
         Step0Page owns the popup's whole lifecycle, and Step1 borrows nothing
         but the open entry point.  Nothing here creates or reparents a widget.
         """
-        self._step0.show_tissue_navigator()
+        self._step0.show_tissue_navigator(
+            roi_policy="delete_only", patch_editable=True)
 
     def _on_step0_geometry_committed(self, payload):
         """Adopt a geometry-only commit published by Step0.
@@ -698,7 +703,39 @@ class MainWindow(QMainWindow):
         self._update_next_button()
         print(f"[Step1] dataset switch committed (gen={gen}); Step1 context invalidated")
 
-    def _discard_step1_dataset_state(self):
+    def _on_step0_handoff_invalidated(self, payload):
+        """The published handoff no longer describes the geometry in memory.
+
+        The user's new ROI/patch stays exactly where they put it — it is
+        Step0's staged geometry now — but every Step1 fact derived from the
+        OLD geometry (results, caches, the corrected zarr binding, readiness)
+        has stopped being true, so it goes.  Bound by manifest path: an
+        invalidation for a handoff this window is not bound to is ignored.
+        """
+        payload = dict(payload or {})
+        bound = str((self.step0_output or {}).get("step0_manifest_path") or "")
+        incoming = str(payload.get("step0_manifest_path") or "")
+        if not bound or not incoming:
+            return
+        if os.path.abspath(bound) != os.path.abspath(incoming):
+            return
+
+        reason = str(payload.get("reason") or "")
+        message = str(payload.get("message") or
+                      "The Step0 handoff is no longer valid; run Step0 Save.")
+        self.step0_done = False
+        self._step1_context_ready = False
+        self.step1_done = False
+        self._discard_step1_dataset_state(status_text=message)
+        if self._current_step == 1:
+            self._go_to_step0()
+        self._update_next_button()
+        print(f"[Step1] handoff invalidated ({reason}); Step1 locked")
+
+    def _discard_step1_dataset_state(
+            self,
+            status_text="Dataset changed — Step1 is locked until the new Step0 "
+                        "handoff is loaded."):
         """Drop every Step1 fact that belonged to the previous dataset.
 
         Deliberately field-by-field rather than a blanket reset: the listed
@@ -754,8 +791,7 @@ class MainWindow(QMainWindow):
         self._fusion_bar_widget.setVisible(False)
         self.patch_cache_status.setText(" ")
         self.roi_status.setText("No ROI loaded")
-        self.prev_status.setText(
-            "Dataset changed — Step1 is locked until the new Step0 handoff is loaded.")
+        self.prev_status.setText(status_text)
 
         # 7. Downstream pages, through their public entry points only.
         if hasattr(self, "_step2"):
@@ -2270,6 +2306,14 @@ class MainWindow(QMainWindow):
 
     def _set_step_active(self, active):
         self._current_step = active
+        # The ONE place the shared navigator's edit policy is decided.  Every
+        # navigation path goes through here, so an already-open popup follows
+        # the step immediately: no reopen, no extra click.
+        step0 = getattr(self, "_step0", None)
+        if step0 is not None and hasattr(step0, "set_navigator_edit_policy"):
+            step0.set_navigator_edit_policy(
+                roi_policy="full" if active == 0 else "delete_only",
+                patch_editable=True)
         _on = ("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
                "background:#1a2a3a;border-radius:4px;")
         _off = "font-size:12px;color:#555;padding:4px 12px;"

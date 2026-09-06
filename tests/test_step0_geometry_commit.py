@@ -165,7 +165,7 @@ def test_a_changed_roi_is_refused_and_says_so(app, tmp_path):
         # the edit was saved.
         assert seen == []
         assert _published(step0_dir, "roi_config.json") == before
-        assert "NOT saved" in page._load_status.text()
+        assert "no longer valid" in page._load_status.text()
     finally:
         page.deleteLater()
 
@@ -218,8 +218,7 @@ def test_a_failed_write_publishes_no_manifest_and_reports_the_failure(
         assert seen == []
         assert _published(step0_dir, "step0_roi_result.json") == before_manifest
         assert os.stat(manifest_path).st_mtime_ns == before_mtime
-        assert "NOT saved" in page._load_status.text()
-        assert "disk is full" in page._load_status.text()
+        assert "was not published" in page._load_status.text()
     finally:
         page.deleteLater()
 

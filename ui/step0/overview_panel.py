@@ -1261,6 +1261,14 @@ class OverviewPanel(QWidget):
         self._patches = []
         self._selected_patch_idx = -1
 
+        # ── Edit policy ───────────────────────────────────────────────
+        # Which edits this panel accepts AT ALL.  The gate sits on the actions
+        # themselves, not on button styling, so a blocked edit never reaches
+        # the model and never has to be undone afterwards.
+        self._roi_create_allowed = True
+        self._roi_delete_allowed = True
+        self._patch_edit_allowed = True
+
         # ── Drawing state ─────────────────────────────────────────────
         self._mode            = 'patch'
         self._drag_start      = None
@@ -1632,9 +1640,43 @@ class OverviewPanel(QWidget):
 
     # ── Mode switching ────────────────────────────────────────────────
 
+    def set_edit_policy(self, *, roi_create=None, roi_delete=None,
+                        patch_edit=None):
+        """Narrow the edits this panel accepts.  Only the given flags change.
+
+        The panel is shared between steps, so the policy is a property of the
+        step that is showing it, not of the panel.  Nothing here duplicates an
+        editing implementation: the existing actions simply refuse.
+        """
+        if roi_create is not None:
+            self._roi_create_allowed = bool(roi_create)
+        if roi_delete is not None:
+            self._roi_delete_allowed = bool(roi_delete)
+        if patch_edit is not None:
+            self._patch_edit_allowed = bool(patch_edit)
+        # A tool that is no longer allowed cannot stay armed: an ROI polygon
+        # half drawn under the old policy is dropped rather than left to be
+        # closed by a keystroke.
+        if not self._roi_create_allowed and self._mode == 'roi':
+            self._cur_pts.clear()
+            self._redraw_cur_polygon()
+            self._set_mode('patch' if self._patch_edit_allowed else None)
+
+    def edit_policy(self):
+        return {"roi_create": self._roi_create_allowed,
+                "roi_delete": self._roi_delete_allowed,
+                "patch_edit": self._patch_edit_allowed}
+
     def _set_mode(self, mode):
         """'roi', 'patch', or None -- None is navigate/pan: no drawing tool,
         a click emits `navigate_requested`, a left-drag pans."""
+        if mode == 'roi' and not self._roi_create_allowed:
+            self.status.setText(
+                "Drawing a new ROI is not available in this step.")
+            return
+        if mode == 'patch' and not self._patch_edit_allowed:
+            self.status.setText("Patch editing is not available in this step.")
+            return
         self._mode = mode
         # _btn_roi / _btn_patch 已从 OverviewPanel 移除，
         # 模式切换状态由 Step0Page 工具栏按钮负责，这里只更新内部状态和UI
@@ -1745,6 +1787,10 @@ class OverviewPanel(QWidget):
         self.vb.addItem(self._cur_preview)
 
     def _finish_roi(self):
+        if not self._roi_create_allowed:
+            self.status.setText(
+                "Drawing a new ROI is not available in this step.")
+            return
         if len(self._cur_pts) < 3:
             self.status.setText("⚠ ROI needs at least 3 vertices")
             return
@@ -1820,6 +1866,9 @@ class OverviewPanel(QWidget):
             )
 
     def _delete_last_roi(self):
+        if not self._roi_delete_allowed:
+            self.status.setText("Deleting an ROI is not available in this step.")
+            return
         if not self._rois:
             return
         roi = self._rois.pop()
@@ -1840,6 +1889,9 @@ class OverviewPanel(QWidget):
         )
 
     def clear_rois(self):
+        if not self._roi_delete_allowed:
+            self.status.setText("Deleting an ROI is not available in this step.")
+            return
         for arts in self._roi_artists:
             for a in arts:
                 self.vb.removeItem(a)
@@ -1931,6 +1983,8 @@ class OverviewPanel(QWidget):
         hold: how many places on the slide are worth measuring is the user's
         judgement, not this panel's.
         """
+        if not self._patch_edit_allowed:
+            return
         self._patches.append({
             "roi_idx": roi_idx,
             "coords":  (fy0, fy1, fx0, fx1),
@@ -1965,6 +2019,8 @@ class OverviewPanel(QWidget):
         return coords
 
     def _remove_last_patch(self):
+        if not self._patch_edit_allowed:
+            return
         if not self._patches:
             return
         removed_idx = len(self._patches) - 1
@@ -1982,6 +2038,8 @@ class OverviewPanel(QWidget):
         self.patches_changed.emit(self._patch_coords())
 
     def _remove_patch(self, patch_idx):
+        if not self._patch_edit_allowed:
+            return
         if patch_idx < 0 or patch_idx >= len(self._patches):
             return
         removed = self._patches.pop(patch_idx)
@@ -2136,6 +2194,8 @@ class OverviewPanel(QWidget):
 
     def _begin_patch_drag(self, idx, handle, r, c, press_pos):
         """Take hold of a patch: the press that starts a move or a resize."""
+        if not self._patch_edit_allowed:
+            return
         self._patch_drag = {
             "idx":    idx,
             "handle": handle,
@@ -3095,6 +3155,8 @@ class OverviewPanel(QWidget):
                     # with Ctrl). While a polygon is being drawn, clicks add
                     # vertices wherever they land.
                     self._emit_navigate(r, c)
+                    return True
+                if not self._roi_create_allowed:
                     return True
                 if event.button() == Qt.LeftButton:
                     self._cur_pts.append((c, r))

@@ -227,6 +227,11 @@ class Step0Page(QWidget):
     # made anywhere (this page, the navigator popup, Step1) have been written
     # through the one Step0 writer and a new manifest has been published.
     geometry_committed = pyqtSignal(dict)
+    # The published handoff no longer matches the geometry in memory and a
+    # matching new manifest could NOT be published.  Separate from
+    # `geometry_committed` (which means the opposite) and from
+    # `dataset_committed` (a different slide entirely).
+    handoff_invalidated = pyqtSignal(dict)
 
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
     _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
@@ -268,6 +273,17 @@ class Step0Page(QWidget):
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
+        # Which ROI edits the shared navigator accepts.  "full" is Step0's own
+        # policy; Step1 borrows the same window with "delete_only".  Stored on
+        # the page (never per-popup) so it survives the popup being created,
+        # hidden or reopened, and so a step change updates an already-open one.
+        self._navigator_roi_policy = "full"
+        self._navigator_patch_editable = True
+        # Monotonic token for "which geometry are we talking about".  Bumped
+        # once per finished edit that actually differs from what is published,
+        # and carried by both geometry signals so a receiver can tell a stale
+        # notification from a current one.
+        self._geometry_revision = 0
         # The floating Intensity window (owned by the internal remap workbench,
         # re-parented) and the widget it hosts. Both lazily created.
         self._intensity_window = None
@@ -4000,6 +4016,9 @@ class Step0Page(QWidget):
             # A panel built after the page already has a channel starts on
             # that channel rather than on a DAPI thumbnail nothing asked for.
             self._update_tissue_preview()
+            # A popup created while Step1 is showing must open under Step1's
+            # policy, not under the default.
+            self._apply_navigator_edit_policy()
         return self._tissue_navigator_popup
 
     # ── v14.2b single-model ROI bridge ───────────────────────────────────────
@@ -4120,45 +4139,58 @@ class Step0Page(QWidget):
         at is reused untouched, and `_write_step0_handoff` only ever CREATES a
         corrected zarr when none exists.
 
-        Returns (committed, reason).
+        The checks are ordered so that "did the geometry change at all?" is
+        answered BEFORE any precondition: a precondition failure on unchanged
+        geometry is not an invalidation, it is a no-op.
+
+        Returns (committed, reason, info).
         """
+        info = {"step0_manifest_path": "", "geometry_revision": self._geometry_revision}
         published = self._published_handoff()
         if published is None:
-            return False, "no_published_handoff"
+            return False, "no_published_handoff", info
         step0_dir, manifest_path, zarr_path, config, manifest = published
-        if not os.path.exists(zarr_path):
-            return False, "corrected_zarr_missing"
+        info["step0_manifest_path"] = os.path.abspath(manifest_path)
 
         rois = self._standard_rois()
         patches = self._standard_patches(rois)
+        old_rois, old_patches = self._published_geometry(step0_dir)
+        roi_changed = (self._roi_context_signature(rois) != self._roi_context_sig
+                       or self._geometry_bboxes(rois) != old_rois)
+        patch_changed = self._geometry_bboxes(patches) != old_patches
+        if not roi_changed and not patch_changed:
+            return False, "unchanged", info
+
+        self._geometry_revision += 1
+        info["geometry_revision"] = self._geometry_revision
+
         # An ROI edit moves the analysis region, which mints a NEW roi_context
         # (roi_id, roi_dir, step directories) and invalidates the corrected
         # zarr computed for the old region; a NEW ROI has no channel group in
-        # that zarr at all.  There is no safe cross-ROI reuse rule to apply
-        # here, so this refuses instead of inventing one or quietly running a
-        # full Save.
-        if self._roi_context_signature(rois) != self._roi_context_sig:
-            return False, "roi_geometry_changed"
-        old_rois, old_patches = self._published_geometry(step0_dir)
-        if self._geometry_bboxes(rois) != old_rois:
-            return False, "roi_set_changed"
-        if self._geometry_bboxes(patches) == old_patches:
-            return False, "unchanged"
+        # that zarr at all, and a deleted one leaves a zarr that describes a
+        # region that no longer exists.  There is no safe cross-ROI reuse rule
+        # to apply here, so this refuses instead of inventing one or quietly
+        # running a full Save.
+        if roi_changed:
+            return False, "roi_changed", info
+        if not os.path.exists(zarr_path):
+            return False, "corrected_zarr_missing", info
 
         try:
             _cfg, rois_out, patches_out, _manifest = self._write_step0_handoff(
                 config, zarr_path)
         except Exception as exc:
             print(f"[Step0] geometry-only commit FAILED: {exc}")
-            return False, f"write_failed: {exc}"
+            return False, f"write_failed: {exc}", info
 
         self.geometry_committed.emit({
-            "step0_manifest_path": os.path.abspath(manifest_path),
+            "step0_manifest_path": info["step0_manifest_path"],
+            "geometry_revision": self._geometry_revision,
             "rois": rois_out,
             "patches": patches_out,
         })
         print(f"[Step0] geometry-only commit published: patches={len(patches_out)}")
-        return True, "committed"
+        return True, "committed", info
 
     def _set_geometry_status(self, text):
         if hasattr(self, "_load_status"):
@@ -4168,25 +4200,88 @@ class Step0Page(QWidget):
             popup._bar_label.setText(text)
 
     def _persist_geometry_edit(self):
-        """Persist a finished ROI/patch edit, and never lie about the outcome."""
-        ok, reason = self._commit_geometry_only()
+        """Persist a finished ROI/patch edit, and never lie about the outcome.
+
+        Three outcomes, and only three: published, nothing to do, or the
+        already-published handoff is now stale.  The last case is announced,
+        because the user's edit stays (it is Step0's staged geometry) while
+        every Step1 result derived from the OLD geometry has stopped being
+        true.
+        """
+        ok, reason, info = self._commit_geometry_only()
         if ok:
             self._set_geometry_status("Patch geometry saved to the Step0 handoff.")
             return True
-        if reason in ("no_published_handoff", "corrected_zarr_missing", "unchanged"):
-            # Nothing published yet (or nothing changed): edits stay staged for
-            # Save, which is what they have always done.
+        if reason in ("no_published_handoff", "unchanged"):
+            # Nothing published yet, or nothing changed: edits stay staged for
+            # Save, which is what they have always done.  Not an invalidation.
             return False
-        if reason in ("roi_geometry_changed", "roi_set_changed"):
-            self._set_geometry_status(
-                "⚠ ROI changed — NOT saved. A different analysis region needs its own "
-                "corrected output: re-run Step0 Save.")
-            return False
-        self._set_geometry_status(f"⚠ Geometry NOT saved ({reason}).")
+
+        if reason == "roi_changed":
+            message = ("ROI changed. Previous Step1 results are no longer valid; "
+                       "run Step0 Save for the new ROI.")
+        elif reason == "corrected_zarr_missing":
+            message = ("The published corrected output is missing; the patch edit "
+                       "is staged but was not published. Step1 is locked until "
+                       "Step0 Save succeeds.")
+        else:
+            message = ("Patch edit is staged but was not published; Step1 is "
+                       "locked until Step0 Save succeeds.")
+        self._set_geometry_status(f"⚠ {message}")
+        self.handoff_invalidated.emit({
+            "step0_manifest_path": info.get("step0_manifest_path", ""),
+            "geometry_revision": info.get("geometry_revision", 0),
+            "reason": reason,
+            "message": message,
+        })
+        print(f"[Step0] published handoff invalidated: {reason}")
         return False
 
-    def show_tissue_navigator(self):
+    def set_navigator_edit_policy(self, *, roi_policy=None, patch_editable=None):
+        """Set which ROI/patch edits the shared navigator accepts.
+
+        `roi_policy` is "full" (Step0) or "delete_only" (Step1).  Applied to
+        every overview that renders the one ROI model and to the ROI-mode
+        button, immediately, whether or not the popup is open — a step change
+        must not need a click or a reopen to take effect.
+        """
+        if roi_policy is not None:
+            if roi_policy not in ("full", "delete_only"):
+                raise ValueError(f"unknown roi_policy: {roi_policy!r}")
+            self._navigator_roi_policy = roi_policy
+        if patch_editable is not None:
+            self._navigator_patch_editable = bool(patch_editable)
+        self._apply_navigator_edit_policy()
+
+    def navigator_edit_policy(self):
+        return {"roi_policy": self._navigator_roi_policy,
+                "patch_editable": self._navigator_patch_editable}
+
+    def _apply_navigator_edit_policy(self):
+        roi_create = (self._navigator_roi_policy == "full")
+        for panel in self._registered_roi_overviews():
+            panel.set_edit_policy(
+                roi_create=roi_create,
+                roi_delete=True,          # deleting an ROI is allowed in both steps
+                patch_edit=self._navigator_patch_editable)
+        btn = getattr(self, "_btn_mode_roi", None)
+        if btn is not None:
+            btn.setEnabled(roi_create)
+            btn.setToolTip(
+                "Switch to ROI mode — click vertices on overview, "
+                "Enter/right-click to close"
+                if roi_create else
+                "Drawing or reshaping an ROI is only available in Step 0.")
+            if not roi_create and btn.isChecked():
+                # The tool cannot stay armed under a policy that forbids it.
+                self._set_draw_mode("patch" if self._navigator_patch_editable
+                                    else None)
+
+    def show_tissue_navigator(self, *, roi_policy=None, patch_editable=None):
         popup = self._ensure_tissue_navigator()
+        if roi_policy is not None or patch_editable is not None:
+            self.set_navigator_edit_policy(roi_policy=roi_policy,
+                                           patch_editable=patch_editable)
         popup.show()
         popup.raise_()
         self._update_tissue_view_rect()

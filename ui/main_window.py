@@ -237,6 +237,9 @@ class MainWindow(QMainWindow):
         # derived from the previous dataset.  This is a different event from
         # step0_complete (Save/handoff) and must not be folded into it.
         self._step0.dataset_committed.connect(self._on_step0_dataset_committed)
+        # ROI/patch edits made anywhere are published by Step0's writer; Step1
+        # re-reads them from that commit instead of keeping its own copy.
+        self._step0.geometry_committed.connect(self._on_step0_geometry_committed)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -659,6 +662,41 @@ class MainWindow(QMainWindow):
         but the open entry point.  Nothing here creates or reparents a widget.
         """
         self._step0.show_tissue_navigator()
+
+    def _on_step0_geometry_committed(self, payload):
+        """Adopt a geometry-only commit published by Step0.
+
+        The payload is what Step0's writer just put on disk, so Step1 follows
+        the new authority rather than keeping a second copy of the geometry.
+        Bound by manifest path: a commit for a handoff this window is not bound
+        to is ignored rather than half-applied.
+        """
+        payload = dict(payload or {})
+        bound = str((self.step0_output or {}).get("step0_manifest_path") or "")
+        incoming = str(payload.get("step0_manifest_path") or "")
+        if not bound or not incoming:
+            return
+        if os.path.abspath(bound) != os.path.abspath(incoming):
+            return
+
+        rois = [dict(r) for r in (payload.get("rois") or [])]
+        patches = []
+        for item in payload.get("patches") or []:
+            bbox = item.get("bbox_fullres") if isinstance(item, dict) else item
+            if bbox and len(bbox) == 4:
+                patches.append(tuple(int(v) for v in bbox))
+
+        self._rois = rois
+        self._active_roi = rois[0] if rois else None
+        if self._active_roi:
+            patches = self._filter_patches_to_roi(patches, self._active_roi)
+        self.step0_output["rois"] = list(self._rois)
+        self.step0_output["patches"] = list(patches)
+        self._on_rois_changed(self._rois)
+        # `_on_patches` is the single sink: it drops every cache, result and
+        # history that belonged to a patch whose identity or bbox moved.
+        self._on_patches(patches)
+        print(f"[Step1] adopted Step0 geometry commit: patches={len(patches)}")
 
     def _on_step0_dataset_committed(self, info):
         """A different dataset is now Step0's committed dataset.
@@ -2668,12 +2706,25 @@ class MainWindow(QMainWindow):
                 i: self._patch_seg_results.get(i, {})
                 for i in range(len(patches))
             }
+        if len(patches) != len(old_rois):
+            # Patch names are positional ("P3"), so adding or removing one
+            # renumbers the rest: every name-keyed result now points at a
+            # different rectangle and none of it may be shown as current.
+            self._seg_preview_history = {}
+            self._active_preview_patch = ""
+            self._preserve_view_after_patch_load.clear()
         for idx, roi in enumerate(patches):
             if idx < len(old_rois) and roi != old_rois[idx]:
                 self._patch_channel_cache.pop(idx, None)
                 self._patch_load_ready.discard(idx)
                 self._stop_loader_for(idx)
                 self._patch_seg_results.pop(idx, None)
+                self._preserve_view_after_patch_load.pop(idx, None)
+                # Same rectangle name, different rectangle: its previews and
+                # segmentation history describe pixels that are no longer there.
+                self._seg_preview_history.pop(f"P{idx+1}", None)
+                if self._active_preview_patch == f"P{idx+1}":
+                    self._active_preview_patch = ""
 
         # Auto-select only newly added patches; keep selection on move/resize.
         if len(patches) > len(old_rois):

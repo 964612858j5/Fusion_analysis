@@ -223,6 +223,10 @@ class Step0Page(QWidget):
     # deliberately NOT `step0_complete`: "the dataset changed" and "Step0 Save
     # published a handoff" are different events with different consumers.
     dataset_committed = pyqtSignal(dict)
+    # A geometry-only update of the ALREADY published handoff: ROI/patch edits
+    # made anywhere (this page, the navigator popup, Step1) have been written
+    # through the one Step0 writer and a new manifest has been published.
+    geometry_committed = pyqtSignal(dict)
 
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
     _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
@@ -4044,8 +4048,142 @@ class Step0Page(QWidget):
             # (the Step0 overview's own signal already refreshed them).
             if source_panel is not self.overview:
                 self._on_patches_changed(list(self._roi_model.patches))
+            # A completed edit is a commit: `patches_changed` fires once per
+            # finished gesture (drags preview through `_preview_patch_geometry`
+            # and stay silent), so this is edit-end persistence, not per-move.
+            self._persist_geometry_edit()
         finally:
             self._roi_sync_guard = False
+
+    # ── geometry-only handoff commit ─────────────────────────────────────────
+    def _published_handoff(self):
+        """The handoff Step0 has already published, or None.
+
+        Returns (step0_dir, manifest_path, corrected_zarr_path, correction
+        config, manifest).  Before the first Save there is nothing to update
+        and edits stay staged for that Save, exactly as they always have.
+        """
+        ctx = getattr(self, "_roi_context", None)
+        if not ctx:
+            return None
+        step0_dir = (ctx.get("step_dirs") or {}).get("step0") or ""
+        if not step0_dir:
+            return None
+        manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
+        corr_path = os.path.join(step0_dir, "correction_config.json")
+        if not (os.path.exists(manifest_path) and os.path.exists(corr_path)):
+            return None
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            with open(corr_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as exc:
+            print(f"[Step0] cannot read the published handoff: {exc}")
+            return None
+        if not isinstance(manifest, dict) or not isinstance(config, dict):
+            return None
+        zarr_path = str(manifest.get("corrected_zarr_path")
+                        or os.path.join(step0_dir, "corrected_channels.zarr"))
+        return step0_dir, manifest_path, zarr_path, config, manifest
+
+    @staticmethod
+    def _geometry_bboxes(items):
+        out = []
+        for item in items or []:
+            bbox = item.get("bbox_fullres") if isinstance(item, dict) else item
+            if bbox and len(bbox) == 4:
+                out.append([int(v) for v in bbox])
+        return out
+
+    def _published_geometry(self, step0_dir):
+        """(roi bboxes, patch bboxes) as they stand in the published files."""
+        def _read(name):
+            path = os.path.join(step0_dir, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return (self._geometry_bboxes(_read("roi_config.json")),
+                self._geometry_bboxes(_read("patch_config.json")))
+
+    def _commit_geometry_only(self):
+        """Publish a geometry-only update of the published handoff.
+
+        Patch geometry lives in patch_config.json, which only Step0 writes, so
+        an edit made anywhere has to come back through this path or it is not
+        persisted at all.  The one handoff writer is reused verbatim: same
+        artifacts, same schema, same tmp+fsync+os.replace publication of the
+        manifest as the final marker.  Nothing here recomputes background
+        correction — the corrected zarr the published manifest already points
+        at is reused untouched, and `_write_step0_handoff` only ever CREATES a
+        corrected zarr when none exists.
+
+        Returns (committed, reason).
+        """
+        published = self._published_handoff()
+        if published is None:
+            return False, "no_published_handoff"
+        step0_dir, manifest_path, zarr_path, config, manifest = published
+        if not os.path.exists(zarr_path):
+            return False, "corrected_zarr_missing"
+
+        rois = self._standard_rois()
+        patches = self._standard_patches(rois)
+        # An ROI edit moves the analysis region, which mints a NEW roi_context
+        # (roi_id, roi_dir, step directories) and invalidates the corrected
+        # zarr computed for the old region; a NEW ROI has no channel group in
+        # that zarr at all.  There is no safe cross-ROI reuse rule to apply
+        # here, so this refuses instead of inventing one or quietly running a
+        # full Save.
+        if self._roi_context_signature(rois) != self._roi_context_sig:
+            return False, "roi_geometry_changed"
+        old_rois, old_patches = self._published_geometry(step0_dir)
+        if self._geometry_bboxes(rois) != old_rois:
+            return False, "roi_set_changed"
+        if self._geometry_bboxes(patches) == old_patches:
+            return False, "unchanged"
+
+        try:
+            _cfg, rois_out, patches_out, _manifest = self._write_step0_handoff(
+                config, zarr_path)
+        except Exception as exc:
+            print(f"[Step0] geometry-only commit FAILED: {exc}")
+            return False, f"write_failed: {exc}"
+
+        self.geometry_committed.emit({
+            "step0_manifest_path": os.path.abspath(manifest_path),
+            "rois": rois_out,
+            "patches": patches_out,
+        })
+        print(f"[Step0] geometry-only commit published: patches={len(patches_out)}")
+        return True, "committed"
+
+    def _set_geometry_status(self, text):
+        if hasattr(self, "_load_status"):
+            self._load_status.setText(text)
+        popup = getattr(self, "_tissue_navigator_popup", None)
+        if popup is not None and hasattr(popup, "_bar_label"):
+            popup._bar_label.setText(text)
+
+    def _persist_geometry_edit(self):
+        """Persist a finished ROI/patch edit, and never lie about the outcome."""
+        ok, reason = self._commit_geometry_only()
+        if ok:
+            self._set_geometry_status("Patch geometry saved to the Step0 handoff.")
+            return True
+        if reason in ("no_published_handoff", "corrected_zarr_missing", "unchanged"):
+            # Nothing published yet (or nothing changed): edits stay staged for
+            # Save, which is what they have always done.
+            return False
+        if reason in ("roi_geometry_changed", "roi_set_changed"):
+            self._set_geometry_status(
+                "⚠ ROI changed — NOT saved. A different analysis region needs its own "
+                "corrected output: re-run Step0 Save.")
+            return False
+        self._set_geometry_status(f"⚠ Geometry NOT saved ({reason}).")
+        return False
 
     def show_tissue_navigator(self):
         popup = self._ensure_tissue_navigator()

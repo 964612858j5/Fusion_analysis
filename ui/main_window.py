@@ -121,6 +121,10 @@ class MainWindow(QMainWindow):
         self.step4_done          = False
         self._current_step       = 0
         self._gui_work_dir       = ""
+        # Highest Step0 dataset generation this window has already invalidated
+        # for.  A repeated notification for the same committed generation is a
+        # no-op (the signal is idempotent by generation, not by identity).
+        self._dataset_gen_seen    = 0
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -229,6 +233,10 @@ class MainWindow(QMainWindow):
 
         self._step0 = Step0Page()
         self._step0.step0_complete.connect(self._on_step0_complete)
+        # A committed dataset switch invalidates every Step1 fact that was
+        # derived from the previous dataset.  This is a different event from
+        # step0_complete (Save/handoff) and must not be folded into it.
+        self._step0.dataset_committed.connect(self._on_step0_dataset_committed)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -627,6 +635,103 @@ class MainWindow(QMainWindow):
             print(f"[Layout-Step1] {where} splitter sizes=not-used tab={current_tab}")
         except Exception as e:
             print(f"[Layout] log failed: {e}")
+
+    def _on_step0_dataset_committed(self, info):
+        """A different dataset is now Step0's committed dataset.
+
+        Everything Step1 holds was derived from the PREVIOUS dataset, so it is
+        dropped here rather than at the next Save.  Fail-closed: both readiness
+        flags go false, so `_go_to_step1` refuses entry until the authoritative
+        reader has accepted the new dataset's handoff.
+
+        Idempotent by generation: Step0 only emits this from the tail of its
+        commit block, and a repeat for a generation already invalidated here is
+        a no-op.  A FAILED load returns before that commit block, so this never
+        runs for a switch that did not happen and the previous dataset stays
+        current with its readiness untouched.
+        """
+        info = dict(info or {})
+        gen = int(info.get("gen") or 0)
+        if gen and gen <= self._dataset_gen_seen:
+            return
+        self._dataset_gen_seen = max(gen, self._dataset_gen_seen)
+
+        self.step0_done = False
+        self._step1_context_ready = False
+        self.step1_done = False
+        self._discard_step1_dataset_state()
+        # Standing on a Step1 page whose every field was just cleared is not a
+        # locked Step1, it is an empty one.  Send the user back to the step that
+        # owns the new dataset.
+        if self._current_step == 1:
+            self._go_to_step0()
+        self._update_next_button()
+        print(f"[Step1] dataset switch committed (gen={gen}); Step1 context invalidated")
+
+    def _discard_step1_dataset_state(self):
+        """Drop every Step1 fact that belonged to the previous dataset.
+
+        Deliberately field-by-field rather than a blanket reset: the listed
+        fields are exactly those keyed by the old dataset's identity, geometry
+        or patch indices.  Step-navigation state, layout and Step0's own state
+        are not ours to clear.
+        """
+        # 1. Silence anything that could still write Step1 state.  Stopping the
+        #    loaders also DISCONNECTS them, so a thread that refuses to finish
+        #    can no longer deliver the old dataset's pixels into the new one.
+        self._stop_all_loaders()
+        self._preload_debounce.stop()
+        self._prev_timer.stop()
+        self._step1_session_timer.stop()
+        if self.proc is not None:
+            self._stop()
+
+        # 2. Data-source bindings.
+        self.loader = None
+        self.step0_output = {}
+        self.step1_output = None
+        self._corrected_zarr_path = ""
+        self._corrected_zarr_mode = ""
+        self._corrected_decisions = {}
+        self._fused_zarr_path = None
+
+        # 3. Geometry (authoritative copy lives in the new dataset's manifest).
+        self._rois = []
+        self._active_roi = None
+        self._all_patches = []
+
+        # 4. Everything keyed by a patch index.
+        self._patch_channel_cache.clear()
+        self._patch_load_ready.clear()
+        self._patch_seg_results.clear()
+        self._preserve_view_after_patch_load.clear()
+        self._preview_patch_idx = -1
+        self._selected_step1_patch_idx = -1
+
+        # 5. Everything keyed by a patch name / by the old dataset's results.
+        self._seg_preview_history = {}
+        self._active_preview_patch = ""
+        self._active_segmentation_method = ""
+        self._p2_params = None
+        self._p1_diam = None
+        self._params_source = None
+
+        # 6. On-screen remains of the old dataset.
+        self._rebuild_patch_buttons([])
+        self.prev_img.clear()
+        self.result_grid.setup_grid(0, [], "")
+        self.btn_save.setEnabled(False)
+        self._fusion_bar_widget.setVisible(False)
+        self.patch_cache_status.setText(" ")
+        self.roi_status.setText("No ROI loaded")
+        self.prev_status.setText(
+            "Dataset changed — Step1 is locked until the new Step0 handoff is loaded.")
+
+        # 7. Downstream pages, through their public entry points only.
+        if hasattr(self, "_step2"):
+            self._step2.set_rois([])
+            if hasattr(self._step2, "set_roi_context"):
+                self._step2.set_roi_context(roi_id="", roi_dir="", step2_dir="")
 
     def _on_step0_complete(self, payload):
         global OME_TIFF_FILE, OUTPUT_DIR

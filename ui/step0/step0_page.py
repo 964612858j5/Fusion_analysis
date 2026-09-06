@@ -216,6 +216,13 @@ FULL_IMAGE_COARSE_LEVEL = 2
 
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
+    # A dataset switch that has been COMMITTED (not a load attempt, not a path
+    # edit, not a failed rollback).  Emitted once per committed generation from
+    # the tail of `_reload_from_paths`'s commit block, carrying the generation
+    # and the normalized identity of the dataset that is now current.  This is
+    # deliberately NOT `step0_complete`: "the dataset changed" and "Step0 Save
+    # published a handoff" are different events with different consumers.
+    dataset_committed = pyqtSignal(dict)
 
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
     _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
@@ -4816,6 +4823,16 @@ class Step0Page(QWidget):
         # drawing lives there since #10). Reuses the existing open path; guarded
         # to fire once per load.
         self._auto_open_tissue_navigator()
+
+        # The switch is committed: announce it exactly once, from the end of the
+        # commit block.  Every pre-commit failure above returned before the
+        # generation moved, so a listener that acts on this signal can never be
+        # told about a dataset that is not the current one.
+        self.dataset_committed.emit({
+            "gen": int(self._dataset_gen),
+            "ome_path": os.path.abspath(self.ome_path) if self.ome_path else "",
+            "output_dir": os.path.abspath(self.output_dir) if self.output_dir else "",
+        })
 
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when

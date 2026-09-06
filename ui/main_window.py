@@ -121,6 +121,16 @@ class MainWindow(QMainWindow):
         # for.  A repeated notification for the same committed generation is a
         # no-op (the signal is idempotent by generation, not by identity).
         self._dataset_gen_seen    = 0
+        # Full-fusion job state, declared here rather than appearing when
+        # `_save()` first runs, so every teardown path can reason about it.
+        self._fusion_worker       = None
+        self._fusion_dialog       = None
+        self._fusion_token        = None   # identity of the job that may write
+        self._fusion_run_id       = 0
+        # Threads that were asked to stop but had not finished yet.  A strong
+        # reference is kept until the thread physically ends, so the C++ object
+        # is never destroyed while it is still running.
+        self._retired_fusion_workers = []
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -750,6 +760,7 @@ class MainWindow(QMainWindow):
         self._preload_debounce.stop()
         self._prev_timer.stop()
         self._step1_session_timer.stop()
+        self._retire_fusion_worker("the Step1 context was discarded")
         if self.proc is not None:
             self._stop()
 
@@ -2737,6 +2748,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._stop_all_loaders()
+        # A fusion job outlives the window unless it is asked to stop and then
+        # held: destroying a running QThread is what produces
+        # "QThread: Destroyed while thread is still running".
+        self._retire_fusion_worker("the main window is closing")
+        for worker in list(self._retired_fusion_workers):
+            if worker.isRunning():
+                worker.wait(3000)
+            self._drop_retired_fusion_worker(worker)
         if self._patch_loaders:
             event.ignore()
             self.prev_status.setText("Waiting for preview loaders to stop…")
@@ -3981,21 +4000,45 @@ class MainWindow(QMainWindow):
         n_rows, n_cols = sel
 
         # ── Start FullFusionWorker ────────────────────────────────────
-        self._fusion_worker = FullFusionWorker(
+        worker = FullFusionWorker(
             loader     = self.loader,
             fusion_cfg = worker_fcfg,
             n_rows     = n_rows,
             n_cols     = n_cols,
             rois       = self._rois if self._rois else None,
         )
-        self._fusion_worker.progress.connect(self._on_fusion_progress)
-        self._fusion_worker.finished.connect(self._on_fusion_done)
-        self._fusion_worker.error.connect(self._on_fusion_error)
+        self._start_fusion_worker(
+            worker,
+            job_name="fusion" if is_wholecell else "DAPI input zarr",
+            n_rows=n_rows, n_cols=n_cols)
+
+    def _start_fusion_worker(self, worker, job_name, n_rows, n_cols):
+        """Bind a fusion job to the dataset and handoff it was started for.
+
+        The token, not the handler, is what makes a callback legitimate: the
+        business callbacks are wrapped here, because `_on_fusion_done` is also
+        called synchronously by the reuse paths, where there is no worker and
+        nothing to invalidate.
+        """
+        self._fusion_worker = worker
+        self._fusion_run_id += 1
+        token = {
+            "run": self._fusion_run_id,
+            "dataset_gen": int(self._dataset_gen_seen),
+            "manifest": str((self.step0_output or {}).get("step0_manifest_path") or ""),
+            "source_identity": (self.step0_output or {}).get("source_identity"),
+        }
+        self._fusion_token = token
+        worker.progress.connect(
+            self._guarded_fusion_callback(token, self._on_fusion_progress, "progress"))
+        worker.finished.connect(
+            self._guarded_fusion_callback(token, self._on_fusion_done, "finished"))
+        worker.error.connect(
+            self._guarded_fusion_callback(token, self._on_fusion_error, "error"))
 
         self._lock_ui()
         self._fusion_bar_widget.setVisible(True)
         self._fusion_pbar.setValue(0)
-        job_name = "fusion" if is_wholecell else "DAPI input zarr"
         self._fusion_lbl.setText(
             f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"
         )
@@ -4009,10 +4052,85 @@ class MainWindow(QMainWindow):
         self._fusion_dialog.setMinimumDuration(0)
         self._fusion_dialog.setAutoClose(False)
         self._fusion_dialog.setAutoReset(False)
-        self._fusion_dialog.canceled.connect(self._fusion_worker.stop)
+        self._fusion_dialog.canceled.connect(worker.stop)
         self._fusion_dialog.setValue(0)
         self._fusion_dialog.show()
-        self._fusion_worker.start()
+        worker.start()
+        return token
+
+    def _fusion_callback_allowed(self, token):
+        """Is this fusion job still the one allowed to write Step1 state?
+
+        A job is allowed only while it is THE current job, started for the
+        dataset generation that is still current and for the handoff Step1 is
+        still bound to.  Anything else is a late answer about a slide the user
+        has left.
+        """
+        current = self._fusion_token
+        if current is None or token is not current:
+            return False
+        if int(token.get("dataset_gen", 0)) != int(self._dataset_gen_seen):
+            return False
+        expected = str(token.get("manifest") or "")
+        bound = str((self.step0_output or {}).get("step0_manifest_path") or "")
+        if expected:
+            if not bound or os.path.abspath(expected) != os.path.abspath(bound):
+                return False
+        return True
+
+    def _guarded_fusion_callback(self, token, handler, label):
+        """Wrap a fusion callback so a retired job's answer is dropped."""
+        def _dispatch(*args):
+            if not self._fusion_callback_allowed(token):
+                print(f"[Step1] dropped late fusion {label} from run "
+                      f"{token.get('run')}: it is not the current job")
+                return
+            handler(*args)
+        return _dispatch
+
+    def _retire_fusion_worker(self, reason):
+        """Stop the running fusion job and make sure it can never write again.
+
+        `stop()` is cooperative, so returning from here does not mean the
+        thread has ended.  Two separate things happen: the token is dropped, so
+        every business callback is refused from this line on, and the QThread is
+        kept alive by a strong reference until it PHYSICALLY finishes.  Physical
+        exit is `QThread.finished()`, which the worker's own `finished(str)`
+        shadows — the base signal is fetched explicitly rather than mistaking
+        the business one for thread termination.
+        """
+        self._fusion_token = None
+        worker = self._fusion_worker
+        self._fusion_worker = None
+        self._close_fusion_dialog()
+        if hasattr(self, "_fusion_bar_widget"):
+            self._fusion_bar_widget.setVisible(False)
+        if worker is None:
+            return False
+        print(f"[Step1] retiring fusion job: {reason}")
+        try:
+            worker.stop()
+        except Exception as exc:
+            print(f"[Step1] fusion stop() failed: {exc}")
+        if worker.isRunning():
+            worker.wait(2000)
+        if worker.isRunning():
+            self._retired_fusion_workers.append(worker)
+            try:
+                physically_finished = QtCore.QThread.finished.__get__(
+                    worker, QtCore.QThread)
+                physically_finished.connect(
+                    lambda w=worker: self._drop_retired_fusion_worker(w))
+            except Exception as exc:
+                print(f"[Step1] could not watch fusion thread exit: {exc}")
+        return True
+
+    def _drop_retired_fusion_worker(self, worker):
+        """Release a retired thread once it has physically ended."""
+        if worker.isRunning():
+            return
+        self._retired_fusion_workers = [
+            w for w in self._retired_fusion_workers if w is not worker]
 
     def _close_fusion_dialog(self):
         d = getattr(self, "_fusion_dialog", None)

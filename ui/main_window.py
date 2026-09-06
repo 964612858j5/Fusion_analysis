@@ -266,6 +266,21 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(4)
         ll.addWidget(self._make_label("① ROI / Patch Overview", bold=True))
+        # The ONE Tissue Preview / ROI Navigator is Step0's: Step0Page creates,
+        # owns and tears down the popup, and this button only borrows its open
+        # entry point.  Step1 must never build a second popup, a second
+        # OverviewPanel over it, or a second ROI/patch model.
+        self._btn_step1_tissue_nav = QPushButton("🗺 Tissue Preview / ROI Navigator")
+        self._btn_step1_tissue_nav.setToolTip(
+            "Open the shared Tissue Preview. ROI and patches are the same ones "
+            "Step0 edits — there is only ever one navigator window.")
+        self._btn_step1_tissue_nav.setStyleSheet(
+            "QPushButton{color:#9bd0ff;font-size:10px;"
+            "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
+            "QPushButton:hover{background:#182230;}"
+        )
+        self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
+        ll.addWidget(self._btn_step1_tissue_nav)
         self.roi_gv = pg.GraphicsLayoutWidget()
         self.roi_gv.setBackground("#111")
         self.roi_gv.setMinimumSize(240, 300)
@@ -635,6 +650,15 @@ class MainWindow(QMainWindow):
             print(f"[Layout-Step1] {where} splitter sizes=not-used tab={current_tab}")
         except Exception as e:
             print(f"[Layout] log failed: {e}")
+
+    def _show_tissue_navigator(self):
+        """Open the shared Tissue Preview from Step1.
+
+        Deliberately a one-line delegation, not an attach/detach protocol:
+        Step0Page owns the popup's whole lifecycle, and Step1 borrows nothing
+        but the open entry point.  Nothing here creates or reparents a widget.
+        """
+        self._step0.show_tissue_navigator()
 
     def _on_step0_dataset_committed(self, info):
         """A different dataset is now Step0's committed dataset.

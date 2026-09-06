@@ -102,11 +102,12 @@ class _RecordingExploreTab:
         pass
 
 
-def test_the_top_level_tabs_are_only_correction_and_remap(full_image_page):
+def test_the_only_top_level_tab_is_background_correction(full_image_page):
     page = full_image_page
     titles = [page._step0_tabs.tabText(i)
               for i in range(page._step0_tabs.count())]
-    assert titles == ["Background Correction", "Channel Remap"], titles
+    assert titles == ["Background Correction"], titles
+    assert not hasattr(page, "_cond_tab_index")
     assert not hasattr(page, "_explore_tab_index")
 
 

@@ -1,5 +1,6 @@
-"""The Background Correction tab's display controls ARE the Channel Remap
-tab's "Intensity" inspector, in a floating window.
+"""Background Correction uses the internal remap owner's Intensity inspector.
+
+The inspector lives in a floating window.
 
 The previous attempt built a second, smaller set of spin boxes. This one
 does not re-implement anything: the workbench hands its inspector panel over
@@ -182,7 +183,7 @@ def _tear_pages_down_before_the_flush():
 
 
 def _bare_page(app, stack=None, loader=None, channel="CD3"):
-    """A page whose Channel Remap tab was NEVER shown -- the real-app state
+    """A page whose hidden remap owner was never engaged -- the real-app state
     the Intensity window has to cope with.
 
     `channel=None` leaves the channel the load chose -- the landing state,
@@ -250,8 +251,7 @@ def test_it_is_a_separate_top_level_window_not_the_navigator(app):
 
 
 def test_the_widget_inside_is_the_workbenchs_own_inspector(app):
-    """1:1, not a replica: the same object the Channel Remap tab used to
-    show, and the Channel Remap tab no longer contains it."""
+    """1:1, not a replica: the hidden workbench's own inspector."""
     page = _page(app)
     wb = page._cond_workbench
     before = wb._inspector
@@ -263,7 +263,7 @@ def test_the_widget_inside_is_the_workbenchs_own_inspector(app):
     assert panel is before, "a different widget was built"
     assert panel in win.findChildren(QtWidgets.QWidget)
     assert panel not in wb.findChildren(QtWidgets.QWidget), \
-        "the Channel Remap tab still shows the inspector"
+        "the hidden workbench still owns the detached inspector"
     assert wb.inspector_is_detached()
     # The workbench still drives it: its controls are that panel's children.
     for ctrl in (wb._histogram, wb._sp_min, wb._sp_max, wb._sp_gamma,
@@ -1013,8 +1013,8 @@ def test_a_colour_change_on_an_inactive_channel_leaves_the_curve_alone(app):
 
 # ── 7. the workbench is engaged by the window, not by its tab ────────────
 
-def test_opening_the_window_engages_a_never_shown_remap_tab(app):
-    """The gap: the workbench used to be fed only when the Channel Remap tab
+def test_opening_the_window_engages_the_hidden_remap_owner(app):
+    """The gap: the workbench used to be fed only when its old tab
     was entered, so on a real slide the Intensity window opened empty --
     no active channel, no params, no histogram pixels."""
     page = _bare_page(app)
@@ -1077,7 +1077,7 @@ def test_engaging_starts_no_correction(app, monkeypatch):
 
 # ── 7. the detached inspector must not drive the workbench's own preview ──
 #
-# While the inspector lives in Step0's floating window the Channel Remap tab
+# While the inspector lives in Step0's floating window, the hidden workbench
 # is not on screen, but every Min/Max move and every channel switch still
 # recomposited the workbench's OWN patch overlay: measured on a real slide,
 # 360 ms of a 404 ms slider step and 943 ms of a 1.48 s channel switch, for
@@ -1150,7 +1150,7 @@ def test_an_active_change_while_detached_recomposites_once_after_reattach(app, m
     assert len(calls) == 1
 
 
-def test_showing_the_channel_remap_tab_pays_the_deferred_preview_back(app, monkeypatch):
+def test_hidden_conditioning_host_never_replays_its_old_canvas(app, monkeypatch):
     page = _page(app)
     page.show_intensity_window()
     wb = page._cond_workbench
@@ -1158,19 +1158,13 @@ def test_showing_the_channel_remap_tab_pays_the_deferred_preview_back(app, monke
     wb._sp_max.setValue(float(wb._sp_max.value()) + 50.0)
     assert calls == []
 
-    # Entering the Channel Remap tab: Qt delivers a show event to the
-    # workbench, whose handler pays the deferred composite back.
     page.show()
-    page._step0_tabs.setCurrentIndex(page._cond_tab_index)
     try:
-        assert wb.isVisible()
-        assert len(calls) == 1, f"{len(calls)} composites on show, want 1"
-        assert not wb._preview_dirty
-        # ...and only once: leaving and re-entering with nothing changed in
-        # between must not recomposite again.
-        page._step0_tabs.setCurrentIndex(0)
-        page._step0_tabs.setCurrentIndex(page._cond_tab_index)
-        assert len(calls) == 1, "a second visit recomposited again"
+        app.processEvents()
+        assert page._conditioning_host.isHidden()
+        assert not wb.isVisible()
+        assert calls == [], "the removed Remap canvas was recomposited"
+        assert wb._preview_dirty
     finally:
         page.hide()
 

@@ -1,16 +1,8 @@
-"""v14.1b: Step0 hosts the Channel Conditioning / Remap surface.
+"""Step0 keeps ChannelWorkbench as an internal Intensity/remap owner.
 
-Step0 is the v14 third host of the shared ChannelWorkbench (alongside the
-Step1.5 creator and Step3 reviewer). These tests pin:
-
-- Step0 exposes two main tabs (Background Correction + Channel Conditioning /
-  Remap).
-- The conditioning tab hosts the SAME shared ChannelWorkbench class (not forked).
-- Step0 owns/uses the same context pieces Step1.5 used (loader / output_dir /
-  patches / nucleus_channel) and can load current-patch channels with a fake
-  loader.
-- Saving writes ONLY a preview-only config with a REGISTERED created_from_step
-  constant and an honest legacy_storage_path.
+These tests pin the one user-facing Background Correction tab, the hidden shared
+workbench, the canonical preview-only remap config, and Background Save's
+validate/persist-before-handoff contract.
 
 Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 """
@@ -78,21 +70,21 @@ def _inject_roi_context(page, tmp_path):
     page._roi_context = {
         "roi_id": "roi1",
         "roi_dir": roi_dir,
-        "step_dirs": {"step0": step0_dir},
+        "step_dirs": {"step0": step0_dir, "step1": os.path.join(roi_dir, "step1")},
     }
     return step0_dir
 
 
-# ── 1. Two main tabs ─────────────────────────────────────────────────────────
-def test_step0_has_two_main_tabs(page):
+# ── 1. One visible tab; remap state has one hidden owner ─────────────────────
+def test_step0_has_one_main_tab(page):
     assert hasattr(page, "_step0_tabs")
     tabs = [page._step0_tabs.tabText(i) for i in range(page._step0_tabs.count())]
-    assert "Background Correction" in tabs
-    assert any("Channel Remap" in t for t in tabs)
+    assert tabs == ["Background Correction"]
+    assert not hasattr(page, "_cond_tab_index")
 
 
-# ── 2. Conditioning tab hosts the shared ChannelWorkbench class ──────────────
-def test_conditioning_tab_hosts_shared_channel_workbench(page):
+# ── 2. Hidden host owns the shared ChannelWorkbench class ─────────────────────
+def test_hidden_host_owns_shared_channel_workbench(page):
     from block01.ui.widgets.channel_workbench import ChannelWorkbench
     assert hasattr(page, "_cond_workbench")
     assert isinstance(page._cond_workbench, ChannelWorkbench)
@@ -405,13 +397,13 @@ def test_dapi_lazy_loads_like_a_marker(app):
 
 
 # ── step0-conditioning-cleanup-and-all-toggle: Step0-host integration ────────
-def test_step0_conditioning_tab_has_no_load_buttons(app):
+def test_internal_conditioning_host_has_no_visible_load_buttons(app):
     from PyQt5 import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
-    # no visible "Load ..." button remains in the conditioning tab (the page-level
-    # btn_load was removed; the workbench load buttons are hidden for Step0).
-    load_btns = [b for b in s._cond_tab.findChildren(QtWidgets.QPushButton)
+    assert s._conditioning_host.isHidden()
+    load_btns = [b for b in
+                 s._conditioning_host.findChildren(QtWidgets.QPushButton)
                  if "Load" in b.text() and not b.isHidden()]
     assert load_btns == []
 
@@ -432,35 +424,15 @@ def test_step0_workbench_has_all_toggle(app):
 
 
 # ── step0-all-toggle-perf-and-save-position: Save right-aligned ──────────────
-def _find_layout_with_widget(layout, widget):
-    """Recursively find the QLayout directly containing `widget`."""
-    from PyQt5 import QtWidgets
-    for i in range(layout.count()):
-        item = layout.itemAt(i)
-        if item.widget() is widget:
-            return layout
-        child = item.layout()
-        if child is not None:
-            found = _find_layout_with_widget(child, widget)
-            if found is not None:
-                return found
-    return None
-
-
-def test_conditioning_save_is_right_aligned(app):
+def test_background_save_replaces_the_separate_conditioning_save(app):
     from PyQt5 import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
-    save = next(b for b in s._cond_tab.findChildren(QtWidgets.QPushButton)
-                if b.text() == "Save")
-    bar = _find_layout_with_widget(s._cond_tab.layout(), save)
-    assert bar is not None
-    # Save is the last item, and a stretch/spacer precedes it (right-aligned,
-    # matching the BG tab's save_row order).
-    save_idx = next(i for i in range(bar.count())
-                    if bar.itemAt(i).widget() is save)
-    assert save_idx == bar.count() - 1
-    assert any(bar.itemAt(i).spacerItem() is not None for i in range(save_idx))
+    assert s._btn_continue.text() == "Save"
+    labels = [b.text() for b in
+              s._conditioning_host.findChildren(QtWidgets.QPushButton)]
+    assert "Save" not in labels
+
 
 
 # ── step0-fix-patch-switching: patch selector + change propagation ───────────
@@ -482,11 +454,9 @@ def _row_buttons(row):
             if isinstance(row.itemAt(i).widget(), QtWidgets.QPushButton)]
 
 
-def test_conditioning_tab_has_patch_selector(app):
+def test_only_background_correction_has_a_patch_selector(app):
     p = _page_with_patches(app, n=3)
-    # the conditioning tab mirrors the BG tab's P1/P2/P3 buttons
-    assert hasattr(p, "_cond_patch_buttons_row")
-    assert len(_row_buttons(p._cond_patch_buttons_row)) == 3
+    assert not hasattr(p, "_cond_patch_buttons_row")
     assert len(_row_buttons(p._patch_buttons_row)) == 3
 
 
@@ -500,8 +470,7 @@ def test_conditioning_patch_button_switches_without_resync(app):
     calls = []
     orig = p._sync_step0_to_workbench
     p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx) or orig()
-    # click P3 in the conditioning row
-    btn = next(b for b in _row_buttons(p._cond_patch_buttons_row) if b.text() == "P3")
+    btn = next(b for b in _row_buttons(p._patch_buttons_row) if b.text() == "P3")
     btn.click()
     assert p.current_patch_idx == 2
     assert calls == []                           # no re-sync on a patch switch
@@ -518,12 +487,12 @@ def test_new_patches_rebuild_buttons_without_resyncing_conditioning(app):
     p._sync_step0_to_workbench = lambda: calls.append(p.current_patch_idx)
     p._on_patches_changed([(0, 40, 0, 40), (40, 80, 40, 80)])
     assert len(_row_buttons(p._patch_buttons_row)) == 2
-    assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
+    assert not hasattr(p, "_cond_patch_buttons_row")
     assert calls == []                           # conditioning left alone
 
 
 def test_delete_all_patches_keeps_the_conditioning_view(app):
-    """Deleting every patch no longer empties the Channel Remap view. The
+    """Deleting every patch no longer empties the hidden remap owner. The
     workbench shows the whole slide, which exists with no patch drawn at all
     -- this page even lands in that state."""
     p = _page_with_patches(app, n=3)
@@ -533,7 +502,8 @@ def test_delete_all_patches_keeps_the_conditioning_view(app):
     assert p._cond_workbench.has_channel_data() is True
     assert p._conditioning_in_use is True
     p._on_patches_changed([(0, 30, 0, 30), (30, 60, 30, 60)])   # recreate
-    assert len(_row_buttons(p._cond_patch_buttons_row)) == 2
+    assert len(_row_buttons(p._patch_buttons_row)) == 2
+    assert not hasattr(p, "_cond_patch_buttons_row")
     assert p._cond_workbench.has_channel_data() is True
 
 
@@ -767,3 +737,104 @@ def test_display_param_change_does_not_reset_current_patch_zoom(app):
     wb._on_minmax_changed()                # same-patch display change -> no refit
     after = vb.viewRange()
     assert np.allclose(before[0], after[0]) and np.allclose(before[1], after[1])
+
+# ── Removed Remap tab: Background Save owns validation + persistence ──────────
+def _fresh_save_contract_page(app, tmp_path):
+    from block01.ui.step0.step0_page import Step0Page
+    page = Step0Page()
+    _inject_context(page, tmp_path)
+    _inject_roi_context(page, tmp_path)
+    return page
+
+
+def _stub_handoff(page):
+    page._write_step0_handoff = lambda config, zarr_path: (
+        config,
+        [],
+        [],
+        {
+            "corrected_zarr_path": zarr_path,
+            "step0_dir": os.path.dirname(zarr_path),
+            "analysis_region_type": "full_wsi",
+        },
+    )
+
+
+def test_background_save_persists_remap_before_emitting_handoff(
+        app, tmp_path, monkeypatch):
+    page = _fresh_save_contract_page(app, tmp_path)
+    try:
+        page._sync_step0_to_workbench()
+        _stub_handoff(page)
+        path = page._step0_conditioning_config_path()
+        timeline = []
+        real_persist = page._persist_step0_remap_config
+
+        def persist():
+            result = real_persist()
+            timeline.append(("remap", result, os.path.isfile(path)))
+            return result
+
+        page._persist_step0_remap_config = persist
+        page.step0_complete.connect(
+            lambda _payload: timeline.append(("handoff", os.path.isfile(path))))
+        monkeypatch.setattr(
+            "block01.ui.step0.step0_page.QMessageBox.information",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("Background Save showed the old Remap success dialog")))
+
+        zarr_path = os.path.join(
+            page._roi_context["step_dirs"]["step0"], "corrected_channels.zarr")
+        assert page._emit_complete({}, zarr_path, {}) is True
+        assert timeline == [("remap", True, True), ("handoff", True)]
+        assert page._last_saved_remap_path == path
+    finally:
+        page.teardown()
+        page.deleteLater()
+
+
+def test_invalid_remap_blocks_the_step0_handoff(app, tmp_path, monkeypatch):
+    page = _fresh_save_contract_page(app, tmp_path)
+    try:
+        page._sync_step0_to_workbench()
+        writes = []
+        page._write_step0_handoff = lambda *_a: writes.append(1)
+        emitted = []
+        page.step0_complete.connect(lambda payload: emitted.append(payload))
+        warnings = []
+        monkeypatch.setattr(
+            "block01.ui.step0.step0_page.save_channel_remap_config",
+            lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad gamma")))
+        monkeypatch.setattr(
+            "block01.ui.step0.step0_page.QMessageBox.warning",
+            lambda *a, **k: warnings.append(a))
+
+        zarr_path = os.path.join(
+            page._roi_context["step_dirs"]["step0"], "corrected_channels.zarr")
+        assert page._emit_complete({}, zarr_path, {}) is False
+        assert writes == []
+        assert emitted == []
+        assert warnings and "bad gamma" in str(warnings[0])
+    finally:
+        page.teardown()
+        page.deleteLater()
+
+
+def test_no_intensity_edits_need_no_remap_file_but_handoff_continues(
+        app, tmp_path):
+    page = _fresh_save_contract_page(app, tmp_path)
+    try:
+        assert page._cond_workbench.has_channel_data() is False
+        _stub_handoff(page)
+        emitted = []
+        page.step0_complete.connect(lambda payload: emitted.append(payload))
+        zarr_path = os.path.join(
+            page._roi_context["step_dirs"]["step0"], "corrected_channels.zarr")
+
+        assert page._emit_complete({}, zarr_path, {}) is True
+        assert len(emitted) == 1
+        assert not os.path.exists(page._step0_conditioning_config_path())
+        assert getattr(page, "_last_saved_remap_path", "") == ""
+    finally:
+        page.teardown()
+        page.deleteLater()

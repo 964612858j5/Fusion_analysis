@@ -70,10 +70,11 @@ from ...utils.roi_project import (
     mark_roi_step,
     roi_shape_from_bbox,
 )
-# v14.1b: Step0 hosts the shared ChannelWorkbench as its Channel Conditioning /
-# Remap tab (the third host alongside Step1.5 creator + Step3 reviewer). GUI-only
-# — these are the same UI-local schema/widget modules Step1.5 used; no promotion /
-# resolver / Step2-runtime import is introduced here.
+# Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
+# Its Intensity inspector is exposed from Background Correction; the former
+# user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
+# schema/widget modules Step1.5 and Step3 use; no promotion / resolver /
+# Step2-runtime import is introduced here.
 from ..widgets.channel_workbench import (
     ChannelWorkbench,
     _PALETTE as CHANNEL_PALETTE,
@@ -253,7 +254,7 @@ class Step0Page(QWidget):
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
-        # The floating "Intensity" window (the Channel Remap inspector,
+        # The floating Intensity window (owned by the internal remap workbench,
         # re-parented) and the widget it hosts. Both lazily created.
         self._intensity_window = None
         self._intensity_panel = None
@@ -494,25 +495,26 @@ class Step0Page(QWidget):
         main_split.setChildrenCollapsible(False)
         self._main_split = main_split   # 保存引用，showEvent里固定比例
 
-        # v14.1b: Step0 main workarea = two tabs.
-        #   Tab 1 "Background Correction"        — the existing Step0 correction UI
-        #   Tab 2 "Channel Conditioning / Remap" — the migrated Step1.5 conditioning
-        #                                          surface, reusing ChannelWorkbench.
+        # Step0 has one user-facing work area. Channel remapping is edited by
+        # the floating Intensity inspector inside Background Correction, so a
+        # second top-level Remap tab would expose two competing homes for the
+        # same parameters.
         self._step0_tabs = QtWidgets.QTabWidget()
         self._step0_tabs.addTab(main_split, "Background Correction")
-        self._cond_tab = self._build_step0_conditioning_tab()
-        self._cond_tab_index = self._step0_tabs.addTab(
-            self._cond_tab, "Channel Remap")
+        # Keep exactly one ChannelWorkbench alive as the Intensity inspector's
+        # owner and the remap config serializer. It is deliberately not added
+        # to `_step0_tabs`; its old multichannel canvas is no longer a Step0 UI.
+        self._conditioning_host = self._build_step0_conditioning_host()
+        self._conditioning_host.setParent(self)
+        self._conditioning_host.hide()
         # The full-image viewer is NOT a top-level tab. It lives inside
         # Background Correction, as the second page of the Patch Preview
         # area, and is built there (Section C) -- one instance, owned by
         # that stack. The trial third tab it replaced is gone.
-        self._step0_tabs.currentChanged.connect(self._on_step0_tab_changed)
         outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
-        # Keep the BG-tab left column (channel list + params) and the Remap-tab left
-        # column (Channels + Intensity) the SAME width + position, and draggable: a
-        # drag on either syncs the other. Deferred: Section C (which builds _bg_c_split)
-        # is constructed after this point, so wire it once the whole page exists.
+        # Section C builds `_bg_c_split` later. Keep the established initial
+        # channel-column width while the hidden workbench still owns the
+        # Intensity panel.
         QtCore.QTimer.singleShot(0, self._wire_left_column_sync)
 
         # ── Section B（左 25%）— ROI & Patch Definition ───────────────
@@ -721,11 +723,11 @@ class Step0Page(QWidget):
         # Section C 内部：左（通道列表+参数+patch选择） / 右（三联预览+metrics+决策）
         c_split = QSplitter(Qt.Horizontal)
         c_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
-        self._bg_c_split = c_split   # synced with the Remap tab's left column
+        self._bg_c_split = c_split   # user-facing channel/content splitter
         cl.addWidget(c_split, stretch=1)
 
         # C-左：通道列表 + 参数滑块 + patch 选择. Capped narrow so the Channels
-        # list matches the Channel Remap tab's left-column width; the freed width
+        # list keeps the established compact left-column width; the freed width
         # goes to the triple Patch Preview on the right.
         c_left = QWidget()
         cll = QVBoxLayout(c_left)
@@ -754,13 +756,13 @@ class Step0Page(QWidget):
         self._method_all.setFixedWidth(64)
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
         # One compact button opens the floating "Intensity" window -- the
-        # Channel Remap tab's inspector itself (histogram, Min/Max, Gamma,
+        # internal remap workbench's inspector (histogram, Min/Max, Gamma,
         # Auto, Reset), re-parented. It belongs next to the channel list,
         # not in the Patch Preview header: it edits the SELECTED CHANNEL.
         self._btn_intensity_window = QPushButton("Intensity…")
         self._btn_intensity_window.setToolTip(
-            "Open the floating Intensity window: the Channel Remap "
-            "histogram, Min/Max, Gamma, Auto and Reset for the selected "
+            "Open the floating Intensity window: histogram, Min/Max, "
+            "Gamma, Auto and Reset for the selected "
             "channel. Display only — it never changes the h5ad.")
         self._btn_intensity_window.setStyleSheet(
             "QPushButton{color:#c678dd;border:1px solid #c678dd;border-radius:3px;"
@@ -799,13 +801,13 @@ class Step0Page(QWidget):
         self._dock_adapter.model.selection_changed.connect(
             self._on_channel_selected_by_id)
         # The model is the third writer of a channel's colour (after this page
-        # and the Channel Remap layer list). Listening here is what makes the
+        # and the internal remap colour store). Listening here makes the
         # Intensity window's histogram follow a swatch change live, whichever
         # of the three did the writing.
         self._dock_adapter.model.color_changed.connect(
             self._on_model_color_changed)
         # One display mapping per channel (core/display_mapping.py). Its
-        # SOURCE is the Channel Remap workbench's params (see
+        # SOURCE is the internal remap workbench's params (see
         # `_display_mapping_for`); `wb.params_changed` is what tells the
         # compare panels, the full image and its DAPI overlay to follow. The
         # model's display fields are only a mirror, so nothing is connected
@@ -1269,7 +1271,7 @@ class Step0Page(QWidget):
         dl.addWidget(self._decision_status)
 
         # v15 mutual visibility: the current channel's LIVE remap state
-        # (from the Channel Remap tab) shown on the correction side.
+        # (from the Intensity inspector) shown on the correction side.
         self._remap_state_lbl = QLabel("Remap: —")
         self._remap_state_lbl.setWordWrap(True)
         self._remap_state_lbl.setStyleSheet("color:#879bb1;font-size:10px;")
@@ -1294,15 +1296,15 @@ class Step0Page(QWidget):
         save_row.addStretch()
         self._btn_continue = QPushButton("Save")
         self._btn_continue.setToolTip(
-            "Run background correction on assigned channels, write "
-            "corrected_channels.zarr + the Step0->Step1 handoff, and mark Step0 "
-            "complete. Navigate via the step names.")
+            "Validate and save the current Intensity remap, run background "
+            "correction on assigned channels, write corrected_channels.zarr "
+            "+ the Step0->Step1 handoff, and mark Step0 complete.")
         self._btn_continue.setStyleSheet(
             "QPushButton{background:#2a5;color:white;border-radius:4px;"
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}"
         )
-        self._btn_continue.setFixedHeight(38)   # unify with the Remap-tab Save
+        self._btn_continue.setFixedHeight(38)
         self._btn_continue.clicked.connect(self._save_and_continue)
         save_row.addWidget(self._btn_continue)
         cl.addLayout(save_row)
@@ -1320,132 +1322,53 @@ class Step0Page(QWidget):
 
         self._refresh_slider_labels()
 
-    # ── v14.1b Channel Conditioning / Remap (migrated from Step1.5) ───────────
-    #  Step0 is the v14 host for pre-segmentation channel conditioning. It reuses
-    #  the shared ChannelWorkbench and Step0's OWN context (self.loader + current
-    #  patch + self._channel_order + self.nucleus_channel) — the same context
-    #  pieces the old Step1.5 page received via set_context. Configs stay
-    #  preview_only (step2_ready=false); promotion to Step2-ready is a v14.5 phase.
+    # ── Internal channel-remap host (migrated from Step1.5) ───────────────────
+    # Step0 reuses ChannelWorkbench's model, Intensity inspector and config
+    # serializer with Step0's own context. The composite widget stays hidden;
+    # only its inspector is re-parented into the Background Correction window.
+    # Configs stay preview_only (step2_ready=false).
 
-    def _build_step0_conditioning_tab(self):
-        w = QWidget()
-        # Match the Background Correction tab's darker background (#1c1c1c) instead
-        # of the default gray.
-        w.setStyleSheet("background:#1c1c1c;")
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(4, 4, 4, 4)   # match the BG tab so the left edges align
+    def _build_step0_conditioning_host(self):
+        """Build the one hidden workbench that owns Intensity/remap state.
 
-        # Preview-patch selector for the conditioning view. The BG tab's P1/P2/…
-        # buttons are not visible from this tab, so mirror them here. Both rows are
-        # rebuilt by _rebuild_patch_buttons and drive the same _select_patch (which
-        # refreshes the conditioning data for the chosen patch).
-        patch_sel_row = QHBoxLayout()
-        patch_sel_row.setSpacing(4)
-        psl = QLabel("Preview Patch:")
-        psl.setStyleSheet("color:#98c379;font-size:10px;font-weight:bold;")
-        patch_sel_row.addWidget(psl)
-        self._cond_patch_buttons_row = QHBoxLayout()
-        self._cond_patch_buttons_row.setSpacing(4)
-        patch_sel_row.addLayout(self._cond_patch_buttons_row)
-        patch_sel_row.addStretch()
-        # Fit view + Validate config live here (top row, right of the patch buttons),
-        # not inside the workbench — frees the workbench height for the panes. They
-        # drive the workbench's public actions (workbench built just below).
-        _btn_fit = QPushButton("Fit view")
-        _btn_fit.setToolTip("Reset zoom/pan to fit the patch.")
-        _btn_fit.clicked.connect(lambda: self._cond_workbench.fit_view())
-        patch_sel_row.addWidget(_btn_fit)
-        _btn_val = QPushButton("Validate config")
-        _btn_val.setToolTip("Validate the current per-channel remap config.")
-        _btn_val.clicked.connect(lambda: self._cond_workbench.validate_config())
-        patch_sel_row.addWidget(_btn_val)
-        # NOT added to the tab column: this bar goes into the workbench's center
-        # (above the image) so the left Channels column rises to the top and its
-        # border aligns with the BG tab's Channels border.
-        patch_sel_row.setContentsMargins(0, 0, 0, 2)
-        _patch_bar = QWidget()
-        _patch_bar.setLayout(patch_sel_row)
+        Its former patch selector, preview canvas actions, Validate button and
+        separate Save button were user-facing Tab controls. They are intentionally
+        not recreated: validation and persistence now belong to Background
+        Correction's single Save transaction.
+        """
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # (#6/#8) Step0 conditioning: DAPI is a normal channel (no reference
-        # overlay) and fusion participation is Step1's call (no per-channel
-        # Enabled checkbox). Both shared-widget surfaces are turned off here;
-        # Step1.5 / Step3 keep them.
+        # Preserve the established workbench behaviour underneath the Intensity
+        # inspector. The composite canvas remains hidden and is no longer a Step0
+        # feature, but the shared class continues to own params, colours and config.
         self._cond_workbench = ChannelWorkbench(
             show_reference_bar=False, show_enabled_checkbox=False,
             multichannel_overlay=True, show_banner=False,
             step0_intensity_panel=True)
-        # Match the Background Correction tab's darker background.
         self._cond_workbench.setStyleSheet("background:#1c1c1c;")
-        # Host-agnostic: it asks for data via refresh_requested and we feed it from
-        # Step0's own loader/patch. Hide the generic internal save — Step0's
-        # "Save remap config (Step0)" below is the only official save path (it
-        # stamps the honest preview provenance + registered created_from_step).
-        # (#2-cleanup) Hide the manual data-load buttons: Step0 auto-syncs the
-        # current patch (+ lazy-load), so host-refresh / demo / file are redundant.
         self._cond_workbench.configure_host_actions(
             show_internal_save=False, show_load_buttons=False,
             show_fit_button=False, show_bottom_bar=False)
-        # Put the Preview Patch + Fit/Validate bar over the image (center top), so the
-        # Channels column top is not pushed down by it and aligns with the BG tab.
-        self._cond_workbench.set_center_top_bar(_patch_bar)
-        self._cond_workbench.refresh_requested.connect(self._sync_step0_to_workbench)
-        # A colour picked in the Channel Remap layer list is the SAME colour
-        # store the Background Correction swatches read (and vice versa).
+        self._cond_workbench.refresh_requested.connect(
+            self._sync_step0_to_workbench)
         self._cond_workbench.channel_color_changed.connect(
             self._on_workbench_color_changed)
-        # v15: single data-access seam with the SAVE boundary — remap eats
-        # only loader-served pixels (saved corrected after Save, raw before,
-        # honestly labeled). Lazy per-channel fetch preserved.
-        from .preview_source_provider import (
-            Step0PreviewSourceProvider, STAGE_CORRECTED)
+
+        from .preview_source_provider import Step0PreviewSourceProvider
         self._preview_provider = Step0PreviewSourceProvider(self)
         self._cond_workbench.set_pixel_provider(self._workbench_pixels)
-        # The window the sliders open on is the page's slide-wide seed, for
-        # every channel and however the workbench came by its pixels --
-        # otherwise a lazily loaded channel would open on the raw min/max of
-        # the array and disagree with `_display_mapping_for` on first sight.
         self._cond_workbench.set_display_seed_provider(
             lambda _name, arr: seed_display_range(arr))
         self._preview_provider.stage_invalidated.connect(
             self._on_stage_invalidated)
-        # Mutual visibility: remap edits surface live in the BG tab's
-        # Per-Channel Decision panel.
         self._cond_workbench.params_changed.connect(
             self._on_remap_params_changed)
-        # SINGLE SOURCE OF TRUTH: those same params are the display mapping.
-        # Every Min/Max/Gamma/Auto/Reset move in the inspector lands here and
-        # redraws the compare panels + the full image and its DAPI overlay.
         self._cond_workbench.params_changed.connect(
             self._on_display_mapping_changed)
-        # v14.2c: when the viewer's viewport settles (debounced), update the
-        # Tissue Navigator current-view rectangle.
-        self._cond_workbench.viewer.viewport_changed.connect(
-            self._update_tissue_view_rect)
-        lay.addWidget(self._cond_workbench, stretch=1)
-        lay.addSpacing(8)   # small gap so the panes don't sit flush against Save
-
-        bar = QHBoxLayout()
-        # (#2-cleanup) The redundant "Load current patch channels" button was
-        # removed; data auto-syncs from Step0's current patch (_sync_step0_to_
-        # workbench via refresh_requested + on patch load) with lazy-load.
-        # (#5b) The Channel Conditioning tab's Save. Same handler / same written
-        # preview remap config as before — only the label + styling are formalized
-        # to match the BG tab's "Save" (one tab, one Save).
-        btn_save = QPushButton('Save')
-        btn_save.setToolTip(
-            "Save the per-channel preview remap config (preview_only; "
-            "step2_ready=false) for this tab.")
-        btn_save.setStyleSheet(
-            "QPushButton{background:#2a5;color:white;border-radius:4px;"
-            "padding:8px 22px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#3b6;}")
-        btn_save.setFixedHeight(38)   # unify with the BG-tab Save
-        btn_save.clicked.connect(self._save_step0_remap_config)
-        # Right-align Save to match the BG tab's save_row (stretch -> button).
-        bar.addStretch()
-        bar.addWidget(btn_save)
-        lay.addLayout(bar)
-        return w
+        layout.addWidget(self._cond_workbench)
+        return host
 
     # ── production correction vs the Explore stack ──────────────────────
     #
@@ -3287,34 +3210,19 @@ class Step0Page(QWidget):
         cannot be swapped for a second instance -- there is exactly one, and
         the remap workbench's pixel source is bound to it.
 
-        Returns None before the conditioning tab has been built (the
-        provider is created there, partway through `__init__`), which is the
+        Returns None before the internal conditioning host has been built
+        (the provider is created there, partway through `__init__`), which is the
         same guard the page's own `_refresh_remap_state_label` uses.
         """
         return getattr(self, "_preview_provider", None)
 
-    def _on_step0_tab_changed(self, idx):
-        if not hasattr(self, "_step0_tabs"):
-            return
-        # Key on the tab INDEX, not its title (title was renamed to "Channel
-        # Remap"). Entering the remap tab always (re)feeds the workbench from the
-        # current patch so it works even when NO background correction was run.
-        if idx == getattr(self, "_cond_tab_index", -1) \
-                and hasattr(self, "_cond_workbench") \
-                and not self._cond_workbench.has_channel_data():
-            self._sync_step0_to_workbench()
-        # Re-apply the shared channels-column width to the now-visible tab so the
-        # left column looks unmoved across the switch.
-        now = (self._bg_c_split if idx == 0
-               else getattr(getattr(self, "_cond_workbench", None), "_h_split", None))
-        if now is not None and getattr(self, "_left_col_width", None):
-            QtCore.QTimer.singleShot(0, lambda s=now: self._apply_left_col_width(s))
-
     def _wire_left_column_sync(self):
-        """Bidirectionally sync the BG tab's left column (channel list + params) and the
-        Remap tab's left column (Channels + Intensity): a drag on either updates the
-        shared width and the other splitter, and a tab switch re-applies it. Draggable,
-        no fixed cap — so switching tabs never appears to move the channels column."""
+        """Preserve the established Background Correction channel-column width.
+
+        The hidden workbench still owns the floating Intensity inspector, so its
+        minimum width remains a useful sizing reference. It is not a user-facing
+        second tab and dragging Background Correction is the only visible input.
+        """
         a = getattr(self, "_bg_c_split", None)
         b = getattr(getattr(self, "_cond_workbench", None), "_h_split", None)
         if a is None or b is None:
@@ -3327,9 +3235,8 @@ class Step0Page(QWidget):
         wa = a.widget(0).minimumSizeHint().width() if a.widget(0) else 0
         wb = b.widget(0).minimumSizeHint().width() if b.widget(0) else 0
         # v15 user feedback: the BG Channels column starts at 4/3 of the old
-        # default (was 2x, then trimmed to 2/3 of that). Still draggable and
-        # width-synced with the Remap tab. Row-internal geometry (name/combo
-        # spacing) is independent of this and unchanged.
+        # default. It remains draggable; the hidden peer is only kept in sync
+        # because it owns the detached Intensity inspector's original layout.
         self._left_col_width = (4 * (max(wa, wb, 120) + 4)) // 3
         a.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(a))
         b.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(b))
@@ -3920,18 +3827,27 @@ class Step0Page(QWidget):
         cfg.setdefault("camp_source_policy", DEFAULT_CAMP_SOURCE_POLICY)
         return cfg
 
-    def _save_step0_remap_config(self):
+    def _persist_step0_remap_config(self, *, notify=False):
+        """Validate and persist the active Intensity remap before Step0 handoff.
+
+        The former Remap tab had a separate Save button. Background Correction's
+        Save is now the single transaction boundary, so this helper is silent on
+        success unless invoked by the legacy/private convenience wrapper below.
+        No workbench data means the user never opened or edited Intensity and is
+        a valid no-remap state. Any real validation or provenance failure blocks
+        the downstream handoff instead of silently dropping the user's mapping.
+        """
         wb = getattr(self, "_cond_workbench", None)
         if wb is None or not wb.has_channel_data():
-            QMessageBox.information(
-                self, "Nothing to save",
-                "Load current patch channels and condition them first.")
-            return
+            if notify:
+                QMessageBox.information(
+                    self, "Nothing to save",
+                    "Open Intensity and adjust a channel before saving a remap.")
+            return True
         cfg = wb.build_config()
-        # v14.5b: stamp per-channel source-aware identity (preview only). Stays
-        # preview_only / step2_ready=false; never promoted here.
-        # v14.5b.1 Strategy A: if any channel's identity cannot be resolved, abort
-        # the WHOLE save — no path chosen, no dir created, no partial config.
+        # Stamp source-aware identity only after the corrected store has been
+        # reconciled. This makes the saved provenance describe the pixels Step1
+        # will actually receive, not the pre-Save raw preview.
         try:
             self._apply_source_aware_identity(cfg)
         except SourceAwareIdentityError as exc:
@@ -3940,36 +3856,30 @@ class Step0Page(QWidget):
                 f"Cannot save source-aware preview config: channel "
                 f"'{exc.channel}' source identity could not be resolved "
                 f"(requested {exc.requested_source}).\n{exc.message}")
-            return
-        # Provenance: created in the v14 Step0 Setup & Preprocessing workbench.
-        # created_from_step is a REGISTERED constant (utils.channel_remap_config),
-        # not an ad-hoc string, so v14.5 promotion can recognize Step0 configs.
-        # Stays preview_only / step2_ready=false (set via the workbench source_policy).
+            return False
         out_dir = self._step0_conditioning_out_dir()
         cfg["created_from_step"] = CREATED_FROM_STEP0_CONDITIONING
-        cfg["ui_context"] = "Step0: Setup & Preprocessing / Channel Conditioning"
-        # Record the actual physical storage dir honestly. With a ROI context this
-        # is the unified <roi_dir>/step0/ location (next to corrected_channels.zarr);
-        # without one it is the legacy step1_5/channel_remap_configs fallback.
+        cfg["ui_context"] = "Step0: Background Correction / Intensity"
         cfg["storage_dir"] = out_dir
-        cfg["legacy_storage_path"] = out_dir      # kept for schema back-compat
+        cfg["legacy_storage_path"] = out_dir
         os.makedirs(out_dir, exist_ok=True)
-        # Normal Save AUTO-writes to the canonical Step0 remap-config path for the
-        # current run/ROI (stable filename so a later Save overwrites it). No file
-        # dialog — picking a location is reserved for an explicit Save As/Export.
         path = self._step0_conditioning_config_path()
         try:
+            # save_channel_remap_config validates before writing.
             save_channel_remap_config(cfg, path)
         except ValueError as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
-            return
-        # Remember the exact path just written so Step1 fusion can pick up the
-        # manual remap regardless of any later ROI-context change.
+            return False
         self._last_saved_remap_path = path
         print(f"[Step0] saved channel remap config -> {path}")
-        QMessageBox.information(
-            self, "Saved",
-            f"Saved channel remap:\n{path}")
+        if notify:
+            QMessageBox.information(
+                self, "Saved", f"Saved channel remap:\n{path}")
+        return True
+
+    def _save_step0_remap_config(self):
+        """Private compatibility entry; the visible Save uses `_emit_complete`."""
+        return self._persist_step0_remap_config(notify=True)
 
     def _step0_conditioning_config_path(self):
         """Canonical Step0 remap-config file for the current run/ROI. Stable name
@@ -4089,10 +3999,10 @@ class Step0Page(QWidget):
     # ── the floating "Intensity" window ─────────────────────────────────────
     #  A SECOND, separate floating window (never inside the Tissue Navigator,
     #  which must stay navigation-only). What it hosts is NOT a re-implementation
-    #  of the Channel Remap inspector -- it IS that inspector: the workbench
+    #  of the internal remap workbench -- it IS that inspector: the workbench
     #  hands its "Intensity" panel over (`detach_inspector`) and keeps driving
     #  it, so histogram, Min/Max/Gamma, Auto and Reset behave here exactly as
-    #  they do in the Channel Remap tab, on the same params.
+    #  they do in Background Correction, on the same params.
     def _ensure_intensity_window(self):
         win = getattr(self, "_intensity_window", None)
         if win is not None:
@@ -4101,8 +4011,8 @@ class Step0Page(QWidget):
         if wb is None:
             return None
         # Feed the workbench the current dataset/patch first: opening this
-        # window is engaging the Channel Remap machinery, exactly as entering
-        # its tab is (see `_engage_conditioning_workbench`).
+        # window engages the internal remap machinery directly; there is no
+        # separate tab (see `_engage_conditioning_workbench`).
         self._engage_conditioning_workbench()
         panel = wb.detach_inspector()
         if panel is None:
@@ -4184,16 +4094,15 @@ class Step0Page(QWidget):
         return win
 
     def _engage_conditioning_workbench(self):
-        """Populate the Channel Remap workbench for the current dataset
-        WITHOUT showing its tab.
+        """Populate the internal remap workbench for the current dataset.
 
-        The workbench used to be fed only when its tab was entered
-        (`_on_step0_tab_changed`), so on a real slide the floating Intensity
+        The workbench used to be fed only when its former tab was entered, so
+        on a real slide the floating Intensity
         window opened empty: no channel set, no params, no histogram pixels,
         and `_display_mapping_for` silently fell back to the page-level
         entry -- i.e. the single source of truth was not in effect.
 
-        This is the tab's OWN engagement path, not a copy of it: the same
+        This is the hidden owner's engagement path, not a duplicate:
         guard (`has_channel_data`) and the same loader
         (`_sync_step0_to_workbench`, which sets `_conditioning_in_use` so
         later patch switches keep it fresh). It reads pixels only -- eagerly
@@ -6195,7 +6104,7 @@ class Step0Page(QWidget):
 
         ONE source of truth: the workbench's per-channel remap params ARE
         this page's display mapping, so the floating Intensity window, the
-        compare panels, the full image and the Channel Remap tab can never
+        compare panels, the full image and the Intensity inspector can never
         disagree. Brightness/contrast have no Step0 UI and are pinned to the
         neutral 0.0 / 1.0 where remap semantics equal a display window.
 
@@ -6770,10 +6679,9 @@ class Step0Page(QWidget):
             self._update_decision_ui()
 
     def _all_patch_rows(self):
-        """Every patch-button row to keep in sync: the BG tab's Preview Patch row
-        and (when built) the Channel Conditioning tab's mirror row."""
+        """The Background Correction Preview Patch row."""
         rows = []
-        for attr in ("_patch_buttons_row", "_cond_patch_buttons_row"):
+        for attr in ("_patch_buttons_row",):
             row = getattr(self, attr, None)
             if row is not None:
                 rows.append(row)
@@ -8171,13 +8079,14 @@ class Step0Page(QWidget):
             self._ensure_empty_corrected_zarr(zarr_path, rois)
             # Reconciles the cache: previously corrected channels revert to raw.
             self._apply_corrected_store(None, {})
-            self._emit_complete(config, zarr_path, {})
+            if not self._emit_complete(config, zarr_path, {}):
+                return
             QMessageBox.information(
                 self, "No background correction",
                 "No channel is assigned TopHat or cuCIM, so there is no "
                 "background correction to save.\n\n"
-                "That's fine — click OK, then use the Channel Remap tab to "
-                "adjust channels manually, or continue to Step1.")
+                "That's fine — use Intensity in Background Correction to "
+                "adjust channel display mapping, or continue to Step1.")
             return
 
         # Incremental save: skip channels already in the corrected zarr with the
@@ -8494,7 +8403,7 @@ class Step0Page(QWidget):
             # No channels assigned -> a valid "no correction" choice, not an error.
             self._bg_corrected_status.setText(
                 "No background correction applied (no channels assigned). "
-                "Use Channel Remap or continue to Step1.")
+                "Use Intensity for display mapping, or continue to Step1.")
             self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
 
     def _write_step0_handoff(self, config, zarr_path):
@@ -8611,6 +8520,11 @@ class Step0Page(QWidget):
     def _emit_complete(self, config, zarr_path, decisions):
         self._btn_continue.setEnabled(True)
         self._btn_load.setEnabled(True)
+        # Background Correction Save is the sole Step0 save boundary. Persist
+        # and validate the remap before writing/emitting the downstream handoff.
+        if not self._persist_step0_remap_config():
+            print("[Step0] handoff stopped: channel remap was not saved")
+            return False
         try:
             config, rois, patches, manifest = self._write_step0_handoff(config, zarr_path)
         except Exception as e:
@@ -8642,3 +8556,4 @@ class Step0Page(QWidget):
             "step0_manifest_path": manifest.get("step0_roi_result_path", os.path.join(self.output_dir, "step0_roi_result.json")),
         }
         self.step0_complete.emit(payload)
+        return True

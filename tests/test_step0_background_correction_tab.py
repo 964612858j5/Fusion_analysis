@@ -1,5 +1,5 @@
-"""v14.4: Step0 Background Correction is a formal tab, separate from Channel
-Conditioning / Remap, and never writes corrected output on navigation/show.
+"""Step0 exposes one Background Correction tab and keeps remap machinery internal.
+Navigation/show never writes corrected output.
 
 Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 """
@@ -27,16 +27,14 @@ def _no_corrected_zarr_anywhere(root):
     return True
 
 
-# ── 1 + 2. Two separate tabs ─────────────────────────────────────────────────
-def test_step0_has_background_correction_tab(app):
+# ── 1 + 2. One user-facing Step0 work area ───────────────────────────────────
+def test_step0_only_exposes_background_correction(app):
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     tabs = [s._step0_tabs.tabText(i) for i in range(s._step0_tabs.count())]
-    assert "Background Correction" in tabs
-    assert any("Channel Remap" in t for t in tabs)
-    # they are distinct tab indices
-    assert tabs.index("Background Correction") != next(
-        i for i, t in enumerate(tabs) if "Channel Remap" in t)
+    assert tabs == ["Background Correction"]
+    assert not hasattr(s, "_cond_tab_index")
+    assert s._conditioning_host.isHidden()
 
 
 # ── 3. BG tab has tophat/cuCIM controls, not remap controls ──────────────────
@@ -56,8 +54,8 @@ def test_bg_tab_has_no_remap_controls_as_primary(app):
         assert not hasattr(s, forbidden), forbidden
 
 
-# ── 4. Channel Conditioning tab still hosts the shared ChannelWorkbench ──────
-def test_conditioning_tab_hosts_channel_workbench(app):
+# ── 4. Hidden lifecycle host still owns the shared ChannelWorkbench ──────────
+def test_internal_conditioning_host_owns_channel_workbench(app):
     from block01.ui.widgets.channel_workbench import ChannelWorkbench
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
@@ -299,12 +297,14 @@ def test_preview_patch_relocated_to_c_right(app):
     assert hasattr(s, "_patch_buttons_row") and hasattr(s, "_patch_info")
 
 
-def test_tab2_save_renamed(app):
+def test_background_correction_has_the_only_step0_save_button(app):
     from PyQt5 import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
-    labels = [b.text() for b in s._cond_tab.findChildren(QtWidgets.QPushButton)]
-    assert "Save" in labels                 # formalized Tab2 Save
+    assert s._btn_continue.text() == "Save"
+    labels = [b.text() for b in
+              s._conditioning_host.findChildren(QtWidgets.QPushButton)]
+    assert "Save" not in labels
     assert "Save remap config (Step0)" not in labels
 
 

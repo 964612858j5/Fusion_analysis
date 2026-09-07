@@ -7,6 +7,19 @@ import numpy as np
 
 from .channel_remap import apply_channel_remap
 
+# Which fusion arithmetic produced a result.  It lives here, beside the maths,
+# so a change to the formula and a change to this number are the same edit.
+#
+# 1 = the historical family: the preview and FusionEngine combine channels one
+#     way while the on-disk FullFusionWorker re-normalises per group, per tile
+#     and globally, so the same configuration produces different pixels
+#     depending on which path made them.
+#
+# Anything that carries no version at all predates the field and cannot be
+# assumed to match: a reader must treat a missing version as "unknown", never
+# as "current".
+FUSION_FORMULA_VERSION = 1
+
 
 class FusionEngine:
 

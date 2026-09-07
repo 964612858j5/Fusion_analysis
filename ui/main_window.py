@@ -29,7 +29,7 @@ from ..config import (
     OME_TIFF_FILE, OUTPUT_DIR,
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
-from ..core.fusion_engine import FusionEngine
+from ..core.fusion_engine import FusionEngine, FUSION_FORMULA_VERSION
 from ..core.channel_remap import (
     apply_channel_remap, compose_multichannel_overlay,
     compute_qupath_auto_minmax,
@@ -101,6 +101,10 @@ def _hex_to_rgb01(value):
         return tuple(int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
     except ValueError:
         return (1.0, 1.0, 1.0)
+
+class _ArtifactKindMismatch(Exception):
+    """The zarr on disk was written for the other Step1 output kind."""
+
 
 class MainWindow(QMainWindow):
 
@@ -3923,7 +3927,15 @@ class MainWindow(QMainWindow):
             "normalization_source": "corrected" if self._corrected_zarr_path else "raw",
             "background_correction_source": os.path.abspath(self._corrected_zarr_path) if self._corrected_zarr_path else "",
             "pixel_size": (self.step0_output or {}).get("pixel_size"),
-            "code_version": "block01_step1_v8_dapi_meta",
+            "artifact_kind": "step1_dapi_input_zarr",
+            "fusion_formula_version": FUSION_FORMULA_VERSION,
+            # Channel 0 of this file is a full marker fusion — Mesmer's fused
+            # mode reads it as the membrane channel — so the weights that made
+            # it belong in this identity too. They were absent, which is why a
+            # weight change did not invalidate a DAPI-input zarr.
+            "fusion_config": worker_fcfg,
+            "display_mapping": self._display_mapping_identity(worker_fcfg),
+            "code_version": "block01_step1_v9_dapi_meta",
         }
         # Fingerprint the DAPI channel's Step0 manual remap so that changing (or
         # clearing) the remap invalidates the reused DAPI input zarr — otherwise a
@@ -3937,6 +3949,22 @@ class MainWindow(QMainWindow):
             meta["channel_remap_hash"] = self._remap_params_hash({dapi_ch: dapi_remap})
         return meta
 
+    def _display_mapping_identity(self, worker_fcfg):
+        """What every pixel of this artifact was mapped through.
+
+        The fusion weights say how channels are combined; this says what each
+        channel's [0,1] signal MEANT before they were combined. A run whose
+        Min/Max/Gamma changed is a different result even at identical weights,
+        so it belongs in the identity rather than outside it.
+        """
+        params = dict((worker_fcfg or {}).get("channel_remap_params") or {})
+        if not params:
+            params, _src = self._load_step0_remap_params()
+        return {
+            "source": os.path.abspath(self._load_step0_remap_params()[1] or ""),
+            "hash": self._remap_params_hash(params or {}),
+        }
+
     @staticmethod
     def _remap_params_hash(params):
         payload = json.dumps(params, sort_keys=True, default=str)
@@ -3949,6 +3977,8 @@ class MainWindow(QMainWindow):
             "dapi_channel", "shape", "dtype", "resolution",
             "normalization_source", "background_correction_source", "pixel_size",
             "code_version", "channel_remap_hash",
+            "artifact_kind", "fusion_formula_version", "fusion_config",
+            "display_mapping",
         )
         return {k: meta.get(k) for k in keys}
 
@@ -4046,7 +4076,14 @@ class MainWindow(QMainWindow):
             "background_correction_source": os.path.abspath(self._corrected_zarr_path) if self._corrected_zarr_path else "",
             "pixel_size": (self.step0_output or {}).get("pixel_size"),
             "fusion_config": worker_fcfg,
-            "code_version": "block01_step1_v11_fused_reuse",
+            # What this file IS. The whole-cell and the DAPI-input runs write the
+            # same `fused_<roi>.zarr` filename, so without this a run of one kind
+            # could be picked up as the other.
+            "artifact_kind": "step1_fused_zarr",
+            # Which arithmetic made these pixels.
+            "fusion_formula_version": FUSION_FORMULA_VERSION,
+            "display_mapping": self._display_mapping_identity(worker_fcfg),
+            "code_version": "block01_step1_v12_fused_reuse",
         }
         meta["config_hash"] = self._step1_config_hash(meta)
         return meta
@@ -4118,6 +4155,9 @@ class MainWindow(QMainWindow):
             "background_correction_source": expected_meta.get("background_correction_source"),
             "pixel_size": expected_meta.get("pixel_size"),
             "fusion_config": expected_meta.get("fusion_config"),
+            "artifact_kind": expected_meta.get("artifact_kind"),
+            "fusion_formula_version": expected_meta.get("fusion_formula_version"),
+            "display_mapping": expected_meta.get("display_mapping"),
             "config_hash": expected_meta.get("config_hash"),
             "last_used": time.strftime("%Y-%m-%d %H:%M:%S"),
             "code_version": expected_meta.get("code_version"),
@@ -4149,24 +4189,36 @@ class MainWindow(QMainWindow):
 
         print(f"[Step1] existing fused zarr found: {existing_zarr}")
         meta_path = self._fusion_meta_path()
-        old_hash = ""
+        old_meta = {}
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
-                    old_meta = json.load(f)
-                old_hash = str(old_meta.get("config_hash") or "")
+                    old_meta = json.load(f) or {}
             except Exception as e:
-                print(f"[Step1] failed to read fusion_meta.json; reusing valid zarr: {e}")
-
+                print(f"[Step1] failed to read fusion_meta.json: {e}")
+                old_meta = {}
+        old_hash = str(old_meta.get("config_hash") or "")
         new_hash = str(expected_meta.get("config_hash") or "")
+
+        # Fail closed. A file that cannot say what made it is not evidence that
+        # it matches: an unreadable meta, a missing hash, a missing formula
+        # version and a run of the other kind all used to end in "reuse it
+        # anyway", which is how a DAPI-input run's zarr could be served as the
+        # whole-cell fusion.
+        kind = str(old_meta.get("artifact_kind") or "")
+        if kind != expected_meta.get("artifact_kind"):
+            print(f"[Step1] existing fused zarr was written as {kind or 'an unknown kind'}, "
+                  f"not {expected_meta.get('artifact_kind')}; regenerating")
+            return False
+        if old_meta.get("fusion_formula_version") != expected_meta.get(
+                "fusion_formula_version"):
+            print("[Step1] existing fused zarr was made by another fusion formula "
+                  f"({old_meta.get('fusion_formula_version')!r} vs "
+                  f"{expected_meta.get('fusion_formula_version')!r}); regenerating")
+            return False
         if not old_hash:
-            print("[Step1] existing fused zarr has no config hash; reusing because zarr is valid")
-            self._write_fused_zarr_meta(expected_meta, existing_zarr)
-            self._reused_fused_zarr_meta = True
-            self._on_fusion_done(existing_zarr)
-            print("[Step1] config unchanged, skip generation")
-            print("[Step1] Next unlocked")
-            return True
+            print("[Step1] existing fused zarr has no config hash; regenerating")
+            return False
         if old_hash == new_hash:
             print("[Step1] config unchanged, skip generation")
             self._write_fused_zarr_meta(expected_meta, existing_zarr)
@@ -4193,7 +4245,10 @@ class MainWindow(QMainWindow):
         else:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
-                    old_meta = json.load(f)
+                    old_meta = json.load(f) or {}
+                if str(old_meta.get("artifact_kind") or "") != expected_meta.get("artifact_kind"):
+                    raise _ArtifactKindMismatch(
+                        old_meta.get("artifact_kind") or "an unknown kind")
                 if self._dapi_meta_compare_view(old_meta) == self._dapi_meta_compare_view(expected_meta):
                     print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
                     print("[Step1] DAPI input zarr reuse/regenerate reason: metadata match")
@@ -4202,6 +4257,8 @@ class MainWindow(QMainWindow):
                     self._on_fusion_done(existing_zarr)
                     return True
                 reason = "metadata changed"
+            except _ArtifactKindMismatch as e:
+                reason = f"existing zarr was written as {e}"
             except Exception as e:
                 reason = f"failed to read existing meta: {e}"
         print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")

@@ -29,7 +29,7 @@ from ...config import (
     OUTPUT_DIR, ROI_COLORS, PATCH_COLORS, OVERVIEW_DOWNSAMPLE,
 )
 from ...workers.cellpose_worker import OverviewLoaderThread
-from ...core.fusion_engine import FusionEngine
+from ...core.fusion_engine import FusionEngine, FUSION_FORMULA_VERSION
 from ...core.channel_remap import apply_channel_remap
 
 class TileSelectDialog(QDialog):
@@ -458,6 +458,9 @@ class FullFusionWorker(QThread):
                 out_zarr.attrs["roi_name"]          = rname
                 out_zarr.attrs["bbox_fullres"]      = [ry0, ry1, rx0, rx1]
                 out_zarr.attrs["created_at"]        = datetime.now().isoformat()
+                # Self-describing: a consumer can tell which arithmetic made
+                # these pixels without consulting a sidecar file.
+                out_zarr.attrs["fusion_formula_version"] = FUSION_FORMULA_VERSION
 
                 # Tile the region
                 tile_h = -(-rh // self.n_rows)

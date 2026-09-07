@@ -30,6 +30,9 @@ def _stub(remap):
     s.loader = types.SimpleNamespace(shape=(64, 48), filepath="/x/raw.ome.tiff")
     s._load_step0_remap_params = lambda: (remap, "")
     s._remap_params_hash = MainWindow._remap_params_hash
+    # The identity now also records which display mapping the pixels went
+    # through; the stub gets the real method, bound to itself.
+    s._display_mapping_identity = MainWindow._display_mapping_identity.__get__(s)
     return s
 
 

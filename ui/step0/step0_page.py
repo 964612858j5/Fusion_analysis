@@ -4212,7 +4212,7 @@ class Step0Page(QWidget):
         image into tiles. Returns None when the pixels are not available.
         """
         try:
-            arr = self._workbench_pixels(channel, blocking=True)
+            arr = self._workbench_pixels(channel)
         except Exception as exc:
             print(f"[Step0] no pixels to seed a display window for {channel}: {exc}")
             return None
@@ -4256,7 +4256,30 @@ class Step0Page(QWidget):
                 draft[ch] = dict(auto)
         return draft
 
-    def commit_display_mapping(self, channels=None):
+    @staticmethod
+    def _restore_remap_config(path, previous):
+        """Put the canonical remap config back the way it was.
+
+        Called when the manifest could not be republished. Leaving the new file
+        in place would leave the published manifest hashed over a file that no
+        longer exists in that form, i.e. a handoff that was valid before the
+        Save and is invalid after a Save that produced nothing.
+        """
+        try:
+            if previous is None:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            tmp = path + ".rollback"
+            with open(tmp, "wb") as f:
+                f.write(previous)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception as exc:
+            print(f"[Step0] could not roll the remap config back: {exc}")
+
+    def commit_display_mapping(self, channels=None, required=None):
         """Freeze the draft, write it, and republish the manifest — or nothing.
 
         One transaction: the snapshot is taken first, written to the canonical
@@ -4278,20 +4301,41 @@ class Step0Page(QWidget):
             return False, "roi_geometry_changed"
 
         snapshot = self.frozen_display_mapping(channels)
+        # A channel that will carry weight into the fusion MUST have a window.
+        # Without one the screen would still draw it and the fusion would leave
+        # it out, so this refuses loudly and names the channels instead of
+        # producing a result that is missing a marker nobody was told about.
+        missing = [str(c) for c in (required or []) if str(c) not in snapshot]
+        if missing:
+            print("[Step0] no display window for: " + ", ".join(sorted(missing)))
+            return False, "no_display_window: " + ", ".join(sorted(missing))
         wb = getattr(self, "_cond_workbench", None)
         if wb is None:
             return False, "no_workbench"
+        # Both writes or neither. The manifest is hashed over the remap config,
+        # so a written config with an un-republished manifest is worse than no
+        # commit at all: it invalidates the handoff that was valid a moment ago.
+        cfg_path = self._step0_conditioning_config_path()
+        previous = None
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "rb") as f:
+                    previous = f.read()
+            except Exception as exc:
+                print(f"[Step0] could not read the remap config to protect it: {exc}")
+                return False, f"read_failed: {exc}"
         try:
             cfg = wb.build_config()
             cfg_channels = cfg.setdefault("channels", {})
             for name, params in snapshot.items():
                 cfg_channels[str(name)] = normalize_channel_remap_params(params)
-            save_channel_remap_config(cfg, self._step0_conditioning_config_path())
-            self._last_saved_remap_path = self._step0_conditioning_config_path()
+            save_channel_remap_config(cfg, cfg_path)
+            self._last_saved_remap_path = cfg_path
             _cfg, _rois, _patches, _manifest = self._write_step0_handoff(
                 config, zarr_path)
         except Exception as exc:
             print(f"[Step0] display-mapping commit FAILED: {exc}")
+            self._restore_remap_config(cfg_path, previous)
             return False, f"write_failed: {exc}"
 
         self.display_mapping_committed.emit({

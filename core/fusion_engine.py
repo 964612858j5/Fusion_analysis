@@ -118,10 +118,9 @@ class FusionEngine:
         norm. Channels are read RAW (normalize=False) so the raw-unit remap window
         is correct."""
         remap = channel_remap_params or {}
-        needed = set(nuc_ch)
+        needed = {nuc_ch} if nuc_ch else set()
         for cw in groups.values():
             needed.update(cw.keys())
-        needed.add(nuc_ch)
 
         cache = {}
         for ch in needed:

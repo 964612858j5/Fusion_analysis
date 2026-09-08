@@ -1895,7 +1895,8 @@ class MainWindow(QMainWindow):
         self._active_preview_patch = str(sess.get("active_preview_patch") or "")
         self._p1_diam = sess.get("p1_diam")
         self._params_source = sess.get("params_source")
-        self._fused_zarr_path = sess.get("fusion_zarr_path") or None
+        self._fused_zarr_path = self._restorable_fused_zarr(
+            sess.get("fusion_zarr_path")) or None
 
         self.step1_output = {
             "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
@@ -2210,7 +2211,8 @@ class MainWindow(QMainWindow):
             self._active_preview_patch = str(sess.get("active_preview_patch") or "")
             self._p1_diam = sess.get("p1_diam")
             self._params_source = sess.get("params_source")
-            self._fused_zarr_path = sess.get("fusion_zarr_path") or None
+            self._fused_zarr_path = self._restorable_fused_zarr(
+                sess.get("fusion_zarr_path")) or None
             self.step1_output = {
                 "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
                 "correction_config_path": os.path.join(out_dir, "correction_config.json"),
@@ -3384,9 +3386,13 @@ class MainWindow(QMainWindow):
             cyto = np.zeros(shape, dtype=np.float32)
             nuc = np.zeros(shape, dtype=np.float32)
 
-        if float(cyto.max()) <= 0.0 and float(nuc.max()) <= 0.0 and nuc_ch and nuc_ch in cache:
-            nuc = signals[nuc_ch]
-            self.prev_status.setText("All marker weights are 0. Showing nucleus channel fallback.")
+        if float(cyto.max()) <= 0.0 and float(nuc.max()) <= 0.0:
+            # Say so; do not draw something else. Substituting the raw nucleus
+            # here was a second set of fusion semantics that the disk worker
+            # does not have, so an all-zero configuration looked different on
+            # screen from the file it would save.
+            self.prev_status.setText(
+                "This configuration fuses to nothing: every weight is 0.")
 
         if cyto is None and nuc is None:
             return
@@ -3963,6 +3969,9 @@ class MainWindow(QMainWindow):
         dapi_remap = (self._load_step0_remap_params()[0] or {}).get(dapi_ch) if dapi_ch else None
         if dapi_remap:
             meta["channel_remap_hash"] = self._remap_params_hash({dapi_ch: dapi_remap})
+        # The store stamps this into itself, so a finished DAPI-input zarr can
+        # be told apart from a truncated one at the same path.
+        meta["config_hash"] = self._step1_config_hash(meta)
         return meta
 
     def _display_mapping_identity(self, worker_fcfg):
@@ -4195,6 +4204,81 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to write fusion_meta.json:\n{traceback.format_exc()}")
 
+    def _restorable_fused_zarr(self, path):
+        """The session's fused zarr, only if it is still usable as one.
+
+        A session file records a path, and Step2 is handed that path as a
+        finished result. Restoring it unchecked was a way around every gate the
+        Save path applies: a store made by the old formula, a DAPI-input store
+        at the whole-cell name, a run that was cancelled half-way, or a path
+        that no longer exists at all could all come back as "Step1 done".
+        """
+        path = str(path or "")
+        if not path:
+            return ""
+        if not os.path.isdir(path) or not self._is_valid_existing_fused_zarr(path):
+            print(f"[Step1] session fused zarr missing or unreadable: {path}")
+            return ""
+        attrs = self._fused_zarr_body_identity(path)
+        if attrs is None:
+            print(f"[Step1] session fused zarr is not marked complete: {path}")
+            return ""
+        kind = str(attrs.get("artifact_kind") or "")
+        if kind not in ("step1_fused_zarr", "step1_dapi_input_zarr"):
+            print(f"[Step1] session fused zarr is {kind or 'of an unknown kind'}; "
+                  "not restoring it")
+            return ""
+        if attrs.get("fusion_formula_version") != FUSION_FORMULA_VERSION:
+            print("[Step1] session fused zarr was made by formula "
+                  f"{attrs.get('fusion_formula_version')!r}, not "
+                  f"{FUSION_FORMULA_VERSION}; not restoring it")
+            return ""
+        return path
+
+    @staticmethod
+    def _fused_zarr_body_identity(path):
+        """What the store itself says it is, or None if it will not say.
+
+        The sidecar describes a path, not a file: a run that was cancelled or
+        crashed part-way left a store of the right shape at that path with the
+        previous run's meta still beside it. Only the store's own attrs,
+        written last, can tell a finished result from a truncated one.
+        """
+        try:
+            attrs = dict(getattr(zarr.open(path, mode="r"), "attrs", {}) or {})
+        except Exception as exc:
+            print(f"[Step1] could not read the fused zarr attrs: {exc}")
+            return None
+        if attrs.get("complete") is not True:
+            return None
+        return attrs
+
+    def _body_matches_expected(self, path, expected_meta, label):
+        """Fail closed unless the store itself matches the identity we want."""
+        attrs = self._fused_zarr_body_identity(path)
+        if attrs is None:
+            print(f"[Step1] {label} at {path} is not marked complete; regenerating")
+            return False
+        kind = str(attrs.get("artifact_kind") or "")
+        want_kind = str(expected_meta.get("artifact_kind") or "")
+        if kind != want_kind:
+            print(f"[Step1] {label} says it is {kind or 'an unknown kind'}, "
+                  f"not {want_kind}; regenerating")
+            return False
+        if attrs.get("fusion_formula_version") != expected_meta.get(
+                "fusion_formula_version"):
+            print(f"[Step1] {label} was made by formula "
+                  f"{attrs.get('fusion_formula_version')!r}, not "
+                  f"{expected_meta.get('fusion_formula_version')!r}; regenerating")
+            return False
+        body_hash = str(attrs.get("config_hash") or "")
+        want_hash = str(expected_meta.get("config_hash") or "")
+        if not body_hash or body_hash != want_hash:
+            print(f"[Step1] {label} carries config hash {body_hash or 'none'}, "
+                  f"not {want_hash or 'none'}; regenerating")
+            return False
+        return True
+
     def _try_reuse_fused_zarr(self, expected_meta):
         existing_zarr = self._existing_fused_zarr_path()
         if bool(getattr(self, "_force_dapi_zarr", None) and self._force_dapi_zarr.isChecked()):
@@ -4236,6 +4320,9 @@ class MainWindow(QMainWindow):
             print("[Step1] existing fused zarr has no config hash; regenerating")
             return False
         if old_hash == new_hash:
+            if not self._body_matches_expected(existing_zarr, expected_meta,
+                                               "the existing fused zarr"):
+                return False
             print("[Step1] config unchanged, skip generation")
             self._write_fused_zarr_meta(expected_meta, existing_zarr)
             self._reused_fused_zarr_meta = True
@@ -4265,7 +4352,11 @@ class MainWindow(QMainWindow):
                 if str(old_meta.get("artifact_kind") or "") != expected_meta.get("artifact_kind"):
                     raise _ArtifactKindMismatch(
                         old_meta.get("artifact_kind") or "an unknown kind")
-                if self._dapi_meta_compare_view(old_meta) == self._dapi_meta_compare_view(expected_meta):
+                if (self._dapi_meta_compare_view(old_meta)
+                        == self._dapi_meta_compare_view(expected_meta)
+                        and self._body_matches_expected(
+                            existing_zarr, expected_meta,
+                            "the existing DAPI input zarr")):
                     print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
                     print("[Step1] DAPI input zarr reuse/regenerate reason: metadata match")
                     print("Reusing existing DAPI input zarr")
@@ -4331,12 +4422,13 @@ class MainWindow(QMainWindow):
         step0 = getattr(self, "_step0", None)
         if step0 is None or not hasattr(step0, "commit_display_mapping"):
             return True, "no step0 page"
-        channels = list(self._fusion_weighted_channels())
+        required = list(self._fusion_weighted_channels())
+        channels = list(required)
         for ch in self.config.visible_channels():
             if ch not in channels:
                 channels.append(ch)
         try:
-            return step0.commit_display_mapping(channels)
+            return step0.commit_display_mapping(channels, required=required)
         except Exception as exc:
             print(f"[Step1] display-mapping commit raised: {exc}")
             return False, f"commit raised: {exc}"
@@ -4616,6 +4708,13 @@ class MainWindow(QMainWindow):
             self._reused_fused_zarr_meta = False
             if self._try_reuse_fused_zarr(expected_fused_meta):
                 return
+        # The worker stamps these into the zarr itself, so a finished store can
+        # say what it is without a sidecar vouching for it.
+        identity = (self._pending_fused_zarr_meta
+                    or self._pending_dapi_input_meta or {})
+        worker_fcfg["artifact_kind"] = identity.get("artifact_kind") or ""
+        worker_fcfg["config_hash"] = identity.get("config_hash") or ""
+
         active_ch = set([worker_fcfg["nucleus"]["channel"]])
         for gdata in worker_fcfg["groups"].values():
             active_ch.update(gdata["channels"].keys())

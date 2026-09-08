@@ -84,12 +84,25 @@ def _window(app, tmp_path):
     return w
 
 
-def _make_zarr(tmp_path, name="fused.zarr"):
+def _make_zarr(tmp_path, name="fused.zarr", stamp=None):
+    """A fused store on disk. `stamp` is what the store says about itself: the
+    worker writes those attrs last, and a reader may only believe a store that
+    carries them."""
     path = str(tmp_path / name)
     z = zarr.open(path, mode="w", shape=(64, 64, 2), dtype="uint16")
     z[:] = 1
     z.attrs["cellpose_channels"] = [1, 2]
+    for key, value in (stamp or {}).items():
+        z.attrs[key] = value
     return path
+
+
+def _stamp(meta):
+    """What a completed run of `meta` stamps into its own store."""
+    return {"complete": True,
+            "artifact_kind": meta.get("artifact_kind"),
+            "fusion_formula_version": meta.get("fusion_formula_version"),
+            "config_hash": meta.get("config_hash")}
 
 
 def test_a_meta_without_a_config_hash_is_not_reused(app, tmp_path):
@@ -196,8 +209,8 @@ def test_a_result_from_another_formula_is_not_reused(app, tmp_path):
 def test_a_matching_result_is_still_reused(app, tmp_path, monkeypatch):
     w = _window(app, tmp_path)
     try:
-        path = _make_zarr(tmp_path)
         expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        path = _make_zarr(tmp_path, stamp=_stamp(expected))
         with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
             json.dump(expected, f, default=str)
 
@@ -239,5 +252,57 @@ def test_changing_the_display_mapping_invalidates_both(app, tmp_path, monkeypatc
 
         assert a_fused["config_hash"] != b_fused["config_hash"]
         assert w._dapi_meta_compare_view(a_dapi) != w._dapi_meta_compare_view(b_dapi)
+    finally:
+        w.close()
+
+
+def test_a_store_that_never_finished_is_not_reused(app, tmp_path):
+    """A run cancelled or crashed part-way leaves a store of the right shape at
+    the right path, with the PREVIOUS run's meta still beside it. The sidecar
+    then matches and the pixels are half old, half new — so the store itself has
+    to say it finished before anything may be reused."""
+    w = _window(app, tmp_path)
+    try:
+        expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        stamp = _stamp(expected)
+        stamp["complete"] = False
+        _make_zarr(tmp_path, stamp=stamp)
+        with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+            json.dump(expected, f, default=str)
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_store_stamped_as_the_other_kind_is_not_reused(app, tmp_path):
+    """The whole-cell and DAPI-input runs write the same filename. A sidecar
+    can be replaced; what the store says about itself cannot."""
+    w = _window(app, tmp_path)
+    try:
+        expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        stamp = _stamp(expected)
+        stamp["artifact_kind"] = "step1_dapi_input_zarr"
+        _make_zarr(tmp_path, stamp=stamp)
+        with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+            json.dump(expected, f, default=str)
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_store_made_by_an_older_formula_is_not_reused(app, tmp_path):
+    """Even with a matching sidecar: the pixels were made by other arithmetic."""
+    w = _window(app, tmp_path)
+    try:
+        expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        stamp = _stamp(expected)
+        stamp["fusion_formula_version"] = 1
+        _make_zarr(tmp_path, stamp=stamp)
+        with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+            json.dump(expected, f, default=str)
+
+        assert w._try_reuse_fused_zarr(expected) is False
     finally:
         w.close()

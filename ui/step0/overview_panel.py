@@ -8,6 +8,7 @@ import gc
 import json
 import time
 import traceback
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -276,6 +277,14 @@ class FullFusionWorker(QThread):
         # window — so the fused output reflects the user's manual adjustments.
         self._remap_params = dict(fusion_cfg.get("channel_remap_params") or {})
         self._unmapped_reported = set()
+        # What this run claims to be producing. Written into the zarr itself so
+        # a reader never has to trust a sidecar that may describe an older file
+        # at the same path.
+        self._artifact_kind = str(fusion_cfg.get("artifact_kind") or "")
+        self._config_hash = str(fusion_cfg.get("config_hash") or "")
+        # Half-built stores still on disk, so a stop or a crash does not leave
+        # them behind for the next run to trip over.
+        self._tmp_stores = []
 
     def stop(self):
         self._stop = True
@@ -441,8 +450,18 @@ class FullFusionWorker(QThread):
                     f"({rh}×{rw} px)  creating zarr…"
                 )
 
+                # Build in a temporary store and publish it by rename. Writing
+                # the real store in place meant a cancelled or crashed run left
+                # a half-written zarr of the correct shape beside a meta file
+                # describing the previous, complete one — which the reuse check
+                # would then accept.
+                tmp_path = zarr_path + ".inprogress"
+                if os.path.isdir(tmp_path):
+                    shutil.rmtree(tmp_path, ignore_errors=True)
+                self._tmp_stores.append(tmp_path)
+
                 out_zarr = zarr.open(
-                    zarr_path, mode="w",
+                    tmp_path, mode="w",
                     shape=(rh, rw, 2),
                     dtype="uint16",
                     chunks=(self.zarr_chunk, self.zarr_chunk, 2),
@@ -456,6 +475,10 @@ class FullFusionWorker(QThread):
                 # Self-describing: a consumer can tell which arithmetic made
                 # these pixels without consulting a sidecar file.
                 out_zarr.attrs["fusion_formula_version"] = FUSION_FORMULA_VERSION
+                out_zarr.attrs["artifact_kind"] = self._artifact_kind
+                out_zarr.attrs["config_hash"] = self._config_hash
+                # Flipped only after every tile and the polygon mask are in.
+                out_zarr.attrs["complete"] = False
 
                 # Tile the region
                 tile_h = -(-rh // self.n_rows)
@@ -564,6 +587,17 @@ class FullFusionWorker(QThread):
                 except Exception as e:
                     print(f"[Fusion] Preview failed ({rname}): {e}")
 
+                # Publish: mark complete, close the handle, then swap the
+                # finished store into place. Until this line the real path
+                # still holds the previous result, untouched.
+                out_zarr.attrs["complete"] = True
+                del out_zarr
+                gc.collect()
+                if os.path.isdir(zarr_path):
+                    shutil.rmtree(zarr_path)
+                os.replace(tmp_path, zarr_path)
+                self._tmp_stores.remove(tmp_path)
+
                 zarr_paths[rname] = zarr_path
                 all_meta.append({
                     "roi_name":   rname,
@@ -601,6 +635,10 @@ class FullFusionWorker(QThread):
 
         except Exception:
             self.error.emit(traceback.format_exc())
+        finally:
+            for leftover in list(self._tmp_stores):
+                shutil.rmtree(leftover, ignore_errors=True)
+            self._tmp_stores = []
 
 
 # ── Direct patch editing on the tissue thumbnail ──────────────────────

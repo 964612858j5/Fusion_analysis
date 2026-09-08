@@ -218,7 +218,8 @@ def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, m
     try:
         monkeypatch.setattr(mwmod, "OUTPUT_DIR", str(tmp_path))
         monkeypatch.setattr(type(w._step0), "commit_display_mapping",
-                            lambda self, channels=None: (False, "disk is full"))
+                            lambda self, channels=None, required=None:
+                            (False, "disk is full"))
         warned = []
         monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
                             staticmethod(lambda *a, **k: warned.append(a)))
@@ -325,5 +326,87 @@ def test_a_new_dataset_does_not_inherit_the_old_slides_auto_window(app, tmp_path
         second = page.display_mapping_for_preview(["CD3"])["CD3"]["max"]
 
         assert second < first
+    finally:
+        w.close()
+
+
+def test_a_weighted_channel_with_no_window_stops_the_save(app, tmp_path):
+    """Refuse rather than fuse a channel the screen shows and the file omits.
+
+    The worker leaves out any channel with no committed window. If the commit
+    let that through, the marker would be visible in the preview and simply
+    absent from fused.zarr, with nothing said. The refusal names the channels.
+    """
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        page._workbench_pixels = lambda ch: None      # no pixels, no window
+
+        ok, reason = page.commit_display_mapping(["CD3"], required=["CD3"])
+
+        assert ok is False
+        assert "CD3" in reason
+    finally:
+        w.close()
+
+
+def test_the_automatic_window_uses_the_real_pixel_source(app, tmp_path):
+    """Drive the real method chain, with nothing on the page stubbed.
+
+    An earlier version called the pixel source with a keyword it does not
+    accept. Every call raised, every untuned channel silently got no window,
+    and the failure was invisible because the tests replaced that source with a
+    lambda that accepted the keyword.
+    """
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
+        # Stub the SLIDE READ, one level below the page's own pixel accessor,
+        # so `_workbench_pixels` itself is the real method under test.
+        page._slide_lowres_array = lambda name: pixels
+
+        window = page._auto_display_window("CD3")
+
+        assert window is not None
+        assert window["max"] > window["min"]
+    finally:
+        w.close()
+
+
+def test_a_failed_republish_leaves_the_previous_handoff_valid(app, tmp_path):
+    """Both writes or neither.
+
+    The manifest is hashed over the remap config. Writing the config and then
+    failing to republish left the published manifest naming a file that no
+    longer existed in that form: a handoff that was valid before the Save and
+    invalid after a Save that produced nothing.
+    """
+    from block01.utils.channel_remap_config import channel_remap_config_hash, \
+        load_channel_remap_config
+
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
+        assert page.commit_display_mapping(["CD3"])[0] is True
+
+        json_path = os.path.join(step0_dir, "step0_channel_remap.json")
+        with open(json_path, "rb") as f:
+            before = f.read()
+
+        page._cond_workbench._params["CD3"]["max"] = 999.0
+        page._write_step0_handoff = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("disk is full"))
+        ok, reason = page.commit_display_mapping(["CD3"])
+
+        assert ok is False and "disk is full" in reason
+        with open(json_path, "rb") as f:
+            assert f.read() == before                 # rolled back
+
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            manifest = json.load(f)
+        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
+            load_channel_remap_config(json_path))     # still names this file
     finally:
         w.close()

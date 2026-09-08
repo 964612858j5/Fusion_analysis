@@ -328,3 +328,35 @@ def test_a_channel_without_a_committed_window_takes_no_part():
 
 def test_the_formula_version_says_the_paths_agree():
     assert FUSION_FORMULA_VERSION == 2
+
+
+def test_an_all_zero_configuration_draws_nothing_and_says_so(app):
+    """The screen used to substitute the raw nucleus when everything fused to
+    zero. The disk worker has no such rule, so that configuration looked like a
+    picture on screen and came out black in the file. Now the preview shows what
+    the fusion actually produces and the status line explains it."""
+    from block01.ui.main_window import MainWindow
+
+    raw = _raw()
+    w = MainWindow()
+    try:
+        w.loader = _FakeLoader(raw)
+        chans = list(raw)
+        w.config.set_channels(chans)
+        w.config.load_panel({"g": ["CD3"]}, "DAPI")
+        w.config.set_nucleus("DAPI", 0.0)
+        w.config.set_group_weight("g", 1.0)
+        w.config.set_channel_weight("CD3", 0.0)
+        w.config._edited_channels.add("CD3")
+        w._all_patches = [(0, H, 0, W)]
+        w._preview_patch_idx = 0
+        w._patch_channel_cache[0] = {c: a.copy() for c, a in raw.items()}
+        w._patch_load_ready.add(0)
+        w._display_mapping = lambda: _REMAP
+        w.set_preview_mode("fusion", force=True, reconcile=False)
+        w._render_current_patch(reset_view=True)
+
+        assert int(np.asarray(w.prev_img.image).max()) == 0
+        assert "0" in w.prev_status.text()
+    finally:
+        w.close()

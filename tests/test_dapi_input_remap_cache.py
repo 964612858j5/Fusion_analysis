@@ -37,6 +37,9 @@ def _stub(remap):
     # no Step0 page, so the draft falls through to the committed file.
     s._step0 = None
     s._display_mapping = MainWindow._display_mapping.__get__(s)
+    # The identity is now also stamped into the zarr itself, so the meta
+    # carries the hash it is stamped with.
+    s._step1_config_hash = MainWindow._step1_config_hash
     return s
 
 

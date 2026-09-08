@@ -87,9 +87,11 @@ from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     normalize_channel_remap_params,
+    default_channel_remap_params,
     channel_remap_config_hash,
     CREATED_FROM_STEP0_CONDITIONING,
 )
+from ...core.channel_remap import compute_qupath_auto_minmax
 # v14.5b: source-aware preview-config primitives (schema + preview-time identity
 # reader). Pure/Qt-free; NOT the Step2 resolver or promotion.
 from ...utils.source_identity import (
@@ -231,6 +233,11 @@ class Step0Page(QWidget):
     # purpose: it names the channel and nothing else, so another step can drop
     # exactly that channel's derived pixels instead of everything it holds.
     display_mapping_changed = pyqtSignal(str)
+    # The draft mapping has been WRITTEN and locked by a freshly published
+    # manifest. Deliberately a different signal from the one above: "the slider
+    # moved" and "the file on disk now says so" are different facts, and a
+    # listener that redraws on the first must not conclude the second.
+    display_mapping_committed = pyqtSignal(dict)
     # The published handoff no longer matches the geometry in memory and a
     # matching new manifest could NOT be published.  Separate from
     # `geometry_committed` (which means the opposite) and from
@@ -4130,6 +4137,138 @@ class Step0Page(QWidget):
                 return []
         return (self._geometry_bboxes(_read("roi_config.json")),
                 self._geometry_bboxes(_read("patch_config.json")))
+
+    # ── display mapping: draft in memory, committed on Save ──────────────────
+    def set_intensity_editing_enabled(self, enabled):
+        """Freeze or release the Intensity controls.
+
+        Used while a Save is fusing with a frozen copy of the mapping: an edit
+        landing mid-run would leave the screen and the file it is writing out of
+        step for the length of the run.
+        """
+        panel = getattr(self, "_intensity_panel", None)
+        if panel is not None:
+            panel.setEnabled(bool(enabled))
+        btn = getattr(self, "_btn_intensity_window", None)
+        if btn is not None:
+            btn.setEnabled(bool(enabled))
+        return True
+
+    def display_mapping_draft(self):
+        """The Min/Max/Gamma the user is looking at RIGHT NOW.
+
+        The Intensity window edits the workbench's params in memory; nothing is
+        written until a Save commits them. Another step that wants to show what
+        the user is adjusting reads this, and only this.  Channels whose params
+        are still the provisional placeholder are left out: reading that back as
+        a display window saturates the whole image.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        params = getattr(wb, "_params", None) if wb is not None else None
+        if not params:
+            return {}
+        out = {}
+        for name, p in params.items():
+            if not wb.channel_params_seeded(name):
+                continue
+            out[str(name)] = dict(p)
+        return out
+
+    def _auto_display_window(self, channel):
+        """A stable automatic window for a channel nobody tuned.
+
+        Computed ONCE, from the whole-slide overview — the same pixels for
+        every patch, region and tile — so that the mapping cannot depend on
+        which crop happened to be on screen or how the Save dialog split the
+        image into tiles. Returns None when the pixels are not available.
+        """
+        try:
+            arr = self._workbench_pixels(channel, blocking=True)
+        except Exception as exc:
+            print(f"[Step0] no pixels to seed a display window for {channel}: {exc}")
+            return None
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if not arr.size:
+            return None
+        try:
+            lo, hi = compute_qupath_auto_minmax(arr, exclude_zero=True)
+        except Exception as exc:
+            print(f"[Step0] auto display window failed for {channel}: {exc}")
+            return None
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return None
+        params = default_channel_remap_params()
+        params.update({"min": float(lo), "max": float(hi), "auto": True})
+        return params
+
+    def frozen_display_mapping(self, channels=None):
+        """The draft, completed with a stable automatic window per channel.
+
+        Every channel that will take part in a fusion gets an explicit
+        Min/Max/Gamma here, so no path downstream has to invent one from
+        whatever pixels it happens to hold.
+        """
+        draft = self.display_mapping_draft()
+        names = list(channels or [])
+        if not names and self.loader is not None:
+            try:
+                names = list(self.loader.channel_names())
+            except Exception:
+                names = []
+        for ch in names:
+            if ch in draft:
+                continue
+            auto = self._auto_display_window(ch)
+            if auto is not None:
+                draft[ch] = auto
+        return draft
+
+    def commit_display_mapping(self, channels=None):
+        """Freeze the draft, write it, and republish the manifest — or nothing.
+
+        One transaction: the snapshot is taken first, written to the canonical
+        remap config, and the manifest is republished so its hash names exactly
+        that file. If any step fails nothing is published and the caller must
+        not go on to produce results that claim to match.
+
+        Returns (committed, reason).
+        """
+        published = self._published_handoff()
+        if published is None:
+            return False, "no_published_handoff"
+        step0_dir, manifest_path, zarr_path, config, manifest = published
+        if not os.path.exists(zarr_path):
+            return False, "corrected_zarr_missing"
+
+        rois = self._standard_rois()
+        if self._roi_context_signature(rois) != self._roi_context_sig:
+            return False, "roi_geometry_changed"
+
+        snapshot = self.frozen_display_mapping(channels)
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None:
+            return False, "no_workbench"
+        try:
+            cfg = wb.build_config()
+            cfg_channels = cfg.setdefault("channels", {})
+            for name, params in snapshot.items():
+                cfg_channels[str(name)] = normalize_channel_remap_params(params)
+            save_channel_remap_config(cfg, self._step0_conditioning_config_path())
+            self._last_saved_remap_path = self._step0_conditioning_config_path()
+            _cfg, _rois, _patches, _manifest = self._write_step0_handoff(
+                config, zarr_path)
+        except Exception as exc:
+            print(f"[Step0] display-mapping commit FAILED: {exc}")
+            return False, f"write_failed: {exc}"
+
+        self.display_mapping_committed.emit({
+            "step0_manifest_path": os.path.abspath(manifest_path),
+            "channels": sorted(snapshot),
+        })
+        print(f"[Step0] display mapping committed for {len(snapshot)} channel(s)")
+        return True, "committed"
 
     def _commit_geometry_only(self):
         """Publish a geometry-only update of the published handoff.

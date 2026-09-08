@@ -33,6 +33,10 @@ def _stub(remap):
     # The identity now also records which display mapping the pixels went
     # through; the stub gets the real method, bound to itself.
     s._display_mapping_identity = MainWindow._display_mapping_identity.__get__(s)
+    # Step1 now draws (and fingerprints) with the DRAFT mapping; this stub has
+    # no Step0 page, so the draft falls through to the committed file.
+    s._step0 = None
+    s._display_mapping = MainWindow._display_mapping.__get__(s)
     return s
 
 

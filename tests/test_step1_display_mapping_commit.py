@@ -1,0 +1,277 @@
+"""Min/Max/Gamma is a live draft on screen and a committed fact on disk.
+
+Dragging the Intensity slider changes what Step1 draws at once and writes
+nothing. A Save freezes that draft, writes it to the canonical remap config and
+republishes the manifest whose hash names it, and only then fuses — so the
+numbers on screen, the numbers in the fusion config and the numbers the
+manifest is hashed over are one set. If the commit fails, nothing is fused.
+
+Channels the user never tuned get one stable automatic window, computed from
+the whole slide, so a mapping can never depend on which patch was on screen or
+how the Save dialog split the image into tiles.
+
+Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
+"""
+
+import json
+import os
+
+import numpy as np
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip("PyQt5")
+pytest.importorskip("zarr")
+
+from PyQt5 import QtWidgets  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def app():
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+def _roi(bbox=(0, 32, 0, 32)):
+    y0, y1, x0, x1 = bbox
+    return {"name": "ROI_1", "bbox_fullres": [y0, y1, x0, x1],
+            "polygon_fullres": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+
+class _Loader:
+    shape = (64, 64)
+
+    def __init__(self, path):
+        self.filepath = path
+        self._n = ["DAPI", "CD3"]
+        self.ch_map = {c: i for i, c in enumerate(self._n)}
+
+    def channel_names(self):
+        return list(self._n)
+
+    @staticmethod
+    def _norm(arr):
+        return np.clip(np.asarray(arr, np.float32), 0.0, 1.0)
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1, normalize=True):
+        return np.zeros((y1 - y0, x1 - x0), np.float32)
+
+
+def _window(app, tmp_path):
+    """MainWindow over a Step0 page with one published handoff."""
+    from block01.ui.main_window import MainWindow
+
+    raw = tmp_path / "raw.ome.tif"
+    raw.write_bytes(b"x" * 16)
+    w = MainWindow()
+    page = w._step0
+    page.loader = _Loader(str(raw))
+    page.ome_path = str(raw)
+    page.output_dir = str(tmp_path)
+    page.panel_csv_path = ""
+    page.panel_groups = {}
+    page.nucleus_channel = "DAPI"
+    page.overview.loader = page.loader
+    page.overview.full_h, page.overview.full_w = 64, 64
+    page.overview.full_wsi_mode = False
+    page.overview._rois = [_roi()]
+    page.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)}]
+
+    step0_dir = tmp_path / "roi1" / "step0"
+    step0_dir.mkdir(parents=True, exist_ok=True)
+    page._roi_context = {
+        "roi_id": "roi1",
+        "roi_dir": str(tmp_path / "roi1"),
+        "project_dir": str(tmp_path),
+        "step_dirs": {"step0": str(step0_dir),
+                      "step1": str(tmp_path / "roi1" / "step1"),
+                      "step2": str(tmp_path / "roi1" / "step2")},
+    }
+    page._roi_context_sig = page._roi_context_signature(page._standard_rois())
+    page._write_step0_handoff(
+        {"method_params": {"tophat_radius": 25, "cucim_sigma": 30},
+         "channel_decisions": {}},
+        str(step0_dir / "corrected_channels.zarr"))
+
+    w.loader = _Loader(str(raw))
+    w.step0_output = {
+        "handoff_schema_version": 2,
+        "step0_manifest_path": str(step0_dir / "step0_roi_result.json"),
+        "step0_dir": str(step0_dir),
+        "step1_dir": str(tmp_path / "roi1" / "step1"),
+        "output_dir": str(step0_dir),
+        "channel_remap_config_path": str(step0_dir / "step0_channel_remap.json"),
+    }
+    return w, str(step0_dir)
+
+
+def _seed_workbench(page, values):
+    """Put channels into the workbench the way the Intensity window does."""
+    wb = page._cond_workbench
+    wb.set_channel_images({c: np.linspace(0, 1000, 32 * 32, dtype=np.float32)
+                           .reshape(32, 32) for c in values})
+    for ch, params in values.items():
+        wb.set_active_channel(ch)
+        wb._params[ch].update(params)
+    return wb
+
+
+def test_a_draft_edit_changes_what_step1_draws_without_touching_disk(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 1000.0}})
+        json_path = os.path.join(step0_dir, "step0_channel_remap.json")
+        before = os.path.exists(json_path) and open(json_path).read()
+
+        assert w._display_mapping()["CD3"]["max"] == 1000.0
+        wb._params["CD3"]["max"] = 250.0
+
+        assert w._display_mapping()["CD3"]["max"] == 250.0     # seen at once
+        after = os.path.exists(json_path) and open(json_path).read()
+        assert after == before                                  # nothing written
+    finally:
+        w.close()
+
+
+def test_an_uncommitted_draft_makes_an_existing_result_unreusable(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 1000.0}})
+        cfg = {"nucleus": {"channel": "DAPI", "weight": 1.0},
+               "groups": {"g": {"group_weight": 1.0, "channels": {"CD3": 0.5}}},
+               "channel_remap_params": {}}
+        before = w._expected_fused_zarr_meta(cfg, "cellpose_wholecell_fusion")
+
+        wb._params["CD3"]["max"] = 250.0
+        after = w._expected_fused_zarr_meta(cfg, "cellpose_wholecell_fusion")
+
+        assert before["config_hash"] != after["config_hash"]
+    finally:
+        w.close()
+
+
+def test_committing_writes_the_mapping_and_republishes_the_manifest(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 250.0}})
+        seen = []
+        w._step0.display_mapping_committed.connect(seen.append)
+
+        ok, reason = w._step0.commit_display_mapping(["CD3"])
+        assert ok is True, reason
+
+        from block01.utils.channel_remap_config import (
+            load_channel_remap_config, channel_remap_config_hash)
+        json_path = os.path.join(step0_dir, "step0_channel_remap.json")
+        on_disk = load_channel_remap_config(json_path)
+        assert on_disk["channels"]["CD3"]["max"] == 250.0
+
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            manifest = json.load(f)
+        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(on_disk)
+        assert len(seen) == 1 and "CD3" in seen[0]["channels"]
+    finally:
+        w.close()
+
+
+def test_a_channel_nobody_tuned_gets_one_stable_window(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
+        page._workbench_pixels = lambda ch, blocking=False: pixels
+
+        frozen = page.frozen_display_mapping(["CD3"])
+        assert "CD3" in frozen
+        assert frozen["CD3"]["min"] is not None
+        assert frozen["CD3"]["max"] is not None
+        assert frozen["CD3"]["auto"] is True
+
+        # Stable: asking again, and asking about a different crop, is the same
+        # window, because it is computed from the slide and not from a patch.
+        again = page.frozen_display_mapping(["CD3"])
+        assert again["CD3"]["min"] == frozen["CD3"]["min"]
+        assert again["CD3"]["max"] == frozen["CD3"]["max"]
+    finally:
+        w.close()
+
+
+def test_a_tuned_channel_keeps_its_own_window(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        _seed_workbench(page, {"CD3": {"min": 3.0, "max": 7.0}})
+        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+            0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
+
+        frozen = page.frozen_display_mapping(["CD3", "DAPI"])
+        assert frozen["CD3"]["min"] == 3.0 and frozen["CD3"]["max"] == 7.0
+        assert frozen["DAPI"]["auto"] is True          # the untouched one
+    finally:
+        w.close()
+
+
+def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, monkeypatch):
+    from block01.ui import main_window as mwmod
+
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        monkeypatch.setattr(mwmod, "OUTPUT_DIR", str(tmp_path))
+        monkeypatch.setattr(type(w._step0), "commit_display_mapping",
+                            lambda self, channels=None: (False, "disk is full"))
+        warned = []
+        monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                            staticmethod(lambda *a, **k: warned.append(a)))
+        for name in ("information", "critical"):
+            monkeypatch.setattr(QtWidgets.QMessageBox, name,
+                                staticmethod(lambda *a, **k: None))
+        started = []
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: started.append(a))
+
+        class _NoDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec_(self):
+                return QtWidgets.QDialog.Rejected
+        monkeypatch.setattr(mwmod, "TileSelectDialog", _NoDialog)
+        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+
+        w._save()
+
+        assert started == []
+        assert warned and "disk is full" in str(warned[-1])
+        # It stopped before producing anything: the config a Save writes on its
+        # way to fusing is not there.
+        assert not os.path.exists(os.path.join(str(tmp_path), "fusion_config.json"))
+    finally:
+        w.close()
+
+
+def test_intensity_editing_is_frozen_while_a_save_fuses(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        page._btn_intensity_window.setEnabled(True)
+        w._lock_ui()
+        assert page._btn_intensity_window.isEnabled() is False
+        w._unlock_ui()
+        assert page._btn_intensity_window.isEnabled() is True
+    finally:
+        w.close()
+
+
+def test_a_draft_change_is_not_a_commit(app, tmp_path):
+    w, step0_dir = _window(app, tmp_path)
+    committed = []
+    try:
+        w._step0.display_mapping_committed.connect(committed.append)
+        wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 1000.0}})
+        wb._params["CD3"]["max"] = 400.0
+        wb.params_changed.emit("CD3")
+        QtWidgets.QApplication.processEvents()
+
+        assert committed == []
+    finally:
+        w.close()

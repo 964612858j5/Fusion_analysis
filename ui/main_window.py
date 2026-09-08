@@ -317,6 +317,8 @@ class MainWindow(QMainWindow):
         # overlay's remapped pixels for that ONE channel are stale.
         self._step0.display_mapping_changed.connect(
             self._on_display_mapping_changed)
+        self._step0.display_mapping_committed.connect(
+            self._on_display_mapping_committed)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -3215,7 +3217,7 @@ class MainWindow(QMainWindow):
             self.prev_status.setText("Loading channels…")
             return
 
-        remap = self._load_step0_remap_params()[0]
+        remap = self._display_mapping()
         grays, colors, params = {}, {}, {}
         for ch in ready:
             grays[ch] = self._overlay_gray(idx, ch, cache[ch], remap)
@@ -3276,6 +3278,18 @@ class MainWindow(QMainWindow):
         if (self._step1_preview_mode == STEP1_PREVIEW_OVERLAY
                 and channel in self.config.visible_channels()):
             self._refresh_patch_preview(reset_view=False)
+
+    def _on_display_mapping_committed(self, payload):
+        """The draft is now on disk and named by a fresh manifest hash.
+
+        Nothing to redraw — the pixels were already being drawn with these
+        numbers — but the committed file has changed, so anything derived from
+        the old one is dropped.
+        """
+        payload = dict(payload or {})
+        self._remap_cache = None
+        print(f"[Step1] display mapping committed for "
+              f"{len(payload.get('channels') or [])} channel(s)")
 
     def _on_channel_color_changed(self, _channel, _color):
         if self._restoring_display_state:
@@ -3355,7 +3369,7 @@ class MainWindow(QMainWindow):
         # Reflect the manual Channel Remap (Step0) in the on-screen preview too,
         # mirroring the disk FullFusionWorker: conditioned channels use
         # apply_channel_remap (Min/Max/Gamma); others use the percentile norm.
-        remap = self._load_step0_remap_params()[0]
+        remap = self._display_mapping()
 
         # Map each channel once, then hand the signals to THE fusion core.  The
         # arithmetic below used to be written out here as well; a second copy of
@@ -3550,7 +3564,7 @@ class MainWindow(QMainWindow):
             "nuc_w": nuc_w,
             "corrected_zarr_path": self._corrected_zarr_path,
             "corrected_decisions": self._corrected_decisions,
-            "channel_remap_params": self._load_step0_remap_params()[0],
+            "channel_remap_params": self._display_mapping(),
             "output_dir": (self.step0_output or {}).get("output_dir") or OUTPUT_DIR,
         }
         first_method = ""
@@ -3779,8 +3793,18 @@ class MainWindow(QMainWindow):
 
     # ── Lock / unlock UI during fusion ──────────────────────────────
 
+    def _set_intensity_editing_enabled(self, enabled):
+        step0 = getattr(self, "_step0", None)
+        setter = getattr(step0, "set_intensity_editing_enabled", None)
+        if setter is not None:
+            setter(bool(enabled))
+
     def _lock_ui(self):
         """Disable all interactive elements during fusion."""
+        # The mapping was frozen a moment ago; letting it be edited while the
+        # worker fuses with the frozen copy would put the screen and the file
+        # back out of step for the length of the run.
+        self._set_intensity_editing_enabled(False)
         self.btn_save.setEnabled(False)
         self.config.setEnabled(False)
         self.search.setEnabled(False)
@@ -3788,6 +3812,7 @@ class MainWindow(QMainWindow):
 
     def _unlock_ui(self):
         """Re-enable UI after fusion completes or errors."""
+        self._set_intensity_editing_enabled(True)
         self.config.setEnabled(True)
         self.search.setEnabled(True)
         self._btn_back_to_step0.setEnabled(True)
@@ -3950,7 +3975,7 @@ class MainWindow(QMainWindow):
         """
         params = dict((worker_fcfg or {}).get("channel_remap_params") or {})
         if not params:
-            params, _src = self._load_step0_remap_params()
+            params = self._display_mapping()
         return {
             "source": os.path.abspath(self._load_step0_remap_params()[1] or ""),
             "hash": self._remap_params_hash(params or {}),
@@ -4296,6 +4321,51 @@ class MainWindow(QMainWindow):
 
     # ── Save ────────────────────────────────────────────────────────
 
+    def _commit_display_mapping_for_save(self):
+        """Freeze and publish the mapping this Save is about to fuse with.
+
+        The fusion config written moments later reads the COMMITTED file, so
+        after this returns the numbers on screen, the numbers in the config and
+        the numbers in the manifest hash are one set.
+        """
+        step0 = getattr(self, "_step0", None)
+        if step0 is None or not hasattr(step0, "commit_display_mapping"):
+            return True, "no step0 page"
+        channels = list(self._fusion_weighted_channels())
+        for ch in self.config.visible_channels():
+            if ch not in channels:
+                channels.append(ch)
+        try:
+            return step0.commit_display_mapping(channels)
+        except Exception as exc:
+            print(f"[Step1] display-mapping commit raised: {exc}")
+            return False, f"commit raised: {exc}"
+
+    def _display_mapping(self):
+        """The Min/Max/Gamma Step1 should DRAW with.
+
+        The draft: what the Intensity window is showing the user right now.
+        Nothing is written until a Save commits it, so a slider that has moved
+        is visible here immediately and on disk not at all — which is exactly
+        why a Save commits the draft before it fuses anything, and why an
+        uncommitted draft makes an existing result unreusable.
+
+        Falls back to the committed file when there is no draft (no workbench
+        engaged yet), so a freshly opened project still draws with the mapping
+        its handoff carries.
+        """
+        step0 = getattr(self, "_step0", None)
+        draft = {}
+        if step0 is not None and hasattr(step0, "display_mapping_draft"):
+            try:
+                draft = step0.display_mapping_draft() or {}
+            except Exception as exc:
+                print(f"[Step1] could not read the display-mapping draft: {exc}")
+                draft = {}
+        if draft:
+            return draft
+        return self._load_step0_remap_params()[0]
+
     def _load_step0_remap_params(self):
         """Load the Step0 Channel Remap config (if any) as {channel: params}.
 
@@ -4398,6 +4468,21 @@ class MainWindow(QMainWindow):
                 self, "ROI required",
                 "Step0 corrected output is ROI-only, but no ROI is loaded."
             )
+            return
+
+        # ── Commit the display mapping, once, before anything is produced ──
+        # Up to here the Min/Max/Gamma the user has been adjusting lived only in
+        # memory. This freezes that draft, writes it, and republishes the
+        # manifest whose hash names it. If it fails, nothing is fused and no
+        # existing result is touched: a fused zarr that cannot say which mapping
+        # made it is exactly what this phase is removing.
+        committed, reason = self._commit_display_mapping_for_save()
+        if not committed:
+            QMessageBox.warning(
+                self, "Save",
+                "The channel display mapping could not be saved, so nothing was "
+                f"fused.\n\nReason: {reason}")
+            print(f"[Step1] save aborted: display mapping not committed ({reason})")
             return
 
         # ── Write fusion_config.json ──────────────────────────────────

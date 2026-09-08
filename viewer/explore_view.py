@@ -2368,6 +2368,7 @@ class ExploreController(QtCore.QObject):
         # overview record would otherwise bring for the same channel.
         self._gamma = 1.0
         self._host_mapping = {}      # channel -> (lo, hi, gamma)
+        self._host_tint = {}         # channel -> rgb: the host's word on colour
         # Levels callbacks capture VALUES, never `self`: a closure over the
         # controller would put it, its pools and their items in a reference
         # cycle, and a torn-down controller would then die in a cyclic GC
@@ -2602,14 +2603,23 @@ class ExploreController(QtCore.QObject):
         """
         return build_display_lut(rgb, gamma)
 
-    def set_tint(self, rgb):
+    def set_tint(self, rgb, *, channel=None):
         """Colour every layer this controller owns. `None` = greyscale.
 
         Display only: the stored uint8 pixels are unchanged, so this is a
         lookup-table swap -- no re-read, no re-quantisation, no scheduler
         traffic. Applied to the overview, the corrected floor and BOTH tile
         pools, and remembered so tiles that arrive later are coloured too.
+
+        Tagged by channel, the way the display mapping is: the host may know
+        the colour of a channel this controller has not switched to yet, and
+        painting the pixels it still holds in that colour would say "this is
+        the new channel" about the old one's pixels. Such a colour is
+        remembered and applied when the switch lands.
         """
+        self._host_tint[channel or self.channel] = rgb
+        if channel is not None and channel != self.channel:
+            return
         self._tint = rgb
         try:
             gamma = self._gamma
@@ -2723,6 +2733,10 @@ class ExploreController(QtCore.QObject):
         overview_ready = True
         if channel is not _UNSET:
             self.channel = channel
+            if channel_changed and channel in self._host_tint:
+                # The colour the host gave for this channel while another one
+                # was on screen: now it is this one's turn.
+                self._tint = self._host_tint[channel]
         if method is not _UNSET:
             self.method = method
         if params is not _UNSET:

@@ -802,7 +802,10 @@ class CompareStrip(QtWidgets.QWidget):
             controller.set_selection(channel=channel, method=method,
                                      params=params)
             if tint is not None:
-                controller.set_tint(tint)
+                try:
+                    controller.set_tint(tint, channel=channel)
+                except TypeError:
+                    controller.set_tint(tint)
         self._displayed_channel = channel
         self._displayed_params_for = params_for
         self._displayed_tint = tint
@@ -1246,10 +1249,27 @@ class CompareStrip(QtWidgets.QWidget):
         if method is None:
             self.refresh_hot()
 
-    def set_tint(self, rgb):
+    def set_tint(self, rgb, *, channel=None):
+        """Colour for `channel` (default: whatever each panel is showing).
+
+        Tagged, like the display mapping, because a colour is a property of
+        a channel and a switch can be pending: three panels still holding
+        the previous channel's pixels must not be repainted in the colour of
+        the channel that has not arrived yet.
+        """
         for controller in self.controllers:
-            if controller is not None:
-                controller.set_tint(rgb)
+            if controller is None:
+                continue
+            try:
+                controller.set_tint(rgb, channel=channel)
+            except TypeError:
+                # A controller that cannot be told which channel a colour is
+                # for gets it only when that IS the channel it is showing.
+                # Handing it over anyway would paint the pixels it holds in
+                # another channel's colour, which is the thing the tag exists
+                # to prevent.
+                if channel is None or channel == getattr(controller, "channel", None):
+                    controller.set_tint(rgb)
 
     def set_display_mapping(self, lo, hi, gamma=None, *, channel=None):
         for controller in self.controllers:

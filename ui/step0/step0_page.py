@@ -2661,6 +2661,13 @@ class Step0Page(QWidget):
         channel = self.current_channel
         if not channel:
             return
+        # The new channel's window and colour go in BEFORE its pixels. Both
+        # are tagged with the channel, so nothing on screen changes here;
+        # what it buys is that the panels already hold this channel's mapping
+        # when `set_channel` installs its overview and swaps in its tiles.
+        # Pushing them afterwards meant one publication where the pixels were
+        # the new channel's and the window was still the previous channel's.
+        self._preseed_compare_display(channel)
         strip.set_channel(channel, params_for=self._compare_params_for,
                           tint=self._full_image_tint())
         self._refresh_preview_display(keep_zoom=True)
@@ -6152,6 +6159,14 @@ class Step0Page(QWidget):
         if ch == self.current_channel and self._last_payload is not None:
             self._rebuild_payload_rgb(ch)
             self._refresh_preview_display(keep_zoom=True)
+        # The compare panels draw the same channel in the same colour, and
+        # they draw it NOW. They used to be reached only through
+        # `_refresh_preview_display`, from inside a branch that ran only when
+        # a legacy payload existed — and in compare mode there is none, so
+        # recolouring the channel on screen changed nothing until the user
+        # switched away and back. This is a lookup-table swap on tiles that
+        # are already pooled: no read, no correction, no camera.
+        self._push_channel_tint_to_compare(ch)
         # The full image draws the SAME channel in the SAME colour: a lookup
         # table swap, no re-read and no request.
         if ch == self.current_channel:
@@ -6162,6 +6177,22 @@ class Step0Page(QWidget):
                 set_tint(self._full_image_tint(ch))
             # ...and so does the Tissue Preview.
             self._update_tissue_preview()
+
+    def _push_channel_tint_to_compare(self, ch):
+        """Give the panels `ch`'s colour, tagged with the channel it is for.
+
+        Tagged, so recolouring a channel that is NOT on screen changes
+        nothing now and is used the moment that channel is shown — rather
+        than repainting the current channel's pixels in another channel's
+        colour.
+        """
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is None or not getattr(strip, "built", False) or not ch:
+            return
+        if ch == self.nucleus_channel and ch != self.current_channel:
+            strip.set_nucleus_tint(self._channel_color(ch))
+            return
+        strip.set_tint(self._channel_color(ch), channel=ch)
 
     def _pick_channel_color(self, ch, btn=None):
         """弹颜色对话框，让用户选择通道显示颜色。"""
@@ -6208,6 +6239,14 @@ class Step0Page(QWidget):
         if self._last_payload is not None and self.current_channel:
             self._rebuild_payload_rgb(self.current_channel)
             self._refresh_preview_display(keep_zoom=True)
+        # The panels' nucleus overlay takes the colour now, not at the next
+        # channel switch: same reason as the marker colour, and the same
+        # lookup-table swap.
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None and getattr(strip, "built", False):
+            if nuc and nuc == self.current_channel:
+                strip.set_tint(self._nuc_color, channel=nuc)
+            strip.set_nucleus_tint(self._nuc_color)
         # The full image draws the nucleus in this same colour; swapping the
         # lookup table is all it takes -- no re-read, no re-quantisation and
         # no request. With no stack up, the new colour is simply what the
@@ -6360,6 +6399,42 @@ class Step0Page(QWidget):
             self._channel_color(ch),
         )
 
+    def _preseed_compare_display(self, channel):
+        """Tell the panels what `channel` looks like before they show it."""
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is None or not getattr(strip, "built", False) or not channel:
+            return
+        # Only numbers that are ALREADY known. Asking for a window this page
+        # does not have would read the slide on the GUI thread, and the three
+        # controllers are about to read that very level on workers; the seed
+        # arrives through `_on_channel_overview_ready` instead.
+        if self._display_mapping_is_real(channel):
+            lo, hi, gamma = self._display_mapping_for(channel)
+            strip.set_display_mapping(lo, hi, gamma, channel=channel)
+        strip.set_tint(self._channel_color(channel), channel=channel)
+
+    def _display_mapping_is_real(self, ch):
+        """Is this channel's display window derived from ITS OWN pixels yet?
+
+        A channel whose slide overview has not been read has no window, and
+        the placeholder that stands in for one is 0..1 — which, published as
+        a display window over 8/16-bit data, saturates every pixel. That is
+        the over-exposed compare panel: not a wrong channel, a window that
+        belongs to no channel at all. So the placeholder is never published;
+        the panels keep the range each derives from its own overview record
+        until `_on_channel_overview_ready` brings the real numbers.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None:
+            try:
+                if wb._user_adjusted.get(ch):
+                    return True
+                if wb.channel_params_seeded(ch):
+                    return True
+            except (AttributeError, TypeError):
+                pass
+        return ch in getattr(self, "_display_fallback", {})
+
     def _refresh_preview_display(self, keep_zoom=False):
         """Push the page's display state onto the three compare viewers.
 
@@ -6387,9 +6462,13 @@ class Step0Page(QWidget):
         channel = self.current_channel
         if not channel:
             return
-        strip.set_tint(self._channel_color(channel))
+        strip.set_tint(self._channel_color(channel), channel=channel)
         lo, hi, gamma = self._display_mapping_for(channel)
-        strip.set_display_mapping(lo, hi, gamma, channel=channel)
+        if self._display_mapping_is_real(channel):
+            strip.set_display_mapping(lo, hi, gamma, channel=channel)
+        else:
+            print(f"[Step0] {channel} has no display window yet; "
+                  "the panels keep their own range until it is read")
         # The marker switch is an opacity gate on every layer the controller
         # owns, not a lookup table of zeros: black pixels would still
         # occlude the nucleus added on top of them.
@@ -6398,7 +6477,8 @@ class Step0Page(QWidget):
         if nucleus:
             n_lo, n_hi, n_gamma = self._display_mapping_for(nucleus,
                                                            nucleus=True)
-            strip.set_nucleus_display_mapping(n_lo, n_hi, n_gamma)
+            if self._display_mapping_is_real(nucleus):
+                strip.set_nucleus_display_mapping(n_lo, n_hi, n_gamma)
             strip.set_nucleus_tint(self._channel_color(nucleus))
             # Never added to itself: the marker layer IS the nucleus channel
             # when the user has selected that row. Suppression only -- the

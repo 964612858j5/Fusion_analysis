@@ -29,7 +29,9 @@ from ..config import (
     OME_TIFF_FILE, OUTPUT_DIR,
     NORM_LOW, NORM_HIGH, PATCH_COLORS,
 )
-from ..core.fusion_engine import FusionEngine, FUSION_FORMULA_VERSION
+from ..core.fusion_engine import (
+    FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
+)
 from ..core.channel_remap import (
     apply_channel_remap, compose_multichannel_overlay,
     compute_qupath_auto_minmax,
@@ -3355,32 +3357,21 @@ class MainWindow(QMainWindow):
         # apply_channel_remap (Min/Max/Gamma); others use the percentile norm.
         remap = self._load_step0_remap_params()[0]
 
-        def _cn(ch):
-            return self._preview_channel_signal(ch, cache[ch], remap)
-
-        # FIX: initial weights
-        # FIX: intensity normalization
-        cyto = np.zeros(shape, dtype=np.float32)
-        for gname, ch_weights in groups.items():
-            group_signal = np.zeros(shape, dtype=np.float32)
-            gw = float(np.clip(group_weights.get(gname, 1.0), 0.0, 1.0))
-            if gw <= 0:
-                continue
-            for ch, w in ch_weights.items():
-                w = float(np.clip(w, 0.0, 1.0))
-                if w <= 0 or ch not in cache:
-                    continue
-                group_signal += _cn(ch) * w
-            group_signal *= gw
-            np.maximum(cyto, np.clip(group_signal, 0.0, 1.0), out=cyto)
-
-        nuc = np.zeros(shape, dtype=np.float32)
-        if nuc_ch and nuc_ch in cache and nuc_w > 0:
-            nuc = _cn(nuc_ch) * float(np.clip(nuc_w, 0.0, 1.0))
-            np.clip(nuc, 0.0, 1.0, out=nuc)
+        # Map each channel once, then hand the signals to THE fusion core.  The
+        # arithmetic below used to be written out here as well; a second copy of
+        # it is how the screen and the saved file drifted apart.
+        wanted = {nuc_ch} if nuc_ch else set()
+        for ch_weights in groups.values():
+            wanted.update(ch_weights.keys())
+        signals = {ch: self._preview_channel_signal(ch, cache[ch], remap)
+                   for ch in wanted if ch in cache}
+        cyto, nuc = fuse_channels(signals, groups, group_weights, nuc_ch, nuc_w)
+        if cyto is None:
+            cyto = np.zeros(shape, dtype=np.float32)
+            nuc = np.zeros(shape, dtype=np.float32)
 
         if float(cyto.max()) <= 0.0 and float(nuc.max()) <= 0.0 and nuc_ch and nuc_ch in cache:
-            nuc = _cn(nuc_ch)
+            nuc = signals[nuc_ch]
             self.prev_status.setText("All marker weights are 0. Showing nucleus channel fallback.")
 
         if cyto is None and nuc is None:

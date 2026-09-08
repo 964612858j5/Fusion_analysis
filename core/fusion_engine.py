@@ -21,6 +21,52 @@ from .channel_remap import apply_channel_remap
 FUSION_FORMULA_VERSION = 1
 
 
+def fuse_channels(signals, groups, group_weights, nuc_ch, nuc_w):
+    """THE Step1 fusion. One implementation; every path calls this one.
+
+    `signals` are per-channel images ALREADY mapped to [0, 1] — the caller
+    decides what that mapping is (a user's Min/Max/Gamma, or a frozen automatic
+    window) and applies it exactly once. This function does no reading, no
+    mapping, no normalisation of its own: given the same signals and the same
+    weights it returns the same pixels, whether it was called for one patch on
+    screen, one region for a segmentation preview, or one tile being written to
+    disk.
+
+        cyto    = max over groups of  clip( gw · Σ w_ch · signal_ch )
+        nucleus = clip( nuc_w · signal_nuc )
+
+    Weights are clipped to [0, 1] first, so a hand-edited config cannot push a
+    group past the others by scale alone. Channels absent from `signals` are
+    skipped rather than treated as zero — a channel that has not arrived is not
+    the same as a channel that is dark.
+
+    Returns `(cyto, nucleus)` float32 in [0, 1], the shape of the inputs, or
+    `(None, None)` when there is nothing to fuse.
+    """
+    if not signals:
+        return None, None
+    shape = next(iter(signals.values())).shape
+
+    cyto = np.zeros(shape, dtype=np.float32)
+    for gname, ch_weights in (groups or {}).items():
+        gw = float(np.clip(group_weights.get(gname, 1.0), 0.0, 1.0))
+        accum = np.zeros(shape, dtype=np.float32)
+        for ch, w in ch_weights.items():
+            if ch in signals and w > 0:
+                accum += signals[ch] * float(np.clip(w, 0.0, 1.0))
+        accum *= gw
+        np.clip(accum, 0.0, 1.0, out=accum)
+        np.maximum(cyto, accum, out=cyto)
+    np.clip(cyto, 0.0, 1.0, out=cyto)
+
+    nucleus = np.zeros(shape, dtype=np.float32)
+    if nuc_ch and nuc_ch in signals and nuc_w > 0:
+        nucleus = signals[nuc_ch] * float(np.clip(nuc_w, 0.0, 1.0))
+        np.clip(nucleus, 0.0, 1.0, out=nucleus)
+
+    return cyto, nucleus
+
+
 class FusionEngine:
 
     @staticmethod
@@ -43,33 +89,18 @@ class FusionEngine:
         caller's normalization (incl. the manual remap) is preserved."""
         if not cache:
             return None, None
-        shape = next(iter(cache.values())).shape
-
-        def _n(arr):
-            return arr if prenormalized else self._normalize_intensity(arr)
-
-        signals = []
-        for gname, ch_weights in groups.items():
-            gw    = float(np.clip(group_weights.get(gname, 1.0), 0.0, 1.0))
-            accum = np.zeros(shape, dtype=np.float32)
-            for ch, w in ch_weights.items():
-                if ch in cache and w > 0:
-                    accum += _n(cache[ch]) * float(np.clip(w, 0.0, 1.0))
-            accum *= gw
-            np.clip(accum, 0.0, 1.0, out=accum)
-            signals.append(accum)
-
-        cyto = np.zeros(shape, dtype=np.float32)
-        for s in signals:
-            np.maximum(cyto, s, out=cyto)
-        np.clip(cyto, 0.0, 1.0, out=cyto)
-
-        nucleus = np.zeros(shape, dtype=np.float32)
-        if nuc_ch and nuc_ch in cache and nuc_w > 0:
-            nucleus = _n(cache[nuc_ch]) * float(np.clip(nuc_w, 0.0, 1.0))
-            np.clip(nucleus, 0.0, 1.0, out=nucleus)
-
-        return cyto, nucleus
+        if prenormalized:
+            signals = cache
+        else:
+            # Only what the fusion will actually read: normalising a channel
+            # nobody weighs would be work for nothing, and the old inline loop
+            # did not do it either.
+            wanted = {nuc_ch} if nuc_ch else set()
+            for ch_weights in (groups or {}).values():
+                wanted.update(ch_weights.keys())
+            signals = {ch: self._normalize_intensity(arr)
+                       for ch, arr in cache.items() if ch in wanted}
+        return fuse_channels(signals, groups, group_weights, nuc_ch, nuc_w)
 
     def fuse_fullres(self, loader, y0, y1, x0, x1,
                      groups, group_weights, nuc_ch, nuc_w,

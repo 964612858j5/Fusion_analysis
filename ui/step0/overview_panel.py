@@ -320,6 +320,46 @@ class FullFusionWorker(QThread):
             return None
         return apply_channel_remap(arr, params).astype(np.float32)
 
+    @staticmethod
+    def _recover_interrupted_publish(zarr_path):
+        """Put back a result left aside by a run that died mid-publish.
+
+        Between renaming the old store aside and moving the new one in there is
+        an instant where the real path holds nothing. A process killed exactly
+        there leaves the previous result under `.previous`; this returns it
+        rather than letting the next run see no previous result at all.
+        """
+        backup = zarr_path + ".previous"
+        if os.path.isdir(backup) and not os.path.isdir(zarr_path):
+            os.rename(backup, zarr_path)
+            print(f"[Fusion] recovered the previous result at {zarr_path}")
+
+    def _publish_store(self, tmp_path, zarr_path):
+        """Move the finished store into place without a moment of having none.
+
+        Deleting the old store and then renaming the new one leaves a window in
+        which a failed rename, a full disk or a killed process destroys the
+        previous result and puts nothing in its place. So the old store is
+        renamed aside first and only dropped once the new one is in position;
+        if the rename fails, the old one goes back and the error is raised.
+        """
+        backup = zarr_path + ".previous"
+        if os.path.isdir(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        had_previous = os.path.isdir(zarr_path)
+        if had_previous:
+            os.rename(zarr_path, backup)
+        try:
+            os.replace(tmp_path, zarr_path)
+        except Exception:
+            if had_previous and not os.path.isdir(zarr_path):
+                os.rename(backup, zarr_path)
+                print(f"[Fusion] publish failed; the previous result at "
+                      f"{zarr_path} was put back")
+            raise
+        if had_previous:
+            shutil.rmtree(backup, ignore_errors=True)
+
     def _fuse_tile(self, raw_cache, groups, group_weights,
                    nucleus_ch, nucleus_w):
         """Fuse a pre-loaded channel cache into (H,W,2) uint16.
@@ -455,6 +495,7 @@ class FullFusionWorker(QThread):
                 # a half-written zarr of the correct shape beside a meta file
                 # describing the previous, complete one — which the reuse check
                 # would then accept.
+                self._recover_interrupted_publish(zarr_path)
                 tmp_path = zarr_path + ".inprogress"
                 if os.path.isdir(tmp_path):
                     shutil.rmtree(tmp_path, ignore_errors=True)
@@ -588,14 +629,11 @@ class FullFusionWorker(QThread):
                     print(f"[Fusion] Preview failed ({rname}): {e}")
 
                 # Publish: mark complete, close the handle, then swap the
-                # finished store into place. Until this line the real path
-                # still holds the previous result, untouched.
+                # finished store into place.
                 out_zarr.attrs["complete"] = True
                 del out_zarr
                 gc.collect()
-                if os.path.isdir(zarr_path):
-                    shutil.rmtree(zarr_path)
-                os.replace(tmp_path, zarr_path)
+                self._publish_store(tmp_path, zarr_path)
                 self._tmp_stores.remove(tmp_path)
 
                 zarr_paths[rname] = zarr_path

@@ -4257,13 +4257,21 @@ class Step0Page(QWidget):
         return draft
 
     @staticmethod
-    def _restore_remap_config(path, previous):
-        """Put the canonical remap config back the way it was.
+    def _file_bytes(path):
+        """The file's contents, or None when it does not exist."""
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
 
-        Called when the manifest could not be republished. Leaving the new file
-        in place would leave the published manifest hashed over a file that no
-        longer exists in that form, i.e. a handoff that was valid before the
-        Save and is invalid after a Save that produced nothing.
+    @staticmethod
+    def _restore_file(path, previous):
+        """Put one file back the way it was, or remove it if it was not there.
+
+        Called when a commit failed part-way. Leaving a rewritten file behind
+        would leave the step0 directory describing something other than what
+        the published manifest was hashed over.
         """
         try:
             if previous is None:
@@ -4282,10 +4290,13 @@ class Step0Page(QWidget):
     def commit_display_mapping(self, channels=None, required=None):
         """Freeze the draft, write it, and republish the manifest — or nothing.
 
-        One transaction: the snapshot is taken first, written to the canonical
-        remap config, and the manifest is republished so its hash names exactly
-        that file. If any step fails nothing is published and the caller must
-        not go on to produce results that claim to match.
+        The frozen mapping goes into a NEW file named after its own hash, so
+        nothing that the published manifest depends on is overwritten while the
+        commit is in flight. The manifest, published atomically, is what names
+        that file: until it lands the previous handoff is intact, and a process
+        that dies in between leaves an unreferenced file and nothing else. The
+        canonical copy is refreshed afterwards for the Intensity workbench,
+        which is not part of the handoff identity.
 
         Returns (committed, reason).
         """
@@ -4312,31 +4323,52 @@ class Step0Page(QWidget):
         wb = getattr(self, "_cond_workbench", None)
         if wb is None:
             return False, "no_workbench"
-        # Both writes or neither. The manifest is hashed over the remap config,
-        # so a written config with an un-republished manifest is worse than no
-        # commit at all: it invalidates the handoff that was valid a moment ago.
         cfg_path = self._step0_conditioning_config_path()
-        previous = None
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "rb") as f:
-                    previous = f.read()
-            except Exception as exc:
-                print(f"[Step0] could not read the remap config to protect it: {exc}")
-                return False, f"read_failed: {exc}"
+        # The handoff writer also rewrites correction/ROI/patch JSON from the
+        # same in-memory state; keep their bytes so a failure part-way leaves
+        # the whole step0 directory as the published manifest describes it.
+        guarded = [os.path.join(step0_dir, name) for name in
+                   ("correction_config.json", "roi_config.json",
+                    "patch_config.json")]
+        kept = {}
+        for path in guarded:
+            kept[path] = self._file_bytes(path)
+
+        versioned = ""
         try:
             cfg = wb.build_config()
             cfg_channels = cfg.setdefault("channels", {})
             for name, params in snapshot.items():
                 cfg_channels[str(name)] = normalize_channel_remap_params(params)
-            save_channel_remap_config(cfg, cfg_path)
-            self._last_saved_remap_path = cfg_path
+            digest = channel_remap_config_hash(cfg)
+            versioned = os.path.join(
+                step0_dir, f"step0_channel_remap.{digest[:12]}.json")
+            save_channel_remap_config(cfg, versioned)
             _cfg, _rois, _patches, _manifest = self._write_step0_handoff(
-                config, zarr_path)
+                config, zarr_path, remap_config_path=versioned)
         except Exception as exc:
             print(f"[Step0] display-mapping commit FAILED: {exc}")
-            self._restore_remap_config(cfg_path, previous)
+            if versioned and os.path.exists(versioned):
+                # Unreferenced: the manifest never named it.
+                try:
+                    os.remove(versioned)
+                except OSError:
+                    pass
+            for path, previous in kept.items():
+                self._restore_file(path, previous)
             return False, f"write_failed: {exc}"
+
+        # Published. The canonical copy is a convenience for the workbench and
+        # is not what any consumer is pointed at, so a failure here is reported
+        # and does not undo the commit.
+        try:
+            save_channel_remap_config(cfg, cfg_path)
+        except Exception as exc:
+            print(f"[Step0] canonical remap copy not refreshed: {exc}")
+        # Superseded mapping files are left in place deliberately: they are a
+        # few hundred bytes each, and an earlier fused result or session may
+        # still name one as the mapping its pixels went through.
+        self._last_saved_remap_path = versioned
 
         self.display_mapping_committed.emit({
             "step0_manifest_path": os.path.abspath(manifest_path),
@@ -9105,7 +9137,7 @@ class Step0Page(QWidget):
                 "Use Intensity for display mapping, or continue to Step1.")
             self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
 
-    def _write_step0_handoff(self, config, zarr_path):
+    def _write_step0_handoff(self, config, zarr_path, remap_config_path=None):
         raw_path = os.path.abspath(self.ome_path) if self.ome_path else ""
         if not raw_path:
             raise RuntimeError("raw OME-TIFF path is empty")
@@ -9188,7 +9220,11 @@ class Step0Page(QWidget):
             "stage": "raw",
             "corrected_artifact": None,
         }
-        remap_path = os.path.abspath(os.path.join(step0_dir, "step0_channel_remap.json"))
+        # The manifest names the remap config it is hashed over. A display
+        # mapping commit passes an immutable, hash-named file so that publishing
+        # the manifest is the only moment anything changes for a consumer.
+        remap_path = os.path.abspath(
+            remap_config_path or os.path.join(step0_dir, "step0_channel_remap.json"))
         remap_hash = ""
         if os.path.exists(remap_path):
             try:

@@ -395,6 +395,11 @@ def test_a_failed_republish_leaves_the_previous_handoff_valid(app, tmp_path):
         with open(json_path, "rb") as f:
             before = f.read()
 
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            published = json.load(f)
+        named = published["channel_remap_config_path"]
+        before_named = open(named, "rb").read()
+
         page._cond_workbench._params["CD3"]["max"] = 999.0
         page._write_step0_handoff = lambda *a, **k: (_ for _ in ()).throw(
             OSError("disk is full"))
@@ -402,11 +407,54 @@ def test_a_failed_republish_leaves_the_previous_handoff_valid(app, tmp_path):
 
         assert ok is False and "disk is full" in reason
         with open(json_path, "rb") as f:
-            assert f.read() == before                 # rolled back
+            assert f.read() == before                 # canonical untouched
 
         with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
             manifest = json.load(f)
+        assert manifest["channel_remap_config_path"] == named
+        assert open(named, "rb").read() == before_named
         assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
-            load_channel_remap_config(json_path))     # still names this file
+            load_channel_remap_config(named))         # still names a real file
+
+        # And it left no half-committed mapping file lying around.
+        strays = [f for f in os.listdir(step0_dir)
+                  if f.startswith("step0_channel_remap.")
+                  and f not in (os.path.basename(named), "step0_channel_remap.json")]
+        assert strays == []
+    finally:
+        w.close()
+
+
+def test_the_manifest_names_an_immutable_mapping_file(app, tmp_path):
+    """Publishing the manifest is the only moment a consumer sees a change.
+
+    The frozen mapping is written to a new file named after its own hash, so
+    the file the published manifest points at is never rewritten in place. A
+    commit that dies before the manifest lands leaves that file unreferenced
+    and every reader still on the previous, consistent pair.
+    """
+    from block01.utils.channel_remap_config import channel_remap_config_hash, \
+        load_channel_remap_config
+
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
+        assert page.commit_display_mapping(["CD3"])[0] is True
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            first = json.load(f)["channel_remap_config_path"]
+        first_bytes = open(first, "rb").read()
+
+        page._cond_workbench._params["CD3"]["max"] = 120.0
+        assert page.commit_display_mapping(["CD3"])[0] is True
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            manifest = json.load(f)
+
+        assert manifest["channel_remap_config_path"] != first
+        assert open(first, "rb").read() == first_bytes      # never rewritten
+        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
+            load_channel_remap_config(manifest["channel_remap_config_path"]))
+        assert load_channel_remap_config(
+            manifest["channel_remap_config_path"])["channels"]["CD3"]["max"] == 120.0
     finally:
         w.close()

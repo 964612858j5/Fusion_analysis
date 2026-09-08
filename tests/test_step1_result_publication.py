@@ -108,54 +108,152 @@ def test_a_stopped_run_leaves_the_previous_result_alone(tmp_path):
     assert not os.path.isdir(path + ".inprogress")  # and cleaned up after itself
 
 
-def test_a_session_pointing_at_a_missing_store_is_not_step1_done(app, tmp_path):
+def test_a_failed_publish_still_leaves_the_previous_result(tmp_path, monkeypatch):
+    """The dangerous instant is the publish itself.
+
+    Deleting the old store and then renaming the new one in means a rename that
+    fails — a full disk, a cross-device move, a killed process — destroys the
+    previous result and puts nothing in its place. The old store is therefore
+    moved aside, not deleted, and put back when the publish fails.
+    """
+    first = _worker(tmp_path, hash_="first")
+    first.run()
+    path = str(tmp_path / "fused.zarr")
+    before = np.array(zarr.open(path, mode="r")[:])
+
+    real_replace = os.replace
+
+    def _fail_the_publish(src, dst, *a, **k):
+        if str(dst) == path:
+            raise OSError("no space left on device")
+        return real_replace(src, dst, *a, **k)
+    monkeypatch.setattr(os, "replace", _fail_the_publish)
+
+    second = _worker(tmp_path, hash_="second")
+    errors = []
+    second.error.connect(errors.append)
+    second.run()
+
+    assert errors                                   # it reported the failure
+    z = zarr.open(path, mode="r")
+    assert z.attrs["config_hash"] == "first"        # previous result still there
+    assert z.attrs["complete"] is True
+    assert np.array_equal(np.array(z[:]), before)
+    assert not os.path.isdir(path + ".inprogress")
+    assert not os.path.isdir(path + ".previous")
+
+
+def test_a_result_left_aside_by_a_killed_run_comes_back(tmp_path):
+    """A process killed between moving the old store aside and moving the new
+    one in leaves the previous result under `.previous`; the next run returns
+    it rather than starting from no previous result at all."""
+    first = _worker(tmp_path, hash_="first")
+    first.run()
+    path = str(tmp_path / "fused.zarr")
+    os.rename(path, path + ".previous")             # what that kill leaves
+
+    from block01.ui.step0.overview_panel import FullFusionWorker
+    FullFusionWorker._recover_interrupted_publish(path)
+
+    assert zarr.open(path, mode="r").attrs["config_hash"] == "first"
+    assert not os.path.isdir(path + ".previous")
+
+
+def _restore_window(app, tmp_path):
+    """A window whose loaded configuration can describe its own identity."""
+    from block01.ui import main_window as mw
     from block01.ui.main_window import MainWindow
 
+    raw = tmp_path / "raw.ome.tif"
+    raw.write_bytes(b"x" * 8)
     w = MainWindow()
+    w.loader = _Loader()
+    w.loader.filepath = str(raw)
+    w._rois = []
+    w._active_roi = None
+    w.step0_output = {"roi_id": "roi-1", "handoff_schema_version": 2}
+    w.config.set_channels(["DAPI", "CD3"])
+    w.config.load_panel({"g": ["CD3"]}, "DAPI")
+    w.config.set_nucleus("DAPI", 1.0)
+    w.config.set_channel_weight("CD3", 0.5)
+    w.config._edited_channels.add("CD3")
+    w._active_segmentation_method = "cellpose_wholecell_fusion"
+    mw.OUTPUT_DIR = str(tmp_path)
+    return w
+
+
+def _store(tmp_path, attrs, name="fused.zarr"):
+    path = str(tmp_path / name)
+    z = zarr.open(path, mode="w", shape=(16, 16, 2), dtype="uint16")
+    z.attrs["cellpose_channels"] = [1, 2]
+    for k, v in attrs.items():
+        z.attrs[k] = v
+    return path
+
+
+def _stamp_of(w):
+    """What a completed run of the window's CURRENT configuration would stamp."""
+    meta = w._expected_meta_for_current_config()
+    return {"complete": True,
+            "artifact_kind": meta.get("artifact_kind"),
+            "fusion_formula_version": meta.get("fusion_formula_version"),
+            "config_hash": meta.get("config_hash")}
+
+
+def test_a_session_pointing_at_a_missing_store_is_not_step1_done(app, tmp_path):
+    w = _restore_window(app, tmp_path)
     try:
         assert w._restorable_fused_zarr(str(tmp_path / "gone.zarr")) == ""
     finally:
         w.close()
 
 
-@pytest.mark.parametrize("attrs,why", [
-    ({"complete": False, "artifact_kind": "step1_fused_zarr",
-      "fusion_formula_version": 2, "config_hash": "h"}, "never finished"),
-    ({"complete": True, "artifact_kind": "corrected_channels_zarr",
-      "fusion_formula_version": 2, "config_hash": "h"}, "another kind"),
-    ({"complete": True, "artifact_kind": "step1_fused_zarr",
-      "fusion_formula_version": 1, "config_hash": "h"}, "the old formula"),
-    ({"cellpose_channels": [1, 2]}, "nothing at all"),
-])
-def test_a_session_store_that_cannot_prove_itself_is_refused(app, tmp_path, attrs, why):
-    from block01.ui.main_window import MainWindow
-
-    path = str(tmp_path / "fused.zarr")
-    z = zarr.open(path, mode="w", shape=(16, 16, 2), dtype="uint16")
-    z.attrs["cellpose_channels"] = [1, 2]
-    for k, v in attrs.items():
-        z.attrs[k] = v
-
-    w = MainWindow()
+def test_a_session_store_that_proves_itself_is_restored(app, tmp_path):
+    w = _restore_window(app, tmp_path)
     try:
+        path = _store(tmp_path, _stamp_of(w))
+        assert w._restorable_fused_zarr(path) == path
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("change,why", [
+    ({"complete": False}, "never finished"),
+    ({"artifact_kind": "step1_dapi_input_zarr"}, "the other kind of artifact"),
+    ({"fusion_formula_version": 1}, "an older formula"),
+    ({"config_hash": ""}, "no configuration recorded"),
+    ({"config_hash": "unrelated-config"}, "another configuration entirely"),
+])
+def test_a_session_store_that_cannot_prove_itself_is_refused(app, tmp_path, change, why):
+    w = _restore_window(app, tmp_path)
+    try:
+        stamp = _stamp_of(w)
+        stamp.update(change)
+        path = _store(tmp_path, stamp)
         assert w._restorable_fused_zarr(path) == "", why
     finally:
         w.close()
 
 
-def test_a_session_store_that_proves_itself_is_restored(app, tmp_path):
-    from block01.ui.main_window import MainWindow
-
-    path = str(tmp_path / "fused.zarr")
-    z = zarr.open(path, mode="w", shape=(16, 16, 2), dtype="uint16")
-    z.attrs["cellpose_channels"] = [1, 2]
-    z.attrs["complete"] = True
-    z.attrs["artifact_kind"] = "step1_fused_zarr"
-    z.attrs["fusion_formula_version"] = 2
-    z.attrs["config_hash"] = "h"
-
-    w = MainWindow()
+def test_a_session_store_from_other_weights_is_refused(app, tmp_path):
+    """Formula version 2 is not enough. A result made at other weights is a
+    different picture, and Step2 would be handed it as this session's."""
+    w = _restore_window(app, tmp_path)
     try:
+        path = _store(tmp_path, _stamp_of(w))
         assert w._restorable_fused_zarr(path) == path
+
+        w.config.set_channel_weight("CD3", 0.9)
+        w.config._edited_channels.add("CD3")
+        assert w._restorable_fused_zarr(path) == ""
+    finally:
+        w.close()
+
+
+def test_a_store_with_nothing_to_say_is_refused(app, tmp_path):
+    w = _restore_window(app, tmp_path)
+    try:
+        path = _store(tmp_path, {})
+        assert w._restorable_fused_zarr(path) == ""
     finally:
         w.close()

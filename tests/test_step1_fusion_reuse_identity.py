@@ -306,3 +306,69 @@ def test_a_store_made_by_an_older_formula_is_not_reused(app, tmp_path):
         assert w._try_reuse_fused_zarr(expected) is False
     finally:
         w.close()
+
+
+def _two_roi_window(app, tmp_path):
+    w = _window(app, tmp_path)
+    w._rois = [{"name": "ROI_1", "bbox_fullres": [0, 64, 0, 64]},
+               {"name": "ROI_2", "bbox_fullres": [0, 64, 0, 64]}]
+    w._active_roi = w._rois[0]
+    return w
+
+
+def _two_roi_meta(w, tmp_path):
+    expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+    on_disk = dict(expected)
+    on_disk["regions"] = [
+        {"roi_name": "ROI_1", "zarr_path": str(tmp_path / "fused_ROI_1.zarr"),
+         "zarr_shape": [64, 64, 2]},
+        {"roi_name": "ROI_2", "zarr_path": str(tmp_path / "fused_ROI_2.zarr"),
+         "zarr_shape": [64, 64, 2]},
+    ]
+    with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+        json.dump(on_disk, f, default=str)
+    return expected
+
+
+def test_a_second_roi_that_is_missing_stops_the_whole_reuse(app, tmp_path):
+    """One intact ROI used to vouch for the batch: the reuse check looked at
+    the first zarr the meta named and no other. A second ROI that was never
+    written, or written by another run, went unnoticed."""
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr", stamp=_stamp(expected))
+        # ROI_2 was never written.
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_second_roi_from_another_configuration_stops_the_reuse(app, tmp_path):
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr", stamp=_stamp(expected))
+        stale = _stamp(expected)
+        stale["config_hash"] = "an-older-configuration"
+        _make_zarr(tmp_path, "fused_ROI_2.zarr", stamp=stale)
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_every_roi_present_and_current_is_reused(app, tmp_path, monkeypatch):
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        for name in ("fused_ROI_1.zarr", "fused_ROI_2.zarr"):
+            _make_zarr(tmp_path, name, stamp=_stamp(expected))
+        done = []
+        monkeypatch.setattr(type(w), "_on_fusion_done",
+                            lambda self, p: done.append(p))
+
+        assert w._try_reuse_fused_zarr(expected) is True
+        assert done
+    finally:
+        w.close()

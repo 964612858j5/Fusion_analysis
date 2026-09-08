@@ -4204,6 +4204,80 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to write fusion_meta.json:\n{traceback.format_exc()}")
 
+    def _all_regions_reusable(self, expected_meta, old_meta):
+        """Every region of a multi-ROI result has to be there and be current.
+
+        The reuse decision used to look at the first zarr the meta names. With
+        several ROIs that meant an intact ROI_1 vouched for the whole batch,
+        while ROI_2 could be missing, truncated or left over from another
+        configuration.
+        """
+        expected_regions = list(expected_meta.get("regions") or [])
+        old_regions = list(old_meta.get("regions") or [])
+        if not expected_regions:
+            return True
+        if len(old_regions) != len(expected_regions):
+            print(f"[Step1] the existing result covers {len(old_regions)} region(s), "
+                  f"not {len(expected_regions)}; regenerating")
+            return False
+        by_name = {str(r.get("roi_name") or ""): r for r in old_regions}
+        for i, want in enumerate(expected_regions):
+            name = str(want.get("roi_name") or "")
+            have = by_name.get(name) or old_regions[i]
+            path = str(have.get("zarr_path") or "")
+            if not path:
+                # The DAPI-input meta records regions without paths; the worker
+                # names them by ROI, so derive the name it would have written.
+                path = os.path.join(
+                    OUTPUT_DIR,
+                    f"fused_{name}.zarr" if name and name != "full" else "fused.zarr")
+            label = f"region {name or i + 1}"
+            if not path or not self._is_valid_existing_fused_zarr(path):
+                print(f"[Step1] {label} is missing or unreadable at "
+                      f"{path or 'no recorded path'}; regenerating")
+                return False
+            want_shape = list(want.get("shape") or [])
+            have_shape = list(have.get("zarr_shape") or [])
+            if want_shape and have_shape and want_shape != have_shape:
+                print(f"[Step1] {label} has shape {have_shape}, not {want_shape}; "
+                      "regenerating")
+                return False
+            if not self._body_matches_expected(path, expected_meta, label):
+                return False
+        return True
+
+    def _expected_meta_for_current_config(self, method=""):
+        """The identity a fusion of what is loaded right now would have.
+
+        Built the way `_save` builds it, so a stored result can be compared
+        against the configuration in front of the user rather than merely
+        against "some Step1 output of the current formula version".
+        Returns None when there is not enough loaded to say.
+        """
+        if self.loader is None:
+            return None
+        method = str(method or self._active_segmentation_method
+                     or (self._p2_params or {}).get("method")
+                     or CELLPOSE_WHOLECELL_FUSION)
+        try:
+            fcfg = self.config.get_full_config()
+            fcfg.update({
+                "ome_tiff": OME_TIFF_FILE,
+                "output_dir": OUTPUT_DIR,
+                "norm_low": NORM_LOW,
+                "norm_high": NORM_HIGH,
+                "channel_remap_params": self._load_step0_remap_params()[0],
+            })
+            if method == CELLPOSE_WHOLECELL_FUSION:
+                return self._expected_fused_zarr_meta(fcfg, method)
+            nuc_ch = (fcfg.get("nucleus") or {}).get("channel") \
+                or self.config.nucleus_channel()
+            fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
+            return self._expected_dapi_input_meta(fcfg, method)
+        except Exception as exc:
+            print(f"[Step1] could not describe the current fusion identity: {exc}")
+            return None
+
     def _restorable_fused_zarr(self, path):
         """The session's fused zarr, only if it is still usable as one.
 
@@ -4223,15 +4297,16 @@ class MainWindow(QMainWindow):
         if attrs is None:
             print(f"[Step1] session fused zarr is not marked complete: {path}")
             return ""
-        kind = str(attrs.get("artifact_kind") or "")
-        if kind not in ("step1_fused_zarr", "step1_dapi_input_zarr"):
-            print(f"[Step1] session fused zarr is {kind or 'of an unknown kind'}; "
-                  "not restoring it")
+        # And it has to be THIS configuration's result, not merely a result of
+        # the current formula: the weights, the display mapping, the ROI and the
+        # method all decide what those pixels are. A store of the other kind
+        # fails here too, because the expected kind follows from the method.
+        expected = self._expected_meta_for_current_config()
+        if expected is None:
+            print("[Step1] cannot describe the current fusion; not restoring "
+                  f"{path}")
             return ""
-        if attrs.get("fusion_formula_version") != FUSION_FORMULA_VERSION:
-            print("[Step1] session fused zarr was made by formula "
-                  f"{attrs.get('fusion_formula_version')!r}, not "
-                  f"{FUSION_FORMULA_VERSION}; not restoring it")
+        if not self._body_matches_expected(path, expected, "the session fused zarr"):
             return ""
         return path
 
@@ -4323,6 +4398,8 @@ class MainWindow(QMainWindow):
             if not self._body_matches_expected(existing_zarr, expected_meta,
                                                "the existing fused zarr"):
                 return False
+            if not self._all_regions_reusable(expected_meta, old_meta):
+                return False
             print("[Step1] config unchanged, skip generation")
             self._write_fused_zarr_meta(expected_meta, existing_zarr)
             self._reused_fused_zarr_meta = True
@@ -4356,7 +4433,8 @@ class MainWindow(QMainWindow):
                         == self._dapi_meta_compare_view(expected_meta)
                         and self._body_matches_expected(
                             existing_zarr, expected_meta,
-                            "the existing DAPI input zarr")):
+                            "the existing DAPI input zarr")
+                        and self._all_regions_reusable(expected_meta, old_meta)):
                     print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
                     print("[Step1] DAPI input zarr reuse/regenerate reason: metadata match")
                     print("Reusing existing DAPI input zarr")

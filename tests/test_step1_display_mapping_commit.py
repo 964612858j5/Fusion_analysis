@@ -275,3 +275,55 @@ def test_a_draft_change_is_not_a_commit(app, tmp_path):
         assert committed == []
     finally:
         w.close()
+
+
+def test_the_screen_uses_the_window_the_save_will_freeze(app, tmp_path):
+    """An untuned channel is not left to the loader's per-region percentile.
+
+    Step1 draws it through the same automatic window a Save would freeze, and
+    that window is computed once from the slide — so what is on screen before a
+    Save and what lands in fused.zarr after it are the same mapping, and a
+    redraw never re-reads the overview to invent a new one.
+    """
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        calls = []
+        pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
+
+        def _pix(ch, blocking=False):
+            calls.append(ch)
+            return pixels
+        page._workbench_pixels = _pix
+
+        drawn = page.display_mapping_for_preview(["CD3"])["CD3"]
+        frozen = page.frozen_display_mapping(["CD3"])["CD3"]
+        assert drawn["min"] == frozen["min"]
+        assert drawn["max"] == frozen["max"]
+
+        n = len(calls)
+        page.display_mapping_for_preview(["CD3"])
+        assert len(calls) == n            # memoised, not recomputed per redraw
+    finally:
+        w.close()
+
+
+def test_a_new_dataset_does_not_inherit_the_old_slides_auto_window(app, tmp_path):
+    """The automatic window is a property of the pixels, so loading another
+    slide must discard it rather than map the new channel through the old
+    slide's range."""
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+            0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
+        first = page.display_mapping_for_preview(["CD3"])["CD3"]["max"]
+
+        page._auto_window_cache = {}          # what loading a dataset does
+        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+            0, 50, 64 * 64, dtype=np.float32).reshape(64, 64)
+        second = page.display_mapping_for_preview(["CD3"])["CD3"]["max"]
+
+        assert second < first
+    finally:
+        w.close()

@@ -51,10 +51,11 @@ def test_preview_channel_signal_remap_and_percentile(app):
         w.close()
 
 
-def test_fuse_fullres_applies_remap_for_patch_segmentation():
-    """Patch-level Cellpose fusion input (FusionEngine.fuse_fullres) applies the
-    Step0 manual remap on RAW channels; non-remapped channels use the loader
-    percentile norm. This is the fix for Patch Results using un-adjusted channels."""
+def test_fuse_fullres_uses_the_committed_window_for_every_channel():
+    """Patch-level Cellpose fusion input applies each channel's COMMITTED
+    Min/Max/Gamma. A channel without one takes no part rather than being given a
+    scale derived from whichever region was asked for — that region dependence
+    is what made the saved result disagree with the screen."""
     from block01.core.fusion_engine import FusionEngine
     from block01.core.io_loader import OMETIFFLoader
     from block01.core.channel_remap import apply_channel_remap
@@ -70,18 +71,24 @@ def test_fuse_fullres_applies_remap_for_patch_segmentation():
             return {"CD8": cd8, "DAPI": dapi}[ch]
 
     fe = FusionEngine()
-    params = {"min": 0.0, "max": 167.0, "gamma": 1.0}
+    cd8_params = {"min": 0.0, "max": 167.0, "gamma": 1.0}
+    dapi_params = {"min": 0.0, "max": 255.0, "gamma": 1.0}
+
     fused = fe.fuse_fullres(
         _L(), 0, 64, 0, 64, {"g": {"CD8": 1.0}}, {"g": 1.0}, "DAPI", 1.0,
-        channel_remap_params={"CD8": params})
+        channel_remap_params={"CD8": cd8_params, "DAPI": dapi_params})
     cyto = fused[:, :, 0].astype(np.float32) / 65535.0
     nuc = fused[:, :, 1].astype(np.float32) / 65535.0
-    # cyto (single channel, weight 1) == the manual remap of raw CD8
-    exp_cyto = np.clip(apply_channel_remap(cd8, params).astype(np.float32), 0, 1)
-    assert np.allclose(cyto, exp_cyto, atol=2 / 65535)
-    # nucleus (no remap) == the loader percentile norm of raw DAPI
-    exp_nuc = np.clip(OMETIFFLoader._norm(dapi), 0, 1)
-    assert np.allclose(nuc, exp_nuc, atol=2 / 65535)
+    assert np.allclose(cyto, np.clip(apply_channel_remap(cd8, cd8_params), 0, 1),
+                       atol=2 / 65535)
+    assert np.allclose(nuc, np.clip(apply_channel_remap(dapi, dapi_params), 0, 1),
+                       atol=2 / 65535)
+
+    # DAPI with no committed window: it is left out, not rescaled.
+    without = fe.fuse_fullres(
+        _L(), 0, 64, 0, 64, {"g": {"CD8": 1.0}}, {"g": 1.0}, "DAPI", 1.0,
+        channel_remap_params={"CD8": cd8_params})
+    assert without[:, :, 1].max() == 0
 
 
 def test_preview_loader_thread_normalize_flag():

@@ -874,6 +874,7 @@ class CellposeWorker(QThread):
                     self.loader, y0, y1, x0, x1,
                     self.groups, self.group_weights,
                     self.nuc_ch, self.nuc_w,
+                    channel_remap_params=getattr(self, "channel_remap_params", None),
                 )
 
                 print(f"[Cellpose] fused: shape={fused.shape} dtype={fused.dtype} "

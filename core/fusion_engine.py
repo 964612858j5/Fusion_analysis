@@ -10,15 +10,19 @@ from .channel_remap import apply_channel_remap
 # Which fusion arithmetic produced a result.  It lives here, beside the maths,
 # so a change to the formula and a change to this number are the same edit.
 #
-# 1 = the historical family: the preview and FusionEngine combine channels one
-#     way while the on-disk FullFusionWorker re-normalises per group, per tile
-#     and globally, so the same configuration produces different pixels
-#     depending on which path made them.
+# 1 = the historical family: the preview and FusionEngine combined channels one
+#     way while the on-disk FullFusionWorker re-normalised per group, per tile
+#     and globally, so the same configuration produced different pixels
+#     depending on which path made them, and a different tile grid produced
+#     different pixels again.
+# 2 = one implementation, `fuse_channels`, called by all three, over channels
+#     mapped through a window that was committed once and does not depend on
+#     the patch, region or tile in hand.
 #
 # Anything that carries no version at all predates the field and cannot be
 # assumed to match: a reader must treat a missing version as "unknown", never
 # as "current".
-FUSION_FORMULA_VERSION = 1
+FUSION_FORMULA_VERSION = 2
 
 
 def fuse_channels(signals, groups, group_weights, nuc_ch, nuc_w):
@@ -122,13 +126,17 @@ class FusionEngine:
         cache = {}
         for ch in needed:
             if ch in loader.ch_map:
+                p = remap.get(ch)
+                if not p:
+                    # No committed window means no agreed scale for this
+                    # channel; giving it one derived from this region would make
+                    # the result depend on which region was asked for.
+                    print(f"[Fusion] {ch} has no committed display window; "
+                          "it takes no part in this fusion")
+                    continue
                 raw = loader.read_region(ch, y0, y1, x0, x1, downsample=1,
                                          normalize=False)
-                p = remap.get(ch)
-                if p:
-                    cache[ch] = apply_channel_remap(raw, p).astype(np.float32)
-                else:
-                    cache[ch] = loader._norm(raw)   # exact percentile norm (1–99.5)
+                cache[ch] = apply_channel_remap(raw, p).astype(np.float32)
 
         cyto, nucleus = self.compute(cache, groups, group_weights, nuc_ch, nuc_w,
                                      prenormalized=True)

@@ -4356,11 +4356,11 @@ class MainWindow(QMainWindow):
         """
         step0 = getattr(self, "_step0", None)
         draft = {}
-        if step0 is not None and hasattr(step0, "display_mapping_draft"):
+        if step0 is not None and hasattr(step0, "display_mapping_for_preview"):
             try:
-                draft = step0.display_mapping_draft() or {}
+                draft = step0.display_mapping_for_preview() or {}
             except Exception as exc:
-                print(f"[Step1] could not read the display-mapping draft: {exc}")
+                print(f"[Step1] could not read the display mapping: {exc}")
                 draft = {}
         if draft:
             return draft

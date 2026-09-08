@@ -283,6 +283,10 @@ class Step0Page(QWidget):
         # (see set_channel_source_request). CalibrationSourceIdentity is never read
         # from this map; it is derived from the actual opened pixel source at save.
         self._channel_source_requests = {}
+        # Automatic display windows, one per channel, computed from the slide
+        # and kept: a redraw must not re-read the overview, and the answer must
+        # not change between one redraw and the next.
+        self._auto_window_cache = {}
         self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
         # Which ROI edits the shared navigator accepts.  "full" is Step0's own
         # policy; Step1 borrows the same window with "delete_only".  Stored on
@@ -4174,6 +4178,31 @@ class Step0Page(QWidget):
             out[str(name)] = dict(p)
         return out
 
+    def display_mapping_for_preview(self, channels=None):
+        """The draft, completed with the same automatic windows a Save freezes.
+
+        A project whose Intensity window has never been opened still has to draw
+        something, and it must be the same something the Save will write — not a
+        percentile of whichever patch is on screen. The automatic windows are
+        memoised per channel so a redraw does not re-read the slide.
+        """
+        draft = self.display_mapping_draft()
+        names = list(channels or [])
+        if not names and self.loader is not None:
+            try:
+                names = list(self.loader.channel_names())
+            except Exception:
+                names = []
+        for ch in names:
+            if ch in draft:
+                continue
+            if ch not in self._auto_window_cache:
+                self._auto_window_cache[ch] = self._auto_display_window(ch)
+            auto = self._auto_window_cache[ch]
+            if auto is not None:
+                draft[ch] = dict(auto)
+        return draft
+
     def _auto_display_window(self, channel):
         """A stable automatic window for a channel nobody tuned.
 
@@ -4220,9 +4249,11 @@ class Step0Page(QWidget):
         for ch in names:
             if ch in draft:
                 continue
-            auto = self._auto_display_window(ch)
+            if ch not in self._auto_window_cache:
+                self._auto_window_cache[ch] = self._auto_display_window(ch)
+            auto = self._auto_window_cache[ch]
             if auto is not None:
-                draft[ch] = auto
+                draft[ch] = dict(auto)
         return draft
 
     def commit_display_mapping(self, channels=None):
@@ -5129,6 +5160,7 @@ class Step0Page(QWidget):
         # Re-arm the per-load auto-open guard: each genuine load may open the
         # navigator once; ROI/overview refreshes (other code paths) do not re-arm.
         self._navigator_auto_opened = False
+        self._auto_window_cache = {}
 
         OME_TIFF_FILE = ome
         OUTPUT_DIR = new_output_dir

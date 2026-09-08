@@ -29,7 +29,9 @@ from ...config import (
     OUTPUT_DIR, ROI_COLORS, PATCH_COLORS, OVERVIEW_DOWNSAMPLE,
 )
 from ...workers.cellpose_worker import OverviewLoaderThread
-from ...core.fusion_engine import FusionEngine, FUSION_FORMULA_VERSION
+from ...core.fusion_engine import (
+    FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
+)
 from ...core.channel_remap import apply_channel_remap
 
 class TileSelectDialog(QDialog):
@@ -273,6 +275,7 @@ class FullFusionWorker(QThread):
         # conditioned with apply_channel_remap instead of the plain percentile
         # window — so the fused output reflects the user's manual adjustments.
         self._remap_params = dict(fusion_cfg.get("channel_remap_params") or {})
+        self._unmapped_reported = set()
 
     def stop(self):
         self._stop = True
@@ -289,64 +292,58 @@ class FullFusionWorker(QThread):
         )
         return ch_name, region.copy()
 
-    @staticmethod
-    def _norm(arr, low, high):
-        arr  = arr.astype(np.float32)
-        nz   = arr[arr > 0]
-        if nz.size < 100:
-            return np.zeros_like(arr)
-        lo, hi = np.percentile(nz, [low, high])
-        if hi <= lo:
-            return np.zeros_like(arr)
-        return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    def _channel_norm(self, ch, arr):
+        """One channel as a [0,1] signal, through its COMMITTED window.
 
-    def _channel_norm(self, ch, arr, low, high):
-        """Normalize one channel to [0,1] for fusion. When the user manually
-        conditioned this channel in Step0 Channel Remap, apply that remap
-        (Min/Max/Gamma) so the fused output reflects it; otherwise use the plain
-        percentile window."""
+        The window is the one frozen at Save — a user's Min/Max/Gamma, or the
+        automatic one computed from the whole slide. It is never derived from
+        the tile in hand: a percentile taken per tile gave every tile its own
+        scale, so the same data saved with a different tile grid came out
+        different. A channel with no committed window returns None and takes no
+        part, rather than being given a scale of its own.
+        """
         params = self._remap_params.get(ch)
-        if params:
-            return apply_channel_remap(arr, params).astype(np.float32)
-        return self._norm(arr, low, high)
+        if not params:
+            if ch not in self._unmapped_reported:
+                self._unmapped_reported.add(ch)
+                print(f"[Fusion] {ch} has no committed display window; "
+                      "it takes no part in this fusion")
+            return None
+        return apply_channel_remap(arr, params).astype(np.float32)
 
     def _fuse_tile(self, raw_cache, groups, group_weights,
-                   nucleus_ch, nucleus_w, norm_low, norm_high):
-        """Fuse a pre-loaded channel cache into (H,W,2) uint16."""
-        shape = next(iter(raw_cache.values())).shape
+                   nucleus_ch, nucleus_w):
+        """Fuse a pre-loaded channel cache into (H,W,2) uint16.
 
-        # ── cyto ──────────────────────────────────────────────────────
-        cyto = np.zeros(shape, dtype=np.float32)
-        for gname, ch_weights in groups.items():
-            gw    = group_weights.get(gname, 1.0)
-            accum = np.zeros(shape, dtype=np.float32)
-            for ch, w in ch_weights.items():
-                if ch in raw_cache and w > 0:
-                    norm  = self._channel_norm(ch, raw_cache[ch], norm_low, norm_high)
-                    accum += norm * float(w)
-            mx = accum.max()
-            if mx > 0:
-                accum = (accum / mx) * float(gw)
-            np.maximum(cyto, accum, out=cyto)
-            del accum
-        mx = cyto.max()
-        if mx > 0:
-            cyto /= mx
+        The arithmetic is `fuse_channels`, the same call the screen makes. This
+        method owns the mapping and the quantisation around it and nothing
+        else: no per-group, per-tile or global renormalisation, which is what
+        used to cancel the group and nucleus weights on their way to disk.
+        """
+        wanted = {nucleus_ch} if nucleus_ch else set()
+        for ch_weights in (groups or {}).values():
+            wanted.update(ch_weights.keys())
+        signals = {}
+        for ch in wanted:
+            arr = raw_cache.get(ch)
+            if arr is None:
+                continue
+            mapped = self._channel_norm(ch, arr)
+            if mapped is not None:
+                signals[ch] = mapped
 
-        # ── nucleus ───────────────────────────────────────────────────
-        nucleus = np.zeros(shape, dtype=np.float32)
-        if nucleus_ch and nucleus_ch in raw_cache:
-            nucleus = self._channel_norm(nucleus_ch, raw_cache[nucleus_ch], norm_low, norm_high)
-            nucleus *= float(nucleus_w)
-            mx = nucleus.max()
-            if mx > 0:
-                nucleus /= mx
+        cyto, nucleus = fuse_channels(signals, groups, group_weights,
+                                      nucleus_ch, nucleus_w)
+        if cyto is None:
+            shape = next(iter(raw_cache.values())).shape
+            cyto = np.zeros(shape, dtype=np.float32)
+            nucleus = np.zeros(shape, dtype=np.float32)
 
         result = np.stack([
             (cyto    * 65535).astype(np.uint16),
             (nucleus * 65535).astype(np.uint16),
         ], axis=-1)
-        del cyto, nucleus
+        del cyto, nucleus, signals
         return result
 
     # ── main run ──────────────────────────────────────────────────────
@@ -374,8 +371,6 @@ class FullFusionWorker(QThread):
             cfg        = self.fusion_cfg
             ome_path   = cfg["ome_tiff"]
             output_dir = cfg["output_dir"]
-            norm_low   = cfg.get("norm_low",  1.0)
-            norm_high  = cfg.get("norm_high", 99.5)
             nucleus_ch = cfg["nucleus"]["channel"]
             nucleus_w  = cfg["nucleus"]["weight"]
             groups     = {
@@ -510,7 +505,7 @@ class FullFusionWorker(QThread):
 
                     fused = self._fuse_tile(
                         raw_cache, groups, group_weights,
-                        nucleus_ch, nucleus_w, norm_low, norm_high,
+                        nucleus_ch, nucleus_w,
                     )
                     del raw_cache
                     gc.collect()

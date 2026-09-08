@@ -79,6 +79,9 @@ STEP1_PATCH_PREVIEW_MAX_PX = 1024
 _IDENTITY_REMAP = {"min": 0.0, "max": 1.0, "brightness": 0.0,
                    "contrast": 1.0, "gamma": 1.0}
 
+# How long a burst of state changes is allowed to coalesce into one redraw.
+PREVIEW_COALESCE_MS = 60
+
 STEP1_PREVIEW_OVERLAY = "overlay"
 STEP1_PREVIEW_FUSION = "fusion"
 
@@ -155,6 +158,7 @@ class MainWindow(QMainWindow):
         # True while a saved display state is being put back, so the per-change
         # handlers stay quiet and the reconcile at the end is the only one.
         self._restoring_display_state = False
+        self._preview_update_pending = False
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -201,7 +205,11 @@ class MainWindow(QMainWindow):
 
         self._prev_timer = QTimer()
         self._prev_timer.setSingleShot(True)
-        self._prev_timer.timeout.connect(self._render_current_patch)
+        # ONE coalesced redraw per burst of state changes, in whichever mode
+        # is showing. Dragging a weight or a Min/Max slider emits per step; a
+        # full-array composite per step would run the GUI thread into the
+        # ground and only the last one is ever seen.
+        self._prev_timer.timeout.connect(self._apply_pending_preview_update)
 
         self._proc_poll_timer = QTimer()
         self._proc_poll_timer.setInterval(100)
@@ -393,6 +401,10 @@ class MainWindow(QMainWindow):
         self.config.visibility_changed.connect(self._on_channel_visibility_changed)
         self.config.current_channel_changed.connect(self._on_current_channel_changed)
         self.config.color_changed.connect(self._on_channel_color_changed)
+        # ...and the other direction: a colour picked in the Intensity window
+        # or in Step0 is the same channel's colour.
+        self._step0.channel_color_changed.connect(
+            self._on_step0_channel_color_changed)
         ll.addWidget(self.config, stretch=1)
 
         self.roi_status = QLabel("No ROI loaded")
@@ -2765,16 +2777,21 @@ class MainWindow(QMainWindow):
         except Exception:
             return []
         wanted = []
-        groups = self.config.get_groups()
-        group_weights = self.config.get_group_weights()
+        effective = self._effective_fusion_config()
+        groups = {name: dict(data.get("channels") or {})
+                  for name, data in (effective.get("groups") or {}).items()}
+        group_weights = {name: float(data.get("group_weight", 1.0) or 0.0)
+                         for name, data in (effective.get("groups") or {}).items()}
         for gname, ch_weights in groups.items():
             if float(group_weights.get(gname, 1.0) or 0.0) <= 0:
                 continue
             for ch, weight in ch_weights.items():
                 if ch in available and float(weight or 0) > 0 and ch not in wanted:
                     wanted.append(ch)
-        nuc_ch, _nuc_w = self.config.get_nucleus()
-        if nuc_ch in available and nuc_ch not in wanted:
+        nuc = effective.get("nucleus") or {}
+        nuc_ch = nuc.get("channel", "")
+        if (nuc_ch in available and float(nuc.get("weight", 0.0) or 0.0) > 0
+                and nuc_ch not in wanted):
             wanted.append(nuc_ch)
         return wanted
 
@@ -3199,11 +3216,47 @@ class MainWindow(QMainWindow):
         self._overlay_display_cache[key] = gray
         return gray
 
-    def _render_overlay_patch(self, reset_view=False):
-        """Additively blend the ticked channels in their own colours.
+    def _effective_fusion_config(self):
+        """The one configuration both previews and every Save consume.
 
-        Reads no fusion weight, by design: the overlay answers "what is in this
-        tissue", the fusion preview answers "what will Step1 fuse".
+        `ConfigPanel.effective_config` drops the unticked channels; the panel
+        keeps their weights so re-ticking restores them, but nothing that
+        produces pixels or files may see them.
+        """
+        cfg = self.config
+        if hasattr(cfg, "effective_config"):
+            return cfg.effective_config()
+        return cfg.get_full_config()
+
+    def _overlay_weight(self, channel):
+        """How strongly a ticked channel shows: the same 0..1 the fusion uses.
+
+        The nucleus carries its own weight rather than a group's, and a channel
+        in several groups shows at the strongest of them, which is what the
+        fusion's max-over-groups does with it too.
+        """
+        nuc_ch, nuc_w = self.config.get_nucleus()
+        if channel == nuc_ch:
+            return float(nuc_w or 0.0)
+        groups = self.config.get_groups()
+        group_weights = self.config.get_group_weights()
+        best = 0.0
+        for gname, ch_weights in groups.items():
+            if channel not in ch_weights:
+                continue
+            gw = float(group_weights.get(gname, 1.0) or 0.0)
+            best = max(best, gw * float(ch_weights[channel] or 0.0))
+        return min(max(best, 0.0), 1.0)
+
+    def _render_overlay_patch(self, reset_view=False):
+        """Additively blend the ticked channels in their own colours, each at
+        its own weight.
+
+        One set of numbers for both previews. The overlay used to ignore the
+        weight while the fusion ignored the tick, so the same panel described
+        two different pictures and neither matched what a Save would write.
+        Weight is strength here and contribution there; the channels are the
+        ticked ones in both.
         """
         idx = self._preview_patch_idx
         cache = self._patch_channel_cache.get(idx) or {}
@@ -3222,7 +3275,11 @@ class MainWindow(QMainWindow):
         remap = self._display_mapping()
         grays, colors, params = {}, {}, {}
         for ch in ready:
-            grays[ch] = self._overlay_gray(idx, ch, cache[ch], remap)
+            weight = self._overlay_weight(ch)
+            if weight <= 0:
+                continue
+            gray = self._overlay_gray(idx, ch, cache[ch], remap)
+            grays[ch] = gray if weight >= 1.0 else gray * float(weight)
             colors[ch] = _hex_to_rgb01(self.config.channel_color(ch))
             params[ch] = _IDENTITY_REMAP
         rgb = compose_multichannel_overlay(grays, colors, params)
@@ -3265,21 +3322,28 @@ class MainWindow(QMainWindow):
             return
         self._ensure_channels_cached(self._preview_patch_idx)
         try:
-            self._step0.focus_intensity_on(channel)
+            self._step0.focus_intensity_on(
+                channel, color=self.config.channel_color(channel))
         except Exception as exc:
             print(f"[Step1] could not point Intensity at {channel}: {exc}")
         self._schedule_step1_session_save()
 
     def _on_display_mapping_changed(self, channel):
-        """One channel's Min/Max/Gamma moved: drop only that channel's pixels."""
+        """One channel's Min/Max/Gamma moved: drop only that channel's pixels.
+
+        Both previews map through these numbers, so both follow them. Only the
+        overlay used to redraw, which left the fusion preview showing the
+        window the user had just moved away from until something else forced a
+        redraw. Coalesced like every other state change: a slider drag leaves
+        one composite of where the user stopped.
+        """
         if not channel:
             return
         dropped = [key for key in self._overlay_display_cache if key[1] == channel]
         for key in dropped:
             self._overlay_display_cache.pop(key, None)
-        if (self._step1_preview_mode == STEP1_PREVIEW_OVERLAY
-                and channel in self.config.visible_channels()):
-            self._refresh_patch_preview(reset_view=False)
+        if channel in self.config.visible_channels():
+            self._schedule_preview_update()
 
     def _on_display_mapping_committed(self, payload):
         """The draft is now on disk and named by a fresh manifest hash.
@@ -3293,11 +3357,32 @@ class MainWindow(QMainWindow):
         print(f"[Step1] display mapping committed for "
               f"{len(payload.get('channels') or [])} channel(s)")
 
-    def _on_channel_color_changed(self, _channel, _color):
+    def _on_channel_color_changed(self, channel, color):
+        """One colour, wherever it is changed.
+
+        The Intensity window draws its histogram in the channel's colour and
+        used to take Step0's palette while the overlay used this panel's, so
+        the same channel came up in two colours. Step1 owns the overlay colour,
+        so it is pushed; and a colour changed in the Intensity window comes
+        back the same way.
+        """
         if self._restoring_display_state:
             return
+        try:
+            self._step0.adopt_channel_color(channel, color)
+        except Exception as exc:
+            print(f"[Step1] could not share the colour of {channel}: {exc}")
         self._refresh_patch_preview(reset_view=False)
         self._schedule_step1_session_save()
+
+    def _on_step0_channel_color_changed(self, channel, color):
+        """A colour picked in the Intensity window (or Step0) comes back."""
+        if self._restoring_display_state or not channel:
+            return
+        try:
+            self.config.set_channel_color(channel, color)
+        except Exception as exc:
+            print(f"[Step1] could not adopt the colour of {channel}: {exc}")
 
     def _ensure_channels_cached(self, idx):
         """Read what this patch is missing — only that, and only once.
@@ -3336,7 +3421,8 @@ class MainWindow(QMainWindow):
         self._step0.show_intensity_window()
         current = self.config.current_channel()
         if current:
-            self._step0.focus_intensity_on(current)
+            self._step0.focus_intensity_on(
+                current, color=self.config.channel_color(current))
 
     def _render_current_patch(self, reset_view=False):
         """Compute and display fusion for the currently selected patch from cache.
@@ -3363,9 +3449,17 @@ class MainWindow(QMainWindow):
             self.prev_status.setText(
                 f"Preparing fusion — {len(missing)} channel(s) still loading…")
             return
-        groups = self.config.get_groups()
-        group_weights = self.config.get_group_weights()
-        nuc_ch, nuc_w = self.config.get_nucleus()
+        # The EFFECTIVE configuration: an unticked channel is out of the
+        # picture, so it is out of the fusion too. The preview used to read
+        # weights alone, so a channel the user had hidden still went into the
+        # fused result and into fused.zarr.
+        effective = self._effective_fusion_config()
+        groups = {name: dict(data.get("channels") or {})
+                  for name, data in (effective.get("groups") or {}).items()}
+        group_weights = {name: float(data.get("group_weight", 1.0) or 0.0)
+                         for name, data in (effective.get("groups") or {}).items()}
+        nuc = effective.get("nucleus") or {}
+        nuc_ch, nuc_w = nuc.get("channel", ""), float(nuc.get("weight", 0.0) or 0.0)
         shape = next(iter(cache.values())).shape
 
         # Reflect the manual Channel Remap (Step0) in the on-screen preview too,
@@ -3418,15 +3512,28 @@ class MainWindow(QMainWindow):
     def _on_cfg_changed(self):
         """A weight or the nucleus channel changed.
 
-        Only fusion reads weights, so only fusion redraws.  A weight that has
-        just risen above zero can make one channel newly necessary, and that
-        one channel is read; everything already in hand stays, and nothing is
+        BOTH previews read weights now, so both redraw. A weight that has just
+        risen above zero can make one channel newly necessary, and that one
+        channel is read; everything already in hand stays, and nothing is
         evicted.
         """
-        if self._step1_preview_mode == STEP1_PREVIEW_FUSION:
-            self._ensure_channels_cached(self._preview_patch_idx)
-            self._prev_timer.start(300)
+        self._ensure_channels_cached(self._preview_patch_idx)
+        self._schedule_preview_update()
         self._schedule_step1_session_save()
+
+    def _schedule_preview_update(self, delay_ms=PREVIEW_COALESCE_MS):
+        """Redraw once, after the user stops moving the control.
+
+        Latest wins: a burst of slider steps leaves one composite, of the
+        state the user ended on, and the intermediate ones are never drawn.
+        """
+        self._preview_update_pending = True
+        self._prev_timer.start(int(delay_ms))
+
+    def _apply_pending_preview_update(self):
+        """The coalesced redraw, in whichever mode is showing."""
+        self._preview_update_pending = False
+        self._refresh_patch_preview(reset_view=False)
 
     # ── Phase 1 ─────────────────────────────────────────────────────
 
@@ -4337,7 +4444,7 @@ class MainWindow(QMainWindow):
                      or (self._p2_params or {}).get("method")
                      or CELLPOSE_WHOLECELL_FUSION)
         try:
-            fcfg = self.config.get_full_config()
+            fcfg = self._effective_fusion_config()
             fcfg.update({
                 "ome_tiff": OME_TIFF_FILE,
                 "output_dir": OUTPUT_DIR,
@@ -4751,7 +4858,10 @@ class MainWindow(QMainWindow):
             return
 
         # ── Write fusion_config.json ──────────────────────────────────
-        fcfg = self.config.get_full_config()
+        # The EFFECTIVE configuration, so an unticked channel that still holds
+        # a remembered weight cannot reach fused.zarr, the segmentation or the
+        # reuse identity: what is saved is what the screen shows.
+        fcfg = self._effective_fusion_config()
         # Apply the user's manual Channel Remap (Step0) to the fused output so the
         # fusion reflects their per-channel Min/Max/Gamma adjustments. Corrected
         # channels already flow through the loader's corrected store.

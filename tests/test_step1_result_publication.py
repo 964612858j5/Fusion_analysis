@@ -177,6 +177,9 @@ def _restore_window(app, tmp_path):
     w.config.set_nucleus("DAPI", 1.0)
     w.config.set_channel_weight("CD3", 0.5)
     w.config._edited_channels.add("CD3")
+    # Ticked, so it is part of the effective configuration the identity is
+    # taken over: an unticked channel's weight belongs to no result.
+    w.config.set_channel_visible("CD3", True)
     w._active_segmentation_method = "cellpose_wholecell_fusion"
     mw.OUTPUT_DIR = str(tmp_path)
     return w

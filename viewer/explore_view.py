@@ -2617,8 +2617,20 @@ class ExploreController(QtCore.QObject):
         the new channel" about the old one's pixels. Such a colour is
         remembered and applied when the switch lands.
         """
-        self._host_tint[channel or self.channel] = rgb
-        if channel is not None and channel != self.channel:
+        # A controller can be built without `__init__` (tests drive the
+        # setters on a bare object), and on such an object even reading an
+        # attribute raises. A colour that cannot be remembered is simply
+        # applied, which is what those callers are asking for.
+        try:
+            store = self._host_tint
+            if store is None:
+                store = self._host_tint = {}
+            mine = self.channel
+        except (AttributeError, RuntimeError):
+            store, mine = None, channel
+        if store is not None:
+            store[channel or mine] = rgb
+        if channel is not None and mine is not None and channel != mine:
             return
         self._tint = rgb
         try:
@@ -2733,7 +2745,7 @@ class ExploreController(QtCore.QObject):
         overview_ready = True
         if channel is not _UNSET:
             self.channel = channel
-            if channel_changed and channel in self._host_tint:
+            if channel_changed and channel in getattr(self, "_host_tint", {}):
                 # The colour the host gave for this channel while another one
                 # was on screen: now it is this one's turn.
                 self._tint = self._host_tint[channel]

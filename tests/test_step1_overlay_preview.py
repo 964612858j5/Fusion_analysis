@@ -1,10 +1,17 @@
-"""Overlay is display; weight is fusion. They must not leak into each other.
+"""One channel state, two views of it.
 
-The channel row carries three separate states: which channel is being edited,
-which channels are drawn, and how much each contributes to the fusion. The
-overlay reads the checkbox, the channel colour and the Intensity window's
-Min/Max/Gamma, and never the fusion weight — so a ticked channel is always
-visible, whatever its weight, and moving a weight slider costs no disk read.
+The row carries which channel is being edited, which channels are in the
+picture, how strongly each takes part, its colour and its display window. The
+overlay and the fusion preview read the SAME answers: the ticked channels, each
+at its weight. They used to disagree — the overlay ignored the weight while the
+fusion ignored the tick — so one panel described two pictures and neither was
+what a Save would write.
+
+Tick and weight cannot contradict the picture: raising a weight above zero
+ticks the channel, dropping it to zero unticks it, and ticking a channel at
+zero gives it back a weight it can be seen at. Unticking keeps the weight so
+re-ticking restores it, and an unticked channel takes part in nothing.
+Moving a weight still costs no disk read.
 
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
@@ -55,6 +62,21 @@ class _Loader:
         rng = np.random.default_rng(abs(hash(channel)) % 1000)
         return rng.random(((y1 - y0) // ds or 1, (x1 - x0) // ds or 1),
                           dtype=np.float32)
+
+
+def _settle(w, timeout=2.0):
+    """Let the coalesced redraw land.
+
+    A state change schedules ONE composite of where the user stopped rather
+    than drawing every intermediate step, so a test that changes state and
+    reads the picture has to let that publication happen.
+    """
+    import time
+    deadline = time.monotonic() + timeout
+    while w._prev_timer.isActive() and time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.005)
+    QtWidgets.QApplication.processEvents()
 
 
 def _window(app, cached=("DAPI", "CD3", "CD8")):
@@ -114,34 +136,98 @@ def test_ticking_another_channel_does_not_move_the_selection(app):
         w.close()
 
 
-def test_the_overlay_ignores_the_fusion_weight(app):
-    w = _window(app)
-    try:
-        w.config.set_channel_visible("CD3", True)
-        w._render_overlay_patch(reset_view=True)
-        before = w.prev_img.image.copy()
-
-        w.config._rows["CD3"].spin.setValue(1.0)
-        w._render_overlay_patch(reset_view=False)
-        assert np.array_equal(w.prev_img.image, before)
-
-        w.config._rows["CD3"].spin.setValue(0.0)
-        w._render_overlay_patch(reset_view=False)
-        assert np.array_equal(w.prev_img.image, before)
-    finally:
-        w.close()
-
-
-def test_a_channel_with_zero_weight_is_still_drawn_when_ticked(app):
+def test_the_overlay_shows_a_channel_at_its_weight(app):
+    """Weight is strength on screen as well as contribution on disk."""
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == 0.0
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w._render_overlay_patch(reset_view=True)
+        full = w.prev_img.image.copy()
+
+        w.config._rows["CD3"].spin.setValue(0.25)
+        w._render_overlay_patch(reset_view=False)
+        quarter = w.prev_img.image.copy()
+
+        assert int(quarter.max()) < int(full.max())
+        assert int(quarter.max()) > 0
+    finally:
+        w.close()
+
+
+def test_a_weight_of_zero_leaves_the_channel_out_of_the_picture(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("DAPI", False)
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+
+        assert "CD3" not in w.config.visible_channels()
+        w._render_overlay_patch(reset_view=True)
+        assert w.prev_img.image is None or int(w.prev_img.image.max()) == 0
+    finally:
+        w.close()
+
+
+def test_raising_a_weight_above_zero_ticks_the_channel(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", False)
+        w.config._rows["CD3"].spin.setValue(0.4)
+
+        assert "CD3" in w.config.visible_channels()
+    finally:
+        w.close()
+
+
+def test_ticking_a_channel_at_zero_gives_it_something_to_be_seen_at(app):
+    """A ticked row that produces no pixels is a control that lies."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("DAPI", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") > 0.0
 
         w._render_overlay_patch(reset_view=True)
         assert w.prev_img.image is not None
         assert w.prev_img.image.max() > 0
+    finally:
+        w.close()
+
+
+def test_unticking_keeps_the_weight_and_re_ticking_restores_it(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.6)
+
+        w.config.set_channel_visible("CD3", False)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.6)
+        assert "CD3" not in w.config.visible_channels()
+
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.6)
+    finally:
+        w.close()
+
+
+def test_an_unticked_channel_takes_part_in_nothing(app):
+    """Not the overlay, not the fusion, not what a Save writes — even though
+    the panel still remembers the weight for when it is ticked again."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.7)
+        w.config.set_channel_visible("CD3", False)
+
+        effective = w._effective_fusion_config()
+        weighted = set()
+        for data in effective["groups"].values():
+            weighted.update(data["channels"])
+        assert "CD3" not in weighted
+        assert "CD3" not in w._fusion_weighted_channels()
+        assert w.config.channel_weight("CD3") == pytest.approx(0.7)
     finally:
         w.close()
 
@@ -182,6 +268,7 @@ def test_the_overlay_follows_the_intensity_window(app, monkeypatch):
         # Exactly what moving the Intensity slider does.
         window["max"] = 0.3
         w._step0.display_mapping_changed.emit("CD3")
+        _settle(w)
         narrow = w.prev_img.image
 
         assert narrow.mean() > wide.mean()      # a tighter window is brighter
@@ -202,6 +289,7 @@ def test_a_mapping_change_drops_only_that_channels_pixels(app, monkeypatch):
 
         window["CD3"] = {"min": 0.0, "max": 0.4, "gamma": 1.0}
         w._step0.display_mapping_changed.emit("CD3")
+        _settle(w)
 
         cached = {key[1] for key in w._overlay_display_cache}
         assert "DAPI" in cached                     # untouched channel kept
@@ -395,9 +483,13 @@ def test_selecting_a_channel_points_the_intensity_window_at_it(app):
     w = _window(app)
     try:
         asked = []
-        w._step0.focus_intensity_on = lambda ch: asked.append(ch) or True
+        w._step0.focus_intensity_on = lambda ch, color=None: (
+            asked.append((ch, color)) or True)
         w.config._rows["CD3"].selected.emit("CD3")
-        assert asked == ["CD3"]
+        # The colour goes with it: Step1 owns the overlay colours and the
+        # Intensity histogram must not come up in another palette.
+        assert [ch for ch, _c in asked] == ["CD3"]
+        assert asked[0][1] == w.config.channel_color("CD3")
     finally:
         w.close()
 
@@ -407,7 +499,8 @@ def test_the_intensity_button_opens_the_shared_window_on_the_current_channel(app
     try:
         opened, focused = [], []
         w._step0.show_intensity_window = lambda: opened.append(True)
-        w._step0.focus_intensity_on = lambda ch: focused.append(ch) or True
+        w._step0.focus_intensity_on = lambda ch, color=None: (
+            focused.append(ch) or True)
         w.config._rows["CD8"].selected.emit("CD8")
         w._btn_step1_intensity.click()
 
@@ -481,17 +574,25 @@ def test_a_tick_made_during_a_load_is_not_lost(app):
         w.close()
 
 
-def test_fusion_holds_the_channels_it_weighs(app):
+def test_both_modes_want_the_same_channels(app):
+    """Weighted and ticked are the same set now, so the pixels each mode needs
+    are the same pixels — switching modes never drops or re-reads a channel."""
     w = _window(app)
     try:
         w.set_preview_mode("fusion")
         assert set(w._needed_channels()) == {"DAPI"}
 
-        w.config._rows["CD3"].spin.setValue(0.8)     # weighted but not ticked
+        w.config._rows["CD3"].spin.setValue(0.8)     # weighted, therefore ticked
+        assert "CD3" in w.config.visible_channels()
         assert "CD3" in w._needed_channels()
 
         w.set_preview_mode("overlay")
-        assert "CD3" not in w._needed_channels()     # overlay draws what is ticked
+        assert "CD3" in w._needed_channels()
+
+        w.config.set_channel_visible("CD3", False)   # out of the picture
+        assert "CD3" not in w._needed_channels()
+        w.set_preview_mode("fusion")
+        assert "CD3" not in w._needed_channels()
     finally:
         w.close()
 
@@ -570,7 +671,7 @@ def test_entering_fusion_asks_for_the_channels_fusion_needs(app):
         w.close()
 
 
-def test_restoring_a_fusion_session_asks_for_the_fusion_channels(app):
+def test_restoring_a_fusion_session_asks_only_for_what_it_shows(app):
     w = _window(app, cached=("DAPI",))
     try:
         w.config._rows["CD3"].spin.setValue(0.8)
@@ -584,7 +685,11 @@ def test_restoring_a_fusion_session_asks_for_the_fusion_channels(app):
         })
 
         assert w._step1_preview_mode == "fusion"
-        assert ["CD3"] in asked
+        # CD3 keeps its weight for when it is ticked again, and is read for
+        # nothing while it is not: a session brings back the picture that was
+        # saved, not a channel the user had hidden.
+        assert not any("CD3" in a for a in asked)
+        assert "CD3" not in w._fusion_weighted_channels()
     finally:
         w.close()
 
@@ -683,9 +788,12 @@ def test_a_dataset_switch_forgets_a_pending_demand(app):
 def test_restoring_a_session_loads_once_and_draws_once(app):
     w = _window(app, cached=("DAPI",))
     try:
-        w.config._rows["CD3"].spin.setValue(0.8)
         loads, draws = [], []
         w._start_loader_for = lambda idx, needed=None: loads.append(list(needed or []))
+        # After the stub, so the restore is the only thing that asks.
+        w.config._rows["CD3"].spin.setValue(0.8)
+        w.config._rows["CD8"].spin.setValue(0.5)
+        loads.clear()
         real_refresh = w._refresh_patch_preview
         w._refresh_patch_preview = lambda reset_view=False: (
             draws.append(reset_view) or real_refresh(reset_view=reset_view))
@@ -698,7 +806,7 @@ def test_restoring_a_session_loads_once_and_draws_once(app):
         })
 
         assert len(loads) == 1
-        assert sorted(loads[0]) == ["CD3", "CD8"]
+        assert sorted(loads[0]) == ["CD8"]      # CD3 is hidden: not read
         assert len(draws) == 1
         assert w._step1_preview_mode == "fusion"
         assert "CD3" not in w.config.visible_channels()   # hidden stays hidden

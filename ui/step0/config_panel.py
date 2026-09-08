@@ -8,9 +8,34 @@ channel has in Step1:
     the checkbox   -> whether it takes part in the multi-channel overlay
     the weight box -> its 0..1 contribution to the FUSION preview
 
-Those are three separate states on purpose. Ticking a channel does not change
-which channel is current, and a weight of 0 does not hide a channel from the
-overlay: the overlay is display (colour + Min/Max/Gamma), the weight is fusion.
+THE STATE TABLE. Both previews read exactly this, and so does everything a
+Save writes:
+
+    selected/current  the channel the Intensity window edits
+    checked/visible   whether this channel takes part in the picture at all
+    weight 0..1       how strongly it takes part, in overlay and in fusion
+    colour            what colour the overlay draws it in
+    Min/Max/Gamma     the one live display mapping for this channel
+
+Checked and weight are not independent readings of the same thing, and they
+must never disagree with the picture:
+
+  * clicking a row selects it AND ticks it -- selecting something invisible is
+    a dead end;
+  * ticking or unticking some OTHER channel never moves the selection;
+  * raising a weight above 0 ticks the channel: it now contributes, so it is
+    shown;
+  * dropping a weight to 0 unticks it: it contributes nothing, and a tick that
+    claims otherwise is a lie;
+  * unticking by hand KEEPS the weight, so re-ticking restores it, but the
+    effective configuration -- overlay, fusion preview, and what a Save fuses
+    -- excludes the channel completely while it is unticked;
+  * ticking a channel whose weight is 0 gives it back its last non-zero weight,
+    or 1.0 if it never had one, so a tick always produces something to see.
+
+`get_full_config` is still the whole panel including unticked channels, because
+that is what a session must round-trip. `effective_config` is what is drawn and
+what is fused.
 
 Channel GROUPS are still here, they are just not on screen any more. Group
 membership and group weight remain in the model and in every file that carries
@@ -71,7 +96,9 @@ class ChannelRow(QWidget):
 
         self.checkbox = QCheckBox()
         self.checkbox.setChecked(bool(visible))
-        self.checkbox.setToolTip("Show this channel in the overlay")
+        self.checkbox.setToolTip(
+            "Take this channel into the picture — overlay and fusion both. "
+            "Ticking a channel at weight 0 gives it a weight to be seen at.")
         self.checkbox.toggled.connect(self._on_toggled)
         lay.addWidget(self.checkbox)
 
@@ -91,7 +118,9 @@ class ChannelRow(QWidget):
         self.slider.setValue(int(round(float(weight) * 100)))
         self.slider.setFixedHeight(16)
         self.slider.setMinimumWidth(60)
-        self.slider.setToolTip("Fusion weight (not used by the overlay)")
+        self.slider.setToolTip(
+            "How strongly this channel takes part — in the overlay and in "
+            "the fusion alike. 0 unticks it.")
         lay.addWidget(self.slider, stretch=2)
 
         self.spin = QDoubleSpinBox()
@@ -156,7 +185,8 @@ class ChannelRow(QWidget):
         self.spin.setButtonSymbols(
             QDoubleSpinBox.UpDownArrows if editable else QDoubleSpinBox.NoButtons)
         self.slider.setToolTip(
-            "Fusion weight (not used by the overlay)" if editable else
+            "How strongly this channel takes part — in the overlay and in "
+            "the fusion alike. 0 unticks it." if editable else
             "The nucleus weight comes from Step0 and is read-only here.")
 
     def set_visible(self, visible):
@@ -215,6 +245,11 @@ class ConfigPanel(QWidget):
         self._rows = {}            # channel -> ChannelRow
         self._items = {}           # channel -> QListWidgetItem
         self._colors = {}          # channel -> "#rrggbb" (user picks win)
+        # The last weight above zero each channel had. Unticking keeps a
+        # channel's weight so re-ticking restores it; a channel that reaches
+        # zero is remembered here so ticking it again has something to give
+        # back rather than producing an invisible ticked row.
+        self._remembered_weights = {}
         self._current = ""
         self._selecting = False
         self._setup_ui()
@@ -352,18 +387,60 @@ class ConfigPanel(QWidget):
         if changed:
             self.current_channel_changed.emit(channel)
 
+    DEFAULT_TICK_WEIGHT = 1.0
+
     def _on_row_visibility(self, channel, visible):
-        self.visibility_changed.emit(channel, bool(visible))
+        """The user ticked or unticked a row.
+
+        Ticking must produce something to see: a channel at weight 0
+        contributes nothing, so it gets its last non-zero weight back, or
+        `DEFAULT_TICK_WEIGHT` if it never had one. Unticking keeps the weight
+        exactly as it is -- the channel is out of the picture either way, and
+        keeping the number is what makes re-ticking restore what the user had.
+        """
+        visible = bool(visible)
+        if visible and channel in self._rows:
+            # Silently: ONE signal per user act. `visibility_changed` already
+            # makes every reader recompute from the panel, and a second signal
+            # for the same click would make them all do it twice — two demands
+            # for the same channel, two composites of the same picture.
+            self._restore_weight_for(channel)
+        self.visibility_changed.emit(channel, visible)
+
+    def _restore_weight_for(self, channel):
+        """Give a ticked channel a weight it can be seen at. True if changed."""
+        if channel == self._nucleus_channel:
+            if self._nucleus_weight > 0:
+                return False
+            self._nucleus_weight = float(
+                self._remembered_weights.get(channel, self.DEFAULT_TICK_WEIGHT))
+            self._refresh_nucleus_display()
+            return True
+        row = self._rows.get(channel)
+        if row is None or float(row.weight()) > 0:
+            return False
+        row.set_weight(float(self._remembered_weights.get(
+            channel, self.DEFAULT_TICK_WEIGHT)))
+        self._edited_channels.add(channel)
+        return True
 
     def visible_channels(self):
         return [ch for ch in self.all_channels
                 if ch in self._rows and self._rows[ch].is_visible()]
 
     def set_channel_visible(self, channel, visible):
+        """Tick or untick `channel` — the same act as clicking its box.
+
+        Same rule too: a channel ticked at weight 0 gets a weight it can be
+        seen at. Restoring a saved session does NOT come through here; it sets
+        the rows directly, so a session brings back exactly what was saved.
+        """
         row = self._rows.get(channel)
         if row is None or row.is_visible() == bool(visible):
             return
         row.set_visible(visible)
+        if visible:
+            self._restore_weight_for(channel)
         self.visibility_changed.emit(channel, bool(visible))
 
     def channel_color(self, channel):
@@ -434,7 +511,43 @@ class ConfigPanel(QWidget):
         loaded with.
         """
         self._edited_channels.add(channel)
+        weight = self.channel_weight(channel)
+        row = self._rows.get(channel)
+        if weight > 0:
+            self._remembered_weights[channel] = weight
+            if row is not None and not row.is_visible():
+                # It contributes now, so it is shown. A weighted channel the
+                # picture leaves out is the disagreement this removes. Ticked
+                # silently: `config_changed` below is the one signal for this
+                # act, and readers recompute the whole panel from it.
+                row.set_visible(True)
+        elif row is not None and row.is_visible():
+            # It contributes nothing. A tick that says otherwise is a lie.
+            row.set_visible(False)
         self.config_changed.emit()
+
+    def effective_config(self):
+        """What is actually drawn and actually fused.
+
+        `get_full_config` is the panel's whole state, unticked channels
+        included, because a session has to round-trip it. This is the subset
+        that takes part: an unticked channel keeps its weight on screen and
+        contributes nothing, here and on disk alike, so what is saved can
+        never contain a marker the picture does not show.
+        """
+        cfg = self.get_full_config()
+        shown = set(self.visible_channels())
+        nuc = cfg.get("nucleus") or {}
+        if nuc.get("channel") and nuc["channel"] not in shown:
+            cfg["nucleus"] = {"channel": nuc.get("channel"), "weight": 0.0}
+        groups = {}
+        for name, data in (cfg.get("groups") or {}).items():
+            channels = {ch: w for ch, w in (data.get("channels") or {}).items()
+                        if ch in shown}
+            groups[name] = {"group_weight": data.get("group_weight", 1.0),
+                            "channels": channels}
+        cfg["groups"] = groups
+        return cfg
 
     def _stored_weights_for(self, channel):
         """Every weight this channel was LOADED with, one per group it is in
@@ -484,6 +597,11 @@ class ConfigPanel(QWidget):
             if ch != nuc:
                 row.set_weight(0.0)
                 self._edited_channels.add(ch)
+                # Zero means "takes no part", so the tick goes with it, and the
+                # remembered weight goes too: a Reset that could be undone by
+                # re-ticking would not be a reset.
+                row.set_visible(False)
+                self._remembered_weights.pop(ch, None)
         self.config_changed.emit()
 
     def _reset_all_channel_weights(self):
@@ -552,9 +670,12 @@ class ConfigPanel(QWidget):
         Defaults, deliberately: the nucleus is the only channel shown and the
         only one with weight; every marker starts at 0 and unticked.
         """
-        # A new dataset starts with its own colours: nothing is inherited from
-        # the slide that was open before.
+        # A new dataset starts with its own colours AND its own weights:
+        # nothing is inherited from the slide that was open before. Without
+        # this, ticking a marker on the new slide brought back the weight it
+        # had on the previous one.
         self._colors = {}
+        self._remembered_weights = {}
         self._groups = {}
         self._group_channel_weights = {}
         self._edited_channels = set()
@@ -669,6 +790,17 @@ class ConfigPanel(QWidget):
                     row = self._rows.get(ch)
                     if row is not None:
                         row.set_visible(bool(visibility[ch]))
+
+        # A saved state can hold the one combination the panel does not allow:
+        # ticked at weight zero. In a session written before tick and weight
+        # were tied together that meant "show me this channel", so it is
+        # resolved the way a tick is — the channel gets a weight it can be
+        # seen at — rather than leaving a row that claims to be showing
+        # something which contributes nothing. An UNTICKED channel is not
+        # touched, so an old project's unused weights round-trip untouched.
+        for ch, row in self._rows.items():
+            if row.is_visible():
+                self._restore_weight_for(ch)
 
         if current_channel and current_channel in self._rows:
             self.set_current_channel(current_channel, auto_show=False)

@@ -244,6 +244,10 @@ class Step0Page(QWidget):
     # `geometry_committed` (which means the opposite) and from
     # `dataset_committed` (a different slide entirely).
     handoff_invalidated = pyqtSignal(dict)
+    # A channel's colour changed HERE — the swatch, the Intensity window, the
+    # dock. Step1 draws the same channels and holds the same colours, so it
+    # follows this rather than keeping a second palette that drifts.
+    channel_color_changed = pyqtSignal(str, str)
 
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
     _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
@@ -4706,13 +4710,41 @@ class Step0Page(QWidget):
         self._bring_to_front(win)
         return win
 
-    def focus_intensity_on(self, channel):
+    def adopt_channel_color(self, channel, color):
+        """Take another step's word for a channel's colour.
+
+        Step1's channel panel owns the overlay colours; this page draws the
+        same channels and must not hold a second answer. Accepts "#rrggbb" or
+        an (r, g, b) triple in 0..1.
+        """
+        if not channel or color is None:
+            return
+        if isinstance(color, str):
+            qc = QtGui.QColor(color)
+            if not qc.isValid():
+                return
+            rgb = (qc.red() / 255.0, qc.green() / 255.0, qc.blue() / 255.0)
+        else:
+            rgb = tuple(float(v) for v in color)
+        if self._channel_color(channel) == rgb:
+            return
+        if channel == self.nucleus_channel:
+            self._apply_nucleus_color(rgb)
+        else:
+            self._apply_channel_color(channel, rgb)
+
+    def focus_intensity_on(self, channel, color=None):
         """Point the shared Intensity window at `channel` for another step.
 
         Step1 has its own channel list but must not grow its own Min/Max/Gamma
         controls: those numbers belong to this page's remap config, which the
         handoff hashes.  This is the same narrow borrowing the Tissue Preview
         uses — the window, the workbench and the params stay Step0's.
+
+        `color` is the caller's answer to "what colour is this channel", and it
+        wins: Step1 owns the overlay colours, and an Intensity histogram drawn
+        in this page's palette while the overlay uses another is two answers to
+        one question.
         """
         if not channel:
             return False
@@ -4722,6 +4754,8 @@ class Step0Page(QWidget):
         if getattr(self, "_intensity_window", None) is not None:
             self._engage_conditioning_workbench()
         try:
+            if color is not None:
+                self.adopt_channel_color(channel, color)
             self._push_color_to_workbench(channel, self._channel_color(channel))
             wb.set_active_channel(channel)
         except Exception as exc:
@@ -6167,6 +6201,7 @@ class Step0Page(QWidget):
         # switched away and back. This is a lookup-table swap on tiles that
         # are already pooled: no read, no correction, no camera.
         self._push_channel_tint_to_compare(ch)
+        self.channel_color_changed.emit(ch, self._channel_color_hex(ch))
         # The full image draws the SAME channel in the SAME colour: a lookup
         # table swap, no re-read and no request.
         if ch == self.current_channel:
@@ -6247,6 +6282,8 @@ class Step0Page(QWidget):
             if nuc and nuc == self.current_channel:
                 strip.set_tint(self._nuc_color, channel=nuc)
             strip.set_nucleus_tint(self._nuc_color)
+        if nuc:
+            self.channel_color_changed.emit(nuc, self._channel_color_hex(nuc))
         # The full image draws the nucleus in this same colour; swapping the
         # lookup table is all it takes -- no re-read, no re-quantisation and
         # no request. With no stack up, the new colour is simply what the

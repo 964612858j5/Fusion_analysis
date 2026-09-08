@@ -4586,9 +4586,25 @@ class Step0Page(QWidget):
         if roi_policy is not None or patch_editable is not None:
             self.set_navigator_edit_policy(roi_policy=roi_policy,
                                            patch_editable=patch_editable)
-        popup.show()
-        popup.raise_()
+        self._bring_navigator_to_front(popup)
         self._update_tissue_view_rect()
+
+    def _bring_navigator_to_front(self, popup):
+        """Put the ONE navigator in front, whichever way it was put away.
+
+        It can be out of sight in two different ways, and `show()` answers
+        neither. Collapsed to its header bar it is still a shown window, so
+        `show()` is a no-op and the body stays hidden. Minimised by the window
+        manager it is still `isVisible()` — Qt counts an icon as shown — so
+        `show()` does nothing and `raise_()` raises something nobody can see.
+        Which is what the button did: minimise, press it, nothing happens.
+
+        Same object either way: the popup keeps its overview, camera, ROIs and
+        patches, because none of this creates or replaces a widget.
+        """
+        if popup.is_minimized():
+            popup.restore_from_bar()
+        self._bring_to_front(popup)
 
     def _auto_open_tissue_navigator(self):
         """Auto-open the Tissue Navigator ONCE after a successful Step0 data load.
@@ -4774,12 +4790,18 @@ class Step0Page(QWidget):
         wb.set_active_channel(ch)
 
     def toggle_tissue_navigator(self):
+        """The button hides the navigator only when it is actually in view.
+
+        Collapsed to its bar or minimised by the window manager both count as
+        "not up": `isVisible()` is True in both cases, so the button used to
+        hide an already-invisible window and the user was left pressing it with
+        nothing to show for it.
+        """
         popup = self._ensure_tissue_navigator()
-        if popup.isVisible():
+        if popup.isVisible() and not popup.is_minimized() and not popup.isMinimized():
             popup.hide()
         else:
-            popup.show()
-            popup.raise_()
+            self._bring_navigator_to_front(popup)
             self._update_tissue_view_rect()
 
     # ── v14.2c viewer → Tissue Navigator current-view rectangle sync ──────────

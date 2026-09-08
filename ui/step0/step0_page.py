@@ -86,6 +86,7 @@ from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
+    load_channel_remap_config,
     normalize_channel_remap_params,
     default_channel_remap_params,
     channel_remap_config_hash,
@@ -4287,6 +4288,31 @@ class Step0Page(QWidget):
         except Exception as exc:
             print(f"[Step0] could not roll the remap config back: {exc}")
 
+    @staticmethod
+    def _mapping_file_holds(path, digest):
+        """True when `path` already contains exactly the mapping `digest` names.
+
+        Not merely "the file exists": a file left half-written by a killed
+        process would have the right name and the wrong contents, and reusing
+        it would publish a manifest hashed over something else.
+        """
+        if not os.path.exists(path):
+            return False
+        try:
+            return channel_remap_config_hash(load_channel_remap_config(path)) == digest
+        except Exception as exc:
+            print(f"[Step0] unreadable mapping file {path}: {exc}")
+            return False
+
+    @staticmethod
+    def _write_mapping_file(cfg, path):
+        """Write one mapping file so it appears complete or not at all."""
+        tmp = path + ".tmp"
+        save_channel_remap_config(cfg, tmp)
+        with open(tmp, "rb+") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
     def commit_display_mapping(self, channels=None, required=None):
         """Freeze the draft, write it, and republish the manifest — or nothing.
 
@@ -4335,6 +4361,7 @@ class Step0Page(QWidget):
             kept[path] = self._file_bytes(path)
 
         versioned = ""
+        created = ""
         try:
             cfg = wb.build_config()
             cfg_channels = cfg.setdefault("channels", {})
@@ -4343,15 +4370,31 @@ class Step0Page(QWidget):
             digest = channel_remap_config_hash(cfg)
             versioned = os.path.join(
                 step0_dir, f"step0_channel_remap.{digest[:12]}.json")
-            save_channel_remap_config(cfg, versioned)
+            # Committing the SAME mapping twice lands on the file the published
+            # manifest already names. Rewriting it would edit the authoritative
+            # file in place, and deleting it on a later failure would leave the
+            # published manifest naming nothing at all. An existing file whose
+            # contents hash to this name already IS the mapping: keep it.
+            if self._mapping_file_holds(versioned, digest):
+                print(f"[Step0] mapping already published as "
+                      f"{os.path.basename(versioned)}; reusing it")
+            else:
+                # Deleting on failure is only safe for a name nothing occupied
+                # before: a file that was there and merely unreadable is still
+                # what the published manifest names, and removing it would turn
+                # a corrupt reference into a missing one.
+                fresh = not os.path.exists(versioned)
+                self._write_mapping_file(cfg, versioned)
+                created = versioned if fresh else ""
             _cfg, _rois, _patches, _manifest = self._write_step0_handoff(
                 config, zarr_path, remap_config_path=versioned)
         except Exception as exc:
             print(f"[Step0] display-mapping commit FAILED: {exc}")
-            if versioned and os.path.exists(versioned):
-                # Unreferenced: the manifest never named it.
+            if created and os.path.exists(created):
+                # Only ever the file THIS commit created: unreferenced, because
+                # the manifest that would have named it was never published.
                 try:
-                    os.remove(versioned)
+                    os.remove(created)
                 except OSError:
                     pass
             for path, previous in kept.items():

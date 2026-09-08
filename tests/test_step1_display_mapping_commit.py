@@ -458,3 +458,61 @@ def test_the_manifest_names_an_immutable_mapping_file(app, tmp_path):
             manifest["channel_remap_config_path"])["channels"]["CD3"]["max"] == 120.0
     finally:
         w.close()
+
+
+def test_recommitting_the_same_mapping_never_touches_the_published_file(app, tmp_path):
+    """The file name is the mapping's own hash, so an unchanged mapping lands on
+    the file the published manifest already names. Rewriting it would edit the
+    authoritative file in place, and removing it when a later step fails would
+    leave the manifest naming nothing at all."""
+    from block01.utils.channel_remap_config import channel_remap_config_hash, \
+        load_channel_remap_config
+
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
+        assert page.commit_display_mapping(["CD3"])[0] is True
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            named = json.load(f)["channel_remap_config_path"]
+        before = open(named, "rb").read()
+        before_mtime = os.path.getmtime(named)
+
+        # Same mapping, and the republish fails.
+        page._write_step0_handoff = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("disk is full"))
+        ok, reason = page.commit_display_mapping(["CD3"])
+
+        assert ok is False and "disk is full" in reason
+        assert os.path.exists(named)                    # not deleted
+        assert open(named, "rb").read() == before       # not rewritten
+        assert os.path.getmtime(named) == before_mtime
+
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            manifest = json.load(f)
+        assert manifest["channel_remap_config_path"] == named
+        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
+            load_channel_remap_config(named))
+    finally:
+        w.close()
+
+
+def test_a_mapping_file_with_the_wrong_contents_is_not_trusted(app, tmp_path):
+    """A file left half-written by a killed process has the right name and the
+    wrong contents; publishing a manifest hashed over it would be a lie."""
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        page = w._step0
+        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
+        assert page.commit_display_mapping(["CD3"])[0] is True
+        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
+            named = json.load(f)["channel_remap_config_path"]
+
+        with open(named, "w", encoding="utf-8") as f:
+            f.write("{}")                               # truncated leftover
+
+        assert page.commit_display_mapping(["CD3"])[0] is True
+        from block01.utils.channel_remap_config import load_channel_remap_config
+        assert load_channel_remap_config(named)["channels"]["CD3"]["max"] == 250.0
+    finally:
+        w.close()

@@ -4221,9 +4221,19 @@ class MainWindow(QMainWindow):
                   f"not {len(expected_regions)}; regenerating")
             return False
         by_name = {str(r.get("roi_name") or ""): r for r in old_regions}
+        seen_paths = {}
         for i, want in enumerate(expected_regions):
             name = str(want.get("roi_name") or "")
-            have = by_name.get(name) or old_regions[i]
+            have = by_name.get(name)
+            if have is None:
+                if name and any(str(r.get("roi_name") or "") for r in old_regions):
+                    # The recorded regions are named and none of them is this
+                    # one: matching by position here is how ROI_1's file came to
+                    # stand in for ROI_2.
+                    print(f"[Step1] the existing result has no region named "
+                          f"{name}; regenerating")
+                    return False
+                have = old_regions[i]
             path = str(have.get("zarr_path") or "")
             if not path:
                 # The DAPI-input meta records regions without paths; the worker
@@ -4232,19 +4242,86 @@ class MainWindow(QMainWindow):
                     OUTPUT_DIR,
                     f"fused_{name}.zarr" if name and name != "full" else "fused.zarr")
             label = f"region {name or i + 1}"
-            if not path or not self._is_valid_existing_fused_zarr(path):
-                print(f"[Step1] {label} is missing or unreadable at "
-                      f"{path or 'no recorded path'}; regenerating")
+            real = os.path.realpath(path)
+            if real in seen_paths:
+                print(f"[Step1] {label} and region {seen_paths[real]} name the "
+                      "same store; regenerating")
                 return False
-            want_shape = list(want.get("shape") or [])
-            have_shape = list(have.get("zarr_shape") or [])
+            seen_paths[real] = name or i + 1
+            if not self._is_valid_existing_fused_zarr(path):
+                print(f"[Step1] {label} is missing or unreadable at {path}; "
+                      "regenerating")
+                return False
+            want_shape = [int(v) for v in (want.get("shape") or [])]
+            have_shape = [int(v) for v in (have.get("zarr_shape") or [])]
             if want_shape and have_shape and want_shape != have_shape:
                 print(f"[Step1] {label} has shape {have_shape}, not {want_shape}; "
                       "regenerating")
                 return False
             if not self._body_matches_expected(path, expected_meta, label):
                 return False
+            # The store's own account of which region it covers. Every ROI of
+            # one run shares a config hash, so the hash alone cannot tell them
+            # apart; the pixels' extent can.
+            if not self._body_is_region(path, want, label):
+                return False
         return True
+
+    def _body_is_region(self, path, want, label):
+        """Does the store itself say it covers the region we expect?
+
+        A store made by the current formula records which ROI it holds and the
+        area it covers, so for those fields "not stated" is a mismatch, not a
+        pass: every ROI of one run shares a config hash, and the extent of the
+        pixels is the only thing that tells them apart.
+        """
+        try:
+            z = zarr.open(path, mode="r")
+            attrs = dict(getattr(z, "attrs", {}) or {})
+            real_shape = [int(v) for v in (getattr(z, "shape", None) or [])]
+        except Exception as exc:
+            print(f"[Step1] {label} could not be read: {exc}; regenerating")
+            return False
+        want_shape = [int(v) for v in (want.get("shape") or [])]
+        if want_shape and real_shape and real_shape != want_shape:
+            print(f"[Step1] {label} is {real_shape} on disk, not {want_shape}; "
+                  "regenerating")
+            return False
+        current = attrs.get("fusion_formula_version") == FUSION_FORMULA_VERSION
+        want_name = str(want.get("roi_name") or "")
+        body_name = str(attrs.get("roi_name") or "")
+        if want_name and not body_name and current:
+            print(f"[Step1] {label} does not say which ROI it holds; regenerating")
+            return False
+        if want_name and body_name and body_name != want_name:
+            print(f"[Step1] {label} holds {body_name}, not {want_name}; "
+                  "regenerating")
+            return False
+        want_bbox = [int(v) for v in (want.get("roi_bbox") or [])]
+        body_bbox = [int(v) for v in (attrs.get("bbox_fullres") or [])]
+        if want_bbox and not body_bbox and current:
+            print(f"[Step1] {label} does not say which area it covers; regenerating")
+            return False
+        if want_bbox and body_bbox and body_bbox != want_bbox:
+            print(f"[Step1] {label} covers {body_bbox}, not {want_bbox}; "
+                  "regenerating")
+            return False
+        return True
+
+    def _expected_region_for_active_roi(self, expected_meta):
+        """The one region a single stored path is supposed to hold."""
+        regions = list(expected_meta.get("regions") or [])
+        if not regions:
+            return None
+        active = self._active_roi or (self._rois[0] if self._rois else None)
+        name = str((active or {}).get("name")
+                   or (active or {}).get("display_name") or "")
+        if name:
+            for region in regions:
+                if str(region.get("roi_name") or "") == name:
+                    return region
+            return None
+        return regions[0]
 
     def _expected_meta_for_current_config(self, method=""):
         """The identity a fusion of what is loaded right now would have.
@@ -4290,6 +4367,14 @@ class MainWindow(QMainWindow):
         path = str(path or "")
         if not path:
             return ""
+        # A run killed between moving the old store aside and moving the new one
+        # in leaves the previous result under `.previous`. Recovering it only at
+        # the start of the next fusion would mean the user opens the project and
+        # is told Step1 is not done, with the result sitting right there.
+        try:
+            FullFusionWorker._recover_interrupted_publish(path)
+        except Exception as exc:
+            print(f"[Step1] could not recover an interrupted publish: {exc}")
         if not os.path.isdir(path) or not self._is_valid_existing_fused_zarr(path):
             print(f"[Step1] session fused zarr missing or unreadable: {path}")
             return ""
@@ -4307,6 +4392,16 @@ class MainWindow(QMainWindow):
                   f"{path}")
             return ""
         if not self._body_matches_expected(path, expected, "the session fused zarr"):
+            return ""
+        # Which ROI those pixels are. One run writes every ROI with the same
+        # config hash, so without this a session could hand Step2 the fusion of
+        # a neighbouring region and nothing would notice.
+        want = self._expected_region_for_active_roi(expected)
+        if want is None:
+            print("[Step1] the session result names no region of this ROI; "
+                  f"not restoring {path}")
+            return ""
+        if not self._body_is_region(path, want, "the session fused zarr"):
             return ""
         return path
 

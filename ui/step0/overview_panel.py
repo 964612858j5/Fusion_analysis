@@ -335,13 +335,19 @@ class FullFusionWorker(QThread):
             print(f"[Fusion] recovered the previous result at {zarr_path}")
 
     def _publish_store(self, tmp_path, zarr_path):
-        """Move the finished store into place without a moment of having none.
+        """Move the finished store into place recoverably.
 
         Deleting the old store and then renaming the new one leaves a window in
         which a failed rename, a full disk or a killed process destroys the
         previous result and puts nothing in its place. So the old store is
         renamed aside first and only dropped once the new one is in position;
         if the rename fails, the old one goes back and the error is raised.
+
+        This is recoverable, not strictly atomic: between the two renames the
+        real path briefly holds nothing, and a process killed exactly there
+        leaves the previous result under `.previous`. Both the next run and the
+        session restore path call `_recover_interrupted_publish` to bring it
+        back, so the gap is survivable rather than invisible.
         """
         backup = zarr_path + ".previous"
         if os.path.isdir(backup):

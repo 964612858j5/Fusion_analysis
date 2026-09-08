@@ -98,11 +98,15 @@ def _make_zarr(tmp_path, name="fused.zarr", stamp=None):
 
 
 def _stamp(meta):
-    """What a completed run of `meta` stamps into its own store."""
+    """What a completed run of `meta` stamps into its own store: the identity of
+    the run, and which region these pixels are."""
+    region = (meta.get("regions") or [{}])[0]
     return {"complete": True,
             "artifact_kind": meta.get("artifact_kind"),
             "fusion_formula_version": meta.get("fusion_formula_version"),
-            "config_hash": meta.get("config_hash")}
+            "config_hash": meta.get("config_hash"),
+            "roi_name": region.get("roi_name") or "",
+            "bbox_fullres": list(region.get("roi_bbox") or [])}
 
 
 def test_a_meta_without_a_config_hash_is_not_reused(app, tmp_path):
@@ -358,17 +362,140 @@ def test_a_second_roi_from_another_configuration_stops_the_reuse(app, tmp_path):
         w.close()
 
 
-def test_every_roi_present_and_current_is_reused(app, tmp_path, monkeypatch):
+def _region_stamp(expected, roi_name, bbox=(0, 64, 0, 64)):
+    """What the worker writes into one region's store: the identity of the run
+    plus which region these pixels are."""
+    stamp = _stamp(expected)
+    stamp["roi_name"] = roi_name
+    stamp["bbox_fullres"] = list(bbox)
+    return stamp
+
+
+def test_one_roi_file_cannot_stand_in_for_two(app, tmp_path):
+    """Every ROI of one run shares a config hash, so the hash cannot tell them
+    apart. A meta naming ROI_1's store for both regions used to pass."""
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        on_disk = dict(expected)
+        one = str(tmp_path / "fused_ROI_1.zarr")
+        on_disk["regions"] = [
+            {"roi_name": "ROI_1", "zarr_path": one, "zarr_shape": [64, 64, 2]},
+            {"roi_name": "ROI_2", "zarr_path": one, "zarr_shape": [64, 64, 2]},
+        ]
+        with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+            json.dump(on_disk, f, default=str)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_store_holding_another_roi_stops_the_reuse(app, tmp_path):
+    """The file is in the right place and stamped by the right run, but the
+    pixels are a different region's."""
     w = _two_roi_window(app, tmp_path)
     try:
         expected = _two_roi_meta(w, tmp_path)
-        for name in ("fused_ROI_1.zarr", "fused_ROI_2.zarr"):
-            _make_zarr(tmp_path, name, stamp=_stamp(expected))
+        _make_zarr(tmp_path, "fused_ROI_1.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))
+        _make_zarr(tmp_path, "fused_ROI_2.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))   # ROI_1's pixels
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_store_covering_another_area_stops_the_reuse(app, tmp_path):
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))
+        _make_zarr(tmp_path, "fused_ROI_2.zarr",
+                   stamp=_region_stamp(expected, "ROI_2", bbox=(0, 32, 0, 32)))
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_region_whose_pixels_are_the_wrong_size_stops_the_reuse(app, tmp_path):
+    """The sidecar can claim any shape; the array on disk cannot."""
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))
+        path = str(tmp_path / "fused_ROI_2.zarr")
+        z = zarr.open(path, mode="w", shape=(32, 32, 2), dtype="uint16")
+        for k, v in _region_stamp(expected, "ROI_2").items():
+            z.attrs[k] = v
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_two_correctly_stamped_regions_are_reused(app, tmp_path, monkeypatch):
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        for name in ("ROI_1", "ROI_2"):
+            _make_zarr(tmp_path, f"fused_{name}.zarr",
+                       stamp=_region_stamp(expected, name))
         done = []
         monkeypatch.setattr(type(w), "_on_fusion_done",
                             lambda self, p: done.append(p))
 
         assert w._try_reuse_fused_zarr(expected) is True
         assert done
+    finally:
+        w.close()
+
+
+def test_a_store_that_does_not_say_which_roi_it_holds_is_refused(app, tmp_path):
+    """A store made by the current formula records its ROI. One that does not
+    cannot be told apart from a neighbouring region's file — every ROI of a run
+    shares a config hash — so silence is a mismatch, not a pass."""
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = w._expected_fused_zarr_meta(_worker_cfg(), "cellpose_wholecell_fusion")
+        one = str(tmp_path / "fused_ROI_1.zarr")
+        on_disk = dict(expected)
+        on_disk["regions"] = [
+            {"roi_name": "ROI_1", "zarr_path": one, "zarr_shape": [64, 64, 2]},
+            {"roi_name": "ROI_2", "zarr_path": one, "zarr_shape": [64, 64, 2]},
+        ]
+        with open(tmp_path / "fusion_meta.json", "w", encoding="utf-8") as f:
+            json.dump(on_disk, f, default=str)
+        # An older store, from before the region was recorded: it says nothing
+        # about itself beyond the run identity.
+        stamp = _stamp(expected)
+        stamp.update({"roi_name": "", "bbox_fullres": [],
+                      "fusion_formula_version": 2})
+        _make_zarr(tmp_path, "fused_ROI_1.zarr", stamp=stamp)
+
+        assert w._try_reuse_fused_zarr(expected) is False
+    finally:
+        w.close()
+
+
+def test_a_region_store_silent_about_its_roi_stops_the_batch(app, tmp_path):
+    """Each store of a current-formula run records its ROI; one that does not
+    cannot be checked against the region it is claimed for."""
+    w = _two_roi_window(app, tmp_path)
+    try:
+        expected = _two_roi_meta(w, tmp_path)
+        _make_zarr(tmp_path, "fused_ROI_1.zarr",
+                   stamp=_region_stamp(expected, "ROI_1"))
+        silent = _region_stamp(expected, "ROI_2")
+        silent["roi_name"] = ""
+        _make_zarr(tmp_path, "fused_ROI_2.zarr", stamp=silent)
+
+        assert w._try_reuse_fused_zarr(expected) is False
     finally:
         w.close()

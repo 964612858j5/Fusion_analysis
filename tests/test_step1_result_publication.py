@@ -191,13 +191,17 @@ def _store(tmp_path, attrs, name="fused.zarr"):
     return path
 
 
-def _stamp_of(w):
-    """What a completed run of the window's CURRENT configuration would stamp."""
+def _stamp_of(w, region=None):
+    """What a completed run of the window's CURRENT configuration would stamp,
+    including which region the pixels are."""
     meta = w._expected_meta_for_current_config()
+    region = region if region is not None else (meta.get("regions") or [{}])[0]
     return {"complete": True,
             "artifact_kind": meta.get("artifact_kind"),
             "fusion_formula_version": meta.get("fusion_formula_version"),
-            "config_hash": meta.get("config_hash")}
+            "config_hash": meta.get("config_hash"),
+            "roi_name": region.get("roi_name") or "",
+            "bbox_fullres": list(region.get("roi_bbox") or [])}
 
 
 def test_a_session_pointing_at_a_missing_store_is_not_step1_done(app, tmp_path):
@@ -255,5 +259,94 @@ def test_a_store_with_nothing_to_say_is_refused(app, tmp_path):
     try:
         path = _store(tmp_path, {})
         assert w._restorable_fused_zarr(path) == ""
+    finally:
+        w.close()
+
+
+def test_reopening_the_project_recovers_a_result_left_aside(app, tmp_path):
+    """A kill during publish must not read as "Step1 not done" when the previous
+    result is sitting right there under `.previous`. Recovering only at the
+    start of the next fusion would show the user an empty Step1 first."""
+    w = _restore_window(app, tmp_path)
+    try:
+        path = _store(tmp_path, _stamp_of(w))
+        os.rename(path, path + ".previous")           # what the kill leaves
+
+        assert w._restorable_fused_zarr(path) == path
+        assert not os.path.isdir(path + ".previous")
+    finally:
+        w.close()
+
+
+def _two_roi_restore_window(app, tmp_path):
+    w = _restore_window(app, tmp_path)
+    w._rois = [{"name": "ROI_1", "bbox_fullres": [0, 16, 0, 16]},
+               {"name": "ROI_2", "bbox_fullres": [0, 16, 16, 32]}]
+    w._active_roi = w._rois[0]
+    return w
+
+
+def test_a_session_pointing_at_another_roi_of_the_same_run_is_refused(app, tmp_path):
+    """Every ROI of one run carries the same config hash, so the hash alone
+    cannot say which region a stored path holds. Without checking, a session
+    could hand Step2 the fusion of the neighbouring region."""
+    w = _two_roi_restore_window(app, tmp_path)
+    try:
+        meta = w._expected_meta_for_current_config()
+        regions = {str(r.get("roi_name")): r for r in meta["regions"]}
+        mine = _store(tmp_path, _stamp_of(w, regions["ROI_1"]), "fused_ROI_1.zarr")
+        theirs = _store(tmp_path, _stamp_of(w, regions["ROI_2"]), "fused_ROI_2.zarr")
+
+        assert w._restorable_fused_zarr(mine) == mine
+        assert w._restorable_fused_zarr(theirs) == ""
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("drop", ["roi_name", "bbox_fullres"])
+def test_a_session_store_silent_about_its_region_is_refused(app, tmp_path, drop):
+    """A store made by the current formula records both; not saying is a
+    mismatch rather than something to skip over."""
+    w = _two_roi_restore_window(app, tmp_path)
+    try:
+        meta = w._expected_meta_for_current_config()
+        region = [r for r in meta["regions"] if r.get("roi_name") == "ROI_1"][0]
+        stamp = _stamp_of(w, region)
+        stamp[drop] = "" if drop == "roi_name" else []
+        path = _store(tmp_path, stamp, "fused_ROI_1.zarr")
+
+        assert w._restorable_fused_zarr(path) == ""
+    finally:
+        w.close()
+
+
+def test_a_session_store_covering_another_area_is_refused(app, tmp_path):
+    w = _two_roi_restore_window(app, tmp_path)
+    try:
+        meta = w._expected_meta_for_current_config()
+        region = [r for r in meta["regions"] if r.get("roi_name") == "ROI_1"][0]
+        stamp = _stamp_of(w, region)
+        stamp["bbox_fullres"] = [0, 16, 8, 24]
+        path = _store(tmp_path, stamp, "fused_ROI_1.zarr")
+
+        assert w._restorable_fused_zarr(path) == ""
+    finally:
+        w.close()
+
+
+def test_the_region_checked_is_the_one_the_user_is_on(app, tmp_path):
+    """With ROI_2 active, ROI_2's store is the one that restores and ROI_1's is
+    refused. Checking whichever region happened to be listed first would accept
+    the wrong file for every ROI but one."""
+    w = _two_roi_restore_window(app, tmp_path)
+    try:
+        w._active_roi = w._rois[1]
+        meta = w._expected_meta_for_current_config()
+        regions = {str(r.get("roi_name")): r for r in meta["regions"]}
+        first = _store(tmp_path, _stamp_of(w, regions["ROI_1"]), "fused_ROI_1.zarr")
+        second = _store(tmp_path, _stamp_of(w, regions["ROI_2"]), "fused_ROI_2.zarr")
+
+        assert w._restorable_fused_zarr(second) == second
+        assert w._restorable_fused_zarr(first) == ""
     finally:
         w.close()

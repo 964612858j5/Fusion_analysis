@@ -2768,7 +2768,8 @@ class OverviewPanel(QWidget):
         because it can only ever add a reason to keep panning.
         """
         buttons = event.buttons()
-        if buttons & Qt.MiddleButton:
+        trusted = bool(buttons & Qt.MiddleButton)
+        if trusted:
             self._mid_pan_confirmed = True
             self._mid_pan_blank = 0
         elif buttons:
@@ -2795,6 +2796,36 @@ class OverviewPanel(QWidget):
                         "button had been reported down")
                     return True
         self._mid_pan_log("move", event)
+        if self._mid_pan_confirmed and not trusted:
+            # MEASURED on the real desk, 106 gestures over three panels:
+            # 26 of them contained a camera step that the NEXT move undid
+            # EXACTLY -- to the last bit of a double, dx and dy negated --
+            # and every one of those undoing moves reported
+            # buttons=NoButton while QApplication.mouseButtons() still said
+            # Middle. All of them landed 4-17 ms after the press, which is
+            # when `grabMouse()` takes effect. So the position they carry
+            # is the position the gesture STARTED from: the platform's
+            # crossing into the new pointer grab, arriving as a move with
+            # stale coordinates. Trusting it panned the picture out and
+            # straight back, and the visible result is the first fraction
+            # of a quarter of all drags doing nothing -- "the middle drag
+            # does nothing at first".
+            #
+            # A blank move is therefore not evidence about WHERE the
+            # pointer is either, and it was only ever read as evidence
+            # about whether the button is still down. It keeps its say over
+            # that: the branches above have already confirmed or counted it
+            # and may already have ended the gesture. What it does not get
+            # is the camera and the anchor, which stay on the last position
+            # a real move reported -- so the next real move measures from
+            # there, and the step it undid is not re-applied either.
+            #
+            # Only AFTER the platform has proven, in this same gesture,
+            # that it can report the middle button down. Before that a
+            # blank move is all there is, and it still pans: a platform
+            # that never reports buttons at all must still be able to drag
+            # (the whole point of the ranking this sits inside).
+            return True
         last_scene = self._mid_pan_last
         now_scene = self._mid_pan_scene_pos(event)
         if last_scene is None or now_scene is None:
@@ -2820,7 +2851,15 @@ class OverviewPanel(QWidget):
             before = self.vb.viewRange() if measuring else None
             self.vb._resetTarget()
             self.vb.translateBy(x=-dx, y=-dy)
-            self.vb.sigRangeChangedManually.emit((True, True))
+            # `sigRangeChangedManually` is NOT emitted here. It was, once
+            # per move, and nothing listens to it: nothing in this
+            # application connects it, and in pyqtgraph only PlotItem
+            # forwards it onward -- this panel's plot is a bare ViewBox in
+            # a GraphicsLayoutWidget, not a PlotItem. The camera work is
+            # `_resetTarget()` + `translateBy()`, which is what actually
+            # moves the view and disables the auto-range that would fight
+            # it; the signal was only ever an announcement, and it was
+            # announced to no one, on the hottest path this panel has.
             if measuring:
                 after = self.vb.viewRange()
                 self._mid_pan_step_t = time.monotonic()

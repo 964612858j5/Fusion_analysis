@@ -1597,3 +1597,144 @@ def test_an_unwritable_log_file_does_not_break_the_drag(app, capsys,
     err = capsys.readouterr().err
     assert "log-file-failed" in err
     assert _midpan_lines(err), "and the lines still reached stderr"
+
+
+# ── the stale position a pointer grab arrives with ───────────────────────
+#
+# MEASURED, on the real desk, with BLOCK01_MIDPAN_DEBUG=1 over 106
+# gestures on three panels: 26 of them contained a camera step that the
+# NEXT move undid exactly -- dx and dy negated to the last bit of a
+# double -- and every undoing move reported buttons=NoButton while
+# QApplication.mouseButtons() still said Middle, 4-17 ms after the press,
+# which is when grabMouse() takes effect. The position such a move
+# carries is the position the gesture started from, so trusting it panned
+# the picture out and straight back.
+#
+# The rule these pin: a move that reports no buttons is evidence about
+# the BUTTON (which the ranking above already weighs) and not about WHERE
+# the pointer is -- once this gesture has seen the platform report the
+# middle button down at least once. Before that, it is all there is, and
+# it still pans.
+
+def test_a_blank_move_after_a_confirmed_one_does_not_move_the_camera(app):
+    """The measured failure: the step is undone by the grab's own stale
+    position and a quarter of all drags lose their first fraction."""
+    panel = _panel()
+    start = _range(panel)
+    _press(panel, at=(250, 250))
+    _move(panel, (210, 226))                    # real, middle down
+    moved = _range(panel)
+    assert moved != start, "the real move panned"
+
+    _move(panel, (250, 250), buttons=Qt.NoButton)   # the grab's stale position
+
+    assert _range(panel) == moved, (
+        "a move that reports no buttons carried the position the gesture "
+        "started from; panning on it undoes the step just taken")
+
+
+def test_a_monotone_drag_never_moves_the_picture_backwards(app):
+    """The user-visible invariant, and the one the measurement caught
+    being broken: while the cursor goes one way, the picture goes one way.
+
+    Not an anchor test. This handler pans from ABSOLUTE positions, so a
+    stale event that pans back and re-anchors is self-consistent -- the
+    error cancels on the next real move and the drag ends in the right
+    place. What it leaves behind is a picture that went out and jumped
+    straight back, which is what a hand feels as the drag doing nothing at
+    first, and it is invisible to any test that only looks at the end.
+    """
+    panel = _panel()
+    xs = [_range(panel)[0]]
+    _press(panel, at=(250, 250))
+    for i in range(1, 5):
+        _move(panel, (250 - 10 * i, 250 - 6 * i))
+        xs.append(_range(panel)[0])
+        # the grab's stale move, arriving between real ones
+        _move(panel, (250, 250), buttons=Qt.NoButton)
+        xs.append(_range(panel)[0])
+    _release(panel, (210, 226))
+
+    assert xs == sorted(xs), (
+        "the picture went backwards inside a one-way drag: "
+        f"{[round(x, 2) for x in xs]}")
+    assert xs[-1] > xs[0], "and it did travel"
+
+
+def test_a_blank_first_move_still_pans(app):
+    """Not a retreat to cancel-on-first-blank-move. Until the platform has
+    reported the middle button down ONCE in this gesture, a blank move is
+    all there is, and a platform that never reports buttons must still be
+    able to drag."""
+    panel = _panel()
+    before = _range(panel)
+    _press(panel, at=(250, 250))
+    _move(panel, (210, 226), buttons=Qt.NoButton)
+
+    assert _range(panel) != before
+    assert panel._mid_pan_last is not None
+
+
+def test_a_blank_move_still_ends_a_gesture_whose_release_was_lost(app):
+    """It keeps its say over the button. Only the camera and the anchor
+    are taken away from it."""
+    panel = _panel()
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))                    # confirms the button
+    for i in range(ovp.MID_PAN_BLANK_MOVE_TOLERANCE + 2):
+        _move(panel, (240 - i, 244), buttons=Qt.NoButton)
+
+    assert panel._mid_pan_last is None
+    assert panel._mid_pan_grab is None
+
+
+def test_a_blank_move_does_not_claim_the_camera_for_the_panel(app):
+    """A step that did not happen must not cost the slide its one
+    automatic fit either."""
+    panel = _panel()
+    panel._thumbnail_camera_touched = False
+    _press(panel, at=(250, 250))
+    _move(panel, (250, 250), buttons=Qt.NoButton)
+    _move(panel, (250, 250), buttons=Qt.NoButton)
+
+    assert panel._thumbnail_camera_touched is False
+
+
+def test_the_real_desk_sequence_travels_its_full_distance(app):
+    """The whole measured sequence: press, a real move, the grab's stale
+    move, then the rest of the drag. The picture ends where the cursor
+    did, 1:1, with nothing lost at the start."""
+    x0, y0 = 250, 250
+    panel = _panel()
+    start = _range(panel)
+
+    _press(panel, at=(x0, y0))
+    _move(panel, (x0 - 10, y0 - 6))
+    step = [a - b for a, b in zip(_range(panel), start)]
+    _move(panel, (x0, y0), buttons=Qt.NoButton)     # stale, at the press
+    for i in range(2, 5):
+        _move(panel, (x0 - 10 * i, y0 - 6 * i))
+    _release(panel, (x0 - 40, y0 - 24))
+
+    travelled = [a - b for a, b in zip(_range(panel), start)]
+    assert travelled == pytest.approx([4 * s for s in step], rel=1e-9), (
+        "four equal moves of the cursor must move the picture by four equal "
+        "steps; the stale event in the middle must cost nothing and add "
+        f"nothing (one step {step}, four moves travelled {travelled})")
+
+
+def test_no_signal_is_emitted_per_move_that_nothing_listens_to(app):
+    """`sigRangeChangedManually` had no subscriber: nothing in this
+    application connects it, and in pyqtgraph only PlotItem forwards it --
+    this plot is a bare ViewBox. The camera work is _resetTarget() +
+    translateBy(), which is what moves the view and disables the
+    auto-range that would fight it."""
+    panel = _panel()
+    seen = []
+    panel.vb.sigRangeChangedManually.connect(lambda *a: seen.append(a))
+    before = _range(panel)
+    _middle_drag(panel, -40, -24)
+
+    assert _range(panel) != before, "the camera still moves"
+    assert seen == [], \
+        "the pan announced itself once per move to nobody at all"

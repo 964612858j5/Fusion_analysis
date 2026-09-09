@@ -5419,7 +5419,11 @@ class Step0Page(QWidget):
         self.overview._patches.clear()
         self.overview._roi_artists.clear()
         self.overview._patch_artists.clear()
-        self.overview.img_item.clear()
+        # Not just the item: the panel holds the pushed channel image and its
+        # own overview array, and either one would be drawn again by the next
+        # `_apply_thumbnail` — the previous slide's tissue under this slide's
+        # name.
+        self.overview.forget_pixels()
         self.overview._update_info()
         self.overview._load_overview()
         self._on_rois_changed([])

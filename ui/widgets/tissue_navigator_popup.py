@@ -167,6 +167,12 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         """Thin adapter to feed the reused OverviewPanel. v14.2a stores context;
         live sync with the Step0 main viewer is v14.2b. Never creates files."""
         if loader is not None:
+            if loader is not self._overview.loader:
+                # Another slide. Its thumbnail is not this one's, so it goes
+                # now — before the new loader is bound — rather than staying up
+                # under the new dataset's name until a replacement arrives.
+                self._overview.forget_pixels()
+                self._overview_loaded_for = None
             self._overview.loader = loader
             try:
                 self._overview.full_h = loader.shape[0]

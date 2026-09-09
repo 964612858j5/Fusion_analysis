@@ -1153,6 +1153,30 @@ class OverviewPanel(QWidget):
 
     # ── Overview loading ──────────────────────────────────────────────
 
+    def forget_pixels(self):
+        """Drop every pixel this panel is holding, and say so.
+
+        A new slide is a new subject: the previous one's thumbnail must leave
+        the screen when the switch is committed, not when the replacement
+        happens to arrive. Both stores go — the host-pushed channel image and
+        the panel's own DAPI overview — because whichever survived would be
+        drawn again by the next `_apply_thumbnail`. The overview's geometry
+        goes with them, so the new slide is never stretched onto the old
+        slide's rectangle.
+        """
+        self._channel_rgb = None
+        self._overview_arr = None
+        self._thumb_fitted = None
+        self._thumbnail_camera_touched = False
+        for attr in ("ov_h", "ov_w"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+        try:
+            self.img_item.clear()
+        except Exception:                                   # noqa: BLE001
+            pass
+        self.status.setText("Loading overview, please wait...")
+
     def _load_overview(self):
         if self.loader is None or self.full_h == 0:
             self.status.setText("Please select an OME-TIFF and click Load.")
@@ -1166,10 +1190,16 @@ class OverviewPanel(QWidget):
         self._thumb_fitted = None
         self._thumbnail_camera_touched = False
         self._t0 = time.time()
+        # Which read this is. A slide that is switched while its overview is
+        # being read leaves that read running; without a token its pixels land
+        # in the panel that now shows another slide.
+        self._ov_gen = getattr(self, "_ov_gen", 0) + 1
+        gen, loader = self._ov_gen, self.loader
         self._ov_thread = OverviewLoaderThread(
             self.loader, self.nuc_ch, self.ds
         )
-        self._ov_thread.done.connect(self._on_overview_loaded)
+        self._ov_thread.done.connect(
+            lambda arr, _g=gen, _l=loader: self._on_overview_loaded(arr, _g, _l))
         self._ov_thread.error.connect(
             lambda e: self.status.setText(f"Overview load failed: {e}")
         )
@@ -1251,14 +1281,26 @@ class OverviewPanel(QWidget):
             if not self._thumbnail_camera_touched:
                 self.vb.setRange(rect, padding=0.01)
 
-    def _on_overview_loaded(self, arr):
+    def _on_overview_loaded(self, arr, gen=None, loader=None):
+        """Install a finished overview read — if it is still this panel's.
+
+        A read started for the previous slide finishes after the switch; its
+        pixels are that slide's and must be dropped rather than drawn under the
+        new slide's name.
+        """
+        if gen is not None and gen != getattr(self, "_ov_gen", gen):
+            print("[Overview] dropped a late overview read from a previous load")
+            return
+        if loader is not None and loader is not self.loader:
+            print("[Overview] dropped an overview read for another dataset")
+            return
         self.ov_h, self.ov_w = arr.shape
         self._overview_arr = arr
         self._apply_thumbnail()
         self.status.setText(
             f"Full image {self.full_h}×{self.full_w} px  |  "
             f"Overview {self.ov_h}×{self.ov_w} px  "
-            f"({time.time()-self._t0:.1f}s)"
+            f"({time.time()-getattr(self, '_t0', time.time()):.1f}s)"
         )
 
     # ── Coordinate helpers ────────────────────────────────────────────

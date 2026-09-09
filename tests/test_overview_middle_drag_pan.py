@@ -1619,10 +1619,28 @@ def test_an_unwritable_log_file_does_not_break_the_drag(app, capsys,
 # whole class would rebuild the same complaint from the other side, so
 # the tests below hold both halves.
 
-def test_a_blank_move_at_the_press_position_does_not_move_the_camera(app):
+def _app_says_middle(monkeypatch, panel):
+    """Make the application-wide button state read middle-down.
+
+    Part of the replay's measured signature is that
+    `QApplication.mouseButtons()` still said Middle -- all 38 of the
+    run's blank moves did, the 31 that undid a step among them. The
+    offscreen platform has no pointer and always answers NoButton, so
+    the panel's own seam is what the tests drive. Deliberately not
+    patching `QApplication.mouseButtons` itself: the blank-move ranking
+    reads that directly to CONFIRM a gesture, and these tests are about
+    the refusal, not about that.
+    """
+    monkeypatch.setattr(type(panel), "_mid_pan_app_middle",
+                        lambda self: True)
+
+
+def test_a_blank_move_at_the_press_position_does_not_move_the_camera(
+        app, monkeypatch):
     """The measured failure: the step is undone by the position the grab
     replays, and a quarter of all drags lose their first fraction."""
     panel = _panel()
+    _app_says_middle(monkeypatch, panel)
     start = _range(panel)
     _press(panel, at=(250, 250))
     _move(panel, (210, 226))                    # real, middle down
@@ -1681,6 +1699,56 @@ def test_only_this_gesture_s_press_position_is_refused(app):
         "only the press position is the grab's replay; this is a hand"
 
 
+def test_a_legitimate_return_to_the_press_position_still_pans(
+        app, monkeypatch):
+    """Review's counter-example, and the reason the refusal is bounded by
+    the step count rather than by the position alone.
+
+    A hand that drags out over several steps and then comes back to where
+    it pressed is doing something real, and the platform may fail to
+    label that particular move. In 31 cases out of 31 the replay undid
+    the gesture's FIRST step -- it belongs to the grab being established,
+    not to the gesture's whole life -- so by the time more than one step
+    has been made, a move at the press position is the hand.
+    """
+    panel = _panel()
+    _app_says_middle(monkeypatch, panel)
+    at_press = _range(panel)
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))
+    _move(panel, (230, 238))
+    _move(panel, (220, 232))                        # three real steps
+    before_return = _range(panel)
+    assert before_return != at_press
+
+    _move(panel, (250, 250), buttons=Qt.NoButton)   # legitimately back
+
+    assert _range(panel) != before_return, (
+        "after more than one step, a move at the press position is a hand "
+        "coming back, not the grab replaying -- refusing it stops the "
+        "picture and rebuilds the complaint from the other side")
+    assert _range(panel) == pytest.approx(at_press, rel=1e-9), \
+        "and a cursor back at the press position puts the picture back "\
+        "where the press found it"
+
+
+def test_the_refusal_needs_the_application_to_say_middle_down(
+        app, monkeypatch):
+    """Also part of the signature: all 38 blank moves in the run had
+    `QApplication.mouseButtons()` reading Middle. With the platform's
+    global state saying nothing is down, a move at the press position is
+    not the shape that was measured, and is not refused."""
+    panel = _panel()
+    monkeypatch.setattr(type(panel), "_mid_pan_app_middle", lambda self: False)
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))
+    after_first = _range(panel)
+
+    _move(panel, (250, 250), buttons=Qt.NoButton)
+
+    assert _range(panel) != after_first
+
+
 def test_a_blank_move_at_the_press_position_before_any_step_is_harmless(app):
     """The press position with no step yet behind it is a zero-delta move
     either way. It must not end the gesture or claim the camera."""
@@ -1695,6 +1763,24 @@ def test_a_blank_move_at_the_press_position_before_any_step_is_harmless(app):
     assert panel._thumbnail_camera_touched is False
 
 
+def test_the_second_gesture_can_refuse_its_own_replay(app, monkeypatch):
+    """The step count belongs to the gesture, not to the panel. Carried
+    across, the next drag would already be past its first step and would
+    pan on the replay it should refuse -- the bug back on every drag but
+    the first."""
+    panel = _panel()
+    _app_says_middle(monkeypatch, panel)
+    for _ in range(2):
+        _press(panel, at=(250, 250))
+        _move(panel, (240, 244))
+        after_first = _range(panel)
+        _move(panel, (250, 250), buttons=Qt.NoButton)
+        assert _range(panel) == after_first, \
+            "each gesture's first step is the one the replay undoes"
+        _release(panel, (240, 244))
+        assert panel._mid_pan_steps == 0
+
+
 def test_the_press_position_is_forgotten_with_the_gesture(app):
     panel = _panel()
     _press(panel, at=(250, 250))
@@ -1706,6 +1792,7 @@ def test_the_press_position_is_forgotten_with_the_gesture(app):
 def test_the_replayed_move_is_named_in_the_log(app, capsys, monkeypatch):
     monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
     panel = _panel()
+    _app_says_middle(monkeypatch, panel)
     _press(panel, at=(250, 250))
     _move(panel, (240, 244))
     _move(panel, (250, 250), buttons=Qt.NoButton)
@@ -1717,46 +1804,38 @@ def test_the_replayed_move_is_named_in_the_log(app, capsys, monkeypatch):
         "from a move that never arrived"
 
 
-def test_a_monotone_drag_never_moves_the_picture_backwards(app):
+def test_a_monotone_drag_never_moves_the_picture_backwards(app, monkeypatch):
     """The user-visible invariant, and the one the measurement caught
     being broken: while the cursor goes one way, the picture goes one way.
 
     Not an anchor test. This handler pans from ABSOLUTE positions, so a
-    stale event that pans back and re-anchors is self-consistent -- the
-    error cancels on the next real move and the drag ends in the right
-    place. What it leaves behind is a picture that went out and jumped
-    straight back, which is what a hand feels as the drag doing nothing at
-    first, and it is invisible to any test that only looks at the end.
+    replayed position that pans back and re-anchors is self-consistent --
+    the error cancels on the next real move and the drag ends in the
+    right place. What it leaves behind is a picture that went out and
+    jumped straight back, which is what a hand feels as the drag doing
+    nothing at first, and it is invisible to any test that only looks at
+    the end.
+
+    The shape is the measured one: the replay arrives once, while the
+    grab is being established, after the gesture's first step.
     """
     panel = _panel()
+    _app_says_middle(monkeypatch, panel)
     xs = [_range(panel)[0]]
     _press(panel, at=(250, 250))
-    for i in range(1, 5):
+    _move(panel, (240, 244))                        # the first real step
+    xs.append(_range(panel)[0])
+    _move(panel, (250, 250), buttons=Qt.NoButton)   # the grab's replay
+    xs.append(_range(panel)[0])
+    for i in range(2, 6):                           # the drag continues
         _move(panel, (250 - 10 * i, 250 - 6 * i))
         xs.append(_range(panel)[0])
-        # the grab's stale move, arriving between real ones
-        _move(panel, (250, 250), buttons=Qt.NoButton)
-        xs.append(_range(panel)[0])
-    _release(panel, (210, 226))
+    _release(panel, (200, 220))
 
     assert xs == sorted(xs), (
         "the picture went backwards inside a one-way drag: "
         f"{[round(x, 2) for x in xs]}")
     assert xs[-1] > xs[0], "and it did travel"
-
-
-def test_a_blank_first_move_still_pans(app):
-    """Not a retreat to cancel-on-first-blank-move. Until the platform has
-    reported the middle button down ONCE in this gesture, a blank move is
-    all there is, and a platform that never reports buttons must still be
-    able to drag."""
-    panel = _panel()
-    before = _range(panel)
-    _press(panel, at=(250, 250))
-    _move(panel, (210, 226), buttons=Qt.NoButton)
-
-    assert _range(panel) != before
-    assert panel._mid_pan_last is not None
 
 
 def test_a_blank_move_still_ends_a_gesture_whose_release_was_lost(app):

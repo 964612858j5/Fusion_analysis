@@ -1146,7 +1146,13 @@ class OverviewPanel(QWidget):
         # the whole gesture: it is the coordinate the platform replays
         # when the pointer grab is established, and the only position a
         # move that reports no buttons is refused for.
+        #
+        # `_mid_pan_steps` counts the camera steps this gesture has made.
+        # The replay was measured undoing the FIRST step and never a
+        # later one, so the count -- not a time window -- is what bounds
+        # the refusal to the grab-establishment phase it was seen in.
         self._mid_pan_press_scene = None
+        self._mid_pan_steps = 0
 
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
@@ -2752,6 +2758,7 @@ class OverviewPanel(QWidget):
         held, self._mid_pan_grab = self._mid_pan_grab, None
         self._mid_pan_last = None
         self._mid_pan_press_scene = None
+        self._mid_pan_steps = 0
         self._mid_pan_confirmed = False
         self._mid_pan_blank = 0
         self._mid_pan_watch_stop()
@@ -2862,33 +2869,48 @@ class OverviewPanel(QWidget):
         last_scene = self._mid_pan_last
         now_scene = self._mid_pan_scene_pos(event)
         if (not trusted
+                and self._mid_pan_app_middle()
+                and self._mid_pan_steps == 1
                 and now_scene is not None
                 and last_scene is not None
                 and self._mid_pan_press_scene is not None
                 and now_scene == self._mid_pan_press_scene
                 and now_scene != last_scene):
-            # The one signature the real desk actually produced, and only
-            # it. MEASURED over 106 gestures and 816 moves: 26 gestures
-            # contained a camera step that the next move undid EXACTLY --
-            # dx and dy negated to the last bit of a double -- and in ALL
-            # 31 such pairs the undone step was the gesture's FIRST step,
-            # never a later one. So the position those moves carried was
-            # not merely stale, it was the PRESS position: establishing
-            # the pointer grab (4-17 ms after the press, which is when
-            # `grabMouse()` takes effect) makes the platform deliver a
-            # move with the grab-time coordinates. This handler pans from
-            # absolute positions, so it panned the picture out and
-            # straight back, and a quarter of all drags lost their first
-            # fraction -- "the middle drag does nothing at first".
+            # The one signature the real desk produced, and nothing
+            # wider. MEASURED over 125 gestures and 1313 moves
+            # (docs/midpan_real_x_evidence/): 38 moves reported
+            # buttons=NoButton, all 38 of them with
+            # QApplication.mouseButtons() still reading Middle, and 31 of
+            # them exactly undid a camera step -- dx and dy negated to
+            # the last bit of a double. In 31 cases out of 31 the undone
+            # step was the gesture's FIRST, never a later one. So the
+            # position they carried was not merely stale, it was the
+            # PRESS position, replayed when `grabMouse()` establishes the
+            # pointer grab. This handler pans from absolute positions, so
+            # it panned the picture out and straight back, and a quarter
+            # of all drags lost their first fraction -- "the middle drag
+            # does nothing at first".
             #
-            # Deliberately NOT "ignore every move that reports no
-            # buttons". The evidence covers exactly one shape: no button
-            # reported, AND the position is bit-identical to this
-            # gesture's press, AND we are not already there. A platform
-            # that merely fails to report buttons while giving a REAL new
-            # position keeps panning, keeps its anchor, and keeps feeling
-            # attached to the hand -- dropping that whole class would
-            # rebuild the same complaint from the other side.
+            # Every clause below is one of those observations, and there
+            # is no clause that is not:
+            #
+            #   not trusted            the event reported no button
+            #   _mid_pan_app_middle    the platform still says middle-down
+            #   _mid_pan_steps == 1    it would undo the FIRST step, which
+            #                          is where all 31 were seen -- the
+            #                          grab-establishment phase, bounded
+            #                          by a fact rather than by inventing
+            #                          a 4-17 ms window
+            #   position == press      the coordinate the grab replays
+            #   position != anchor     we are not already sitting there,
+            #                          where the move is a no-op anyway
+            #
+            # So a legitimate return to the press position -- a hand that
+            # dragged out and came back, several steps in, on a move the
+            # platform failed to label -- is NOT refused: by then this
+            # gesture has made more than one step. Nor is a blank move at
+            # a real new position, at any point. Refusing either would
+            # rebuild the reported complaint from the other side.
             #
             # The button ranking above is untouched: this move has already
             # had its say about whether the drag is still live, including
@@ -2945,7 +2967,22 @@ class OverviewPanel(QWidget):
             # half-loaded thumbnail does not cost that slide its one
             # automatic fit.
             self._thumbnail_camera_touched = True
+            self._mid_pan_steps += 1
         return True
+
+    def _mid_pan_app_middle(self):
+        """Does the application-wide button state still say middle-down?
+
+        Part of the replay's measured signature: all 38 of the run's moves
+        that reported no buttons had `QApplication.mouseButtons()` reading
+        Middle, the 31 that undid a step among them. Read here only to
+        REFUSE a position, never to keep a gesture alive on its own --
+        that direction stays where it was, in the ranking above.
+        """
+        try:
+            return bool(QtWidgets.QApplication.mouseButtons() & Qt.MiddleButton)
+        except Exception:                                   # noqa: BLE001
+            return False
 
     def _middle_pan_release(self, event):
         """Give the pointer back and forget the anchor.

@@ -1599,26 +1599,29 @@ def test_an_unwritable_log_file_does_not_break_the_drag(app, capsys,
     assert _midpan_lines(err), "and the lines still reached stderr"
 
 
-# ── the stale position a pointer grab arrives with ───────────────────────
+# ── the position a pointer grab replays ──────────────────────────────────
 #
 # MEASURED, on the real desk, with BLOCK01_MIDPAN_DEBUG=1 over 106
-# gestures on three panels: 26 of them contained a camera step that the
-# NEXT move undid exactly -- dx and dy negated to the last bit of a
-# double -- and every undoing move reported buttons=NoButton while
-# QApplication.mouseButtons() still said Middle, 4-17 ms after the press,
-# which is when grabMouse() takes effect. The position such a move
-# carries is the position the gesture started from, so trusting it panned
-# the picture out and straight back.
+# gestures on three panels and 816 moves: 26 gestures contained a camera
+# step that the NEXT move undid exactly -- dx and dy negated to the last
+# bit of a double -- every undoing move reported buttons=NoButton while
+# QApplication.mouseButtons() still said Middle, all landed 4-17 ms after
+# the press, and in ALL 31 such pairs the undone step was the gesture's
+# FIRST step and never a later one. That last count is what names the
+# signature: the position those moves carried was the PRESS position,
+# replayed by the platform when `grabMouse()` established the pointer
+# grab.
 #
-# The rule these pin: a move that reports no buttons is evidence about
-# the BUTTON (which the ranking above already weighs) and not about WHERE
-# the pointer is -- once this gesture has seen the platform report the
-# middle button down at least once. Before that, it is all there is, and
-# it still pans.
+# The rule these pin is exactly that shape and no wider: no button
+# reported, position bit-identical to this gesture's press, and not
+# already there. A platform that fails to report buttons while giving a
+# REAL new position keeps the camera and the anchor -- refusing that
+# whole class would rebuild the same complaint from the other side, so
+# the tests below hold both halves.
 
-def test_a_blank_move_after_a_confirmed_one_does_not_move_the_camera(app):
-    """The measured failure: the step is undone by the grab's own stale
-    position and a quarter of all drags lose their first fraction."""
+def test_a_blank_move_at_the_press_position_does_not_move_the_camera(app):
+    """The measured failure: the step is undone by the position the grab
+    replays, and a quarter of all drags lose their first fraction."""
     panel = _panel()
     start = _range(panel)
     _press(panel, at=(250, 250))
@@ -1631,6 +1634,87 @@ def test_a_blank_move_after_a_confirmed_one_does_not_move_the_camera(app):
     assert _range(panel) == moved, (
         "a move that reports no buttons carried the position the gesture "
         "started from; panning on it undoes the step just taken")
+
+
+def test_a_blank_move_at_a_new_position_still_pans_and_re_anchors(app):
+    """The other half, and the risk of fixing this too widely: a move
+    that reports no buttons but carries a REAL new position is a hand
+    that moved on a platform that failed to say which button is down.
+    Refusing it would stop the picture, freeze the anchor, and end the
+    gesture after a run of them -- the reported complaint, rebuilt from
+    the other side. Nothing in the measurement licenses that."""
+    panel = _panel()
+    start = _range(panel)
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))                    # real, middle down
+    after_first = _range(panel)
+
+    _move(panel, (230, 238), buttons=Qt.NoButton)   # blank, but a new place
+
+    after_blank = _range(panel)
+    assert after_blank != after_first, \
+        "a blank move carrying a new position must still pan"
+    step1 = [a - b for a, b in zip(after_first, start)]
+    step2 = [a - b for a, b in zip(after_blank, after_first)]
+    assert step2 == pytest.approx(step1, rel=1e-9), \
+        "and it must be worth exactly what the same cursor step is worth"
+
+    _move(panel, (220, 232))                    # the drag continues, real
+    step3 = [a - b for a, b in zip(_range(panel), after_blank)]
+    assert step3 == pytest.approx(step1, rel=1e-9), \
+        "the anchor followed the blank move, so the next real one is one step"
+
+
+def test_only_this_gesture_s_press_position_is_refused(app):
+    """Measured: the undone step was ALWAYS the gesture's first, so the
+    replayed coordinate is the press. A blank move landing on some
+    EARLIER anchor is not that signature and is not refused."""
+    panel = _panel()
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))                    # anchor A
+    _move(panel, (230, 238))                    # anchor B
+    after_b = _range(panel)
+
+    _move(panel, (240, 244), buttons=Qt.NoButton)   # back to A, no buttons
+
+    assert _range(panel) != after_b, \
+        "only the press position is the grab's replay; this is a hand"
+
+
+def test_a_blank_move_at_the_press_position_before_any_step_is_harmless(app):
+    """The press position with no step yet behind it is a zero-delta move
+    either way. It must not end the gesture or claim the camera."""
+    panel = _panel()
+    before = _range(panel)
+    _press(panel, at=(250, 250))
+    panel._thumbnail_camera_touched = False
+    _move(panel, (250, 250), buttons=Qt.NoButton)
+
+    assert _range(panel) == before
+    assert panel._mid_pan_last is not None, "the gesture is still live"
+    assert panel._thumbnail_camera_touched is False
+
+
+def test_the_press_position_is_forgotten_with_the_gesture(app):
+    panel = _panel()
+    _press(panel, at=(250, 250))
+    assert panel._mid_pan_press_scene is not None
+    _release(panel, (250, 250))
+    assert panel._mid_pan_press_scene is None
+
+
+def test_the_replayed_move_is_named_in_the_log(app, capsys, monkeypatch):
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _press(panel, at=(250, 250))
+    _move(panel, (240, 244))
+    _move(panel, (250, 250), buttons=Qt.NoButton)
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    named = [ln for ln in lines if " what=stale-grab-move " in ln]
+    assert len(named) == 1, \
+        "a refused move must say so, or the next reader cannot tell it " \
+        "from a move that never arrived"
 
 
 def test_a_monotone_drag_never_moves_the_picture_backwards(app):
@@ -1740,15 +1824,17 @@ def test_no_signal_is_emitted_per_move_that_nothing_listens_to(app):
         "the pan announced itself once per move to nobody at all"
 
 
-# ── separating a hand that paused from an event that was late ────────────
+# ── separating a late event from a hole that opened before it ────────────
 #
 # MEASURED on the real desk: the intervals between one middle move and
 # the next were p50 8 ms but p90 46 ms, p99 148 ms and 308 ms at worst,
 # while the handler's own work was under 2 ms and the first repaint under
-# 10 ms, and the 5 ms heartbeat recorded no matching silence. So the moves
-# were not late because this code was busy -- they were not there. The
-# log could not then say whether the hand had stopped or the event had
-# waited, and those need opposite fixes.
+# 10 ms, and the 5 ms heartbeat recorded no matching silence. So the
+# moves were not late because this code was busy. What the log could not
+# then say is whether the event waited after being stamped -- which this
+# application could be responsible for -- or whether the hole opened
+# before the stamp, upstream of Qt entirely. Those need opposite fixes,
+# and only the first is ours.
 
 def test_a_move_carries_how_late_it_was(app, capsys, monkeypatch):
     monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
@@ -1786,10 +1872,12 @@ def test_the_first_move_of_a_gesture_has_nothing_to_be_late_against(
                for ln in lines if " what=move " in ln)
 
 
-def test_a_paused_hand_is_not_reported_as_a_late_event(app, capsys,
-                                                       monkeypatch):
+def test_a_hole_before_the_stamp_is_not_reported_as_a_late_event(
+        app, capsys, monkeypatch):
     """The whole point of the pair: when the platform's own stamps show
-    the same gap the arrivals do, nothing was late."""
+    the same gap the arrivals do, nothing waited inside this application.
+    What opened the hole upstream is a separate question this does not
+    answer."""
     monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
     panel = _panel()
     _press(panel)

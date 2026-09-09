@@ -1142,6 +1142,11 @@ class OverviewPanel(QWidget):
         # same amount, a delivery stall moves only the arrival.
         self._mid_pan_prev_arr = None
         self._mid_pan_prev_ts = None
+        # The scene position this gesture's press was taken at, kept for
+        # the whole gesture: it is the coordinate the platform replays
+        # when the pointer grab is established, and the only position a
+        # move that reports no buttons is refused for.
+        self._mid_pan_press_scene = None
 
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
@@ -2374,6 +2379,7 @@ class OverviewPanel(QWidget):
         self._middle_pan_cancel("a new press arrived on an open gesture")
         viewport = self._mid_pan_viewport()
         self._mid_pan_last = self._mid_pan_scene_pos(event)
+        self._mid_pan_press_scene = self._mid_pan_last
         self._mid_pan_confirmed = False
         self._mid_pan_blank = 0
         self._mid_pan_seq += 1
@@ -2637,20 +2643,25 @@ class OverviewPanel(QWidget):
     def _mid_pan_arrival(self, event):
         """How late this move was, if it was late at all.
 
-        A drag that stutters looks the same in the log whether the hand
-        stopped moving or the event took 300 ms to arrive: both are a hole
+        A drag that stutters looks the same in the log whether no input
+        was produced or the event took 300 ms to arrive: both are a hole
         in the timeline. The platform stamps every mouse event with the
-        time the INPUT happened, so the two are separable --
+        time the input reached it, so the two are separable --
 
           arr_gap   ms since the previous middle move reached this handler
           ts_gap    ms between the platform's stamps on those two events
           late_ms   arr_gap - ts_gap: how much of the hole was delivery
 
-        A hand that paused moves both gaps together and leaves `late_ms`
-        near zero. An event that waited -- behind a busy GUI thread,
-        behind compression, behind the compositor -- shows a large
-        `late_ms`, and the heartbeat says whether this thread was the one
-        holding it. Empty (and cost-free) with the switch off.
+        A large `late_ms` says the event waited AFTER it was stamped --
+        behind a busy GUI thread, behind this application's own queue --
+        and the heartbeat then says whether this thread was what held it.
+        A `late_ms` near zero says only that the hole was NOT there: it
+        opened before the event was stamped, or no event was produced at
+        all. Which of those it was -- a hand that stopped, a device or
+        driver that reported nothing, coalescing upstream of the stamp --
+        this cannot distinguish, and the log must not be read as if it
+        could. Empty with the switch off, and then costs one environment
+        read per event.
         """
         if not _mid_pan_debug_enabled():
             return None
@@ -2680,7 +2691,8 @@ class OverviewPanel(QWidget):
         one the eye is waiting for; the rest of a scene's repaints say
         nothing about whether the picture followed the hand. Bounded to an
         open gesture plus MID_PAN_PAINT_WINDOW_MS after it closes, so
-        ordinary browsing pays nothing for this even with the switch on.
+        ordinary browsing costs no more than the environment read that
+        every event already pays, even with the switch on.
         """
         if not _mid_pan_debug_enabled():
             return
@@ -2739,6 +2751,7 @@ class OverviewPanel(QWidget):
             self._mid_pan_log("cancel", reason=reason)
         held, self._mid_pan_grab = self._mid_pan_grab, None
         self._mid_pan_last = None
+        self._mid_pan_press_scene = None
         self._mid_pan_confirmed = False
         self._mid_pan_blank = 0
         self._mid_pan_watch_stop()
@@ -2846,38 +2859,42 @@ class OverviewPanel(QWidget):
                         "button had been reported down")
                     return True
         self._mid_pan_log("move", event, extra=self._mid_pan_arrival(event))
-        if self._mid_pan_confirmed and not trusted:
-            # MEASURED on the real desk, 106 gestures over three panels:
-            # 26 of them contained a camera step that the NEXT move undid
-            # EXACTLY -- to the last bit of a double, dx and dy negated --
-            # and every one of those undoing moves reported
-            # buttons=NoButton while QApplication.mouseButtons() still said
-            # Middle. All of them landed 4-17 ms after the press, which is
-            # when `grabMouse()` takes effect. So the position they carry
-            # is the position the gesture STARTED from: the platform's
-            # crossing into the new pointer grab, arriving as a move with
-            # stale coordinates. Trusting it panned the picture out and
-            # straight back, and the visible result is the first fraction
-            # of a quarter of all drags doing nothing -- "the middle drag
-            # does nothing at first".
-            #
-            # A blank move is therefore not evidence about WHERE the
-            # pointer is either, and it was only ever read as evidence
-            # about whether the button is still down. It keeps its say over
-            # that: the branches above have already confirmed or counted it
-            # and may already have ended the gesture. What it does not get
-            # is the camera and the anchor, which stay on the last position
-            # a real move reported -- so the next real move measures from
-            # there, and the step it undid is not re-applied either.
-            #
-            # Only AFTER the platform has proven, in this same gesture,
-            # that it can report the middle button down. Before that a
-            # blank move is all there is, and it still pans: a platform
-            # that never reports buttons at all must still be able to drag
-            # (the whole point of the ranking this sits inside).
-            return True
         last_scene = self._mid_pan_last
         now_scene = self._mid_pan_scene_pos(event)
+        if (not trusted
+                and now_scene is not None
+                and last_scene is not None
+                and self._mid_pan_press_scene is not None
+                and now_scene == self._mid_pan_press_scene
+                and now_scene != last_scene):
+            # The one signature the real desk actually produced, and only
+            # it. MEASURED over 106 gestures and 816 moves: 26 gestures
+            # contained a camera step that the next move undid EXACTLY --
+            # dx and dy negated to the last bit of a double -- and in ALL
+            # 31 such pairs the undone step was the gesture's FIRST step,
+            # never a later one. So the position those moves carried was
+            # not merely stale, it was the PRESS position: establishing
+            # the pointer grab (4-17 ms after the press, which is when
+            # `grabMouse()` takes effect) makes the platform deliver a
+            # move with the grab-time coordinates. This handler pans from
+            # absolute positions, so it panned the picture out and
+            # straight back, and a quarter of all drags lost their first
+            # fraction -- "the middle drag does nothing at first".
+            #
+            # Deliberately NOT "ignore every move that reports no
+            # buttons". The evidence covers exactly one shape: no button
+            # reported, AND the position is bit-identical to this
+            # gesture's press, AND we are not already there. A platform
+            # that merely fails to report buttons while giving a REAL new
+            # position keeps panning, keeps its anchor, and keeps feeling
+            # attached to the hand -- dropping that whole class would
+            # rebuild the same complaint from the other side.
+            #
+            # The button ranking above is untouched: this move has already
+            # had its say about whether the drag is still live, including
+            # ending it if a run of them says the release was lost.
+            self._mid_pan_log("stale-grab-move", event)
+            return True
         if last_scene is None or now_scene is None:
             self._mid_pan_last = now_scene
             return True

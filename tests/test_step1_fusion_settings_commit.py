@@ -356,3 +356,203 @@ def test_a_job_uses_the_mapping_that_was_frozen_with_it(app, tmp_path,
         assert seen["args"]["channel_remap_params"]["CD3"]["max"] == 1.0
     finally:
         w.close()
+
+
+def test_the_fused_zarr_uses_the_mapping_that_was_saved_with_it(app, tmp_path,
+                                                                monkeypatch):
+    """The final run must not read the mapping back through the handoff.
+
+    The manifest path this window holds can name the file from before the
+    commit that just happened, so the searches would have run on the new
+    numbers and fused.zarr been written with the old ones."""
+    w = _window(app, tmp_path)
+    try:
+        mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
+        monkeypatch.setattr(type(w), "_display_mapping", lambda self: mapping)
+        monkeypatch.setattr(type(w), "_load_step0_remap_params",
+                            lambda self: ({"CD3": {"min": 0.0, "max": 0.1,
+                                                   "gamma": 1.0}}, "stale.json"))
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+
+        snapshot = w._committed_fusion_settings()
+        assert snapshot["display_mapping"]["CD3"]["max"] == 1.0
+
+        # What `_save` writes into the worker config, without running a Save.
+        fcfg = json.loads(json.dumps(snapshot["fusion_config"]))
+        fcfg["channel_remap_params"] = snapshot["display_mapping"]
+        assert fcfg["channel_remap_params"]["CD3"]["max"] == 1.0
+    finally:
+        w.close()
+
+
+def test_params_searched_on_other_settings_are_refused(app, tmp_path,
+                                                       monkeypatch,
+                                                       _no_modal_dialogs):
+    """Search on settings A, save settings B, then generate: the params
+    describe a picture the new fusion does not produce."""
+    w = _window(app, tmp_path)
+    try:
+        seen = _launched(w, monkeypatch)
+        started = []
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: started.append(a))
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        w._run_p1([None])
+        w._on_param_sel({"method": "cellpose_wholecell_fusion", "diameter": 30})
+        assert w._params_match_committed_settings() is True
+
+        w.config._rows["CD3"].spin.setValue(0.9)
+        w._commit_fusion_settings()
+
+        assert w._params_match_committed_settings() is False
+        w._save()
+        assert started == []
+        assert any("other settings" in str(a).lower() for a in _no_modal_dialogs)
+    finally:
+        w.close()
+
+
+def test_hand_written_params_make_no_claim(app, tmp_path):
+    """Params typed in or loaded from a file were not produced by a search, so
+    they are not tied to any settings."""
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w._commit_fusion_settings()
+        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+
+        assert w._params_match_committed_settings() is True
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("break_it", [
+    "step0_manifest_path", "raw_ome_path", "source_identity", "fusion_config"])
+def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it):
+    """Fail closed: a missing field is not a wildcard, and an edited file keeps
+    the hash it used to have."""
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+
+        path = tmp_path / "step1_fusion_settings.json"
+        with open(path) as f:
+            snapshot = json.load(f)
+        if break_it == "fusion_config":
+            snapshot["fusion_config"]["groups"]["markers"]["channels"]["CD3"] = 0.9
+        else:
+            snapshot.pop(break_it, None)
+        with open(path, "w") as f:
+            json.dump(snapshot, f)
+
+        w._fusion_settings_snapshot = None
+        assert w._restore_fusion_settings() is None
+        assert w._fusion_settings_dirty() is True
+    finally:
+        w.close()
+
+
+def test_the_label_follows_a_tick_at_once(app, tmp_path):
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        assert "saved" in w._fusion_settings_label.text().lower()
+
+        w.config.set_channel_visible("CD8", True)
+
+        assert w._fusion_settings_dirty() is True
+        assert "Unsaved" in w._fusion_settings_label.text()
+        assert w._btn_save_fusion_settings.isEnabled()
+    finally:
+        w.close()
+
+
+def test_a_failed_save_leaves_no_half_written_file(app, tmp_path, monkeypatch,
+                                                   _no_modal_dialogs):
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        monkeypatch.setattr(os, "replace", lambda *a, **k: (
+            (_ for _ in ()).throw(OSError("no space left on device"))))
+
+        assert w._commit_fusion_settings() is False
+
+        leftovers = [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]
+        assert leftovers == []
+    finally:
+        w.close()
+
+
+def test_a_snapshot_that_names_nothing_is_refused(app, tmp_path):
+    """Two empty fields are not a match. A snapshot that says nothing about
+    which handoff and which slide it belongs to cannot be shown to be this
+    session's, and "neither of us said" is not proof that we agree."""
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w._commit_fusion_settings()
+
+        path = tmp_path / "step1_fusion_settings.json"
+        with open(path) as f:
+            snapshot = json.load(f)
+        # The raw file still matches on both sides; the manifest is the one
+        # thing neither of them names.
+        snapshot["step0_manifest_path"] = ""
+        with open(path, "w") as f:
+            json.dump(snapshot, f)
+        w.step0_output["step0_manifest_path"] = ""
+
+        w._fusion_settings_snapshot = None
+        assert w._restore_fusion_settings() is None
+    finally:
+        w.close()
+
+
+def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
+    """Drive the real Save far enough to read fusion_config.json back."""
+    from block01.ui import main_window as mw
+
+    w = _window(app, tmp_path)
+    try:
+        monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
+        monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
+        mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
+        monkeypatch.setattr(type(w), "_display_mapping", lambda self: mapping)
+        # What reading the mapping back through the handoff would return: the
+        # file from before the commit.
+        monkeypatch.setattr(type(w), "_load_step0_remap_params",
+                            lambda self: ({"CD3": {"min": 0.0, "max": 0.1,
+                                                   "gamma": 1.0}}, "stale.json"))
+        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
+                            lambda self: (True, "committed"))
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: None)
+
+        class _NoDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec_(self):
+                return QtWidgets.QDialog.Rejected
+        monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
+
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+
+        w._save()
+
+        with open(tmp_path / "fusion_config.json") as f:
+            written = json.load(f)
+        assert written["channel_remap_params"]["CD3"]["max"] == 1.0
+    finally:
+        w.close()

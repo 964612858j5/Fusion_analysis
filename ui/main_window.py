@@ -3363,6 +3363,11 @@ class MainWindow(QMainWindow):
                 failed.discard(channel)
             self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
+        # A tick changes the effective configuration, so it changes whether the
+        # screen and the committed snapshot still agree. Said now, not at the
+        # next redraw: a panel claiming "saved" while a search would be refused
+        # is the disagreement this label exists to show.
+        self._update_fusion_settings_state()
         self._schedule_step1_session_save()
 
     def _on_current_channel_changed(self, channel):
@@ -3695,7 +3700,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Info", "Please add at least one Patch first")
             return
         params = normalize_segmentation_config(params or {})
-        self._p2_params = params
+        self._p2_params = self._stamp_with_fusion_settings(params)
         self._params_source = "direct_patch_preview"
         self._check_save_unlock()
 
@@ -3946,10 +3951,35 @@ class MainWindow(QMainWindow):
             self.search.set_p2_diam(diam)
         else:
             # Phase 2 grid selection
-            self._p2_params    = params
+            self._p2_params    = self._stamp_with_fusion_settings(params)
             self._params_source = "phase2"
             self._check_save_unlock()
         self._schedule_step1_session_save()
+
+    def _stamp_with_fusion_settings(self, params):
+        """Record WHICH fusion settings produced these segmentation params.
+
+        A search runs on the settings that were committed when it started. If
+        the user then changes and re-saves them, those params describe a
+        picture that no longer exists, and pairing them with the new fusion is
+        exactly the mix-up the commit point was added to prevent.
+        """
+        params = dict(params or {})
+        stamp = getattr(self, "_running_fusion_settings_hash", None)
+        if not stamp:
+            snapshot = self._committed_fusion_settings() or {}
+            stamp = snapshot.get("hash")
+        if stamp:
+            params["fusion_settings_hash"] = stamp
+        return params
+
+    def _params_match_committed_settings(self):
+        """Were the chosen segmentation params produced on these settings?"""
+        stamp = str((self._p2_params or {}).get("fusion_settings_hash") or "")
+        if not stamp:
+            return True         # params from a file or typed by hand: no claim
+        snapshot = self._committed_fusion_settings() or {}
+        return stamp == snapshot.get("hash")
 
     # ── the fusion settings: a draft on screen, a snapshot for the workers ──
 
@@ -4010,23 +4040,40 @@ class MainWindow(QMainWindow):
             print(f"[Step1] saved fusion settings unreadable: {exc}")
             self._update_fusion_settings_state()
             return None
+        # Fail closed. A missing field is not a wildcard: a snapshot that does
+        # not say which handoff, which slide and which source it was frozen
+        # against cannot be shown to be this session's, and adopting it would
+        # let a search run on settings nobody can trace.
+        def _refuse(why):
+            print(f"[Step1] saved fusion settings not adopted: {why}")
+            self._update_fusion_settings_state()
+            return None
+
         wanted = str((self.step0_output or {}).get("step0_manifest_path") or "")
         found = str(snapshot.get("step0_manifest_path") or "")
-        if wanted and found and os.path.abspath(wanted) != os.path.abspath(found):
-            print("[Step1] saved fusion settings belong to another handoff; "
-                  "not adopted")
-            self._update_fusion_settings_state()
-            return None
+        if not wanted or not found:
+            return _refuse("no manifest to compare")
+        if os.path.abspath(wanted) != os.path.abspath(found):
+            return _refuse("another handoff")
         raw = str(getattr(self.loader, "filepath", "") or "")
         saved_raw = str(snapshot.get("raw_ome_path") or "")
-        if raw and saved_raw and os.path.abspath(raw) != os.path.abspath(saved_raw):
-            print("[Step1] saved fusion settings belong to another dataset; "
-                  "not adopted")
-            self._update_fusion_settings_state()
-            return None
-        if not snapshot.get("hash"):
-            self._update_fusion_settings_state()
-            return None
+        if not raw or not saved_raw:
+            return _refuse("no raw file to compare")
+        if os.path.abspath(raw) != os.path.abspath(saved_raw):
+            return _refuse("another dataset")
+        wanted_id = (self.step0_output or {}).get("source_identity")
+        if self._step1_config_hash(wanted_id) != self._step1_config_hash(
+                snapshot.get("source_identity")):
+            return _refuse("another source identity")
+        # The stored hash is the file's own claim about itself; a file that was
+        # edited would keep the old one. Recompute it from the content.
+        stored = str(snapshot.get("hash") or "")
+        actual = self._fusion_settings_hash({
+            "fusion_config": snapshot.get("fusion_config"),
+            "display_mapping": snapshot.get("display_mapping"),
+        })
+        if not stored or stored != actual:
+            return _refuse("its contents do not match its hash")
         self._fusion_settings_snapshot = snapshot
         print(f"[Step1] fusion settings restored: {snapshot['hash'][:12]}")
         self._update_fusion_settings_state()
@@ -4056,9 +4103,9 @@ class MainWindow(QMainWindow):
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         path = self._fusion_settings_path()
+        tmp = path + ".tmp"
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, indent=2, ensure_ascii=False)
                 f.flush()
@@ -4066,6 +4113,11 @@ class MainWindow(QMainWindow):
             os.replace(tmp, path)
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step1] fusion settings NOT saved: {exc}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
             QMessageBox.warning(
                 self, "Fusion settings",
                 f"The fusion settings could not be saved, so nothing was "
@@ -5086,6 +5138,16 @@ class MainWindow(QMainWindow):
         if not self._require_committed_fusion_settings(
                 "Generating fused.zarr"):
             return
+        if not self._params_match_committed_settings():
+            QMessageBox.warning(
+                self, "Segmentation params are from other settings",
+                "These segmentation parameters were found by a search that ran "
+                "on different fusion settings, so pairing them with this "
+                "fusion would describe a picture neither of them saw.\n\n"
+                "Run the search again on the saved settings.")
+            print("[Step1] save refused: the params were searched on "
+                  "other fusion settings")
+            return
 
         # ── Commit the display mapping, once, before anything is produced ──
         # Up to here the Min/Max/Gamma the user has been adjusting lived only in
@@ -5109,10 +5171,15 @@ class MainWindow(QMainWindow):
         snapshot = self._committed_fusion_settings() or {}
         fcfg = copy.deepcopy(snapshot.get("fusion_config")
                              or self._effective_fusion_config())
-        # Apply the user's manual Channel Remap (Step0) to the fused output so the
-        # fusion reflects their per-channel Min/Max/Gamma adjustments. Corrected
-        # channels already flow through the loader's corrected store.
-        remap_params, remap_src = self._load_step0_remap_params()
+        # The mapping comes from the SAME snapshot, not from a file read back
+        # through the handoff. Reading it back meant the manifest path this
+        # window still held could name the mapping from before the commit that
+        # had just happened: the searches would have run on the new numbers and
+        # the fused.zarr been written with the old ones.
+        remap_params = copy.deepcopy(snapshot.get("display_mapping") or {})
+        remap_src = "the committed fusion settings"
+        if not remap_params:
+            remap_params, remap_src = self._load_step0_remap_params()
         if remap_params:
             print(f"[Step1] fusion applies manual remap from {remap_src} "
                   f"({len(remap_params)} channels)")

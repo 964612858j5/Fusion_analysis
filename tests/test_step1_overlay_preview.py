@@ -79,6 +79,17 @@ def _settle(w, timeout=2.0):
     QtWidgets.QApplication.processEvents()
 
 
+def _show(w, channel, weight=1.0):
+    """Put a channel in the picture: tick it AND give it a weight.
+
+    The two are independent now — a tick says "part of the configuration", a
+    weight says "this much" — so a test that wants to see something has to say
+    both, exactly as a user does.
+    """
+    w.config.set_channel_visible(channel, True)
+    w.config._rows[channel].spin.setValue(weight)
+
+
 def _window(app, cached=("DAPI", "CD3", "CD8")):
     from block01.ui.main_window import MainWindow
     w = MainWindow()
@@ -156,42 +167,49 @@ def test_the_overlay_shows_a_channel_at_its_weight(app):
         w.close()
 
 
-def test_a_weight_of_zero_leaves_the_channel_out_of_the_picture(app):
+def test_a_weight_of_zero_contributes_nothing_but_keeps_the_tick(app):
+    """A ticked channel at 0 is a legal state: in the configuration, adding
+    nothing to the picture right now."""
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
-        w.config.set_channel_visible("CD3", True)
+        _show(w, "CD3", 1.0)
         w.config._rows["CD3"].spin.setValue(0.0)
 
-        assert "CD3" not in w.config.visible_channels()
+        assert "CD3" in w.config.visible_channels()
         w._render_overlay_patch(reset_view=True)
         assert w.prev_img.image is None or int(w.prev_img.image.max()) == 0
     finally:
         w.close()
 
 
-def test_raising_a_weight_above_zero_ticks_the_channel(app):
+def test_a_weight_never_ticks_or_unticks_anything(app):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", False)
         w.config._rows["CD3"].spin.setValue(0.4)
+        assert "CD3" not in w.config.visible_channels()
 
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
         assert "CD3" in w.config.visible_channels()
     finally:
         w.close()
 
 
-def test_ticking_a_channel_at_zero_gives_it_something_to_be_seen_at(app):
-    """A ticked row that produces no pixels is a control that lies."""
+def test_ticking_a_channel_leaves_its_weight_alone(app):
+    """Whether a channel contributes is the user's decision, so a tick brings
+    back the weight that was there — 0 included."""
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") > 0.0
+        assert w.config.channel_weight("CD3") == 0.0
 
-        w._render_overlay_patch(reset_view=True)
-        assert w.prev_img.image is not None
-        assert w.prev_img.image.max() > 0
+        w.config._rows["CD3"].spin.setValue(0.6)
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.6)
     finally:
         w.close()
 
@@ -199,8 +217,7 @@ def test_ticking_a_channel_at_zero_gives_it_something_to_be_seen_at(app):
 def test_unticking_keeps_the_weight_and_re_ticking_restores_it(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.6)
+        _show(w, "CD3", 0.6)
 
         w.config.set_channel_visible("CD3", False)
         assert w.config.channel_weight("CD3") == pytest.approx(0.6)
@@ -217,8 +234,7 @@ def test_an_unticked_channel_takes_part_in_nothing(app):
     the panel still remembers the weight for when it is ticked again."""
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.7)
+        _show(w, "CD3", 0.7)
         w.config.set_channel_visible("CD3", False)
 
         effective = w._effective_fusion_config()
@@ -236,7 +252,7 @@ def test_the_overlay_follows_the_channel_colour(app):
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
-        w.config.set_channel_visible("CD3", True)
+        _show(w, "CD3", 1.0)
         w.config.set_channel_color("CD3", "#ff0000")
         w._render_overlay_patch(reset_view=True)
         red = w.prev_img.image.copy()
@@ -256,7 +272,7 @@ def test_the_overlay_follows_the_intensity_window(app, monkeypatch):
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
-        w.config.set_channel_visible("CD3", True)
+        _show(w, "CD3", 1.0)
         w.config.set_channel_color("CD3", "#ffffff")
 
         window = {"min": 0.0, "max": 1.0, "gamma": 1.0}
@@ -279,7 +295,7 @@ def test_the_overlay_follows_the_intensity_window(app, monkeypatch):
 def test_a_mapping_change_drops_only_that_channels_pixels(app, monkeypatch):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _show(w, "CD3", 1.0)
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0},
                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
@@ -304,7 +320,7 @@ def test_the_display_cache_is_keyed_by_the_window_not_by_its_source(app, monkeyp
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
-        w.config.set_channel_visible("CD3", True)
+        _show(w, "CD3", 1.0)
         w.config.set_channel_color("CD3", "#ffffff")
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
@@ -582,8 +598,7 @@ def test_both_modes_want_the_same_channels(app):
         w.set_preview_mode("fusion")
         assert set(w._needed_channels()) == {"DAPI"}
 
-        w.config._rows["CD3"].spin.setValue(0.8)     # weighted, therefore ticked
-        assert "CD3" in w.config.visible_channels()
+        _show(w, "CD3", 0.8)                         # ticked AND weighted
         assert "CD3" in w._needed_channels()
 
         w.set_preview_mode("overlay")
@@ -604,9 +619,9 @@ def test_a_newly_weighted_channel_is_read_without_dropping_the_rest(app):
         asked = []
         w._start_loader_for = lambda idx, needed=None: asked.append(list(needed or []))
 
-        w.config._rows["CD8"].spin.setValue(0.5)
+        _show(w, "CD8", 0.5)
 
-        assert asked == [["CD8"]]
+        assert asked and all(a == ["CD8"] for a in asked)
         assert "DAPI" in w._patch_channel_cache[0]
     finally:
         w.close()
@@ -617,7 +632,7 @@ def test_fusion_says_preparing_instead_of_faking_a_nucleus_only_result(app):
     try:
         w.set_preview_mode("fusion")
         w._start_loader_for = lambda idx, needed=None: None   # nothing arrives
-        w.config._rows["CD3"].spin.setValue(0.9)
+        _show(w, "CD3", 0.9)
         w.prev_img.clear()
 
         w._render_current_patch(reset_view=True)
@@ -661,7 +676,7 @@ def test_entering_fusion_asks_for_the_channels_fusion_needs(app):
     try:
         asked = []
         w._start_loader_for = lambda idx, needed=None: asked.append(list(needed or []))
-        w.config._rows["CD3"].spin.setValue(0.8)   # weighted, not ticked
+        _show(w, "CD3", 0.8)
         asked.clear()
 
         w.set_preview_mode("fusion")

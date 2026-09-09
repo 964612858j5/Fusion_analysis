@@ -81,35 +81,36 @@ def test_a_new_dataset_shows_only_the_nucleus(app):
         w.close()
 
 
-def test_ticking_a_channel_at_zero_makes_it_contribute(app):
+def test_ticking_a_channel_leaves_its_weight_at_zero(app):
+    """Whether a channel contributes is the user's decision. A tick puts it in
+    the configuration; it does not invent a number for it."""
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") > 0
-        weighted = set()
-        for data in w._effective_fusion_config()["groups"].values():
-            weighted.update(data["channels"])
-        assert "CD3" in weighted
+        assert w.config.channel_weight("CD3") == 0.0
+        assert "CD3" in w.config.visible_channels()
     finally:
         w.close()
 
 
-def test_a_weight_above_zero_ticks_and_a_weight_of_zero_unticks(app):
+def test_a_weight_never_moves_a_tick(app):
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.5)
-        assert "CD3" in w.config.visible_channels()
-
-        w.config._rows["CD3"].spin.setValue(0.0)
         assert "CD3" not in w.config.visible_channels()
+
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        assert "CD3" in w.config.visible_channels()   # ticked at zero is legal
     finally:
         w.close()
 
 
-def test_re_ticking_restores_the_weight_the_user_had(app):
+def test_re_ticking_brings_back_the_weight_unchanged(app):
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.35)
+        w.config.set_channel_visible("CD3", True)
         w.config.set_channel_visible("CD3", False)
         w.config.set_channel_visible("CD3", True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
@@ -249,6 +250,7 @@ def test_a_burst_of_weight_changes_draws_once_and_shows_the_last_one(app):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
         w.set_preview_mode("overlay", force=True, reconcile=False)
         draws = []
         real = w._refresh_patch_preview
@@ -278,6 +280,7 @@ def test_the_coalesced_redraw_costs_no_disk_read(app):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
         reads = len(w.loader.reads)
         for value in (0.9, 0.5, 0.2):
             w.config._rows["CD3"].spin.setValue(value)
@@ -304,6 +307,7 @@ def test_the_intensity_window_changes_both_previews(app, mode, monkeypatch):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0},
                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
@@ -329,6 +333,7 @@ def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
         w.set_preview_mode("fusion", force=True, reconcile=False)
@@ -348,40 +353,36 @@ def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
         w.close()
 
 
-def test_a_new_dataset_does_not_inherit_the_last_slides_weights(app):
-    """Ticking a marker on a new slide must not bring back the weight it had
-    on the previous one."""
+def test_a_new_dataset_starts_from_zero(app):
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.35)
-        assert w.config.channel_weight("CD3") == pytest.approx(0.35)
 
         # What loading another dataset does.
         w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
-        assert w.config.channel_weight("CD3") == 0.0
 
+        assert w.config.channel_weight("CD3") == 0.0
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == pytest.approx(
-            w.config.DEFAULT_TICK_WEIGHT)
+        assert w.config.channel_weight("CD3") == 0.0
     finally:
         w.close()
 
 
-def test_reset_unticks_the_markers_and_forgets_their_weights(app):
-    """A reset that re-ticking can undo is not a reset."""
+def test_reset_zeroes_the_weights_and_leaves_the_ticks_alone(app):
+    """It says weights, so it does weights: removing channels from the
+    configuration is a different act, and the user did not ask for it."""
     w = _window(app)
     try:
+        w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.4)
         w.config._rows["CD8"].spin.setValue(0.9)
+        before = list(w.config.visible_channels())
 
         w.config.zero_marker_weights()
 
-        assert w.config.visible_channels() == ["DAPI"]
+        assert list(w.config.visible_channels()) == before
         assert w.config.channel_weight("CD3") == 0.0
-
-        w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == pytest.approx(
-            w.config.DEFAULT_TICK_WEIGHT)
+        assert w.config.channel_weight("CD8") == 0.0
     finally:
         w.close()
 

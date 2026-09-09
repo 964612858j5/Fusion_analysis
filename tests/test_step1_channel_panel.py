@@ -130,6 +130,7 @@ def test_the_fusion_preview_arithmetic_is_unchanged(app):
     w = _window(app)
     try:
         w.config.set_group_weight("markers", 0.5)
+        w.config.set_channel_visible("CD3", True)     # in the configuration
         w.config._rows["CD3"].spin.setValue(0.4)
         w.config._rows["CD8"].spin.setValue(0.0)
         w.config.set_nucleus_weight(1.0)
@@ -198,6 +199,7 @@ def test_moving_the_panel_kept_it_wired_to_the_preview(app):
         before = w.prev_img.image.copy()
 
         # A weight edit in the moved panel still reaches the preview.
+        w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.9)
         w._render_current_patch(reset_view=False)
         assert not np.array_equal(w.prev_img.image, before)

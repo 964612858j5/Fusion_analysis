@@ -7,6 +7,7 @@ import gc
 import glob
 import hashlib
 import json
+import copy
 import time
 import traceback
 import multiprocessing as mp
@@ -159,6 +160,9 @@ class MainWindow(QMainWindow):
         # handlers stay quiet and the reconcile at the end is the only one.
         self._restoring_display_state = False
         self._preview_update_pending = False
+        # The settings a segmentation search or a fused.zarr run will use, as
+        # opposed to the ones on screen. None until the user saves them.
+        self._fusion_settings_snapshot = None
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -406,6 +410,26 @@ class MainWindow(QMainWindow):
         self._step0.channel_color_changed.connect(
             self._on_step0_channel_color_changed)
         ll.addWidget(self.config, stretch=1)
+
+        # The commit point for everything above it. The preview follows the
+        # panel live; a segmentation search and the final fused.zarr run on
+        # what this button froze, so the two can be told apart.
+        self._btn_save_fusion_settings = QPushButton("💾 Save Fusion Settings")
+        self._btn_save_fusion_settings.setToolTip(
+            "Freeze the ticked channels, their weights and their Min/Max/Gamma "
+            "as the settings segmentation and fused.zarr will run on. The "
+            "preview keeps following what you change afterwards.")
+        self._btn_save_fusion_settings.setStyleSheet(
+            "QPushButton{color:#8cf;font-size:11px;"
+            "border:1px solid #8cf;border-radius:3px;padding:3px 8px;}"
+            "QPushButton:hover{background:#122333;}"
+            "QPushButton:disabled{color:#666;border-color:#444;}"
+        )
+        self._btn_save_fusion_settings.clicked.connect(self._commit_fusion_settings)
+        ll.addWidget(self._btn_save_fusion_settings)
+        self._fusion_settings_label = QLabel("Unsaved fusion changes")
+        self._fusion_settings_label.setStyleSheet("color:#f4c45e;font-size:10px;")
+        ll.addWidget(self._fusion_settings_label)
 
         self.roi_status = QLabel("No ROI loaded")
         self.roi_status.setAlignment(Qt.AlignCenter)
@@ -826,6 +850,8 @@ class MainWindow(QMainWindow):
             return
         self._dataset_gen_seen = max(gen, self._dataset_gen_seen)
 
+        # The snapshot described the previous slide's channels.
+        self._forget_fusion_settings("another dataset was committed")
         self.step0_done = False
         self._step1_context_ready = False
         self.step1_done = False
@@ -857,6 +883,9 @@ class MainWindow(QMainWindow):
         reason = str(payload.get("reason") or "")
         message = str(payload.get("message") or
                       "The Step0 handoff is no longer valid; run Step0 Save.")
+        # Settings frozen against a handoff that no longer holds describe a
+        # configuration nothing can reproduce.
+        self._forget_fusion_settings("the handoff no longer holds")
         self.step0_done = False
         self._step1_context_ready = False
         self.step1_done = False
@@ -1875,6 +1904,7 @@ class MainWindow(QMainWindow):
 
     def _on_display_state_restored(self):
         """One load and one redraw after a bulk restore."""
+        self._restore_fusion_settings()
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
         self._schedule_step1_session_save()
@@ -3548,11 +3578,15 @@ class MainWindow(QMainWindow):
         """
         self._preview_update_pending = True
         self._prev_timer.start(int(delay_ms))
+        # Said immediately, not after the redraw: the moment the settings differ
+        # from the snapshot, a search must not look startable.
+        self._update_fusion_settings_state()
 
     def _apply_pending_preview_update(self):
         """The coalesced redraw, in whichever mode is showing."""
         self._preview_update_pending = False
         self._refresh_patch_preview(reset_view=False)
+        self._update_fusion_settings_state()
 
     # ── Phase 1 ─────────────────────────────────────────────────────
 
@@ -3563,6 +3597,8 @@ class MainWindow(QMainWindow):
         showing the auto-diameter result for the user to visually confirm.
         After completion, diameter is automatically passed to Phase 2.
         """
+        if not self._require_committed_fusion_settings("Phase 1"):
+            return
         self._show_step1_patch_results_tab("phase1")
         patches = list(self._all_patches)
         if not patches:
@@ -3594,6 +3630,8 @@ class MainWindow(QMainWindow):
     # ── Phase 2 ─────────────────────────────────────────────────────
 
     def _run_p2(self, cfg):
+        if not self._require_committed_fusion_settings("Phase 2"):
+            return
         self._show_step1_patch_results_tab("phase2")
         patches = list(self._all_patches)
         if not patches:
@@ -3627,6 +3665,8 @@ class MainWindow(QMainWindow):
         self._launch_worker(tasks)
 
     def _run_direct_patch_preview(self, params):
+        if not self._require_committed_fusion_settings("A patch preview"):
+            return
         self._show_step1_patch_results_tab("run_patch_preview")
         method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
         if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
@@ -3681,7 +3721,22 @@ class MainWindow(QMainWindow):
     def _launch_worker(self, tasks):
         if self.proc is not None and self.proc.is_alive():
             return
-        nuc_ch, nuc_w = self.config.get_nucleus()
+        # THE SNAPSHOT, copied here on the GUI thread and never read again:
+        # the panel and the Intensity window stay live for the user, and this
+        # job keeps the settings it was started with for as long as it runs.
+        snapshot = self._committed_fusion_settings()
+        if not snapshot:
+            print("[Step1] refusing to launch: no committed fusion settings")
+            return
+        fcfg = copy.deepcopy(snapshot.get("fusion_config") or {})
+        groups = {name: dict(data.get("channels") or {})
+                  for name, data in (fcfg.get("groups") or {}).items()}
+        group_weights = {name: float(data.get("group_weight", 1.0) or 0.0)
+                         for name, data in (fcfg.get("groups") or {}).items()}
+        nucleus = fcfg.get("nucleus") or {}
+        nuc_ch = nucleus.get("channel", "")
+        nuc_w = float(nucleus.get("weight", 0.0) or 0.0)
+        self._running_fusion_settings_hash = snapshot.get("hash")
         self._proc_stopped = False
         self._proc_queue = mp.Queue()
         self._proc_stop_flag = mp.Event()
@@ -3690,13 +3745,14 @@ class MainWindow(QMainWindow):
             "ome_path": self.loader.filepath,
             "name_map": self.loader.name_map,
             "correction_config": self.loader.correction_config,
-            "groups": self.config.get_groups(),
-            "group_weights": self.config.get_group_weights(),
+            "groups": groups,
+            "group_weights": group_weights,
             "nuc_ch": nuc_ch,
             "nuc_w": nuc_w,
             "corrected_zarr_path": self._corrected_zarr_path,
             "corrected_decisions": self._corrected_decisions,
-            "channel_remap_params": self._display_mapping(),
+            "channel_remap_params": copy.deepcopy(
+                snapshot.get("display_mapping") or {}),
             "output_dir": (self.step0_output or {}).get("output_dir") or OUTPUT_DIR,
         }
         first_method = ""
@@ -3894,6 +3950,172 @@ class MainWindow(QMainWindow):
             self._params_source = "phase2"
             self._check_save_unlock()
         self._schedule_step1_session_save()
+
+    # ── the fusion settings: a draft on screen, a snapshot for the workers ──
+
+    def _fusion_settings_draft(self):
+        """What the panel and the Intensity window say RIGHT NOW.
+
+        This is what the previews draw. It is not what a segmentation search
+        runs on: a search that re-read the live panel would change subject
+        half-way through, and the user would have no way to tell which settings
+        produced which result.
+        """
+        # Deep-copied, because the mapping this returns is the workbench's own
+        # live dictionary: a snapshot holding a reference to it would keep
+        # changing under the job that was given it, which is the whole thing a
+        # snapshot exists to prevent.
+        return {
+            "fusion_config": copy.deepcopy(self._effective_fusion_config()),
+            "display_mapping": copy.deepcopy(self._display_mapping() or {}),
+        }
+
+    def _fusion_settings_hash(self, draft=None):
+        draft = self._fusion_settings_draft() if draft is None else draft
+        return self._step1_config_hash(draft)
+
+    def _committed_fusion_settings(self):
+        """The snapshot the workers use, or None when nothing is committed."""
+        return getattr(self, "_fusion_settings_snapshot", None)
+
+    def _fusion_settings_dirty(self):
+        """Does the screen show something the committed snapshot does not?"""
+        snapshot = self._committed_fusion_settings()
+        if not snapshot:
+            return True
+        return snapshot.get("hash") != self._fusion_settings_hash()
+
+    def _fusion_settings_path(self, output_dir=None):
+        out = output_dir or (self.step0_output or {}).get("step1_dir") \
+            or (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
+        return os.path.join(out, "step1_fusion_settings.json")
+
+    def _restore_fusion_settings(self):
+        """Adopt the saved snapshot, but only if it is THIS handoff's.
+
+        A snapshot names the manifest and the raw file it was frozen against.
+        One from another dataset, or from a handoff that has since been
+        republished, describes settings this session cannot reproduce, so it is
+        left on disk and the draft simply counts as unsaved.
+        """
+        self._fusion_settings_snapshot = None
+        path = self._fusion_settings_path()
+        if not os.path.exists(path):
+            self._update_fusion_settings_state()
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                snapshot = json.load(f) or {}
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] saved fusion settings unreadable: {exc}")
+            self._update_fusion_settings_state()
+            return None
+        wanted = str((self.step0_output or {}).get("step0_manifest_path") or "")
+        found = str(snapshot.get("step0_manifest_path") or "")
+        if wanted and found and os.path.abspath(wanted) != os.path.abspath(found):
+            print("[Step1] saved fusion settings belong to another handoff; "
+                  "not adopted")
+            self._update_fusion_settings_state()
+            return None
+        raw = str(getattr(self.loader, "filepath", "") or "")
+        saved_raw = str(snapshot.get("raw_ome_path") or "")
+        if raw and saved_raw and os.path.abspath(raw) != os.path.abspath(saved_raw):
+            print("[Step1] saved fusion settings belong to another dataset; "
+                  "not adopted")
+            self._update_fusion_settings_state()
+            return None
+        if not snapshot.get("hash"):
+            self._update_fusion_settings_state()
+            return None
+        self._fusion_settings_snapshot = snapshot
+        print(f"[Step1] fusion settings restored: {snapshot['hash'][:12]}")
+        self._update_fusion_settings_state()
+        return snapshot
+
+    def _commit_fusion_settings(self, _checked=False):
+        """Freeze the draft as the settings every job will run on.
+
+        Fail-closed: if the file cannot be written the previous snapshot stands
+        and the draft is still unsaved, because a search told it was saved and
+        then run on something else is the confusion this exists to remove.
+        """
+        if self.loader is None:
+            QMessageBox.warning(self, "Fusion settings",
+                                "Load a dataset before saving fusion settings.")
+            return False
+        draft = self._fusion_settings_draft()
+        snapshot = {
+            "version": 1,
+            "hash": self._fusion_settings_hash(draft),
+            "fusion_config": draft["fusion_config"],
+            "display_mapping": draft["display_mapping"],
+            "source_identity": (self.step0_output or {}).get("source_identity"),
+            "step0_manifest_path": (self.step0_output or {}).get(
+                "step0_manifest_path", ""),
+            "raw_ome_path": getattr(self.loader, "filepath", ""),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        path = self._fusion_settings_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] fusion settings NOT saved: {exc}")
+            QMessageBox.warning(
+                self, "Fusion settings",
+                f"The fusion settings could not be saved, so nothing was "
+                f"committed.\n\nReason: {exc}")
+            self._update_fusion_settings_state()
+            return False
+        self._fusion_settings_snapshot = snapshot
+        print(f"[Step1] fusion settings committed: {snapshot['hash'][:12]}")
+        self._update_fusion_settings_state()
+        self._schedule_step1_session_save()
+        return True
+
+    def _forget_fusion_settings(self, reason=""):
+        """Another dataset, or a handoff that no longer holds: the snapshot
+        described settings for a slide that is no longer on screen."""
+        if getattr(self, "_fusion_settings_snapshot", None) is not None:
+            print(f"[Step1] fusion settings dropped{': ' + reason if reason else ''}")
+        self._fusion_settings_snapshot = None
+        self._update_fusion_settings_state()
+
+    def _update_fusion_settings_state(self):
+        """Say, on screen, whether what is drawn is what a search would run."""
+        dirty = self._fusion_settings_dirty()
+        label = getattr(self, "_fusion_settings_label", None)
+        if label is not None:
+            if dirty:
+                label.setText("Unsaved fusion changes")
+                label.setStyleSheet("color:#f4c45e;font-size:10px;")
+            else:
+                snapshot = self._committed_fusion_settings() or {}
+                label.setText(f"Fusion settings saved · {snapshot.get('hash', '')[:8]}")
+                label.setStyleSheet("color:#6bffa0;font-size:10px;")
+        button = getattr(self, "_btn_save_fusion_settings", None)
+        if button is not None:
+            button.setEnabled(dirty)
+        return dirty
+
+    def _require_committed_fusion_settings(self, what):
+        """Refuse to start `what` while the screen and the snapshot disagree."""
+        if not self._fusion_settings_dirty():
+            return True
+        QMessageBox.warning(
+            self, "Unsaved fusion changes",
+            f"{what} runs on the saved fusion settings, and the channel "
+            "settings on screen have not been saved.\n\nClick "
+            "\"Save Fusion Settings\" first — the preview keeps following "
+            "what you change, and a running job keeps the settings it started "
+            "with.")
+        print(f"[Step1] {what} refused: fusion settings are unsaved")
+        return False
 
     def _check_save_unlock(self):
         """Unlock the Save button whenever valid params are available."""
@@ -4861,6 +5083,10 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if not self._require_committed_fusion_settings(
+                "Generating fused.zarr"):
+            return
+
         # ── Commit the display mapping, once, before anything is produced ──
         # Up to here the Min/Max/Gamma the user has been adjusting lived only in
         # memory. This freezes that draft, writes it, and republishes the
@@ -4877,10 +5103,12 @@ class MainWindow(QMainWindow):
             return
 
         # ── Write fusion_config.json ──────────────────────────────────
-        # The EFFECTIVE configuration, so an unticked channel that still holds
-        # a remembered weight cannot reach fused.zarr, the segmentation or the
-        # reuse identity: what is saved is what the screen shows.
-        fcfg = self._effective_fusion_config()
+        # The COMMITTED settings, the same ones every search ran on, so the
+        # file and the results that led to it describe one configuration. An
+        # unticked channel is not in them, whatever weight it still holds.
+        snapshot = self._committed_fusion_settings() or {}
+        fcfg = copy.deepcopy(snapshot.get("fusion_config")
+                             or self._effective_fusion_config())
         # Apply the user's manual Channel Remap (Step0) to the fused output so the
         # fusion reflects their per-channel Min/Max/Gamma adjustments. Corrected
         # channels already flow through the loader's corrected store.

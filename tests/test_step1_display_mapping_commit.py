@@ -238,6 +238,10 @@ def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, m
                 return QtWidgets.QDialog.Rejected
         monkeypatch.setattr(mwmod, "TileSelectDialog", _NoDialog)
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+        # The fusion settings are a separate commit point, and Save refuses
+        # while they are unsaved; this test is about the mapping commit that
+        # comes after that gate.
+        assert w._commit_fusion_settings() is True
 
         w._save()
 

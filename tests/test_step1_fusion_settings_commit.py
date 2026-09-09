@@ -60,6 +60,20 @@ class _Loader:
         return np.zeros(((y1 - y0) or 1, (x1 - x0) or 1), np.float32)
 
 
+def _publish_manifest(tmp_path, loader, remap_hash="remap-1", roi="ROI_1"):
+    """A published Step0 handoff on disk — settings are bound to its CONTENT."""
+    path = tmp_path / "step0_roi_result.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "handoff_schema_version": 2,
+            "channel_remap_config_hash": remap_hash,
+            "active_roi": roi,
+            "source_identity": {"dataset_path": loader.filepath,
+                                "stage": "raw"},
+        }, f)
+    return path
+
+
 def _window(app, tmp_path):
     from block01.ui.main_window import MainWindow
     w = MainWindow()
@@ -67,9 +81,12 @@ def _window(app, tmp_path):
     w.config.set_channels(w.loader.channel_names())
     w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
     w.config.set_nucleus("DAPI", 1.0)
+    _publish_manifest(tmp_path, w.loader)
     w.step0_output = {"step1_dir": str(tmp_path), "output_dir": str(tmp_path),
                       "step0_manifest_path": str(tmp_path / "step0_roi_result.json"),
-                      "source_identity": {"dataset_path": w.loader.filepath}}
+                      "channel_remap_config_hash": "remap-1",
+                      "source_identity": {"dataset_path": w.loader.filepath,
+                                          "stage": "raw"}}
     w._all_patches = [(0, 32, 0, 32)]
     w._preview_patch_idx = 0
     rng = np.random.default_rng(3)
@@ -285,7 +302,8 @@ def test_a_snapshot_from_another_handoff_is_not_adopted(app, tmp_path):
         path = tmp_path / "step1_fusion_settings.json"
         with open(path) as f:
             snapshot = json.load(f)
-        snapshot["step0_manifest_path"] = str(tmp_path / "another" / "manifest.json")
+        snapshot["handoff_identity"]["manifest_path"] = str(
+            tmp_path / "another" / "manifest.json")
         with open(path, "w") as f:
             json.dump(snapshot, f)
 
@@ -402,7 +420,12 @@ def test_params_searched_on_other_settings_are_refused(app, tmp_path,
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         w._run_p1([None])
-        w._on_param_sel({"method": "cellpose_wholecell_fusion", "diameter": 30})
+        # What the worker returns: the params it was given, hash and all.
+        launched = seen["args"]["tasks"][0][2]
+        assert launched["fusion_settings_hash"] == w._committed_fusion_settings()["hash"]
+        # Selecting it in the result grid, the way a Phase 2 pick arrives.
+        w._on_param_sel(dict(launched, method="cellpose_wholecell_fusion",
+                             diameter=30, _phase=2))
         assert w._params_match_committed_settings() is True
 
         w.config._rows["CD3"].spin.setValue(0.9)
@@ -424,14 +447,22 @@ def test_hand_written_params_make_no_claim(app, tmp_path):
         w.config.set_channel_visible("CD3", True)
         w._commit_fusion_settings()
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+        w._params_source = "manual"
 
         assert w._params_match_committed_settings() is True
+
+        # ...and the same params claiming to come from a search are refused,
+        # because a search result without its hash cannot be shown to match.
+        w._params_source = "phase2"
+        assert w._params_match_committed_settings() is False
     finally:
         w.close()
 
 
 @pytest.mark.parametrize("break_it", [
-    "step0_manifest_path", "raw_ome_path", "source_identity", "fusion_config"])
+    "manifest_path", "manifest_digest", "channel_remap_config_hash",
+    "handoff_schema_version", "raw_ome_path", "source_identity",
+    "handoff_identity", "version", "fusion_config"])
 def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it):
     """Fail closed: a missing field is not a wildcard, and an edited file keeps
     the hash it used to have."""
@@ -446,10 +477,36 @@ def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it)
             snapshot = json.load(f)
         if break_it == "fusion_config":
             snapshot["fusion_config"]["groups"]["markers"]["channels"]["CD3"] = 0.9
+        elif break_it == "version":
+            snapshot["version"] = 1
+        elif break_it in ("handoff_identity",):
+            snapshot.pop("handoff_identity", None)
         else:
-            snapshot.pop(break_it, None)
+            snapshot["handoff_identity"].pop(break_it, None)
         with open(path, "w") as f:
             json.dump(snapshot, f)
+
+        w._fusion_settings_snapshot = None
+        assert w._restore_fusion_settings() is None
+        assert w._fusion_settings_dirty() is True
+    finally:
+        w.close()
+
+
+def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
+    """The manifest keeps ONE path. Step0 republishing it in place — a new ROI,
+    a new display mapping, new geometry — leaves the path and the source
+    identity untouched, so only its contents can say the settings no longer
+    describe this handoff."""
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        assert w._fusion_settings_dirty() is False
+
+        # Same path, same source identity, different contents.
+        _publish_manifest(tmp_path, w.loader, remap_hash="remap-2", roi="ROI_2")
 
         w._fusion_settings_snapshot = None
         assert w._restore_fusion_settings() is None
@@ -500,14 +557,7 @@ def test_a_snapshot_that_names_nothing_is_refused(app, tmp_path):
         w.config.set_channel_visible("CD3", True)
         w._commit_fusion_settings()
 
-        path = tmp_path / "step1_fusion_settings.json"
-        with open(path) as f:
-            snapshot = json.load(f)
-        # The raw file still matches on both sides; the manifest is the one
-        # thing neither of them names.
-        snapshot["step0_manifest_path"] = ""
-        with open(path, "w") as f:
-            json.dump(snapshot, f)
+        # No published handoff to compare against at all.
         w.step0_output["step0_manifest_path"] = ""
 
         w._fusion_settings_snapshot = None
@@ -548,11 +598,63 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+        w._params_source = "manual"
 
         w._save()
 
         with open(tmp_path / "fusion_config.json") as f:
             written = json.load(f)
         assert written["channel_remap_params"]["CD3"]["max"] == 1.0
+    finally:
+        w.close()
+
+
+def test_params_that_already_know_their_settings_are_never_re_stamped(app,
+                                                                      tmp_path):
+    """A result carries the hash of the run that produced it. Stamping it with
+    whatever is committed now would turn an old result into a current-looking
+    one — a guess dressed as a record."""
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+
+        older = {"method": "cellpose_wholecell_fusion",
+                 "fusion_settings_hash": "the-run-that-made-it"}
+        assert w._stamp_with_fusion_settings(older)["fusion_settings_hash"] == \
+            "the-run-that-made-it"
+
+        # Only params that say nothing get the current settings' hash.
+        fresh = w._stamp_with_fusion_settings({"method": "mesmer_whole_cell"})
+        assert fresh["fusion_settings_hash"] == \
+            w._committed_fusion_settings()["hash"]
+    finally:
+        w.close()
+
+
+def test_an_old_result_selected_later_keeps_its_own_hash(app, tmp_path,
+                                                         monkeypatch):
+    """Search on A, save B, then click the old result: it still says A, so
+    Generate refuses it."""
+    w = _window(app, tmp_path)
+    try:
+        seen = _launched(w, monkeypatch)
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        first = w._committed_fusion_settings()["hash"]
+        w._run_p1([None])
+        old_result = dict(seen["args"]["tasks"][0][2], _phase=2,
+                          method="cellpose_wholecell_fusion", diameter=30)
+
+        w.config._rows["CD3"].spin.setValue(0.9)
+        w._commit_fusion_settings()
+        assert w._committed_fusion_settings()["hash"] != first
+
+        w._on_param_sel(old_result)
+
+        assert w._p2_params["fusion_settings_hash"] == first
+        assert w._params_match_committed_settings() is False
     finally:
         w.close()

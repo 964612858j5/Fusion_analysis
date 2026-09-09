@@ -83,6 +83,11 @@ _IDENTITY_REMAP = {"min": 0.0, "max": 1.0, "brightness": 0.0,
 # How long a burst of state changes is allowed to coalesce into one redraw.
 PREVIEW_COALESCE_MS = 60
 
+# What a `step1_fusion_settings.json` has to say it is. A file of another
+# version describes a contract this code does not implement, so it is refused
+# rather than half-read.
+FUSION_SETTINGS_VERSION = 2
+
 STEP1_PREVIEW_OVERLAY = "overlay"
 STEP1_PREVIEW_FUSION = "fusion"
 
@@ -3700,6 +3705,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Info", "Please add at least one Patch first")
             return
         params = normalize_segmentation_config(params or {})
+        # Stamped from the snapshot this run is about to be launched with; the
+        # gate above has already refused a dirty draft, so these are the same
+        # settings `_launch_worker` will stamp into the tasks.
         self._p2_params = self._stamp_with_fusion_settings(params)
         self._params_source = "direct_patch_preview"
         self._check_save_unlock()
@@ -3741,7 +3749,15 @@ class MainWindow(QMainWindow):
         nucleus = fcfg.get("nucleus") or {}
         nuc_ch = nucleus.get("channel", "")
         nuc_w = float(nucleus.get("weight", 0.0) or 0.0)
-        self._running_fusion_settings_hash = snapshot.get("hash")
+        # Stamped into the TASKS, not onto the result when somebody clicks it.
+        # The worker returns these params verbatim, so the history, the result
+        # grid and whatever the user selects all carry the hash of the settings
+        # that actually produced them — rather than the hash of whatever ran
+        # most recently, which is a guess.
+        stamp = snapshot.get("hash")
+        tasks = [(pi, roi, dict(params, fusion_settings_hash=stamp))
+                 for pi, roi, params in tasks]
+        self._running_fusion_settings_hash = stamp
         self._proc_stopped = False
         self._proc_queue = mp.Queue()
         self._proc_stop_flag = mp.Event()
@@ -3951,7 +3967,9 @@ class MainWindow(QMainWindow):
             self.search.set_p2_diam(diam)
         else:
             # Phase 2 grid selection
-            self._p2_params    = self._stamp_with_fusion_settings(params)
+            # Whatever the result carries, unchanged: the hash belongs to the
+            # run that produced it and must not be re-guessed here.
+            self._p2_params    = params
             self._params_source = "phase2"
             self._check_save_unlock()
         self._schedule_step1_session_save()
@@ -3965,23 +3983,68 @@ class MainWindow(QMainWindow):
         exactly the mix-up the commit point was added to prevent.
         """
         params = dict(params or {})
-        stamp = getattr(self, "_running_fusion_settings_hash", None)
-        if not stamp:
-            snapshot = self._committed_fusion_settings() or {}
-            stamp = snapshot.get("hash")
+        if params.get("fusion_settings_hash"):
+            return params              # it already knows; never overwrite
+        snapshot = self._committed_fusion_settings() or {}
+        stamp = snapshot.get("hash")
         if stamp:
             params["fusion_settings_hash"] = stamp
         return params
 
+    #: Where segmentation params can come from without having been searched.
+    HANDWRITTEN_PARAM_SOURCES = ("manual", "loaded", "direct_method")
+
     def _params_match_committed_settings(self):
-        """Were the chosen segmentation params produced on these settings?"""
-        stamp = str((self._p2_params or {}).get("fusion_settings_hash") or "")
+        """Were the chosen segmentation params produced on these settings?
+
+        Params typed in or loaded from a file were not produced by a search and
+        make no claim about any fusion. Params from a search must carry the
+        hash of the settings it ran on: no hash means the record is from before
+        this was stamped, or from a path that lost it, and neither can be shown
+        to match.
+        """
+        params = self._p2_params or {}
+        stamp = str(params.get("fusion_settings_hash") or "")
+        source = str(self._params_source or "")
         if not stamp:
-            return True         # params from a file or typed by hand: no claim
+            return source in self.HANDWRITTEN_PARAM_SOURCES
         snapshot = self._committed_fusion_settings() or {}
         return stamp == snapshot.get("hash")
 
     # ── the fusion settings: a draft on screen, a snapshot for the workers ──
+
+    def _handoff_identity(self):
+        """WHAT the handoff says right now, not merely where it lives.
+
+        The manifest keeps one stable path and Step0 republishes it in place, so
+        a path and a source identity can be identical across a republish that
+        changed the ROI, the geometry or the display mapping. The manifest's own
+        contents are what actually changed, so they are what a snapshot is bound
+        to. Returns None when there is nothing to be bound to.
+        """
+        s0 = self.step0_output or {}
+        path = str(s0.get("step0_manifest_path") or "")
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                manifest = json.load(f) or {}
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] could not read the manifest to bind against: {exc}")
+            return None
+        # The whole manifest, minus what changes without meaning anything.
+        return {
+            "manifest_path": os.path.abspath(path),
+            "manifest_digest": self._step1_config_hash(manifest),
+            "channel_remap_config_hash": str(
+                manifest.get("channel_remap_config_hash")
+                or s0.get("channel_remap_config_hash") or ""),
+            "handoff_schema_version": manifest.get("handoff_schema_version"),
+            "source_identity": manifest.get("source_identity")
+            or s0.get("source_identity"),
+            "raw_ome_path": os.path.abspath(
+                str(getattr(self.loader, "filepath", "") or "")),
+        }
 
     def _fusion_settings_draft(self):
         """What the panel and the Intensity window say RIGHT NOW.
@@ -4049,21 +4112,26 @@ class MainWindow(QMainWindow):
             self._update_fusion_settings_state()
             return None
 
-        wanted = str((self.step0_output or {}).get("step0_manifest_path") or "")
-        found = str(snapshot.get("step0_manifest_path") or "")
-        if not wanted or not found:
-            return _refuse("no manifest to compare")
-        if os.path.abspath(wanted) != os.path.abspath(found):
-            return _refuse("another handoff")
-        raw = str(getattr(self.loader, "filepath", "") or "")
-        saved_raw = str(snapshot.get("raw_ome_path") or "")
-        if not raw or not saved_raw:
-            return _refuse("no raw file to compare")
-        if os.path.abspath(raw) != os.path.abspath(saved_raw):
-            return _refuse("another dataset")
-        wanted_id = (self.step0_output or {}).get("source_identity")
-        if self._step1_config_hash(wanted_id) != self._step1_config_hash(
-                snapshot.get("source_identity")):
+        if snapshot.get("version") != FUSION_SETTINGS_VERSION:
+            return _refuse(f"version {snapshot.get('version')!r}, not "
+                           f"{FUSION_SETTINGS_VERSION}")
+        current = self._handoff_identity()
+        saved = snapshot.get("handoff_identity")
+        if current is None:
+            return _refuse("no published handoff to compare against")
+        if not isinstance(saved, dict) or not saved:
+            return _refuse("it records no handoff identity")
+        if not saved.get("source_identity") or not current.get("source_identity"):
+            return _refuse("the source identity is missing on one side")
+        for field in ("manifest_path", "manifest_digest",
+                      "channel_remap_config_hash", "handoff_schema_version",
+                      "raw_ome_path"):
+            if not current.get(field) or not saved.get(field):
+                return _refuse(f"{field} is missing on one side")
+            if current[field] != saved[field]:
+                return _refuse(f"{field} changed since it was saved")
+        if self._step1_config_hash(current.get("source_identity")) != \
+                self._step1_config_hash(saved.get("source_identity")):
             return _refuse("another source identity")
         # The stored hash is the file's own claim about itself; a file that was
         # edited would keep the old one. Recompute it from the content.
@@ -4090,16 +4158,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Fusion settings",
                                 "Load a dataset before saving fusion settings.")
             return False
+        identity = self._handoff_identity()
+        if identity is None:
+            QMessageBox.warning(
+                self, "Fusion settings",
+                "There is no published Step0 handoff to save these settings "
+                "against, so nothing was committed.")
+            print("[Step1] fusion settings NOT saved: no handoff to bind to")
+            self._update_fusion_settings_state()
+            return False
         draft = self._fusion_settings_draft()
         snapshot = {
-            "version": 1,
+            "version": FUSION_SETTINGS_VERSION,
             "hash": self._fusion_settings_hash(draft),
             "fusion_config": draft["fusion_config"],
             "display_mapping": draft["display_mapping"],
-            "source_identity": (self.step0_output or {}).get("source_identity"),
-            "step0_manifest_path": (self.step0_output or {}).get(
-                "step0_manifest_path", ""),
-            "raw_ome_path": getattr(self.loader, "filepath", ""),
+            # WHAT the handoff said when these settings were frozen, not just
+            # where it lives: the manifest keeps one path across republishes.
+            "handoff_identity": identity,
+            "source_identity": identity.get("source_identity"),
+            "step0_manifest_path": identity.get("manifest_path", ""),
+            "raw_ome_path": identity.get("raw_ome_path", ""),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         path = self._fusion_settings_path()

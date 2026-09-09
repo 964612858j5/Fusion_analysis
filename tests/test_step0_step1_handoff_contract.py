@@ -159,6 +159,12 @@ def make_window(run, schema=1, loader_path=None):
     w._overlay_display_cache = {}
     w._pending_channel_demand, w._loader_channels, w._failed_channels = {}, {}, {}
     w._restoring_display_state = False
+    w._preview_update_pending = False
+    # Step1 now has a commit point between the live settings and the settings a
+    # job runs on; a restore consults it, so the double needs the same fields.
+    w._fusion_settings_snapshot = None
+    w._fusion_settings_label = None
+    w._btn_save_fusion_settings = None
     w._step1_preview_mode = "overlay"
     w.prev_img = SimpleNamespace(image=None, clear=lambda: None,
                                  setImage=lambda *a, **k: None)

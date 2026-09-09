@@ -283,11 +283,13 @@ def test_preview_patch_relocated_to_c_right(app):
     s = Step0Page()
     g = _gb(s)
     pp, met, dec = g["Preview Patch"], g["Quantitative Metrics"], g["Per-Channel Decision"]
-    # The former standalone "Process" box is now folded into "Method Parameters"
-    # (run button + Stop + progress + status live there).
+    # The former standalone "Process" box is gone entirely, and so is the run
+    # button: what is left of the run controls (Stop, progress, status) lives
+    # under "Method Parameters".
     ch, mp = g["Channels"], g["Method Parameters"]
     assert "Process" not in g                      # no separate Process box anymore
-    assert _under(mp, s._btn_process)              # run controls under Method Parameters
+    assert not hasattr(s, "_btn_process")          # and no run button at all
+    assert _under(mp, s._btn_stop_process)
     # Preview Patch now shares the bottom_row container with Metrics + Decision...
     assert pp.parentWidget() is met.parentWidget() is dec.parentWidget()
     # ...and is NO LONGER in c_left with Channels/Method Parameters
@@ -743,8 +745,7 @@ class _GpuPathLoader:
 
 @pytest.mark.parametrize(
     ("path_name", "driver"),
-    [("_on_process_clicked", lambda p: p._on_process_clicked()),
-     ("_process_current_channel", lambda p: p._process_current_channel()),
+    [("_process_current_channel", lambda p: p._process_current_channel()),
      ("_save_and_continue", lambda p: p._save_and_continue())],
 )
 def test_a_gpu_path_releases_explore_before_starting(gpu_path_page,
@@ -798,7 +799,7 @@ def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
         lambda self, reason: (_ for _ in ()).throw(RuntimeError("release failed")))
 
     with pytest.raises(RuntimeError, match="release failed"):
-        page._on_process_clicked()
+        page._process_current_channel()
 
     assert not [e for e in timeline
                 if isinstance(e, tuple) and e[0] == "worker.start"], (

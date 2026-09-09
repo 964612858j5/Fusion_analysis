@@ -929,23 +929,16 @@ class Step0Page(QWidget):
         ml.addWidget(self._cucim_warn)
 
         # Run controls folded INTO Method Parameters (the params ARE the run's
-        # inputs). Process = first run; becomes Re-process only after a completed
-        # run when params change (see _on_slider_changed / _on_batch_all_done).
+        # inputs). There is no Process button any more: a parameter change
+        # recomputes the channel it belongs to, Compare and HOT fetch what they
+        # need, and Save writes the corrected zarr. Asking the user to press a
+        # button as well only made those three easy to mistake for previews.
         _sep = QFrame()
         _sep.setFrameShape(QFrame.HLine)
         _sep.setStyleSheet("color:#333;")
         ml.addWidget(_sep)
 
         proc_btn_row = QHBoxLayout()
-        self._btn_process = QPushButton("▶ Process")
-        self._btn_process.setStyleSheet(
-            "QPushButton{background:#1a5c2a;color:#6bffa0;border:1px solid #4a9;"
-            "border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#2a7c3a;}"
-            "QPushButton:disabled{background:#222;color:#555;border-color:#333;}"
-        )
-        self._btn_process.clicked.connect(self._on_process_clicked)
-
         self._btn_stop_process = QPushButton("⏹ Stop")
         self._btn_stop_process.setEnabled(False)
         self._btn_stop_process.setStyleSheet(
@@ -955,7 +948,7 @@ class Step0Page(QWidget):
         )
         self._btn_stop_process.clicked.connect(self._on_stop_process)
 
-        proc_btn_row.addWidget(self._btn_process, stretch=1)
+        proc_btn_row.addStretch(1)
         proc_btn_row.addWidget(self._btn_stop_process)
         ml.addLayout(proc_btn_row)
 
@@ -970,7 +963,7 @@ class Step0Page(QWidget):
         )
         ml.addWidget(self._proc_pbar)
 
-        self._proc_status = QLabel("Select channels and click Process.")
+        self._proc_status = QLabel("Ready.")
         self._proc_status.setWordWrap(True)
         self._proc_status.setStyleSheet("color:#aaa;font-size:10px;")
         ml.addWidget(self._proc_status)
@@ -5394,11 +5387,10 @@ class Step0Page(QWidget):
         self.current_patch_idx = 0
         self.current_channel = None
         self._channel_decisions.clear()
-        # New image/ROI loaded -> no BG run yet: button back to "▶ Process".
+        # New image/ROI loaded: nothing has been computed for it yet.
         # (The stale-result clearing itself lives in _reset_dataset_view_state,
         # which ran above, before the new loader was bound.)
-        if hasattr(self, "_btn_process"):
-            self._reset_process_button()
+        self._params_dirty = False
         # (#5) the BG run-progress widgets (_bg_pbar/_bg_start_status) were removed
         # with the standalone "Run BG correction" button; Save uses its own
         # progress dialog.
@@ -7264,8 +7256,7 @@ class Step0Page(QWidget):
         """The method a Process run would use for `ch` right now.
 
         The row's Method combo first (it is the assigned-method control),
-        then the recorded decision, then "both" -- the same precedence
-        `_on_process_clicked` uses when it reads the ticked rows.
+        then the recorded decision, then "both".
         """
         row = self._channel_rows.get(ch)
         combo = (row or {}).get("method_cb")
@@ -7747,116 +7738,21 @@ class Step0Page(QWidget):
         # clicked after the first Process) is gone: it put the GPU to work on
         # a channel the user had not selected for processing, took the full
         # image away while it ran, and made "which channels did I compute?"
-        # depend on the order rows happened to be clicked in. The checkbox
-        # plus the Process button are now the only way to a correction run;
-        # the row's own state glyph says whether a result exists.
+        # depend on the order rows happened to be clicked in. The row's own
+        # state glyph says whether a result exists.
         if self._has_any_cache(ch):
             self._show_channel_from_cache(ch)
         elif ch in self._computed_channels:
-            self._preview_status.setText(f"No result for {ch}. Try re-processing.")
+            self._preview_status.setText(
+                f"No result for {ch}. Press Enter in a parameter box to "
+                f"compute it again.")
         else:
             self._preview_status.setText(
-                f"{ch}: not computed. Tick it and press Process to fill the "
-                f"compare panels. The full image previews it either way.")
+                f"{ch}: not computed yet. The compare panels compute what they "
+                f"need; the full image previews it either way.")
             self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
 
-    # ══ Process 按钮逻辑 ══════════════════════════════════════════════
-
-    def _on_process_clicked(self):
-        """▶ Process 按钮。只要勾选就跑，method只有tophat/cucim/both。"""
-        busy = self.production_correction_busy()
-        if busy:
-            # Reachable during a Save now that its progress dialog is not
-            # modal; two GPU users at once is what this gate prevents.
-            QMessageBox.information(
-                self, "Busy", f"A {busy} run is already in progress.")
-            return
-        selected = {}
-        for ch, row_data in self._channel_rows.items():
-            if ch == self.nucleus_channel:
-                continue
-            if row_data["checkbox"].isChecked():
-                method = row_data["method_cb"].currentText().lower()
-                if method not in {"tophat", "cucim", "both"}:
-                    method = self._channel_methods.get(ch, "both")
-                if method == "original":
-                    continue  # skip channels with no correction selected
-                selected[ch] = method
-        if not selected:
-            QMessageBox.information(self, "No channels selected",
-                                    "Please check at least one channel and select a method.")
-            return
-        if not self.patches:
-            QMessageBox.information(self, "No patches",
-                                    "Please draw at least one patch in Section B.")
-            return
-
-        # Incremental Process: only NEW or CHANGED channels are recomputed.
-        # "Changed" is decided from evidence -- the signature (method, this
-        # channel's params, the patch list) that produced the cached result --
-        # not from the dirty flag, which cannot say WHICH channel changed.
-        to_process, skipped = {}, []
-        for ch, method in selected.items():
-            sig = self._channel_signature(ch, method)
-            if self._channel_is_up_to_date(ch, sig):
-                skipped.append(ch)
-                continue
-            to_process[ch] = method
-            self._pending_signatures[ch] = sig
-        for ch in skipped:
-            print(f"[Step0] Process: {ch} is up to date (unchanged method/params/"
-                  f"patches) — skipped", flush=True)
-        self._params_dirty = False
-
-        if not to_process:
-            n = len(selected)
-            print(f"[Step0] Process: nothing to do — all {n} selected channel(s) "
-                  f"are up to date", flush=True)
-            self._proc_status.setText(
-                f"All {n} selected channel{'s' if n != 1 else ''} are up to date.")
-            self._proc_status.setStyleSheet("color:#6bffa0;font-size:10px;")
-            self._btn_process.setEnabled(True)
-            self._btn_stop_process.setEnabled(False)
-            self._process_completed = True
-            self._reset_process_button()
-            return
-
-        # 清掉待重算通道的缓存（method/params/patches 变了）
-        stale = set(to_process.keys())
-        self._preview_cache = {k: v for k, v in self._preview_cache.items()
-                               if k[0] not in stale}
-        self._computed_channels -= stale
-        for ch in stale:
-            self._computed_signatures.pop(ch, None)
-        self._process_completed = False
-
-        self._btn_process.setEnabled(False)
-        self._btn_stop_process.setEnabled(True)
-        self._proc_pbar.setVisible(True)
-        self._proc_pbar.setValue(0)
-        self._proc_status.setText("Starting…")
-
-        # 将待计算通道标记为"计算中"
-        for ch in to_process:
-            self._set_channel_computing(ch)
-
-        self._batch_worker = BatchProcessWorker(
-            self.loader, self.patches, to_process,
-            self.nucleus_channel,
-            self._tophat_slider.value(),
-            self._cucim_slider.value(),
-            channel_params=self._channel_params,   # each channel uses its own params
-            max_gpu_workers=4,
-        )
-        self._batch_worker.channel_patch_done.connect(self._gen_slot(self._on_batch_patch_done))
-        self._batch_worker.channel_done.connect(self._gen_slot(self._on_batch_channel_done))
-        self._batch_worker.all_done.connect(self._gen_slot(self._on_batch_all_done))
-        self._batch_worker.progress.connect(self._gen_slot(self._on_batch_progress))
-        self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
-        self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
-        self._release_explore_for_production("patch background correction")
-        self._watch_production_worker(self._batch_worker)
-        self._batch_worker.start()
+    # ══ correction runs ═══════════════════════════════════════════════
 
     def _on_stop_process(self):
         if self._batch_worker and self._batch_worker.isRunning():
@@ -7923,27 +7819,13 @@ class Step0Page(QWidget):
         self._pending_signatures.pop(ch, None)
         self._set_channel_done(ch)
 
-    def _reset_process_button(self):
-        """Return the run button to the idle '▶ Process' look + clear the dirty flag.
-        A subsequent param change (after a completed run) flips it to Re-process."""
-        self._params_dirty = False
-        self._btn_process.setText("▶ Process")
-        self._btn_process.setStyleSheet(
-            "QPushButton{background:#1a5c2a;color:#6bffa0;border:1px solid #4a9;"
-            "border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#2a7c3a;}"
-            "QPushButton:disabled{background:#222;color:#555;border-color:#333;}"
-        )
-
     def _on_batch_all_done(self):
         self._proc_pbar.setValue(100)
         self._proc_status.setText("✓ All done. Click a channel to view results.")
         self._proc_status.setStyleSheet("color:#6bffa0;font-size:10px;font-weight:bold;")
-        self._btn_process.setEnabled(True)
         self._btn_stop_process.setEnabled(False)
         self._process_completed = True
-        # Not auto "Re-process": only a param change after this flips it (Topic 1).
-        self._reset_process_button()
+        self._params_dirty = False
         # Every row is re-asked, not just the ones that ran: a skipped
         # up-to-date channel and a channel whose run was stopped both have
         # something to say now.
@@ -7953,7 +7835,6 @@ class Step0Page(QWidget):
     def _on_batch_canceled(self):
         self._proc_status.setText("Stopped.")
         self._proc_status.setStyleSheet("color:#ffb86c;font-size:10px;")
-        self._btn_process.setEnabled(True)
         self._btn_stop_process.setEnabled(False)
         self._clear_pending_signatures()
 
@@ -7962,7 +7843,6 @@ class Step0Page(QWidget):
         if ch == "__global__":
             self._proc_status.setText(f"Error (see terminal): {msg[:60]}")
             self._proc_status.setStyleSheet("color:#ff6b6b;font-size:10px;")
-            self._btn_process.setEnabled(True)
             self._btn_stop_process.setEnabled(False)
             self._clear_pending_signatures()
 
@@ -8384,19 +8264,12 @@ class Step0Page(QWidget):
                 else:
                     self._sync_full_image_param(method=method)
         self._refresh_all_channel_states()
-        # Only a param change AFTER a completed run (with data loaded) means the
-        # existing result is stale -> "Re-process". Before any run (or no data),
-        # the button stays "▶ Process" (this is the initial run, not a re-run).
+        # A parameter change after a completed run means the stored result for
+        # this channel is stale. The row glyph says so; there is no button to
+        # relabel, and pressing Enter recomputes it.
         if not (self._process_completed and self.loader and self.patches):
             return
-        if not self._params_dirty:
-            self._params_dirty = True
-            self._btn_process.setText("↺ Re-process (params changed)")
-            self._btn_process.setStyleSheet(
-                "QPushButton{background:#5c3a1a;color:#ffb86c;border:1px solid #c87;"
-                "border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;}"
-                "QPushButton:hover{background:#7c5a2a;}"
-            )
+        self._params_dirty = True
 
     def _refresh_slider_labels(self):
         # No-op: the QSpinBox input boxes display their own value now (the old

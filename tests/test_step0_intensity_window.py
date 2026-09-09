@@ -831,9 +831,13 @@ def test_the_dapi_checkbox_never_enters_processing(app, monkeypatch):
     assert "DAPI" not in page._channel_methods
     assert page._channel_decisions.get("DAPI") in (None, "original")
 
-    page._on_process_clicked()
+    # The nucleus row is never a correction subject, whichever entry runs.
+    page.current_channel = "CD3"
+    page._process_current_channel("both")
+    page.current_channel = "DAPI"
+    page._process_current_channel("both")
 
-    assert _FakeBatchWorker.created, "Process did not start"
+    assert _FakeBatchWorker.created, "no correction run started"
     for w in _FakeBatchWorker.created:
         assert "DAPI" not in w.channels, w.channels
 

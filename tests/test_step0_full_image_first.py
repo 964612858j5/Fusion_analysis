@@ -532,7 +532,7 @@ def test_nothing_but_process_reaches_a_worker(app, monkeypatch, what, drive):
     assert started == [], f"{what} started a correction run"
 
 
-def test_process_computes_exactly_the_ticked_channels(app, monkeypatch):
+def test_a_recompute_computes_exactly_its_own_channel(app, monkeypatch):
     page = _page(app)
     page._explore_tab = _RecordingExploreTab()
     asked = {}
@@ -557,9 +557,11 @@ def test_process_computes_exactly_the_ticked_channels(app, monkeypatch):
         page._channel_rows[ch]["method_cb"].setCurrentText("TopHat")
         page._channel_rows[ch]["checkbox"].setChecked(True)
 
-    page._on_process_clicked()
+    # The surviving entry: Enter recomputes the channel the user is on.
+    page.current_channel = "CD3"
+    page._process_current_channel("tophat")
 
-    assert asked["channels"] == {"CD3": "tophat", "CD20": "tophat"}
+    assert asked["channels"] == {"CD3": "tophat"}
 
 
 def test_a_parameter_change_only_marks_the_channel_stale(app, monkeypatch):

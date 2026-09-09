@@ -203,15 +203,14 @@ def test_the_gpu_entry_points_refuse_while_a_save_runs(app, monkeypatch):
     row = page._channel_rows.get("CD3")
     row["checkbox"].setChecked(True)
 
-    page._process_current_channel()            # Apply
-    page._on_process_clicked()                 # ▶ Process
+    page._process_current_channel()            # Enter in a parameter box
     # Clicking an uncomputed channel is no longer a GPU entry point at all
     # (it used to start an on-demand run), so it is checked here for the
     # opposite reason: busy or not, it must reach no worker.
     page._on_channel_selected_by_id("CD20")
 
     assert started == [], "a GPU run started during a Save"
-    assert boxes == ["Busy", "Busy"]
+    assert boxes == ["Busy"]
     assert "not computed" in page._preview_status.text().lower()
 
 

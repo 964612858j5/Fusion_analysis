@@ -1,11 +1,14 @@
-"""▶ Process is INCREMENTAL: it recomputes only what is new or changed.
+"""Correction runs are INCREMENTAL: what is already computed is not redone.
 
-Pressing Process again with nothing changed used to rerun every ticked
-channel from scratch (minutes of GPU work for an identical result). The page
-now records, per channel, the signature that PRODUCED its cached result --
-(method, tophat_radius, cucim_sigma, patches) -- and at Process time skips
-every channel whose would-be signature matches and whose patches are all
-cached.
+The page records, per channel, the signature that PRODUCED its cached result
+-- (method, tophat_radius, cucim_sigma, patches) -- so it can answer "is this
+channel up to date?" without rerunning it. That answer drives the row glyphs
+and keeps a recompute to the channel that actually changed.
+
+The ▶ Process button that used to read this is gone: a parameter change
+recomputes the channel it belongs to (Enter), the compare panels and HOT fetch
+what they need, and Save writes the corrected zarr. The signature machinery
+below is what all of those still rely on.
 
 Own module (not appended to test_step0_background_correction_tab.py): that
 file already builds enough `Step0Page` instances to sit at the edge of the
@@ -113,151 +116,126 @@ def _finish(page, *channels):
 
 
 def _last_channels(page):
-    """The channels dict of the worker created by the last Process, or None."""
+    """The channels dict of the worker created by the last run, or None."""
     workers = _FakeBatchWorker.created
     return dict(workers[-1].channels) if workers else None
 
 
-def _run_process(page):
-    """Press Process; return the channels the new worker got (None if none)."""
+def _recompute(page, channel, method="both"):
+    """The surviving entry point: Enter in a parameter box recomputes the
+    channel the user is on. Returns the channels dict the worker got."""
     before = len(_FakeBatchWorker.created)
-    page._on_process_clicked()
+    page.current_channel = channel
+    page._process_current_channel(method)
     if len(_FakeBatchWorker.created) == before:
         return None
     return _last_channels(page)
 
 
+def _up_to_date(page, channel, method=None):
+    method = method or page._channel_row_method(channel)
+    return page._channel_is_up_to_date(
+        channel, page._channel_signature(channel, method))
+
+
 # ── the cases ─────────────────────────────────────────────────────────────
 
-def test_second_process_with_no_change_starts_no_worker(page):
-    _tick(page, "CD3", "CD20")
-    assert _run_process(page) == {"CD3": "both", "CD20": "both"}
-    _finish(page, "CD3", "CD20")
+def test_a_finished_run_leaves_its_channel_up_to_date(page):
+    _tick(page, "CD3")
+    assert _recompute(page, "CD3") == {"CD3": "both"}
+    _finish(page, "CD3")
 
-    assert _run_process(page) is None, (
-        "Process recomputed channels that nothing had changed")
-    assert "up to date" in page._proc_status.text().lower()
-    assert "2" in page._proc_status.text()
-    # and the cached results are untouched
-    assert page._computed_channels == {"CD3", "CD20"}
-    assert set(page._preview_cache) == {("CD3", 0), ("CD3", 1),
-                                        ("CD20", 0), ("CD20", 1)}
-    assert page._btn_process.text() == "▶ Process"
-    assert page._btn_process.isEnabled()
+    assert _up_to_date(page, "CD3") is True
+    assert page._computed_channels == {"CD3"}
+    assert set(page._preview_cache) == {("CD3", 0), ("CD3", 1)}
     assert not page._btn_stop_process.isEnabled()
 
 
-def test_changing_one_channels_sigma_recomputes_only_that_channel(page):
+def test_a_sigma_change_makes_only_that_channel_stale(page):
     _tick(page, "CD3", "CD20")
-    _run_process(page)
-    _finish(page, "CD3", "CD20")
+    _recompute(page, "CD3")
+    _finish(page, "CD3")
+    _recompute(page, "CD20")
+    _finish(page, "CD20")
 
     tr, cs = page._resolve_channel_params("CD3")
     page._channel_params["CD3"] = {"tophat_radius": tr, "cucim_sigma": cs + 7}
 
-    assert _run_process(page) == {"CD3": "both"}, (
-        "a sigma change on CD3 must recompute CD3 and nothing else")
-    # CD20's cached pixels survived; CD3's were dropped for the rerun
-    assert ("CD20", 0) in page._preview_cache
-    assert ("CD3", 0) not in page._preview_cache
+    assert _up_to_date(page, "CD3") is False
+    assert _up_to_date(page, "CD20") is True
+
+
+def test_recomputing_one_channel_keeps_the_others_pixels(page):
+    _tick(page, "CD3", "CD20")
+    _recompute(page, "CD3")
+    _finish(page, "CD3")
+    _recompute(page, "CD20")
+    _finish(page, "CD20")
+
+    assert _recompute(page, "CD3") == {"CD3": "both"}
+
+    assert ("CD20", 0) in page._preview_cache      # untouched
+    assert ("CD3", 0) not in page._preview_cache   # dropped for the rerun
     assert page._computed_channels == {"CD20"}
 
 
-def test_changing_one_channels_method_recomputes_only_that_channel(page):
-    """A "both" result covers a later TopHat or cuCIM request (same params,
-    same patches), so narrowing the method is NOT a recompute. Widening it --
-    a channel computed as TopHat only, now asked for cuCIM -- is, and only
-    that channel runs."""
-    _tick(page, "CD3", "CD20")
-    page._channel_rows["CD20"]["method_cb"].setCurrentText("TopHat")
-    assert _run_process(page) == {"CD3": "both", "CD20": "tophat"}
-    _finish(page, "CD3", "CD20")
-
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")   # covered by "both"
-    assert _run_process(page) is None
-
-    page._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")   # not covered
-    assert _run_process(page) == {"CD20": "cucim"}
-
-def test_newly_checked_channel_computes_only_itself(page):
+def test_a_both_result_covers_a_later_tophat_or_cucim_request(page):
+    """A channel computed as "both" is up to date for a narrower request with
+    the same parameters and patches; widening it is a real change."""
     _tick(page, "CD3")
-    _run_process(page)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    tr, cs = page._resolve_channel_params("CD3")
+    page._pending_signatures["CD3"] = page._channel_signature(
+        "CD3", "both", params=(tr, cs))
     _finish(page, "CD3")
 
-    _tick(page, "CD20")
+    assert _up_to_date(page, "CD3", "tophat") is True
+    assert _up_to_date(page, "CD3", "cucim") is True
 
-    assert _run_process(page) == {"CD20": "both"}, (
-        "adding a channel must not rerun the ones already computed")
-    assert ("CD3", 0) in page._preview_cache
+    page._channel_params["CD3"] = {"tophat_radius": tr + 5, "cucim_sigma": cs}
+    assert _up_to_date(page, "CD3", "tophat") is False
 
 
-def test_adding_a_patch_recomputes_every_selected_channel(page):
+def test_a_changed_patch_list_invalidates_every_channel(page):
     _tick(page, "CD3", "CD20")
-    _run_process(page)
-    _finish(page, "CD3", "CD20")
+    _recompute(page, "CD3")
+    _finish(page, "CD3")
+    _recompute(page, "CD20")
+    _finish(page, "CD20")
 
     page.patches = list(page.patches) + [(0, 32, 32, 64)]
 
-    assert _run_process(page) == {"CD3": "both", "CD20": "both"}, (
-        "a changed patch list invalidates every channel's cached result")
-    assert page._preview_cache == {}
+    assert _up_to_date(page, "CD3") is False
+    assert _up_to_date(page, "CD20") is False
 
 
-def test_apply_still_forces_its_channel(page):
+def test_a_recompute_always_runs_its_own_channel(page):
+    """Pressing Enter is an instruction, not a question: it recomputes the
+    channel even when nothing about it has changed."""
     _tick(page, "CD3")
-    _run_process(page)
+    _recompute(page, "CD3")
     _finish(page, "CD3")
-    n_before = len(_FakeBatchWorker.created)
+    assert _up_to_date(page, "CD3") is True
 
-    page.current_channel = "CD3"
-    page._process_current_channel()
-
-    assert len(_FakeBatchWorker.created) == n_before + 1, (
-        "Apply must always recompute its channel, even when unchanged")
-    assert _last_channels(page) == {"CD3": "both"}
+    assert _recompute(page, "CD3") == {"CD3": "both"}
     assert ("CD3", 0) not in page._preview_cache
-
-
-def test_apply_result_is_then_up_to_date_for_process(page):
-    _tick(page, "CD3")
-    _run_process(page)
-    _finish(page, "CD3")
-
-    page.current_channel = "CD3"
-    page._process_current_channel()
-    _finish(page, "CD3")
-
-    assert _run_process(page) is None, (
-        "the result Apply just produced must count as up to date")
 
 
 def test_dataset_reset_forgets_the_signatures(page):
     _tick(page, "CD3", "CD20")
-    _run_process(page)
-    _finish(page, "CD3", "CD20")
+    _recompute(page, "CD3")
+    _finish(page, "CD3")
     assert page._computed_signatures
 
     page._reset_dataset_view_state()
 
     assert page._computed_signatures == {}
     assert page._pending_signatures == {}
-    # a channel of the NEW dataset with the same name is computed again
-    _tick(page, "CD3", "CD20")
-    assert _run_process(page) == {"CD3": "both", "CD20": "both"}
+    assert _up_to_date(page, "CD3") is False
 
 
-def test_a_both_result_covers_a_later_tophat_or_cucim_request(page):
-    """Apply computes "both"; a later Process asking for tophat (same params,
-    same patches) needs nothing new -- the "both" result already holds it."""
-    _tick(page, "CD3")
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
-    tr, cs = page._resolve_channel_params("CD3")
-    page._pending_signatures["CD3"] = page._channel_signature("CD3", "both", params=(tr, cs))
-    _finish(page, "CD3")
-
-    assert _run_process(page) is None
-    assert "up to date" in page._proc_status.text()
-
-    # A different radius is a real change, "both" or not.
-    page._channel_params["CD3"] = {"tophat_radius": tr + 5, "cucim_sigma": cs}
-    assert _run_process(page) == {"CD3": "tophat"}
+def test_no_process_button_survives(page):
+    """The entry the user pressed is gone, and nothing kept a hidden one."""
+    assert not hasattr(page, "_btn_process")
+    assert not hasattr(page, "_on_process_clicked")
+    assert not hasattr(page, "_reset_process_button")

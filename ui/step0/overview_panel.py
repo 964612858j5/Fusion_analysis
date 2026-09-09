@@ -726,9 +726,76 @@ MID_PAN_BLANK_MOVE_TOLERANCE = 2
 # and so the tests can drive it.
 MID_PAN_DEBUG_ENV = "BLOCK01_MIDPAN_DEBUG"
 
+# Where the readout goes. stderr is where it has always gone, and on a real
+# desktop run that is the terminal that launched the application -- which
+# nobody is watching while both hands are on the mouse reproducing the
+# gesture. BLOCK01_MIDPAN_LOG=<path> appends the same lines to a file as
+# well, so the run can be driven by one person and read by another (or by a
+# tail) without the two having to share a terminal. Unset: stderr only,
+# exactly as before.
+MID_PAN_LOG_ENV = "BLOCK01_MIDPAN_LOG"
+
+# A drag that never reaches the screen and a drag that never reaches the
+# code look identical to the hand holding the mouse. These two bound the
+# extra measurements that tell them apart, and both are inert unless the
+# switch above is on:
+#
+#   * MID_PAN_LOOP_GAP_MS -- the GUI thread is asked every 5 ms whether it
+#     is still there. A silence longer than this is the event loop being
+#     unavailable, which means the NEXT mouse event was late before it was
+#     ever handled: the pointer's own timeline, not the pan's.
+#   * MID_PAN_PAINT_WINDOW_MS -- viewport repaints are logged only while a
+#     gesture is open and for this long after it closes. A camera that
+#     moved on every move while the picture arrived hundreds of ms later is
+#     a drawing problem; the same lines during idle browsing would be noise
+#     and permanent overhead.
+MID_PAN_LOOP_GAP_MS = 25.0
+MID_PAN_PAINT_WINDOW_MS = 500.0
+
+_MID_PAN_LOG_FILE = None            # (path, handle) for the current run
+
 
 def _mid_pan_debug_enabled():
     return os.environ.get(MID_PAN_DEBUG_ENV, "") not in ("", "0", "false", "no")
+
+
+def _mid_pan_log_sink(line):
+    """Write one diagnostic line to stderr, and to the file the environment
+    named if it named one.
+
+    The handle is kept open for the process (one line per event, flushed, is
+    already the shape of this readout) and re-opened if the path changes, so
+    a test can point it somewhere and a run can point it elsewhere. A file
+    that cannot be opened or written costs the gesture nothing: the line
+    still reaches stderr and the failure is reported once, in place of the
+    file, rather than raised into the drag.
+    """
+    global _MID_PAN_LOG_FILE
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except Exception:                                       # noqa: BLE001
+        pass
+    path = os.environ.get(MID_PAN_LOG_ENV, "") or None
+    if path is None:
+        return
+    try:
+        if _MID_PAN_LOG_FILE is None or _MID_PAN_LOG_FILE[0] != path:
+            if _MID_PAN_LOG_FILE is not None:
+                try:
+                    _MID_PAN_LOG_FILE[1].close()
+                except Exception:                           # noqa: BLE001
+                    pass
+            _MID_PAN_LOG_FILE = (
+                path, open(path, "a", encoding="utf-8", buffering=1))
+        _MID_PAN_LOG_FILE[1].write(line + "\n")
+        _MID_PAN_LOG_FILE[1].flush()
+    except Exception as exc:                                # noqa: BLE001
+        _MID_PAN_LOG_FILE = None
+        try:
+            print(f"MIDPAN log-file-failed path={path!r} err={exc!r}",
+                  file=sys.stderr, flush=True)
+        except Exception:                                   # noqa: BLE001
+            pass
 
 
 def _mid_pan_button_name(buttons):
@@ -1055,6 +1122,19 @@ class OverviewPanel(QWidget):
         self._mid_pan_watch = None
         self._mid_pan_seq = 0
         self._mid_pan_t0 = None
+        # Diagnostic-only bookkeeping. All of it stays None/False unless
+        # BLOCK01_MIDPAN_DEBUG is on: `_mid_pan_step_t` is when the camera
+        # last moved (so the next repaint can be dated from it),
+        # `_mid_pan_step_painted` whether that step has reached the screen,
+        # `_mid_pan_closed_t` when the last gesture ended (the paint window
+        # outlives it deliberately -- a picture that arrives after the
+        # release is exactly the symptom), and `_mid_pan_gap_*` the GUI
+        # thread's own heartbeat.
+        self._mid_pan_step_t = None
+        self._mid_pan_step_painted = False
+        self._mid_pan_closed_t = None
+        self._mid_pan_gap_timer = None
+        self._mid_pan_gap_last = None
 
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
@@ -2299,6 +2379,9 @@ class OverviewPanel(QWidget):
             else:
                 self._mid_pan_grab = viewport
         self._mid_pan_watch_start()
+        self._mid_pan_step_t = None
+        self._mid_pan_step_painted = False
+        self._mid_pan_gap_start()
         self._mid_pan_log("press", event)
         try:
             event.accept()
@@ -2315,11 +2398,12 @@ class OverviewPanel(QWidget):
     # causes actually produces it. So the machine that has the bug is the
     # instrument, and this is its readout.
 
-    def _mid_pan_log(self, what, event=None, obj=None, reason=None):
+    def _mid_pan_log(self, what, event=None, obj=None, reason=None,
+                     extra=None):
         if not _mid_pan_debug_enabled():
             return
         try:
-            self._mid_pan_log_line(what, event, obj, reason)
+            self._mid_pan_log_line(what, event, obj, reason, extra)
         except Exception as exc:                            # noqa: BLE001
             # A diagnostic that can break the gesture it is diagnosing is
             # worse than no diagnostic.
@@ -2329,7 +2413,7 @@ class OverviewPanel(QWidget):
             except Exception:                               # noqa: BLE001
                 pass
 
-    def _mid_pan_log_line(self, what, event, obj, reason):
+    def _mid_pan_log_line(self, what, event, obj, reason, extra=None):
         now = time.monotonic()
         t0 = self._mid_pan_t0
         since = "n/a" if t0 is None else f"{(now - t0) * 1000.0:.1f}ms"
@@ -2391,9 +2475,15 @@ class OverviewPanel(QWidget):
             f"swallow={getattr(self, '_adjust_swallow', 'n/a')}",
             f"since_press={since}",
         ]
+        # The measured fields come last and only when the call site measured
+        # something, so the field set of an ordinary event line is the one
+        # the previous runs produced and a reader (or a test) can still
+        # index it by name.
+        for key, value in (extra or {}).items():
+            fields.append(f"{key}={value}")
         if reason is not None:
             fields.append(f"closed_by={reason}")
-        print(" ".join(str(f) for f in fields), file=sys.stderr, flush=True)
+        _mid_pan_log_sink(" ".join(str(f) for f in fields))
 
     def _mid_pan_viewport(self):
         """The viewport widget the gesture is owned at, or None once the
@@ -2479,6 +2569,87 @@ class OverviewPanel(QWidget):
         except RuntimeError:                                # noqa: BLE001
             pass
 
+    def _mid_pan_gap_start(self):
+        """Ask the GUI thread every 5 ms whether it is still there.
+
+        A drag can feel dead or heavy for a reason that has nothing to do
+        with the mouse: if the event loop is busy for 200 ms, the pointer's
+        events wait 200 ms before any of this code sees them, and every
+        timestamp downstream is already late. Nothing in the log so far can
+        tell that apart from an event that was never delivered, because
+        both look like a missing line.
+
+        A timer is the only instrument that can: it should tick 200 times a
+        second, so a silence IS the thread being unavailable, measured from
+        the inside. It exists only while a gesture is open and only while
+        the switch is on -- a permanent 5 ms timer in a viewer that reads
+        slides would be exactly the kind of overhead this diagnostic must
+        not leave behind.
+        """
+        if not _mid_pan_debug_enabled():
+            return
+        if self._mid_pan_gap_timer is not None:
+            return
+        try:
+            timer = QtCore.QTimer(self)
+            timer.setInterval(5)
+            timer.timeout.connect(self._mid_pan_gap_tick)
+            self._mid_pan_gap_last = time.monotonic()
+            timer.start()
+        except Exception:                                   # noqa: BLE001
+            return
+        self._mid_pan_gap_timer = timer
+
+    def _mid_pan_gap_tick(self):
+        now = time.monotonic()
+        last, self._mid_pan_gap_last = self._mid_pan_gap_last, now
+        if last is None:
+            return
+        gap = (now - last) * 1000.0
+        if gap > MID_PAN_LOOP_GAP_MS:
+            self._mid_pan_log("loop-gap", extra={
+                "gap_ms": f"{gap:.1f}",
+                "expected_ms": "5",
+            })
+
+    def _mid_pan_gap_stop(self):
+        timer, self._mid_pan_gap_timer = self._mid_pan_gap_timer, None
+        self._mid_pan_gap_last = None
+        if timer is None:
+            return
+        try:
+            timer.stop()
+            timer.deleteLater()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    def _mid_pan_log_paint(self):
+        """Date the viewport's repaint from the camera step that asked for it.
+
+        Only the FIRST repaint after a step is logged, because that is the
+        one the eye is waiting for; the rest of a scene's repaints say
+        nothing about whether the picture followed the hand. Bounded to an
+        open gesture plus MID_PAN_PAINT_WINDOW_MS after it closes, so
+        ordinary browsing pays nothing for this even with the switch on.
+        """
+        if not _mid_pan_debug_enabled():
+            return
+        open_now = self._mid_pan_last is not None
+        closed = self._mid_pan_closed_t
+        recent = (closed is not None
+                  and (time.monotonic() - closed) * 1000.0
+                  <= MID_PAN_PAINT_WINDOW_MS)
+        if not (open_now or recent):
+            return
+        step_t = self._mid_pan_step_t
+        if step_t is None or self._mid_pan_step_painted:
+            return
+        self._mid_pan_step_painted = True
+        self._mid_pan_log("paint", extra={
+            "after_step_ms": f"{(time.monotonic() - step_t) * 1000.0:.2f}",
+            "gesture_open": open_now,
+        })
+
     def _mid_pan_check_viewport(self):
         """End an open gesture whose viewport has been swapped underneath.
 
@@ -2521,6 +2692,12 @@ class OverviewPanel(QWidget):
         self._mid_pan_confirmed = False
         self._mid_pan_blank = 0
         self._mid_pan_watch_stop()
+        # The heartbeat goes with the gesture; the paint window outlives it
+        # on purpose, so a repaint that lands after the release is still
+        # dated from the step that asked for it.
+        if was_open:
+            self._mid_pan_closed_t = time.monotonic()
+        self._mid_pan_gap_stop()
         if held is None:
             return
         try:
@@ -2633,9 +2810,29 @@ class OverviewPanel(QWidget):
         dy = now.y() - last.y()
         self._mid_pan_last = now_scene
         if dx or dy:
+            # Measured only when the switch is on: the camera step's own
+            # cost and whether the range it was asked to move actually
+            # moved. Together with the paint line that follows it these
+            # separate "the code never ran" from "the code ran and the
+            # screen did not follow" -- the two the hand cannot tell apart.
+            measuring = _mid_pan_debug_enabled()
+            step_t0 = time.monotonic() if measuring else None
+            before = self.vb.viewRange() if measuring else None
             self.vb._resetTarget()
             self.vb.translateBy(x=-dx, y=-dy)
             self.vb.sigRangeChangedManually.emit((True, True))
+            if measuring:
+                after = self.vb.viewRange()
+                self._mid_pan_step_t = time.monotonic()
+                self._mid_pan_step_painted = False
+                self._mid_pan_log("move-applied", event, extra={
+                    "took_ms": f"{(self._mid_pan_step_t - step_t0) * 1000.0:.2f}",
+                    "moved": _view_range_moved(before, after),
+                    "dx_view": f"{dx:.4f}",
+                    "dy_view": f"{dy:.4f}",
+                    "range_x": f"({after[0][0]:.2f},{after[0][1]:.2f})",
+                    "range_y": f"({after[1][0]:.2f},{after[1][1]:.2f})",
+                })
             # A step that translated is a camera the user has moved. The
             # PRESS is not: a middle click that never moved anywhere leaves
             # the panel owning the camera, so a stray click on a
@@ -2798,6 +2995,29 @@ class OverviewPanel(QWidget):
         if t == QtCore.QEvent.MouseButtonRelease \
                 and event.button() == Qt.MiddleButton:
             return self._middle_pan_release(event)
+
+        # ── diagnostics, below the gesture and above everything else ──
+        #
+        # Neither branch changes what the viewport does with the event;
+        # both are silent unless BLOCK01_MIDPAN_DEBUG is on.
+        #
+        # `stray-move` is the ONE signature the log could not previously
+        # produce: a move arriving with the middle button down while no
+        # gesture is open means the PRESS never got here -- taken by a
+        # window manager's click-to-focus grab, delivered to another
+        # window, or swallowed on the way. Without this line that case is
+        # indistinguishable from the user not having pressed anything.
+        if (t == QtCore.QEvent.MouseMove
+                and not self._middle_pan_holding()
+                and _mid_pan_debug_enabled()):
+            try:
+                stray = bool(event.buttons() & Qt.MiddleButton)
+            except (AttributeError, RuntimeError):
+                stray = False
+            if stray:
+                self._mid_pan_log("stray-move", event)
+        if t == QtCore.QEvent.Paint:
+            self._mid_pan_log_paint()
 
         # ── Mouse press ───────────────────────────────────────────────
         # `if`, not `elif`: the wheel branch above returns unconditionally,

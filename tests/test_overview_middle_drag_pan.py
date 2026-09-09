@@ -1358,3 +1358,242 @@ def test_the_diagnostic_is_off_by_default_and_speaks_when_asked(
         assert field in lines[0], f"{field} missing from {lines[0]}"
     assert any("closed_by=" in ln for ln in lines), \
         "the log never says which line closed the gesture"
+
+
+# ── what the diagnostic can now measure ──────────────────────────────────
+#
+# The previous readout answered "did the code run": events in, state
+# machine, which line closed the gesture. It could not answer the two
+# questions a sluggish drag actually raises -- did the camera step reach
+# the SCREEN, and was the GUI thread even available when the event
+# arrived -- nor the one that a dead FIRST drag raises: did the press
+# reach this viewport at all. These pin the fields that answer them, and
+# pin equally that none of it runs, or costs anything, with the switch
+# off. They do not claim the real machine's cause; they make the
+# instrument able to name it.
+
+def _midpan_lines(err):
+    return [ln for ln in err.splitlines() if ln.startswith("MIDPAN")]
+
+
+def _field(line, name):
+    for token in line.split():
+        if token.startswith(name + "="):
+            return token[len(name) + 1:]
+    return None
+
+
+def test_a_camera_step_is_timed_and_says_whether_the_range_moved(
+        app, capsys, monkeypatch):
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    applied = [ln for ln in lines if " what=move-applied " in ln]
+    assert len(applied) == 4, \
+        f"four moves translated, {len(applied)} were measured"
+    for ln in applied:
+        assert _field(ln, "moved") == "True", ln
+        assert float(_field(ln, "took_ms")) >= 0.0, ln
+        assert _field(ln, "range_x") and _field(ln, "range_y"), ln
+        assert _field(ln, "dx_view") and _field(ln, "dy_view"), ln
+
+
+def test_a_move_that_translated_nothing_is_not_reported_as_a_step(
+        app, capsys, monkeypatch):
+    """`move-applied` is the CAMERA's line, not the event's: a zero-delta
+    move has nothing to time and nothing to have reached the screen."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _press(panel, at=(250, 250))
+    _move(panel, (250, 250))
+    _release(panel, (250, 250))
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    assert [ln for ln in lines if " what=move " in ln], \
+        "the move itself is still logged"
+    assert not [ln for ln in lines if " what=move-applied " in ln]
+
+
+def test_the_repaint_after_a_step_is_dated_from_that_step(
+        app, capsys, monkeypatch):
+    """C, the drawing case: the camera moved on every move and the picture
+    followed hundreds of ms later. Unmeasurable until the repaint carries
+    its own delay from the step that asked for it."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _press(panel)
+    _move(panel, (240, 244))
+    QtWidgets.QApplication.instance().sendEvent(
+        panel.gview.viewport(),
+        QtGui.QPaintEvent(panel.gview.viewport().rect()))
+    _release(panel, (240, 244))
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    paints = [ln for ln in lines if " what=paint " in ln]
+    assert len(paints) == 1, \
+        f"one repaint after one step, got {len(paints)}"
+    assert float(_field(paints[0], "after_step_ms")) >= 0.0, paints[0]
+    assert _field(paints[0], "gesture_open") == "True", paints[0]
+
+
+def test_only_the_first_repaint_after_a_step_is_logged(app, capsys,
+                                                       monkeypatch):
+    """The eye waits for the first one. The rest of a scene's repaints say
+    nothing about whether the picture followed the hand, and a line per
+    repaint would drown the timeline they are in."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _press(panel)
+    _move(panel, (240, 244))
+    vp = panel.gview.viewport()
+    for _ in range(5):
+        QtWidgets.QApplication.instance().sendEvent(
+            vp, QtGui.QPaintEvent(vp.rect()))
+    _release(panel, (240, 244))
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    assert len([ln for ln in lines if " what=paint " in ln]) == 1
+
+
+def test_repaints_outside_a_gesture_are_not_logged(app, capsys, monkeypatch):
+    """Bounded on purpose: with the switch on, ordinary browsing must not
+    pay for this."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    vp = panel.gview.viewport()
+    # A step HAS happened -- the repaint is pending and would be dated if
+    # the window were open. What closes it is the window, and nothing else.
+    _press(panel)
+    _move(panel, (240, 244))
+    _release(panel, (240, 244))
+    assert panel._mid_pan_step_t is not None
+    assert not panel._mid_pan_step_painted
+    capsys.readouterr()
+
+    monkeypatch.setattr(ovp, "MID_PAN_PAINT_WINDOW_MS", 0.0)
+    for _ in range(3):
+        QtWidgets.QApplication.instance().sendEvent(
+            vp, QtGui.QPaintEvent(vp.rect()))
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    assert not [ln for ln in lines if " what=paint " in ln]
+
+
+def test_a_middle_move_with_no_open_gesture_reports_the_lost_press(
+        app, capsys, monkeypatch):
+    """A, the ownership case: the button IS down and this viewport never
+    saw the press. Previously indistinguishable from no gesture at all."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _move(panel, (240, 244), buttons=Qt.MiddleButton)
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    strays = [ln for ln in lines if " what=stray-move " in ln]
+    assert len(strays) == 1, \
+        "a middle-button move with no press taken here is the signature of " \
+        "a press that went somewhere else; the log has to name it"
+    assert _field(strays[0], "last") == "None", strays[0]
+
+
+def test_a_move_with_no_button_and_no_gesture_is_not_a_lost_press(
+        app, capsys, monkeypatch):
+    """Every idle mouse move is not evidence. Only a move carrying the
+    middle button says a press was lost."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _move(panel, (240, 244), buttons=Qt.NoButton)
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    assert not [ln for ln in lines if " what=stray-move " in ln]
+
+
+def test_the_gui_thread_heartbeat_lives_exactly_as_long_as_a_gesture(
+        app, monkeypatch):
+    """D, the blocked-thread case: a 5 ms timer is the only instrument that
+    can measure the event loop's own availability from inside it. It must
+    not outlive the drag -- a permanent 5 ms timer in a slide viewer is
+    the overhead this diagnostic is forbidden to leave behind."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    assert panel._mid_pan_gap_timer is None
+
+    _press(panel)
+    assert panel._mid_pan_gap_timer is not None
+    assert panel._mid_pan_gap_timer.isActive()
+
+    _release(panel, (250, 250))
+    assert panel._mid_pan_gap_timer is None
+
+
+def test_the_heartbeat_does_not_exist_with_the_switch_off(app, monkeypatch):
+    monkeypatch.delenv(ovp.MID_PAN_DEBUG_ENV, raising=False)
+    panel = _panel()
+    _press(panel)
+    assert panel._mid_pan_gap_timer is None
+    _release(panel, (250, 250))
+
+
+def test_a_stalled_event_loop_is_reported_as_a_gap(app, capsys, monkeypatch):
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.setattr(ovp, "MID_PAN_LOOP_GAP_MS", 0.0)
+    panel = _panel()
+    _press(panel)
+    panel._mid_pan_gap_tick()
+    _release(panel, (250, 250))
+    lines = _midpan_lines(capsys.readouterr().err)
+
+    gaps = [ln for ln in lines if " what=loop-gap " in ln]
+    assert gaps, "a tick later than its interval is the thread being busy"
+    assert float(_field(gaps[0], "gap_ms")) >= 0.0, gaps[0]
+
+
+def test_none_of_the_new_lines_appear_with_the_switch_off(app, capsys,
+                                                          monkeypatch):
+    monkeypatch.delenv(ovp.MID_PAN_DEBUG_ENV, raising=False)
+    panel = _panel()
+    vp = panel.gview.viewport()
+    _middle_drag(panel, -40, -24)
+    _move(panel, (240, 244), buttons=Qt.MiddleButton)
+    QtWidgets.QApplication.instance().sendEvent(
+        vp, QtGui.QPaintEvent(vp.rect()))
+
+    assert "MIDPAN" not in capsys.readouterr().err
+
+
+def test_the_log_can_be_collected_from_a_file(app, capsys, monkeypatch,
+                                              tmp_path):
+    """The run is driven by whoever has the mouse; it is read by whoever
+    has the question. stderr on a real desktop run is a terminal nobody is
+    watching mid-gesture, so the same lines go to a file when one is
+    named."""
+    path = tmp_path / "midpan.log"
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.setenv(ovp.MID_PAN_LOG_ENV, str(path))
+    monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+
+    on_stderr = _midpan_lines(capsys.readouterr().err)
+    in_file = _midpan_lines(path.read_text(encoding="utf-8"))
+    assert in_file == on_stderr, "the file sink is the same readout, not a subset"
+    assert any(" what=move-applied " in ln for ln in in_file)
+
+
+def test_an_unwritable_log_file_does_not_break_the_drag(app, capsys,
+                                                        monkeypatch,
+                                                        tmp_path):
+    """A diagnostic that can break the gesture it is diagnosing is worse
+    than no diagnostic."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.setenv(ovp.MID_PAN_LOG_ENV, str(tmp_path / "no" / "such.log"))
+    monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
+    panel = _panel()
+    before = _range(panel)
+    _middle_drag(panel, -40, -24)
+
+    assert _range(panel) != before, "the pan still happened"
+    err = capsys.readouterr().err
+    assert "log-file-failed" in err
+    assert _midpan_lines(err), "and the lines still reached stderr"

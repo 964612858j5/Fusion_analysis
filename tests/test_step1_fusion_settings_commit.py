@@ -36,6 +36,10 @@ def _no_modal_dialogs(monkeypatch):
     for name in ("information", "critical", "warning"):
         monkeypatch.setattr(QtWidgets.QMessageBox, name,
                             staticmethod(lambda *a, _w=warned, **k: _w.append(a)))
+    # A wrong answer here reaches a modal question and blocks for ever under
+    # offscreen Qt: a test that should go red would hang instead.
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
     return warned
 
 
@@ -656,5 +660,135 @@ def test_an_old_result_selected_later_keeps_its_own_hash(app, tmp_path,
 
         assert w._p2_params["fusion_settings_hash"] == first
         assert w._params_match_committed_settings() is False
+    finally:
+        w.close()
+
+
+def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path,
+                                                                   monkeypatch):
+    """The real order, end to end.
+
+    Save Fusion Settings binds the snapshot to the manifest as it is. A Save
+    then commits the display mapping, which republishes that manifest in place
+    — same path, new contents — and fuses. Without following that republish the
+    settings just saved would be refused by the next session's restore while
+    this window went on saying "saved".
+
+    The numbers did not change, so the hash does not either: the search that ran
+    on these settings is still a search on these settings.
+    """
+    from block01.ui import main_window as mw
+
+    w = _window(app, tmp_path)
+    try:
+        seen = _launched(w, monkeypatch)
+        monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
+        monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: None)
+
+        class _NoDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec_(self):
+                return QtWidgets.QDialog.Rejected
+        monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
+
+        # 1. save the settings, 2. search on them
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        assert w._commit_fusion_settings() is True
+        saved_hash = w._committed_fusion_settings()["hash"]
+        w._run_p1([None])
+        result = dict(seen["args"]["tasks"][0][2], _phase=2,
+                      method="cellpose_wholecell_fusion", diameter=30)
+        w._on_param_sel(result)
+        assert w._params_match_committed_settings() is True
+
+        # 3. Generate: the mapping commit republishes the manifest in place.
+        def _commit_and_republish(self):
+            _publish_manifest(tmp_path, self.loader, remap_hash="remap-2")
+            return True, "committed"
+        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
+                            _commit_and_republish)
+
+        w._save()
+
+        # The hash is untouched, so the search result is still valid...
+        assert w._committed_fusion_settings()["hash"] == saved_hash
+        assert w._params_match_committed_settings() is True
+        assert w._fusion_settings_dirty() is False
+
+        # ...and a fresh session restores exactly this snapshot.
+        w._fusion_settings_snapshot = None
+        restored = w._restore_fusion_settings()
+        assert restored is not None
+        assert restored["hash"] == saved_hash
+        assert restored["handoff_identity"]["channel_remap_config_hash"] == "remap-2"
+    finally:
+        w.close()
+
+
+def test_a_rebind_that_cannot_be_written_fuses_nothing(app, tmp_path,
+                                                       monkeypatch,
+                                                       _no_modal_dialogs):
+    """Memory and disk must not disagree about which handoff the settings
+    belong to, so a rebind that cannot be written stops the Save and drops the
+    claim rather than fusing against a snapshot nothing could restore."""
+    from block01.ui import main_window as mw
+
+    w = _window(app, tmp_path)
+    try:
+        monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
+        fused = []
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: fused.append(a))
+
+        class _NoDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec_(self):
+                return QtWidgets.QDialog.Rejected
+        # Unstubbed, this opens a real modal under offscreen Qt and the test
+        # hangs instead of failing.
+        monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w._commit_fusion_settings()
+        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+        w._params_source = "manual"
+
+        def _commit_and_republish(self):
+            _publish_manifest(tmp_path, self.loader, remap_hash="remap-2")
+            return True, "committed"
+        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
+                            _commit_and_republish)
+        monkeypatch.setattr(type(w), "_write_fusion_settings",
+                            lambda self, snap: (False, OSError("read-only")))
+
+        w._save()
+
+        assert fused == []
+        assert w._committed_fusion_settings() is None
+        assert w._fusion_settings_dirty() is True
+        assert any("could not be tied" in str(a) for a in _no_modal_dialogs)
+    finally:
+        w.close()
+
+
+def test_a_republish_that_changes_nothing_leaves_the_snapshot_alone(app, tmp_path,
+                                                                   monkeypatch):
+    w = _window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w._commit_fusion_settings()
+        before = dict(w._committed_fusion_settings())
+
+        ok, why = w._rebind_fusion_settings_to_handoff()
+
+        assert ok is True and why == "unchanged"
+        assert w._committed_fusion_settings() == before
     finally:
         w.close()

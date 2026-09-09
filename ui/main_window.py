@@ -4181,22 +4181,8 @@ class MainWindow(QMainWindow):
             "raw_ome_path": identity.get("raw_ome_path", ""),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        path = self._fusion_settings_path()
-        tmp = path + ".tmp"
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[Step1] fusion settings NOT saved: {exc}")
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+        written, exc = self._write_fusion_settings(snapshot)
+        if not written:
             QMessageBox.warning(
                 self, "Fusion settings",
                 f"The fusion settings could not be saved, so nothing was "
@@ -4208,6 +4194,67 @@ class MainWindow(QMainWindow):
         self._update_fusion_settings_state()
         self._schedule_step1_session_save()
         return True
+
+    def _write_fusion_settings(self, snapshot):
+        """Put a snapshot on disk whole or not at all. Returns (ok, error)."""
+        path = self._fusion_settings_path()
+        tmp = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] fusion settings NOT written: {exc}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return False, exc
+        return True, None
+
+    def _rebind_fusion_settings_to_handoff(self):
+        """Follow the handoff the committed settings are bound to.
+
+        A Save commits the display mapping first, and that republishes the
+        manifest — same path, new contents. The settings the user saved a
+        moment ago still name the manifest as it was, so the fusion about to be
+        written would be refused by the next session's restore while this
+        window went on saying "saved".
+
+        The NUMBERS have not changed, so the hash does not either: a search that
+        ran on these settings is still a search on these settings. Only the
+        record of which handoff they are bound to moves, and it moves on disk
+        and in memory together. Returns (ok, reason).
+        """
+        snapshot = self._committed_fusion_settings()
+        if not snapshot:
+            return True, "nothing committed"
+        identity = self._handoff_identity()
+        if identity is None:
+            return False, "no published handoff to bind to"
+        if identity == snapshot.get("handoff_identity"):
+            return True, "unchanged"
+        rebound = dict(snapshot)
+        rebound["handoff_identity"] = identity
+        rebound["source_identity"] = identity.get("source_identity")
+        rebound["step0_manifest_path"] = identity.get("manifest_path", "")
+        rebound["raw_ome_path"] = identity.get("raw_ome_path", "")
+        rebound["rebound_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        written, exc = self._write_fusion_settings(rebound)
+        if not written:
+            # Memory and disk must not disagree about which handoff these
+            # settings belong to, so neither keeps the claim.
+            self._forget_fusion_settings("the rebind could not be written")
+            return False, str(exc)
+        self._fusion_settings_snapshot = rebound
+        print(f"[Step1] fusion settings rebound to the republished handoff "
+              f"({rebound['hash'][:12]} unchanged)")
+        self._update_fusion_settings_state()
+        return True, "rebound"
 
     def _forget_fusion_settings(self, reason=""):
         """Another dataset, or a handoff that no longer holds: the snapshot
@@ -5235,6 +5282,20 @@ class MainWindow(QMainWindow):
         # existing result is touched: a fused zarr that cannot say which mapping
         # made it is exactly what this phase is removing.
         committed, reason = self._commit_display_mapping_for_save()
+        if committed:
+            # That commit republished the manifest, so the settings the user
+            # saved now name a handoff as it was a moment ago. Follow it, or
+            # stop: fusing against a snapshot the next session would refuse is
+            # how "saved" and "restorable" come apart.
+            rebound, why = self._rebind_fusion_settings_to_handoff()
+            if not rebound:
+                QMessageBox.warning(
+                    self, "Fusion settings",
+                    "The saved fusion settings could not be tied to the "
+                    f"republished Step0 handoff, so nothing was fused.\n\n"
+                    f"Reason: {why}\n\nSave the fusion settings again.")
+                print(f"[Step1] save aborted: settings not rebound ({why})")
+                return
         if not committed:
             QMessageBox.warning(
                 self, "Save",

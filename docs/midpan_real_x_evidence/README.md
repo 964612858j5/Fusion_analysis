@@ -3,24 +3,41 @@
 Seven attempts at this gesture were each reasoned from a symptom, and the
 seventh (`c6a7631`) said so in its own message: the root cause was
 unconfirmed because no real X server had been measured. This directory
-holds the measurement that replaced the guessing, so the numbers quoted
-in `673f44c`, `7ed2960` and `f7dcbf4` can be recomputed by anyone.
+holds the measurement that replaced the guessing. Every number quoted
+here is printed by the script shipped beside the logs, from the logs
+shipped here -- run it rather than trusting the table.
 
 ## What is here
 
 | File | What it is |
 |---|---|
-| `run1_before_the_fix.log.gz` | 4312 log lines from a real desktop run of the loaded application, before any behaviour change. 106 gestures, 816 moves, three `OverviewPanel` instances. |
-| `run2_after_the_fix.log.gz` | 2157 lines from a later real run with `673f44c` in place. 48 gestures, 686 moves. |
-| `analyze_midpan_log.py` | One gesture per line, plus the A/B/C/D classification. Reads either file directly. |
+| `run1_before_the_fix.log.gz` | A real desktop run of the loaded application before any behaviour change: 125 gestures over three `OverviewPanel` instances, 1313 moves. |
+| `run2_after_the_fix.log.gz` | A later real run with `673f44c` in place (its first, over-general form -- see below): 48 gestures, 686 moves. |
+| `xtest_{cold,warm,raise_cold,raise_warm}.log.gz` | Four XTEST-driven runs of the harness against the narrowed rule, 2 gestures each: thumbnail just shown, after a left click, after `Step0Page._bring_to_front`, and that plus a click. |
+| `analyze_midpan_log.py` | Recomputes everything below from any of those files. `--gestures` adds one line per gesture with its A/B/C/D verdict. |
+| `harness/midpan_realx.py`, `harness/xinject.py` | The harness: hosts the REAL `TissueNavigatorPopup` on the running X server and drives the middle button with XTEST-injected pointer events. |
 
-Both logs are anonymised: every memory address is replaced by a stable
-label (`0x0001`, `0x0002`, …) so the same object stays recognisable
-within a run, and the monotonic clock is rebased to the run's first
-line. The lines contain no paths, file names or slide identifiers -- only
-event fields, timings and object types.
+All logs are anonymised: memory addresses are replaced by stable labels
+(`0x0001`, `0x0002`, …) so an object stays recognisable within a run, and
+the monotonic clock is rebased to each run's first line. The lines carry
+no paths, file names or slide identifiers -- event fields, timings and
+object types only.
 
-## How they were produced
+A gesture's identity is `(panel, gid)` and never `gid` alone: every panel
+counts its own gestures from 1, and the page's own thumbnail and the
+Tissue Navigator popup's are two panels in one process. Grouping by `gid`
+merges unrelated drags -- it produces "gestures" with three presses
+spanning minutes, and totals that are simply wrong.
+
+## Reproducing
+
+```bash
+python docs/midpan_real_x_evidence/analyze_midpan_log.py \
+    docs/midpan_real_x_evidence/run1_before_the_fix.log.gz \
+    docs/midpan_real_x_evidence/run2_after_the_fix.log.gz
+```
+
+New logs come from the application itself:
 
 ```bash
 cd /sda1/Fusion/analysis_pipline
@@ -28,48 +45,62 @@ BLOCK01_MIDPAN_DEBUG=1 BLOCK01_MIDPAN_LOG=/tmp/midpan.log \
     python -m block01_v14.main 2>&1 | tee /tmp/midpan_stderr.log
 ```
 
-The switch is default-off and read per event (`MID_PAN_DEBUG_ENV`), so a
-single run can be instrumented without a code change. `BLOCK01_MIDPAN_LOG`
-appends the same lines to a file, which is what makes a run drivable by
-the person with the mouse and readable by someone else. The `tee` also
-captures `[gui-watchdog]` stall traces.
+The switch is default-off and read per event, so a single run can be
+instrumented without a code change; `BLOCK01_MIDPAN_LOG` appends the same
+lines to a file, which is what makes a run drivable by the person with
+the mouse and readable by someone else. The `tee` also captures
+`[gui-watchdog]` stall traces. Note that the file is opened once per path:
+renaming it mid-run does not start a new file, the process keeps writing
+to the same inode (see "corrections" below).
 
-Independent of the application, a harness drives the REAL
-`TissueNavigatorPopup` on the running X server with XTEST-injected
-pointer events (`libXtst` via ctypes; no `xdotool` needed), which is the
-one path the offscreen tests cannot exercise. It found the gesture
-correct in all four activation states, including after
-`Step0Page._bring_to_front` -- where mutter answers with
-`isActiveWindow() == False` and panning still works -- so window
-activation is not a precondition, and the first move's `buttons()` is
-`MiddleButton` on this machine, which is what `c6a7631` had guessed
-otherwise.
-
-## Recomputing the numbers
+The harness needs no installation -- `libXtst` through ctypes, no
+`xdotool`:
 
 ```bash
-python docs/midpan_real_x_evidence/analyze_midpan_log.py \
-    docs/midpan_real_x_evidence/run1_before_the_fix.log.gz
-python docs/midpan_real_x_evidence/analyze_midpan_log.py \
-    docs/midpan_real_x_evidence/run2_after_the_fix.log.gz
+DISPLAY=:1 HARNESS_X=2350 HARNESS_Y=420 \
+BLOCK01_MIDPAN_LOG=/tmp/xtest_cold.log \
+    python docs/midpan_real_x_evidence/harness/midpan_realx.py cold
 ```
+
+It refuses to inject unless the window under the pointer belongs to it
+(`XQueryPointer`'s child against its own window's ancestor chain -- a
+reparenting window manager puts its frame in between), so a run on a
+live desktop cannot click someone else's windows.
+
+## The numbers
 
 | Quantity | run 1 (before) | run 2 (after) |
 |---|---|---|
-| gestures / moves | 106 / 816 | 48 / 686 |
+| gestures `(panel, gid)` / panels | 125 / 3 | 48 / 1 |
+| moves / camera steps | 1313 / 1313 | 686 / 672 |
 | moves reporting `buttons=NoButton` | 38 | 14 |
-| camera steps exactly undone by the next move | 31 pairs, in 26 gestures | 0 |
-| … of which undid the gesture's FIRST step | 31 of 31 | — |
-| camera step cost | p50 0.42 ms, p99 1.77 ms | p50 ~0.4 ms |
-| first repaint after a step | p50 0.67 ms, p99 9.35 ms | p50 0.55 ms, p99 2.22 ms |
+| … of those, with `QApplication.mouseButtons() == Middle` | 38 | 14 |
+| moves reporting some other button / stray moves | 0 / 0 | 0 / 0 |
+| camera steps exactly undone by the next move | **31** | **0** |
+| … undoing the gesture's FIRST step / a later step | **31 / 0** | 0 / 0 |
+| camera step cost | p50 0.42, p99 1.77, max 8.06 ms | p50 0.35, p99 0.77 ms |
+| first repaint after a step | p50 0.67, p99 9.35, max 42.3 ms | p50 0.55, p99 2.22, max 21.8 ms |
+| move-to-move arrival gap | not recorded | p50 7.7, p90 45.1, p99 150.7, max 258.5 ms |
+| `late_ms` = arrival gap − platform stamp gap | not recorded | p50 0.0, p90 3.4, p99 12.3, max 76.2 ms |
 | 5 ms heartbeat gaps | 24 lines, worst 77.6 ms | 3 lines, worst 81.1 ms |
-| move-to-move arrival gap | p50 8.3, p90 46, p99 148, max 308 ms | p50 7.7, p90 45, p99 151, max 259 ms |
-| `late_ms` (arrival gap minus the platform's own stamp gap) | not recorded | p50 0.0, p90 3.4, p99 12.3, max 76.2 ms |
+| gestures ended by a release / by a new press | 101 / 24 | 38 / 10 |
 
-`31 of 31` is the count that named the cause. An exactly negated step is
-not a hand and not a coincidence: it says the following move carried a
-position already visited. That it was ALWAYS the first step being undone
-says which position -- the press.
+`31 / 0` is the count that names the cause. An exactly negated step is
+neither a hand nor a coincidence: it says the later move carried a
+position already visited. That it was ALWAYS the FIRST step being undone
+says which position -- the press -- and when: while the pointer grab is
+being established.
+
+run 2 shows `refused as a grab replay: 0` because it ran the first,
+over-general form of the fix, which returned before naming the refusal;
+its 14 refusals are visible as 686 moves producing 672 camera steps. The
+narrowed rule logs each one as `stale-grab-move`.
+
+The four XTEST runs (24 moves each, 96 in total) all read: 24 moves, 24
+camera steps, 0 blank moves, 0 refusals, 0 undone pairs, step cost ~0.2
+ms, first repaint ~0.4 ms. Their `arr_gap` p99 of 1000 ms is the
+harness's own deliberate one-second hold between the press and the first
+move, not a stall.
 
 ## A. A failing gesture (run 1, before the fix)
 
@@ -84,12 +115,13 @@ says which position -- the press.
 ```
 
 Press taken, first move handled in 0.56 ms, on screen 1.04 ms later --
-and 4 ms after that a move reporting no buttons puts the picture back,
-`dx` and `dy` negated to the last digit. The camera did move both times;
-what the hand gets is the first fraction of the drag thrown away. Because
-the anchor moves back with it, the drag still ENDS in the right place,
-which is why every test that checked the final range passed while the
-desk reported a middle drag that does nothing at first.
+and 4 ms after that a move reporting no buttons, while the application
+still reads middle-down, puts the picture back with `dx` and `dy` negated
+to the last digit. The camera did move both times; what the hand gets is
+the first fraction of the drag thrown away. Because the anchor moves back
+with it the drag still ENDS in the right place, which is why every test
+that checked the final range passed while the desk reported a middle drag
+that does nothing at first.
 
 Classification: **B** -- the press arrived, the moves were handled, and
 an event this code accepted destroyed the step. Not A (the press is
@@ -109,9 +141,9 @@ here), not C (repaint 1.04 ms), not D (no heartbeat gap).
     124.10 ms  move-applied     dx=-132.1996  dy=-132.1996  took=0.59ms moved=True
 ```
 
-Every move is handled once, in under a millisecond, and reaches the
-screen within two. Nothing is undone. The gaps between moves (80 ms,
-35 ms, 7 ms) are the hand's, not the code's -- see D.
+Every move handled once, in under a millisecond, on screen within two,
+nothing undone. The 80 ms and 35 ms gaps between moves are not the code's
+-- see D.
 
 ## C. The same replayed move, refused (run 2, after the fix)
 
@@ -125,16 +157,26 @@ screen within two. Nothing is undone. The gaps between moves (80 ms,
 ```
 
 Same shape, same 5 ms, and this time no second `move-applied`: the
-replayed position is refused, the step stands. Across run 2 that happened
-14 times and produced 672 camera steps from 686 moves, with zero undone
+replayed position is refused and the step stands. Across run 2 that
+happened 14 times, giving 672 camera steps from 686 moves and zero undone
 pairs.
 
-The refusal is deliberately narrow -- no button reported AND the position
-bit-identical to this gesture's press AND not already there. A platform
-that fails to report buttons while giving a real new position keeps
-panning and keeps its anchor; refusing that whole class would rebuild the
-same complaint from the other side, and nothing measured here licenses
-it.
+The refusal matches the measured signature and nothing wider. All five
+clauses are observations:
+
+* the event reported no button (38 of 38 such moves in run 1);
+* the application still reads middle-down (38 of 38);
+* this gesture has made exactly ONE camera step, so the refusal is
+  bounded to the grab-establishment phase where all 31 were seen -- by a
+  fact, rather than by inventing a 4-17 ms window;
+* the position is bit-identical to this gesture's press;
+* we are not already sitting there, where the move is a no-op anyway.
+
+So a hand that drags out over several steps and legitimately comes back
+to the press position -- on a move the platform failed to label -- keeps
+panning, as does a blank move at a real new position at any point in the
+drag. Refusing either would rebuild the reported complaint from the other
+side.
 
 ## D. What the stutter is, and what it is not
 
@@ -160,23 +202,43 @@ What that supports, and all it supports:
 
 It does NOT identify the hand as the cause. A mouse, its driver, the X
 server, or event coalescing upstream of the timestamp can all open a gap
-before Qt ever sees it, and this log cannot separate those. Saying "the
-hand paused" would be a claim beyond the instrument.
+before Qt ever sees it, and this log cannot separate those. The analyzer
+therefore leaves such holes unclassified.
+
+## Corrections to earlier reports
+
+* An earlier version of this README said run 1 was "106 gestures, 816
+  moves". That was a snapshot taken while the application was still
+  appending to the file: the log had been renamed, but the process holds
+  the handle it opened, so it kept writing to the same inode. The
+  committed file has 125 gestures and 1313 moves. The conclusion is
+  unchanged and stronger on the full file: 31 undone steps, 31 of 31 of
+  them the gesture's first.
+* An earlier analyzer grouped by `gid` alone and so merged the three
+  panels' gestures. It now groups by `(panel, gid)` and prints every
+  summary this README states.
+* "A hand that paused" was a claim beyond the instrument; see D.
 
 ## Still unexplained
 
 * The failure originally reported -- a middle drag doing nothing at the
   start, in Step1 especially -- has NOT been reproduced with the
-  diagnostic on. `673f44c` fixes a defect the instrument proved is there
-  and which has that exact shape; it is not confirmation that what the
-  user saw is gone.
-* 8 of run 1's 106 presses arrived within 50 ms of the previous press, so
-  duplicate presses do occur on this machine and restart the gesture.
-  With the anchor taken at the new press the picture does not move when
-  it happens, and nothing measured says it is felt, so it is untouched.
+  diagnostic on. The fix addresses a defect the instrument proved is
+  there and which has that exact shape; it is not confirmation that what
+  the user saw is gone.
+* Duplicate presses do occur: 24 of run 1's gestures and 10 of run 2's
+  ended because another press arrived on an open gesture. With the anchor
+  taken at the new press the picture does not move when it happens, and
+  nothing measured says it is felt, so it is untouched.
 * Whatever opens the pre-timestamp holes in D is outside this log.
-  Answering it needs an instrument below Qt (XInput event stamps, or the
-  device's own report rate).
+  Answering it needs an instrument below Qt -- XInput event stamps, or
+  the device's own report rate.
+* The refusal itself has not been exercised by XTEST, and cannot be:
+  injected moves always carry `buttons=Middle`, while the signature needs
+  a move with no button at the press position, which only the platform's
+  own grab replay produces. The next real-application run with the
+  diagnostic on will show it as `stale-grab-move` lines, with
+  `moves - camera steps` equal to their count.
 
 ## Cost of leaving the diagnostic in
 

@@ -1738,3 +1738,83 @@ def test_no_signal_is_emitted_per_move_that_nothing_listens_to(app):
     assert _range(panel) != before, "the camera still moves"
     assert seen == [], \
         "the pan announced itself once per move to nobody at all"
+
+
+# ── separating a hand that paused from an event that was late ────────────
+#
+# MEASURED on the real desk: the intervals between one middle move and
+# the next were p50 8 ms but p90 46 ms, p99 148 ms and 308 ms at worst,
+# while the handler's own work was under 2 ms and the first repaint under
+# 10 ms, and the 5 ms heartbeat recorded no matching silence. So the moves
+# were not late because this code was busy -- they were not there. The
+# log could not then say whether the hand had stopped or the event had
+# waited, and those need opposite fixes.
+
+def test_a_move_carries_how_late_it_was(app, capsys, monkeypatch):
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+    lines = [ln for ln in _midpan_lines(capsys.readouterr().err)
+             if " what=move " in ln]
+
+    assert lines
+    assert _field(lines[0], "qt_ts") is not None
+    later = [ln for ln in lines[1:] if _field(ln, "arr_gap") is not None]
+    assert later, "every move after the first is dated from the one before"
+    for ln in later:
+        assert _field(ln, "ts_gap") is not None, ln
+        assert _field(ln, "late_ms") is not None, ln
+
+
+def test_the_first_move_of_a_gesture_has_nothing_to_be_late_against(
+        app, capsys, monkeypatch):
+    """Gaps are measured within one gesture. Carried across, the time
+    between two drags would be reported as a stall."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+    _middle_drag(panel, -40, -24)
+    lines = [ln for ln in _midpan_lines(capsys.readouterr().err)
+             if " what=press " in ln or " what=move " in ln]
+    firsts = [ln for ln in lines if _field(ln, "arr_gap") is None]
+
+    assert len(firsts) == 2 and all(" what=press " in ln for ln in firsts), (
+        "each gesture starts its own timeline at its press, and the first "
+        "move is dated from that press -- so exactly one line per gesture "
+        "has no predecessor, and it is the press")
+    assert all(_field(ln, "arr_gap") is not None
+               for ln in lines if " what=move " in ln)
+
+
+def test_a_paused_hand_is_not_reported_as_a_late_event(app, capsys,
+                                                       monkeypatch):
+    """The whole point of the pair: when the platform's own stamps show
+    the same gap the arrivals do, nothing was late."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    panel = _panel()
+    _press(panel)
+    # Two moves whose platform stamps are 200 ms apart, delivered 200 ms
+    # apart: a hand that stopped for 200 ms.
+    _move(panel, (240, 244))
+    QtTest.QTest.qWait(200)
+    _move(panel, (230, 238))
+    lines = [ln for ln in _midpan_lines(capsys.readouterr().err)
+             if " what=move " in ln and _field(ln, "late_ms") is not None]
+
+    assert lines, "the second move carries the comparison"
+    # Constructed events share a stamp, so this asserts the ARITHMETIC:
+    # late_ms is arr_gap minus ts_gap, whatever those turn out to be.
+    for ln in lines:
+        arr = float(_field(ln, "arr_gap"))
+        ts = float(_field(ln, "ts_gap"))
+        assert float(_field(ln, "late_ms")) == pytest.approx(arr - ts,
+                                                             abs=0.2), ln
+
+
+def test_lateness_is_not_measured_with_the_switch_off(app, monkeypatch):
+    monkeypatch.delenv(ovp.MID_PAN_DEBUG_ENV, raising=False)
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+
+    assert panel._mid_pan_prev_arr is None
+    assert panel._mid_pan_prev_ts is None

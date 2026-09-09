@@ -1135,6 +1135,13 @@ class OverviewPanel(QWidget):
         self._mid_pan_closed_t = None
         self._mid_pan_gap_timer = None
         self._mid_pan_gap_last = None
+        # `_mid_pan_prev_arr` / `_mid_pan_prev_ts` are the previous middle
+        # move's arrival time here and the platform's own timestamp ON that
+        # event. The pair is the only thing that separates a hand that
+        # paused from an event that was late: a pause moves both by the
+        # same amount, a delivery stall moves only the arrival.
+        self._mid_pan_prev_arr = None
+        self._mid_pan_prev_ts = None
 
         self.gview.viewport().installEventFilter(self)
         self.gview.scene().sigMouseClicked.connect(self._on_overview_click)
@@ -2381,8 +2388,12 @@ class OverviewPanel(QWidget):
         self._mid_pan_watch_start()
         self._mid_pan_step_t = None
         self._mid_pan_step_painted = False
+        # A new gesture measures its own arrival gaps: carrying the last
+        # one's would report the time between two drags as a stall.
+        self._mid_pan_prev_arr = None
+        self._mid_pan_prev_ts = None
         self._mid_pan_gap_start()
-        self._mid_pan_log("press", event)
+        self._mid_pan_log("press", event, extra=self._mid_pan_arrival(event))
         try:
             event.accept()
         except (AttributeError, RuntimeError):
@@ -2623,6 +2634,45 @@ class OverviewPanel(QWidget):
         except Exception:                                   # noqa: BLE001
             pass
 
+    def _mid_pan_arrival(self, event):
+        """How late this move was, if it was late at all.
+
+        A drag that stutters looks the same in the log whether the hand
+        stopped moving or the event took 300 ms to arrive: both are a hole
+        in the timeline. The platform stamps every mouse event with the
+        time the INPUT happened, so the two are separable --
+
+          arr_gap   ms since the previous middle move reached this handler
+          ts_gap    ms between the platform's stamps on those two events
+          late_ms   arr_gap - ts_gap: how much of the hole was delivery
+
+        A hand that paused moves both gaps together and leaves `late_ms`
+        near zero. An event that waited -- behind a busy GUI thread,
+        behind compression, behind the compositor -- shows a large
+        `late_ms`, and the heartbeat says whether this thread was the one
+        holding it. Empty (and cost-free) with the switch off.
+        """
+        if not _mid_pan_debug_enabled():
+            return None
+        now = time.monotonic()
+        ts = None
+        try:
+            ts = int(event.timestamp())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            ts = None
+        out = {"qt_ts": "n/a" if ts is None else ts}
+        prev_arr, prev_ts = self._mid_pan_prev_arr, self._mid_pan_prev_ts
+        if prev_arr is not None:
+            arr_gap = (now - prev_arr) * 1000.0
+            out["arr_gap"] = f"{arr_gap:.1f}"
+            if ts is not None and prev_ts is not None:
+                ts_gap = float(ts - prev_ts)
+                out["ts_gap"] = f"{ts_gap:.1f}"
+                out["late_ms"] = f"{arr_gap - ts_gap:.1f}"
+        self._mid_pan_prev_arr = now
+        self._mid_pan_prev_ts = ts
+        return out
+
     def _mid_pan_log_paint(self):
         """Date the viewport's repaint from the camera step that asked for it.
 
@@ -2795,7 +2845,7 @@ class OverviewPanel(QWidget):
                         "a run of moves carried no buttons after the middle "
                         "button had been reported down")
                     return True
-        self._mid_pan_log("move", event)
+        self._mid_pan_log("move", event, extra=self._mid_pan_arrival(event))
         if self._mid_pan_confirmed and not trusted:
             # MEASURED on the real desk, 106 gestures over three panels:
             # 26 of them contained a camera step that the NEXT move undid

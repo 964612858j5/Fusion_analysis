@@ -2908,6 +2908,18 @@ class MainWindow(QMainWindow):
         if not needed:
             return
 
+        # An INCREMENTAL read — this patch is already on screen and is only
+        # missing a channel the user has just asked for — must not move the
+        # camera. The state is captured HERE, on the GUI thread, against the
+        # loader that is about to run, and only that loader may spend it: a
+        # late or replaced one would otherwise restore a view the user has
+        # since moved. A patch with nothing cached is a FIRST load and still
+        # fits, which is what makes P1 -> P2 frame the new rectangle.
+        incremental = (idx == self._preview_patch_idx
+                       and bool(self._patch_channel_cache.get(idx))
+                       and self.prev_img.image is not None)
+        pending_view = self._save_patch_preview_view_state() if incremental else None
+
         # Stop any existing loader for this patch before replacing it.
         if not self._stop_loader_for(idx):
             self.prev_status.setText(f"P{idx+1} is still stopping… please wait")
@@ -2934,6 +2946,11 @@ class MainWindow(QMainWindow):
             self._connect_patch_loader(t, idx)
             self._patch_loaders[idx] = t
             self._loader_channels[idx] = set(needed)
+            if pending_view is not None:
+                # Bound to THIS loader: only its own result may spend it.
+                self._preserve_view_after_patch_load[idx] = (t, pending_view)
+            else:
+                self._preserve_view_after_patch_load.pop(idx, None)
             self._set_patch_btn_state(idx, 'loading')
             t.start()
         except Exception:
@@ -2982,8 +2999,10 @@ class MainWindow(QMainWindow):
                 f"P{patch_idx+1} ready  nucleus({nuc_ch}){nuc_ok}  "
                 f"cyto: {cyto_n} ch  {h}×{w} px (full-res crop)"
             )
-            state = self._preserve_view_after_patch_load.pop(patch_idx, None)
-            if state is not None:
+            saved = self._preserve_view_after_patch_load.pop(patch_idx, None)
+            owner, state = saved if saved else (None, None)
+            if state is not None and owner is self._patch_loaders.get(patch_idx):
+                # The load this camera was captured for: new pixels, same view.
                 self._refresh_patch_preview(reset_view=False)
                 self._restore_patch_preview_view_state(state)
             else:

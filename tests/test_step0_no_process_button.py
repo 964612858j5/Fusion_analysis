@@ -91,6 +91,23 @@ def test_nothing_tells_the_user_to_press_it(page):
     assert "re-process" not in text
 
 
+def test_no_hint_anywhere_still_names_the_button(page):
+    """Every per-channel hint, not just the one an empty page happens to show:
+    a page that still says "press Process" describes a control that is gone."""
+    seen = []
+    for ch in ("CD3", "CD20", "DAPI"):
+        page.current_channel = ch
+        page._on_channel_selected_by_id(ch)
+        seen.append(page._preview_status.text())
+        for decision in (None, "original", "tophat"):
+            page._channel_decisions[ch] = decision
+            page._update_decision_ui()
+            seen.append(page._decision_status.text())
+    seen.append(page._proc_status.text())
+    joined = " ".join(seen).lower()
+    assert "process" not in joined, joined
+
+
 def test_enter_still_recomputes_the_current_channel(page):
     """The authoritative manual entry: the parameter box the user typed in."""
     page._on_dec_param_entered("tophat")

@@ -929,7 +929,7 @@ class Step0Page(QWidget):
         ml.addWidget(self._cucim_warn)
 
         # Run controls folded INTO Method Parameters (the params ARE the run's
-        # inputs). There is no Process button any more: a parameter change
+        # inputs). There is no run button any more: a parameter change
         # recomputes the channel it belongs to, Compare and HOT fetch what they
         # need, and Save writes the corrected zarr. Asking the user to press a
         # button as well only made those three easy to mistake for previews.
@@ -1290,11 +1290,12 @@ class Step0Page(QWidget):
         dl.addLayout(rb_row)
 
         btn_row = QHBoxLayout()
-        # There is no per-channel Process button any more. Computing is the
-        # row's checkbox plus the one Process button in Method Parameters,
-        # and a second entry that ran ONE channel meant two answers to
-        # "what did this page compute" sitting side by side. Apply is what
-        # this panel does now: it saves the channel's method and parameters.
+        # There is no Run button in this panel. A correction run starts by
+        # pressing Enter in a parameter box, which recomputes the channel
+        # those numbers belong to; a second button that ran ONE channel meant
+        # two answers to "what did this page compute" sitting side by side.
+        # Apply is what this panel does: it saves the channel's method and
+        # parameters without running anything.
 
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.setToolTip("Save this channel's method + params (no run).")
@@ -6054,8 +6055,8 @@ class Step0Page(QWidget):
         """A channel's result landed: green tick, row highlighted.
 
         The checkbox stays ENABLED. It used to be locked ("computed" was
-        treated as final), but the checkbox is now the ONE selector Process
-        and Save read: locked, a computed channel could never be turned back
+        treated as final), but the checkbox is now the ONE selector Save
+        reads: locked, a computed channel could never be turned back
         into a raw one, and `_raw_save_channels` would have a set the user
         cannot leave. Green says "computed", not "frozen".
         """
@@ -7459,7 +7460,7 @@ class Step0Page(QWidget):
                 self._decision_status.setText(f"Saved: {ch} {decision}  (r={tr}, σ={cs})")
             else:
                 self._decision_status.setText(
-                    f"{ch}: set radius/sigma, pick a method, press Enter or Process.")
+                    f"{ch}: set radius/sigma, pick a method, press Enter.")
         finally:
             self._loading_decision = False
         self._refresh_remap_state_label()
@@ -7868,11 +7869,11 @@ class Step0Page(QWidget):
     # ══ on-demand computing: REMOVED ═════════════════════════════════
     #
     # `_start_ondemand` used to launch a `BatchProcessWorker` whenever an
-    # uncomputed channel's row was clicked after the first Process. It is
-    # gone, not merely unwired: a helper whose only job is to start a
-    # production run outside the Process button is the exact thing the
-    # "only the checkbox and Process compute" rule forbids, and leaving it
-    # in the class is an invitation to call it again.
+    # uncomputed channel's row was clicked. It is gone, not merely unwired:
+    # a helper whose only job is to start a production run behind the user's
+    # back is the exact thing the "a run is something you asked for" rule
+    # forbids, and leaving it in the class is an invitation to call it
+    # again.
     #
     # `_ondemand_workers` survives as an empty list. It is read by
     # `production_correction_busy` and by teardown, and keeping the reads
@@ -8362,12 +8363,10 @@ class Step0Page(QWidget):
         """Recompute one method for one channel across all patches.
 
         The single entry point for "this one channel, again, with the
-        numbers that are in the Per-Channel Decision boxes now". The
-        "Process" button that used to sit in that panel is gone -- the
-        checkbox plus the one Process button in Method Parameters is how a
-        WHOLE RUN starts, so that "which channels did this page compute"
-        has a single answer -- and Enter in a param box is what reaches
-        this: an explicit request about one channel, not a batch.
+        numbers that are in the Per-Channel Decision boxes now", and since
+        the Process button went, the only manual one on the page. Enter in a
+        parameter box is what reaches it: an explicit request about one
+        channel, not a batch.
 
         Everything a run has to respect lives here and only here: the
         production busy guard, the patch precondition, updating this

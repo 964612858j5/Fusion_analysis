@@ -3183,9 +3183,12 @@ class MainWindow(QMainWindow):
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
             self._perf_heartbeat = None
-        # Bounded: what the writer has not written by the deadline is lost
-        # rather than holding the window open on a disk.
-        perf_trace.shutdown()
+        # The sink is NOT shut down here. It closes once, at the end of this
+        # method, after every managed loader has physically finished and its
+        # own `job.end` is queued -- a shutdown before that is followed by
+        # loader lines that start a second writer on a file the first one
+        # closed, and a close attempt that ends in `event.ignore()` would
+        # stop and restart the writer on every retry.
         self._stop_all_loaders()
         # A fusion job outlives the window unless it is asked to stop and then
         # held: destroying a running QThread is what produces
@@ -5231,7 +5234,8 @@ class MainWindow(QMainWindow):
             print(f"[Step1] display-mapping commit raised: {exc}")
             return False, f"commit raised: {exc}"
 
-    def _display_mapping(self, channels=None, blocking=True):
+    def _display_mapping(self, channels=None, blocking=True,
+                         resident_only=False):
         """The Min/Max/Gamma Step1 should DRAW with, for the channels asked for.
 
         The draft: what the Intensity window is showing the user right now.
@@ -5244,8 +5248,8 @@ class MainWindow(QMainWindow):
         engaged yet), so a freshly opened project still draws with the mapping
         its handoff carries.
 
-        `blocking=False` exists for callers that must not wait on pixels, and
-        the render paths deliberately do NOT use it: a frame that skips a
+        `resident_only=True` exists for callers that must not wait on pixels,
+        and the render paths deliberately do NOT use it yet: a frame that skips a
         channel's window draws that channel with a provisional percentile
         instead, and the screen would stop matching what a Save writes --
         the one equality this preview exists to keep. Scoping WHICH channels
@@ -5269,7 +5273,8 @@ class MainWindow(QMainWindow):
         if step0 is not None and hasattr(step0, "display_mapping_for_preview"):
             try:
                 draft = step0.display_mapping_for_preview(
-                    channels=channels, blocking=blocking) or {}
+                    channels=channels, blocking=blocking,
+                    resident_only=resident_only) or {}
             except Exception as exc:
                 print(f"[Step1] could not read the display mapping: {exc}")
                 draft = {}

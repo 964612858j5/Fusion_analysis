@@ -3461,7 +3461,7 @@ class Step0Page(QWidget):
                 continue
         return False
 
-    def _slide_lowres_array(self, ch, *, blocking=True):
+    def _slide_lowres_array(self, ch, *, blocking=True, resident_only=False):
         """The WHOLE-SLIDE low-resolution read of `ch`, cached, or None.
 
         `blocking=False` means "do not start a read of your own if a viewer
@@ -3502,6 +3502,16 @@ class Step0Page(QWidget):
         if rec is not None:
             cache[ch] = rec.arr
             return rec.arr
+        if resident_only:
+            # Nothing in the cache and nothing resident, so the answer is
+            # "not yet". A separate word from `blocking` on purpose: that one
+            # means "do not duplicate a read another worker is already
+            # doing", and its callers -- the display seed, the compare
+            # panels -- DO expect a read when nobody else is reading. This
+            # one means "never read at all", which is what a GUI render
+            # callback needs: falling through to `read_region_lowres` below
+            # costs 170-230 ms of the GUI thread per channel, measured.
+            return None
         if not blocking and self._overview_read_pending(ch):
             # Somebody is already reading it, on a worker. Waiting costs
             # nothing; reading it a second time here costs 170-230 ms of
@@ -3527,7 +3537,7 @@ class Step0Page(QWidget):
         cache[ch] = arr
         return arr
 
-    def _workbench_pixels(self, name, blocking=True):
+    def _workbench_pixels(self, name, blocking=True, resident_only=False):
         """The pixels the Channel Remap workbench works on for `name`.
 
         The whole slide at the overview level, not the current patch. The
@@ -3546,12 +3556,14 @@ class Step0Page(QWidget):
         pyramid read (fake loaders, a TIFF without levels), which is the
         behaviour every caller had before.
         """
-        arr = self._slide_lowres_array(name, blocking=blocking)
+        arr = self._slide_lowres_array(name, blocking=blocking,
+                                       resident_only=resident_only)
         if arr is not None:
             return arr
-        if not blocking:
-            # The fallback below is a live read; a caller that said "do not
-            # block" gets nothing rather than a synchronous decode.
+        if resident_only:
+            # The fallback below is a live read; a caller that said "answer
+            # from what is resident" gets nothing rather than a synchronous
+            # decode.
             return None
         provider = getattr(self, "_preview_provider", None)
         if provider is None:
@@ -4216,7 +4228,8 @@ class Step0Page(QWidget):
             out[str(name)] = dict(p)
         return out
 
-    def display_mapping_for_preview(self, channels=None, blocking=True):
+    def display_mapping_for_preview(self, channels=None, blocking=True,
+                                    resident_only=False):
         """The draft, completed with the same automatic windows a Save freezes.
 
         A project whose Intensity window has never been opened still has to draw
@@ -4232,11 +4245,11 @@ class Step0Page(QWidget):
         first frame after a patch was drawn spent 7.47 seconds seeding windows
         for 28 channels it did not show.
 
-        `blocking=False` is the render path's other half: complete what is
-        already in memory, and never start a whole-slide read or a percentile
-        pass for a channel whose pixels have not arrived. Such a channel is
-        simply absent from the answer, and the caller draws it with a cheap
-        provisional window until the real one lands.
+        `resident_only=True` is the render path's other half: complete what
+        is already in memory, and never start a whole-slide read or a
+        percentile pass for a channel whose pixels have not arrived. Such a
+        channel is simply absent from the answer, and the caller draws it
+        with a cheap provisional window until the real one lands.
         """
         draft = self.display_mapping_draft()
         if channels is None:
@@ -4252,8 +4265,9 @@ class Step0Page(QWidget):
             if ch in draft:
                 continue
             if ch not in self._auto_window_cache:
-                auto = self._auto_display_window(ch, blocking=blocking)
-                if auto is None and not blocking:
+                auto = self._auto_display_window(
+                    ch, blocking=blocking, resident_only=resident_only)
+                if auto is None and resident_only:
                     # Not "this channel has no window", but "not yet": leave
                     # the cache empty so the next attempt, once the pixels are
                     # in, computes it.
@@ -4264,7 +4278,8 @@ class Step0Page(QWidget):
                 draft[ch] = dict(auto)
         return draft
 
-    def _auto_display_window(self, channel, blocking=True):
+    def _auto_display_window(self, channel, blocking=True,
+                             resident_only=False):
         """A stable automatic window for a channel nobody tuned.
 
         Computed ONCE, from the whole-slide overview — the same pixels for
@@ -4272,12 +4287,14 @@ class Step0Page(QWidget):
         which crop happened to be on screen or how the Save dialog split the
         image into tiles. Returns None when the pixels are not available.
 
-        `blocking=False` refuses to fetch them: this runs on the GUI thread
-        from render callbacks, and a whole-slide read plus a percentile pass
-        there is a frozen window.
+        `resident_only=True` refuses to fetch them: this runs on the GUI
+        thread from render callbacks, and a whole-slide read plus a
+        percentile pass there is a frozen window. `blocking=False` is the
+        weaker, older request -- do not duplicate a read already in flight.
         """
         try:
-            arr = self._workbench_pixels(channel, blocking=blocking)
+            arr = self._workbench_pixels(channel, blocking=blocking,
+                                         resident_only=resident_only)
         except Exception as exc:
             print(f"[Step0] no pixels to seed a display window for {channel}: {exc}")
             return None

@@ -960,9 +960,10 @@ def _mapping_requests(w, monkeypatch):
     page = w._step0
     real = type(page).display_mapping_for_preview
 
-    def spy(self, channels=None, blocking=True):
+    def spy(self, channels=None, blocking=True, resident_only=False):
         asked.append(None if channels is None else list(channels))
-        return real(self, channels=channels, blocking=blocking)
+        return real(self, channels=channels, blocking=blocking,
+                    resident_only=resident_only)
 
     monkeypatch.setattr(type(page), "display_mapping_for_preview", spy)
     return asked
@@ -973,7 +974,8 @@ def _auto_window_calls(w, monkeypatch):
     seeded = []
     page = w._step0
     monkeypatch.setattr(type(page), "_auto_display_window",
-                        lambda self, channel, blocking=True:
+                        lambda self, channel, blocking=True,
+                        resident_only=False:
                         (seeded.append(channel), None)[1])
     return seeded
 
@@ -1029,7 +1031,8 @@ def test_an_empty_channel_list_means_no_channels(app, monkeypatch):
         page._auto_window_cache.clear()      # nothing memoised yet
         seeded = []
         monkeypatch.setattr(type(page), "_auto_display_window",
-                            lambda self, channel, blocking=True:
+                            lambda self, channel, blocking=True,
+                            resident_only=False:
                             (seeded.append(channel), None)[1])
 
         assert page.display_mapping_for_preview(channels=[]) == \
@@ -1046,20 +1049,103 @@ def test_an_empty_channel_list_means_no_channels(app, monkeypatch):
 
 
 def test_the_pixel_source_can_refuse_to_read(app):
-    """`blocking=False` is what a future background seeder needs: complete
-    what is in memory, start no whole-slide read. The render paths do NOT use
-    it -- a frame that skipped a window would draw a channel with a
-    provisional percentile and stop matching what a Save writes."""
+    """`resident_only=True` is what a future background seeder needs:
+    complete what is in memory, start no whole-slide read. The render paths do
+    NOT use it yet -- a frame that skipped a window would draw a channel with
+    a provisional percentile and stop matching what a Save writes."""
     w = _window(app)
     try:
         page = w._step0
         reads = []
-        page._slide_lowres_array = lambda name, blocking=True: (
-            reads.append((name, blocking)), None)[1]
+        page._slide_lowres_array = lambda name, blocking=True, \
+            resident_only=False: (reads.append((name, resident_only)),
+                                  None)[1]
         page._preview_provider = None
 
-        assert page._workbench_pixels("CD3", blocking=False) is None
-        assert reads == [("CD3", False)], reads
-        assert page._auto_display_window("CD3", blocking=False) is None
+        assert page._workbench_pixels("CD3", resident_only=True) is None
+        assert reads == [("CD3", True)], reads
+        assert page._auto_display_window("CD3", resident_only=True) is None
+    finally:
+        w.close()
+
+
+def test_a_resident_only_pixel_request_never_reads(app):
+    """The real branch, with the real `_slide_lowres_array`.
+
+    `resident_only` is a separate word from `blocking` because they are
+    different requests: `blocking=False` means "do not duplicate a read
+    another worker is already doing" and its callers -- the display seed, the
+    compare panels -- expect a read when nobody else is reading;
+    `resident_only=True` means "never read", which is what a GUI render
+    callback needs.
+
+    The first version of this refused only when another worker was already
+    reading the channel -- so with no resident record and nothing pending,
+    which is the ordinary case for a channel nobody has looked at, it fell
+    through to a synchronous whole-slide read: 170-230 ms of the GUI thread,
+    from a caller that had asked not to wait. The earlier test replaced
+    `_slide_lowres_array` wholesale and only checked that the keyword was
+    passed on, which could not see it.
+    """
+    w = _window(app)
+    try:
+        page = w._step0
+        reads = []
+
+        class _CountingLoader(_Loader):
+            def read_region_lowres(self, ch, y0, y1, x0, x1, ds,
+                                   normalize=False):
+                reads.append(ch)
+                return np.zeros((8, 8), np.float32)
+
+            def overview_downsample(self):
+                return 32
+
+        page.loader = _CountingLoader()
+        page._slide_lowres = {}                     # nothing cached
+        page._resident_overview_record = lambda ch: None
+        page._overview_read_pending = lambda ch: False
+
+        assert page._slide_lowres_array("CD3", resident_only=True) is None
+        assert reads == [], f"a resident-only request read {reads}"
+
+        # And the reading path -- which is what a background seeder uses --
+        # still reads, including with the older `blocking=False`, whose
+        # meaning is only "do not duplicate a read already in flight".
+        assert page._slide_lowres_array("CD3", blocking=False) is not None
+        assert reads == ["CD3"]
+        page._slide_lowres = {}
+        assert page._slide_lowres_array("CD3", blocking=True) is not None
+        assert reads == ["CD3", "CD3"]
+    finally:
+        w.close()
+
+
+def test_a_resident_only_window_request_reads_nothing_either(app):
+    """The whole chain: no window, no pixels, no read, and no percentile."""
+    w = _window(app)
+    try:
+        page = w._step0
+        reads = []
+        page._slide_lowres = {}
+        page._resident_overview_record = lambda ch: None
+        page._overview_read_pending = lambda ch: False
+        page._preview_provider = None
+        page.loader = None
+        page._auto_window_cache.clear()
+
+        original = page._workbench_pixels
+
+        def spy(name, blocking=True, resident_only=False):
+            reads.append((name, resident_only))
+            return original(name, blocking=blocking,
+                            resident_only=resident_only)
+
+        page._workbench_pixels = spy
+        page.display_mapping_for_preview(channels=["CD3"], resident_only=True)
+
+        assert reads == [("CD3", True)]
+        assert "CD3" not in page._auto_window_cache, \
+            "a channel whose pixels never arrived was cached as having no window"
     finally:
         w.close()

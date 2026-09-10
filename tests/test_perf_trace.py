@@ -655,3 +655,97 @@ def test_a_span_start_survives_the_formatter(monkeypatch, capsys):
     dur = float(line.split(" dur_ms=")[1].split(" ")[0])
     assert end - begin == pytest.approx(dur / 1000.0, abs=1e-4), \
         f"the span's own start does not match its duration: {line}"
+
+
+# ── the window's own teardown order ──────────────────────────────────────
+
+def test_the_window_closes_the_sink_after_the_loaders(monkeypatch, tmp_path):
+    """Order, on the real `closeEvent`, not on the writer alone.
+
+    A shutdown before the loaders are stopped is followed by their own
+    `job.end` lines, which start a second writer on a file the first one
+    closed -- so the sink closes once, last, and only when the window is
+    actually closing.
+    """
+    from PyQt5 import QtWidgets, QtGui
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_step1_channel_state_contract import _window
+
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = _window(app)
+    order = []
+
+    real_stop = w._stop_all_loaders
+
+    def stop_loaders():
+        order.append("loaders")
+        # a loader reporting its own end DURING teardown
+        perf_trace.mark("job.end", source="step1.preview", job=99)
+        return real_stop()
+
+    def shutdown(*a, **k):
+        order.append("sink:final=%s" % k.get("final", False))
+        return perf_trace.WRITER.shutdown(*a, **k)
+
+    w._stop_all_loaders = stop_loaders
+    monkeypatch.setattr(perf_trace, "shutdown", shutdown)
+    try:
+        w.closeEvent(QtGui.QCloseEvent())
+    finally:
+        w._stop_all_loaders = real_stop
+
+    assert order == ["loaders", "sink:final=True"], order
+    text = (tmp_path / "perf.log").read_text(encoding="utf-8")
+    assert " job=99" in text, "the loader's own end line was lost"
+
+
+def test_a_close_that_is_refused_keeps_the_writer_alive(monkeypatch,
+                                                        tmp_path):
+    """`closeEvent` can end in `event.ignore()` and retry in 500 ms. Stopping
+    the sink on every attempt would restart the writer as often as the user's
+    loaders take to stop."""
+    from PyQt5 import QtWidgets, QtGui
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_step1_channel_state_contract import _window
+
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = _window(app)
+    perf_trace.mark("before-close")
+    writer = perf_trace.WRITER._thread
+    shutdowns = []
+    monkeypatch.setattr(perf_trace, "shutdown",
+                        lambda *a, **k: shutdowns.append(k))
+
+    class _Busy:
+        """A loader that has been asked to stop and has not yet."""
+
+        def isRunning(self):
+            return True
+
+        def stop(self):
+            pass
+
+        def wait(self, _timeout_ms=0):
+            return False
+
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    w._patch_loaders = {0: _Busy()}
+    try:
+        event = QtGui.QCloseEvent()
+        w.closeEvent(event)
+
+        assert not event.isAccepted(), "the window closed with a live loader"
+        assert shutdowns == [], "the sink was closed on a refused attempt"
+        assert perf_trace.WRITER._thread is writer
+        assert perf_trace.WRITER.is_running()
+    finally:
+        w._patch_loaders = {}
+        _drain()

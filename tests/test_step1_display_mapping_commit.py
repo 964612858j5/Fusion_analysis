@@ -179,7 +179,7 @@ def test_a_channel_nobody_tuned_gets_one_stable_window(app, tmp_path):
     try:
         page = w._step0
         pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
-        page._workbench_pixels = lambda ch, blocking=False: pixels
+        page._workbench_pixels = lambda ch, blocking=False, resident_only=False: pixels
 
         frozen = page.frozen_display_mapping(["CD3"])
         assert "CD3" in frozen
@@ -201,7 +201,7 @@ def test_a_tuned_channel_keeps_its_own_window(app, tmp_path):
     try:
         page = w._step0
         _seed_workbench(page, {"CD3": {"min": 3.0, "max": 7.0}})
-        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+        page._workbench_pixels = lambda ch, blocking=False, resident_only=False: np.linspace(
             0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
 
         frozen = page.frozen_display_mapping(["CD3", "DAPI"])
@@ -299,7 +299,7 @@ def test_the_screen_uses_the_window_the_save_will_freeze(app, tmp_path):
         calls = []
         pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
 
-        def _pix(ch, blocking=False):
+        def _pix(ch, blocking=False, resident_only=False):
             calls.append(ch)
             return pixels
         page._workbench_pixels = _pix
@@ -323,12 +323,12 @@ def test_a_new_dataset_does_not_inherit_the_old_slides_auto_window(app, tmp_path
     w, step0_dir = _window(app, tmp_path)
     try:
         page = w._step0
-        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+        page._workbench_pixels = lambda ch, blocking=False, resident_only=False: np.linspace(
             0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
         first = page.display_mapping_for_preview(["CD3"])["CD3"]["max"]
 
         page._auto_window_cache = {}          # what loading a dataset does
-        page._workbench_pixels = lambda ch, blocking=False: np.linspace(
+        page._workbench_pixels = lambda ch, blocking=False, resident_only=False: np.linspace(
             0, 50, 64 * 64, dtype=np.float32).reshape(64, 64)
         second = page.display_mapping_for_preview(["CD3"])["CD3"]["max"]
 
@@ -347,7 +347,8 @@ def test_a_weighted_channel_with_no_window_stops_the_save(app, tmp_path):
     w, step0_dir = _window(app, tmp_path)
     try:
         page = w._step0
-        page._workbench_pixels = lambda ch: None      # no pixels, no window
+        page._workbench_pixels = (
+            lambda ch, blocking=False, resident_only=False: None)  # no pixels
 
         ok, reason = page.commit_display_mapping(["CD3"], required=["CD3"])
 
@@ -371,7 +372,8 @@ def test_the_automatic_window_uses_the_real_pixel_source(app, tmp_path):
         pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
         # Stub the SLIDE READ, one level below the page's own pixel accessor,
         # so `_workbench_pixels` itself is the real method under test.
-        page._slide_lowres_array = lambda name, blocking=True: pixels
+        page._slide_lowres_array = (
+                lambda name, blocking=True, resident_only=False: pixels)
 
         window = page._auto_display_window("CD3")
 

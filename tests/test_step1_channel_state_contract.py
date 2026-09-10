@@ -781,3 +781,138 @@ def test_the_panels_own_row_syncing_claims_nothing(app):
         assert groups["b"]["CD3"] == pytest.approx(0.5)
     finally:
         w.close()
+
+
+# ── the REAL Step0 -> Step1 initialisation path ──────────────────────────
+#
+# The manual acceptance test failed while all of the above passed, because
+# all of the above builds the panel by calling `config.load_panel()` and the
+# production handoff does not stop there. `_load_step0_roi_result()` ran:
+#
+#     set_channels -> load_panel -> set_nucleus -> _zero_marker_weights()
+#
+# and that last line is the Reset weights BUTTON. Once the weights somebody
+# has given are remembered apart from the numbers, pressing it on every load
+# marked every marker as already answered, so the first tick of each kept 0
+# and the channel the user had just asked for stayed invisible. The
+# handoff-contract module could not see it either: it stubbed that one line
+# out with a no-op.
+#
+# These drive the real method with the real ConfigPanel. Nothing here may be
+# replaced by a `load_panel()` call: the bug lived in what came after it.
+
+def _handoff_window(app, tmp_path):
+    """A Step1 panel built the way the application builds it."""
+    from block01.ui.main_window import MainWindow
+    w = MainWindow()
+    w.loader = _Loader()
+    w.step0_output = {
+        "handoff_schema_version": 1,
+        "output_dir": str(tmp_path), "step0_dir": str(tmp_path),
+        "step1_dir": str(tmp_path), "step2_dir": str(tmp_path),
+        "ome_tiff_path": _Loader.filepath,
+        "rois": [{"name": "R1", "bbox_fullres": [0, 64, 0, 64]}],
+        "patches": [(0, 32, 0, 32)],
+        "panel_groups": {"markers": {"CD3": 0.0, "CD8": 0.0}},
+        "corrected_zarr_path": "",
+    }
+    assert w._load_step0_roi_result(auto=True) is True, \
+        "the real handoff did not complete; this test proves nothing"
+    return w
+
+
+def test_the_real_handoff_leaves_markers_unanswered(app, tmp_path):
+    w = _handoff_window(app, tmp_path)
+    try:
+        assert w.config.visible_channels() == ["DAPI"]
+        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.channel_weight("CD8") == 0.0
+        assert w.config.weight_initialized_channels() == [], (
+            "the handoff marked markers as already weighted, so their first "
+            "tick will keep 0 -- this is the manual acceptance failure")
+    finally:
+        w.close()
+
+
+def test_after_the_real_handoff_the_checkbox_weighs_one(app, tmp_path):
+    w = _handoff_window(app, tmp_path)
+    try:
+        w.config._rows["CD3"].checkbox.setChecked(True)
+
+        assert w.config.channel_weight("CD3") == 1.0
+        assert w.config.get_groups()["markers"]["CD3"] == 1.0
+        eff = w.config.effective_config()
+        assert eff["groups"]["markers"]["channels"]["CD3"] == 1.0
+    finally:
+        w.close()
+
+
+def test_after_the_real_handoff_clicking_a_row_weighs_one(app, tmp_path):
+    w = _handoff_window(app, tmp_path)
+    try:
+        w.config.set_current_channel("CD8", auto_show=True)
+
+        assert w.config.current_channel() == "CD8"
+        assert "CD8" in w.config.visible_channels()
+        assert w.config.channel_weight("CD8") == 1.0
+        assert w.config.get_groups()["markers"]["CD8"] == 1.0
+    finally:
+        w.close()
+
+
+def test_after_the_real_handoff_an_edited_weight_survives_both_entries(
+        app, tmp_path):
+    w = _handoff_window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.35)
+
+        w.config.set_channel_visible("CD3", False)
+        w.config._rows["CD3"].checkbox.setChecked(True)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.35)
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_current_channel("CD3", auto_show=True)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.35)
+    finally:
+        w.close()
+
+
+def test_after_the_real_handoff_a_deliberate_zero_survives(app, tmp_path):
+    w = _handoff_window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_current_channel("CD3", auto_show=True)
+        assert w.config.channel_weight("CD3") == 0.0
+    finally:
+        w.close()
+
+
+def test_the_reset_button_still_remembers_its_zeros_after_a_real_handoff(
+        app, tmp_path):
+    """The button keeps its meaning: pressing it IS the user saying zero, so
+    those zeros survive a re-tick. What changed is that nobody presses it on
+    the user's behalf during a load."""
+    w = _handoff_window(app, tmp_path)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 1.0
+
+        w.config.zero_marker_weights()          # what the button does
+        assert w.config.channel_weight("CD3") == 0.0
+        assert "CD3" in w.config.visible_channels()
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0
+        assert "CD8" in w.config.weight_initialized_channels(), \
+            "the button answers for every marker, ticked or not"
+    finally:
+        w.close()

@@ -187,7 +187,6 @@ def make_window(run, schema=1, loader_path=None):
     w._show_active_roi_preview = lambda: None
     w._schedule_step1_session_save = lambda: None
     w._log_step1_layout = lambda _where: None
-    w._zero_marker_weights = lambda: None
     w._set_gui_work_dir = lambda p: setattr(w, "_gui_work_dir", p)
     return w
 

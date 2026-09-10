@@ -1350,7 +1350,17 @@ class MainWindow(QMainWindow):
             self.config.set_channels(channels)
             self.config.load_panel(panel_groups, nucleus_channel)
             self.config.set_nucleus(nucleus_channel, 1.0)   # Step0's answer
-            self._zero_marker_weights()
+            # `zero_marker_weights()` is NOT called here any more, and that
+            # is the whole of this fix. It is the Reset weights BUTTON --
+            # a user saying "zero" -- and since the weights each marker has
+            # been given are now remembered apart from the numbers, saying it
+            # on every load marked every marker as already answered, so the
+            # first tick of each kept 0 and the channel stayed invisible.
+            # It was also redundant: `load_panel` above builds the new
+            # dataset's markers at 0 in the rows AND in the groups (it enters
+            # each channel at 0.0 whatever the handoff's panel_groups say),
+            # unticked, and with no weight history. There is nothing left for
+            # a reset to do except claim the zeros belong to somebody.
             print(f"[Step1] nucleus_channel={nucleus_channel}")
             print(f"[Step1] panel_groups source={source}")
             print(f"[Step1] config panel initialized={bool(self.config.get_groups())}")
@@ -2615,9 +2625,6 @@ class MainWindow(QMainWindow):
             style += "font-weight:bold;"
         lbl.setStyleSheet(style)
         return lbl
-
-    def _zero_marker_weights(self):
-        self.config.zero_marker_weights()
 
     @staticmethod
     def _patch_inside_roi_bbox(patch, roi):

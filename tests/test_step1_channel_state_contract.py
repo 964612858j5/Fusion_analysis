@@ -81,13 +81,20 @@ def test_a_new_dataset_shows_only_the_nucleus(app):
         w.close()
 
 
-def test_ticking_a_channel_leaves_its_weight_at_zero(app):
-    """Whether a channel contributes is the user's decision. A tick puts it in
-    the configuration; it does not invent a number for it."""
+def test_a_first_tick_gives_the_channel_weight_one(app):
+    """A channel the user just asked to see and cannot see is not an answer.
+
+    The first tick a marker ever gets in this dataset sets its weight to 1.0.
+    Only the first: from then on the number is the user's, and this panel does
+    not replace it. (This module previously pinned the opposite -- a first tick
+    leaving the weight at 0 -- which is what made a newly ticked channel
+    invisible until the user found the slider.)
+    """
     w = _window(app)
     try:
+        assert w.config.channel_weight("CD3") == 0.0     # nobody has said yet
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.channel_weight("CD3") == 1.0
         assert "CD3" in w.config.visible_channels()
     finally:
         w.close()
@@ -354,6 +361,9 @@ def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
 
 
 def test_a_new_dataset_starts_from_zero(app):
+    """A new dataset's markers start unticked at 0 -- and un-initialised, so
+    the first tick in the NEW dataset answers 1.0 rather than inheriting the
+    previous slide's 0.35."""
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.35)
@@ -362,8 +372,9 @@ def test_a_new_dataset_starts_from_zero(app):
         w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
 
         assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.weight_initialized_channels() == []
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.channel_weight("CD3") == 1.0
     finally:
         w.close()
 
@@ -393,5 +404,313 @@ def test_the_weight_control_says_what_it_now_does(app):
         tip = w.config._rows["CD3"].slider.toolTip().lower()
         assert "not used by the overlay" not in tip
         assert "overlay" in tip and "fusion" in tip
+    finally:
+        w.close()
+
+
+# ── the first tick's default, and every zero that is not an absence ──────
+#
+# A marker starts a dataset at 0 because nobody has said anything about it.
+# A user can also deliberately set one to 0.00, and `Reset weights` sets all
+# of them to 0, and a project file can carry an explicit 0. Same number, four
+# different facts, and only the first may be replaced by a default -- so the
+# panel records WHO said it, apart from the numbers. `weight == 0` can never
+# be the test: it would overwrite the decision with the default.
+
+def test_all_three_enable_entries_answer_the_same(app):
+    """The checkbox, `set_channel_visible` and clicking a hidden row are one
+    decision in one place, not three rules that can drift apart."""
+    w = _window(app)
+    try:
+        # 1. the checkbox itself
+        w.config._rows["CD3"].checkbox.setChecked(True)
+        assert w.config.channel_weight("CD3") == 1.0
+
+        # 2. the programmatic tick
+        w.config.set_channel_visible("CD8", True)
+        assert w.config.channel_weight("CD8") == 1.0
+    finally:
+        w.close()
+
+
+def test_clicking_a_hidden_row_selects_ticks_and_weighs_it(app):
+    w = _window(app)
+    try:
+        w.config.set_current_channel("CD3", auto_show=True)
+
+        assert w.config.current_channel() == "CD3"
+        assert "CD3" in w.config.visible_channels()
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_an_edited_weight_survives_unticking_and_re_ticking(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.35)
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+
+        assert w.config.channel_weight("CD3") == pytest.approx(0.35)
+    finally:
+        w.close()
+
+
+def test_a_deliberate_zero_survives_unticking_and_re_ticking(app):
+    """The case a `weight == 0` test would get wrong: the user said 0.00, and
+    a re-tick must not read that as "nobody has said anything"."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        assert w.config.channel_weight("CD3") == 0.0
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+
+        assert w.config.channel_weight("CD3") == 0.0
+        assert "CD3" in w.config.visible_channels()
+    finally:
+        w.close()
+
+
+def test_reset_weights_zeros_are_answers_too(app):
+    """`Reset weights` is the user saying zero. Re-ticking after it keeps the
+    0 -- and the button still does not move a single tick."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        ticks = list(w.config.visible_channels())
+
+        w.config.zero_marker_weights()
+
+        assert list(w.config.visible_channels()) == ticks
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0
+    finally:
+        w.close()
+
+
+def test_a_weight_still_never_moves_a_tick_and_a_tick_never_moves_a_weight(app):
+    """The first tick is a one-off initialisation, not weights and ticks tied
+    back together."""
+    w = _window(app)
+    try:
+        w.config._rows["CD3"].spin.setValue(0.5)
+        assert "CD3" not in w.config.visible_channels()   # weight, no tick
+
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.5), \
+            "an already-weighted channel is not re-initialised by its tick"
+
+        w.config._rows["CD3"].spin.setValue(0.0)
+        assert "CD3" in w.config.visible_channels()       # zero stays ticked
+
+        w.config.set_channel_visible("CD3", False)
+        assert w.config.channel_weight("CD3") == 0.0      # untick keeps it
+    finally:
+        w.close()
+
+
+def test_the_nucleus_weight_is_not_touched_by_the_first_tick_rule(app):
+    """It comes from the Step0 handoff and is read-only in Step1."""
+    w = _window(app)
+    try:
+        w.config.set_nucleus("DAPI", 0.6)
+        w.config.set_channel_visible("DAPI", False)
+        w.config.set_channel_visible("DAPI", True)
+
+        assert w.config.channel_weight("DAPI") == pytest.approx(0.6)
+        assert w.config.get_nucleus() == ("DAPI", pytest.approx(0.6))
+    finally:
+        w.close()
+
+
+def test_a_visibility_observer_already_sees_the_final_weight(app):
+    """The atomicity requirement: whoever handles the tick reads 1.0, not a
+    weight of 0 that changes a moment later. Anything else shows a blank frame
+    first, or saves an intermediate state."""
+    w = _window(app)
+    try:
+        seen = []
+        w.config.visibility_changed.connect(
+            lambda ch, vis: seen.append((ch, vis, w.config.channel_weight(ch))))
+
+        w.config.set_channel_visible("CD3", True)
+
+        assert seen == [("CD3", True, 1.0)]
+    finally:
+        w.close()
+
+
+def test_a_first_tick_does_not_announce_a_separate_weight_change(app):
+    """One logical act, one notification. `config_changed` would schedule a
+    second redraw of a state the visibility handler has already drawn."""
+    w = _window(app)
+    try:
+        cfg_signals = []
+        w.config.config_changed.connect(lambda: cfg_signals.append(1))
+
+        w.config.set_channel_visible("CD3", True)
+
+        assert cfg_signals == []
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_a_first_tick_redraws_once_and_reads_nothing_twice(app):
+    """One logical act, one repaint.
+
+    The channel's pixels are already in hand, so the only thing that could
+    draw twice is the state changing twice -- a weight announced separately
+    from the tick schedules a second, coalesced redraw of what the first one
+    already showed. Waited out past the coalescing window rather than only
+    pumping events, so a pending timer is not simply missed.
+    """
+    from PyQt5 import QtTest
+    w = _window(app)
+    try:
+        # Building the panel already scheduled one coalesced redraw
+        # (`load_panel` announces the config it just loaded). Let it happen
+        # before counting, or the tick inherits it and the count says two for
+        # a reason that has nothing to do with the tick.
+        QtTest.QTest.qWait(200)
+        w.loader.reads.clear()
+        redraws = []
+        original = w._refresh_patch_preview
+
+        def counting(*a, **kw):
+            redraws.append(1)
+            return original(*a, **kw)
+
+        w._refresh_patch_preview = counting
+        w.config.set_channel_visible("CD3", True)
+        QtTest.QTest.qWait(200)
+
+        assert w.loader.reads == [], \
+            f"a cached channel was read again: {w.loader.reads}"
+        assert len(redraws) == 1, f"{len(redraws)} redraws for one tick"
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_the_saved_config_carries_the_first_tick_weight(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+
+        eff = w.config.effective_config()
+        markers = eff["groups"]["markers"]["channels"]
+        assert markers["CD3"] == 1.0
+
+        w.config.set_channel_visible("CD3", False)
+        eff = w.config.effective_config()
+        assert "CD3" not in eff["groups"]["markers"]["channels"], \
+            "an unticked channel is out of what gets fused"
+        full = w.config.get_full_config()
+        assert full["groups"]["markers"]["channels"]["CD3"] == 1.0, \
+            "but the full config and the panel still show its weight"
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_weights_loaded_from_a_file_are_answers_including_zero(app):
+    """An explicit 0 in a project's fusion config is somebody's decision. A
+    first tick afterwards must not overwrite it with 1.0."""
+    w = _window(app)
+    try:
+        w.config.apply_full_config({
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {"markers": {"group_weight": 1.0,
+                                   "channels": {"CD3": 0.0, "CD8": 0.4}}},
+        })
+
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+
+        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.channel_weight("CD8") == pytest.approx(0.4)
+    finally:
+        w.close()
+
+
+def test_a_new_dataset_does_not_inherit_the_previous_history(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        assert w.config.weight_initialized_channels() == ["CD3"]
+
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
+
+        assert w.config.weight_initialized_channels() == []
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_a_removed_channel_takes_its_history_with_it(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+
+        w.config.set_channels(["DAPI", "CD8"])
+        assert w.config.weight_initialized_channels() == []
+
+        w.config.set_channels(["DAPI", "CD3", "CD8"])
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 1.0, \
+            "a channel that left and came back is new again"
+    finally:
+        w.close()
+
+
+def test_a_host_set_weight_is_not_overwritten_by_the_first_tick(app):
+    """`set_channel_weight` is somebody naming a number.
+
+    Found by `test_step1_fusion_core`, which builds a configuration through
+    this API and then ticks the channels: the first-tick default overwrote
+    every weight it had just been given. A programmatic weight is an answer
+    like a user's edit or a file's value -- 0 included -- so the tick leaves
+    it alone.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_weight("CD3", 0.5)
+        w.config.set_channel_weight("CD8", 0.0)
+
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+
+        assert w.config.channel_weight("CD3") == pytest.approx(0.5)
+        assert w.config.channel_weight("CD8") == 0.0
+    finally:
+        w.close()
+
+
+def test_the_nucleus_is_never_in_the_weight_history(app):
+    """Its weight is the handoff's answer and read-only here, so the history
+    -- which exists to decide first ticks -- has nothing to say about it, and
+    a session must not carry it as if it did."""
+    w = _window(app)
+    try:
+        assert "DAPI" not in w.config.weight_initialized_channels()
+
+        w.config.set_nucleus("DAPI", 0.4)
+        w.config.set_channel_weight("DAPI", 0.4)
+        w.config.set_channel_visible("DAPI", False)
+        w.config.set_channel_visible("DAPI", True)
+
+        assert "DAPI" not in w.config.weight_initialized_channels()
+        assert w.config.channel_weight("DAPI") == pytest.approx(0.4)
     finally:
         w.close()

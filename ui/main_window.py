@@ -1702,6 +1702,12 @@ class MainWindow(QMainWindow):
             "fusion_config": fusion_cfg,
             "channel_weights": channel_weights,
             "channel_visibility": channel_visibility,
+            # Which weights are ANSWERS rather than absences. Without it a
+            # restored session cannot tell a marker nobody ever enabled from
+            # one the user deliberately set to 0.00 -- both are 0.0 in
+            # `channel_weights` -- and the next first tick would guess.
+            "channel_weight_initialized":
+                self.config.weight_initialized_channels(),
             "channel_colors": self.config.channel_colors(),
             "current_channel": self.config.current_channel(),
             "preview_mode": self._step1_preview_mode,
@@ -1890,6 +1896,20 @@ class MainWindow(QMainWindow):
         mode = str(sess.get("preview_mode") or "")
         if mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION):
             self.set_preview_mode(mode, force=True, reconcile=False)
+
+        # Which weights are answers, restored before any tick is put back.
+        # Presence of the KEY is the test, not its truth: an empty list is a
+        # session in which nobody had weighted anything yet, and reading it as
+        # "absent" would let the next first tick overwrite nothing at all --
+        # while a session written before this field existed must fall back to
+        # the conservative migration, which `apply_full_config` has already
+        # applied by treating every weight in the saved fusion config as
+        # authoritative. That way opening an old project and ticking a channel
+        # cannot silently rewrite a weight it had stored, 0 included.
+        if "channel_weight_initialized" in sess:
+            recorded = sess.get("channel_weight_initialized")
+            if isinstance(recorded, (list, tuple, dict)):
+                self.config.restore_weight_initialization(recorded)
 
         colors = sess.get("channel_colors")
         visibility = sess.get("channel_visibility")

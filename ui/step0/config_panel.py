@@ -28,9 +28,16 @@ other:
     configuration and contributes nothing right now;
   * moving a weight never ticks or unticks anything, and `Reset weights` zeroes
     the markers without touching the ticks;
-  * unticking by hand keeps the weight exactly as it was, so re-ticking brings
-    that number back -- 0 included, because a weight the user never raised is
-    not a weight this panel may invent;
+  * the FIRST tick a marker ever gets in this dataset sets its weight to 1.0,
+    because a channel the user just asked to see and cannot see is not an
+    answer to anything. It happens once, before the tick is announced, so
+    nothing ever observes the channel ticked at 0;
+  * every tick after that leaves the number alone: unticking by hand keeps the
+    weight exactly as it was, so re-ticking brings that number back -- 0.00
+    included, because a 0 the user chose, or `Reset weights` set, or a file
+    supplied, is a decision and not an absence. Which zeros are which is
+    recorded apart from the numbers (`_weight_initialized`), carried in the
+    session, and cleared for a new dataset;
   * while a channel is unticked the effective configuration -- overlay, fusion
     preview, and what a Save fuses -- excludes it completely.
 
@@ -99,7 +106,8 @@ class ChannelRow(QWidget):
         self.checkbox.setChecked(bool(visible))
         self.checkbox.setToolTip(
             "Take this channel into the picture — overlay and fusion both. "
-            "Ticking a channel at weight 0 gives it a weight to be seen at.")
+            "The first tick sets the weight to 1.00; after that, unticking "
+            "and re-ticking brings back the weight you left, 0.00 included.")
         self.checkbox.toggled.connect(self._on_toggled)
         lay.addWidget(self.checkbox)
 
@@ -121,7 +129,7 @@ class ChannelRow(QWidget):
         self.slider.setMinimumWidth(60)
         self.slider.setToolTip(
             "How strongly this channel takes part — in the overlay and in "
-            "the fusion alike. 0 unticks it.")
+            "the fusion alike. 0 keeps it ticked and contributing nothing.")
         lay.addWidget(self.slider, stretch=2)
 
         self.spin = QDoubleSpinBox()
@@ -187,7 +195,8 @@ class ChannelRow(QWidget):
             QDoubleSpinBox.UpDownArrows if editable else QDoubleSpinBox.NoButtons)
         self.slider.setToolTip(
             "How strongly this channel takes part — in the overlay and in "
-            "the fusion alike. 0 unticks it." if editable else
+            "the fusion alike. 0 keeps it ticked and contributing nothing."
+            if editable else
             "The nucleus weight comes from Step0 and is read-only here.")
 
     def set_visible(self, visible):
@@ -243,6 +252,19 @@ class ConfigPanel(QWidget):
         # Channels whose weight the USER moved since the config was loaded.
         # Only those are written back, and then to every group they belong to.
         self._edited_channels = set()
+        # Channels whose weight is an ANSWER rather than an absence.
+        #
+        # Kept apart from the numbers on purpose. A marker starts a dataset at
+        # 0 because nobody has said anything about it yet, and a user can also
+        # deliberately set one to 0.00 -- the same number, two different
+        # facts, and only one of them may be replaced by a default. So this
+        # records who said it rather than what it says: the user moved the
+        # weight, `Reset weights` set it, or a config/weights file supplied
+        # it. `weight == 0` can never be the test (it would overwrite a 0 the
+        # user chose), and neither can `_edited_channels`, which already means
+        # something else -- which channels' rows get written back to every
+        # group they belong to in an old multi-group project.
+        self._weight_initialized = set()
         self._rows = {}            # channel -> ChannelRow
         self._items = {}           # channel -> QListWidgetItem
         self._colors = {}          # channel -> "#rrggbb" (user picks win)
@@ -335,6 +357,11 @@ class ConfigPanel(QWidget):
             self._rows[ch] = row
             self._items[ch] = item
 
+        # A channel that is gone takes its history with it; one that is
+        # still here keeps it, because rebuilding the rows is not a new
+        # dataset.
+        self._weight_initialized &= set(self._rows)
+
         self._refresh_nucleus_display()
         if current in self._rows:
             self.set_current_channel(current)
@@ -370,6 +397,10 @@ class ConfigPanel(QWidget):
         row = self._rows[channel]
         newly_visible = auto_show and not row.is_visible()
         if newly_visible:
+            # A click on a hidden row is that channel's first tick as much as
+            # the checkbox is, so it goes through the same decision, before
+            # the tick is announced.
+            self._first_enable_weight(channel)
             row.set_visible(True)
         changed = (channel != self._current)
         self._current = channel
@@ -383,14 +414,61 @@ class ConfigPanel(QWidget):
         if changed:
             self.current_channel_changed.emit(channel)
 
+    def _mark_weight_given(self, channel):
+        """Record that somebody named this channel's weight.
+
+        The nucleus is never in this set: its weight comes from the Step0
+        handoff, it is read-only here, and the first-tick rule does not apply
+        to it -- so recording it would only put a channel in the session's
+        history that the history has nothing to say about.
+        """
+        if not channel or channel == self._nucleus_channel:
+            return
+        self._weight_initialized.add(channel)
+
+    def _first_enable_weight(self, channel):
+        """Give a channel nobody has weighted yet the weight 1.0.
+
+        The FIRST time a marker is ticked it becomes visible, and a channel
+        that is visible at weight 0 is a channel the user asked to see and
+        cannot: the tick is the moment to answer, and the answer is 1.0.
+        Afterwards the weight is the user's, whatever it is -- so this runs
+        once per channel per dataset and never again.
+
+        Silent by design. The weight is set BEFORE the tick is announced, and
+        `config_changed` is deliberately NOT emitted for it: the visibility
+        handler already reloads the channel, redraws, marks the settings
+        unsaved and schedules the session save, so announcing the weight
+        separately would either draw the picture twice or draw it once with
+        the channel ticked at 0 -- a blank frame the user sees before the real
+        one. One logical act, one notification, the state already final when
+        it arrives.
+
+        The nucleus is untouched: its weight comes from the Step0 handoff and
+        is read-only here.
+        """
+        if not channel or channel == self._nucleus_channel:
+            return False
+        if channel in self._weight_initialized:
+            return False
+        row = self._rows.get(channel)
+        if row is None:
+            return False
+        self._mark_weight_given(channel)
+        row.set_weight(1.0)
+        self._edited_channels.add(channel)
+        return True
+
     def _on_row_visibility(self, channel, visible):
         """The user ticked or unticked a row.
 
-        The weight is not touched either way. Unticking a channel keeps its
-        number so re-ticking brings it back unchanged, and ticking a channel
-        the user has never weighted leaves it at 0: whether it contributes is
-        the user's decision, not this panel's.
+        Ticking for the FIRST time gives the channel weight 1.0 -- see
+        `_first_enable_weight`. Ticking it again does not: unticking keeps the
+        number, so re-ticking brings back exactly what the user left, 0.00
+        included. Unticking never touches the weight at all.
         """
+        if visible:
+            self._first_enable_weight(channel)
         self.visibility_changed.emit(channel, bool(visible))
 
     def visible_channels(self):
@@ -400,13 +478,17 @@ class ConfigPanel(QWidget):
     def set_channel_visible(self, channel, visible):
         """Tick or untick `channel` — the same act as clicking its box.
 
-        Same rule too: a channel ticked at weight 0 gets a weight it can be
-        seen at. Restoring a saved session does NOT come through here; it sets
-        the rows directly, so a session brings back exactly what was saved.
+        The same act, so the same rule: a first tick brings weight 1.0 with
+        it, through the one decision in `_first_enable_weight`. Restoring a
+        saved session does NOT come through here; it sets the rows directly,
+        so a session brings back exactly what was saved -- including a marker
+        the user never enabled, which stays at 0 and un-initialised.
         """
         row = self._rows.get(channel)
         if row is None or row.is_visible() == bool(visible):
             return
+        if visible:
+            self._first_enable_weight(channel)
         row.set_visible(visible)
         self.visibility_changed.emit(channel, bool(visible))
 
@@ -440,9 +522,19 @@ class ConfigPanel(QWidget):
         return float(row.weight()) if row is not None else 0.0
 
     def set_channel_weight(self, channel, weight):
+        """Set a channel's weight from outside the panel.
+
+        An answer, like a user's edit or a file's value: somebody named this
+        number, so a later first tick must not replace it with the default --
+        including when the number is 0. The exception is a fresh dataset,
+        whose zeros are written through here while the groups are built and
+        which clears the history at the end of `load_panel` for exactly that
+        reason.
+        """
         row = self._rows.get(channel)
         if row is None:
             return
+        self._mark_weight_given(channel)
         row.set_weight(weight)
 
     def nucleus_channel(self):
@@ -478,6 +570,10 @@ class ConfigPanel(QWidget):
         loaded with.
         """
         self._edited_channels.add(channel)
+        # And it is an answer from now on: a weight the user set is never
+        # replaced by the first-tick default, including 0.00, which is a
+        # deliberate "in the configuration, contributing nothing".
+        self._mark_weight_given(channel)
         # The tick is not touched. A weight is how much a channel contributes,
         # not whether it is part of the configuration, and moving one must not
         # silently add or remove a channel behind the user.
@@ -554,6 +650,10 @@ class ConfigPanel(QWidget):
             if ch != nuc:
                 row.set_weight(0.0)
                 self._edited_channels.add(ch)
+                # The button is the user saying "zero", so these zeros are
+                # answers: a channel unticked and re-ticked after a Reset
+                # comes back at 0, not at the first-tick default.
+                self._mark_weight_given(ch)
                 # The ticks are NOT touched: this resets weights, and a reset
                 # that also removed channels from the configuration would be
                 # doing something the button does not say.
@@ -644,6 +744,13 @@ class ConfigPanel(QWidget):
         for ch, row in self._rows.items():
             row.set_weight(0.0)
             row.set_visible(False)
+        # A new dataset's markers have never been weighted by ANYONE: their 0
+        # is an absence again, and the first tick of each will answer 1.0.
+        # Cleared here, at the end, because building the groups and zeroing
+        # the rows above writes those zeros through the same setters a host
+        # would use -- and those, being somebody's answer, mark the weight as
+        # given. Nothing is inherited from the slide that was open before.
+        self._weight_initialized = set()
         if nuc_ch and nuc_ch in self._rows:
             self._nucleus_weight = 1.0
             self.set_channel_weight(nuc_ch, 1.0)
@@ -684,6 +791,11 @@ class ConfigPanel(QWidget):
         self._groups = {}
         self._group_channel_weights = {}
         self._edited_channels = set()
+        # Weights that arrive in a file or a saved config are answers, not
+        # absences -- an explicit 0 in a project's fusion config is a decision
+        # somebody made, and a first tick afterwards must not overwrite it
+        # with 1.0. Collected as the groups are read, below.
+        loaded = set()
         dropped = []
         for gname, gdata in groups_cfg.items():
             channels = {}
@@ -695,12 +807,14 @@ class ConfigPanel(QWidget):
                     dropped.append(f"{gname}:{ch}")
                     continue
                 channels[ch] = float(w)
+                loaded.add(ch)
             self._add_group(str(gname), channels)
             self.set_group_weight(str(gname),
                                   float((gdata or {}).get("group_weight", 1.0)))
         if dropped:
             print("[Step1] nucleus channel removed from marker groups "
                   f"(it would contribute twice): {sorted(dropped)}")
+        self._weight_initialized = {ch for ch in loaded if ch != nuc_ch}
         if nuc_ch:
             self.set_channel_weight(nuc_ch,
                                     self._representative_weight(nuc_ch))
@@ -718,6 +832,33 @@ class ConfigPanel(QWidget):
             print(f"[Step1] channels in several groups at different weights: "
                   f"{sorted(ambiguous)}")
         self.config_changed.emit()
+
+    def weight_initialized_channels(self):
+        """The channels whose weight is an answer, for a session to carry.
+
+        Without this a session cannot tell its own zeros apart: a marker
+        nobody ever enabled and a marker the user deliberately set to 0.00
+        both save as 0.0, and after a restart the first tick would either
+        overwrite the user's decision or leave the untouched channel invisible
+        at 0. The numbers alone cannot say which is which; this says it.
+        """
+        return sorted(self._weight_initialized)
+
+    def restore_weight_initialization(self, channels):
+        """Put back exactly which weights are answers. Not a click.
+
+        Replaces whatever loading the config marked, because the session knows
+        better: `apply_full_config` has to treat every weight in a file as
+        authoritative (it cannot see who wrote it), while a session written by
+        this panel recorded the truth. Channels that no longer exist are
+        dropped rather than remembered.
+        """
+        if isinstance(channels, dict):
+            channels = [ch for ch, flag in channels.items() if flag]
+        known = set(self._rows) or set(self.all_channels or [])
+        self._weight_initialized = {str(ch) for ch in (channels or [])
+                                    if str(ch) in known
+                                    and str(ch) != self._nucleus_channel}
 
     def restore_display_state(self, colors=None, visibility=None,
                               current_channel=""):

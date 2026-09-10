@@ -197,14 +197,14 @@ def test_a_weight_never_ticks_or_unticks_anything(app):
         w.close()
 
 
-def test_ticking_a_channel_leaves_its_weight_alone(app):
-    """Whether a channel contributes is the user's decision, so a tick brings
-    back the weight that was there — 0 included."""
+def test_a_first_tick_weighs_one_and_later_ticks_leave_it_alone(app):
+    """The first tick answers 1.0 so the channel is actually in the picture;
+    every tick after that brings back the weight the user left."""
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
         w.config.set_channel_visible("CD3", True)
-        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.channel_weight("CD3") == 1.0
 
         w.config._rows["CD3"].spin.setValue(0.6)
         w.config.set_channel_visible("CD3", False)
@@ -965,4 +965,124 @@ def test_a_late_result_after_a_dataset_switch_writes_no_pixels(app):
         assert w._patch_load_ready == set()
     finally:
         w._patch_loaders.clear()
+        w.close()
+
+
+# ── a session that can tell its own zeros apart ──────────────────────────
+#
+# `channel_weights` saves 0.0 for a marker nobody ever enabled AND for one the
+# user deliberately set to 0.00. After a restart the first tick has to answer
+# 1.0 for the first and leave the second alone, so the session carries which
+# weights are ANSWERS alongside the numbers.
+
+def test_a_session_round_trips_which_zeros_are_answers(app):
+    w = _window(app)
+    try:
+        # CD3: the user says 0.00 on purpose. CD8: never enabled at all.
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        payload = w._step1_session_payload()
+
+        assert payload["channel_weights"]["CD3"] == 0.0
+        assert payload["channel_weights"]["CD8"] == 0.0
+        assert payload["channel_weight_initialized"] == ["CD3"]
+    finally:
+        w.close()
+
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config(payload["fusion_config"])
+        w._apply_step1_display_state(payload)
+
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0, \
+            "the user's own 0.00 came back as a default"
+
+        w.config.set_channel_visible("CD8", True)
+        assert w.config.channel_weight("CD8") == 1.0, \
+            "a channel nobody ever enabled is still un-initialised"
+    finally:
+        w.close()
+
+
+def test_an_empty_history_field_is_not_read_as_a_missing_one(app):
+    """A session in which nobody had weighted anything saves an EMPTY list.
+    Read as "absent", the conservative migration would mark every weight in
+    the saved config as an answer and the next first tick would leave the
+    channel invisible at 0."""
+    w = _window(app)
+    try:
+        payload = w._step1_session_payload()
+        assert payload["channel_weight_initialized"] == []
+    finally:
+        w.close()
+
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config(payload["fusion_config"])
+        w._apply_step1_display_state(payload)
+
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_an_old_session_without_the_field_keeps_its_stored_weights(app):
+    """The migration, conservative on purpose: a session written before this
+    field existed has weights that somebody meant, 0 included, so opening the
+    project and ticking a channel must not silently rewrite them."""
+    w = _window(app)
+    try:
+        old_session = {
+            "fusion_config": {
+                "nucleus": {"channel": "DAPI", "weight": 1.0},
+                "groups": {"markers": {"group_weight": 1.0,
+                                       "channels": {"CD3": 0.0, "CD8": 0.7}}},
+            },
+            "channel_visibility": {"DAPI": True, "CD3": False, "CD8": False},
+        }
+        assert "channel_weight_initialized" not in old_session
+
+        w._apply_step1_fusion_config(old_session["fusion_config"])
+        w._apply_step1_display_state(old_session)
+
+        w.config.set_channel_visible("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0, \
+            "an old session's stored 0 was overwritten with the default"
+        w.config.set_channel_visible("CD8", True)
+        assert w.config.channel_weight("CD8") == pytest.approx(0.7)
+    finally:
+        w.close()
+
+
+def test_restoring_a_session_ticks_nothing_and_weighs_nothing(app):
+    """Restoring is not clicking: the ticks and weights that come back are the
+    ones that were saved, and the current channel does not get a default
+    either."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        w.config.set_channel_visible("CD3", False)
+        w.config.set_current_channel("CD3", auto_show=True)
+        w.config._rows["CD3"].spin.setValue(0.0)
+        w.config.set_channel_visible("CD3", False)
+        payload = w._step1_session_payload()
+        assert payload["channel_visibility"]["CD3"] is False
+        assert payload["current_channel"] == "CD3"
+    finally:
+        w.close()
+
+    w = _window(app)
+    try:
+        w._apply_step1_fusion_config(payload["fusion_config"])
+        w._apply_step1_display_state(payload)
+
+        assert "CD3" not in w.config.visible_channels(), \
+            "a channel the user left hidden came back ticked"
+        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.current_channel() == "CD3"
+    finally:
         w.close()

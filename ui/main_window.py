@@ -38,6 +38,7 @@ from ..core.channel_remap import (
     compute_qupath_auto_minmax,
 )
 from ..core.io_loader import OMETIFFLoader
+from ..utils import perf_trace
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -225,6 +226,10 @@ class MainWindow(QMainWindow):
         self._proc_poll_timer.timeout.connect(self._poll_cellpose_process)
 
         self._step1_restore_active = False
+        # The GUI thread's own heartbeat, with the switch off it is None and
+        # no timer exists. It is what turns "the window froze" into a number
+        # with a callback beside it.
+        self._perf_heartbeat = perf_trace.start_heartbeat(self, label="main")
         self._step1_session_timer = QTimer()
         self._step1_session_timer.setSingleShot(True)
         self._step1_session_timer.timeout.connect(self._save_step1_session)
@@ -2931,6 +2936,10 @@ class MainWindow(QMainWindow):
                 continue   # already cached
             if idx in self._patch_loaders and self._patch_loaders[idx].isRunning():
                 continue   # already loading
+            perf_trace.mark("loader.start", who="_preload_all_patches",
+                            patch=idx, channels=len(needed),
+                            running=sum(1 for t in self._patch_loaders.values()
+                                        if t.isRunning()))
             self._start_loader_for(idx, needed=needed)
 
     def _connect_patch_loader(self, thread, idx):
@@ -3136,7 +3145,9 @@ class MainWindow(QMainWindow):
             return True
         if thread.isRunning():
             thread.stop()
-            thread.wait(timeout_ms)
+            with perf_trace.span("loader.wait", who="_stop_loader_for",
+                                 patch=idx, timeout_ms=int(timeout_ms)):
+                thread.wait(timeout_ms)
         if not thread.isRunning() and self._patch_loaders.get(idx) is thread:
             self._patch_loaders.pop(idx, None)
             return True
@@ -3151,7 +3162,9 @@ class MainWindow(QMainWindow):
         for idx, t in list(self._patch_loaders.items()):
             if t.isRunning():
                 t.stop()
-                t.wait(3000)
+                with perf_trace.span("loader.wait", who="_stop_all_loaders",
+                                     patch=idx, timeout_ms=3000):
+                    t.wait(3000)
             try:
                 t.done.disconnect()
                 t.progress.disconnect()
@@ -3164,6 +3177,9 @@ class MainWindow(QMainWindow):
         self._patch_loaders = survivors
 
     def closeEvent(self, event):
+        if self._perf_heartbeat is not None:
+            self._perf_heartbeat.stop()
+            self._perf_heartbeat = None
         self._stop_all_loaders()
         # A fusion job outlives the window unless it is asked to stop and then
         # held: destroying a running QThread is what produces
@@ -3269,10 +3285,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_patch_preview(self, reset_view=False):
         """Draw whichever preview the current mode asks for."""
-        if self._step1_preview_mode == STEP1_PREVIEW_OVERLAY:
-            self._render_overlay_patch(reset_view=reset_view)
-        else:
-            self._render_current_patch(reset_view=reset_view)
+        with perf_trace.span("step1.frame", mode=self._step1_preview_mode,
+                             patch=self._preview_patch_idx,
+                             reset_view=bool(reset_view)):
+            if self._step1_preview_mode == STEP1_PREVIEW_OVERLAY:
+                self._render_overlay_patch(reset_view=reset_view)
+            else:
+                self._render_current_patch(reset_view=reset_view)
 
     _DISPLAY_KEYS = ("min", "max", "brightness", "contrast", "gamma")
 
@@ -3307,10 +3326,13 @@ class MainWindow(QMainWindow):
         hit = self._overlay_display_cache.get(key)
         if hit is not None:
             return hit
-        if params is None:
-            lo, hi = compute_qupath_auto_minmax(arr, exclude_zero=True)
-            params = {"min": float(lo), "max": float(hi)}
-        gray = np.asarray(apply_channel_remap(arr, params), dtype=np.float32)
+        with perf_trace.span("step1.remap", channel=channel,
+                             shape="x".join(str(v) for v in arr.shape)):
+            if params is None:
+                lo, hi = compute_qupath_auto_minmax(arr, exclude_zero=True)
+                params = {"min": float(lo), "max": float(hi)}
+            gray = np.asarray(apply_channel_remap(arr, params),
+                              dtype=np.float32)
         self._overlay_display_cache[key] = gray
         return gray
 
@@ -3380,7 +3402,8 @@ class MainWindow(QMainWindow):
             grays[ch] = gray if weight >= 1.0 else gray * float(weight)
             colors[ch] = _hex_to_rgb01(self.config.channel_color(ch))
             params[ch] = _IDENTITY_REMAP
-        rgb = compose_multichannel_overlay(grays, colors, params)
+        with perf_trace.span("step1.compose", channels=len(grays)):
+            rgb = compose_multichannel_overlay(grays, colors, params)
         if rgb is None:
             self.prev_img.clear()
             self.prev_status.setText(
@@ -3390,8 +3413,9 @@ class MainWindow(QMainWindow):
         first_load = (self.prev_img.image is None)
         preserve = not (first_load or reset_view)
         state = self._save_patch_preview_view_state() if preserve else None
-        self.prev_img.setImage(
-            (np.clip(rgb, 0, 1) * 255).astype(np.uint8), autoLevels=False)
+        with perf_trace.span("step1.setImage", kind="overlay"):
+            self.prev_img.setImage(
+                (np.clip(rgb, 0, 1) * 255).astype(np.uint8), autoLevels=False)
         if first_load or reset_view:
             self.prev_vb.autoRange()
         else:
@@ -3442,6 +3466,8 @@ class MainWindow(QMainWindow):
         """
         if not channel:
             return
+        rev = perf_trace.REVISIONS.bump("display_mapping")
+        perf_trace.mark("step1.mapping_in", channel=channel, rev=rev)
         dropped = [key for key in self._overlay_display_cache if key[1] == channel]
         for key in dropped:
             self._overlay_display_cache.pop(key, None)
@@ -3517,6 +3543,10 @@ class MainWindow(QMainWindow):
                 self._pending_channel_demand.setdefault(idx, set()).update(wanted)
             return
         self._pending_channel_demand.pop(idx, None)
+        perf_trace.mark("loader.start", who="_ensure_channels_cached",
+                        patch=idx, channels=len(missing),
+                        running=sum(1 for t in self._patch_loaders.values()
+                                    if t.isRunning()))
         self._start_loader_for(idx, needed=missing)
 
     def _show_intensity_window(self):
@@ -3576,9 +3606,12 @@ class MainWindow(QMainWindow):
         wanted = {nuc_ch} if nuc_ch else set()
         for ch_weights in groups.values():
             wanted.update(ch_weights.keys())
-        signals = {ch: self._preview_channel_signal(ch, cache[ch], remap)
-                   for ch in wanted if ch in cache}
-        cyto, nuc = fuse_channels(signals, groups, group_weights, nuc_ch, nuc_w)
+        with perf_trace.span("step1.signals", channels=len(wanted)):
+            signals = {ch: self._preview_channel_signal(ch, cache[ch], remap)
+                       for ch in wanted if ch in cache}
+        with perf_trace.span("step1.fuse", channels=len(signals)):
+            cyto, nuc = fuse_channels(signals, groups, group_weights,
+                                      nuc_ch, nuc_w)
         if cyto is None:
             cyto = np.zeros(shape, dtype=np.float32)
             nuc = np.zeros(shape, dtype=np.float32)
@@ -3606,7 +3639,8 @@ class MainWindow(QMainWindow):
         print(f"[Step1-preview] preserve_view={preserve_view}")
         print(f"[Step1-preview] old_view_range={(state or {}).get('view_range')}")
         print(f"[Step1-preview] reset_view={bool(first_load or reset_view)}")
-        self.prev_img.setImage(rgb_u8, autoLevels=False)
+        with perf_trace.span("step1.setImage", kind="fusion"):
+            self.prev_img.setImage(rgb_u8, autoLevels=False)
         if first_load or reset_view:
             self.prev_vb.autoRange()
         else:
@@ -3631,6 +3665,8 @@ class MainWindow(QMainWindow):
         state the user ended on, and the intermediate ones are never drawn.
         """
         self._preview_update_pending = True
+        perf_trace.mark("step1.schedule", delay_ms=int(delay_ms),
+                        rev=perf_trace.REVISIONS.latest("display_mapping"))
         self._prev_timer.start(int(delay_ms))
         # Said immediately, not after the redraw: the moment the settings differ
         # from the snapshot, a search must not look startable.
@@ -3639,7 +3675,10 @@ class MainWindow(QMainWindow):
     def _apply_pending_preview_update(self):
         """The coalesced redraw, in whichever mode is showing."""
         self._preview_update_pending = False
-        self._refresh_patch_preview(reset_view=False)
+        with perf_trace.span("step1.publish",
+                             rev=perf_trace.REVISIONS.latest("display_mapping"),
+                             mode=self._step1_preview_mode):
+            self._refresh_patch_preview(reset_view=False)
         self._update_fusion_settings_state()
 
     # ── Phase 1 ─────────────────────────────────────────────────────

@@ -33,6 +33,7 @@ from ...core.channel_remap import (
     compose_multichannel_overlay,
     compute_qupath_auto_minmax,
 )
+from ...utils import perf_trace
 from ...utils.channel_remap_config import (
     DEFAULT_AUTO_SATURATION,
     default_channel_remap_config,
@@ -1398,7 +1399,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
             p["enabled"] = self._chk_enabled.isChecked()
         # else: no fusion-enable surface (Step0) -> keep params' default
         # enabled=True; Step1 decides fusion participation downstream.
-        self.params_changed.emit(self._active)
+        rev = perf_trace.REVISIONS.bump("workbench_params")
+        perf_trace.mark("intensity.in", channel=self._active, rev=rev)
+        with perf_trace.span("intensity.fanout", channel=self._active, rev=rev):
+            self.params_changed.emit(self._active)
 
     def _on_minmax_changed(self, _v=None):
         if self._loading or self._active is None:
@@ -1604,13 +1608,17 @@ class ChannelWorkbench(QtWidgets.QWidget):
             self._preview_dirty = True          # replayed by showEvent
             return
         if self._multichannel_overlay:
-            self._recomposite_overlay()
+            with perf_trace.span("intensity.overlay_recomposite"):
+                self._recomposite_overlay()
             return
         if self._active is None or self._raw.get(self._active) is None:
             self._canvas.clear()
             return
         raw = self._raw[self._active]
-        remapped = apply_channel_remap(raw, self._params[self._active])
+        with perf_trace.span("intensity.remap", channel=self._active,
+                             shape="x".join(str(v) for v in
+                                            getattr(raw, "shape", ()))):
+            remapped = apply_channel_remap(raw, self._params[self._active])
         # Fixed default (#5): always show the conditioned (remapped) channel — the
         # tab's purpose. raw is still supplied as the fallback the canvas shows when
         # no remap is active, so the viewer is never blank.

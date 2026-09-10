@@ -77,6 +77,7 @@ from ...utils.roi_project import (
 # user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
 # schema/widget modules Step1.5 and Step3 use; no promotion / resolver /
 # Step2-runtime import is introduced here.
+from ...utils import perf_trace
 from ..widgets.channel_workbench import (
     ChannelWorkbench,
     _PALETTE as CHANNEL_PALETTE,
@@ -3553,12 +3554,16 @@ class Step0Page(QWidget):
         """(Re)start the background preload of all patches × channels. Cancels any
         running preload and invalidates the cache first (patches changed)."""
         self._cancel_preload()
+        cleared = sum(len(v) for v in (self._preload_cache or {}).values())
         self._preload_cache = {}
         if not self.loader or not self.patches:
             return
         channels = self._conditioning_channels()
         if not channels:
             return
+        perf_trace.mark("step0.preload_start", patches=len(self.patches),
+                        channels=len(channels), cleared_arrays=cleared,
+                        gen=self._preload_gen + 1)
         self._preload_gen += 1
         gen = self._preload_gen
         worker = PreloadWorker(self.loader, list(self.patches), channels, gen,
@@ -4071,6 +4076,8 @@ class Step0Page(QWidget):
             return
         self._roi_sync_guard = True
         try:
+            perf_trace.mark("patch.reconcile_in",
+                            patches=len(source_panel._patch_coords() or []))
             self._roi_model.adopt(
                 rois=source_panel.get_rois(),
                 patches=source_panel._patch_coords(),
@@ -4091,7 +4098,8 @@ class Step0Page(QWidget):
             # A completed edit is a commit: `patches_changed` fires once per
             # finished gesture (drags preview through `_preview_patch_geometry`
             # and stay silent), so this is edit-end persistence, not per-move.
-            self._persist_geometry_edit()
+            with perf_trace.span("patch.persist"):
+                self._persist_geometry_edit()
         finally:
             self._roi_sync_guard = False
 
@@ -4506,7 +4514,9 @@ class Step0Page(QWidget):
         every Step1 result derived from the OLD geometry has stopped being
         true.
         """
-        ok, reason, info = self._commit_geometry_only()
+        with perf_trace.span("patch.commit_geometry_only") as _sp:
+            ok, reason, info = self._commit_geometry_only()
+            _sp.add(ok=bool(ok), reason=reason or "")
         if ok:
             self._set_geometry_status("Patch geometry saved to the Step0 handoff.")
             return True
@@ -5524,6 +5534,11 @@ class Step0Page(QWidget):
         self._rebuild_patch_list()
 
     def _on_patches_changed(self, patches):
+        with perf_trace.span("patch.on_patches_changed",
+                             patches=len(patches or [])):
+            self._on_patches_changed_inner(patches)
+
+    def _on_patches_changed_inner(self, patches):
         self.patches = list(patches or [])
         self._reindex_roi_patch_links()
         self.rois = list(self.overview.get_rois())
@@ -6889,14 +6904,20 @@ class Step0Page(QWidget):
         timer = getattr(self, "_tissue_preview_timer", None)
         if timer is not None:
             timer.stop()
-        rgb = self._tissue_preview_rgb()
-        if rgb is None:
-            return None
-        for panel in self._registered_roi_overviews():
-            setter = getattr(panel, "set_channel_image", None)
-            if callable(setter):
-                setter(rgb)
-        return rgb
+        with perf_trace.span("step0.tissue_preview_render") as _sp:
+            rgb = self._tissue_preview_rgb()
+            if rgb is None:
+                _sp.add(drawn=0)
+                return None
+            drawn = 0
+            for panel in self._registered_roi_overviews():
+                setter = getattr(panel, "set_channel_image", None)
+                if callable(setter):
+                    setter(rgb)
+                    drawn += 1
+            _sp.add(drawn=drawn,
+                    shape="x".join(str(v) for v in getattr(rgb, "shape", ())))
+            return rgb
 
     # ── display mapping: one per channel, shared by every view ─────────
 
@@ -7093,33 +7114,42 @@ class Step0Page(QWidget):
     def _on_display_mapping_changed(self, cid):
         """A channel's mapping changed: the compare panels redraw (a levels
         and table swap), the full image and its overlay get the numbers."""
-        # Announced first, so a listener that caches remapped pixels drops the
-        # stale ones before anything else redraws from them.
-        self.display_mapping_changed.emit(cid)
-        if cid in (self.current_channel, self.nucleus_channel):
-            self._refresh_preview_display(keep_zoom=True)
-            # The Tissue Preview is drawn with the same numbers, but it is a
-            # whole-slide re-render in numpy rather than a levels swap, so it
-            # waits for the slider to stop moving. Hooked HERE rather than on
-            # `params_changed`, so that the fallback path -- a page whose
-            # Channel Remap workbench has never been engaged, which is every
-            # page until the Intensity window is first opened -- reaches it
-            # too; that path calls this method directly and emits nothing.
-            self._queue_tissue_preview()
-        explore_tab = getattr(self, "_explore_tab", None)
-        stack = explore_tab.stack if explore_tab is not None else None
-        if stack is None:
-            return
-        if cid == self.current_channel:
-            set_marker = getattr(stack.controller, "set_display_mapping", None)
-            if set_marker is not None:
-                lo, hi, gamma = self._display_mapping_for(cid)
-                set_marker(lo, hi, gamma, channel=cid)
-        if cid == self.nucleus_channel:
-            set_nuc = getattr(getattr(stack, "overlay", None), "set_display_mapping", None)
-            if set_nuc is not None:
-                lo, hi, gamma = self._display_mapping_for(cid, nucleus=True)
-                set_nuc(lo, hi, gamma)
+        _sp = perf_trace.span("step0.mapping_fanout", channel=cid)
+        with _sp:
+            # Announced first, so a listener that caches remapped pixels drops
+            # the stale ones before anything else redraws from them.
+            with perf_trace.span("step0.mapping_emit", channel=cid):
+                self.display_mapping_changed.emit(cid)
+            if cid in (self.current_channel, self.nucleus_channel):
+                with perf_trace.span("step0.compare_setters", channel=cid):
+                    self._refresh_preview_display(keep_zoom=True)
+                # The Tissue Preview is drawn with the same numbers, but it
+                # is a whole-slide re-render in numpy rather than a levels
+                # swap, so it waits for the slider to stop moving. Hooked HERE
+                # rather than on `params_changed`, so that the fallback path --
+                # a page whose Channel Remap workbench has never been engaged,
+                # which is every page until the Intensity window is first
+                # opened -- reaches it too; that path calls this method
+                # directly and emits nothing.
+                self._queue_tissue_preview()
+            explore_tab = getattr(self, "_explore_tab", None)
+            stack = explore_tab.stack if explore_tab is not None else None
+            if stack is None:
+                return
+            with perf_trace.span("step0.full_image_setters", channel=cid):
+                if cid == self.current_channel:
+                    set_marker = getattr(stack.controller,
+                                         "set_display_mapping", None)
+                    if set_marker is not None:
+                        lo, hi, gamma = self._display_mapping_for(cid)
+                        set_marker(lo, hi, gamma, channel=cid)
+                if cid == self.nucleus_channel:
+                    set_nuc = getattr(getattr(stack, "overlay", None),
+                                      "set_display_mapping", None)
+                    if set_nuc is not None:
+                        lo, hi, gamma = self._display_mapping_for(
+                            cid, nucleus=True)
+                        set_nuc(lo, hi, gamma)
 
     def _on_display_auto(self, prefix):
         """Re-seed a role's mapping from the SLIDE (not the patch). `prefix`

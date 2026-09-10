@@ -34,6 +34,7 @@ from ...core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
 from ...core.channel_remap import apply_channel_remap
+from ...utils import perf_trace
 
 class TileSelectDialog(QDialog):
     """
@@ -1792,7 +1793,14 @@ class OverviewPanel(QWidget):
 
         self._rebuild_patch_artists()
         self._update_info()
-        self.patches_changed.emit(self._patch_coords())
+        # The gesture ends here and everything the host does about it happens
+        # inside this emit, on this thread. That is the span the "drawing a
+        # second patch freezes the window" complaint has to be measured
+        # against.
+        perf_trace.mark("patch.added", patches=len(self._patches))
+        with perf_trace.span("patch.emit_patches_changed",
+                             patches=len(self._patches)):
+            self.patches_changed.emit(self._patch_coords())
 
     def add_patch_rect(self, fy0, fy1, fx0, fx1, roi_idx=None):
         """Add a patch from a FULL-RESOLUTION rectangle, with no drawing.

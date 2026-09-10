@@ -521,20 +521,43 @@ class ConfigPanel(QWidget):
         row = self._rows.get(channel)
         return float(row.weight()) if row is not None else 0.0
 
-    def set_channel_weight(self, channel, weight):
-        """Set a channel's weight from outside the panel.
+    def _sync_row_weight(self, channel, weight):
+        """Put a number in a row, and say nothing about who chose it.
 
-        An answer, like a user's edit or a file's value: somebody named this
-        number, so a later first tick must not replace it with the default --
-        including when the number is 0. The exception is a fresh dataset,
-        whose zeros are written through here while the groups are built and
-        which clears the history at the end of `load_panel` for exactly that
-        reason.
+        The panel's own bookkeeping uses this: showing the representative of
+        an old project's several group weights, showing the nucleus weight the
+        handoff gave. None of that is an answer ABOUT the channel -- it is the
+        row catching up with the model -- so it must not mark the weight as
+        given (which would defeat the first-tick default) and must not mark
+        the channel as edited (which would write one row's number into every
+        group it belongs to and flatten an old project's per-group weights).
+        """
+        row = self._rows.get(channel)
+        if row is None:
+            return
+        row.set_weight(weight)
+
+    def set_channel_weight(self, channel, weight):
+        """Set a channel's weight from OUTSIDE the panel: the same act as
+        the user moving its slider.
+
+        So the same consequences, both of them. It is an answer, so a later
+        first tick will not replace it with the default -- 0.00 included. And
+        it is this channel's weight everywhere, so it goes to every group the
+        channel belongs to, exactly as an edit does: without that, the row
+        showed 0.5 while `get_groups`, the overlay, the fusion preview and
+        every Save still read the 0 the group was loaded with. One number on
+        screen and a different one in the picture is the split this panel
+        exists to prevent.
+
+        The panel's own row-syncing does NOT come through here; it uses
+        `_sync_row_weight`, which claims neither.
         """
         row = self._rows.get(channel)
         if row is None:
             return
         self._mark_weight_given(channel)
+        self._edited_channels.add(channel)
         row.set_weight(weight)
 
     def nucleus_channel(self):
@@ -681,7 +704,7 @@ class ConfigPanel(QWidget):
         if channel not in data["members"]:
             data["members"].append(channel)
         self._group_channel_weights.setdefault(name, {})[channel] = float(weight)
-        self.set_channel_weight(channel, self._representative_weight(channel))
+        self._sync_row_weight(channel, self._representative_weight(channel))
 
     def _del_group(self, name):
         self._groups.pop(name, None)
@@ -753,7 +776,7 @@ class ConfigPanel(QWidget):
         self._weight_initialized = set()
         if nuc_ch and nuc_ch in self._rows:
             self._nucleus_weight = 1.0
-            self.set_channel_weight(nuc_ch, 1.0)
+            self._sync_row_weight(nuc_ch, 1.0)
             self._refresh_nucleus_display()
             self._rows[nuc_ch].set_visible(True)
             self._current = nuc_ch
@@ -816,8 +839,8 @@ class ConfigPanel(QWidget):
                   f"(it would contribute twice): {sorted(dropped)}")
         self._weight_initialized = {ch for ch in loaded if ch != nuc_ch}
         if nuc_ch:
-            self.set_channel_weight(nuc_ch,
-                                    self._representative_weight(nuc_ch))
+            self._sync_row_weight(nuc_ch,
+                                  self._representative_weight(nuc_ch))
         self._refresh_nucleus_display()
         ambiguous = self.ambiguous_channels()
         for ch, values in ambiguous.items():

@@ -714,3 +714,70 @@ def test_the_nucleus_is_never_in_the_weight_history(app):
         assert w.config.channel_weight("DAPI") == pytest.approx(0.4)
     finally:
         w.close()
+
+
+def test_an_external_weight_reaches_the_groups_and_not_just_the_row(app):
+    """One number on screen and a different one in the picture is the split
+    this panel exists to prevent.
+
+    `set_channel_weight` is the same act as moving the slider, so it has the
+    same two consequences: the weight is an answer (no first-tick default
+    over it) AND it is this channel's weight in every group it belongs to.
+    Marking only the first left the row showing 0.5 while `get_groups`, the
+    overlay, the fusion preview and every Save still read the 0 the group was
+    loaded with.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_weight("CD3", 0.5)
+        w.config.set_channel_visible("CD3", True)
+
+        assert w.config.channel_weight("CD3") == pytest.approx(0.5)
+        assert w.config.get_groups()["markers"]["CD3"] == pytest.approx(0.5)
+        eff = w.config.effective_config()
+        assert eff["groups"]["markers"]["channels"]["CD3"] == pytest.approx(0.5)
+    finally:
+        w.close()
+
+
+def test_a_first_tick_reaches_the_groups_too(app):
+    """Same requirement for the default itself: what the tick puts on the row
+    is what gets fused and saved."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+
+        assert w.config.get_groups()["markers"]["CD3"] == 1.0
+        eff = w.config.effective_config()
+        assert eff["groups"]["markers"]["channels"]["CD3"] == 1.0
+    finally:
+        w.close()
+
+
+def test_the_panels_own_row_syncing_claims_nothing(app):
+    """`_sync_row_weight` is the row catching up with the model, not an
+    answer about the channel: it must not defeat the first-tick default, and
+    it must not flatten an old project's per-group weights by marking the
+    channel edited."""
+    w = _window(app)
+    try:
+        w.config.apply_full_config({
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {
+                "a": {"group_weight": 1.0, "channels": {"CD3": 0.2}},
+                "b": {"group_weight": 1.0, "channels": {"CD3": 0.8}},
+            },
+        })
+        # The row shows the largest of the two; the groups keep their own.
+        assert w.config.channel_weight("CD3") == pytest.approx(0.8)
+        groups = w.config.get_groups()
+        assert groups["a"]["CD3"] == pytest.approx(0.2)
+        assert groups["b"]["CD3"] == pytest.approx(0.8)
+
+        # And an explicit external set is an edit: it applies to both.
+        w.config.set_channel_weight("CD3", 0.5)
+        groups = w.config.get_groups()
+        assert groups["a"]["CD3"] == pytest.approx(0.5)
+        assert groups["b"]["CD3"] == pytest.approx(0.5)
+    finally:
+        w.close()

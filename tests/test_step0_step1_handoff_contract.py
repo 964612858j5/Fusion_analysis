@@ -71,6 +71,14 @@ class Config:
 
     def set_current_channel(self, _ch): pass
 
+    # The weight history a session carries: which zeros are answers rather
+    # than absences. Recorded so a restore path can be asked whether it put
+    # it back.
+    restored_weight_history = None
+
+    def restore_weight_initialization(self, channels):
+        self.restored_weight_history = list(channels or [])
+
 
 class StepPage:
     def __init__(self):
@@ -655,3 +663,79 @@ def test_step0_write_failure_does_not_emit(monkeypatch):
         "block01.ui.step0.step0_page.QMessageBox.warning", lambda *_a, **_k: None)
     assert page._emit_complete({}, "out.zarr", {}) is False
     assert emitted == []
+
+
+# ── the weight history is restored on the OLDER path too ─────────────────
+#
+# `channel_weight_initialized` says which of a session's zero weights are
+# somebody's answer and which are "nobody has said yet". Only the second may
+# be replaced by the first tick's 1.0. The v2 restore puts it back through the
+# display state; the older path restores no display state at all, and without
+# this it silently dropped the field -- so a workspace on the old schema, with
+# a session THIS program wrote, came back with every 0 counted as an answer
+# and a channel nobody had ever enabled stayed invisible at 0 on its first
+# tick after a restart.
+
+def test_the_v1_restore_puts_back_which_zeros_are_answers(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    session = run.step1 / "v1-session.json"
+    write_json(session, {
+        "raw_ome_path": str(run.raw),
+        "corrected_zarr_path": str(run.corrected),
+        "output_dir": str(run.step0),
+        "step0_dir": str(run.step0),
+        "step1_dir": str(run.step1),
+        "step2_dir": str(run.step2),
+        "rois": [], "patches": [],
+        "fusion_config": {
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "groups": {"markers": {"group_weight": 1.0,
+                                   "channels": {"CD68": 0.0}}},
+        },
+        # Written by this program: CD68's 0 is nobody's answer.
+        "channel_weight_initialized": [],
+    })
+
+    w = make_window(run)
+    w.step0_output = {}
+    w._update_next_button = lambda: None
+    assert w._load_previous_step1_session(auto=True, path=str(session)) is True
+
+    assert w.config.restored_weight_history == [], (
+        "the older restore path dropped the weight history, so every 0 in "
+        "the config counted as an answer")
+
+
+def test_a_v1_session_without_the_field_restores_nothing_of_it(tmp_path,
+                                                               monkeypatch):
+    """The migration stays conservative: with no field there is nothing to
+    put back, and `apply_full_config` has already treated the saved weights as
+    authoritative."""
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    session = run.step1 / "old-v1-session.json"
+    write_json(session, {
+        "raw_ome_path": str(run.raw),
+        "corrected_zarr_path": str(run.corrected),
+        "output_dir": str(run.step0),
+        "step0_dir": str(run.step0),
+        "step1_dir": str(run.step1),
+        "step2_dir": str(run.step2),
+        "rois": [], "patches": [],
+        "fusion_config": {"nucleus": {"channel": "DAPI", "weight": 1.0},
+                          "groups": {}},
+    })
+
+    w = make_window(run)
+    w.step0_output = {}
+    w._update_next_button = lambda: None
+    assert w._load_previous_step1_session(auto=True, path=str(session)) is True
+
+    assert w.config.restored_weight_history is None

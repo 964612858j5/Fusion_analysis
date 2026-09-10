@@ -1874,6 +1874,30 @@ class MainWindow(QMainWindow):
         self.config.set_channels(names)
         self.config.apply_full_config(cfg)
 
+    def _restore_step1_weight_history(self, sess):
+        """Put back which weights are answers rather than absences.
+
+        Presence of the KEY is the test, not its truth: an empty list is a
+        session in which nobody had weighted anything yet, and reading that as
+        "absent" would let the next first tick leave the channel invisible at
+        0. A session written before this field existed falls back to the
+        conservative migration `apply_full_config` has already performed --
+        every weight in the saved fusion config treated as authoritative, 0
+        included -- so opening an old project and ticking a channel cannot
+        silently rewrite a weight it had stored.
+
+        Called from BOTH restore paths. The v2 path reaches it through the
+        display state; the older path restores no display state at all, but it
+        still loads a session this program may have written, and that session
+        knows which of its zeros nobody ever chose.
+        """
+        sess = dict(sess or {})
+        if "channel_weight_initialized" not in sess:
+            return
+        recorded = sess.get("channel_weight_initialized")
+        if isinstance(recorded, (list, tuple, dict)):
+            self.config.restore_weight_initialization(recorded)
+
     def _apply_step1_display_state(self, sess):
         """Restore Step1's own display state: ticks, colours, current channel,
         preview mode.
@@ -1897,19 +1921,7 @@ class MainWindow(QMainWindow):
         if mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION):
             self.set_preview_mode(mode, force=True, reconcile=False)
 
-        # Which weights are answers, restored before any tick is put back.
-        # Presence of the KEY is the test, not its truth: an empty list is a
-        # session in which nobody had weighted anything yet, and reading it as
-        # "absent" would let the next first tick overwrite nothing at all --
-        # while a session written before this field existed must fall back to
-        # the conservative migration, which `apply_full_config` has already
-        # applied by treating every weight in the saved fusion config as
-        # authoritative. That way opening an old project and ticking a channel
-        # cannot silently rewrite a weight it had stored, 0 included.
-        if "channel_weight_initialized" in sess:
-            recorded = sess.get("channel_weight_initialized")
-            if isinstance(recorded, (list, tuple, dict)):
-                self.config.restore_weight_initialization(recorded)
+        self._restore_step1_weight_history(sess)
 
         colors = sess.get("channel_colors")
         visibility = sess.get("channel_visibility")
@@ -2239,6 +2251,11 @@ class MainWindow(QMainWindow):
             self.config.set_channels(self.loader.channel_names())
             fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
             self._apply_step1_fusion_config(fusion_cfg)
+            # This path restores no display state, but the weight history is
+            # not display state: without it every 0 in the config counts as
+            # somebody's answer, and a channel nobody ever enabled stays
+            # invisible at 0 on its first tick after a restart.
+            self._restore_step1_weight_history(sess)
 
             rois = list(sess.get("rois") or [])
             if not rois and sess.get("roi_bbox"):

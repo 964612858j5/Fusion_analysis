@@ -3403,7 +3403,8 @@ class MainWindow(QMainWindow):
             self.prev_status.setText("Loading channels…")
             return
 
-        remap = self._display_mapping()
+        # Only what this frame draws: `ready` is ticked AND in cache.
+        remap = self._display_mapping(channels=ready)
         grays, colors, params = {}, {}, {}
         for ch in ready:
             weight = self._overlay_weight(ch)
@@ -3609,14 +3610,18 @@ class MainWindow(QMainWindow):
         # Reflect the manual Channel Remap (Step0) in the on-screen preview too,
         # mirroring the disk FullFusionWorker: conditioned channels use
         # apply_channel_remap (Min/Max/Gamma); others use the percentile norm.
-        remap = self._display_mapping()
-
         # Map each channel once, then hand the signals to THE fusion core.  The
         # arithmetic below used to be written out here as well; a second copy of
         # it is how the screen and the saved file drifted apart.
         wanted = {nuc_ch} if nuc_ch else set()
         for ch_weights in groups.values():
             wanted.update(ch_weights.keys())
+        # Only the channels this frame fuses, and only those already in cache:
+        # asking for the rest makes the render callback seed an automatic
+        # window per channel from whole-slide pixels (7.47 s of one measured
+        # frame).
+        remap = self._display_mapping(
+            channels=[ch for ch in wanted if ch in cache])
         with perf_trace.span("step1.signals", channels=len(wanted)):
             signals = {ch: self._preview_channel_signal(ch, cache[ch], remap)
                        for ch in wanted if ch in cache}
@@ -5226,8 +5231,8 @@ class MainWindow(QMainWindow):
             print(f"[Step1] display-mapping commit raised: {exc}")
             return False, f"commit raised: {exc}"
 
-    def _display_mapping(self):
-        """The Min/Max/Gamma Step1 should DRAW with.
+    def _display_mapping(self, channels=None, blocking=True):
+        """The Min/Max/Gamma Step1 should DRAW with, for the channels asked for.
 
         The draft: what the Intensity window is showing the user right now.
         Nothing is written until a Save commits it, so a slider that has moved
@@ -5238,12 +5243,33 @@ class MainWindow(QMainWindow):
         Falls back to the committed file when there is no draft (no workbench
         engaged yet), so a freshly opened project still draws with the mapping
         its handoff carries.
+
+        `blocking=False` exists for callers that must not wait on pixels, and
+        the render paths deliberately do NOT use it: a frame that skips a
+        channel's window draws that channel with a provisional percentile
+        instead, and the screen would stop matching what a Save writes --
+        the one equality this preview exists to keep. Scoping WHICH channels
+        are asked for is what makes the wait affordable: one channel's window
+        is computed once and cached, where 29 were computed per first frame.
+
+        `channels` is NOT optional in the render paths, and this is why:
+        called with nothing, `display_mapping_for_preview()` completes the
+        draft for every channel the loader has, computing an automatic window
+        for each one it has never seen -- from whole-slide pixels, on the GUI
+        thread. MEASURED on the real desk: the first frame after a patch was
+        drawn showed DAPI alone and took 7493.66 ms, of which the remap it
+        actually drew was 3.98 ms and the composite 19.65 ms; the other 7.47
+        seconds were spent seeding windows for the 28 channels that frame did
+        not contain, while the window answered nothing and the second patch
+        the user had already drawn sat in the event queue. A frame asks for
+        the channels it draws.
         """
         step0 = getattr(self, "_step0", None)
         draft = {}
         if step0 is not None and hasattr(step0, "display_mapping_for_preview"):
             try:
-                draft = step0.display_mapping_for_preview() or {}
+                draft = step0.display_mapping_for_preview(
+                    channels=channels, blocking=blocking) or {}
             except Exception as exc:
                 print(f"[Step1] could not read the display mapping: {exc}")
                 draft = {}

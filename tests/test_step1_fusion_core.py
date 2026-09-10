@@ -236,7 +236,7 @@ def _preview_rgb(app, raw, groups, gws, nuc_w):
         w._preview_patch_idx = 0
         w._patch_channel_cache[0] = {c: a.copy() for c, a in raw.items()}
         w._patch_load_ready.add(0)
-        w._display_mapping = lambda: _REMAP
+        w._display_mapping = lambda *a, **k: _REMAP
         w.set_preview_mode("fusion", force=True, reconcile=False)
         w._render_current_patch(reset_view=True)
         return w.prev_img.image.copy()
@@ -352,7 +352,7 @@ def test_an_all_zero_configuration_draws_nothing_and_says_so(app):
         w._preview_patch_idx = 0
         w._patch_channel_cache[0] = {c: a.copy() for c, a in raw.items()}
         w._patch_load_ready.add(0)
-        w._display_mapping = lambda: _REMAP
+        w._display_mapping = lambda *a, **k: _REMAP
         w.set_preview_mode("fusion", force=True, reconcile=False)
         w._render_current_patch(reset_view=True)
 

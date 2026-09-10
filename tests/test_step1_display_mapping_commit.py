@@ -371,7 +371,7 @@ def test_the_automatic_window_uses_the_real_pixel_source(app, tmp_path):
         pixels = np.linspace(0, 5000, 64 * 64, dtype=np.float32).reshape(64, 64)
         # Stub the SLIDE READ, one level below the page's own pixel accessor,
         # so `_workbench_pixels` itself is the real method under test.
-        page._slide_lowres_array = lambda name: pixels
+        page._slide_lowres_array = lambda name, blocking=True: pixels
 
         window = page._auto_display_window("CD3")
 

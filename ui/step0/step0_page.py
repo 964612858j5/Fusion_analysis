@@ -3527,7 +3527,7 @@ class Step0Page(QWidget):
         cache[ch] = arr
         return arr
 
-    def _workbench_pixels(self, name):
+    def _workbench_pixels(self, name, blocking=True):
         """The pixels the Channel Remap workbench works on for `name`.
 
         The whole slide at the overview level, not the current patch. The
@@ -3546,9 +3546,13 @@ class Step0Page(QWidget):
         pyramid read (fake loaders, a TIFF without levels), which is the
         behaviour every caller had before.
         """
-        arr = self._slide_lowres_array(name)
+        arr = self._slide_lowres_array(name, blocking=blocking)
         if arr is not None:
             return arr
+        if not blocking:
+            # The fallback below is a live read; a caller that said "do not
+            # block" gets nothing rather than a synchronous decode.
+            return None
         provider = getattr(self, "_preview_provider", None)
         if provider is None:
             return None
@@ -4212,41 +4216,68 @@ class Step0Page(QWidget):
             out[str(name)] = dict(p)
         return out
 
-    def display_mapping_for_preview(self, channels=None):
+    def display_mapping_for_preview(self, channels=None, blocking=True):
         """The draft, completed with the same automatic windows a Save freezes.
 
         A project whose Intensity window has never been opened still has to draw
         something, and it must be the same something the Save will write — not a
         percentile of whichever patch is on screen. The automatic windows are
         memoised per channel so a redraw does not re-read the slide.
+
+        `channels=None` means every channel the loader has, which is what a
+        Save wants: it is about to fuse all of them and each one needs an
+        explicit window. A LIST means exactly those, and an empty list means
+        none -- the distinction matters because a render callback asks for the
+        channels it is drawing, and treating an empty list as "all" is how the
+        first frame after a patch was drawn spent 7.47 seconds seeding windows
+        for 28 channels it did not show.
+
+        `blocking=False` is the render path's other half: complete what is
+        already in memory, and never start a whole-slide read or a percentile
+        pass for a channel whose pixels have not arrived. Such a channel is
+        simply absent from the answer, and the caller draws it with a cheap
+        provisional window until the real one lands.
         """
         draft = self.display_mapping_draft()
-        names = list(channels or [])
-        if not names and self.loader is not None:
-            try:
-                names = list(self.loader.channel_names())
-            except Exception:
-                names = []
+        if channels is None:
+            names = []
+            if self.loader is not None:
+                try:
+                    names = list(self.loader.channel_names())
+                except Exception:
+                    names = []
+        else:
+            names = [str(ch) for ch in channels]
         for ch in names:
             if ch in draft:
                 continue
             if ch not in self._auto_window_cache:
-                self._auto_window_cache[ch] = self._auto_display_window(ch)
+                auto = self._auto_display_window(ch, blocking=blocking)
+                if auto is None and not blocking:
+                    # Not "this channel has no window", but "not yet": leave
+                    # the cache empty so the next attempt, once the pixels are
+                    # in, computes it.
+                    continue
+                self._auto_window_cache[ch] = auto
             auto = self._auto_window_cache[ch]
             if auto is not None:
                 draft[ch] = dict(auto)
         return draft
 
-    def _auto_display_window(self, channel):
+    def _auto_display_window(self, channel, blocking=True):
         """A stable automatic window for a channel nobody tuned.
 
         Computed ONCE, from the whole-slide overview — the same pixels for
         every patch, region and tile — so that the mapping cannot depend on
         which crop happened to be on screen or how the Save dialog split the
         image into tiles. Returns None when the pixels are not available.
+
+        `blocking=False` refuses to fetch them: this runs on the GUI thread
+        from render callbacks, and a whole-slide read plus a percentile pass
+        there is a frozen window.
         """
         try:
-            arr = self._workbench_pixels(channel)
+            arr = self._workbench_pixels(channel, blocking=blocking)
         except Exception as exc:
             print(f"[Step0] no pixels to seed a display window for {channel}: {exc}")
             return None

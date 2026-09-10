@@ -319,7 +319,8 @@ def test_the_intensity_window_changes_both_previews(app, mode, monkeypatch):
                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
                             lambda self: (window, "x"))
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: window)
 
         w.set_preview_mode(mode, force=True, reconcile=False)
         _settle(w)                       # nothing else pending
@@ -342,7 +343,8 @@ def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
         w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(1.0)
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: window)
         w.set_preview_mode("fusion", force=True, reconcile=False)
         draws = []
         real = w._refresh_patch_preview
@@ -937,5 +939,127 @@ def test_the_reset_button_still_remembers_its_zeros_after_a_real_handoff(
         assert w.config.channel_weight("CD3") == 0.0
         assert "CD8" in w.config.weight_initialized_channels(), \
             "the button answers for every marker, ticked or not"
+    finally:
+        w.close()
+
+
+# ── a frame asks for the channels it draws ───────────────────────────────
+#
+# MEASURED on the real desk (docs/perf_timeline/prefix_run_excerpt.log): the
+# first frame after a patch was drawn showed DAPI alone and held the GUI
+# thread for 7493.66 ms, of which the remap it drew was 3.98 ms and the
+# composite 19.65 ms. The other 7.47 seconds were `_display_mapping()` called
+# with no arguments: `display_mapping_for_preview()` then completes the draft
+# for EVERY channel the loader has, computing an automatic window per channel
+# from whole-slide pixels, on the GUI thread. The window answered nothing for
+# 7.6 s and the second patch the user had already drawn sat in the queue.
+
+def _mapping_requests(w, monkeypatch):
+    """Record which channels each frame asks for a display mapping for."""
+    asked = []
+    page = w._step0
+    real = type(page).display_mapping_for_preview
+
+    def spy(self, channels=None, blocking=True):
+        asked.append(None if channels is None else list(channels))
+        return real(self, channels=channels, blocking=blocking)
+
+    monkeypatch.setattr(type(page), "display_mapping_for_preview", spy)
+    return asked
+
+
+def _auto_window_calls(w, monkeypatch):
+    """Every channel an automatic window was computed for."""
+    seeded = []
+    page = w._step0
+    monkeypatch.setattr(type(page), "_auto_display_window",
+                        lambda self, channel, blocking=True:
+                        (seeded.append(channel), None)[1])
+    return seeded
+
+
+@pytest.mark.parametrize("mode", ["overlay", "fusion"])
+def test_a_frame_asks_only_for_the_channels_it_draws(app, monkeypatch, mode):
+    w = _window(app)
+    try:
+        w.set_preview_mode(mode, force=True, reconcile=False)
+        # DAPI is the only channel with pixels, which is the state the
+        # measured frame was in: one channel ready, 28 not.
+        w._patch_channel_cache[0] = {
+            "DAPI": w._patch_channel_cache[0]["DAPI"]}
+        asked = _mapping_requests(w, monkeypatch)
+        seeded = _auto_window_calls(w, monkeypatch)
+
+        w._refresh_patch_preview(reset_view=False)
+
+        assert asked, "the frame did not ask for a mapping at all"
+        for request in asked:
+            assert request is not None, \
+                "a render callback asked for EVERY channel the loader has"
+            assert set(request) <= {"DAPI"}, request
+        assert set(seeded) <= {"DAPI"}, \
+            f"windows were computed for channels this frame does not draw: {seeded}"
+    finally:
+        w.close()
+
+
+def test_a_save_still_asks_for_every_channel(app, monkeypatch):
+    """The scoping is a render-path rule, not a new global one: a Save is
+    about to fuse all of them and each one needs an explicit window."""
+    w = _window(app)
+    try:
+        asked = _mapping_requests(w, monkeypatch)
+
+        w._display_mapping()
+
+        assert asked == [None], asked
+    finally:
+        w.close()
+
+
+def test_an_empty_channel_list_means_no_channels(app, monkeypatch):
+    """`None` and `[]` cannot mean the same thing here. Read as "all", an
+    empty list is how a caller that legitimately has nothing to draw ends up
+    seeding a window for every channel the loader has -- the 7.47 s the
+    measured frame spent."""
+    w = _window(app)
+    try:
+        page = w._step0
+        page.loader = w.loader               # so `None` has a list to read
+        page._auto_window_cache.clear()      # nothing memoised yet
+        seeded = []
+        monkeypatch.setattr(type(page), "_auto_display_window",
+                            lambda self, channel, blocking=True:
+                            (seeded.append(channel), None)[1])
+
+        assert page.display_mapping_for_preview(channels=[]) == \
+            page.display_mapping_draft()
+        assert seeded == [], \
+            f"an empty list seeded windows for {seeded}"
+
+        page.display_mapping_for_preview(channels=None)
+        expected = (set(w.loader.channel_names())
+                    - set(page.display_mapping_draft()))
+        assert set(seeded) == expected, seeded
+    finally:
+        w.close()
+
+
+def test_the_pixel_source_can_refuse_to_read(app):
+    """`blocking=False` is what a future background seeder needs: complete
+    what is in memory, start no whole-slide read. The render paths do NOT use
+    it -- a frame that skipped a window would draw a channel with a
+    provisional percentile and stop matching what a Save writes."""
+    w = _window(app)
+    try:
+        page = w._step0
+        reads = []
+        page._slide_lowres_array = lambda name, blocking=True: (
+            reads.append((name, blocking)), None)[1]
+        page._preview_provider = None
+
+        assert page._workbench_pixels("CD3", blocking=False) is None
+        assert reads == [("CD3", False)], reads
+        assert page._auto_display_window("CD3", blocking=False) is None
     finally:
         w.close()

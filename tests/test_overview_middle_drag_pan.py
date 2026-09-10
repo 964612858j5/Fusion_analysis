@@ -1564,21 +1564,75 @@ def test_none_of_the_new_lines_appear_with_the_switch_off(app, capsys,
 
 def test_the_log_can_be_collected_from_a_file(app, capsys, monkeypatch,
                                               tmp_path):
-    """The run is driven by whoever has the mouse; it is read by whoever
-    has the question. stderr on a real desktop run is a terminal nobody is
-    watching mid-gesture, so the same lines go to a file when one is
-    named."""
+    """The run is driven by whoever has the mouse; it is read by whoever has
+    the question. stderr on a real desktop run is a terminal nobody is
+    watching mid-gesture -- and writing one costs the gesture, which is why
+    naming a file turns stderr OFF rather than doubling the output."""
     path = tmp_path / "midpan.log"
     monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
     monkeypatch.setenv(ovp.MID_PAN_LOG_ENV, str(path))
+    monkeypatch.delenv(ovp.MID_PAN_STDERR_ENV, raising=False)
     monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
     panel = _panel()
     _middle_drag(panel, -40, -24)
 
-    on_stderr = _midpan_lines(capsys.readouterr().err)
     in_file = _midpan_lines(path.read_text(encoding="utf-8"))
-    assert in_file == on_stderr, "the file sink is the same readout, not a subset"
     assert any(" what=move-applied " in ln for ln in in_file)
+    assert any(" what=press " in ln for ln in in_file)
+    assert _midpan_lines(capsys.readouterr().err) == [], \
+        "a run being measured must not also pay for a terminal"
+
+
+def test_stderr_is_still_available_alongside_the_file(app, capsys, monkeypatch,
+                                                      tmp_path):
+    """Explicit, for watching a run live."""
+    path = tmp_path / "midpan.log"
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.setenv(ovp.MID_PAN_LOG_ENV, str(path))
+    monkeypatch.setenv(ovp.MID_PAN_STDERR_ENV, "1")
+    monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+
+    assert _midpan_lines(path.read_text(encoding="utf-8")) == \
+        _midpan_lines(capsys.readouterr().err)
+
+
+def test_with_no_file_the_lines_still_reach_stderr(app, capsys, monkeypatch):
+    """The interactive case: somebody is watching the terminal, and that is
+    the only readout there is."""
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.delenv(ovp.MID_PAN_LOG_ENV, raising=False)
+    monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+
+    assert _midpan_lines(capsys.readouterr().err)
+
+
+def test_one_file_named_by_both_diagnostics_has_one_writer(app, monkeypatch,
+                                                           tmp_path):
+    """MIDPAN and PERF on one file: the gesture lines go through the
+    performance timeline's background writer, so the mouse thread appends to a
+    queue instead of flushing a disk, and the two logs interleave on one
+    clock."""
+    from block01.utils import perf_trace
+
+    path = tmp_path / "both.log"
+    monkeypatch.setenv(ovp.MID_PAN_DEBUG_ENV, "1")
+    monkeypatch.setenv(ovp.MID_PAN_LOG_ENV, str(path))
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(path))
+    monkeypatch.delenv(perf_trace.PERF_STDERR_ENV, raising=False)
+    monkeypatch.setattr(ovp, "_MID_PAN_LOG_FILE", None)
+    panel = _panel()
+    _middle_drag(panel, -40, -24)
+
+    assert ovp._MID_PAN_LOG_FILE is None, \
+        "the gesture opened the file itself instead of queueing the line"
+    perf_trace.shutdown()
+    text = path.read_text(encoding="utf-8")
+    assert _midpan_lines(text), "the queued gesture lines never landed"
 
 
 def test_an_unwritable_log_file_does_not_break_the_drag(app, capsys,

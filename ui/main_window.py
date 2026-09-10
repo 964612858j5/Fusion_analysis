@@ -230,6 +230,9 @@ class MainWindow(QMainWindow):
         # no timer exists. It is what turns "the window froze" into a number
         # with a callback beside it.
         self._perf_heartbeat = perf_trace.start_heartbeat(self, label="main")
+        # A name for this run, so lines appended to a log that already holds
+        # an older run can be told apart without anyone deleting evidence.
+        perf_trace.announce_run(step="startup")
         self._step1_session_timer = QTimer()
         self._step1_session_timer.setSingleShot(True)
         self._step1_session_timer.timeout.connect(self._save_step1_session)
@@ -3180,6 +3183,9 @@ class MainWindow(QMainWindow):
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
             self._perf_heartbeat = None
+        # Bounded: what the writer has not written by the deadline is lost
+        # rather than holding the window open on a disk.
+        perf_trace.shutdown()
         self._stop_all_loaders()
         # A fusion job outlives the window unless it is asked to stop and then
         # held: destroying a running QThread is what produces

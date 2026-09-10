@@ -1407,15 +1407,27 @@ class ChannelWorkbench(QtWidgets.QWidget):
     def _on_minmax_changed(self, _v=None):
         if self._loading or self._active is None:
             return
-        self._params[self._active]["auto"] = False  # manual override
-        self._collect_params_from_controls()
-        self._histogram.set_window(self._sp_min.value(), self._sp_max.value())
-        self._sync_minmax_sliders()
-        self._refresh_preview()
+        # The WHOLE handler, entry to return: this is what one slider step
+        # costs the GUI thread, and the parts inside it (`intensity.fanout`,
+        # the histogram, this widget's own remap) are the breakdown.
+        with perf_trace.span("intensity.handler", control="minmax",
+                             channel=self._active):
+            self._params[self._active]["auto"] = False  # manual override
+            self._collect_params_from_controls()
+            with perf_trace.span("intensity.histogram", channel=self._active):
+                self._histogram.set_window(self._sp_min.value(),
+                                           self._sp_max.value())
+                self._sync_minmax_sliders()
+            self._refresh_preview()
 
     def _on_slider_changed(self, _v=None):
         if self._loading or self._active is None:
             return
+        with perf_trace.span("intensity.handler", control="slider",
+                             channel=self._active):
+            self._on_slider_changed_inner()
+
+    def _on_slider_changed_inner(self):
         self._lbl_bright.setText(f"{self._sl_bright.value() / 100.0:.2f}")
         self._lbl_contrast.setText(f"{self._sl_contrast.value() / 100.0:.2f}")
         self._lbl_gamma.setText(f"{self._sl_gamma.value() / 100.0:.2f}")
@@ -1433,6 +1445,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """Editable Gamma spinbox -> slider (which drives collect + preview)."""
         if self._loading or self._active is None:
             return
+        with perf_trace.span("intensity.handler", control="gamma_spin",
+                             channel=self._active):
+            self._on_gamma_spin_inner(v)
+
+    def _on_gamma_spin_inner(self, v):
         self._loading = True
         try:
             self._sl_gamma.setValue(int(round(float(v) * 100)))

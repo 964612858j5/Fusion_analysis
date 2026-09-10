@@ -159,27 +159,47 @@ class PreloadWorker(QThread):
         self._cancelled = True
 
     def run(self):
-        for pidx, bbox in enumerate(self._patches):
-            if self._cancelled:
-                return
-            try:
-                y0, y1, x0, x1 = bbox
-            except Exception:
-                continue
-            for ch in self._channels:
+        # Traced as a JOB with both ends and every read inside it, on this
+        # thread and through the same bounded sink the GUI uses. A log of
+        # "started" cannot answer "what was reading when the window froze":
+        # cancel is a flag, and a thread already inside one `read_region`
+        # keeps going until that read returns.
+        with perf_trace.job("step0.preload", gen=self._gen,
+                            patches=len(self._patches),
+                            channels=len(self._channels)) as _job:
+            reads = 0
+            for pidx, bbox in enumerate(self._patches):
                 if self._cancelled:
+                    _job.add(reads=reads, cancelled=1, at_patch=pidx)
                     return
                 try:
-                    arr = self._loader.read_region(ch, y0, y1, x0, x1,
-                                                   normalize=False)
-                    arr = np.asarray(arr, dtype=np.float32)
-                    if arr.ndim == 3 and arr.shape[2] == 1:
-                        arr = arr[:, :, 0]
+                    y0, y1, x0, x1 = bbox
                 except Exception:
-                    continue                 # a bad read never kills the preload
-                self.channel_loaded.emit(self._gen, pidx, ch, arr)
-        if not self._cancelled:
-            self.finished_gen.emit(self._gen)
+                    continue
+                for ch in self._channels:
+                    if self._cancelled:
+                        _job.add(reads=reads, cancelled=1, at_patch=pidx)
+                        return
+                    try:
+                        with _job.read(patch=pidx, channel=ch,
+                                       bbox=f"{y0}:{y1},{x0}:{x1}") as _rd:
+                            arr = self._loader.read_region(
+                                ch, y0, y1, x0, x1, normalize=False)
+                            # A cancel that arrives DURING the read is what
+                            # overlaps two preload rounds; named so the
+                            # overlap is visible rather than inferred.
+                            if self._cancelled:
+                                _rd.add(outcome="cancelled_after_read")
+                        reads += 1
+                        arr = np.asarray(arr, dtype=np.float32)
+                        if arr.ndim == 3 and arr.shape[2] == 1:
+                            arr = arr[:, :, 0]
+                    except Exception:
+                        continue             # a bad read never kills the preload
+                    self.channel_loaded.emit(self._gen, pidx, ch, arr)
+            _job.add(reads=reads, cancelled=int(bool(self._cancelled)))
+            if not self._cancelled:
+                self.finished_gen.emit(self._gen)
 
 
 
@@ -9249,12 +9269,13 @@ class Step0Page(QWidget):
         print("[Step0] writing ROI-specific outputs")
         print(f"[Step0] roi_id={roi_id}")
         print(f"[Step0] step0_dir={step0_dir}")
-        with open(corr_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        with open(roi_path, "w", encoding="utf-8") as f:
-            json.dump(rois, f, indent=2, ensure_ascii=False)
-        with open(patch_path, "w", encoding="utf-8") as f:
-            json.dump(patches, f, indent=2, ensure_ascii=False)
+        with perf_trace.span("handoff.write_json", files=3):
+            with open(corr_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            with open(roi_path, "w", encoding="utf-8") as f:
+                json.dump(rois, f, indent=2, ensure_ascii=False)
+            with open(patch_path, "w", encoding="utf-8") as f:
+                json.dump(patches, f, indent=2, ensure_ascii=False)
 
         if not os.path.exists(corrected_path):
             self._ensure_empty_corrected_zarr(corrected_path, rois)
@@ -9294,7 +9315,8 @@ class Step0Page(QWidget):
 
         # v14.4: validate the corrected output (a directory existing is NOT proof
         # of a valid corrected zarr) and report it honestly to the UI + manifest.
-        corrected_report = corrected_zarr_report(corrected_path)
+        with perf_trace.span("handoff.zarr_report"):
+            corrected_report = corrected_zarr_report(corrected_path)
         self._refresh_bg_corrected_status(corrected_report)
 
         try:
@@ -9368,11 +9390,14 @@ class Step0Page(QWidget):
         # reader never observes a truncated manifest file.
         manifest_tmp = f"{manifest_path}.tmp.{os.getpid()}"
         try:
-            with open(manifest_tmp, "w", encoding="utf-8") as f:
+            with open(manifest_tmp, "w", encoding="utf-8") as f, \
+                    perf_trace.span("handoff.manifest_write"):
                 json.dump(manifest, f, indent=2, ensure_ascii=False)
                 f.flush()
-                os.fsync(f.fileno())
-            os.replace(manifest_tmp, manifest_path)
+                with perf_trace.span("handoff.fsync"):
+                    os.fsync(f.fileno())
+            with perf_trace.span("handoff.publish_replace"):
+                os.replace(manifest_tmp, manifest_path)
         except Exception:
             try:
                 if os.path.exists(manifest_tmp):

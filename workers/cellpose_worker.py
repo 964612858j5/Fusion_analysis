@@ -13,6 +13,7 @@ import numpy as np
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from ..utils import perf_trace
 from ..core.io_loader import OMETIFFLoader
 from ..core.fusion_engine import FusionEngine
 from ..utils.segmentation_config import (
@@ -87,26 +88,41 @@ class PreviewLoaderThread(QThread):
         self._stop = True
 
     def run(self):
-        try:
-            cache = {}
-            total = len(self.channels)
-            for i, ch in enumerate(self.channels):
-                if self._stop:
-                    return
-                self.progress.emit(self.patch_idx, i, total, ch)
-                if ch in self.loader.ch_map:
-                    cache[ch] = self.loader.read_region(
-                        ch,
-                        self.y0, self.y1,
-                        self.x0, self.x1,
-                        downsample=self.downsample,
-                        normalize=self.normalize,
-                    )
-            if not self._stop:
-                self.done.emit(self.patch_idx, cache)
-        except Exception as e:
-            if not self._stop:
-                self.error.emit(self.patch_idx, str(e))
+        # Traced as a JOB with both ends and every read inside it. `stop()` is
+        # a flag: a thread already inside one `read_region` runs to the end of
+        # that read, which is exactly the overlap a stalled GUI needs
+        # attributing, so both ends of every read are reported with the
+        # process-wide active counts at that instant.
+        with perf_trace.job("step1.preview", patch=self.patch_idx,
+                            channels=len(self.channels),
+                            bbox=f"{self.y0}:{self.y1},{self.x0}:{self.x1}",
+                            downsample=self.downsample) as _job:
+            try:
+                cache = {}
+                total = len(self.channels)
+                for i, ch in enumerate(self.channels):
+                    if self._stop:
+                        _job.add(read=len(cache), stopped=1)
+                        return
+                    self.progress.emit(self.patch_idx, i, total, ch)
+                    if ch in self.loader.ch_map:
+                        with _job.read(patch=self.patch_idx, channel=ch) as _rd:
+                            cache[ch] = self.loader.read_region(
+                                ch,
+                                self.y0, self.y1,
+                                self.x0, self.x1,
+                                downsample=self.downsample,
+                                normalize=self.normalize,
+                            )
+                            if self._stop:
+                                _rd.add(outcome="cancelled_after_read")
+                _job.add(read=len(cache), stopped=int(bool(self._stop)))
+                if not self._stop:
+                    self.done.emit(self.patch_idx, cache)
+            except Exception as e:
+                _job.add(failed=1)
+                if not self._stop:
+                    self.error.emit(self.patch_idx, str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════

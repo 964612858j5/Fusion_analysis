@@ -13,6 +13,7 @@ Own module: no page-heavy Qt fixtures, so it runs anywhere.
 """
 
 import os
+import threading
 
 import pytest
 
@@ -23,9 +24,19 @@ from block01.utils import perf_trace  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
+    """Each test starts with the switch off, no file named, and no writer --
+    the state a program that nobody is tracing is in."""
     monkeypatch.delenv(perf_trace.PERF_ENV, raising=False)
     monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
-    monkeypatch.setattr(perf_trace, "_LOG_FILE", None)
+    monkeypatch.delenv(perf_trace.PERF_STDERR_ENV, raising=False)
+    monkeypatch.delenv(perf_trace.PERF_QUEUE_ENV, raising=False)
+    perf_trace.shutdown(0.0)
+    perf_trace.WRITER._queue.clear()
+    perf_trace.WRITER._dropped = 0
+    perf_trace.WRITER._reported_drops = 0
+    perf_trace.WRITER._path = None
+    yield
+    perf_trace.shutdown(0.0)
 
 
 def _lines(err):
@@ -64,6 +75,7 @@ def test_the_switch_is_read_per_call_not_at_import(capsys, monkeypatch):
     perf_trace.mark("during")
     monkeypatch.setenv(perf_trace.PERF_ENV, "0")
     perf_trace.mark("after")
+    _drain()
 
     events = [ln.split(" ev=")[1].split(" ")[0]
               for ln in _lines(capsys.readouterr().err)]
@@ -75,6 +87,7 @@ def test_the_switch_is_read_per_call_not_at_import(capsys, monkeypatch):
 def test_a_mark_carries_the_clock_and_its_fields(capsys, monkeypatch):
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     perf_trace.mark("intensity.in", channel="CD3", rev=7)
+    _drain()
     line = _lines(capsys.readouterr().err)[0]
 
     assert " ev=intensity.in " in line
@@ -88,6 +101,7 @@ def test_a_span_reports_what_the_region_cost(capsys, monkeypatch):
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     with perf_trace.span("step1.frame", mode="overlay") as handle:
         handle.add(channels=3)
+    _drain()
     line = _lines(capsys.readouterr().err)[0]
 
     assert " ev=step1.frame " in line
@@ -105,6 +119,7 @@ def test_a_raising_region_still_reports_and_does_not_swallow(capsys,
     with pytest.raises(ValueError):
         with perf_trace.span("step1.frame"):
             raise ValueError("boom")
+    _drain()
     line = _lines(capsys.readouterr().err)[0]
 
     assert " raised=ValueError" in line
@@ -122,6 +137,7 @@ def test_the_timeline_shares_its_clock_with_the_middle_drag_log(capsys,
     ovp._mid_pan_log_sink("MIDPAN t=%.6f gid=1 what=probe" % __import__(
         "time").monotonic())
     perf_trace.mark("second")
+    _drain()
 
     err = capsys.readouterr().err
     perf_stamps = [float(ln.split(" t=")[1].split(" ")[0])
@@ -162,6 +178,7 @@ def test_the_heartbeat_reports_a_gap_longer_than_its_interval(capsys,
         beat.start()
         assert beat.is_active()
         beat._tick()
+        _drain()
         line = [ln for ln in _lines(capsys.readouterr().err)
                 if " ev=gui.gap " in ln][0]
         assert float(line.split(" gap_ms=")[1].split(" ")[0]) >= 0.0
@@ -181,6 +198,7 @@ def test_a_heartbeat_within_its_interval_says_nothing(capsys, monkeypatch):
     try:
         beat.start()
         beat._tick()
+        _drain()
         assert [ln for ln in _lines(capsys.readouterr().err)
                 if " ev=gui.gap " in ln] == []
     finally:
@@ -188,35 +206,313 @@ def test_a_heartbeat_within_its_interval_says_nothing(capsys, monkeypatch):
     del app
 
 
-# ── the file sink: the run is driven by whoever has the mouse ────────────
+# ── the sink must not become the thing it measures ───────────────────────
+#
+# The first version printed each line to stderr AND wrote the file with a
+# flush, on whichever thread produced it. A slider drag, a mouse move and a
+# 5 ms heartbeat are high-frequency events, so that put terminal rendering and
+# file I/O inside the callbacks being measured: it can inflate `gui.gap` and
+# record the logging as the cost of the work. These pin the shape that fixes
+# it -- bounded enqueue on the caller, one background writer, drops counted
+# rather than waited for.
 
-def test_the_timeline_can_be_collected_from_a_file(capsys, monkeypatch,
-                                                   tmp_path):
+def _drain(timeout_s=2.0):
+    """Wait for the writer to catch up, in the TEST -- never in the app."""
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline and perf_trace.WRITER.pending():
+        _time.sleep(0.005)
+    perf_trace.shutdown()
+
+
+def test_the_calling_thread_never_writes_the_file(monkeypatch, tmp_path):
+    """The producer's whole job is: read the clock, build a tuple, append it.
+    Any file write it does itself is a disk in a mouse callback."""
     path = tmp_path / "perf.log"
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(path))
+    monkeypatch.delenv(perf_trace.PERF_STDERR_ENV, raising=False)
+    perf_trace.shutdown()
+
+    writers = []
+    real_open = open
+
+    def spy_open(*a, **k):
+        writers.append(threading.current_thread().name)
+        return real_open(*a, **k)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    caller = threading.current_thread().name
+    perf_trace.mark("intensity.in", rev=1)
+    _drain()
+
+    assert writers, "nothing opened the file at all"
+    assert caller not in writers, \
+        f"the producing thread opened the log itself: {writers}"
+    assert all(name.startswith("perf-trace-writer") for name in writers), \
+        writers
+
+
+def test_a_slow_sink_does_not_block_the_producer(monkeypatch, tmp_path):
+    """A writer stuck on a disk must cost the GUI an enqueue, not a wait."""
+    import time as _time
+
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    perf_trace.shutdown()
+    slow = []
+
+    def crawl(*_a, **_k):
+        slow.append(1)
+        _time.sleep(0.05)
+        return 0
+
+    monkeypatch.setattr(perf_trace.WRITER, "_drain", crawl)
+    perf_trace.mark("warm")                     # starts the writer
+
+    costs = []
+    for i in range(200):
+        t0 = _time.perf_counter()
+        perf_trace.mark("intensity.in", rev=i)
+        costs.append((_time.perf_counter() - t0) * 1000.0)
+    perf_trace.WRITER.shutdown(0.0)
+
+    costs.sort()
+    p99 = costs[int(0.99 * len(costs))]
+    assert p99 < 5.0, f"enqueue p99 was {p99:.2f} ms with a crawling writer"
+
+
+def test_a_full_queue_drops_and_says_so(monkeypatch, tmp_path):
+    """Bounded on purpose. What it must not do is grow without limit or make
+    the caller wait; what it must not do EITHER is lose lines silently."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    monkeypatch.setenv(perf_trace.PERF_QUEUE_ENV, "10")
+    perf_trace.shutdown()
+    monkeypatch.setattr(perf_trace.WRITER, "_drain", lambda *a, **k: 0)
+
+    for i in range(100):
+        perf_trace.mark("flood", i=i)
+
+    assert perf_trace.WRITER.pending() <= 10
+    assert perf_trace.WRITER.dropped_total() >= 89
+    monkeypatch.undo()
+    # the drop is reported, not swallowed
+    perf_trace.WRITER._drain()
+    perf_trace.shutdown()
+
+
+def test_concurrent_producers_leave_whole_lines_in_clock_order(monkeypatch,
+                                                               tmp_path):
+    """Workers and the GUI thread trace at once. A line may not be torn, and
+    the file must be ordered by when things happened, not by which thread got
+    the lock first."""
+    path = tmp_path / "perf.log"
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(path))
+    perf_trace.shutdown()
+
+    def produce(tag):
+        for i in range(200):
+            perf_trace.mark("read.begin", job=tag, i=i)
+
+    threads = [threading.Thread(target=produce, args=(t,)) for t in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    _drain()
+
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+             if ln.startswith("PERF ")]
+    assert len(lines) == 800, f"{len(lines)} lines of 800"
+    for ln in lines:
+        assert ln.count(" ev=") == 1 and " job=" in ln and " i=" in ln, ln
+    stamps = [float(ln.split(" t=")[1].split(" ")[0]) for ln in lines]
+    assert stamps == sorted(stamps), "the timeline is out of clock order"
+
+
+def test_the_timeline_can_be_collected_from_a_file(capsys, monkeypatch,
+                                                   tmp_path):
+    """The run is driven by whoever has the mouse and read by someone else --
+    and naming a file turns stderr OFF, because a terminal is the expensive
+    half."""
+    path = tmp_path / "perf.log"
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(path))
+    monkeypatch.delenv(perf_trace.PERF_STDERR_ENV, raising=False)
+    perf_trace.shutdown()
     perf_trace.mark("intensity.in", rev=1)
     with perf_trace.span("step1.frame"):
         pass
+    _drain()
 
-    on_stderr = _lines(capsys.readouterr().err)
     in_file = _lines(path.read_text(encoding="utf-8"))
-    assert in_file == on_stderr
     assert len(in_file) == 2
+    assert _lines(capsys.readouterr().err) == [], \
+        "a run being measured must not also pay for a terminal"
+
+
+def test_stderr_is_an_explicit_choice(capsys, monkeypatch, tmp_path):
+    path = tmp_path / "perf.log"
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(path))
+    monkeypatch.setenv(perf_trace.PERF_STDERR_ENV, "1")
+    perf_trace.shutdown()
+    perf_trace.mark("intensity.in", rev=1)
+    _drain()
+
+    assert _lines(capsys.readouterr().err) == _lines(
+        path.read_text(encoding="utf-8"))
+
+
+def test_shutdown_is_bounded(monkeypatch, tmp_path):
+    """Closing a window may not wait on a disk. Whatever is left after the
+    deadline is lost, and that is the right trade."""
+    import time as _time
+
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    perf_trace.shutdown()
+    monkeypatch.setattr(perf_trace.WRITER, "_drain",
+                        lambda *a, **k: (_time.sleep(0.02), 1)[1])
+    for i in range(500):
+        perf_trace.mark("flood", i=i)
+
+    t0 = _time.perf_counter()
+    perf_trace.shutdown(0.1)
+    assert (_time.perf_counter() - t0) < 1.0
+
+
+def test_nothing_is_created_with_the_switch_off(monkeypatch, tmp_path):
+    monkeypatch.delenv(perf_trace.PERF_ENV, raising=False)
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    perf_trace.shutdown()
+
+    perf_trace.mark("nothing")
+    with perf_trace.span("nothing"):
+        pass
+
+    assert not perf_trace.WRITER.is_running()
+    assert perf_trace.WRITER.pending() == 0
+    assert not (tmp_path / "perf.log").exists()
 
 
 def test_an_unwritable_file_does_not_break_the_traced_code(capsys, monkeypatch,
                                                            tmp_path):
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "no" / "x.log"))
+    perf_trace.shutdown()
     ran = []
     with perf_trace.span("step1.frame"):
         ran.append(1)
+    _drain()
 
     assert ran == [1]
-    err = capsys.readouterr().err
-    assert "log-file-failed" in err
-    assert _lines(err), "and the line still reached stderr"
+    assert "log-file-failed" in capsys.readouterr().err
+
+
+# ── background work: both ends, and the counts at each end ───────────────
+
+def test_a_job_reports_both_ends_and_its_reads(capsys, monkeypatch):
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    perf_trace.shutdown()
+
+    with perf_trace.job("step1.preview", patch=0, channels=2) as jb:
+        with jb.read(patch=0, channel="CD3"):
+            pass
+        with jb.read(patch=0, channel="CD8"):
+            pass
+    _drain()
+    events = [ln.split(" ev=")[1].split(" ")[0]
+              for ln in _lines(capsys.readouterr().err)]
+
+    assert events == ["job.begin", "read.begin", "read.end", "read.begin",
+                      "read.end", "job.end"]
+
+
+@pytest.mark.parametrize("how", ["return", "raise", "cancel"])
+def test_a_job_closes_on_every_exit_path(capsys, monkeypatch, how):
+    """A timeline that cannot close a job counts it as reading forever, and
+    then every later stall looks like disk contention."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    perf_trace.shutdown()
+
+    def work():
+        with perf_trace.job("step0.preload") as jb:
+            if how == "raise":
+                raise ValueError("read failed")
+            if how == "cancel":
+                jb.add(cancelled=1)
+                return
+            jb.add(reads=1)
+
+    if how == "raise":
+        with pytest.raises(ValueError):
+            work()
+    else:
+        work()
+    _drain()
+    lines = _lines(capsys.readouterr().err)
+
+    assert sum(1 for ln in lines if " ev=job.begin " in ln) == 1
+    ends = [ln for ln in lines if " ev=job.end " in ln]
+    assert len(ends) == 1, "the job never closed"
+    if how == "raise":
+        assert " raised=ValueError" in ends[0]
+    if how == "cancel":
+        assert " cancelled=1" in ends[0]
+
+
+def test_the_active_counts_are_carried_on_each_line(capsys, monkeypatch):
+    """So "what was reading when the GUI stalled" is answerable from the log
+    rather than from a guess."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    perf_trace.shutdown()
+
+    with perf_trace.job("step0.preload") as a:
+        with perf_trace.job("step1.preview") as b:
+            with a.read(channel="CD3"), b.read(channel="CD8"):
+                pass
+    _drain()
+    lines = _lines(capsys.readouterr().err)
+
+    deepest = [ln for ln in lines if " ev=read.begin " in ln][-1]
+    assert " active_jobs=2 " in deepest
+    assert " active_reads=2 " in deepest
+    last_end = [ln for ln in lines if " ev=job.end " in ln][-1]
+    assert " active_jobs=0 " in last_end
+    assert last_end.endswith(" active_reads=0")
+
+
+def test_a_read_cancelled_while_reading_is_named(capsys, monkeypatch):
+    """The overlap that makes a second patch freeze the window: the old
+    generation was told to stop and is still inside `read_region`."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    perf_trace.shutdown()
+
+    with perf_trace.job("step0.preload") as jb:
+        with jb.read(channel="CD3") as rd:
+            rd.add(outcome="cancelled_after_read")
+    _drain()
+
+    end = [ln for ln in _lines(capsys.readouterr().err)
+           if " ev=read.end " in ln][0]
+    assert " outcome=cancelled_after_read" in end
+
+
+def test_background_tracing_is_off_with_the_switch_off(capsys, monkeypatch):
+    monkeypatch.delenv(perf_trace.PERF_ENV, raising=False)
+    with perf_trace.job("step0.preload") as jb:
+        with jb.read(channel="CD3"):
+            pass
+
+    assert _lines(capsys.readouterr().err) == []
+    assert perf_trace.ACTIVES.snapshot() == (0, 0)
 
 
 # ── the instrumented paths: traced when asked, silent otherwise ──────────
@@ -243,6 +539,7 @@ def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
         w._overlay_display_cache.clear()
         w._on_display_mapping_changed("CD3")
         w._apply_pending_preview_update()
+        _drain()
         err = capsys.readouterr().err
     finally:
         w.close()
@@ -273,6 +570,7 @@ def test_the_instrumented_paths_are_silent_with_the_switch_off(capsys):
         w.config.set_channel_visible("CD3", True)
         w._on_display_mapping_changed("CD3")
         w._apply_pending_preview_update()
+        _drain()
         assert w._perf_heartbeat is None, \
             "a 5 ms timer in a program nobody is tracing"
         assert _lines(capsys.readouterr().err) == []

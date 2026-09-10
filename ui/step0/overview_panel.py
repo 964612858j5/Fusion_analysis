@@ -736,6 +736,16 @@ MID_PAN_DEBUG_ENV = "BLOCK01_MIDPAN_DEBUG"
 # exactly as before.
 MID_PAN_LOG_ENV = "BLOCK01_MIDPAN_LOG"
 
+# With a file named, stderr is off by default: a mouse move is a
+# high-frequency event and a terminal is not free. Explicit opt-in, for
+# watching a run live.
+MID_PAN_STDERR_ENV = "BLOCK01_MIDPAN_STDERR"
+
+
+def _truthy(name):
+    return os.environ.get(name, "") not in ("", "0", "false", "no")
+
+
 # A drag that never reaches the screen and a drag that never reaches the
 # code look identical to the hand holding the mouse. These two bound the
 # extra measurements that tell them apart, and both are inert unless the
@@ -761,24 +771,41 @@ def _mid_pan_debug_enabled():
 
 
 def _mid_pan_log_sink(line):
-    """Write one diagnostic line to stderr, and to the file the environment
-    named if it named one.
+    """Get one diagnostic line out of the gesture as cheaply as possible.
 
-    The handle is kept open for the process (one line per event, flushed, is
-    already the shape of this readout) and re-opened if the path changes, so
-    a test can point it somewhere and a run can point it elsewhere. A file
-    that cannot be opened or written costs the gesture nothing: the line
-    still reaches stderr and the failure is reported once, in place of the
-    file, rather than raised into the drag.
+    When the middle-drag log and the performance timeline name the SAME file,
+    the line goes to `perf_trace`'s single background writer: a bounded,
+    lock-guarded append on this thread, formatted and written elsewhere. It
+    used to `print(..., flush=True)` AND write the file with a flush, on the
+    thread handling the mouse -- and a mouse move is a high-frequency event,
+    so that put terminal rendering and file I/O inside the gesture it was
+    measuring. The line keeps the `time.monotonic()` stamp it was built with,
+    so the timeline still says when the event happened rather than when it
+    reached the disk.
+
+    With its own file it writes that file directly, and stderr is then OFF
+    unless BLOCK01_MIDPAN_STDERR asks for it. With no file at all, stderr is
+    the only readout there is and the line goes straight there -- the
+    interactive case, where somebody is watching. A file that cannot be
+    written costs the gesture nothing: the failure is reported once, in place
+    of the file, rather than raised into the drag.
     """
     global _MID_PAN_LOG_FILE
-    try:
-        print(line, file=sys.stderr, flush=True)
-    except Exception:                                       # noqa: BLE001
-        pass
     path = os.environ.get(MID_PAN_LOG_ENV, "") or None
     if path is None:
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except Exception:                                   # noqa: BLE001
+            pass
         return
+    if (path == (os.environ.get(perf_trace.PERF_LOG_ENV, "") or None)
+            and perf_trace.emit_raw(line)):
+        return
+    if _truthy(MID_PAN_STDERR_ENV):
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except Exception:                                   # noqa: BLE001
+            pass
     try:
         if _MID_PAN_LOG_FILE is None or _MID_PAN_LOG_FILE[0] != path:
             if _MID_PAN_LOG_FILE is not None:

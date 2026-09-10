@@ -85,7 +85,17 @@ ROW_HEIGHT = 26
 
 
 class ChannelRow(QWidget):
-    """One channel: select / show / weight."""
+    """One channel: select / show / weight.
+
+    No hover text on any of the three controls. A tick box, a colour swatch
+    and a 0..1 slider in a list of channels are read at a glance, and a
+    popup over every one of them in a list this long is in the way of the
+    work rather than an explanation of it. The rules the tooltips used to
+    recite live in this module's docstring, where they are read once. The
+    only hover text left in the panel is on things that carry information
+    the widget cannot show: the read-only nucleus line, and the warning on
+    a row whose channel is in several groups at different weights.
+    """
 
     selected = pyqtSignal(str)
     visibility_toggled = pyqtSignal(str, bool)
@@ -104,17 +114,12 @@ class ChannelRow(QWidget):
 
         self.checkbox = QCheckBox()
         self.checkbox.setChecked(bool(visible))
-        self.checkbox.setToolTip(
-            "Take this channel into the picture — overlay and fusion both. "
-            "The first tick sets the weight to 1.00; after that, unticking "
-            "and re-ticking brings back the weight you left, 0.00 included.")
         self.checkbox.toggled.connect(self._on_toggled)
         lay.addWidget(self.checkbox)
 
         self.swatch = QLabel()
         self.swatch.setFixedSize(13, 13)
         self.swatch.setCursor(Qt.PointingHandCursor)
-        self.swatch.setToolTip("Click to change this channel's overlay colour")
         lay.addWidget(self.swatch)
 
         self.name_label = QLabel(channel)
@@ -127,9 +132,6 @@ class ChannelRow(QWidget):
         self.slider.setValue(int(round(float(weight) * 100)))
         self.slider.setFixedHeight(16)
         self.slider.setMinimumWidth(60)
-        self.slider.setToolTip(
-            "How strongly this channel takes part — in the overlay and in "
-            "the fusion alike. 0 keeps it ticked and contributing nothing.")
         lay.addWidget(self.slider, stretch=2)
 
         self.spin = QDoubleSpinBox()
@@ -188,16 +190,15 @@ class ChannelRow(QWidget):
         return self.checkbox.isChecked()
 
     def set_weight_editable(self, editable):
-        """A read-only row still shows its weight; it just cannot be moved."""
+        """A read-only row still shows its weight; it just cannot be moved.
+
+        A disabled slider and a read-only box say that by themselves; the
+        row's controls carry no hover text -- see the class docstring.
+        """
         self.slider.setEnabled(bool(editable))
         self.spin.setReadOnly(not editable)
         self.spin.setButtonSymbols(
             QDoubleSpinBox.UpDownArrows if editable else QDoubleSpinBox.NoButtons)
-        self.slider.setToolTip(
-            "How strongly this channel takes part — in the overlay and in "
-            "the fusion alike. 0 keeps it ticked and contributing nothing."
-            if editable else
-            "The nucleus weight comes from Step0 and is read-only here.")
 
     def set_visible(self, visible):
         if self.checkbox.isChecked() == bool(visible):

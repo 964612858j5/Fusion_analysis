@@ -398,12 +398,35 @@ def test_reset_zeroes_the_weights_and_leaves_the_ticks_alone(app):
         w.close()
 
 
-def test_the_weight_control_says_what_it_now_does(app):
+def test_a_channel_row_has_no_hover_text_on_its_controls(app):
+    """Removed on the user's call: a popup over the tick box, the colour
+    swatch and the weight slider of every row in a long channel list is in
+    the way of the work rather than an explanation of it.
+
+    (This test used to assert the slider's tooltip WORDING. The rules it
+    recited are in the module docstring now, read once instead of hovered
+    over per channel.)
+    """
     w = _window(app)
     try:
-        tip = w.config._rows["CD3"].slider.toolTip().lower()
-        assert "not used by the overlay" not in tip
-        assert "overlay" in tip and "fusion" in tip
+        for ch in ("CD3", "CD8", "DAPI"):
+            row = w.config._rows[ch]
+            assert row.checkbox.toolTip() == ""
+            assert row.swatch.toolTip() == ""
+            assert row.slider.toolTip() == ""
+            assert row.spin.toolTip() == ""
+    finally:
+        w.close()
+
+
+def test_the_nucleus_row_stays_read_only_without_saying_so_on_hover(app):
+    """A disabled slider and a read-only box say it by themselves."""
+    w = _window(app)
+    try:
+        row = w.config._rows["DAPI"]
+        assert row.slider.isEnabled() is False
+        assert row.spin.isReadOnly() is True
+        assert row.slider.toolTip() == ""
     finally:
         w.close()
 

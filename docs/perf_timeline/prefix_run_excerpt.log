@@ -1,0 +1,81 @@
+PERF t=759104.132178 ev=run.begin run=1789035628-3415035 pid=3415035 step=startup
+PERF t=759108.165757 ev=patch.on_patches_changed dur_ms=0.06 patches=0 t_begin=7.591e+05
+PERF t=759146.439474 ev=patch.added patches=1
+PERF t=759146.444935 ev=step0.preload_start patches=1 channels=29 cleared_arrays=0 gen=1
+PERF t=759146.445379 ev=patch.on_patches_changed dur_ms=4.24 patches=1 t_begin=7.591e+05
+PERF t=759146.445780 ev=job.begin source=step0.preload job=1 active_jobs=1 active_reads=0 gen=1 patches=1 channels=29
+PERF t=759146.445880 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=DAPI bbox=2144:3616,16736:17728
+PERF t=759146.550765 ev=patch.persist dur_ms=105.32 t_begin=7.591e+05
+PERF t=759146.550797 ev=patch.emit_patches_changed dur_ms=111.24 patches=1 t_begin=7.591e+05
+PERF t=759146.565858 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=TOX bbox=2144:3616,16736:17728
+PERF t=759146.695765 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=TIM3 bbox=2144:3616,16736:17728
+PERF t=759146.785426 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD22 bbox=2144:3616,16736:17728
+PERF t=759146.889995 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD31 bbox=2144:3616,16736:17728
+PERF t=759146.974958 ev=job.begin source=step1.preview job=2 active_jobs=2 active_reads=1 patch=0 channels=1 bbox=2368:3392,16736:17728 downsample=1
+PERF t=759146.975251 ev=read.begin source=step1.preview job=2 active_jobs=2 active_reads=2 patch=0 channel=DAPI
+PERF t=759147.066881 ev=read.begin source=step0.preload job=1 active_jobs=2 active_reads=2 patch=0 channel=CD68 bbox=2144:3616,16736:17728
+PERF t=759147.125570 ev=job.end source=step1.preview job=2 dur_ms=150.6 active_jobs=1 active_reads=1 patch=0 channels=1 bbox=2368:3392,16736:17728 downsample=1 read=1 stopped=0
+PERF t=759147.315113 ev=read.end source=step0.preload job=1 dur_ms=248.2 active_jobs=1 active_reads=0 patch=0 channel=CD68 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759147.315490 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=PD1 bbox=2144:3616,16736:17728
+PERF t=759147.467451 ev=read.end source=step0.preload job=1 dur_ms=152 active_jobs=1 active_reads=0 patch=0 channel=PD1 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759147.467633 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD163 bbox=2144:3616,16736:17728
+PERF t=759147.805953 ev=read.end source=step0.preload job=1 dur_ms=338.3 active_jobs=1 active_reads=0 patch=0 channel=CD163 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759147.806250 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=FOXP3 bbox=2144:3616,16736:17728
+PERF t=759147.951643 ev=read.end source=step0.preload job=1 dur_ms=145.4 active_jobs=1 active_reads=0 patch=0 channel=FOXP3 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759147.951837 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=PDL1 bbox=2144:3616,16736:17728
+PERF t=759148.063120 ev=read.end source=step0.preload job=1 dur_ms=111.3 active_jobs=1 active_reads=0 patch=0 channel=PDL1 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759148.063223 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=TCF1 bbox=2144:3616,16736:17728
+PERF t=759148.285372 ev=read.end source=step0.preload job=1 dur_ms=222.1 active_jobs=1 active_reads=0 patch=0 channel=TCF1 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759148.285577 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CCR7 bbox=2144:3616,16736:17728
+PERF t=759148.434357 ev=read.end source=step0.preload job=1 dur_ms=148.8 active_jobs=1 active_reads=0 patch=0 channel=CCR7 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759148.434555 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD4 bbox=2144:3616,16736:17728
+PERF t=759148.548862 ev=read.end source=step0.preload job=1 dur_ms=114.3 active_jobs=1 active_reads=0 patch=0 channel=CD4 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759148.549093 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD15 bbox=2144:3616,16736:17728
+PERF t=759148.919161 ev=read.end source=step0.preload job=1 dur_ms=370.1 active_jobs=1 active_reads=0 patch=0 channel=CD15 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759148.919503 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD11c bbox=2144:3616,16736:17728
+PERF t=759149.138294 ev=read.end source=step0.preload job=1 dur_ms=218.8 active_jobs=1 active_reads=0 patch=0 channel=CD11c bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.138558 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD3D bbox=2144:3616,16736:17728
+PERF t=759149.319358 ev=read.end source=step0.preload job=1 dur_ms=180.8 active_jobs=1 active_reads=0 patch=0 channel=CD3D bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.319566 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CXCR6 bbox=2144:3616,16736:17728
+PERF t=759149.430750 ev=read.end source=step0.preload job=1 dur_ms=111.2 active_jobs=1 active_reads=0 patch=0 channel=CXCR6 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.430863 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD8 bbox=2144:3616,16736:17728
+PERF t=759149.658023 ev=read.end source=step0.preload job=1 dur_ms=227.1 active_jobs=1 active_reads=0 patch=0 channel=CD8 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.658310 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD11b bbox=2144:3616,16736:17728
+PERF t=759149.807258 ev=read.end source=step0.preload job=1 dur_ms=148.9 active_jobs=1 active_reads=0 patch=0 channel=CD11b bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.807355 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=HLA-DR bbox=2144:3616,16736:17728
+PERF t=759149.920933 ev=read.end source=step0.preload job=1 dur_ms=113.6 active_jobs=1 active_reads=0 patch=0 channel=HLA-DR bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759149.921113 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=Ki67 bbox=2144:3616,16736:17728
+PERF t=759150.270590 ev=read.end source=step0.preload job=1 dur_ms=349.5 active_jobs=1 active_reads=0 patch=0 channel=Ki67 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759150.270925 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD14 bbox=2144:3616,16736:17728
+PERF t=759150.492879 ev=read.end source=step0.preload job=1 dur_ms=221.9 active_jobs=1 active_reads=0 patch=0 channel=CD14 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759150.508635 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD62L bbox=2144:3616,16736:17728
+PERF t=759150.669023 ev=read.end source=step0.preload job=1 dur_ms=160.4 active_jobs=1 active_reads=0 patch=0 channel=CD62L bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759150.669120 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=Gp3 bbox=2144:3616,16736:17728
+PERF t=759150.781175 ev=read.end source=step0.preload job=1 dur_ms=112 active_jobs=1 active_reads=0 patch=0 channel=Gp3 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759150.781384 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=HsBAg bbox=2144:3616,16736:17728
+PERF t=759151.003700 ev=read.end source=step0.preload job=1 dur_ms=222.3 active_jobs=1 active_reads=0 patch=0 channel=HsBAg bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759151.003906 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CK19 bbox=2144:3616,16736:17728
+PERF t=759151.158200 ev=read.end source=step0.preload job=1 dur_ms=154.3 active_jobs=1 active_reads=0 patch=0 channel=CK19 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759151.158377 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD45RO bbox=2144:3616,16736:17728
+PERF t=759151.317610 ev=read.end source=step0.preload job=1 dur_ms=159.2 active_jobs=1 active_reads=0 patch=0 channel=CD45RO bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759151.317909 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=CD45RA bbox=2144:3616,16736:17728
+PERF t=759151.708848 ev=read.end source=step0.preload job=1 dur_ms=390.9 active_jobs=1 active_reads=0 patch=0 channel=CD45RA bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759151.709073 ev=read.begin source=step0.preload job=1 active_jobs=1 active_reads=1 patch=0 channel=DRAG5 bbox=2144:3616,16736:17728
+PERF t=759151.824335 ev=read.end source=step0.preload job=1 dur_ms=115.3 active_jobs=1 active_reads=0 patch=0 channel=DRAG5 bbox=2144:3616,16736:17728 outcome=ok
+PERF t=759151.824445 ev=job.end source=step0.preload job=1 dur_ms=5379 active_jobs=0 active_reads=0 gen=1 patches=1 channels=29 reads=29 cancelled=0
+PERF t=759154.597687 ev=step1.remap dur_ms=3.98 channel=DAPI shape=1024x992 t_begin=7.592e+05
+PERF t=759154.617480 ev=step1.compose dur_ms=19.65 channels=1 t_begin=7.592e+05
+PERF t=759154.620912 ev=step1.setImage dur_ms=3.32 kind=overlay t_begin=7.592e+05
+PERF t=759154.621387 ev=step1.frame dur_ms=7493.66 mode=overlay patch=0 reset_view=True t_begin=7.591e+05
+PERF t=759154.624472 ev=patch.added patches=2
+PERF t=759154.627783 ev=step0.preload_start patches=2 channels=29 cleared_arrays=5 gen=2
+PERF t=759154.627982 ev=patch.on_patches_changed dur_ms=2.28 patches=2 t_begin=7.592e+05
+PERF t=759154.628277 ev=job.begin source=step0.preload job=3 active_jobs=1 active_reads=0 gen=2 patches=2 channels=29
+PERF t=759154.711095 ev=patch.persist dur_ms=83.07 t_begin=7.592e+05
+PERF t=759154.711117 ev=patch.emit_patches_changed dur_ms=86.61 patches=2 t_begin=7.592e+05
+PERF t=759154.775351 ev=gui.gap gap_ms=7652 expected_ms=5 t_begin=7.591e+05 active_jobs=1 active_reads=1 where=main
+PERF t=759155.132040 ev=job.begin source=step1.preview job=4 active_jobs=2 active_reads=1 patch=1 channels=1 bbox=4736:5760,21712:22736 downsample=1
+PERF t=759155.302166 ev=job.end source=step1.preview job=4 dur_ms=170.1 active_jobs=1 active_reads=1 patch=1 channels=1 bbox=4736:5760,21712:22736 downsample=1 read=1 stopped=0
+PERF t=759162.800497 ev=job.end source=step0.preload job=3 dur_ms=8172 active_jobs=0 active_reads=0 gen=2 patches=2 channels=29 reads=58 cancelled=0
+PERF t=759171.018259 ev=job.begin source=step1.preview job=5 active_jobs=1 active_reads=0 patch=1 channels=1 bbox=4736:5760,21712:22736 downsample=1
+PERF t=759171.083179 ev=job.end source=step1.preview job=5 dur_ms=64.93 active_jobs=0 active_reads=0 patch=1 channels=1 bbox=4736:5760,21712:22736 downsample=1 read=1 stopped=0

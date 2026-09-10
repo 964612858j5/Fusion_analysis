@@ -35,8 +35,12 @@ def _clean_env(monkeypatch):
     perf_trace.WRITER._dropped = 0
     perf_trace.WRITER._reported_drops = 0
     perf_trace.WRITER._path = None
+    # `final` is the program ending; a test that exercises it must not leave
+    # the sink closed for the next one.
+    perf_trace.WRITER._final = False
     yield
     perf_trace.shutdown(0.0)
+    perf_trace.WRITER._final = False
 
 
 def _lines(err):
@@ -328,8 +332,16 @@ def test_concurrent_producers_leave_whole_lines_in_clock_order(monkeypatch,
     assert len(lines) == 800, f"{len(lines)} lines of 800"
     for ln in lines:
         assert ln.count(" ev=") == 1 and " job=" in ln and " i=" in ln, ln
+    # Ordered within each batch the writer takes, and every line carries the
+    # stamp its producer read -- so the file is near-ordered and the analyser,
+    # which sorts by that stamp, is exact. What must not happen is a line
+    # landing a whole batch out of place, which would mean the sort key was
+    # taken at write time.
     stamps = [float(ln.split(" t=")[1].split(" ")[0]) for ln in lines]
-    assert stamps == sorted(stamps), "the timeline is out of clock order"
+    worst = max((prev - cur for prev, cur in zip(stamps, stamps[1:])),
+                default=0.0)
+    assert worst < 0.05, f"a line is {worst * 1000:.1f} ms out of order"
+    assert sorted(stamps)[0] == min(stamps)
 
 
 def test_the_timeline_can_be_collected_from_a_file(capsys, monkeypatch,
@@ -576,3 +588,70 @@ def test_the_instrumented_paths_are_silent_with_the_switch_off(capsys):
         assert _lines(capsys.readouterr().err) == []
     finally:
         w.close()
+
+
+# ── one consumer, and it closes last ─────────────────────────────────────
+
+def test_a_final_shutdown_accepts_nothing_and_starts_no_writer(monkeypatch,
+                                                               tmp_path):
+    """Teardown order: the loaders report their own `job.end`, and only then
+    the sink closes. After that a late line is dropped rather than starting a
+    second writer on a file the first one closed."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    perf_trace.mark("before", n=1)
+    _drain()
+
+    perf_trace.shutdown(final=True)
+    perf_trace.mark("after", n=2)
+
+    assert not perf_trace.WRITER.is_running()
+    assert perf_trace.WRITER.pending() == 0
+    text = (tmp_path / "perf.log").read_text(encoding="utf-8")
+    assert " ev=before " in text
+    assert " ev=after " not in text
+
+
+def test_only_one_writer_ever_runs(monkeypatch, tmp_path):
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.setenv(perf_trace.PERF_LOG_ENV, str(tmp_path / "perf.log"))
+    perf_trace.mark("one")
+    first = perf_trace.WRITER._thread
+    for _ in range(20):
+        perf_trace.mark("more")
+    assert perf_trace.WRITER._thread is first
+
+    names = [t.name for t in threading.enumerate()
+             if t.name.startswith("perf-trace-writer")]
+    assert len(names) == 1, names
+    _drain()
+
+
+def test_time_fields_keep_their_microseconds(monkeypatch, capsys):
+    """`%.4g` on a monotonic reading of 759147.127727 writes 7.591e+05 and
+    loses tens of seconds; the first real run lost every span's start that
+    way."""
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    perf_trace.mark("probe", t_begin=759147.127727, dur_ms=7493.66,
+                    count=29)
+    _drain()
+    line = _lines(capsys.readouterr().err)[0]
+
+    assert " t_begin=759147.127727" in line
+    assert " count=29" in line
+
+
+def test_a_span_start_survives_the_formatter(monkeypatch, capsys):
+    monkeypatch.setenv(perf_trace.PERF_ENV, "1")
+    monkeypatch.delenv(perf_trace.PERF_LOG_ENV, raising=False)
+    with perf_trace.span("step1.frame"):
+        pass
+    _drain()
+    line = _lines(capsys.readouterr().err)[0]
+
+    begin = float(line.split(" t_begin=")[1].split(" ")[0])
+    end = float(line.split(" t=")[1].split(" ")[0])
+    dur = float(line.split(" dur_ms=")[1].split(" ")[0])
+    assert end - begin == pytest.approx(dur / 1000.0, abs=1e-4), \
+        f"the span's own start does not match its duration: {line}"

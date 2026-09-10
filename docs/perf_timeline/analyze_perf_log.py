@@ -32,6 +32,26 @@ import gzip
 import sys
 
 
+def runs(records):
+    """Split the log at each `run.begin`.
+
+    A new process restarts job ids and input revisions from 1, so pairing a
+    `read.end` with a `read.begin` across that boundary invents intervals, and
+    a revision lag computed across it is nonsense. Lines before the first
+    `run.begin` are their own segment: a log from before this marker existed
+    is still readable.
+    """
+    out, current = [], []
+    for rec in records:
+        if rec.get("ev") == "run.begin" and current:
+            out.append(current)
+            current = []
+        current.append(rec)
+    if current:
+        out.append(current)
+    return out
+
+
 def read(path):
     opener = gzip.open if path.endswith(".gz") else open
     out = []
@@ -70,9 +90,15 @@ def spans(records):
         dur = num(rec, "dur_ms")
         if end is None or dur is None:
             continue
-        begin = num(rec, "t_begin")
-        if begin is None:
-            begin = end - dur / 1000.0
+        # `t - dur_ms` is exact; `t_begin` was written through a `%.4g`
+        # formatter in the first instrumented run, which turned 759147.127727
+        # into 7.591e+05 and lost tens of seconds. So the arithmetic is the
+        # authority and `t_begin` is only a cross-check -- used when it agrees
+        # to a millisecond, ignored when it does not.
+        computed = end - dur / 1000.0
+        declared = num(rec, "t_begin")
+        begin = (declared if declared is not None
+                 and abs(declared - computed) < 0.001 else computed)
         out.append((begin, end, rec.get("ev", "?"), rec))
     out.sort()
     return out
@@ -208,7 +234,10 @@ def report_gaps(records, limit=20):
         return
     for rec in gaps[:limit]:
         end = num(rec, "t", 0.0)
-        begin = num(rec, "t_begin", end)
+        computed = end - num(rec, "gap_ms", 0.0) / 1000.0
+        declared = num(rec, "t_begin")
+        begin = (declared if declared is not None
+                 and abs(declared - computed) < 0.001 else computed)
         print("gui.gap %.0f ms  [%.6f .. %.6f]  active_jobs=%s active_reads=%s"
               % (num(rec, "gap_ms", 0.0), begin, end,
                  rec.get("active_jobs", "?"), rec.get("active_reads", "?")))
@@ -230,7 +259,8 @@ def report_gaps(records, limit=20):
                   "not instrumented, or outside this process")
         if inside:
             print("    and, overlapping the gap:")
-            for b, e, ev, r in sorted(inside, key=lambda s: -num(r, "dur_ms", 0.0))[:6]:
+            worst_first = sorted(inside, key=lambda s: -num(s[3], "dur_ms", 0.0))
+            for b, e, ev, r in worst_first[:6]:
                 print("      %-32s %8.2f ms %s" % (ev, num(r, "dur_ms", 0.0),
                                                    _extra(r)))
         hit_reads = overlapping(reads, begin, end)
@@ -279,19 +309,46 @@ def main(argv=None):
     ap.add_argument("--at", type=float, default=None,
                     help="reconstruct what was running at one monotonic time")
     ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--run", default="last",
+                    help='which run in an appended log: "last" (default), '
+                         '"all", or a 1-based index')
     args = ap.parse_args(argv)
 
     records = read(args.path)
     if not records:
         print(f"no PERF lines in {args.path}", file=sys.stderr)
         return 1
-    if args.at is not None:
-        report_at(records, args.at)
-        return 0
-    if args.gaps:
-        report_gaps(records, limit=args.limit)
-        return 0
-    summarise(records)
+    segments = runs(records)
+    if len(segments) > 1:
+        print(f"{len(segments)} runs in this log "
+              f"(job ids and revisions restart with each one)")
+    if args.run == "all":
+        chosen = list(enumerate(segments, start=1))
+    elif args.run == "last":
+        chosen = [(len(segments), segments[-1])]
+    else:
+        try:
+            index = int(args.run)
+        except ValueError:
+            print(f"--run must be last, all or an index: {args.run!r}",
+                  file=sys.stderr)
+            return 2
+        if not 1 <= index <= len(segments):
+            print(f"--run {index} is out of range 1..{len(segments)}",
+                  file=sys.stderr)
+            return 2
+        chosen = [(index, segments[index - 1])]
+    for index, segment in chosen:
+        if len(segments) > 1:
+            marker = [r for r in segment if r.get("ev") == "run.begin"]
+            name = marker[0].get("run") if marker else "before run.begin"
+            print(f"\n=== run {index}/{len(segments)}  ({name}) ===")
+        if args.at is not None:
+            report_at(segment, args.at)
+        elif args.gaps:
+            report_gaps(segment, limit=args.limit)
+        else:
+            summarise(segment)
     return 0
 
 

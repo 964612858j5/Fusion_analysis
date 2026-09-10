@@ -78,13 +78,22 @@ def _truthy(name):
     return os.environ.get(name, "") not in ("", "0", "false", "no")
 
 
+# Field names whose value is a POINT IN TIME rather than a measurement.
+# `%.4g` on a monotonic clock reading of 759147.127727 writes 7.591e+05 and
+# throws away tens of seconds -- the first real run lost every span's start
+# that way, and the intervals had to be recovered from `t - dur_ms`. Times
+# keep microseconds; durations and counts stay short.
+_TIME_FIELDS = ("t_begin", "t_end", "t_input", "t_publish")
+
+
 def _fields(items):
     out = []
     for key, value in items:
         if value is None:
             continue
         if isinstance(value, float):
-            value = f"{value:.4g}"
+            value = (f"{value:.6f}" if key in _TIME_FIELDS
+                     else f"{value:.4g}")
         out.append(f"{key}={value}")
     return out
 
@@ -119,6 +128,9 @@ class _Writer:
         self._thread = None
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._final = False
+        self._start_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
 
     # ── producer side: called from the GUI thread and from workers ──
     def submit(self, record):
@@ -130,6 +142,13 @@ class _Writer:
         silently incomplete.
         """
         with self._lock:
+            if self._final:
+                # After the final shutdown there is no consumer, and starting
+                # one would mean a second writer on a file the first has
+                # closed. Loader lines that arrive after teardown are lost
+                # deliberately -- the alternative is a thread outliving the
+                # program that asked for it.
+                return False
             if len(self._queue) >= self._limit:
                 self._dropped += 1
                 return False
@@ -156,16 +175,22 @@ class _Writer:
             changed = path != self._path
             if changed:
                 self._path = path
-        if self._thread is None or not self._thread.is_alive():
-            self._start()
+        self._ensure_writer()
 
-    def _start(self):
-        self._stop.clear()
-        thread = threading.Thread(target=self._run, name="perf-trace-writer",
-                                  daemon=True)
-        self._thread = thread
-        thread.start()
-        atexit.register(shutdown)
+    def _ensure_writer(self):
+        """Exactly one writer, ever: two would both own the file handle and
+        both drain the queue, which is how a timeline loses its order."""
+        with self._start_lock:
+            if self._final:
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            thread = threading.Thread(target=self._run,
+                                      name="perf-trace-writer", daemon=True)
+            self._thread = thread
+            thread.start()
+            atexit.register(_atexit_shutdown)
 
     # ── consumer side ──
     def _drain(self, limit=WRITER_BATCH):
@@ -226,28 +251,40 @@ class _Writer:
             except Exception:                           # noqa: BLE001
                 pass
 
-    def shutdown(self, timeout_s=SHUTDOWN_DRAIN_S):
-        """Bounded drain. Closing a window must not wait on a disk, so what
-        is left after the deadline is lost -- and the next line of the log
-        says how much."""
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        self._stop.set()
-        self._wake.set()
-        try:
-            while time.monotonic() < deadline:
-                if not self._drain():
-                    break
-        except Exception:                               # noqa: BLE001
-            pass
-        thread, self._thread = self._thread, None
-        if thread is not None and thread.is_alive():
-            thread.join(max(0.0, deadline - time.monotonic()))
-        if self._handle is not None:
+    def shutdown(self, timeout_s=SHUTDOWN_DRAIN_S, final=False):
+        """Bounded drain, and only one at a time.
+
+        Closing a window must not wait on a disk, so what is left after the
+        deadline is lost -- and the next line of the log says how much. The
+        lock matters because the caller and the writer thread must not drain
+        or close the same handle at once; `final` is the program ending, after
+        which nothing is accepted and no writer is started, so a loader
+        reporting `job.end` during teardown cannot resurrect the sink.
+        """
+        with self._shutdown_lock:
+            if final:
+                with self._lock:
+                    self._final = True
+            deadline = time.monotonic() + max(0.0, float(timeout_s))
+            self._stop.set()
+            self._wake.set()
+            thread, self._thread = self._thread, None
+            if thread is not None and thread.is_alive():
+                # Let the ONE consumer finish what it has; draining from here
+                # at the same time would interleave two batches into the file.
+                thread.join(max(0.0, deadline - time.monotonic()))
             try:
-                self._handle.close()
+                while time.monotonic() < deadline:
+                    if not self._drain():
+                        break
             except Exception:                           # noqa: BLE001
                 pass
-            self._handle = None
+            if self._handle is not None:
+                try:
+                    self._handle.close()
+                except Exception:                       # noqa: BLE001
+                    pass
+                self._handle = None
 
     # ── introspection, for the tests ──
     def pending(self):
@@ -265,8 +302,12 @@ class _Writer:
 WRITER = _Writer()
 
 
-def shutdown(timeout_s=SHUTDOWN_DRAIN_S):
-    WRITER.shutdown(timeout_s)
+def shutdown(timeout_s=SHUTDOWN_DRAIN_S, final=False):
+    WRITER.shutdown(timeout_s, final=final)
+
+
+def _atexit_shutdown():
+    WRITER.shutdown(SHUTDOWN_DRAIN_S, final=True)
 
 
 def mark(event, **fields):
@@ -342,7 +383,7 @@ class _Span:
             dur = (end - self._t0) * 1000.0
             if exc_type is not None:
                 self._fields["raised"] = exc_type.__name__
-            self._fields.setdefault("t_begin", round(self._t0, 6))
+            self._fields.setdefault("t_begin", float(self._t0))
             WRITER.configure()
             WRITER.submit(("span", end, self._event, dur, self._fields))
         except Exception:                               # noqa: BLE001
@@ -580,7 +621,7 @@ class Heartbeat:
             jobs, reads = ACTIVES.snapshot()
             mark("gui.gap", gap_ms=gap,
                  expected_ms=self._timer.interval(),
-                 t_begin=round(last, 6),
+                 t_begin=float(last),
                  active_jobs=jobs, active_reads=reads,
                  where=self._label or None)
 

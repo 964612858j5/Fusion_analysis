@@ -3207,6 +3207,11 @@ class MainWindow(QMainWindow):
             self.prev_status.setText("Waiting for preview loaders to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
+        # The sink closes LAST, and finally: every loader has reported its own
+        # `job.end` by now, so nothing is left to write and nothing can start
+        # a second writer on a file the first one closed. Bounded, because a
+        # window must not stay open on a disk.
+        perf_trace.shutdown(final=True)
         super().closeEvent(event)
 
     # ── Force-update (clears all caches, re-loads everything) ───────

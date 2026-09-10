@@ -367,7 +367,8 @@ def test_a_job_uses_the_mapping_that_was_frozen_with_it(app, tmp_path,
     try:
         seen = _launched(w, monkeypatch)
         mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: mapping)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: mapping)
         w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
@@ -390,7 +391,8 @@ def test_the_fused_zarr_uses_the_mapping_that_was_saved_with_it(app, tmp_path,
     w = _window(app, tmp_path)
     try:
         mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: mapping)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: mapping)
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
                             lambda self: ({"CD3": {"min": 0.0, "max": 0.1,
                                                    "gamma": 1.0}}, "stale.json"))
@@ -579,7 +581,8 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
         monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
         monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
         mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: mapping)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: mapping)
         # What reading the mapping back through the handoff would return: the
         # file from before the commit.
         monkeypatch.setattr(type(w), "_load_step0_remap_params",

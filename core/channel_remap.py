@@ -318,6 +318,51 @@ def compose_multichannel_overlay(channels, colors, params):
     return np.clip(rgb, 0.0, 1.0).astype(np.float32)
 
 
+def tint_and_sum_grays(grays, colors):
+    """Tint already-remapped [0,1] channels and sum them, and nothing else.
+
+    The second half of `compose_multichannel_overlay`, for callers that have
+    ALREADY produced each channel's grayscale -- Step1's overlay caches those
+    grays precisely so a colour change or a weight change does not redo the
+    mapping. It used to hand them back to `compose_multichannel_overlay` with
+    an identity window, which re-ran the whole per-channel remap over every
+    array: MEASURED at p50 49.96 ms per frame while the one channel that had
+    actually changed cost about 8 ms to map.
+
+    Numerically identical to the identity-window call it replaces: the clip to
+    [0,1] is kept, because that is what an identity remap does to a value
+    outside the window, and a channel scaled by its weight can only be inside
+    it anyway.
+
+    Parameters
+    ----------
+    grays : dict[str, ndarray]
+        name -> 2D array already in [0,1] (a remap's output, optionally
+        scaled by the channel's weight).
+    colors : dict[str, tuple]
+        name -> (R, G, B) floats in [0, 1].
+
+    Returns
+    -------
+    float32 HxWx3 array in [0, 1], or None if `grays` is empty / unusable.
+    """
+    items = [(n, a) for n, a in (grays or {}).items()
+             if a is not None and np.asarray(a).ndim == 2 and np.asarray(a).size]
+    if not items:
+        return None
+    h, w = np.asarray(items[0][1]).shape[:2]
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    for name, arr in items:
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.shape[:2] != (h, w):
+            continue                       # shape mismatch -> skip (no crash)
+        gray = np.clip(arr, 0.0, 1.0)
+        color = colors.get(name, (1.0, 1.0, 1.0)) if colors else (1.0, 1.0, 1.0)
+        color = np.asarray(color, dtype=np.float32).reshape(1, 1, 3)
+        rgb += gray[:, :, None] * color
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
 # ── Reference-sketch aliases (forward-compat with the spec's API names) ──────
 def remap_channel(image, params=None):
     """Alias of apply_channel_remap (spec sketch name)."""

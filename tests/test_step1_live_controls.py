@@ -151,7 +151,8 @@ def test_the_intensity_window_changes_the_picture_on_screen(app, mode, monkeypat
     try:
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0},
                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: window)
         w.set_preview_mode(mode, force=True, reconcile=False)
         _drag(w, "CD3", [1.0])
         _settle(w)
@@ -171,7 +172,8 @@ def test_five_mapping_changes_publish_one_picture(app, monkeypatch):
     w = _window(app)
     try:
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: window)
         w.set_preview_mode("fusion", force=True, reconcile=False)
         _drag(w, "CD3", [1.0])
         _settle(w)
@@ -198,7 +200,8 @@ def test_editing_a_channel_that_is_not_in_the_picture_redraws_nothing(app, monke
     w = _window(app)
     try:
         window = {"CD8": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping", lambda self: window)
+        monkeypatch.setattr(type(w), "_display_mapping",
+                            lambda self, *a, **k: window)
         w.set_preview_mode("overlay", force=True, reconcile=False)
         _drag(w, "CD3", [1.0])
         _settle(w)

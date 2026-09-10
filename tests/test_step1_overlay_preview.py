@@ -1086,3 +1086,218 @@ def test_restoring_a_session_ticks_nothing_and_weighs_nothing(app):
         assert w.config.current_channel() == "CD3"
     finally:
         w.close()
+
+
+# ── the same picture, computed once ──────────────────────────────────────
+#
+# MEASURED (docs/perf_timeline/prefix_run_excerpt.log and the full pre-fix
+# run): during a Min/Max drag the overlay's `step1.compose` cost p50 49.96 ms
+# per frame while the ONE channel whose window had changed cost about 8 ms to
+# map, and the fusion preview's `step1.signals` cost p50 36.31 ms against a
+# `fuse` of 4 ms. Both were the same mistake: work already done, done again.
+
+def test_the_overlay_composite_is_numerically_what_it_replaced(app):
+    """The optimisation may not change a pixel.
+
+    `tint_and_sum_grays` is the second half of
+    `compose_multichannel_overlay`; the first half -- the per-channel remap --
+    has already been done by `_overlay_gray` and cached. Handing the grays
+    back through the general compositor with an identity window produced
+    exactly this, at the price of redoing every map.
+    """
+    from block01.core.channel_remap import (
+        compose_multichannel_overlay, tint_and_sum_grays,
+    )
+    rng = np.random.default_rng(11)
+    # Includes values OUTSIDE [0,1] on purpose: that is the only place the
+    # identity window does anything at all (it clips), so a fast path that
+    # dropped the clip would agree everywhere else and differ exactly there.
+    out_of_range = rng.random((24, 18), dtype=np.float32) * 2.0 - 0.5
+    grays = {"DAPI": rng.random((24, 18), dtype=np.float32),
+             "CD3": rng.random((24, 18), dtype=np.float32) * 0.35,
+             "CD8": np.zeros((24, 18), np.float32),
+             "CD20": out_of_range}
+    colors = {"DAPI": (0.1, 0.4, 1.0), "CD3": (1.0, 0.2, 0.2),
+              "CD8": (0.3, 1.0, 0.3), "CD20": (0.9, 0.9, 0.1)}
+    identity = {ch: {"min": 0.0, "max": 1.0, "brightness": 0.0,
+                     "contrast": 1.0, "gamma": 1.0} for ch in grays}
+
+    fast = tint_and_sum_grays(grays, colors)
+    old = compose_multichannel_overlay(grays, colors, identity)
+
+    assert fast is not None
+    # Equal to the last bit but for the identity window's OWN rounding: it
+    # computes (x - 0) / (1 - 0) and a gamma of 1.0 in float32, which moves
+    # some values by one unit in the last place. The direct path skips that
+    # arithmetic, so where they differ it is the more exact of the two.
+    assert np.abs(fast - old).max() < 1e-6
+    assert fast.dtype == old.dtype == np.float32
+    assert fast.shape == old.shape
+
+
+def test_the_overlay_frame_does_not_remap_the_grays_again(app, monkeypatch):
+    """The composite may not re-run the mapping it was handed the output of.
+
+    Watched at the CORE module's own reference, which is what the general
+    compositor calls: `main_window` imported `apply_channel_remap` at import
+    time for its own per-channel mapping, so counting that one cannot see a
+    second pass happening inside `compose_multichannel_overlay`.
+    """
+    import block01.core.channel_remap as core
+
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w._render_overlay_patch(reset_view=False)   # warm the grays
+
+        calls = []
+        real = core.apply_channel_remap
+        monkeypatch.setattr(core, "apply_channel_remap",
+                            lambda arr, params=None: (calls.append(
+                                getattr(arr, "shape", None)),
+                                real(arr, params))[1])
+        w._render_overlay_patch(reset_view=False)
+
+        assert calls == [], (
+            "the composite re-ran the per-channel remap over the grays it "
+            f"was given: {len(calls)} extra passes")
+    finally:
+        w.close()
+
+
+def test_the_overlay_maps_each_channel_once_per_window(app, monkeypatch):
+    """And the mapping that DOES belong to a frame happens once: the first
+    frame maps what it draws, the second maps nothing."""
+    import block01.ui.main_window as mw
+
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        calls = []
+        real = mw.apply_channel_remap
+        monkeypatch.setattr(mw, "apply_channel_remap",
+                            lambda arr, params=None: (calls.append(1),
+                                                      real(arr, params))[1])
+
+        w._overlay_display_cache.clear()
+        w._render_overlay_patch(reset_view=False)
+        assert len(calls) > 0, "the frame drew without mapping anything"
+
+        calls.clear()
+        w._render_overlay_patch(reset_view=False)
+
+        assert calls == [], "a second identical frame mapped again"
+    finally:
+        w.close()
+
+
+def test_a_colour_change_reuses_every_gray(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w._render_overlay_patch(reset_view=False)
+        before = dict(w._overlay_display_cache)
+        assert before
+
+        w.config.set_channel_color("CD3", "#00ff88")
+        w._render_overlay_patch(reset_view=False)
+
+        assert set(w._overlay_display_cache) == set(before)
+        for key, value in before.items():
+            assert w._overlay_display_cache[key] is value, \
+                "a colour change recomputed a channel's grayscale"
+    finally:
+        w.close()
+
+
+def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
+    """A Min/Max drag is one channel's window moving. The other signals are
+    the same arrays through the same numbers."""
+    w = _window(app)
+    try:
+        w.set_preview_mode("fusion", force=True, reconcile=False)
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w._render_current_patch(reset_view=False)
+        first = dict(w._signal_cache)
+        assert len(first) >= 2, first
+
+        # One channel's window moves; the others are untouched.
+        window = {"CD3": {"min": 5.0, "max": 900.0, "gamma": 1.0}}
+        w._display_mapping = lambda *a, **k: window
+        w._render_current_patch(reset_view=False)
+
+        kept = [key for key in first if key in w._signal_cache
+                and w._signal_cache[key] is first[key]]
+        assert any(key[0] != "CD3" for key in kept), \
+            "an unchanged channel's signal was recomputed"
+        assert any(key[0] == "CD3" for key in w._signal_cache), \
+            "the changed channel was not recomputed"
+    finally:
+        w.close()
+
+
+def test_a_signal_cannot_be_served_for_different_pixels(app):
+    """The key holds the array's identity, so a patch reload or a dataset
+    switch cannot serve yesterday's signal for today's pixels.
+
+    Pixels that have been replaced leave their entries behind until something
+    clears them (every path that drops the raw arrays does, and the bound
+    catches the rest) -- what matters is that such an entry can never be
+    HIT: the new arrays are different objects, so the lookup misses and the
+    signal is recomputed.
+    """
+    w = _window(app)
+    try:
+        w.set_preview_mode("fusion", force=True, reconcile=False)
+        w.config.set_channel_visible("CD3", True)
+        w._render_current_patch(reset_view=False)
+        old_arr = w._patch_channel_cache[0]["CD3"]
+        window = w._display_mapping(channels=["CD3"])
+        first = w._preview_channel_signal("CD3", old_arr, window)
+
+        rng = np.random.default_rng(5)
+        new_arr = rng.random((32, 32), dtype=np.float32) + 0.1
+        w._patch_channel_cache[0]["CD3"] = new_arr
+
+        second = w._preview_channel_signal("CD3", new_arr, window)
+
+        assert second is not first, \
+            "the cache served the previous array's signal for new pixels"
+        assert w._preview_channel_signal("CD3", new_arr, window) is second, \
+            "and the same pixels through the same window are not recomputed"
+    finally:
+        w.close()
+
+
+def test_dropping_a_patch_drops_its_signals(app):
+    w = _window(app)
+    try:
+        w.set_preview_mode("fusion", force=True, reconcile=False)
+        w.config.set_channel_visible("CD3", True)
+        w._render_current_patch(reset_view=False)
+        assert w._signal_cache
+
+        w._drop_overlay_cache_for(0)
+
+        assert w._signal_cache == {}
+    finally:
+        w.close()
+
+
+def test_the_signal_cache_is_bounded(app):
+    """A drag mints a new window per step; the map must not grow for the
+    length of a session."""
+    import block01.ui.main_window as mw
+
+    w = _window(app)
+    try:
+        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
+        for i in range(mw._SIGNAL_CACHE_MAX * 2):
+            window = {"CD3": {"min": float(i), "max": 1000.0, "gamma": 1.0}}
+            w._preview_channel_signal("CD3", arr, window)
+
+        assert len(w._signal_cache) <= mw._SIGNAL_CACHE_MAX
+    finally:
+        w.close()

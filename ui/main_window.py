@@ -7,6 +7,7 @@ import gc
 import glob
 import hashlib
 import json
+import collections
 import copy
 import time
 import weakref
@@ -100,7 +101,26 @@ STEP1_PATCH_PREVIEW_MAX_PX = 1024
 _SIGNAL_CACHE_MAX = 64
 _SIGNAL_CACHE_BYTES = 160 * 1024 * 1024
 
-# How long a burst of state changes is allowed to coalesce into one redraw.
+# The preview's frame clock.
+#
+# MEASURED before this: every parameter event restarted a 60 ms single-shot
+# timer, which is a TRAILING debounce -- while the hand keeps moving the
+# publish keeps being pushed back, so a 2-3 second drag published 25 frames
+# in 11.4 s (2.2 FPS) in overlay and 28 in 9.7 s (2.9 FPS) in fusion, each
+# one only because an input gap happened to exceed 60 ms. The picture did
+# not lag the mouse; it waited for the mouse to stop.
+#
+# A clock instead: the first input in an idle period draws at once (leading
+# edge), and while input continues frames go out on fixed slots. 33 ms is
+# ~30 FPS, chosen against the measured cost of a frame rather than an
+# aspiration -- the dedup slice took the overlay's composite from ~50 ms to
+# the one changed channel's ~8 ms, so a 33 ms slot is affordable and leaves
+# room for the whole frame inside it. The frame is still ON the GUI thread,
+# which is the next slice; this one only stops the scheduler from hiding it.
+PREVIEW_FRAME_MS = 33
+
+# Kept as the name for "one coalesced redraw", used where a delay is passed
+# explicitly (a dataset switch, a session restore) rather than by the clock.
 PREVIEW_COALESCE_MS = 60
 
 # What a `step1_fusion_settings.json` has to say it is. A file of another
@@ -171,9 +191,9 @@ class MainWindow(QMainWindow):
         # sub-millisecond, the mapping is not.  Cleared wherever the raw patch
         # cache is cleared.
         self._overlay_display_cache: dict = {}
-        # Per-channel fusion signals, keyed by (channel, array identity,
-        # shape, window values) -- see `_preview_channel_signal`.
-        self._signal_cache: dict = {}
+        # Per-channel fusion signals, keyed by (patch, channel), ordered by
+        # recency of USE -- see `_preview_channel_signal`.
+        self._signal_cache = collections.OrderedDict()
         # What each patch still wants that its RUNNING loader is not fetching.
         # Per channel, not a flag: a read that fails must not take a tick made
         # while it ran down with it.
@@ -188,6 +208,17 @@ class MainWindow(QMainWindow):
         # handlers stay quiet and the reconcile at the end is the only one.
         self._restoring_display_state = False
         self._preview_update_pending = False
+        # The frame clock's whole state: the newest input revision not yet
+        # drawn (None = nothing pending), how many inputs have been merged
+        # into it, whether a frame is being drawn right now, when the last
+        # one went out, and when the newest input arrived. See
+        # `_schedule_preview_update`.
+        self._frame_input_rev = 0
+        self._frame_pending_rev = None
+        self._frame_coalesced = 0
+        self._frame_in_flight = False
+        self._frame_last_publish = 0.0
+        self._frame_input_at = 0.0
         # The settings a segmentation search or a fused.zarr run will use, as
         # opposed to the ones on screen. None until the user saves them.
         self._fusion_settings_snapshot = None
@@ -3329,9 +3360,9 @@ class MainWindow(QMainWindow):
         self._overlay_display_cache = {
             key: value for key, value in self._overlay_display_cache.items()
             if key[0] != patch_idx}
-        self._signal_cache = {
-            key: value for key, value in self._signal_cache.items()
-            if key[0] != patch_idx}
+        self._signal_cache = collections.OrderedDict(
+            (key, value) for key, value in self._signal_cache.items()
+            if key[0] != patch_idx)
 
     def _refresh_patch_preview(self, reset_view=False):
         """Draw whichever preview the current mode asks for."""
@@ -3718,28 +3749,98 @@ class MainWindow(QMainWindow):
         self._schedule_preview_update()
         self._schedule_step1_session_save()
 
-    def _schedule_preview_update(self, delay_ms=PREVIEW_COALESCE_MS):
-        """Redraw once, after the user stops moving the control.
+    def _frame_now(self):
+        """The clock the frame scheduler runs on. A seam, so a test can drive
+        two seconds of input without waiting two seconds."""
+        return time.monotonic()
 
-        Latest wins: a burst of slider steps leaves one composite, of the
-        state the user ended on, and the intermediate ones are never drawn.
+    def _arm_frame_timer(self, wait_ms):
+        """Ask for the next frame slot. A seam, for the same reason."""
+        self._prev_timer.start(int(max(0, wait_ms)))
+
+    def _schedule_preview_update(self, delay_ms=None):
+        """Record that the picture is out of date, and publish on the clock.
+
+        Three rules, and the measured failure each one answers:
+
+        * LEADING EDGE. The first input after an idle period draws
+          immediately. The old code always waited 60 ms, so a single slider
+          step -- or the first step of a drag -- showed nothing for 60 ms.
+        * A FIXED SLOT, NOT A RESTARTED WAIT. While input keeps coming the
+          armed timer is left alone. It used to be restarted by every event,
+          which is why a continuous drag published only when the hand paused
+          (2.2 FPS in overlay, 2.9 in fusion, measured over 653 inputs).
+        * LATEST ONLY, DEPTH ONE. What is pending is a revision number, not
+          a queue: those 653 inputs would otherwise be 653 frames of history
+          nobody will see. How many were merged into the next frame is
+          recorded, so "how many were skipped" is a number.
+
+        `delay_ms` is for callers that mean a specific wait -- a dataset
+        switch, a session restore -- and it is a FLOOR, never a reset: a
+        caller asking for 60 ms cannot push back a slot already due.
         """
         self._preview_update_pending = True
-        perf_trace.mark("step1.schedule", delay_ms=int(delay_ms),
-                        rev=perf_trace.REVISIONS.latest("display_mapping"))
-        self._prev_timer.start(int(delay_ms))
+        self._frame_input_rev += 1
+        if self._frame_pending_rev is not None:
+            self._frame_coalesced += 1
+        self._frame_pending_rev = self._frame_input_rev
+        self._frame_input_at = self._frame_now()
+
+        since = (self._frame_input_at - self._frame_last_publish) * 1000.0
+        wait = max(max(0.0, PREVIEW_FRAME_MS - since), float(delay_ms or 0.0))
+        try:
+            armed = bool(self._prev_timer.isActive())
+        except RuntimeError:
+            armed = False
+        perf_trace.mark("step1.schedule", rev=self._frame_pending_rev,
+                        wait_ms=wait, armed=armed,
+                        in_flight=self._frame_in_flight,
+                        coalesced=self._frame_coalesced)
         # Said immediately, not after the redraw: the moment the settings differ
         # from the snapshot, a search must not look startable.
         self._update_fusion_settings_state()
+        if self._frame_in_flight or armed:
+            return          # a frame is already due; this input rides it
+        if wait <= 0.0:
+            self._apply_pending_preview_update()
+            return
+        self._arm_frame_timer(wait)
 
     def _apply_pending_preview_update(self):
-        """The coalesced redraw, in whichever mode is showing."""
+        """Publish the newest state, once, and leave the next slot to the
+        next input.
+
+        Re-entrancy is the thing to get right: drawing runs Qt code, Qt can
+        deliver another parameter event inside it, and that event must NOT
+        start a second frame -- it becomes the pending revision for the slot
+        after this one, which is also how a drag's final value lands.
+        """
+        if self._frame_in_flight:
+            return
+        rev = self._frame_pending_rev
+        if rev is None:
+            self._preview_update_pending = False
+            return
+        coalesced, self._frame_coalesced = self._frame_coalesced, 0
+        self._frame_pending_rev = None
         self._preview_update_pending = False
-        with perf_trace.span("step1.publish",
-                             rev=perf_trace.REVISIONS.latest("display_mapping"),
-                             mode=self._step1_preview_mode):
-            self._refresh_patch_preview(reset_view=False)
+        self._frame_in_flight = True
+        try:
+            with perf_trace.span("step1.publish", rev=rev,
+                                 mode=self._step1_preview_mode,
+                                 coalesced=coalesced,
+                                 input_rev=self._frame_input_rev,
+                                 latency_ms=(self._frame_now()
+                                             - self._frame_input_at) * 1000.0):
+                self._refresh_patch_preview(reset_view=False)
+        finally:
+            self._frame_in_flight = False
+            self._frame_last_publish = self._frame_now()
         self._update_fusion_settings_state()
+        if self._frame_pending_rev is not None:
+            # Input arrived while this frame was being drawn; the next slot
+            # carries it. This is how a drag's final value is never lost.
+            self._arm_frame_timer(PREVIEW_FRAME_MS)
 
     # ── Phase 1 ─────────────────────────────────────────────────────
 
@@ -5277,6 +5378,12 @@ class MainWindow(QMainWindow):
             # confused with a different one.
             source = entry["ref"]()
             if source is arr:
+                # A hit is use, so it moves to the back: eviction order was
+                # "least recently RECOMPUTED", which after a patch switch
+                # would drop the current patch's channels -- the ones every
+                # frame is hitting -- before the previous patch's, which
+                # nothing asks for any more.
+                self._signal_cache.move_to_end(key)
                 return entry["signal"]
         if p:
             signal = apply_channel_remap(arr, p).astype(np.float32)
@@ -5300,11 +5407,10 @@ class MainWindow(QMainWindow):
     def _evict_signals(self):
         """Keep the cache inside both bounds, oldest first.
 
-        Insertion order IS recency here: an entry is re-inserted whenever its
-        window changes, and a hit on an unchanged window is the frame's whole
-        point, so what sits at the front is what no recent frame has wanted.
-        Entries whose array has been released go first, whatever their age --
-        they can never be hit again.
+        Order IS recency: an entry moves to the back when its window changes
+        and when it is HIT, so what sits at the front is what no recent frame
+        has wanted. Entries whose array has been released go first, whatever
+        their age -- they can never be hit again.
         """
         for key, entry in list(self._signal_cache.items()):
             if entry["ref"]() is None:

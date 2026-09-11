@@ -1388,3 +1388,37 @@ def test_dropping_one_patch_keeps_the_others_signals(app):
         assert set(w._signal_cache) == {(1, "CD3")}
     finally:
         w.close()
+
+
+def test_a_hit_moves_the_entry_to_the_back(app):
+    """Eviction order must be least-recently-USED, not least-recently-
+    recomputed: after a patch switch the current patch's channels are the
+    ones every frame hits, and they were at the front of the queue because
+    nothing had recomputed them."""
+    w = _window(app)
+    try:
+        window = {"CD3": {"min": 0.0, "max": 1000.0, "gamma": 1.0}}
+        a = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
+        b = a + 1.0
+        c = a + 2.0
+        w._preview_patch_idx = 0
+        w._preview_channel_signal("A", a, window)
+        w._preview_channel_signal("B", b, window)
+        assert list(w._signal_cache) == [(0, "A"), (0, "B")]
+
+        w._preview_channel_signal("A", a, window)          # a HIT on A
+        assert list(w._signal_cache) == [(0, "B"), (0, "A")], \
+            "a hit did not refresh the entry's recency"
+
+        # One more than the cache holds: B, not A, is the one nobody wanted.
+        import block01.ui.main_window as mw
+        monkey = mw._SIGNAL_CACHE_MAX
+        try:
+            mw._SIGNAL_CACHE_MAX = 2
+            w._preview_channel_signal("C", c, window)
+            assert set(w._signal_cache) == {(0, "A"), (0, "C")}, \
+                list(w._signal_cache)
+        finally:
+            mw._SIGNAL_CACHE_MAX = monkey
+    finally:
+        w.close()

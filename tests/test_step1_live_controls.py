@@ -22,6 +22,8 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets  # noqa: E402
 
+import block01.ui.main_window as mw  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -82,6 +84,66 @@ def _screen(w):
     return None if w.prev_img.image is None else np.asarray(w.prev_img.image).copy()
 
 
+class _FakeClock:
+    """Two seconds of input without waiting two seconds.
+
+    Replaces the window's two scheduler seams: the clock it measures slots
+    against, and the timer it arms. `run_due_slot` is the event loop's part
+    -- deliver the timeout when the wait has elapsed -- so a test can drive
+    hundreds of inputs and know exactly which frames the scheduler chose to
+    publish.
+    """
+
+    def __init__(self, w, start=0.0, idle_ms=10_000):
+        self._w = w
+        self.now = float(start)
+        self.armed_at = None
+        self.armed_wait = None
+        self.arms = []
+        w._frame_now = lambda: self.now
+        w._arm_frame_timer = self._arm
+        w._prev_timer.stop()
+        w._prev_timer.isActive = lambda: self.armed_at is not None
+        # The window's scheduler state is on the REAL clock until now; move
+        # it onto this one, `idle_ms` in the past, so the first input is
+        # treated as arriving after an idle period rather than after a frame
+        # published in the year the monotonic clock started.
+        w._frame_last_publish = self.now - float(idle_ms) / 1000.0
+        w._frame_input_at = w._frame_last_publish
+        w._frame_pending_rev = None
+        w._frame_coalesced = 0
+        w._frame_in_flight = False
+
+    def _arm(self, wait_ms):
+        self.armed_at = self.now
+        self.armed_wait = float(wait_ms)
+        self.arms.append(float(wait_ms))
+
+    def advance_ms(self, ms):
+        self.now += float(ms) / 1000.0
+
+    def due(self):
+        return (self.armed_at is not None
+                and (self.now - self.armed_at) * 1000.0 >= self.armed_wait)
+
+    def run_due_slot(self):
+        """Fire the armed slot if its wait has elapsed, as Qt would."""
+        if not self.due():
+            return False
+        self.armed_at = self.armed_wait = None
+        self._w._apply_pending_preview_update()
+        return True
+
+    def run_all_slots(self, limit=10000):
+        fired = 0
+        while self.armed_at is not None and fired < limit:
+            self.advance_ms(self.armed_wait)
+            if not self.run_due_slot():
+                break
+            fired += 1
+        return fired
+
+
 def _drag(w, channel, values):
     """Move the REAL slider through `values` (0..1), as a drag does."""
     row = w.config._rows[channel]
@@ -116,7 +178,22 @@ def test_the_weight_slider_changes_the_picture_on_screen(app, mode):
 
 
 @pytest.mark.parametrize("mode", ["overlay", "fusion"])
-def test_a_drag_publishes_once_and_shows_where_it_stopped(app, mode):
+def test_a_drag_publishes_on_the_clock_and_ends_on_its_final_value(app, mode):
+    """REWRITTEN, because the contract changed and the old one is what the
+    complaint was about.
+
+    It used to assert "nothing drawn mid-drag, one frame after the hand
+    stops", and the implementation delivered exactly that: a 60 ms
+    single-shot timer restarted by every input, so a 2-3 second drag
+    published 25 frames in 11.4 s (2.2 FPS, measured) -- only where an input
+    gap happened to exceed 60 ms. The picture was not lagging the mouse; it
+    was waiting for the mouse to stop.
+
+    Now: the drag publishes intermediate frames on a fixed clock, far fewer
+    frames than there were inputs, and the last frame is the value the drag
+    ended on. Still no channel re-read -- a weight or window change is
+    arithmetic on pixels already in hand.
+    """
     w = _window(app)
     try:
         w.set_preview_mode(mode, force=True, reconcile=False)
@@ -129,15 +206,23 @@ def test_a_drag_publishes_once_and_shows_where_it_stopped(app, mode):
             published.append(np.asarray(img).copy()) or real(img, **k))
         reads = len(w.loader.reads)
 
-        _drag(w, "CD3", [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15, 0.1])
-        assert published == []                 # nothing drawn mid-drag
-        _settle(w)
+        clock = _FakeClock(w, start=w._frame_last_publish)
+        values = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15, 0.1]
+        for value in values:
+            clock.advance_ms(20)               # 50 inputs a second
+            _drag(w, "CD3", [value])
+            clock.run_due_slot()
 
-        assert len(published) == 1
-        assert len(w.loader.reads) == reads    # and no channel was re-read
+        assert 1 < len(published) < len(values), (
+            f"{len(published)} frames for {len(values)} inputs: a drag should "
+            "publish on the clock, neither per input nor only at the end")
+
+        clock.advance_ms(mw.PREVIEW_FRAME_MS + 1)
+        clock.run_due_slot()
         assert w.config.channel_weight("CD3") == pytest.approx(0.1)
+        assert len(w.loader.reads) == reads    # and no channel was re-read
 
-        # The one frame published is the state the drag ended on.
+        # The last frame published is the state the drag ended on.
         w._refresh_patch_preview(reset_view=False)
         assert np.array_equal(published[-1], _screen(w))
     finally:
@@ -232,5 +317,262 @@ def test_a_weight_drag_starts_no_worker(app):
 
         assert started == []            # everything it needs is already cached
         assert w._fusion_worker is None
+    finally:
+        w.close()
+
+
+# ── the frame clock ──────────────────────────────────────────────────────
+#
+# MEASURED before this slice, over 653 `intensity.in` events on the real
+# desk: 25 frames in 11.435 s of overlay dragging (2.2 FPS) and 28 in 9.677 s
+# of fusion dragging (2.9 FPS), with the last input reaching the screen 131 ms
+# / 101 ms later on average. Not because a frame was slow -- the whole frame
+# was 42-85 ms -- but because a 60 ms single-shot timer was RESTARTED by
+# every input, so a publish happened only where the hand paused longer than
+# 60 ms. The rules below are what replaces that.
+
+def test_the_first_input_draws_at_once(app):
+    """A leading edge. It used to wait 60 ms for a single slider step, and
+    for the first step of every drag."""
+    w = _window(app)
+    try:
+        w.set_preview_mode("overlay", force=True, reconcile=False)
+        clock = _FakeClock(w)              # a slot is due after the idle
+        published = []
+        w.prev_img.setImage = lambda img, **k: published.append(1)
+
+        w._schedule_preview_update()
+
+        assert published == [1], "the first input after an idle wait was held"
+        assert clock.arms == [], "and it did not need a timer at all"
+    finally:
+        w.close()
+
+
+def test_continuous_input_publishes_on_fixed_slots(app):
+    """Two seconds of dragging at 200 inputs a second, on a virtual clock.
+
+    What must NOT happen is the old behaviour -- one frame, at the end --
+    and what must not happen either is a frame per input.
+    """
+    w = _window(app)
+    try:
+        w.set_preview_mode("overlay", force=True, reconcile=False)
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(1000)
+        published = []
+        w.prev_img.setImage = lambda img, **k: published.append(1)
+
+        inputs = 0
+        for _ in range(400):               # 2 s at 5 ms per input
+            clock.advance_ms(5)
+            w._schedule_preview_update()
+            inputs += 1
+            clock.run_due_slot()
+
+        slots = 2000.0 / mw.PREVIEW_FRAME_MS
+        assert 0.5 * slots <= len(published) <= 1.2 * slots, (
+            f"{len(published)} frames in 2 s of input; a {mw.PREVIEW_FRAME_MS} "
+            f"ms clock should give about {slots:.0f}")
+        assert len(published) < inputs / 4, \
+            "a frame per input is not a frame clock either"
+    finally:
+        w.close()
+
+
+def test_the_pending_queue_is_never_deeper_than_one(app):
+    """653 inputs may not become 653 frames of history. What is pending is a
+    revision, not a queue."""
+    w = _window(app)
+    try:
+        w.set_preview_mode("fusion", force=True, reconcile=False)
+        clock = _FakeClock(w, start=0.0)
+        depths = []
+        for i in range(653):
+            clock.advance_ms(2)
+            w._schedule_preview_update()
+            depths.append(0 if w._frame_pending_rev is None else 1)
+            if i % 17 == 0:
+                clock.advance_ms(mw.PREVIEW_FRAME_MS)
+                clock.run_due_slot()
+
+        assert max(depths) == 1
+        assert w._frame_input_rev >= 653, \
+            "every input was counted, however few frames were drawn"
+    finally:
+        w.close()
+
+
+def test_a_frame_slower_than_the_input_keeps_one_in_flight_and_one_pending(app):
+    """When computing is slower than the hand, the answer is to skip, not to
+    queue: one frame being drawn, one revision waiting, and no history."""
+    w = _window(app)
+    try:
+        w.set_preview_mode("overlay", force=True, reconcile=False)
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(1000)
+        seen = []
+
+        def slow_frame(*_a, **_k):
+            seen.append(w._frame_pending_rev)
+            clock.advance_ms(80)                  # a frame costs 80 ms
+            # input arriving DURING the frame must not start a second one
+            w._schedule_preview_update()
+            assert w._frame_in_flight is True
+
+        w._refresh_patch_preview = slow_frame
+
+        for _ in range(20):
+            clock.advance_ms(10)
+            w._schedule_preview_update()
+            clock.run_due_slot()
+
+        assert seen, "no frame ran at all"
+        assert all(rev is None or rev == pending
+                   for rev, pending in zip(seen, seen)), seen
+        assert w._frame_pending_rev is not None, \
+            "the newest input is still waiting for its slot"
+        assert w._frame_in_flight is False
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("mode", ["overlay", "fusion"])
+def test_the_final_value_is_always_published(app, mode):
+    """The hand stops. Whatever the clock was doing, the last revision has to
+    reach the screen."""
+    w = _window(app)
+    try:
+        w.set_preview_mode(mode, force=True, reconcile=False)
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(1000)
+        revs = []
+        real = w._refresh_patch_preview
+        w._refresh_patch_preview = lambda *a, **k: (
+            revs.append(w._frame_input_rev), real(*a, **k))[1]
+
+        for _ in range(12):
+            clock.advance_ms(4)               # faster than the clock
+            w._schedule_preview_update()
+            clock.run_due_slot()
+        last_input = w._frame_input_rev
+        clock.run_all_slots()
+
+        assert revs, "nothing was published"
+        assert revs[-1] == last_input, (
+            f"the drag ended at revision {last_input} and the screen stopped "
+            f"at {revs[-1]}")
+        assert w._frame_pending_rev is None
+    finally:
+        w.close()
+
+
+def test_an_explicit_delay_is_a_floor_not_a_reset(app):
+    """A dataset switch asking for 60 ms may not push back a slot that is
+    already due -- that is the trailing-debounce bug in miniature."""
+    w = _window(app)
+    try:
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(10_000)
+        published = []
+        w.prev_img.setImage = lambda img, **k: published.append(1)
+
+        w._schedule_preview_update(delay_ms=mw.PREVIEW_COALESCE_MS)
+        assert published == [], "an explicit delay was ignored"
+        assert clock.arms == [float(mw.PREVIEW_COALESCE_MS)], clock.arms
+
+        clock.advance_ms(mw.PREVIEW_COALESCE_MS)
+        clock.run_due_slot()
+        assert published == [1]
+    finally:
+        w.close()
+
+
+def test_input_during_a_frame_rides_the_next_slot(app):
+    w = _window(app)
+    try:
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(1000)
+        arms_before = list(clock.arms)
+        real = w._refresh_patch_preview
+
+        def reenter(*a, **k):
+            w._schedule_preview_update()      # Qt can deliver this here
+            return real(*a, **k)
+
+        w._refresh_patch_preview = reenter
+        w._schedule_preview_update()
+
+        assert w._frame_pending_rev is not None
+        assert clock.arms != arms_before, \
+            "the input that arrived during the frame armed no slot"
+        assert clock.arms[-1] == float(mw.PREVIEW_FRAME_MS)
+    finally:
+        w.close()
+
+
+def test_the_published_frame_records_what_it_merged(app):
+    """The evidence the report needs: which revision was drawn, how many
+    inputs were merged into it, and how late the newest input was."""
+    from block01.utils import perf_trace
+
+    w = _window(app)
+    try:
+        clock = _FakeClock(w, start=0.0)
+        clock.advance_ms(1000)
+        lines = []
+        os.environ["BLOCK01_PERF"] = "1"
+        try:
+            perf_trace.WRITER.submit = lambda rec: lines.append(rec) or True
+            # The first input publishes at once (leading edge); the four that
+            # follow are merged into the slot after it.
+            w._schedule_preview_update()
+            lines.clear()
+            for _ in range(4):
+                clock.advance_ms(4)
+                w._schedule_preview_update()
+            clock.advance_ms(mw.PREVIEW_FRAME_MS)
+            clock.run_due_slot()
+        finally:
+            os.environ.pop("BLOCK01_PERF", None)
+            del perf_trace.WRITER.submit
+
+        publishes = [rec for rec in lines if rec[2] == "step1.publish"]
+        assert len(publishes) == 1, [rec[2] for rec in lines]
+        fields = publishes[0][4]
+        assert fields["coalesced"] == 3, fields
+        assert fields["rev"] == fields["input_rev"], fields
+        assert "latency_ms" in fields
+        schedules = [rec for rec in lines if rec[2] == "step1.schedule"]
+        assert len(schedules) == 4, "every input is recorded, drawn or not"
+    finally:
+        w.close()
+
+
+def test_a_frame_cannot_start_inside_a_frame(app):
+    """Drawing runs Qt code, and Qt can deliver a queued timeout inside it --
+    `processEvents`, a dialog, a nested event loop. A second frame starting
+    there would composite the same arrays twice and, worse, publish out of
+    order."""
+    w = _window(app)
+    try:
+        clock = _FakeClock(w)
+        depth = []
+        real = w._refresh_patch_preview
+
+        def reenter(*a, **k):
+            depth.append(len(depth) + 1)
+            # exactly what a delivered timeout would do
+            w._schedule_preview_update()
+            w._apply_pending_preview_update()
+            return real(*a, **k)
+
+        w._refresh_patch_preview = reenter
+        w._schedule_preview_update()
+
+        assert depth == [1], f"{len(depth)} frames ran inside one another"
+        assert w._frame_in_flight is False
+        assert w._frame_pending_rev is not None, \
+            "the input that arrived during the frame is still pending"
     finally:
         w.close()

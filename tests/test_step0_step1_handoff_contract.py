@@ -1,5 +1,6 @@
 """Lightweight behavioral checks for the Step0 -> Step1 handoff contract."""
 
+import collections
 import json
 import os
 from types import SimpleNamespace
@@ -165,6 +166,17 @@ def make_window(run, schema=1, loader_path=None):
     w._all_patches = []
     w._patch_channel_cache, w._patch_load_ready = {}, set()
     w._overlay_display_cache = {}
+    # The preview's caches and its frame clock: this double is a MainWindow
+    # that never ran __init__, so state the production paths touch has to be
+    # named here or Qt answers the attribute lookup with "super-class
+    # __init__() was never called".
+    w._signal_cache = collections.OrderedDict()
+    w._frame_input_rev = 0
+    w._frame_pending_rev = None
+    w._frame_coalesced = 0
+    w._frame_in_flight = False
+    w._frame_last_publish = 0.0
+    w._frame_input_at = 0.0
     w._pending_channel_demand, w._loader_channels, w._failed_channels = {}, {}, {}
     w._restoring_display_state = False
     w._preview_update_pending = False

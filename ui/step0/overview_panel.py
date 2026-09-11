@@ -1161,6 +1161,14 @@ class OverviewPanel(QWidget):
         # by one that reads the same channel names at the same shape, and
         # every store here has to be able to say which slide it is holding.
         self._dataset_token = None
+        # WHICH DATASET EACH STORE'S PIXELS CAME FROM. An entry guard that
+        # only checks the caller's claim is not enough: the caller can be
+        # handed an array of another slide and sign it with this page's
+        # current identity, which is how the previous slide's tissue came to
+        # be drawn -- squashed -- onto the new slide's rectangle. The paint
+        # re-checks these against the panel's own token.
+        self._channel_rgb_token = None
+        self._overview_arr_token = None
         # Set when the image item had to be hidden or removed because it
         # refused to clear; `_apply_thumbnail` puts a usable one back.
         self._img_hidden_for_safety = False
@@ -1497,6 +1505,8 @@ class OverviewPanel(QWidget):
         """
         self._channel_rgb = None
         self._overview_arr = None
+        self._channel_rgb_token = None
+        self._overview_arr_token = None
         self._thumb_fitted = None
         self._thumbnail_camera_touched = False
         for attr in ("ov_h", "ov_w"):
@@ -1685,9 +1695,15 @@ class OverviewPanel(QWidget):
                                token=self._dataset_token, pushed=token)
             return False
         self._channel_rgb = None if rgb is None else np.asarray(rgb)
+        self._channel_rgb_token = (None if rgb is None else
+                                   (self._dataset_token if token is _UNSET
+                                    else token))
         dataset_trace.note("push.accepted", panel=dataset_trace.ident(self),
                            token=self._dataset_token,
-                           shape=getattr(self._channel_rgb, "shape", None))
+                           source_token=self._channel_rgb_token,
+                           shape=getattr(self._channel_rgb, "shape", None),
+                           fingerprint=dataset_trace.fingerprint(
+                               self._channel_rgb))
         self._apply_thumbnail()
         return True
 
@@ -1715,14 +1731,53 @@ class OverviewPanel(QWidget):
         # off the screen gets a working one back here -- the new slide's
         # picture is exactly what it was waiting for.
         self._restore_image_item()
+        # EVERY PAINT re-checks the stores against this panel's dataset.
+        # The rectangle is this panel's, so a store that belongs to another
+        # slide would be STRETCHED onto it -- the reported failure was
+        # exactly that: the previous slide's picture, squashed to the new
+        # slide's proportions. A store that does not match is dropped here
+        # rather than drawn, so the panel falls through to the other one (or
+        # to nothing) instead of showing the wrong slide.
         rgb = self._channel_rgb
+        if rgb is not None and self._channel_rgb_token != self._dataset_token:
+            dataset_trace.note("paint.dropped", which="channel_rgb",
+                               panel=dataset_trace.ident(self),
+                               token=self._dataset_token,
+                               store_token=self._channel_rgb_token,
+                               fingerprint=dataset_trace.fingerprint(rgb))
+            self._channel_rgb = rgb = None
+            self._channel_rgb_token = None
+        overview = self._overview_arr
+        if (overview is not None
+                and self._overview_arr_token != self._dataset_token):
+            dataset_trace.note("paint.dropped", which="overview_arr",
+                               panel=dataset_trace.ident(self),
+                               token=self._dataset_token,
+                               store_token=self._overview_arr_token,
+                               fingerprint=dataset_trace.fingerprint(overview))
+            self._overview_arr = overview = None
+            self._overview_arr_token = None
         if rgb is not None:
             self.img_item.setImage(rgb, autoLevels=False)
             self.img_item.setRect(rect)
-        elif self._overview_arr is not None:
-            self.img_item.setImage(self._overview_arr, autoLevels=True)
+            dataset_trace.note("paint.drawn", which="channel_rgb",
+                               panel=dataset_trace.ident(self),
+                               token=self._dataset_token,
+                               rect=f"{self.ov_w}x{self.ov_h}",
+                               fingerprint=dataset_trace.fingerprint(rgb))
+        elif overview is not None:
+            self.img_item.setImage(overview, autoLevels=True)
             self.img_item.setRect(rect)
+            dataset_trace.note("paint.drawn", which="overview_arr",
+                               panel=dataset_trace.ident(self),
+                               token=self._dataset_token,
+                               rect=f"{self.ov_w}x{self.ov_h}",
+                               fingerprint=dataset_trace.fingerprint(overview))
         else:
+            try:
+                self.img_item.clear()
+            except Exception:                               # noqa: BLE001
+                pass
             return
         # Fit ONCE per overview geometry, and only while the camera is
         # still the PANEL's.
@@ -1825,6 +1880,8 @@ class OverviewPanel(QWidget):
                            shape=getattr(arr, "shape", None))
         self.ov_h, self.ov_w = arr.shape
         self._overview_arr = arr
+        self._overview_arr_token = (self._dataset_token if token is _UNSET
+                                    else token)
         self._apply_thumbnail()
         self.status.setText(
             f"Full image {self.full_h}×{self.full_w} px  |  "

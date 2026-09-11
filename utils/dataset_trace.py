@@ -64,6 +64,31 @@ def _short(value):
     return text.replace(" ", "_")
 
 
+def fingerprint(arr):
+    """A cheap, stable signature of an array: shape, dtype and a fixed
+    handful of samples.
+
+    Never a scan: this is written from paint paths, and reading a whole
+    whole-slide overview to describe it would be the diagnostic causing the
+    stall it is meant to explain. Corners and the centre are enough to tell
+    two slides' pixels apart in a log.
+    """
+    if arr is None:
+        return "-"
+    try:
+        shape = "x".join(str(int(v)) for v in getattr(arr, "shape", ()) or ())
+        dtype = str(getattr(arr, "dtype", ""))
+        flat = arr.reshape(-1)
+        n = int(flat.size)
+        if n == 0:
+            return f"{shape}:{dtype}:empty"
+        picks = (0, n // 2, n - 1, n // 4, (3 * n) // 4)
+        vals = ",".join(f"{float(flat[i]):.4g}" for i in picks)
+        return f"{shape}:{dtype}:{vals}"
+    except Exception:                                       # noqa: BLE001
+        return "?"
+
+
 def ident(obj):
     """A stable, short identity for an object -- for reading a log, not for
     deciding anything: `id()` is reused once an object is released, which is

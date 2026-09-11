@@ -62,13 +62,18 @@ def _collect_before_the_flush():
 
 
 class _Loader:
-    """Two of these differ ONLY in the value their pixels carry."""
+    """Two of these differ in their pixels AND, when asked, in their shape.
+
+    A wide-short slide and a narrow-tall one: the reported failure was the
+    previous slide's picture STRETCHED onto the new slide's rectangle, which
+    two slides of the same proportions cannot show.
+    """
 
     _CHANNELS = ["DAPI", "CD3", "CD20"]
-    shape = (64, 64)
 
-    def __init__(self, value):
+    def __init__(self, value, shape=(64, 64)):
         self.value = float(value)
+        self.shape = tuple(int(v) for v in shape)
         self._corrected_zarr_path = None
         self._corrected_decisions = {}
 
@@ -89,18 +94,36 @@ class _Loader:
     def read_region(self, ch, y0, y1, x0, x1, downsample=1, normalize=True,
                     **_kw):
         ds = max(1, int(downsample))
-        return np.full((max(1, (y1 - y0) // ds), max(1, (x1 - x0) // ds)),
-                       self.value, np.float32)
+        return self._pattern(max(1, (y1 - y0) // ds),
+                             max(1, (x1 - x0) // ds))
+
+    # The whole-slide low-resolution read the tissue thumbnail is rendered
+    # from -- the REAL producer, so the tests below go through the real
+    # pixel chain rather than through a lambda standing in for it.
+    def overview_downsample(self):
+        return 4
+
+    def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+        ds = max(1, int(ds))
+        return self._pattern(max(1, (y1 - y0) // ds),
+                             max(1, (x1 - x0) // ds))
+
+    def _pattern(self, h, w):
+        """Not a constant: a gradient plus the slide's own value, so two
+        slides cannot be confused by a normalisation that flattens them."""
+        rows = np.linspace(0.0, 40.0, h, dtype=np.float32)[:, None]
+        cols = np.linspace(0.0, 20.0, w, dtype=np.float32)[None, :]
+        return (rows + cols + self.value).astype(np.float32)
 
 
 def _rgb(value):
     return np.full((16, 16, 3), value, np.uint8)
 
 
-def _page_showing_a(tmp_path, value=11.0):
+def _page_showing_a(tmp_path, value=11.0, shape=(64, 64)):
     """Dataset A loaded, with its picture on both Tissue Previews."""
     page = sp.Step0Page()
-    page.loader = _Loader(value)
+    page.loader = _Loader(value, shape)
     page.ome_path = str(tmp_path / "A.tif")
     page.output_dir = str(tmp_path / "out")
     page.patches = [(0, 32, 0, 32)]
@@ -109,7 +132,8 @@ def _page_showing_a(tmp_path, value=11.0):
     page._rebuild_channel_list()
     page.current_channel = "CD3"
     page.overview.loader = page.loader
-    page.overview.full_h, page.overview.full_w = 64, 64
+    page.overview.full_h = page.loader.shape[0]
+    page.overview.full_w = page.loader.shape[1]
     return page
 
 
@@ -125,11 +149,11 @@ def _show_a_everywhere(page, value=200):
 
 
 def _switch_to_b(page, tmp_path, monkeypatch, *, value=99.0, raises=None,
-                 load_overview=True):
+                 load_overview=True, shape=(64, 64)):
     """The real Load entry, with only the loader constructor stubbed."""
     b = tmp_path / "B.tif"
     b.write_bytes(b"not-really-a-tiff")
-    made = _Loader(value)
+    made = _Loader(value, shape)
 
     def _ctor(*_a, **_kw):
         if raises is not None:
@@ -397,28 +421,48 @@ def test_a_preview_timer_armed_for_the_previous_slide_renders_the_new_one(
 
 def test_the_pushed_picture_carries_the_dataset_it_was_rendered_from(
         app, tmp_path, monkeypatch):
-    """The identity is captured where the picture is PRODUCED.
+    """The identity is produced WITH the pixels, not signed at install time.
 
-    Not guessed at the panel from the page's state at install time: the
-    render and the token are taken together, so a picture cannot be handed
-    the identity of a slide that arrived after it was made.
+    `_tissue_preview_rgb` returns the picture and the dataset its pixels were
+    fetched under, and that is what travels to the panel. A renderer that
+    hands back the previous slide's pixels therefore hands back the previous
+    slide's token too, and the push is refused -- instead of the page signing
+    a bare array with whatever it is showing at that moment.
     """
     page = _page_showing_a(tmp_path)
     _show_a_everywhere(page)
     try:
-        seen = []
-        monkeypatch.setattr(type(page), "_tissue_preview_rgb",
-                            lambda self: (seen.append(self._dataset_token())
-                                          or _rgb(200)))
+        a_token = page._dataset_token()
         pushed = []
         for panel in _panels(page).values():
             panel.set_channel_image = (
-                lambda rgb, token=None: pushed.append(token))
+                lambda rgb, token=None: pushed.append(token) or True)
+
+        rgb, token = page._tissue_preview_rgb()
+        assert rgb is not None and token == a_token
+
+        page._update_tissue_preview()
+        assert pushed and set(pushed) == {a_token}, pushed
+
+        # A renderer handing back the PREVIOUS slide's pixels returns the
+        # previous slide's token with them; the page moves on, and the push
+        # is refused rather than re-signed.
+        pushed.clear()
+        for panel in _panels(page).values():
+            del panel.set_channel_image
+        page._dataset_gen += 1
+        b_token = page._dataset_token()
+        for panel in _panels(page).values():
+            panel.bind_dataset(b_token, loader=page.loader,
+                               full_shape=(64, 64))
+        monkeypatch.setattr(type(page), "_tissue_preview_rgb",
+                            lambda self: (_rgb(200), a_token))
 
         page._update_tissue_preview()
 
-        assert seen, "nothing was rendered"
-        assert pushed and set(pushed) == {seen[-1]}, (seen, pushed)
+        for name, panel in _panels(page).items():
+            assert panel._channel_rgb is None, (
+                f"{name} took a picture of the previous slide")
     finally:
         page.close()
 
@@ -626,7 +670,9 @@ def test_three_real_reads_may_be_in_flight_and_only_the_last_one_lands(
 
         shown = panel.img_item.image
         assert shown is not None
-        assert float(np.asarray(shown).max()) == pytest.approx(33.0), (
+        # The slide's own value is the gradient's floor, so the minimum
+        # names which slide these pixels are.
+        assert float(np.asarray(shown).min()) == pytest.approx(33.0), (
             "a previous slide's read landed")
         assert panel.dataset_token() == (2, "/slide2.tif")
     finally:
@@ -1024,7 +1070,14 @@ def test_a_normal_load_never_waits_for_the_previous_read(app, tmp_path,
         gate.set()
         assert _pump(app, 10.0,
                      until=lambda: not (op.live_overview_workers() - before))
-        assert _blank(page.overview), "the previous slide's read landed"
+        # The held read finishes and is refused; what the panel shows is the
+        # new slide's picture (rendered from B's own pixels) or nothing at
+        # all -- never A's.
+        panel = page.overview
+        for store in (panel._channel_rgb, panel._overview_arr):
+            if store is not None:
+                assert float(np.asarray(store).min()) != pytest.approx(11.0), (
+                    "the previous slide's read landed")
     finally:
         gate.set()
         _pump(app, 5.0,
@@ -1054,6 +1107,180 @@ def test_a_bound_panel_refuses_a_picture_that_cannot_name_its_slide(
         loose.full_h, loose.full_w = 64, 64
         assert loose.set_channel_image(_rgb(120)) is not False
         loose.deleteLater()
+    finally:
+        page.close()
+
+
+# ── the real machine's picture: B's geometry with A's pixels ────────────
+
+class _Record:
+    """What a viewer's shared overview store hands back."""
+
+    def __init__(self, arr, source, channel, level=0):
+        self.arr = arr
+        self.source = source
+        self.channel = channel
+        self.level = level
+
+
+class _Source:
+    def __init__(self, path):
+        self.dataset_path = path
+        self.dataset_fingerprint = "1:1"
+        self.stage = "raw"
+
+
+class _Controller:
+    """A faithful stand-in for a viewer controller: it answers with whatever
+    its shared store holds for the SOURCE it was built for.
+
+    The store outlives individual stacks in production and is keyed by
+    source, so a controller can be asked for a channel and answer with a
+    record produced for another slide. That is the shape this reproduces --
+    with the page's own adoption path, not with a lambda.
+    """
+
+    def __init__(self, record):
+        self.record = record
+
+    def overview_record(self, channel, level=None, source=None):
+        return self.record if self.record.channel == channel else None
+
+    def overview_read_pending(self, channel, level=None, source=None):
+        return False
+
+
+def test_a_record_of_the_previous_slide_is_never_adopted_or_drawn(
+        app, tmp_path, monkeypatch):
+    """THE REPORTED PICTURE: the previous slide, squashed to the new slide's
+    shape.
+
+    A and B have different proportions (64x128 and 128x64). After the switch,
+    a viewer-side record still holding A's pixels is offered to the page. It
+    used to be adopted -- the record's own source was never checked -- cached
+    under the channel NAME, rendered, signed with the page's current token
+    and pushed; the panel's entry guard saw a token that matched, and
+    `_apply_thumbnail` stretched A's array onto B's rectangle. Every one of
+    those steps is now checked against the dataset the pixels came from.
+    """
+    page = _page_showing_a(tmp_path, shape=(64, 128))      # A: wide and short
+    _show_a_everywhere(page)
+    a_path = os.path.abspath(page.ome_path)
+    a_pixels = _Loader(11.0, (64, 128))._pattern(16, 32)
+    stale = _Controller(_Record(a_pixels, _Source(a_path), "CD3"))
+    try:
+        _switch_to_b(page, tmp_path, monkeypatch, value=99.0,
+                     shape=(128, 64), load_overview=False)  # B: narrow, tall
+
+        # At the commit, nothing of A is left anywhere.
+        for name, panel in _panels(page).items():
+            assert _blank(panel), name
+
+        # The previous slide's record is offered to the page, through the
+        # real adoption path.
+        monkeypatch.setattr(type(page), "_overview_hosts",
+                            lambda self: [stale])
+        page.current_channel = "CD3"
+        page._slide_lowres.clear()
+
+        served = page._slide_lowres_array("CD3", blocking=False)
+        assert served is not None
+        assert float(np.asarray(served).min()) == pytest.approx(99.0), (
+            "the page adopted a record belonging to the previous slide")
+        assert np.asarray(served).shape == (32, 16), (
+            "the adopted array has the previous slide's proportions")
+
+        rgb, token = page._tissue_preview_rgb()
+        assert token == page._dataset_token()
+        page._update_tissue_preview()
+        for name, panel in _panels(page).items():
+            drawn = panel._channel_rgb
+            if drawn is not None:
+                assert tuple(np.asarray(drawn).shape[:2]) == (32, 16), (
+                    f"{name} was given the previous slide's pixels: "
+                    f"{np.asarray(drawn).shape}")
+                assert panel._channel_rgb_token == page._dataset_token(), name
+
+        # B's own overview arrives and is what the panels show, at B's shape.
+        for panel in _panels(page).values():
+            panel._on_overview_loaded(
+                _Loader(99.0, (128, 64))._pattern(32, 16), panel._ov_gen,
+                panel.loader, panel.dataset_token())
+        for name, panel in _panels(page).items():
+            shown = np.asarray(panel.img_item.image)
+            # B's proportions, whichever of the two stores is on top (the
+            # channel picture wins when there is one, and it is B's).
+            assert tuple(shown.shape[:2]) == (32, 16), (name, shown.shape)
+            assert (panel.ov_h, panel.ov_w) == (32, 16), name
+            assert panel._overview_arr_token == page._dataset_token(), name
+            if panel._channel_rgb is not None:
+                assert panel._channel_rgb_token == page._dataset_token(), name
+    finally:
+        page.close()
+
+
+def test_a_store_holding_another_slides_pixels_is_dropped_at_paint(app,
+                                                                   tmp_path):
+    """The last line: even a store that got past the entry guard is checked
+    again when it is drawn.
+
+    Constructed directly -- pixels of A, token of B -- because that is the
+    state the entry guard cannot see: it checks what the CALLER claims, and
+    a caller handed the wrong array claims the wrong thing in good faith.
+    """
+    page = _page_showing_a(tmp_path, shape=(64, 128))
+    panel = page.overview
+    try:
+        a_token = page._dataset_token()
+        panel.bind_dataset(a_token, loader=page.loader, full_shape=(64, 128))
+        panel.set_channel_image(_rgb(200), a_token)
+        assert panel.img_item.image is not None
+
+        # The panel moves to B; the store is left behind, as a bypassed
+        # guard would leave it.
+        b_token = (a_token[0] + 1, "/B.tif")
+        panel._dataset_token = b_token
+        panel.full_h, panel.full_w = 128, 64
+
+        panel._apply_thumbnail()
+
+        assert panel._channel_rgb is None, (
+            "the previous slide's picture was drawn on the new slide's "
+            "rectangle")
+        assert panel.img_item.image is None
+
+        # And the new slide's own overview still draws.
+        panel._on_overview_loaded(np.full((32, 16), 99.0, np.float32),
+                                  panel._ov_gen, panel.loader, b_token)
+        assert float(np.asarray(panel.img_item.image).min()) == \
+            pytest.approx(99.0)
+    finally:
+        page.close()
+
+
+def test_the_lowres_cache_cannot_serve_another_slide_under_the_same_channel(
+        app, tmp_path, monkeypatch):
+    """`_slide_lowres` was keyed by channel NAME. Both slides have a CD3, and
+    clearing the cache at the switch is not enough: a producer that finishes
+    afterwards refills it."""
+    page = _page_showing_a(tmp_path, shape=(64, 128))
+    try:
+        a_token = page._dataset_token()
+        page.current_channel = "CD3"
+        first = page._slide_lowres_array("CD3", blocking=False)
+        assert first is not None
+        assert page._slide_lowres["CD3"][0] == a_token
+
+        # A late producer refills the cache with A's array after the switch.
+        _switch_to_b(page, tmp_path, monkeypatch, value=99.0, shape=(128, 64),
+                     load_overview=False)
+        page._slide_lowres["CD3"] = (a_token, first)
+
+        served = page._slide_lowres_array("CD3", blocking=False)
+        assert served is None or float(np.asarray(served).min()) != \
+            pytest.approx(11.0), "the previous slide's array was served"
+        assert "CD3" not in page._slide_lowres or \
+            page._slide_lowres["CD3"][0] == page._dataset_token()
     finally:
         page.close()
 

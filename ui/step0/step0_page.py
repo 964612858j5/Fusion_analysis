@@ -132,6 +132,11 @@ _NON_MARKER_CHANNEL_KEYWORDS = ("mask", "fusion")
 DAPI_LAYER_DEFAULT_ON = True
 
 
+def _array_fingerprint(arr):
+    """Shape/dtype plus a few samples -- for the identity log only."""
+    return dataset_trace.fingerprint(arr)
+
+
 def _is_non_marker_channel(name):
     """True if a channel name denotes a non-conditioning product (mask/fusion)."""
     low = str(name).lower()
@@ -3376,17 +3381,35 @@ class Step0Page(QWidget):
         return hosts
 
     def _resident_overview_record(self, ch):
-        """`ch`'s whole-slide overview record if a viewer already holds it,
-        else None. Never reads."""
+        """`ch`'s whole-slide overview record if a viewer already holds it
+        FOR THIS DATASET, else None. Never reads.
+
+        The record's own `source` is checked against the slide this page is
+        showing. A controller that "looks like B's" is not evidence that the
+        array it hands back is B's: the shared store is keyed by source and
+        outlives individual stacks, and a record produced for the previous
+        slide would otherwise be adopted, cached under a channel name, and
+        drawn on the new slide's rectangle -- the previous slide's tissue,
+        squashed to the new slide's shape, which is exactly what the real
+        machine showed.
+        """
         if not ch:
             return None
+        wanted = os.path.abspath(self.ome_path) if self.ome_path else ""
         for controller in self._overview_hosts():
             try:
                 rec = controller.overview_record(ch)
             except Exception:                               # noqa: BLE001
                 continue
-            if rec is not None:
-                return rec
+            if rec is None:
+                continue
+            path = getattr(getattr(rec, "source", None), "dataset_path", None)
+            if wanted and path and os.path.abspath(path) != wanted:
+                dataset_trace.note("record.rejected", why="source",
+                                   channel=ch, record_source=path,
+                                   dataset=wanted)
+                continue
+            return rec
         return None
 
     def _overview_read_pending(self, ch):
@@ -3432,15 +3455,29 @@ class Step0Page(QWidget):
         cache = getattr(self, "_slide_lowres", None)
         if cache is None:
             cache = self._slide_lowres = {}
-        if ch in cache:
-            return cache[ch]
+        token = self._dataset_token()
+        hit = cache.get(ch)
+        if hit is not None:
+            # Entries carry the dataset they were produced for. Keyed by
+            # channel name alone, this cache cannot tell two slides apart --
+            # both have a CD3 -- and clearing it at the switch is not enough
+            # either, because a producer that finishes afterwards refills it.
+            if hit[0] == token:
+                return hit[1]
+            dataset_trace.note("lowres.rejected", why="token", channel=ch,
+                               token=token, cached=hit[0])
+            cache.pop(ch, None)
         # The viewers read exactly this array -- the whole slide at
         # `overview_downsample()`, which is `_pick_overview_level` -- and
         # they cache it in a shared store. Adopting theirs is not an
         # optimisation of a read, it is the removal of a duplicate one.
         rec = self._resident_overview_record(ch)
         if rec is not None:
-            cache[ch] = rec.arr
+            cache[ch] = (token, rec.arr)
+            dataset_trace.note("lowres.adopted", channel=ch, token=token,
+                               source=getattr(rec, "source", None),
+                               shape=getattr(rec.arr, "shape", None),
+                               fingerprint=_array_fingerprint(rec.arr))
             return rec.arr
         if resident_only:
             # Nothing in the cache and nothing resident, so the answer is
@@ -3474,7 +3511,11 @@ class Step0Page(QWidget):
             except Exception as exc:                # noqa: BLE001
                 print(f"[step0] slide low-res read failed for {ch!r}: {exc}",
                       flush=True)
-        cache[ch] = arr
+        cache[ch] = (token, arr)
+        if arr is not None:
+            dataset_trace.note("lowres.read", channel=ch, token=token,
+                               shape=getattr(arr, "shape", None),
+                               fingerprint=_array_fingerprint(arr))
         return arr
 
     def _workbench_pixels(self, name, blocking=True, resident_only=False):
@@ -7165,10 +7206,23 @@ class Step0Page(QWidget):
         return lut[idx.astype(np.uint8)]
 
     def _tissue_preview_rgb(self):
-        """The thumbnail image, or None when there is nothing to draw."""
+        """The thumbnail image AND the dataset its pixels came from.
+
+        `(rgb, token)`, together, because a bare array cannot say which slide
+        it is of -- and signing one with whatever the page happens to be
+        showing at install time is how the previous slide's tissue ended up
+        drawn on the new slide's rectangle. The token returned here is the
+        one the PIXELS were fetched under; if the page has moved on by the
+        time they are installed, the panel refuses them.
+
+        Fails closed when the two halves disagree: the marker and the nucleus
+        are composited into one picture, so one of them belonging to another
+        slide makes the whole picture unusable.
+        """
         ch = self.current_channel
         if not ch:
-            return None
+            return None, None
+        token = self._dataset_token()
         # Non-blocking, for the same reason the display seed is: a channel
         # switch has just asked three tile controllers for this exact
         # level, and reading it again here would put the whole 170-230 ms
@@ -7178,7 +7232,12 @@ class Step0Page(QWidget):
         # record lands.
         arr = self._slide_lowres_array(ch, blocking=False)
         if arr is None:
-            return None
+            return None, None
+        if self._dataset_token() != token:
+            # The dataset moved while the pixels were being fetched.
+            dataset_trace.note("render.rejected", why="token_moved",
+                               channel=ch, token=token)
+            return None, None
         rgb = self._lowres_tinted(arr, ch)
         nuc = self.nucleus_channel
         # DAPI is composited ADDITIVELY, in its own colour and under its own
@@ -7187,12 +7246,19 @@ class Step0Page(QWidget):
         # the same picture in all three.
         if nuc and nuc != ch and self._nucleus_layer_visible():
             nuc_arr = self._slide_lowres_array(nuc, blocking=False)
+            if self._dataset_token() != token:
+                dataset_trace.note("render.rejected", why="token_moved_nuc",
+                                   channel=nuc, token=token)
+                return None, None
             if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
                 rgb = np.clip(
                     rgb.astype(np.uint16)
                     + self._lowres_tinted(nuc_arr, nuc, nucleus=True),
                     0, 255).astype(np.uint8)
-        return rgb
+        dataset_trace.note("render.produced", channel=ch, token=token,
+                           shape=getattr(rgb, "shape", None),
+                           fingerprint=_array_fingerprint(rgb))
+        return rgb, token
 
     def _queue_tissue_preview(self):
         """Re-render the thumbnail after the current stream of edits."""
@@ -7211,15 +7277,11 @@ class Step0Page(QWidget):
         if timer is not None:
             timer.stop()
         with perf_trace.span("step0.tissue_preview_render") as _sp:
-            # The identity is taken WITH the picture, not at the moment it is
-            # installed: the pixels come from this dataset's arrays, so the
-            # token that travels with them is the one that was current when
-            # they were read, and a panel can check the two against each
-            # other instead of trusting whatever the page happens to be
-            # showing by the time the push lands.
-            token = self._dataset_token()
-            rgb = self._tissue_preview_rgb()
-            if rgb is None:
+            # The identity comes back WITH the picture: it is the dataset the
+            # pixels were fetched under, not the one the page is showing by
+            # the time they are installed.
+            rgb, token = self._tissue_preview_rgb()
+            if rgb is None or token is None:
                 _sp.add(drawn=0)
                 return None
             drawn = 0
@@ -7233,11 +7295,6 @@ class Step0Page(QWidget):
                     adopt(token)
                 setter = getattr(panel, "set_channel_image", None)
                 if callable(setter):
-                    # With the dataset this picture was rendered FROM: this
-                    # render is asynchronous (a debounce timer, a finished
-                    # overview read), so one of the previous slide can arrive
-                    # after the switch, and a picture cannot say which slide
-                    # it is of.
                     if setter(rgb, token) is not False:
                         drawn += 1
             _sp.add(drawn=drawn,

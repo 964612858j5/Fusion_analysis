@@ -374,16 +374,20 @@ def test_a_push_rendered_for_the_previous_slide_is_refused(
         page.close()
 
 
-def test_a_preview_timer_armed_for_the_previous_slide_renders_the_new_one(
+def test_a_frame_requested_for_the_previous_slide_renders_the_new_one(
         app, tmp_path, monkeypatch):
-    """The debounce timer is armed while A is current and fires after the
-    switch -- the real sequence, driven through the real timer.
+    """A frame is pending while A is current and its slot arrives after the
+    switch -- the real sequence, driven through Block01's real frame clock.
 
     What it must NOT do is put A back. What it DOES do is the honest half of
-    the contract: the timer carries no picture, so when it fires it renders
-    from the page's CURRENT state and its push is the new slide's. With B's
-    pixels not read yet there is nothing to render, and the panels stay
-    empty -- which is what "Loading" means.
+    the contract: a pending revision carries no picture, so when its slot
+    comes the frame is composed from the CURRENT state and its push is the
+    new slide's. With B's pixels not read yet there is nothing to compose,
+    and the panels stay empty -- which is what "Loading" means.
+
+    (The dataset bind at the switch retires the pending revision outright;
+    this pins that the OUTCOME is the new slide or nothing, by whichever of
+    the two mechanisms gets there first.)
     """
     page = _page_showing_a(tmp_path)
     _show_a_everywhere(page)
@@ -393,13 +397,18 @@ def test_a_preview_timer_armed_for_the_previous_slide_renders_the_new_one(
             panel.set_channel_image = (
                 lambda rgb, token=None, _p=panel: pushed.append((_p, token)))
 
+        coordinator = page.display.coordinator
+        # Armed, not fired: a frame is due and has not been composed yet.
+        coordinator._arm(5000)
         page._queue_tissue_preview()
-        assert page._tissue_preview_timer.isActive()
+        assert coordinator.frame_stats()["pending"] == 1
         a_token = page._dataset_token()
 
         _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
-        # The real timer, fired by the real event loop.
-        _pump(app, 1.0, until=lambda: not page._tissue_preview_timer.isActive())
+        # The real clock, fired by the real event loop.
+        coordinator._arm(0)
+        _pump(app, 1.0,
+              until=lambda: not coordinator.frame_stats()["in_flight"])
 
         assert all(token != a_token for _panel, token in pushed), pushed
         for name, panel in _panels(page).items():

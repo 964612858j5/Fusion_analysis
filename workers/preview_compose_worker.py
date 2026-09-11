@@ -41,6 +41,11 @@ class PreviewComposeWorker(QObject):
     done = pyqtSignal(object)          # the result dict
     failed = pyqtSignal(object)        # {"request": ..., "error": str}
 
+    # Named, so `gdb`/`py-spy`/a thread dump can tell the Step1 patch composer
+    # from the Block01 whole-slide one. A subclass composing something else
+    # gets its own name rather than a second thread called "preview-compose".
+    THREAD_NAME = "preview-compose"
+
     def __init__(self, parent=None, cache=None):
         super().__init__(parent)
         self._lock = threading.Lock()
@@ -93,7 +98,7 @@ class PreviewComposeWorker(QObject):
                 return
             self._stopping = False
             thread = threading.Thread(target=self.run,
-                                      name="preview-compose", daemon=True)
+                                      name=self.THREAD_NAME, daemon=True)
             self._thread = thread
         thread.start()
 

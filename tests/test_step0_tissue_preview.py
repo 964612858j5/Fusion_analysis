@@ -109,6 +109,26 @@ def _page(app, channel="CD3"):
     return page
 
 
+def _settle(page, ms=1500):
+    """Let Block01's frame clock reach its slot and its worker come back.
+
+    The thumbnail is no longer drawn inside the call that changed the state:
+    it is an input on a ~30 FPS clock whose frames are composed on the
+    `tissue-compose` thread. So a test that wants to look at the picture has
+    to give the clock its slot and the thread its result, which is what this
+    does -- and no more than that, because waiting a fixed time would hide
+    exactly the starvation this module is here to catch.
+    """
+    co = page.display.coordinator
+    deadline = time.monotonic() + ms / 1000.0
+    while time.monotonic() < deadline:
+        QtTest.QTest.qWait(5)
+        stats = co.frame_stats()
+        if not stats["in_flight"] and not stats["pending"]:
+            return
+    raise AssertionError(f"the frame clock never settled: {co.frame_stats()}")
+
+
 def _thumb(page):
     """What the Tissue Preview is currently drawing."""
     return page.overview.img_item.image
@@ -156,11 +176,13 @@ def test_the_thumbnail_takes_the_channels_colour(app):
     page._on_nucleus_visibility_toggled(False)
 
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    _settle(page)
 
     r, g, b = _mean_rgb(_thumb(page))
     assert r > 40.0 and g == 0.0 and b == 0.0, (r, g, b)
 
     page._apply_channel_color("CD3", (0.0, 1.0, 0.0))
+    _settle(page)
 
     r, g, b = _mean_rgb(_thumb(page))
     assert g > 40.0 and r == 0.0 and b == 0.0, (r, g, b)
@@ -180,6 +202,7 @@ def test_a_colour_picked_anywhere_reaches_it(app):
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
 
     page._on_model_color_changed("CD3", "#0000ff")
+    _settle(page)
 
     r, g, b = _mean_rgb(_thumb(page))
     assert b > 40.0 and r == 0.0 and g == 0.0, (r, g, b)
@@ -202,6 +225,7 @@ def test_switching_channel_switches_the_picture(app):
     before = np.array(_thumb(page), copy=True)
 
     page._on_channel_selected_by_id("CD20")
+    _settle(page)
 
     after = _thumb(page)
     assert not np.array_equal(before, after), "the thumbnail kept CD3"
@@ -230,10 +254,12 @@ def test_dapi_is_composited_in_while_its_layer_is_on(app):
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._apply_nucleus_color((0.0, 0.0, 1.0))
     page._on_nucleus_visibility_toggled(False)
+    _settle(page)
     marker_only = np.array(_thumb(page), copy=True)
     assert _mean_rgb(marker_only)[2] == 0.0, "blue before the layer is on"
 
     page._on_nucleus_visibility_toggled(True)
+    _settle(page)
 
     both = _thumb(page)
     r, _g, b = _mean_rgb(both)
@@ -242,6 +268,7 @@ def test_dapi_is_composited_in_while_its_layer_is_on(app):
     assert r == pytest.approx(_mean_rgb(marker_only)[0])
 
     page._on_nucleus_visibility_toggled(False)
+    _settle(page)
 
     assert np.array_equal(_thumb(page), marker_only)
 
@@ -252,17 +279,24 @@ def test_the_nucleus_colour_reaches_the_composite(app):
     page._on_nucleus_visibility_toggled(True)
 
     page._apply_nucleus_color((0.0, 1.0, 0.0))
+    _settle(page)
 
     _r, g, b = _mean_rgb(_thumb(page))
     assert g > 40.0 and b == 0.0, (g, b)
 
 
-# ── 4. the mapping, off the slider hot path ──────────────────────────────
+# ── 4. the mapping, DURING the drag ──────────────────────────────────────
+#
+# This section used to pin the opposite rule: "the thumbnail waits out the
+# stream". It waited because it was composed on the GUI thread, and the wait
+# was a single-shot 100 ms timer RESTARTED by every slider step -- so a
+# continuous drag pushed the deadline forward faster than it could arrive and
+# the picture did not move until the hand stopped. That is what the user
+# reported. The pixels are now composed on Block01's `tissue-compose` thread
+# and published on a ~30 FPS clock, so what is pinned here is that
+# intermediate frames appear WHILE the input is still coming.
 
-def test_a_mapping_edit_reaches_the_thumbnail_after_the_stream_settles(app):
-    """Dragging Min/Max must not re-render the whole slide once per step,
-    so the thumbnail waits out the stream -- unlike the panels and the full
-    image, which only swap a levels pair."""
+def test_a_mapping_edit_reaches_the_thumbnail(app):
     page = _page(app)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._update_tissue_preview()
@@ -270,11 +304,7 @@ def test_a_mapping_edit_reaches_the_thumbnail_after_the_stream_settles(app):
     lo, hi, _gamma = page._display_mapping_for("CD3")
 
     page.set_display_mapping("CD3", lo, hi / 4.0)
-
-    assert np.array_equal(_thumb(page), before), "re-rendered on the hot path"
-    assert page._tissue_preview_timer.isActive()
-
-    QtTest.QTest.qWait(page._TISSUE_PREVIEW_DEBOUNCE_MS + 120)
+    _settle(page)
 
     after = _thumb(page)
     assert not np.array_equal(before, after)
@@ -282,21 +312,59 @@ def test_a_mapping_edit_reaches_the_thumbnail_after_the_stream_settles(app):
     assert _mean_rgb(after)[0] > _mean_rgb(before)[0]
 
 
-def test_a_burst_of_slider_steps_renders_once(app):
+def test_a_drag_publishes_while_the_hand_is_still_moving(app):
+    """THE reported bug, as a test.
+
+    Two seconds of Min/Max at 200 Hz. The old debounce drew exactly one
+    frame, after the last event; the frame clock must draw many DURING the
+    stream -- and they must be different pictures, not the same one pushed
+    repeatedly.
+    """
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    _settle(page)
+    frames = []
+    page.overview.set_channel_image = (
+        lambda rgb, token=None: frames.append(np.array(rgb, copy=True)))
+
+    lo, hi, _g = page._display_mapping_for("CD3")
+    steps = 400                                  # 2 s at 200 Hz
+    for i in range(1, steps + 1):
+        page.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.5 * i / steps)
+        QtTest.QTest.qWait(1)
+        assert page.display.coordinator.frame_stats()["pending"] <= 1
+    mid = len(frames)
+    assert mid >= 3, f"only {mid} frame(s) during a 2 s drag"
+    distinct = {f.tobytes() for f in frames}
+    assert len(distinct) >= 3, "the same picture was pushed over and over"
+
+    _settle(page)
+
+    # The last frame is the last VALUE, not the value the drag happened to be
+    # at when the final slot fired.
+    final = page._tissue_preview_rgb()[0]
+    assert np.array_equal(frames[-1], final)
+
+
+def test_a_burst_is_coalesced_to_one_frame_in_flight(app):
+    """Latest-only, depth one. 200 inputs must not become 200 frames."""
     page = _page(app)
     page._update_tissue_preview()
     rendered = []
-    # The push carries the dataset it was rendered from now; a spy that
-    # cannot take it would swallow every render as a TypeError.
     page.overview.set_channel_image = (
         lambda rgb, token=None: rendered.append(rgb))
 
     lo, hi, _g = page._display_mapping_for("CD3")
-    for i in range(1, 11):
-        page.set_display_mapping("CD3", lo, hi - i * 10.0)
-    QtTest.QTest.qWait(page._TISSUE_PREVIEW_DEBOUNCE_MS + 120)
+    for i in range(1, 201):
+        page.set_display_mapping("CD3", lo, hi - i * 0.5)
+        assert page.display.coordinator.frame_stats()["pending"] <= 1
+    _settle(page)
 
-    assert len(rendered) == 1, rendered
+    stats = page.display.coordinator.frame_stats()
+    assert stats["max_pending_depth"] <= 1, stats
+    assert len(rendered) < 200 // 4, f"{len(rendered)} frames for 200 inputs"
+    assert rendered, "nothing was drawn at all"
 
 
 def test_the_mapping_reaches_it_before_the_workbench_is_engaged_too(app):
@@ -319,15 +387,17 @@ def test_the_mapping_reaches_it_before_the_workbench_is_engaged_too(app):
     page.overview.full_h, page.overview.full_w = SLIDE_H, SLIDE_W
     assert page._workbench_params("CD3") is None, "the workbench is engaged"
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    _settle(page)
     before = np.array(_thumb(page), copy=True)
     lo, hi, _g = page._display_mapping_for("CD3")
 
     page.set_display_mapping("CD3", lo, hi / 4.0)
-    QtTest.QTest.qWait(page._TISSUE_PREVIEW_DEBOUNCE_MS + 120)
+    _settle(page)
 
     assert page._display_mapping_for("CD3")[1] == pytest.approx(hi / 4.0)
     assert not np.array_equal(before, _thumb(page))
     assert _mean_rgb(_thumb(page))[0] > _mean_rgb(before)[0]
+
 
 # ── 5. everything drawn on the thumbnail still works ─────────────────────
 

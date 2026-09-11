@@ -62,6 +62,7 @@ from .overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
 from .step0_explore_tab import Step0ExploreTab
 from .compare_strip import COMPARE_SOURCES, CompareStrip
 from ...core.display_mapping import build_display_lut, seed_display_range
+from ...core import tissue_compose
 from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
 from .search_ctrl import (
@@ -89,6 +90,7 @@ from ..widgets.channel_workbench import (
     _hex_to_rgb01 as _channel_hex_to_rgb01,
 )
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
+from ..block01_display import Block01DisplayServices, STEP0 as _CTX_STEP0
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
@@ -213,8 +215,17 @@ class Step0Page(QWidget):
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
     _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, display_services=None):
         super().__init__(parent)
+        # Block01's shared display layer. Given by the window that owns the
+        # process when there is one, and built here only for a page that is
+        # standing on its own (the page-level tests, a tool script) -- which
+        # is exactly the fallback that keeps "there is one Intensity window
+        # and one Tissue Preview per Block01" true rather than aspirational:
+        # a page never gets a SECOND one when a host already made it.
+        self.display = (display_services if display_services is not None
+                        else Block01DisplayServices(self))
+        self._owns_display_services = (display_services is None)
         self.loader = None
         self.output_dir = OUTPUT_DIR
         self.ome_path = OME_TIFF_FILE
@@ -347,13 +358,13 @@ class Step0Page(QWidget):
         # dataset: what "Save as patch" and the Tissue Preview rectangle need
         # before they can speak for the panels.
         self._compare_opened = False
-        # The Tissue Preview draws the CURRENT channel, so a Min/Max drag
-        # would re-render it once per slider step. Debounced; every other
-        # trigger (a row click, a colour, the DAPI switch) is a single
-        # discrete event and goes straight through.
-        self._tissue_preview_timer = QTimer(self)
-        self._tissue_preview_timer.setSingleShot(True)
-        self._tissue_preview_timer.timeout.connect(self._update_tissue_preview)
+        # NO TIMER HERE any more. The Tissue Preview's clock is Block01's
+        # (`TissuePreviewCoordinator`), because the picture is not this page's
+        # to schedule: Step1 draws its own overlay in the same window. What
+        # used to be here was a SINGLE-SHOT 100 ms debounce restarted by every
+        # Min/Max/Gamma event, which is why a continuous drag never reached
+        # the thumbnail until the hand stopped -- the timer was pushed back
+        # before it could fire. See `_queue_tissue_preview`.
         # The compare metrics are COALESCED behind a quiet period: measured
         # on the real slide with the tiles already resident, one
         # `_update_compare_metrics` costs ~110-290 ms, and it used to run
@@ -414,6 +425,7 @@ class Step0Page(QWidget):
         self._ondemand_worker = None
         self._ondemand_workers: list = []
         self._build_ui()
+        self._register_block01_display()
 
     def _build_ui(self):
         # ── 顶层：垂直布局，不用 ScrollArea，充满窗口 ──────────────────
@@ -2903,7 +2915,7 @@ class Step0Page(QWidget):
         self._update_full_level_hint()
         # A dataset load lands here too, which is where the thumbnail first
         # gets a channel to draw.
-        self._queue_tissue_preview()
+        self._queue_tissue_preview(kind="view")
 
     def _sync_full_image_to_channel(self):
         """Called at the END of a channel change.
@@ -4164,6 +4176,13 @@ class Step0Page(QWidget):
         instead of announcing a clean load.
         """
         token = self._dataset_token()
+        # Block01's display layer takes the same token at the same moment:
+        # a Tissue Preview frame in flight, a pending frame revision and any
+        # worker result for the previous slide become structurally stale
+        # here, refused on arrival rather than cancelled in some particular
+        # order. Done through the coordinator, not per panel, because the
+        # frame that would overwrite them has not been composed yet.
+        self.display.coordinator.bind_dataset(token)
         failed = []
         popup = self._tissue_navigator_popup
         for panel in self._registered_roi_overviews():
@@ -4923,6 +4942,7 @@ class Step0Page(QWidget):
                                            patch_editable=patch_editable)
         self._bring_navigator_to_front(popup)
         self._update_tissue_view_rect()
+        return popup
 
     def _bring_navigator_to_front(self, popup):
         """Put the ONE navigator in front, whichever way it was put away.
@@ -5363,7 +5383,7 @@ class Step0Page(QWidget):
             explore_tab = getattr(self, "_explore_tab", None)
             self._apply_full_image_display(
                 getattr(explore_tab, "stack", None) if explore_tab else None)
-        self._queue_tissue_preview()
+        self._queue_tissue_preview(kind="overview_ready", channel=channel)
 
     def _update_compare_view_rect(self):
         """Draw the PANELS' viewport on the Tissue Preview.
@@ -6469,23 +6489,43 @@ class Step0Page(QWidget):
             return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
         return _channel_hex_to_rgb01(CHANNEL_PALETTE[i % len(CHANNEL_PALETTE)])
 
-    def _channel_color(self, ch):
-        """THE colour of `ch` as (r, g, b) floats 0-1 -- the one answer every
-        view asks for. A user pick wins; the nucleus falls back to its own
-        colour; every other channel to its palette default."""
-        if not ch:
-            return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
-        rgb = self._channel_colors.get(ch)
-        if rgb is not None:
-            return rgb
-        if ch == self.nucleus_channel:
-            return getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
-        return self._default_channel_color(ch)
+    def _default_channel_color_hex(self, ch):
+        """The palette default for `ch` as "#rrggbb".
 
-    def _channel_color_hex(self, ch):
-        rgb = self._channel_color(ch)
+        Registered with the Block01 display state as its default source, so
+        the colour a user sees before picking anything is dealt ONCE and every
+        step reads that same deal. Step1 used to deal its own from its own
+        palette, which is how one channel came up in two colours.
+        """
+        if ch and ch == self.nucleus_channel:
+            rgb = getattr(self, "_nuc_color", (0.0, 0.5, 1.0))
+        else:
+            rgb = self._default_channel_color(ch)
         return QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
                             int(rgb[2] * 255)).name()
+
+    def _channel_color(self, ch):
+        """THE colour of `ch` as (r, g, b) floats 0-1 -- the one answer every
+        view asks for.
+
+        Read from Block01's shared display state, not from a dictionary of
+        this page's: Step0, Step1's channel rows, the Intensity histogram,
+        the compare panels, the full image and the Tissue Preview all ask the
+        same object, so "the same channel is two colours in two steps" is not
+        a state this program can reach. `_channel_colors` is kept as a MIRROR
+        for the code (and the tests) that still read it directly; it is
+        written only by the fan-out below and never consulted for an answer.
+        """
+        if not ch:
+            return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
+        return self.display.state.color_rgb01(ch)
+
+    def _channel_color_hex(self, ch):
+        if not ch:
+            rgb = getattr(self, "_marker_color", (0.0, 1.0, 0.3))
+            return QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255),
+                                int(rgb[2] * 255)).name()
+        return self.display.state.color(ch)
 
     def _channel_swatch_hex(self, ch):
         """`#rrggbb` for a channel's swatch (the dock adapter asks this)."""
@@ -6538,7 +6578,14 @@ class Step0Page(QWidget):
     def _apply_channel_color(self, ch, rgb, push_workbench=True):
         """Record `rgb` for `ch` and push it to every view: the swatch (via
         the channel model), the Channel Remap layer list, the compare panels
-        and the full image's tint."""
+        and the full image's tint.
+
+        The RECORD is Block01's shared state; what follows is this page's
+        fan-out over its own widgets. Writing the shared state first is what
+        makes Step1's row, the Intensity histogram and the Tissue Preview
+        follow a Step0 pick without this page knowing they exist.
+        """
+        self.display.state.set_color(ch, rgb, origin="step0")
         self._channel_colors[ch] = rgb
         if push_workbench:
             self._push_color_to_workbench(ch, rgb)
@@ -6569,8 +6616,11 @@ class Step0Page(QWidget):
             set_tint = getattr(getattr(stack, "controller", None), "set_tint", None)
             if set_tint is not None:
                 set_tint(self._full_image_tint(ch))
-            # ...and so does the Tissue Preview.
-            self._update_tissue_preview()
+        # ...and so does the Tissue Preview -- for whichever step is drawing
+        # it. A colour is shared state, so the request is made whether or not
+        # this page is the active context; the coordinator decides whose
+        # picture it changes.
+        self._queue_tissue_preview(kind="color", channel=ch)
 
     def _push_channel_tint_to_compare(self, ch):
         """Give the panels `ch`'s colour, tagged with the channel it is for.
@@ -6624,6 +6674,7 @@ class Step0Page(QWidget):
         self._nuc_color = rgb
         nuc = self.nucleus_channel
         if nuc:
+            self.display.state.set_color(nuc, rgb, origin="step0-nucleus")
             self._channel_colors[nuc] = self._nuc_color
             if push_workbench:
                 self._push_color_to_workbench(nuc, self._nuc_color)
@@ -6652,7 +6703,7 @@ class Step0Page(QWidget):
             overlay.set_tint(self._nuc_color)
         # The thumbnail's DAPI composite is in this colour too, when the
         # layer is on.
-        self._update_tissue_preview()
+        self._queue_tissue_preview(kind="color", channel=nuc)
 
     # ── the DAPI layer switch (the nucleus row's checkbox) ───────────────
     def _sync_nucleus_row_checkbox(self, on):
@@ -6765,7 +6816,7 @@ class Step0Page(QWidget):
             self._nucleus_vis_syncing = False
         # One switch, every view: the thumbnail's DAPI composite appears and
         # disappears with the full image's overlay and the panels'.
-        self._update_tissue_preview()
+        self._queue_tissue_preview(kind="dapi_layer")
 
     def _rebuild_payload_rgb_from(self, payload, ch, nucleus_rgb, marker_rgb):
         """Record `marker_rgb` as the channel's colour.
@@ -7183,30 +7234,22 @@ class Step0Page(QWidget):
     # channel per dataset, shared with the display seed and the Intensity
     # histogram). No new read, ever.
 
-    # How long the slider stream is allowed to settle before the thumbnail
-    # is re-rendered.
-    _TISSUE_PREVIEW_DEBOUNCE_MS = 100
-
     def _lowres_tinted(self, arr, ch, nucleus=False):
         """`arr` through `ch`'s display mapping and colour, as uint8 RGB.
 
-        The LUT is `build_display_lut` -- the SAME table the image items are
-        given -- indexed by the same `(value - min) / (max - min)` the
-        `levels` pair means. Doing it in numpy rather than trusting a second
-        formula is what makes "the thumbnail is the channel as you are
-        seeing it" checkable rather than approximately true.
+        A thin delegate now: the arithmetic is `core.tissue_compose`, so the
+        Block01 compose thread runs the same table this page would have, and
+        a reader comparing the thumbnail against the full image has one
+        formula to check rather than two. Kept as a method because it is the
+        page's own answer to "what does this channel look like", which the
+        compare and full-image paths still ask for directly.
         """
-        lo, hi, gamma = self._display_mapping_for(ch, nucleus=nucleus)
-        span = float(hi) - float(lo)
-        if not (span > 0 and math.isfinite(span)):
-            span = 1.0
-        a = np.asarray(arr, dtype=np.float32)
-        idx = np.clip((a - float(lo)) * (255.0 / span), 0.0, 255.0)
-        lut = build_display_lut(self._channel_color(ch), gamma)
-        return lut[idx.astype(np.uint8)]
+        return tissue_compose.lowres_tinted(
+            arr, self._display_mapping_for(ch, nucleus=nucleus),
+            self._channel_color(ch))
 
     def _tissue_preview_rgb(self):
-        """The thumbnail image AND the dataset its pixels came from.
+        """The Step0 thumbnail image AND the dataset its pixels came from.
 
         `(rgb, token)`, together, because a bare array cannot say which slide
         it is of -- and signing one with whatever the page happens to be
@@ -7218,88 +7261,255 @@ class Step0Page(QWidget):
         Fails closed when the two halves disagree: the marker and the nucleus
         are composited into one picture, so one of them belonging to another
         slide makes the whole picture unusable.
+
+        This is Step0's own picture, composed HERE, synchronously. The
+        published frames do not come through it -- they are composed on the
+        Block01 worker from `tissue_render_snapshot`, which is the same
+        values through the same `core.tissue_compose` function. It stays as
+        the direct answer to "what would Step0 draw right now".
         """
-        ch = self.current_channel
-        if not ch:
-            return None, None
         token = self._dataset_token()
-        # Non-blocking, for the same reason the display seed is: a channel
-        # switch has just asked three tile controllers for this exact
-        # level, and reading it again here would put the whole 170-230 ms
-        # back on the GUI thread. Returning None leaves the thumbnail
-        # showing the previous channel for the ~150 ms the worker takes;
-        # `_on_channel_overview_ready` re-queues this render the moment the
-        # record lands.
-        arr = self._slide_lowres_array(ch, blocking=False)
-        if arr is None:
+        snapshot = self.tissue_render_snapshot()
+        if snapshot is None:
             return None, None
-        if self._dataset_token() != token:
-            # The dataset moved while the pixels were being fetched.
+        if self._dataset_token() != token or snapshot.get("token") != token:
+            # The dataset moved while the pixels were being gathered.
             dataset_trace.note("render.rejected", why="token_moved",
-                               channel=ch, token=token)
+                               channel=self.current_channel, token=token)
             return None, None
-        rgb = self._lowres_tinted(arr, ch)
-        nuc = self.nucleus_channel
-        # DAPI is composited ADDITIVELY, in its own colour and under its own
-        # mapping -- the numpy form of the CompositionMode_Plus overlay the
-        # full image and the compare panels draw, so the same switch gives
-        # the same picture in all three.
-        if nuc and nuc != ch and self._nucleus_layer_visible():
-            nuc_arr = self._slide_lowres_array(nuc, blocking=False)
-            if self._dataset_token() != token:
-                dataset_trace.note("render.rejected", why="token_moved_nuc",
-                                   channel=nuc, token=token)
-                return None, None
-            if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
-                rgb = np.clip(
-                    rgb.astype(np.uint16)
-                    + self._lowres_tinted(nuc_arr, nuc, nucleus=True),
-                    0, 255).astype(np.uint8)
-        dataset_trace.note("render.produced", channel=ch, token=token,
-                           shape=getattr(rgb, "shape", None),
+        rgb = tissue_compose.compose(snapshot, None)
+        if rgb is None:
+            return None, None
+        dataset_trace.note("render.produced", channel=snapshot.get("channel"),
+                           token=token, shape=getattr(rgb, "shape", None),
                            fingerprint=_array_fingerprint(rgb))
         return rgb, token
 
-    def _queue_tissue_preview(self):
-        """Re-render the thumbnail after the current stream of edits."""
-        timer = getattr(self, "_tissue_preview_timer", None)
-        if timer is not None:
-            timer.start(self._TISSUE_PREVIEW_DEBOUNCE_MS)
+    def _queue_tissue_preview(self, kind="mapping", channel=""):
+        """Say that the picture is out of date. NOT "draw it after 100 ms".
+
+        The old body was `timer.start(100)` on a single-shot timer, restarted
+        by every Min/Max/Gamma event -- so a continuous drag pushed the
+        deadline forward faster than it could arrive and the thumbnail did
+        not move until the hand stopped. That is the behaviour the user
+        reported, and it is gone: this submits an INPUT to Block01's frame
+        clock, which publishes on a leading edge and then on a fixed ~30 FPS
+        slot, latest-only, with the arrays composed on a worker.
+
+        It also no longer assumes the picture is Step0's. The coordinator
+        asks whichever step is ACTIVE for the frame, which is why the same
+        call is right whether the user is looking at Step0's single channel
+        or Step1's overlay.
+        """
+        return self.display.coordinator.request_frame(
+            kind=kind, channel=channel or (self.current_channel or ""))
 
     def _update_tissue_preview(self):
-        """Push the current channel's picture to every Tissue Preview.
+        """Draw the Tissue Preview NOW, and return the pixels installed.
 
-        Every overview panel that is a view over the one ROI model -- the
-        Step0 one and the floating navigator's -- so the two never show
-        different channels.
+        The synchronous entry, for the callers that need the picture on the
+        panel before they return: a navigator popup built after the page
+        already has a channel, and the tests that assert what is on screen.
+        Everything that is merely a STATE CHANGE goes through
+        `_queue_tissue_preview` instead.
+
+        Still routed through the coordinator, and that is the point: it draws
+        the ACTIVE context. A queued Step0 call that arrives after the user
+        has reached Step1 renders Step1's overlay or nothing at all -- it can
+        no longer put a Step0 single-channel picture on Step1's screen.
         """
-        timer = getattr(self, "_tissue_preview_timer", None)
-        if timer is not None:
-            timer.stop()
         with perf_trace.span("step0.tissue_preview_render") as _sp:
-            # The identity comes back WITH the picture: it is the dataset the
-            # pixels were fetched under, not the one the page is showing by
-            # the time they are installed.
-            rgb, token = self._tissue_preview_rgb()
-            if rgb is None or token is None:
-                _sp.add(drawn=0)
-                return None
-            drawn = 0
-            for panel in self._registered_roi_overviews():
-                # A panel that has never been through a switch has no dataset
-                # yet; it adopts this one rather than refusing every picture.
-                # Adoption keeps its pixels -- the CHECK is what is being
-                # installed here, not another clear.
-                adopt = getattr(panel, "adopt_dataset", None)
-                if callable(adopt):
-                    adopt(token)
-                setter = getattr(panel, "set_channel_image", None)
-                if callable(setter):
-                    if setter(rgb, token) is not False:
-                        drawn += 1
-            _sp.add(drawn=drawn,
+            rgb = self.display.coordinator.render_now()
+            _sp.add(drawn=0 if rgb is None else 1,
                     shape="x".join(str(v) for v in getattr(rgb, "shape", ())))
             return rgb
+
+    # ── Step0's render context (what the coordinator asks this page) ───
+
+    def tissue_render_mode(self):
+        return tissue_compose.MODE_STEP0
+
+    def tissue_lowres_array(self, channel):
+        """`channel`'s whole-slide array if it is RESIDENT. Never reads.
+
+        The Block01 data port. `resident_only` rather than `blocking=False`
+        because this is reached from a render callback and from the compose
+        snapshot: falling through to `read_region_lowres` there costs
+        170-230 ms of the GUI thread per channel, measured.
+        """
+        return self._slide_lowres_array(channel, blocking=False,
+                                        resident_only=True)
+
+    def ensure_tissue_lowres(self, channels):
+        """Ask the shared overview store for the arrays a frame is missing.
+
+        Returns the channels still missing. The read is the viewers' own --
+        `prepare_overview_async`, single-flight per (source, channel, level)
+        ACROSS every controller -- so a channel three views want is read once
+        and everybody is woken by `_on_channel_overview_ready`. Bounded, and
+        in the order the caller asked: a frame's own channels are wanted
+        before anything speculative, and a 29- or 57-channel panel must never
+        become 57 reads because one weight moved.
+        """
+        missing = [ch for ch in (channels or [])
+                   if ch and self.tissue_lowres_array(ch) is None]
+        if not missing:
+            return []
+        started = 0
+        for ch in missing:
+            if started >= self._TISSUE_LOWRES_MAX_IN_FLIGHT:
+                break
+            if self._overview_read_pending(ch):
+                continue            # somebody is already reading it
+            if self._request_overview_async(ch):
+                started += 1
+                continue
+            # NO BACKGROUND READER IN THIS SESSION. A page with no viewer
+            # open -- the landing before the full image is built, a test --
+            # has nobody to ask, and a thumbnail that waits forever for a
+            # read nobody will start is worse than the read. So the page's
+            # own one-off is taken: `_slide_lowres_array` caches per (dataset,
+            # channel), so this happens at most once per channel per slide
+            # and NEVER once per slider step. It is the same read the display
+            # seed already makes, not a new one on the frame path.
+            self._slide_lowres_array(ch, blocking=False)
+            started += 1
+        return [ch for ch in missing if self.tissue_lowres_array(ch) is None]
+
+    def _request_overview_async(self, ch):
+        """Ask a viewer to read `ch`'s whole-slide overview in the background.
+
+        True when somebody took it. Single-flight per (source, channel, level)
+        across every controller sharing the store, so a channel three views
+        want is read once and all of them are woken by
+        `_on_channel_overview_ready`.
+        """
+        for controller in self._overview_hosts():
+            request = getattr(controller, "prepare_overview_async", None)
+            if request is None:
+                continue
+            try:
+                request(ch)
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[step0] tissue low-res request failed for "
+                      f"{ch!r}: {exc}", flush=True)
+                continue
+            return True
+        return False
+
+    # At most this many whole-slide reads asked for at once. The arrays are
+    # ~2 MB each at the overview level and the reads are the viewers', so the
+    # cap is about not queueing a whole panel behind one weight change rather
+    # than about memory: the frame draws what has arrived and the rest lands
+    # as it comes.
+    _TISSUE_LOWRES_MAX_IN_FLIGHT = 4
+
+    def tissue_render_snapshot(self):
+        """Everything Step0's frame needs, as values a worker may hold.
+
+        The single channel the page is showing, plus DAPI when its layer is
+        on -- the same two the old GUI-thread renderer composited, under the
+        same mapping and the same colour, now read from Block01's shared
+        state rather than from this page's private dictionaries.
+
+        Returns None when there is nothing drawable yet: no channel, or its
+        array not resident. The missing arrays are requested in the
+        background; their arrival is an input like any other.
+        """
+        ch = self.current_channel
+        if not ch:
+            return None
+        token = self._dataset_token()
+        nuc = self.nucleus_channel
+        wanted = [ch]
+        if nuc and nuc != ch and self._nucleus_layer_visible():
+            wanted.append(nuc)
+        arrays, loading = {}, []
+        for name in wanted:
+            arr = self.tissue_lowres_array(name)
+            if arr is None:
+                loading.append(name)
+            else:
+                arrays[name] = arr
+        if loading:
+            # Asked for, then looked for again: a channel the page could read
+            # for itself is resident by the time this returns, and one that
+            # went to a worker is still missing and stays named as loading.
+            loading = list(self.ensure_tissue_lowres(loading))
+            for name in wanted:
+                if name not in arrays:
+                    arr = self.tissue_lowres_array(name)
+                    if arr is not None:
+                        arrays[name] = arr
+        if ch not in arrays:
+            # The marker itself is the picture; DAPI alone is not a frame.
+            return None
+        nucleus_layer = (nuc if (nuc in arrays and nuc != ch
+                                 and arrays[nuc].shape[:2]
+                                 == arrays[ch].shape[:2]) else "")
+        return {
+            "mode": tissue_compose.MODE_STEP0,
+            "token": token,
+            "channel": ch,
+            "nucleus_layer": nucleus_layer,
+            "arrays": arrays,
+            "mappings": {
+                name: self._display_mapping_for(name, nucleus=(name == nuc))
+                for name in arrays},
+            "colors": {name: self._channel_color(name) for name in arrays},
+            "loading": tuple(loading),
+        }
+
+    def _register_block01_display(self):
+        """Hand Block01's display layer the four things this page provides.
+
+        A page PROVIDES: the palette default, the display window, the whole-
+        slide arrays and the two shared windows. It DECIDES nothing about
+        what the Tissue Preview shows -- that is the coordinator's, from
+        whichever context is active. Registration is idempotent and does not
+        activate: a page that is built but never navigated to draws nothing.
+        """
+        display = self.display
+        display.state.set_default_source(self._default_channel_color_hex)
+        display.state.set_mapping_source(
+            lambda channel, nucleus=False: self._display_mapping_for(
+                channel, nucleus=nucleus))
+        display.set_window_host(self)
+        display.set_lowres_source(self)
+        display.coordinator.register_context(_CTX_STEP0, self)
+        display.coordinator.attach_navigator(self._registered_roi_overviews)
+        # A colour settled anywhere -- Step1's row, a restored session, this
+        # page's own swatch -- is this page's colour too. Mirrored silently:
+        # the shared state has already decided, so re-emitting from here
+        # would be a second opinion, not a confirmation.
+        display.state.color_changed.connect(self._on_shared_color_changed)
+        if self._owns_display_services:
+            # A page standing on its own IS its Block01: nothing else will
+            # make it the active context, and a Tissue Preview that renders
+            # nothing would make every page-level test a test of silence.
+            display.coordinator.set_active_context(_CTX_STEP0, request=False)
+
+    def _on_shared_color_changed(self, channel, hexc):
+        """Block01 settled a colour: this page's views take it.
+
+        Mirror-only. The store is already the answer -- `_channel_color`
+        reads it -- so nothing here may write back; what this does is repaint
+        the widgets that hold a copy of the colour (the swatch, the Channel
+        Remap layer list, the compare tints, the full image's table).
+        """
+        if not channel:
+            return
+        rgb = _channel_hex_to_rgb01(hexc)
+        self._channel_colors[channel] = rgb
+        if channel == self.nucleus_channel:
+            self._nuc_color = rgb
+        self._push_color_to_workbench(channel, rgb)
+        model = self._display_model()
+        if model is not None and model.get(channel) is not None:
+            model.set_color(channel, hexc)
+        for k in [k for k in self._preview_cache if k[0] == channel]:
+            del self._preview_cache[k]
+        self._push_channel_tint_to_compare(channel)
 
     # ── display mapping: one per channel, shared by every view ─────────
 
@@ -7498,6 +7708,10 @@ class Step0Page(QWidget):
         and table swap), the full image and its overlay get the numbers."""
         _sp = perf_trace.span("step0.mapping_fanout", channel=cid)
         with _sp:
+            # Block01's display state publishes the numbers; saying so here
+            # is what lets a step that is not this one notice that its own
+            # frame is stale without listening to this page.
+            self.display.state.note_mapping_changed(cid)
             # Announced first, so a listener that caches remapped pixels drops
             # the stale ones before anything else redraws from them.
             with perf_trace.span("step0.mapping_emit", channel=cid):
@@ -7505,15 +7719,16 @@ class Step0Page(QWidget):
             if cid in (self.current_channel, self.nucleus_channel):
                 with perf_trace.span("step0.compare_setters", channel=cid):
                     self._refresh_preview_display(keep_zoom=True)
-                # The Tissue Preview is drawn with the same numbers, but it
-                # is a whole-slide re-render in numpy rather than a levels
-                # swap, so it waits for the slider to stop moving. Hooked HERE
-                # rather than on `params_changed`, so that the fallback path --
-                # a page whose Channel Remap workbench has never been engaged,
-                # which is every page until the Intensity window is first
-                # opened -- reaches it too; that path calls this method
-                # directly and emits nothing.
-                self._queue_tissue_preview()
+                # The Tissue Preview is drawn with the same numbers. It is a
+                # whole-slide re-render rather than a levels swap, so it is a
+                # REQUEST on Block01's frame clock -- composed on a worker and
+                # published on the next ~33 ms slot, during the drag, not
+                # after it. Hooked HERE rather than on `params_changed`, so
+                # that the fallback path -- a page whose Channel Remap
+                # workbench has never been engaged, which is every page until
+                # the Intensity window is first opened -- reaches it too; that
+                # path calls this method directly and emits nothing.
+                self._queue_tissue_preview(kind="mapping", channel=cid)
             explore_tab = getattr(self, "_explore_tab", None)
             stack = explore_tab.stack if explore_tab is not None else None
             if stack is None:
@@ -8132,7 +8347,7 @@ class Step0Page(QWidget):
         self._sync_compare_to_channel()
         # The Tissue Preview draws the channel the page is on, so it follows
         # the row too -- in whichever mode the viewing area happens to be.
-        self._update_tissue_preview()
+        self._queue_tissue_preview(kind="channel")
 
         if not self.patches:
             self._preview_status.setText(

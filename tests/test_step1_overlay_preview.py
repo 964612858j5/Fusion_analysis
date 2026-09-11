@@ -601,16 +601,24 @@ def test_selecting_a_channel_points_the_intensity_window_at_it(app):
 
 
 def test_the_intensity_button_opens_the_shared_window_on_the_current_channel(app):
+    """Through Block01, not through Step0.
+
+    The spies used to be on `Step0Page.show_intensity_window` and
+    `focus_intensity_on`, because that is what this button called -- one step
+    reaching into another for a window neither of them owns. The window is
+    `Block01DisplayServices`'s now, so that is what the button is checked
+    against; Step0 still supplies the panel inside it, which is why the
+    channel focus is spied where the CONTENT port answers.
+    """
     w = _window(app)
     try:
-        opened, focused = [], []
-        w._step0.show_intensity_window = lambda: opened.append(True)
-        w._step0.focus_intensity_on = lambda ch, color=None: (
+        focused = []
+        w._step0.focus_intensity_channel = lambda ch, color=None: (
             focused.append(ch) or True)
         w.config._rows["CD8"].selected.emit("CD8")
         w._btn_step1_intensity.click()
 
-        assert opened == [True]
+        assert w._display.intensity_window() is not None
         assert focused[-1] == "CD8"
     finally:
         w.close()

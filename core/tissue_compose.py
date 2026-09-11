@@ -44,10 +44,6 @@ TISSUE_PATCH_KEY = "tissue"
 MODE_STEP0 = "step0"
 MODE_OVERLAY = "overlay"
 MODE_FUSION = "fusion"
-# Downstream of Step1 the thumbnail is a map: the frame is one that was
-# already published and is re-installed unchanged. A mode of its own, so a
-# read-only step is a real context with an identity rather than an absence.
-MODE_PINNED = "pinned"
 
 
 def lowres_tinted(arr, mapping, color):
@@ -156,8 +152,6 @@ def compose(request, cache, span=None):
     if mode == MODE_OVERLAY:
         return overlay_rgb_u8(arrays, mappings, colors,
                               request.get("weights") or {}, cache, span=span)
-    if mode == MODE_PINNED:
-        return request.get("rgb")
     if mode == MODE_FUSION:
         return fusion_rgb_u8(
             arrays, mappings, request.get("groups") or {},

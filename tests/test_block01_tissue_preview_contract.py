@@ -504,10 +504,16 @@ def test_every_step_transition_moves_the_context_and_the_generation(app):
         w.close()
 
 
-def test_downstream_steps_pin_a_frame_that_was_really_on_screen(app):
-    """Step2/Step3 consume geometry they did not produce and choose no
-    thumbnail, so they re-publish the last frame -- never Step0's current
-    fields dressed up as global state."""
+def test_downstream_steps_inherit_the_configuration_not_the_pixels(app):
+    """Step2/Step3 draw the spec Step1 was drawing, and draw it AGAIN.
+
+    An earlier cut kept the composed RGB and re-published it. That is a
+    screenshot: nothing the user changed afterwards could alter pixels that
+    were already baked, so the Tissue Preview went dead past Step1. What is
+    inherited now is the semantic render spec -- mode, channels, weights,
+    fusion config -- with colours and display windows read live on every
+    frame.
+    """
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
@@ -516,13 +522,107 @@ def test_downstream_steps_pin_a_frame_that_was_really_on_screen(app):
         step1_frame = np.array(_thumb(w), copy=True)
 
         _goto(w, 2)
-        assert np.array_equal(_thumb(w), step1_frame)
         published = w._display.coordinator.last_published()
         assert published["owner"] == bd.STEP2
-        assert published["mode"] == tissue_compose.MODE_PINNED
-
-        _goto(w, 3)
+        # Same configuration, so the same picture -- COMPOSED, not replayed.
         assert np.array_equal(_thumb(w), step1_frame)
+        assert published["mode"] == tissue_compose.MODE_OVERLAY
+        context = w._downstream_contexts[bd.STEP2]
+        assert context.has_spec()
+        assert "CD3" in context.spec()["channels"]
+    finally:
+        w.close()
+
+
+def test_a_colour_change_in_step2_changes_the_picture(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        _goto(w, 1)
+        _goto(w, 2)
+        before = np.array(_thumb(w), copy=True)
+        assert _mean_rgb(before)[2] < _mean_rgb(before)[0]
+
+        w._display.state.set_color("CD3", "#0000ff")
+        _pump(w)
+
+        after = _thumb(w)
+        assert not np.array_equal(after, before), "Step2 kept a baked picture"
+        assert _mean_rgb(after)[2] > _mean_rgb(before)[2]
+    finally:
+        w.close()
+
+
+def test_a_mapping_drag_in_step2_and_step3_publishes_intermediate_frames(app):
+    """The hard requirement, downstream: Min/Max/Gamma is live in EVERY step.
+
+    Driven through the global Intensity entry -- the same shared state the
+    window's controls write -- not by editing a context's dictionary.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        for step in (2, 3):
+            _goto(w, step)
+            frames = []
+            handle = w._display.coordinator.frame_published.connect(
+                lambda r: frames.append(np.array(r["rgb"], copy=True)))
+            lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+            for i in range(1, 8):
+                w._step0.set_display_mapping(
+                    "CD3", lo, hi - (hi - lo) * 0.09 * i)
+                _pump(w, 120)
+            w._display.coordinator.frame_published.disconnect(handle)
+
+            assert len(frames) >= 4, (step, len(frames))
+            assert len({f.tobytes() for f in frames}) >= 3, step
+            assert w._display.coordinator.active_context_id() == (
+                bd.STEP2 if step == 2 else bd.STEP3)
+    finally:
+        w.close()
+
+
+def test_a_weight_change_in_step2_and_step3_changes_the_picture(app):
+    """Step2/Step3 have no weight panel and none is faked here.
+
+    The weight goes through `Block01DisplayServices.set_render_weight`, which
+    is the one entry every step's weight edit uses; it lands on the render
+    spec the active downstream context inherited.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w.config._rows["CD8"].spin.setValue(1.0)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
+        _goto(w, 1)
+        for step in (2, 3):
+            _goto(w, step)
+            frames = []
+            handle = w._display.coordinator.frame_published.connect(
+                lambda r: frames.append(np.array(r["rgb"], copy=True)))
+            # Starts at 0.7: the inherited spec already says 1.0, and a
+            # write that changes nothing correctly reports that it changed
+            # nothing.
+            for value in (0.7, 0.5, 0.3, 0.1, 0.0):
+                assert w._display.set_render_weight("CD3", value), (step, value)
+                _pump(w, 120)
+            w._display.coordinator.frame_published.disconnect(handle)
+
+            assert len(frames) >= 4, (step, len(frames))
+            reds = [_mean_rgb(f)[0] for f in frames]
+            greens = [_mean_rgb(f)[1] for f in frames]
+            assert reds[0] > reds[-1], (step, reds)
+            assert max(greens) - min(greens) < 1e-6, (step, greens)
+            # Put it back for the next step's inheritance.
+            w._display.set_render_weight("CD3", 1.0)
+            _pump(w, 120)
     finally:
         w.close()
 
@@ -556,10 +656,11 @@ def test_a_late_frame_from_each_step_is_refused_downstream(app):
 def test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode(app):
     """The mode check is not enough, and this is the case that proves it.
 
-    Step2 and Step3 both render a pinned frame, so a Step2 frame arriving
-    after the user reached Step3 matches on mode AND on dataset. What refuses
-    it is the OWNER and the GENERATION -- the two facts a step transition
-    moves atomically. Without them a step that has been left keeps drawing.
+    Step2 and Step3 draw the same inherited spec in the same mode, so a Step2
+    frame arriving after the user reached Step3 matches on mode AND on
+    dataset. What refuses it is the OWNER and the GENERATION -- the two facts
+    a step transition moves atomically. Without them a step that has been
+    left keeps drawing.
     """
     w = _window(app)
     try:
@@ -574,7 +675,7 @@ def test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode(app):
         _pump(w, 60)
         assert w._tissue_frames.pending() == 1
         stale = w._tissue_frames.submitted.pop()
-        assert stale["mode"] == tissue_compose.MODE_PINNED
+        assert stale["owner"] == bd.STEP2
         w._tissue_frames.auto = True
 
         _goto(w, 3)
@@ -586,7 +687,7 @@ def test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode(app):
 
         assert co.frame_stats()["dropped"] > dropped_before, "it was accepted"
         assert co.last_published() == published_before
-        assert stale["owner"] == bd.STEP2 and co.active_context_id() == bd.STEP3
+        assert co.active_context_id() == bd.STEP3
     finally:
         w.close()
 
@@ -634,34 +735,6 @@ def test_the_mapping_is_one_set_of_numbers_across_the_walk(app):
             answers.append(state.mapping("CD3"))
         assert len(set(answers)) == 1, answers
         assert answers[0][1] == pytest.approx(hi / 2.0)
-    finally:
-        w.close()
-
-
-def test_downstream_steps_still_follow_a_change_to_the_shared_state(app):
-    """Step2/Step3 are read-only, but read-only is about the CONTROLS. A
-    legitimate change to the canonical state still has to reach an open
-    Tissue Preview, and the navigator must stay read-only while it does."""
-    w = _window(app)
-    try:
-        w.config.set_channel_visible("CD3", True)
-        w.config._rows["CD3"].spin.setValue(1.0)
-        _goto(w, 1)
-        _goto(w, 2)
-        before = np.array(_thumb(w), copy=True)
-
-        # A legal global change: the canonical colour of a channel in the
-        # pinned picture. Nothing in Step2's UI is faked to do it.
-        w._display.state.set_color("CD3", "#ff00ff")
-        _pump(w)
-
-        assert w._step0.navigator_edit_policy() == {
-            "roi_policy": "read_only", "patch_editable": False}
-        # The pinned frame is re-published rather than recomposed, so the
-        # picture is stable -- what is pinned here is that the request is
-        # ACCEPTED for the active context and does not fall back to Step0.
-        assert w._display.coordinator.last_published()["owner"] == bd.STEP2
-        assert np.array_equal(_thumb(w), before)
     finally:
         w.close()
 
@@ -719,30 +792,294 @@ def test_the_gui_thread_composes_nothing_during_a_drag(app):
         w.close()
 
 
-def test_the_intensity_window_follows_the_step_without_forking_its_numbers(app):
-    """One window, one set of Min/Max/Gamma; the step decides only the RIGHTS.
+def test_the_intensity_window_is_editable_in_every_step(app):
+    """One window, one set of Min/Max/Gamma, editable wherever the user is.
 
-    Step0 owns the remap config and Step1 tunes the fusion it feeds, so both
-    edit. Step2 and Step3 consume a committed mapping, so they read -- and
-    they still READ, showing the canonical values rather than a copy or a
-    blank.
+    A previous cut disabled it in Step2/Step3 on the reasoning that those
+    steps "consume a committed mapping". That was this implementation's
+    invention and it contradicted the requirement. What DOES lock the
+    controls is a running job holding a frozen copy of the configuration --
+    a lock is a job, not a page.
     """
     w = _window(app)
     try:
         w._display.show_intensity("CD3")
-        panel = w._step0.intensity_panel()
-        lo, hi, _g = w._step0._display_mapping_for("CD3")
+        panel = w._display.intensity_panel()
+        lo, hi, _g = w._display.state.mapping_or_seed("CD3")
         w._step0.set_display_mapping("CD3", lo, hi / 3.0)
 
-        for step, editable in ((0, True), (1, True), (2, False), (3, False),
-                               (1, True), (0, True)):
+        for step in (0, 1, 2, 3, 1, 0):
             _goto(w, step)
-            assert w._display.intensity_policy()["editable"] is editable, step
+            assert w._display.intensity_policy()["editable"] is True, step
             if panel is not None:
-                assert panel.isEnabled() is editable, step
-            # The numbers are the same ones in every step: one store, read
-            # through one port, never copied per step.
+                assert panel.isEnabled() is True, step
+            # The numbers are the same ones in every step: one store, never
+            # copied per step.
             assert w._display.state.mapping("CD3")[1] == pytest.approx(hi / 3.0)
+
+        # ...and the one thing that DOES disable it is a running job.
+        w._lock_ui()
+        assert w._display.intensity_policy() == {
+            "editable": False, "reason": "computation_lock"}
+        if panel is not None:
+            assert panel.isEnabled() is False
+        w._unlock_ui()
+        assert w._display.intensity_policy()["editable"] is True
+    finally:
+        w.close()
+
+
+def _drag_frames(w, moves, settle=120):
+    """Run `moves` and collect the RGB each one actually put on the panel."""
+    frames = []
+    handle = w._display.coordinator.frame_published.connect(
+        lambda r: frames.append(np.array(r["rgb"], copy=True)))
+    try:
+        for move in moves:
+            move()
+            _pump(w, settle)
+    finally:
+        w._display.coordinator.frame_published.disconnect(handle)
+    return frames
+
+
+def test_every_step_publishes_intermediate_frames_for_min_max_and_gamma(app):
+    """THE requirement, in all four steps and on all three controls.
+
+    Driven through `set_display_mapping` -- the one public write that the
+    Intensity window's own controls reach, and that now lands in Block01's
+    shared state rather than in a per-step store. The frames counted are the
+    ones the real `OverviewPanel` was given.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        # Step1 first, so the downstream steps have a spec to inherit.
+        _goto(w, 1)
+        report = {}
+        for step in (0, 1, 2, 3):
+            _goto(w, step)
+            lo, hi, gamma = w._display.state.mapping_or_seed("CD3")
+            counts = {}
+            for name, moves in (
+                ("min", [(lambda v=v: w._step0.set_display_mapping(
+                    "CD3", lo + (hi - lo) * 0.05 * v, hi))
+                    for v in range(1, 7)]),
+                ("max", [(lambda v=v: w._step0.set_display_mapping(
+                    "CD3", lo, hi - (hi - lo) * 0.07 * v))
+                    for v in range(1, 7)]),
+                ("gamma", [(lambda v=v: w._step0.set_display_mapping(
+                    "CD3", lo, hi, 1.0 + 0.12 * v))
+                    for v in range(1, 7)]),
+            ):
+                frames = _drag_frames(w, moves)
+                distinct = len({f.tobytes() for f in frames})
+                counts[name] = (len(frames), distinct)
+                assert len(frames) >= 4, (step, name, len(frames))
+                assert distinct >= 3, (step, name, distinct)
+                # Back to where this control started, so the next one moves
+                # only itself.
+                w._step0.set_display_mapping("CD3", lo, hi, gamma)
+                _pump(w)
+            report[step] = counts
+        print(f"[evidence] visible intermediate frames per step: {report}")
+    finally:
+        w.close()
+
+
+def test_every_step_with_a_legal_weight_entry_follows_a_weight_drag(app):
+    """Weight, through the one global entry, in every step that has one.
+
+    Step1 owns weights in its channel panel; Step2 and Step3 have no weight
+    UI and none is faked -- they receive the change through
+    `Block01DisplayServices.set_render_weight`, which is the entry a
+    downstream weight control would call if one were added. Step0's thumbnail
+    is a single channel with no weight at all, so it is not part of this and
+    says so rather than being given a fake one.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w.config._rows["CD8"].spin.setValue(1.0)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
+        _goto(w, 1)
+        assert w._display.render_weight("CD3") == 1.0
+        report = {}
+        for step in (1, 2, 3):
+            _goto(w, step)
+            frames = _drag_frames(w, [
+                (lambda v=v: w._display.set_render_weight("CD3", v))
+                for v in (0.8, 0.6, 0.4, 0.2, 0.0)])
+            assert len(frames) >= 4, (step, len(frames))
+            reds = [_mean_rgb(f)[0] for f in frames]
+            assert reds[0] > reds[-1], (step, reds)
+            report[step] = (len(frames), len({f.tobytes() for f in frames}))
+            w._display.set_render_weight("CD3", 1.0)
+            _pump(w)
+        print(f"[evidence] visible weight frames per step: {report}")
+        # Step0 draws one channel through one window; there is no weight in
+        # that picture to move, and inventing one would be a fake entry.
+        _goto(w, 0)
+        assert w._display.render_weight("CD3") is None
+    finally:
+        w.close()
+
+
+# ── C. the ownership really is out of Step0 ──────────────────────────────
+
+def test_the_window_and_mapping_owners_are_not_the_step0_page(app):
+    from block01.ui.step0.step0_page import Step0Page
+    w = _window(app)
+    try:
+        services = w._display
+        assert services.window_owner() is services
+        assert not isinstance(services.window_owner(), Step0Page)
+        assert services.mapping_owner() is services.state
+        assert not isinstance(services.mapping_owner(), Step0Page)
+        # A write settles in the STORE, and the store is what everyone reads.
+        services.state.set_mapping("CD3", 7.0, 77.0, 1.5, origin="test")
+        assert services.state.mapping("CD3") == (7.0, 77.0, 1.5)
+        assert w._step0.display_window("CD3") == (7.0, 77.0, 1.5)
+
+        # THE ONE THAT SETTLES OWNERSHIP. With persistence disconnected, a
+        # written window exists ONLY in the shared state -- Step0's remap
+        # params have never heard of it. The state must still answer it. A
+        # state that answered by calling a Step0 getter (which is what the
+        # previous cut did, through a lambda) gives Step0's number here, not
+        # this one.
+        services.state._persist_port = None
+        services.state.set_mapping("CD8", 3.0, 33.0, 1.25, origin="test")
+        assert services.state.mapping("CD8") == (3.0, 33.0, 1.25)
+        assert w._step0.display_window("CD8") == (3.0, 33.0, 1.25)
+        assert w._step0._display_mapping_for("CD8") != (3.0, 33.0, 1.25), (
+            "the test is not proving anything: Step0's own answer already "
+            "matches, so a state delegating to it would look correct")
+        # ...and it keeps answering with the seed port gone too.
+        services.state._seed_port = None
+        assert services.state.mapping("CD8") == (3.0, 33.0, 1.25)
+    finally:
+        w.close()
+
+
+def test_the_two_windows_are_constructed_and_held_by_the_services(app):
+    w = _window(app)
+    try:
+        popup = w._display.show_navigator()
+        intensity = w._display.show_intensity("CD3")
+        assert w._display.navigator() is popup
+        assert w._display.intensity_window() is intensity
+        # The page reads them through; it cannot replace them.
+        assert w._step0._tissue_navigator_popup is popup
+        assert w._step0._intensity_window is intensity
+        for attr in ("_tissue_navigator_popup", "_intensity_window",
+                     "_intensity_panel"):
+            with pytest.raises(AttributeError):
+                setattr(w._step0, attr, None)
+    finally:
+        w.close()
+
+
+def test_no_step_reaches_into_step0_for_the_shared_windows():
+    """A grep, deliberately: this is a rule about call sites, and the way it
+    came back last time was one call site nobody looked at."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    banned = ("_step0.show_tissue_navigator", "_step0.show_intensity_window",
+              "_step0.focus_intensity_on", "_step0._ensure_tissue_navigator",
+              "_step0._ensure_intensity_window",
+              "_step0._update_tissue_preview",
+              "_step0.set_intensity_editing_enabled",
+              "_step0.set_navigator_edit_policy")
+    offenders = []
+    for path in (root / "ui").rglob("*.py"):
+        if path.name == "step0_page.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            code = line.split("#", 1)[0]
+            for needle in banned:
+                if needle in code:
+                    offenders.append(f"{path.name}: {line.strip()}")
+    assert not offenders, offenders
+
+
+def test_the_shared_windows_survive_the_step0_page_being_let_go(app):
+    """Block01's windows are not a page's to take with it.
+
+    The page is dropped from the window's stack and its reference cleared;
+    the shared state, the two windows and the active downstream preview must
+    still be usable, and the data port failing must fail CLOSED (a Loading
+    frame) rather than call into something that is gone.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        popup = w._display.show_navigator()
+        intensity = w._display.show_intensity("CD3")
+        _goto(w, 1)
+        _goto(w, 2)
+
+        w._display.state.set_mapping("CD3", 1.0, 50.0, 1.0, origin="test")
+        _pump(w)
+        assert w._display.state.mapping("CD3") == (1.0, 50.0, 1.0)
+
+        # The data port goes away with the page's dataset.
+        w._display.set_lowres_source(None)
+        w._display.state.set_color("CD3", "#00ffff")
+        _pump(w)
+
+        assert w._display.navigator() is popup
+        assert w._display.intensity_window() is intensity
+        assert w._display.state.color("CD3") == "#00ffff"
+        # Fail closed: nothing composable, nothing drawn, no exception.
+        assert w._downstream_contexts[bd.STEP2].tissue_render_snapshot() is None
+    finally:
+        w.close()
+
+
+def test_the_real_panel_publish_cost_is_measured_not_assumed(app):
+    """What a publish actually costs on the REAL panel.
+
+    The scheduler microbenchmark uses a stand-in panel and says so; this is
+    the one that goes through `OverviewPanel.set_channel_image` and the
+    pyqtgraph item behind it. Reported rather than tightly bounded -- the
+    number depends on the machine -- but bounded loosely enough that a
+    publish doing whole-slide work again would fail it.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        panel = w._step0.overview
+        real_setter = panel.set_channel_image
+        costs = []
+
+        def timed(rgb, token=None):
+            t0 = time.perf_counter()
+            try:
+                return real_setter(rgb, token)
+            finally:
+                costs.append((time.perf_counter() - t0) * 1000.0)
+
+        panel.set_channel_image = timed
+        lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+        for i in range(1, 13):
+            w._step0.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.05 * i)
+            _pump(w, 120)
+        panel.set_channel_image = real_setter
+
+        assert len(costs) >= 6, costs
+        worst = max(costs)
+        print(f"[evidence] real OverviewPanel.set_channel_image over "
+              f"{len(costs)} publishes: worst {worst:.2f} ms, "
+              f"median {sorted(costs)[len(costs) // 2]:.2f} ms")
+        assert worst < 50.0, f"a publish took {worst:.1f} ms on the GUI thread"
     finally:
         w.close()
 

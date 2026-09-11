@@ -1,22 +1,35 @@
-"""How many frames a Tissue Preview drag actually publishes, per step.
+"""A MICROBENCHMARK of the Tissue Preview frame scheduler. Not step evidence.
 
-WHY THIS EXISTS. "The tests pass" is not the claim under review. The claim is
-that a user dragging Min/Max/Gamma (or a weight) sees the picture move WHILE
-the hand is moving, at a rate the frame clock explains, with the last value
-never lost. That is four numbers per step -- intermediate frames published,
-the revision of the last one, the deepest the pending queue ever got, and the
-worst GUI callback -- and this prints them.
+WHAT THIS IS. The real `TissuePreviewCoordinator` and the real compose code,
+driven by a synthetic context on a simulated clock, to answer one question:
+when a frame costs more than the interval between inputs, does the scheduler
+keep publishing during the drag, hold the pending queue at one, and still
+deliver the last value? 40 ms and 80 ms bracket what a real whole-slide frame
+was measured at.
 
-WHAT IT DRIVES. The real `TissuePreviewCoordinator` with the real compose
-code, over a synthetic whole-slide array. The compose cost is imposed
-(`--compose-ms`) rather than measured, because the point is the SCHEDULER's
-behaviour when a frame costs more than the interval between inputs: 40 ms and
-80 ms bracket what a real whole-slide frame was measured at.
+WHAT THIS IS NOT, and an earlier version of this file was reported as being.
+
+* The five rows are FIVE SYNTHETIC CONTEXTS carrying step names, not the real
+  Step0/Step1/Step2/Step3 contexts of a real `MainWindow`. They exercise the
+  scheduler under different channel counts and compose modes. They do NOT
+  show that a step is wired up, and identical rows across them mean only that
+  the scheduler behaves the same way -- which is the point of a scheduler
+  test and nothing more.
+* The `stub ms` column is the cost of a STAND-IN panel whose
+  `set_channel_image` looks at the array's shape. It is not `OverviewPanel`,
+  not pyqtgraph, and not a real GUI publish cost. It is reported so a change
+  that starts doing real work inside the publish loop shows up here; it must
+  never be quoted as a GUI latency.
+
+The real per-step evidence -- a real `MainWindow`, real navigation, the real
+shared Intensity write path, the real `OverviewPanel` -- lives in
+`tests/test_block01_tissue_preview_contract.py`, which prints the number of
+distinct RGB frames the actual panel received per step per control.
 
 Not a test. Nothing here asserts; it prints a table.
 
-    python block01_v14/scripts/benchmark_tissue_preview_frames.py
-    python block01_v14/scripts/benchmark_tissue_preview_frames.py --compose-ms 80
+    python block01_v14/scripts/benchmark_tissue_frame_scheduler.py
+    python block01_v14/scripts/benchmark_tissue_frame_scheduler.py --compose-ms 80
 
 Run as a FILE, from the repo root. The package is imported as `block01` while
 this checkout may be named something else (`block01_v14`, a worktree), and an
@@ -100,11 +113,17 @@ class _Context:
 
 
 class _Panel:
-    """The overview panel, reduced to what publishing touches."""
+    """A STAND-IN for the overview panel: it only looks at the array.
+
+    Named a stub in the output for a reason -- the real publish path is
+    `OverviewPanel.set_channel_image` into a pyqtgraph item, and this is not
+    that. What this column catches is the publish loop starting to do work of
+    its own; it is not a GUI latency.
+    """
 
     def __init__(self):
         self.installs = 0
-        self.worst_ms = 0.0
+        self.worst_ms = 0.0      # stub cost, NOT a GUI publish cost
 
     def adopt_dataset(self, _token):
         pass
@@ -242,17 +261,21 @@ def main():
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     plans = [
-        (bd.STEP0, tissue_compose.MODE_STEP0, ["DAPI"]),
-        (bd.STEP1, tissue_compose.MODE_OVERLAY, ["DAPI", "CD3", "CD8"]),
-        (bd.STEP1, tissue_compose.MODE_FUSION, ["DAPI", "CD3", "CD8"]),
-        (bd.STEP2, tissue_compose.MODE_OVERLAY, ["DAPI", "CD3"]),
-        (bd.STEP3, tissue_compose.MODE_OVERLAY, ["DAPI", "CD3"]),
+        # Synthetic contexts named after the modes they compose. NOT the
+        # product's Step0-3 contexts; see the module docstring.
+        ("single", tissue_compose.MODE_STEP0, ["DAPI"]),
+        ("overlay3", tissue_compose.MODE_OVERLAY, ["DAPI", "CD3", "CD8"]),
+        ("fusion3", tissue_compose.MODE_FUSION, ["DAPI", "CD3", "CD8"]),
+        ("overlay2", tissue_compose.MODE_OVERLAY, ["DAPI", "CD3"]),
     ]
     header = ("step", "mode", "ch", "compose", "inputs", "published",
               "in drag", "mid-drag", "last rev", "input rev", "pending",
-              "gui ms")
+              "stub ms")
     print(f"{args.seconds:g} s of input at {args.hz:g} Hz, "
           f"frame clock {bd.TISSUE_FRAME_MS:g} ms")
+    print("SCHEDULER MICROBENCHMARK -- synthetic contexts, stub panel. "
+          "Per-step product evidence is in "
+          "tests/test_block01_tissue_preview_contract.py.")
     print(" ".join(f"{h:>10}" for h in header))
     for compose_ms in args.compose_ms:
         for name, mode, channels in plans:

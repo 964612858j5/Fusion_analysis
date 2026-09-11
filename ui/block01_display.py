@@ -43,12 +43,14 @@ import math
 import time
 
 import numpy as np
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 from ..core import tissue_compose
 from ..utils import perf_trace
 from ..workers.tissue_compose_worker import TissueComposeWorker
+from .widgets.tissue_navigator_popup import TissueNavigatorPopup
 
 # The frame clock. 33 ms is ~30 FPS and is the interval the Step1 patch
 # viewer was measured and accepted at; the Tissue Preview publishes on the
@@ -110,10 +112,25 @@ class ChannelDisplayState(QObject):
         self._token = None
         self._colors = {}
         self._default_source = None
-        self._mapping_source = None
+        # THE display windows, by (channel, is-nucleus-role). Stored here,
+        # not fetched from a step: a shared state that answers by calling
+        # `Step0Page._display_mapping_for` is Step0's store with another
+        # name, and every step then needs Step0 alive and current to know
+        # what Min/Max/Gamma it is drawing with.
+        self._mappings = {}
+        # Two PORTS, and the difference between them is the whole point.
+        # `_seed_port` computes a FIRST window for a channel nobody has set
+        # one for -- a percentile over whole-slide pixels, which is pixel
+        # work and belongs to whatever holds the pixels. Its answer is then
+        # STORED here and never asked for again. `_persist_port` is told
+        # about every write, so the remap params the Step0 handoff hashes
+        # follow this state rather than competing with it.
+        self._seed_port = None
+        self._persist_port = None
         self._color_rev = 0
         self._mapping_rev = 0
         self._applying = False
+        self._persisting = False
 
     # ── identity ──────────────────────────────────────────────────────
     def dataset_token(self):
@@ -142,11 +159,26 @@ class ChannelDisplayState(QObject):
         same one in every step."""
         self._default_source = fn
 
-    def set_mapping_source(self, fn):
-        """`fn(channel, nucleus=False) -> (min, max, gamma)`: the ONE display
-        window. Registered rather than stored, so this class publishes the
-        answer without owning a second copy of it."""
-        self._mapping_source = fn
+    def set_window_ports(self, seed=None, persist=None):
+        """Register the two display-window ports.
+
+        `seed` answers `seed_display_window(channel, nucleus=False)` -- the
+        automatic window for a channel nothing has set one for, computed from
+        pixels. Consulted ONCE per channel; the answer becomes this state's.
+
+        `persist` answers `write_display_window(channel, lo, hi, gamma,
+        nucleus=False)` -- told about every write so the on-disk remap
+        params, which the handoff hashes, follow this state.
+
+        Ports, not sources: what they do is supply pixels and durability. The
+        ANSWER lives here, which is why `mapping()` keeps working when a port
+        is gone and why a value written by any step is immediately the value
+        every other step reads.
+        """
+        if seed is not None:
+            self._seed_port = seed
+        if persist is not None:
+            self._persist_port = persist
 
     # ── colours ───────────────────────────────────────────────────────
     def has_color(self, channel):
@@ -233,20 +265,123 @@ class ChannelDisplayState(QObject):
 
     # ── mappings ──────────────────────────────────────────────────────
     def mapping(self, channel, nucleus=False):
-        """`(min, max, gamma)` for `channel`, or None when nothing knows yet."""
-        if not channel or self._mapping_source is None:
+        """`(min, max, gamma)` for `channel`, or None when nobody has set one.
+
+        Reads the STORE. No port is consulted, so this answers the same in
+        every step and keeps answering after a step page is gone.
+        """
+        if not channel:
             return None
+        return self._mappings.get((channel, bool(nucleus)))
+
+    def mapping_or_seed(self, channel, nucleus=False):
+        """`mapping()`, and if nothing is stored, seed one and store it.
+
+        The seed is pixel work (a percentile over the whole slide), so it is
+        a port; its RESULT is this state's from the moment it lands. A
+        channel is therefore seeded once, not once per reader, and the two
+        steps looking at it cannot seed it differently.
+        """
+        got = self.mapping(channel, nucleus=nucleus)
+        if got is not None or not channel or self._seed_port is None:
+            return got
         try:
-            got = self._mapping_source(channel, nucleus=nucleus)
+            seeded = self._seed_port.seed_display_window(channel,
+                                                         nucleus=nucleus)
         except Exception:                                   # noqa: BLE001
             return None
-        if got is None:
+        if seeded is None:
             return None
-        lo, hi, gamma = got
-        return (float(lo), float(hi), float(gamma))
+        lo, hi, gamma = seeded
+        # Stored WITHOUT going back to the persistence port: a seed is what
+        # that port just told us, and writing it back would be an echo.
+        value = (float(lo), float(hi), float(gamma))
+        self._mappings[(channel, bool(nucleus))] = value
+        self._mapping_rev += 1
+        return value
+
+    def set_mapping(self, channel, lo, hi, gamma=None, nucleus=False,
+                    origin="", persist=True):
+        """Set `channel`'s display window. THE write, from any step.
+
+        True when it changed anything. The persistence port is told, so the
+        remap params on disk follow; a write that came FROM that port passes
+        `persist=False`, which is what stops the two from echoing.
+        """
+        if not channel:
+            return False
+        key = (channel, bool(nucleus))
+        current = self._mappings.get(key)
+        if gamma is None:
+            gamma = current[2] if current else 1.0
+        value = (float(lo), float(hi), float(gamma))
+        if current == value:
+            return False
+        self._mappings[key] = value
+        self._mapping_rev += 1
+        if persist and self._persist_port is not None and not self._persisting:
+            self._persisting = True
+            try:
+                self._persist_port.write_display_window(
+                    channel, value[0], value[1], value[2], nucleus=nucleus)
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Block01] could not persist the display window of "
+                      f"{channel}: {exc}")
+            finally:
+                self._persisting = False
+        self.mapping_changed.emit(channel)
+        return True
+
+    def adopt_mappings(self, mappings, origin="", persist=False):
+        """Install a whole set of display windows as ONE transaction.
+
+        For a session restore, a handoff or a dataset load: the views redraw
+        once at the end rather than once per channel.
+        """
+        changed = []
+        for key, value in (mappings or {}).items():
+            channel, nucleus = (key if isinstance(key, tuple)
+                                else (key, False))
+            if not channel or value is None:
+                continue
+            lo, hi, gamma = value
+            new = (float(lo), float(hi), float(gamma))
+            if self._mappings.get((channel, bool(nucleus))) == new:
+                continue
+            self._mappings[(channel, bool(nucleus))] = new
+            changed.append((channel, bool(nucleus)))
+        if not changed:
+            return []
+        self._mapping_rev += 1
+        for channel, nucleus in changed:
+            if persist and self._persist_port is not None:
+                value = self._mappings[(channel, nucleus)]
+                try:
+                    self._persist_port.write_display_window(
+                        channel, *value, nucleus=nucleus)
+                except Exception:                           # noqa: BLE001
+                    pass
+        for channel, _nucleus in changed:
+            self.mapping_changed.emit(channel)
+        return changed
+
+    def mappings(self):
+        """Every stored window, for a caller that is writing them out."""
+        return dict(self._mappings)
+
+    def forget_mappings(self):
+        """Drop every window. A new slide's are its own."""
+        self._mappings = {}
+        self._mapping_rev += 1
 
     def note_mapping_changed(self, channel):
-        """The registered source's numbers for `channel` moved."""
+        """The numbers for `channel` moved underneath us.
+
+        For the one case a store cannot see: the remap workbench's own
+        controls wrote its params. The adapter reads them back and calls
+        `set_mapping`; this stays for callers that only know that something
+        moved.
+        """
         self._mapping_rev += 1
         if channel:
             self.mapping_changed.emit(channel)
@@ -892,40 +1027,61 @@ class Block01DisplayServices(QObject):
     """The Block01-level handle every step is given, and the only one it uses.
 
     Constructed by the window that owns Block01's lifetime, BEFORE any step
-    page exists, and shut down after them. A step asks this object for the
-    shared windows, the canonical colour/mapping answers and the whole-slide
-    arrays; it never reaches into another step to get them.
+    page exists, and shut down after them.
 
-    THE PHYSICAL WIDGETS ARE STILL CONSTRUCTED IN STEP0, and that is recorded
-    here rather than hidden. `TissueNavigatorPopup` is built around the ROI /
-    patch toolbar and its lists, and the Intensity window hosts the Channel
-    Remap workbench's own detached inspector; moving those constructors in the
-    same change as the state contract would have meant reviewing a widget
-    re-parenting and an ownership rewrite as one diff. What HAS moved is every
-    decision: who owns the state, who may publish a frame, which results are
-    refused, when the worker dies, and which step is active. Step0 registers
-    itself as a WINDOW HOST -- a provider of two widgets -- and answers no
-    question about what they show.
+    IT OWNS THE TWO SHARED WIDGETS. The `TissueNavigatorPopup` and the
+    Intensity window are constructed here, held here, shown and closed here.
+    An earlier cut left them constructed in `Step0Page` on the argument that
+    only the DECISIONS had to move; that argument did not survive review, and
+    it was wrong for a concrete reason: `show_navigator` still ended in
+    `Step0Page.show_tissue_navigator`, so every step's access to a global
+    window went through a step object that has to be alive, current, and
+    bound to the dataset. A page is now asked only for CONTENT -- the ROI
+    toolbar to put in the popup, the remap inspector to put in the Intensity
+    window, the whole-slide arrays -- through ports that name that
+    responsibility and nothing else.
+
+    A step asks this object for the shared windows, the canonical
+    colour/mapping answers and the whole-slide arrays. It never reaches into
+    another step, and this object never calls a step's private method.
     """
+
+    navigator_created = pyqtSignal(object)      # the popup, once
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.state = ChannelDisplayState(self)
         self.coordinator = TissuePreviewCoordinator(self.state, self)
-        self._window_host = None
+        self._navigator_content = None
+        self._intensity_content = None
         self._lowres_source = None
+        self._navigator = None
+        self._intensity_window = None
+        self._intensity_panel = None
+        self._navigator_policy = {"roi_policy": "full", "patch_editable": True}
+        self._intensity_locked = False
         self._closing = False
 
     # ── ports ─────────────────────────────────────────────────────────
-    def set_window_host(self, host):
-        """Register who physically holds the two shared windows.
+    def set_navigator_content(self, port):
+        """Register who FURNISHES the Tissue Preview popup.
 
-        `host` answers `show_tissue_navigator(...)`, `show_intensity_window()`
-        and `focus_intensity_on(channel, color=...)`. Those are the whole
-        contract: a host is asked to put a widget in front of the user, never
-        what to draw in it.
+        `port` answers `navigator_loader()`, `navigator_nucleus_channel()`,
+        `furnish_navigator(popup)` (the ROI/patch toolbar, the lists and the
+        signal wiring over the one ROI model) and
+        `apply_navigator_policy(roi_policy, patch_editable)`. It is asked for
+        content; it is never asked to show, hide, hold or close the window.
         """
-        self._window_host = host
+        self._navigator_content = port
+
+    def set_intensity_content(self, port):
+        """Register who FURNISHES the Intensity window.
+
+        `port` answers `intensity_panel_widget()` (the Channel Remap
+        inspector, detached) and `focus_intensity_channel(channel, color)`.
+        Same rule: content, not lifetime.
+        """
+        self._intensity_content = port
 
     def set_lowres_source(self, source):
         """Register the whole-slide low-resolution data service.
@@ -938,76 +1094,250 @@ class Block01DisplayServices(QObject):
         """
         self._lowres_source = source
 
-    def window_host(self):
-        return self._window_host
+    def mapping_owner(self):
+        """Who answers "what Min/Max/Gamma is this channel drawn with".
 
-    # ── shared windows ────────────────────────────────────────────────
+        The shared state, and a test asserts it is not a step page: the
+        previous cut answered this question with a lambda closed over
+        `Step0Page._display_mapping_for`.
+        """
+        return self.state
+
+    def window_owner(self):
+        """Who constructs, holds and closes the two shared windows."""
+        return self
+
+    # ── the Tissue Preview popup ──────────────────────────────────────
+    def navigator(self):
+        """The popup if it has been created, else None. Never creates."""
+        return self._navigator
+
+    def ensure_navigator(self):
+        """The ONE Tissue Preview popup, created on first use.
+
+        Created HERE, parented to Block01's window, and furnished by the
+        registered content port. Lazy because a session that never opens it
+        should not carry the widget -- not because a step owns the decision.
+        """
+        if self._navigator is not None or self._closing:
+            return self._navigator
+        port = self._navigator_content
+        if port is None:
+            return None
+        loader = getattr(port, "navigator_loader", lambda: None)()
+        nuc = getattr(port, "navigator_nucleus_channel", lambda: "")()
+        self._navigator = TissueNavigatorPopup(
+            loader=loader, nuc_ch=nuc, parent=self._widget_parent())
+        try:
+            port.furnish_navigator(self._navigator)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] the Tissue Preview could not be furnished: "
+                  f"{exc}")
+        self.apply_navigator_policy()
+        self.navigator_created.emit(self._navigator)
+        # A popup created while some step is already active owes that step a
+        # frame, and only that step is allowed to give it one.
+        self.coordinator.request_frame(kind="navigator_created")
+        return self._navigator
+
+    def _widget_parent(self):
+        parent = self.parent()
+        return parent if isinstance(parent, QWidget) else None
+
+    def set_navigator_policy(self, *, roi_policy=None, patch_editable=None):
+        """Which ROI/patch edits the shared navigator accepts.
+
+        Held HERE, so it survives the popup being created, hidden or
+        reopened, and so a step change updates an already-open one.
+        """
+        if roi_policy is not None:
+            if roi_policy not in ("full", "delete_only", "read_only"):
+                raise ValueError(f"unknown roi_policy: {roi_policy!r}")
+            self._navigator_policy["roi_policy"] = roi_policy
+        if patch_editable is not None:
+            self._navigator_policy["patch_editable"] = bool(patch_editable)
+        self.apply_navigator_policy()
+
+    def navigator_policy(self):
+        return dict(self._navigator_policy)
+
+    def apply_navigator_policy(self):
+        port = self._navigator_content
+        applier = getattr(port, "apply_navigator_policy", None)
+        if applier is None:
+            return
+        try:
+            applier(**self._navigator_policy)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] navigator policy could not be applied: {exc}")
+
     def show_navigator(self, step_id=None, **policy):
         """Put the ONE Tissue Preview in front, under the active step's policy.
 
-        Every step's button resolves here. No step calls another step, and no
-        step can open a second popup: there is one host and it is asked, not
-        reached into.
+        Every step's button resolves here.
         """
-        host = self._window_host
-        if host is None:
+        if policy:
+            self.set_navigator_policy(**policy)
+        popup = self.ensure_navigator()
+        if popup is None:
             return None
-        if step_id is not None and step_id != self.coordinator.active_context_id():
-            # A button pressed on a page that is no longer the active context
-            # opens the window, but must not make that page the renderer.
-            step_id = self.coordinator.active_context_id()
-        popup = host.show_tissue_navigator(**policy)
-        # The popup may have just been created; the active context owes it a
-        # frame, and the active context is the only one allowed to give it one.
+        _bring_to_front(popup)
         self.coordinator.request_frame(kind="navigator_shown")
         return popup
 
-    # Which steps may EDIT Min/Max/Gamma. Step0 owns the remap config and
-    # Step1 tunes the fusion it feeds; everything downstream consumes a
-    # committed mapping and would be editing numbers its results were not
-    # computed from. Read-only does NOT mean stale: the window still shows
-    # the canonical values for the current channel, because there is one set
-    # of them and every step is looking at it.
-    _INTENSITY_EDITABLE_STEPS = (STEP0, STEP1)
+    def hide_navigator(self):
+        if self._navigator is not None:
+            self._navigator.hide()
 
-    def intensity_policy(self, step_id=None):
-        """`{"editable": bool}` for a step. Explicit, so "why is this greyed
-        out" has an answer that is not "whatever last called the setter"."""
-        step = self.coordinator.active_context_id() if step_id is None else step_id
-        return {"editable": step in self._INTENSITY_EDITABLE_STEPS}
+    # ── the Intensity window ──────────────────────────────────────────
+    def intensity_window(self):
+        return self._intensity_window
 
-    def apply_intensity_policy(self, step_id=None):
-        """Give the shared Intensity window the rights the CURRENT step has.
+    def intensity_panel(self):
+        return self._intensity_panel
 
-        Called from the one step transition, so an already-open window follows
-        the step immediately -- no reopen, and no window left editable on a
-        page that consumes a committed mapping.
+    def ensure_intensity(self):
+        """The ONE Intensity window, created on first use.
+
+        The WINDOW is this layer's; the panel inside it is the Channel Remap
+        inspector, handed over by the content port and still driven by it.
         """
-        host = self._window_host
-        setter = getattr(host, "set_intensity_editing_enabled", None)
-        if setter is None:
+        if self._intensity_window is not None or self._closing:
+            return self._intensity_window
+        port = self._intensity_content
+        if port is None:
             return None
-        policy = self.intensity_policy(step_id)
-        setter(bool(policy["editable"]))
-        return policy
+        try:
+            panel = port.intensity_panel_widget()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] the Intensity panel is unavailable: {exc}")
+            return None
+        if panel is None:
+            return None
+        win = QWidget(
+            self._widget_parent(),
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowStaysOnTopHint,
+        )
+        win.setWindowTitle("Intensity")
+        win.setStyleSheet("background:#1c1c1c;")
+        win.setMinimumWidth(260)
+        win.resize(320, 460)
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.addWidget(panel)
+        self._intensity_window = win
+        self._intensity_panel = panel
+        self.apply_intensity_policy()
+        return win
 
-    def show_intensity(self, channel="", color=None):
-        """Put the ONE Intensity window in front, on `channel`.
+    def focus_intensity(self, channel):
+        """Point the ONE Intensity window at `channel`.
 
         The colour handed over is the canonical one -- never a step's private
         palette -- so the histogram cannot come up in a colour no view uses.
         """
-        host = self._window_host
-        if host is None:
+        port = self._intensity_content
+        focus = getattr(port, "focus_intensity_channel", None)
+        if not channel or focus is None:
+            return False
+        try:
+            return bool(focus(channel, self.state.color(channel)))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] could not point Intensity at {channel}: {exc}")
+            return False
+
+    def show_intensity(self, channel="", color=None):
+        """Put the ONE Intensity window in front, on `channel`."""
+        win = self.ensure_intensity()
+        if win is None:
             return None
-        win = host.show_intensity_window()
-        self.apply_intensity_policy()
         if channel:
-            focus = getattr(host, "focus_intensity_on", None)
-            if callable(focus):
-                focus(channel, color=self.state.color(channel)
-                      if color is None else color)
+            self.focus_intensity(channel)
+        self.apply_intensity_policy()
+        _bring_to_front(win)
         return win
+
+    # ── Intensity rights ──────────────────────────────────────────────
+    #
+    # NOT BY STEP. Min/Max/Gamma are Block01's, and the product rule is that
+    # the user may adjust them wherever they are -- Step0, Step1, Step2 and
+    # Step3 alike -- with the Tissue Preview following live. A previous cut
+    # disabled the window in Step2/Step3 on the reasoning that those steps
+    # "consume a committed mapping"; that was this implementation's invention,
+    # it contradicted the requirement, and it is gone.
+    #
+    # What DOES lock the controls is a short computation holding a frozen copy
+    # of the configuration -- a fusion run writing to disk -- because an edit
+    # landing mid-run would leave the screen and the file it is writing out of
+    # step for the length of the run. A lock is a job, not a page.
+    def lock_intensity(self, reason=""):
+        self._intensity_locked = True
+        if reason:
+            print(f"[Block01] Intensity locked: {reason}")
+        self.apply_intensity_policy()
+
+    def unlock_intensity(self):
+        self._intensity_locked = False
+        self.apply_intensity_policy()
+
+    def intensity_policy(self, step_id=None):
+        """`{"editable": bool, "reason": str}`. Explicit, so "why is this
+        greyed out" has an answer that is not "whatever last called the
+        setter" -- and so that "because you are in Step2" can never be it."""
+        if self._intensity_locked:
+            return {"editable": False, "reason": "computation_lock"}
+        return {"editable": True, "reason": ""}
+
+    def apply_intensity_policy(self, step_id=None):
+        """Put the current rights on the window and on every entry to it.
+
+        The panel is the window's own; the BUTTONS that open it belong to the
+        pages, so the content port is told as well -- a lock that greys the
+        controls but leaves the door open is a lock the user can walk past.
+        """
+        policy = self.intensity_policy(step_id)
+        panel = self._intensity_panel
+        if panel is not None:
+            try:
+                panel.setEnabled(bool(policy["editable"]))
+            except RuntimeError:
+                pass
+        port = self._intensity_content
+        applier = getattr(port, "apply_intensity_policy", None)
+        if applier is not None:
+            try:
+                applier(bool(policy["editable"]))
+            except Exception:                               # noqa: BLE001
+                pass
+        return policy
+
+    # ── the render spec every step draws from ─────────────────────────
+    def set_render_weight(self, channel, weight):
+        """THE global entry for "this channel contributes this much".
+
+        Whichever step is active receives it: Step1 through its channel row,
+        a downstream step through the render spec it inherited. This is what
+        makes a weight change a real change downstream instead of something
+        only Step1 can express -- and it is the entry a downstream step's UI
+        would call if and when it grows one.
+        """
+        context = self.coordinator.context()
+        setter = getattr(context, "set_render_weight", None)
+        if setter is None:
+            return False
+        if not setter(channel, float(weight)):
+            return False
+        self.coordinator.request_frame(kind="weight", channel=channel)
+        return True
+
+    def render_weight(self, channel):
+        context = self.coordinator.context()
+        getter = getattr(context, "render_weight", None)
+        return None if getter is None else getter(channel)
 
     # ── whole-slide data ──────────────────────────────────────────────
     def lowres_array(self, channel):
@@ -1043,12 +1373,46 @@ class Block01DisplayServices(QObject):
 
     # ── lifetime ──────────────────────────────────────────────────────
     def shutdown(self, reason="close"):
-        """Block01 is closing. Refuse new work, then retire the thread.
+        """Block01 is closing. Refuse new work, retire the thread, then close
+        the windows. In that order, and from here only.
 
-        In that order, and from here only: a step page being destroyed during
-        an ordinary navigation must never take the shared worker with it.
+        A step page being destroyed during an ordinary navigation must never
+        reach this -- which is now structural rather than a convention, since
+        the windows are not a page's to destroy.
         """
         if self._closing:
             return
         self._closing = True
         self.coordinator.shutdown(reason)
+        for win in (self._intensity_window, self._navigator):
+            if win is None:
+                continue
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+        self._intensity_window = None
+        self._intensity_panel = None
+        self._navigator = None
+
+
+def _bring_to_front(win):
+    """Put `win` in front of the user, whatever state it was left in.
+
+    MINIMISED is the state that needs saying out loud. A minimised window is
+    still `isVisible()` -- Qt counts it as shown, just shown as an icon -- so
+    `show()` on it is a no-op and `raise_()` raises something nobody can see.
+    A popup collapsed to its own header bar is out of sight a second way that
+    `show()` also does not answer, so it is restored first.
+
+    Same object either way: the window keeps its contents, camera, ROIs and
+    patches, because none of this creates or replaces a widget.
+    """
+    restore = getattr(win, "is_minimized", None)
+    if restore is not None and restore():
+        win.restore_from_bar()
+    win.setWindowState(
+        (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+    win.show()
+    win.raise_()
+    win.activateWindow()

@@ -865,7 +865,7 @@ def test_the_row_order_is_checkbox_swatch_name_combo(app):
 
 def test_the_swatch_starts_at_the_pages_colour(app):
     page = _page(app)
-    page._channel_colors["CD3"] = (1.0, 0.0, 0.0)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._nuc_color = (0.0, 0.0, 1.0)
     page._rebuild_channel_list()
 

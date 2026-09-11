@@ -939,7 +939,10 @@ def test_the_display_mapping_reaches_all_three(app):
 def test_the_channel_colour_reaches_all_three(app):
     page = _page(app)
     strip = _enter(page)
-    page._channel_colors["CD3"] = (1.0, 0.0, 0.5)
+    # Through the one setter: `_channel_colors` is a MIRROR of Block01's
+    # shared colour state now, and writing a mirror while the views ask the
+    # store is the divergence this round removed.
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.5))
     page._refresh_preview_display(keep_zoom=True)
     for controller in strip.controllers:
         assert controller.tints[-1] == (1.0, 0.0, 0.5)
@@ -1011,8 +1014,14 @@ class _Overview:
 
 
 def _navigator(page):
+    """Stand a fake navigator in, WHERE THE REAL ONE LIVES.
+
+    The popup is Block01's display services' now, not a field on the page --
+    `page._tissue_navigator_popup` reads through to it. So a stand-in is
+    installed on the owner; assigning to the page would (rightly) raise.
+    """
     popup = type("P", (), {"overview": _Overview()})()
-    page._tissue_navigator_popup = popup
+    page.display._navigator = popup
     return popup
 
 

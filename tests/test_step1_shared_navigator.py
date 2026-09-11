@@ -85,15 +85,30 @@ def test_opening_from_step1_creates_no_second_navigator(app):
         w.close()
 
 
-def test_step1_never_owns_the_popup(app):
+def test_no_step_owns_the_popup(app):
+    """It is Block01's, so it is neither step's.
+
+    This used to assert the popup's parent was `Step0Page` -- Step0 created
+    and held it, and every other step reached through Step0 to get at it.
+    That made Step0 a service locator for a window Step1, Step2 and Step3 use
+    as much, and it is what the ownership move removed. The popup is now
+    constructed and held by `Block01DisplayServices` and parented to the
+    Block01 window; Step0 furnishes its contents and reads it back, and holds
+    no handle that could tear it down.
+    """
     w = _window(app)
     try:
         w._show_tissue_navigator()
-        popup = w._step0._tissue_navigator_popup
-        # Ownership stays with the page that created it; Step1 holds no handle
-        # of its own that could tear it down twice.
-        assert popup.parent() is w._step0
+        popup = w._display.navigator()
+        assert popup is not None
+        assert popup.parent() is w
+        assert popup.parent() is not w._step0
+        # Both steps read the same one through the same owner.
+        assert w._step0._tissue_navigator_popup is popup
         assert not hasattr(w, "_tissue_navigator_popup")
+        # ...and neither of them can replace it.
+        with pytest.raises(AttributeError):
+            w._step0._tissue_navigator_popup = None
     finally:
         w.close()
 

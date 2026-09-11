@@ -265,11 +265,12 @@ class Step0Page(QWidget):
         # and kept: a redraw must not re-read the overview, and the answer must
         # not change between one redraw and the next.
         self._auto_window_cache = {}
-        self._tissue_navigator_popup = None  # v14.2a: lazily created on first toggle
         # Which ROI edits the shared navigator accepts.  "full" is Step0's own
-        # policy; Step1 borrows the same window with "delete_only".  Stored on
-        # the page (never per-popup) so it survives the popup being created,
+        # policy; Step1 sees the same window under "delete_only".  Held by
+        # Block01 (never per-popup) so it survives the popup being created,
         # hidden or reopened, and so a step change updates an already-open one.
+        # These two fields are this page's LAST APPLIED copy, for the widgets
+        # that enforce it; the policy itself lives in the display services.
         self._navigator_roi_policy = "full"
         self._navigator_patch_editable = True
         # Monotonic token for "which geometry are we talking about".  Bumped
@@ -283,10 +284,10 @@ class Step0Page(QWidget):
         # through -- see `geometry_persist_state`.
         self._geometry_persist_worker = None
         self._geometry_persist_state = "idle"
-        # The floating Intensity window (owned by the internal remap workbench,
-        # re-parented) and the widget it hosts. Both lazily created.
-        self._intensity_window = None
-        self._intensity_panel = None
+        # The floating Intensity window and the widget it hosts are NOT
+        # fields here: both belong to Block01's display services, and this
+        # page reads them through the properties below. A page that could
+        # assign them could also replace the one window every step shares.
         # Display mapping bookkeeping. `_display_mapping_for` may be asked for
         # a channel before the Channels box is built, so both live here.
         self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
@@ -1389,8 +1390,12 @@ class Step0Page(QWidget):
             self._on_stage_invalidated)
         self._cond_workbench.params_changed.connect(
             self._on_remap_params_changed)
+        # The inspector's own sliders wrote the workbench params directly, so
+        # the shared state has to be told what they now say. Adopting rather
+        # than announcing: the state decides whether anything moved, and its
+        # signal is the one fan-out.
         self._cond_workbench.params_changed.connect(
-            self._on_display_mapping_changed)
+            self._adopt_workbench_window)
         layout.addWidget(self._cond_workbench)
         return host
 
@@ -1690,7 +1695,7 @@ class Step0Page(QWidget):
         ch = self.current_channel
         set_marker = getattr(getattr(stack, "controller", None), "set_display_mapping", None)
         if ch and set_marker is not None:
-            lo, hi, gamma = self._display_mapping_for(ch)
+            lo, hi, gamma = self.display_window(ch)
             set_marker(lo, hi, gamma, channel=ch)
         overlay = getattr(stack, "overlay", None)
         set_nuc = getattr(overlay, "set_display_mapping", None)
@@ -1700,7 +1705,7 @@ class Step0Page(QWidget):
         # layer back on applies it then -- see `_on_full_nucleus_toggled`.
         if (set_nuc is not None and self.nucleus_channel
                 and self._nucleus_layer_visible()):
-            lo, hi, gamma = self._display_mapping_for(self.nucleus_channel)
+            lo, hi, gamma = self.display_window(self.nucleus_channel)
             set_nuc(lo, hi, gamma)
 
     @staticmethod
@@ -4098,46 +4103,78 @@ class Step0Page(QWidget):
                             "step0_channel_remap.json")
 
     # ── v14.2a Tissue Preview / ROI Navigator popup ──────────────────────────
-    #  Step0 owns one floating TissueNavigatorPopup. Creation/show/hide is
-    #  side-effect free (no files/configs/outputs). Without loaded data the popup
-    #  shows a missing-context hint instead of crashing.
+    #  Block01 owns the one floating TissueNavigatorPopup; this page supplies
+    #  its ROI/patch contents. Creation/show/hide is side-effect free (no
+    #  files/configs/outputs). Without loaded data the popup shows a
+    #  missing-context hint instead of crashing.
     def _ensure_tissue_navigator(self):
-        if self._tissue_navigator_popup is None:
-            self._tissue_navigator_popup = TissueNavigatorPopup(
-                loader=self.loader, nuc_ch=self.nucleus_channel, parent=self)
-            popup = self._tissue_navigator_popup
-            # restore-region-selector: host the analysis-region selector (ROI vs
-            # Full WSI) in the popup, alongside the ROI drawing it controls. The
-            # widget + handler are owned by Step0; reparenting preserves signals.
-            # restore-roi-patch-toolbar: host the ROI/patch drawing toolbar (mode
-            # switches + ROI/patch lists) in the popup, with the overview it draws
-            # on. _set_draw_mode targets the popup overview via _drawing_overview.
-            popup.set_roi_toolbar(self._roi_patch_toolbar)
-            # (navigator-layout) ROI/Patch lists below the overview (3/5 overview,
-            # 1/5 each list). Mode buttons stay above via set_roi_toolbar.
-            popup.set_roi_lists(self._roi_patch_lists)
-            # Feed the popup overview from the SINGLE model (no file IO).
-            self._feed_popup_from_model()
-            # Adopt popup-overview edits into the same model and mirror them back
-            # to the Step0 overview. The popup overview is a view/editor over the
-            # one model — never an independent ROI store.
-            popup.overview.patches_changed.connect(
-                lambda *_: self._reconcile_roi_edit(popup.overview))
-            popup.overview.rois_changed.connect(
-                lambda *_: self._reconcile_roi_edit(popup.overview))
-            # A click on the tissue -> the full image jumps there.
-            popup.overview.navigate_requested.connect(self._on_tissue_navigate)
-            # Clicking a patch in the navigator highlights it in the patch list
-            # (the navigator's overview is the one the user actually draws on).
-            popup.overview.patch_selection_changed.connect(
-                self._on_overview_patch_selected)
-            # A panel built after the page already has a channel starts on
-            # that channel rather than on a DAPI thumbnail nothing asked for.
-            self._update_tissue_preview()
-            # A popup created while Step1 is showing must open under Step1's
-            # policy, not under the default.
-            self._apply_navigator_edit_policy()
-        return self._tissue_navigator_popup
+        """The ONE Tissue Preview popup. Block01's, asked for, not made here.
+
+        This page used to construct, hold and tear the popup down, which made
+        every other step's access to a global window a call into a Step0
+        object that has to be alive and current. It now provides the popup's
+        CONTENT -- the ROI/patch toolbar, the lists, the wiring over the one
+        ROI model -- through `furnish_navigator`, and nothing else.
+        """
+        return self.display.ensure_navigator()
+
+    # ── the navigator content port ────────────────────────────────────────
+    def navigator_loader(self):
+        return self.loader
+
+    def navigator_nucleus_channel(self):
+        return self.nucleus_channel
+
+    def furnish_navigator(self, popup):
+        """Put this page's ROI/patch editor into the shared popup.
+
+        Called ONCE, by the services layer, straight after it constructs the
+        window. Everything here is about the single ROI model: the popup's
+        overview is a view/editor over it and never an independent store.
+        """
+        # restore-region-selector: host the analysis-region selector (ROI vs
+        # Full WSI) in the popup, alongside the ROI drawing it controls. The
+        # widget + handler come from this page; reparenting preserves signals.
+        # restore-roi-patch-toolbar: host the ROI/patch drawing toolbar (mode
+        # switches + ROI/patch lists) in the popup, with the overview it draws
+        # on. _set_draw_mode targets the popup overview via _drawing_overview.
+        popup.set_roi_toolbar(self._roi_patch_toolbar)
+        # (navigator-layout) ROI/Patch lists below the overview (3/5 overview,
+        # 1/5 each list). Mode buttons stay above via set_roi_toolbar.
+        popup.set_roi_lists(self._roi_patch_lists)
+        # Feed the popup overview from the SINGLE model (no file IO).
+        self._feed_popup_from_model()
+        # Adopt popup-overview edits into the same model and mirror them back
+        # to the Step0 overview.
+        popup.overview.patches_changed.connect(
+            lambda *_: self._reconcile_roi_edit(popup.overview))
+        popup.overview.rois_changed.connect(
+            lambda *_: self._reconcile_roi_edit(popup.overview))
+        # A click on the tissue -> the full image jumps there.
+        popup.overview.navigate_requested.connect(self._on_tissue_navigate)
+        # Clicking a patch in the navigator highlights it in the patch list
+        # (the navigator's overview is the one the user actually draws on).
+        popup.overview.patch_selection_changed.connect(
+            self._on_overview_patch_selected)
+        popup.bind_dataset(self._dataset_token(), loader=self.loader,
+                           nuc_ch=self.nucleus_channel)
+
+    # The two shared windows, read through Block01. Properties rather than
+    # fields because they are not this page's to hold: the services layer
+    # constructs them, keeps them across every step and closes them once.
+    # Every existing reader -- this page, its tests -- keeps working, and
+    # none of them can make, replace or destroy a window by writing here.
+    @property
+    def _tissue_navigator_popup(self):
+        return self.display.navigator()
+
+    @property
+    def _intensity_window(self):
+        return self.display.intensity_window()
+
+    @property
+    def _intensity_panel(self):
+        return self.display.intensity_panel()
 
     # ── v14.2b single-model ROI bridge ───────────────────────────────────────
     def _registered_roi_overviews(self):
@@ -4309,19 +4346,26 @@ class Step0Page(QWidget):
 
     # ── display mapping: draft in memory, committed on Save ──────────────────
     def set_intensity_editing_enabled(self, enabled):
-        """Freeze or release the Intensity controls.
+        """Freeze or release the Intensity controls, from this page's button.
 
-        Used while a Save is fusing with a frozen copy of the mapping: an edit
-        landing mid-run would leave the screen and the file it is writing out of
-        step for the length of the run.
+        A LOCK, held by Block01, for a job that is running with a frozen copy
+        of the mapping -- an edit landing mid-run would leave the screen and
+        the file it is writing out of step for the length of the run. Never a
+        step policy: Min/Max/Gamma are editable in Step0, Step1, Step2 and
+        Step3 alike.
         """
-        panel = getattr(self, "_intensity_panel", None)
-        if panel is not None:
-            panel.setEnabled(bool(enabled))
+        if enabled:
+            self.display.unlock_intensity()
+        else:
+            self.display.lock_intensity("a job is using a frozen copy of the "
+                                        "display mapping")
+        return True
+
+    def apply_intensity_policy(self, editable):
+        """The Intensity content port's half: this page's own entry follows."""
         btn = getattr(self, "_btn_intensity_window", None)
         if btn is not None:
-            btn.setEnabled(bool(enabled))
-        return True
+            btn.setEnabled(bool(editable))
 
     def display_mapping_draft(self):
         """The Min/Max/Gamma the user is looking at RIGHT NOW.
@@ -4892,21 +4936,22 @@ class Step0Page(QWidget):
         `roi_policy` is "full" (Step0: create and delete), "delete_only"
         (Step1: an ROI may be dropped, never drawn or reshaped) or "read_only"
         (every step downstream of Step1: the navigator is a map, not an
-        editor).  Applied to every overview that renders the one ROI model and
-        to the ROI-mode button, immediately, whether or not the popup is open —
-        a step change must not need a click or a reopen to take effect.
+        editor). The policy is HELD by Block01 -- it outlives this page and
+        the popup being opened or closed -- and applied here, to the widgets
+        that enforce it.
         """
-        if roi_policy is not None:
-            if roi_policy not in ("full", "delete_only", "read_only"):
-                raise ValueError(f"unknown roi_policy: {roi_policy!r}")
-            self._navigator_roi_policy = roi_policy
-        if patch_editable is not None:
-            self._navigator_patch_editable = bool(patch_editable)
-        self._apply_navigator_edit_policy()
+        self.display.set_navigator_policy(roi_policy=roi_policy,
+                                          patch_editable=patch_editable)
 
     def navigator_edit_policy(self):
-        return {"roi_policy": self._navigator_roi_policy,
-                "patch_editable": self._navigator_patch_editable}
+        return self.display.navigator_policy()
+
+    def apply_navigator_policy(self, *, roi_policy="full",
+                               patch_editable=True):
+        """The navigator content port's half: put the policy on the widgets."""
+        self._navigator_roi_policy = roi_policy
+        self._navigator_patch_editable = bool(patch_editable)
+        self._apply_navigator_edit_policy()
 
     def _apply_navigator_edit_policy(self):
         roi_create = (self._navigator_roi_policy == "full")
@@ -4938,12 +4983,20 @@ class Step0Page(QWidget):
                                     else None)
 
     def show_tissue_navigator(self, *, roi_policy=None, patch_editable=None):
-        popup = self._ensure_tissue_navigator()
-        if roi_policy is not None or patch_editable is not None:
-            self.set_navigator_edit_policy(roi_policy=roi_policy,
-                                           patch_editable=patch_editable)
-        self._bring_navigator_to_front(popup)
-        self._update_tissue_view_rect()
+        """This page's own button. Through Block01, like every other step's.
+
+        Kept as a method because the Step0 toolbar button and the page's own
+        auto-open call it; it decides nothing that another step could not also
+        ask for.
+        """
+        policy = {}
+        if roi_policy is not None:
+            policy["roi_policy"] = roi_policy
+        if patch_editable is not None:
+            policy["patch_editable"] = patch_editable
+        popup = self.display.show_navigator(**policy)
+        if popup is not None:
+            self._update_tissue_view_rect()
         return popup
 
     def _bring_navigator_to_front(self, popup):
@@ -4985,43 +5038,38 @@ class Step0Page(QWidget):
     #  it, so histogram, Min/Max/Gamma, Auto and Reset behave here exactly as
     #  they do in Background Correction, on the same params.
     def _ensure_intensity_window(self):
-        win = getattr(self, "_intensity_window", None)
-        if win is not None:
-            return win
+        """The ONE Intensity window. Block01's, asked for, not made here."""
+        return self.display.ensure_intensity()
+
+    # ── the Intensity content port ────────────────────────────────────────
+    def intensity_panel_widget(self):
+        """The Channel Remap inspector, detached, for the shared window.
+
+        The WINDOW is Block01's; this panel is the workbench's own inspector
+        and the workbench keeps driving it, so histogram, Min/Max/Gamma, Auto
+        and Reset behave there exactly as they do in Background Correction, on
+        the same params.
+        """
         wb = getattr(self, "_cond_workbench", None)
         if wb is None:
             return None
-        # Feed the workbench the current dataset/patch first: opening this
+        # Feed the workbench the current dataset/patch first: opening the
         # window engages the internal remap machinery directly; there is no
         # separate tab (see `_engage_conditioning_workbench`).
         self._engage_conditioning_workbench()
         panel = wb.detach_inspector()
-        if panel is None:
-            return None
-        win = QWidget(
-            self,
-            Qt.Window
-            | Qt.WindowMinimizeButtonHint
-            | Qt.WindowMaximizeButtonHint
-            | Qt.WindowCloseButtonHint
-            | Qt.WindowStaysOnTopHint,
-        )
-        win.setWindowTitle("Intensity")
-        win.setStyleSheet("background:#1c1c1c;")
-        win.setMinimumWidth(260)
-        win.resize(320, 460)
-        lay = QVBoxLayout(win)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.addWidget(panel)
-        self._intensity_window = win
-        self._intensity_panel = panel
-        self._sync_intensity_to_channel()
-        return win
+        if panel is not None:
+            self._sync_intensity_to_channel()
+        return panel
+
+    def focus_intensity_channel(self, channel, color=None):
+        """The content port's half of "point Intensity at this channel"."""
+        return self.focus_intensity_on(channel, color=color)
 
     def intensity_panel(self):
         """The workbench inspector widget hosted by the floating window, or
         None while the window has never been opened."""
-        return getattr(self, "_intensity_panel", None)
+        return self.display.intensity_panel()
 
     @staticmethod
     def _bring_to_front(win):
@@ -5049,12 +5097,8 @@ class Step0Page(QWidget):
         win.activateWindow()
 
     def show_intensity_window(self):
-        win = self._ensure_intensity_window()
-        if win is None:
-            return None
-        self._sync_intensity_to_channel()
-        self._bring_to_front(win)
-        return win
+        """This page's own button. Through Block01, like every other step's."""
+        return self.display.show_intensity(self.current_channel or "")
 
     def adopt_channel_color(self, channel, color):
         """Take another step's word for a channel's colour.
@@ -6885,7 +6929,7 @@ class Step0Page(QWidget):
         # controllers are about to read that very level on workers; the seed
         # arrives through `_on_channel_overview_ready` instead.
         if self._display_mapping_is_real(channel):
-            lo, hi, gamma = self._display_mapping_for(channel)
+            lo, hi, gamma = self.display_window(channel)
             strip.set_display_mapping(lo, hi, gamma, channel=channel)
         strip.set_tint(self._channel_color(channel), channel=channel)
 
@@ -6939,7 +6983,7 @@ class Step0Page(QWidget):
         if not channel:
             return
         strip.set_tint(self._channel_color(channel), channel=channel)
-        lo, hi, gamma = self._display_mapping_for(channel)
+        lo, hi, gamma = self.display_window(channel)
         if self._display_mapping_is_real(channel):
             strip.set_display_mapping(lo, hi, gamma, channel=channel)
         else:
@@ -6951,7 +6995,7 @@ class Step0Page(QWidget):
         strip.set_marker_visible(self._btn_show_marker.isChecked())
         nucleus = self.nucleus_channel
         if nucleus:
-            n_lo, n_hi, n_gamma = self._display_mapping_for(nucleus,
+            n_lo, n_hi, n_gamma = self.display_window(nucleus,
                                                            nucleus=True)
             if self._display_mapping_is_real(nucleus):
                 strip.set_nucleus_display_mapping(n_lo, n_hi, n_gamma)
@@ -7274,7 +7318,7 @@ class Step0Page(QWidget):
         compare and full-image paths still ask for directly.
         """
         return tissue_compose.lowres_tinted(
-            arr, self._display_mapping_for(ch, nucleus=nucleus),
+            arr, self.display_window(ch, nucleus=nucleus),
             self._channel_color(ch))
 
     def _tissue_preview_rgb(self):
@@ -7483,7 +7527,7 @@ class Step0Page(QWidget):
             "nucleus_layer": nucleus_layer,
             "arrays": arrays,
             "mappings": {
-                name: self._display_mapping_for(name, nucleus=(name == nuc))
+                name: self.display_window(name, nucleus=(name == nuc))
                 for name in arrays},
             "colors": {name: self._channel_color(name) for name in arrays},
             "loading": tuple(loading),
@@ -7500,10 +7544,15 @@ class Step0Page(QWidget):
         """
         display = self.display
         display.state.set_default_source(self._default_channel_color_hex)
-        display.state.set_mapping_source(
-            lambda channel, nucleus=False: self._display_mapping_for(
-                channel, nucleus=nucleus))
-        display.set_window_host(self)
+        # The display WINDOWS live in the shared state; this page supplies the
+        # two things a store cannot: a first window computed from pixels, and
+        # durability into the remap params the handoff hashes. It is not asked
+        # what the current answer IS -- that used to be a lambda closed over
+        # `_display_mapping_for`, which made every step's Min/Max/Gamma a call
+        # into a live, current Step0 page.
+        display.state.set_window_ports(seed=self, persist=self)
+        display.set_navigator_content(self)
+        display.set_intensity_content(self)
         display.set_lowres_source(self)
         display.coordinator.register_context(_CTX_STEP0, self)
         display.coordinator.attach_navigator(self._registered_roi_overviews)
@@ -7512,6 +7561,10 @@ class Step0Page(QWidget):
         # the shared state has already decided, so re-emitting from here
         # would be a second opinion, not a confirmation.
         display.state.color_changed.connect(self._on_shared_color_changed)
+        # ...and the same for the display windows: a Min/Max/Gamma settled
+        # anywhere -- this page, the Intensity window, a step downstream --
+        # redraws this page's compare panels and full image once.
+        display.state.mapping_changed.connect(self._on_display_mapping_changed)
         if self._owns_display_services:
             # A page standing on its own IS its Block01: nothing else will
             # make it the active context, and a Tissue Preview that renders
@@ -7554,6 +7607,36 @@ class Step0Page(QWidget):
         if params is None or ch not in params:
             return None
         return params[ch]
+
+    def seed_display_window(self, channel, nucleus=False):
+        """The display-window SEED port: a first window, from pixels.
+
+        Block01's shared state owns the answer; this is only consulted when
+        it has none for a channel, and its result is then stored there. The
+        computation is a QuPath-style percentile over the whole slide's
+        tissue at the overview level, and it belongs here because the pixels
+        and the remap params do.
+        """
+        return self._display_mapping_for(channel, nucleus=nucleus)
+
+    def write_display_window(self, channel, lo, hi, gamma, nucleus=False):
+        """The display-window PERSISTENCE port: the shared state moved.
+
+        The remap params ARE what the Step0 handoff hashes, so they follow
+        the shared state rather than competing with it. Silent: the fan-out
+        belongs to the state's own signal, and re-announcing from here would
+        be the second answer this whole arrangement exists to remove.
+        """
+        self._write_display_window(channel, lo, hi, gamma, nucleus=nucleus)
+
+    def display_window(self, ch, nucleus=False):
+        """`(min, max, gamma)` for `ch` -- Block01's answer, seeded if new.
+
+        THE read, for this page and for everything it hands numbers to. Goes
+        to the shared state, so Step0, Step1, Step2, Step3, the Intensity
+        window and both previews cannot be looking at different numbers.
+        """
+        return self.display.state.mapping_or_seed(ch, nucleus=nucleus)
 
     def _display_mapping_for(self, ch, payload=None, nucleus=False):
         """`(min, max, gamma)` for `ch` -- the Channel Remap params.
@@ -7707,14 +7790,35 @@ class Step0Page(QWidget):
     def set_display_mapping(self, ch, lo, hi, gamma=None):
         """Public: set a channel's display mapping. Every view follows.
 
-        Writes the workbench's remap params -- the single source of truth --
-        and emits its `params_changed`, which is the one signal that redraws
-        the compare panels and pushes the numbers to the full image.
+        The WRITE goes to Block01's shared display state, which is what every
+        step reads; the state then tells the persistence port below, so the
+        remap params the handoff hashes follow. Which means a Min/Max moved
+        here and a Min/Max moved from Step2 are the same act and reach the
+        same places -- rather than one of them writing a store the other does
+        not read.
         """
         if not ch:
             return
-        cur = self._display_mapping_for(ch)
+        cur = self.display_window(ch)
         gamma = cur[2] if gamma is None else gamma
+        if not self.display.state.set_mapping(ch, lo, hi, gamma,
+                                              origin="step0"):
+            # The numbers did not move. A view rebuilt since the last write
+            # still needs them, so the fan-out runs; the state stays quiet.
+            self._on_display_mapping_changed(ch)
+
+    def _write_display_window(self, ch, lo, hi, gamma, nucleus=False):
+        """The persistence half: put the shared state's numbers where the
+        handoff can hash them.
+
+        The workbench's remap params when the workbench knows the channel,
+        this page's own fallback entry otherwise -- which is every page until
+        the Intensity window has been opened once. No signal is emitted from
+        here: the shared state has already announced the change, and a second
+        announcement is a second answer.
+        """
+        if not ch:
+            return
         self._set_display_silently(ch, lo, hi, gamma)     # model mirror
         wb = getattr(self, "_cond_workbench", None)
         if self._workbench_params(ch) is not None:
@@ -7727,20 +7831,38 @@ class Step0Page(QWidget):
             if wb.active_channel() == ch:
                 wb._load_params_into_controls(ch)
                 wb._refresh_preview()
-            wb.params_changed.emit(ch)       # -> _on_display_mapping_changed
             return
         self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
-        self._on_display_mapping_changed(ch)
+
+    def _adopt_workbench_window(self, cid):
+        """The remap inspector's controls moved: the shared state takes them.
+
+        The one direction a store cannot see on its own. `persist=False`
+        because the params ARE the persistence and they already hold these
+        numbers -- writing them back would be an echo.
+        """
+        if not cid:
+            return
+        params = self._workbench_params(cid)
+        if params is None:
+            self._on_display_mapping_changed(cid)
+            return
+        changed = self.display.state.set_mapping(
+            cid, float(params.get("min", 0.0)), float(params.get("max", 1.0)),
+            float(params.get("gamma", 1.0)), origin="workbench", persist=False)
+        if not changed:
+            self._on_display_mapping_changed(cid)
 
     def _on_display_mapping_changed(self, cid):
         """A channel's mapping changed: the compare panels redraw (a levels
-        and table swap), the full image and its overlay get the numbers."""
+        and table swap), the full image and its overlay get the numbers.
+
+        This page's fan-out over its OWN views. Reached from the shared
+        state's `mapping_changed`, so a window moved from any step redraws
+        Step0's compare panels and full image exactly once.
+        """
         _sp = perf_trace.span("step0.mapping_fanout", channel=cid)
         with _sp:
-            # Block01's display state publishes the numbers; saying so here
-            # is what lets a step that is not this one notice that its own
-            # frame is stale without listening to this page.
-            self.display.state.note_mapping_changed(cid)
             # Announced first, so a listener that caches remapped pixels drops
             # the stale ones before anything else redraws from them.
             with perf_trace.span("step0.mapping_emit", channel=cid):
@@ -7763,13 +7885,13 @@ class Step0Page(QWidget):
                     set_marker = getattr(stack.controller,
                                          "set_display_mapping", None)
                     if set_marker is not None:
-                        lo, hi, gamma = self._display_mapping_for(cid)
+                        lo, hi, gamma = self.display_window(cid)
                         set_marker(lo, hi, gamma, channel=cid)
                 if cid == self.nucleus_channel:
                     set_nuc = getattr(getattr(stack, "overlay", None),
                                       "set_display_mapping", None)
                     if set_nuc is not None:
-                        lo, hi, gamma = self._display_mapping_for(
+                        lo, hi, gamma = self.display_window(
                             cid, nucleus=True)
                         set_nuc(lo, hi, gamma)
 

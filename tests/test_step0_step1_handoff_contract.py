@@ -329,6 +329,32 @@ def test_real_step0_writer_publishes_authoritative_manifest(app, tmp_path, monke
         page.deleteLater()
 
 
+def test_loading_a_handoff_hands_step0_the_geometry_baseline(ready_window, run,
+                                                             app):
+    """The real load entry, not a page that just saved.
+
+    Step0's revision counter is per PAGE and starts at zero, while the
+    revisions on disk belong to the DIRECTORY. A page bound to an existing
+    project must take the baseline from the manifest it was bound to, or its
+    first patch edit is numbered over a file that manifest is pointing at.
+    """
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page()
+    ready_window._step0 = page
+    try:
+        assert page._geometry_revision == 0
+        published = dict(run.manifest)
+        published["geometry_revision"] = 7
+        write_json(run.manifest_path, published)
+
+        assert ready_window._load_step0_roi_result(auto=True) is True
+        assert page._geometry_revision == 7
+    finally:
+        del ready_window._step0
+        page.deleteLater()
+
+
 def test_manifest_is_authoritative_over_conflicting_payload(ready_window, run):
     # An explicit v2 payload cannot be silently downgraded by a stale v1
     # manifest (the authority is the committed protocol, not legacy fallback).

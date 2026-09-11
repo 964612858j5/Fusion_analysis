@@ -504,12 +504,7 @@ def commit_geometry_only(task, *, superseded=None):
         return dict(info, outcome="no_published_handoff")
     step0_dir, manifest_path, zarr_path, _config, manifest = published
     info["step0_manifest_path"] = os.path.abspath(manifest_path)
-    # The baseline comes from DISK. A fresh page counts from zero, so after a
-    # restart its "revision 1" is a revision the published manifest already
-    # used -- and the file of that name is the one it is pointing at.
-    disk_revision = published_revision(step0_dir, manifest)
-    revision = max(revision, disk_revision + 1)
-    info["revision"] = info["geometry_revision"] = revision
+
 
     rois = task["rois"]
     patches = task["patches"]
@@ -532,6 +527,15 @@ def commit_geometry_only(task, *, superseded=None):
         return dict(info, outcome="roi_changed")
     if not os.path.exists(zarr_path):
         return dict(info, outcome="corrected_zarr_missing")
+
+    # Only now, with a publication actually needed, is a number taken. The
+    # baseline comes from DISK: a fresh page counts from zero, so after a
+    # restart its "revision 1" is one the published manifest already used --
+    # and the file of that name is the one it is pointing at. Numbering an
+    # outcome that publishes NOTHING would hand the page a revision no file
+    # on disk ever describes.
+    revision = max(revision, published_revision(step0_dir, manifest) + 1)
+    info["revision"] = info["geometry_revision"] = revision
 
     def _check(phase):
         if superseded is not None and superseded(phase):

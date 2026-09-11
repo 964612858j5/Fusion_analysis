@@ -198,7 +198,15 @@ class GeometryPersistWorker(QObject):
                 self._current = None
                 stopping = self._stopping
                 name = outcome.get("outcome")
-                revision = int(task.get("revision") or 0)
+                # The revision the WRITE used, which is not necessarily the
+                # one the task asked for: a commit numbers above what is on
+                # disk, so after a restart a task submitted as revision 1 is
+                # published as 2. Booking the task's number here would leave
+                # the page asking for 2 while this worker confirmed 1, and
+                # every consumer refused until the next edit happened to
+                # catch up.
+                revision = int(outcome.get("revision")
+                               or task.get("revision") or 0)
                 if name == "committed":
                     self._published_rev = max(self._published_rev, revision)
                     self._stats["published"] += 1

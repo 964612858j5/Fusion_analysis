@@ -1485,6 +1485,16 @@ class MainWindow(QMainWindow):
         self._set_gui_work_dir(gui_work_dir)
         if hasattr(self._step2, "set_roi_context"):
             self._step2.set_roi_context(roi_id=roi_id, roi_dir=roi_dir, step2_dir=step2_dir)
+        # The geometry baseline this manifest publishes. Step0's counter is
+        # per PAGE and starts at zero, so a page that comes up on an existing
+        # project would otherwise number its first patch edit over a file this
+        # manifest is pointing at. (The writer takes the baseline from disk
+        # too; this keeps the page's own number honest from the moment it is
+        # bound to a handoff.)
+        adopt = getattr(self.__dict__.get("_step0"),
+                        "adopt_published_geometry_revision", None)
+        if adopt is not None:
+            adopt(manifest)
         self.step0_output.update({
             "output_dir": gui_work_dir,
             "project_output_dir": project_dir,

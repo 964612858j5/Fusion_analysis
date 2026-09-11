@@ -865,6 +865,79 @@ def test_a_manifest_without_a_revision_still_cannot_be_written_over(
         page_b.deleteLater()
 
 
+def test_a_restarted_pages_first_edit_is_immediately_consumable(
+        app, tmp_path):
+    """The bookkeeping, checked after ONE edit and nothing else.
+
+    A restarted page asks for revision 1, the writer numbers it 2 because the
+    disk is at 1, and the page adopts 2. If the worker books the revision the
+    TASK asked for, it has confirmed 1 while the page is asking about 2, and
+    every consumer is refused -- silently, until some later edit happens to
+    catch the numbers up. So: one edit, the signal delivered, and then all
+    four answers at once.
+    """
+    page_a, step0_dir = _page(app, tmp_path)
+    _release_patch(page_a, (16, 32, 16, 32))
+    assert _settle(page_a) == "published"
+    page_a.stop_background_jobs()
+    page_a.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+    page_b, _dir = _page(app, tmp_path, publish=False,
+                         patches=((0, 16, 0, 16), (16, 32, 16, 32)))
+    try:
+        assert page_b._geometry_revision == 0
+        _release_patch(page_b, (32, 48, 0, 16))
+        assert _settle(page_b) == "published"
+
+        assert page_b._geometry_revision == 2
+        worker = page_b._geometry_persist_worker
+        assert worker.published_revision() == 2
+        assert worker.consumable(int(page_b._dataset_gen), 2) is True
+        assert page_b.persisted_geometry_revision() == 2
+        assert page_b.geometry_ready_for_consumers() is True
+        assert _manifest(step0_dir)["geometry_revision"] == 2
+    finally:
+        page_b.stop_background_jobs()
+        page_b.deleteLater()
+
+
+def test_nothing_to_publish_does_not_invent_a_revision(app, tmp_path):
+    """An outcome that writes nothing may not report a number no file on disk
+    describes.
+
+    Visible only after a restart, which is the case that matters: the page
+    asks for revision 1, the disk is already at 1, and an unchanged edit must
+    come back as revision 1 -- the one that IS published -- not as the 2 it
+    would have been given had it needed publishing.
+    """
+    page_a, step0_dir = _page(app, tmp_path)
+    _release_patch(page_a, (16, 32, 16, 32))
+    assert _settle(page_a) == "published"
+    assert _manifest(step0_dir)["geometry_revision"] == 1
+    page_a.stop_background_jobs()
+    page_a.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+    page_b, _dir = _page(app, tmp_path, publish=False,
+                         patches=((0, 16, 0, 16), (16, 32, 16, 32)))
+    skipped = []
+    try:
+        page_b._geometry_persist().skipped.connect(skipped.append)
+        page_b.overview.patches_changed.emit(page_b.overview._patch_coords())
+        assert _settle(page_b) == "staged"
+
+        assert [o["outcome"] for o in skipped] == ["unchanged"], skipped
+        assert skipped[0]["revision"] == 1, (
+            "an outcome that published nothing reported a revision that is "
+            "not on disk")
+        assert _manifest(step0_dir)["geometry_revision"] == 1
+        assert page_b.geometry_ready_for_consumers() is True
+    finally:
+        page_b.stop_background_jobs()
+        page_b.deleteLater()
+
+
 def test_a_restarted_page_keeps_publishing_after_its_first_edit(
         app, tmp_path):
     """The page has to ADOPT the number the worker published.

@@ -194,6 +194,21 @@ def test_step1_may_delete_an_roi(app, tmp_path):
         w.close()
 
 
+def _settle(w, timeout=20.0):
+    """Publishing is a background write now: let it finish before asking the
+    disk what it says."""
+    import time
+    deadline = time.monotonic() + timeout
+    worker = getattr(w._step0, "_geometry_persist_worker", None)
+    while time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        if worker is None or not worker.is_busy():
+            break
+        time.sleep(0.005)
+    QtWidgets.QApplication.processEvents()
+    return w._step0.geometry_persist_state()
+
+
 def test_step1_may_add_move_and_delete_patches(app, tmp_path):
     w, step0_dir = _window(app, tmp_path)
     try:
@@ -204,14 +219,17 @@ def test_step1_may_add_move_and_delete_patches(app, tmp_path):
         ov._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)},
                        {"roi_idx": 0, "coords": (16, 32, 16, 32)}]
         ov.patches_changed.emit(ov._patch_coords())
+        assert _settle(w) == "published"
         assert [p["bbox_fullres"] for p in _published(step0_dir, "patch_config.json")] \
             == [[0, 16, 0, 16], [16, 32, 16, 32]]
 
         assert ov._commit_patch_geometry(1, (18, 30, 18, 30)) is True
+        assert _settle(w) == "published"
         assert [p["bbox_fullres"] for p in _published(step0_dir, "patch_config.json")] \
             == [[0, 16, 0, 16], [18, 30, 18, 30]]
 
         ov._remove_patch(1)
+        assert _settle(w) == "published"
         assert [p["bbox_fullres"] for p in _published(step0_dir, "patch_config.json")] \
             == [[0, 16, 0, 16]]
         assert w.step0_done is True          # patch edits never lock Step1

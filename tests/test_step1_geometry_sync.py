@@ -5,6 +5,10 @@ single ROI model, be published by Step0's writer, and then be adopted by Step1 â
 dropping every preview, fusion and segmentation result that described the old
 rectangle. The P1/P2/P3 buttons stay pure preview selectors.
 
+Publishing is a BACKGROUND write now -- the gesture that ends an edit hands a
+snapshot over and returns -- so "reaches Step0 disk" is asserted after the
+write has been let finish, not in the same turn of the event loop.
+
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
 
@@ -103,6 +107,21 @@ def _window(app, tmp_path):
     return w, str(step0_dir)
 
 
+def _settle(w, timeout=20.0):
+    """Let the background geometry write finish and be announced."""
+    import time
+    from PyQt5 import QtWidgets as _Qt
+    deadline = time.monotonic() + timeout
+    worker = getattr(w._step0, "_geometry_persist_worker", None)
+    while time.monotonic() < deadline:
+        _Qt.QApplication.processEvents()
+        if worker is None or not worker.is_busy():
+            break
+        time.sleep(0.005)
+    _Qt.QApplication.processEvents()
+    return w._step0.geometry_persist_state()
+
+
 def _published_patches(step0_dir):
     with open(os.path.join(step0_dir, "patch_config.json"), "r", encoding="utf-8") as f:
         return [p["bbox_fullres"] for p in json.load(f)]
@@ -117,6 +136,7 @@ def test_an_edit_in_the_shared_navigator_reaches_step0_disk_and_step1(app, tmp_p
         popup.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)},
                                    {"roi_idx": 0, "coords": (16, 32, 16, 32)}]
         popup.overview.patches_changed.emit(popup.overview._patch_coords())
+        assert _settle(w) == "published"
 
         # one model -> the Step0 page overview, the published files and Step1
         assert [p["coords"] for p in w._step0.overview._patches] == [
@@ -136,6 +156,7 @@ def test_an_edit_on_the_step0_page_reaches_the_navigator_and_step1(app, tmp_path
 
         w._step0.overview._patches = [{"roi_idx": 0, "coords": (4, 20, 4, 20)}]
         w._step0.overview.patches_changed.emit(w._step0.overview._patch_coords())
+        assert _settle(w) == "published"
 
         assert [p["coords"] for p in popup.overview._patches] == [(4, 20, 4, 20)]
         assert _published_patches(step0_dir) == [[4, 20, 4, 20]]
@@ -155,6 +176,7 @@ def test_a_moved_patch_drops_the_results_that_described_the_old_rectangle(app, t
 
         w._step0.overview._patches = [{"roi_idx": 0, "coords": (8, 24, 8, 24)}]
         w._step0.overview.patches_changed.emit(w._step0.overview._patch_coords())
+        assert _settle(w) == "published"
 
         assert w._all_patches == [(8, 24, 8, 24)]
         assert 0 not in w._patch_channel_cache
@@ -185,6 +207,7 @@ def test_the_patch_buttons_only_switch_the_preview(app, tmp_path):
         w._step0.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)},
                                       {"roi_idx": 0, "coords": (16, 32, 16, 32)}]
         w._step0.overview.patches_changed.emit(w._step0.overview._patch_coords())
+        assert _settle(w) == "published"
         published_before = _published_patches(step0_dir)
         geometry_before = list(w._all_patches)
 

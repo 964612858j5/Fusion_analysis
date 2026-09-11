@@ -300,13 +300,16 @@ def test_hotswap_only_reprocessed_channels(app, tmp_path):
     p.loader = _L()
     p.patches = [(0, 20, 0, 20)]
     p.current_patch_idx = 0
-    # seed cache with stale values for both channels
-    p._preload_cache = {0: {"CD68": np.zeros((20, 20), np.float32),
-                            "Ki67": np.zeros((20, 20), np.float32)}}
+    # seed the cache with stale values for both channels. Keyed by BBOX
+    # now, not by patch index -- see `PreloadScheduler`.
+    bbox = p._patch_bbox(0)
+    sched = p._preload_scheduler()
+    sched.put(bbox, "CD68", np.zeros((20, 20), np.float32))
+    sched.put(bbox, "Ki67", np.zeros((20, 20), np.float32))
     # hot-swap restricted to CD68 only
     p._hotswap_corrected({"CD68": "tophat", "Ki67": "tophat"}, only={"CD68"})
-    assert float(p._preload_cache[0]["CD68"].mean()) == 7.0   # reprocessed -> updated
-    assert float(p._preload_cache[0]["Ki67"].mean()) == 0.0   # skipped -> untouched
+    assert float(sched.resident(bbox, "CD68").mean()) == 7.0  # reprocessed
+    assert float(sched.resident(bbox, "Ki67").mean()) == 0.0  # untouched
 
 
 def test_step0_all_skipped_emits_handoff_without_worker(app, tmp_path, monkeypatch):
@@ -763,7 +766,9 @@ def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):
     p.patches = [(0, 20, 0, 20)]
     p.current_patch_idx = 0
     # cache holds the OLD cucim pixels
-    p._preload_cache = {0: {"CD11b": np.zeros((20, 20), np.float32)}}
+    bbox = p._patch_bbox(0)
+    sched = p._preload_scheduler()
+    sched.put(bbox, "CD11b", np.zeros((20, 20), np.float32))
     p._incremental_processed = {"CD11b"}
     p._wsi_dialog = None
     # finish: merged decisions say tophat now
@@ -771,4 +776,4 @@ def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):
     # downstream corrected-zarr store points at the updated (tophat) decisions
     assert p.loader.store == ("/x/corrected_channels.zarr", {"CD11b": "tophat"})
     # in-memory cache hot-swapped to the new (tophat) pixels
-    assert float(p._preload_cache[0]["CD11b"].mean()) == 9.0
+    assert float(sched.resident(bbox, "CD11b").mean()) == 9.0

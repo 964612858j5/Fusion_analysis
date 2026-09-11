@@ -7,6 +7,12 @@ the geometry in memory ahead of what is published. In both cases the user's
 edit is kept as Step0's staged geometry and every Step1 fact derived from the
 old geometry is dropped, rather than the other way round.
 
+Persistence is a BACKGROUND write now (the gesture that ends an edit may not
+pay for a manifest and an fsync), so an edit's consequence arrives through a
+queued signal: every test here emits the edit and then settles. What each
+outcome means for Step1 is unchanged -- that is the point of settling rather
+than of asserting less.
+
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
 
@@ -105,6 +111,20 @@ def _window(app, tmp_path, publish=True):
     return w, str(step0_dir)
 
 
+def _settle(w, timeout=20.0):
+    """Let the geometry write finish and its outcome reach this thread."""
+    import time
+    deadline = time.monotonic() + timeout
+    worker = getattr(w._step0, "_geometry_persist_worker", None)
+    while time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        if worker is None or not worker.is_busy():
+            break
+        time.sleep(0.005)
+    QtWidgets.QApplication.processEvents()
+    return w._step0.geometry_persist_state()
+
+
 def _published(step0_dir, name):
     with open(os.path.join(step0_dir, name), "r", encoding="utf-8") as f:
         return json.load(f)
@@ -123,6 +143,7 @@ def test_a_new_roi_in_step0_locks_step1_and_keeps_the_new_geometry(app, tmp_path
     try:
         ov = w._step0._tissue_navigator_popup.overview
         _draw_roi(ov)
+        assert _settle(w) == "failed"
 
         assert len(w._step0._roi_model.rois) == 2      # the edit is kept
         assert w.step0_done is False
@@ -143,6 +164,7 @@ def test_deleting_an_roi_in_step1_returns_to_step0_and_locks_it(app, tmp_path):
         w._set_step_active(1)
 
         ov._delete_last_roi()
+        assert _settle(w) == "failed"
 
         assert w._step0._roi_model.rois == []          # the deletion is kept
         assert w._stack.currentIndex() == 0            # sent back to Step0
@@ -164,6 +186,7 @@ def test_drawing_before_the_first_save_invalidates_nothing(app, tmp_path):
         _draw_roi(ov)
         ov._patches.append({"roi_idx": 0, "coords": (40, 56, 40, 56)})
         ov.patches_changed.emit(ov._patch_coords())
+        assert _settle(w) == "staged"
 
         assert seen == []
         assert len(w._step0._roi_model.rois) == 2
@@ -182,6 +205,7 @@ def test_a_successful_patch_commit_keeps_step1_ready(app, tmp_path):
 
         ov._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         ov.patches_changed.emit(ov._patch_coords())
+        assert _settle(w) == "published"
 
         assert seen == []
         assert w.step0_done is True
@@ -200,13 +224,15 @@ def test_a_failed_patch_write_stages_the_edit_and_locks_step1(app, tmp_path, mon
         before_manifest = _published(step0_dir, "step0_roi_result.json")
         before_mtime = os.stat(manifest_path).st_mtime_ns
 
-        def _fail(self, *_a, **_k):
+        def _fail(*_a, **_k):
             raise RuntimeError("disk is full")
 
-        monkeypatch.setattr(type(w._step0), "_write_step0_handoff", _fail)
+        from block01.core import step0_handoff
+        monkeypatch.setattr(step0_handoff, "write_handoff", _fail)
         ov = w._step0._tissue_navigator_popup.overview
         ov._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         ov.patches_changed.emit(ov._patch_coords())
+        assert _settle(w) == "failed"
 
         # staged in memory, absent from disk
         assert len(w._step0._roi_model.patches) == 2
@@ -229,6 +255,7 @@ def test_a_missing_corrected_zarr_locks_step1_too(app, tmp_path):
         ov = w._step0._tissue_navigator_popup.overview
         ov._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         ov.patches_changed.emit(ov._patch_coords())
+        assert _settle(w) == "failed"
 
         assert len(w._step0._roi_model.patches) == 2
         assert w.step0_done is False
@@ -245,6 +272,7 @@ def test_an_unchanged_geometry_or_a_patch_selection_invalidates_nothing(app, tmp
         ov = w._step0._tissue_navigator_popup.overview
 
         ov.patches_changed.emit(ov._patch_coords())     # same geometry
+        assert _settle(w) == "staged"
         w._select_preview_patch(0)
         w._show_tissue_navigator()
         w._step0._tissue_navigator_popup.hide()
@@ -288,6 +316,7 @@ def test_an_invalidation_returns_from_any_downstream_step(app, tmp_path, step):
         w._stack.setCurrentIndex(step)
         w._current_step = step
         _draw_roi(ov)
+        assert _settle(w) == "failed"
 
         assert w._stack.currentWidget() is w._step0
         assert w.step0_done is False

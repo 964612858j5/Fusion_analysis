@@ -222,7 +222,8 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     _display_a_payload(page)
     page._preview_cache[("CD20", 0)] = {"original_metrics": {"snr": 1,
                                                              "bg_cv": 1}}
-    page._preload_cache = {0: {"CD3": np.zeros((4, 4), np.float32)}}
+    page._preload_scheduler().put((0, 4, 0, 4), "CD3",
+                                 np.zeros((4, 4), np.float32))
     # Dataset A's batch selection: CD3 ticked, cucim. B has a CD3 too.
     page._channel_methods = {"CD3": "cucim"}
     page._channel_colors = {"CD3": (1.0, 0.0, 0.0)}
@@ -241,7 +242,9 @@ def test_a_committed_switch_clears_pixels_metrics_and_caches(app, tmp_path,
     assert "—" in page._metrics_cucim.text()
     assert page._preview_status.text().startswith("Select a channel")
     assert page._preview_cache == {}
-    assert page._preload_cache == {}
+    # The patch reads belonged to dataset A: dropped by identity, not waited
+    # for (a read inside the loader cannot be interrupted).
+    assert page._preload.resident((0, 4, 0, 4), "CD3") is None
     assert page._computed_channels == set()
     assert page._process_completed is False
     # Channel names repeat across datasets: B must not inherit A's ticks.
@@ -295,9 +298,14 @@ _LATE_CALLS = [
     ("progress", "_on_batch_progress", (1, 2, "stale progress")),
     ("error_signal", "_on_batch_error", ("__global__", 0, "stale error")),
     ("canceled", "_on_batch_canceled", ()),
-    ("preload_channel", "_on_preload_channel",
-     (0, 0, "CD3", np.ones((4, 4), np.float32))),
-    ("preload_finished", "_on_preload_finished", (0,)),
+    # A finished preload READ is no longer a page slot per channel: the
+    # scheduler owns the array and the page is only told one arrived. The
+    # stale-generation case is covered by `preload_loaded` here and, on the
+    # scheduler's own side, by
+    # `test_step0_preload_scheduler.py::test_a_read_in_flight_when_the_dataset_changes_is_not_kept`.
+    ("preload_loaded", "_on_preload_loaded",
+     ({"dataset_gen": 0, "bbox": (0, 4, 0, 4), "channel": "CD3",
+       "array": np.ones((4, 4), np.float32)},)),
 ]
 
 
@@ -318,7 +326,7 @@ def test_a_late_signal_from_the_old_dataset_cannot_write_page_state(
     late(*args)
 
     assert page._preview_cache == {}
-    assert page._preload_cache == {}
+    assert page._preload is None or page._preload.stats()["resident"] == 0
     assert page._last_payload is None
     assert page._process_completed is False
     assert page._computed_channels == set()
@@ -429,23 +437,23 @@ def test_every_batch_worker_signal_is_connected_through_a_generation_slot(
 def test_live_workers_are_stopped_waited_and_their_handles_released(
         app, tmp_path, monkeypatch):
     page = _fresh_page(tmp_path, monkeypatch)
-    preload = _BlockingWorker(page).start_and_wait_until_running()
     batch = _BlockingWorker(page).start_and_wait_until_running()
     ondemand = _BlockingWorker(page).start_and_wait_until_running()
     preview = _BlockingWorker(page).start_and_wait_until_running()
-    page._preload_worker = preload
     page._batch_worker = batch
     page._ondemand_workers = [ondemand]
     page._preview_worker = preview
 
     _switch_to_b(page, tmp_path, monkeypatch)
 
-    assert preload.stop_calls == ["cancel"]      # preload's spelling
     for w in (batch, ondemand, preview):
         assert w.stop_calls == ["stop"]
-    for w in (preload, batch, ondemand, preview):
+    for w in (batch, ondemand, preview):
         assert not w.isRunning()                 # waited, not just requested
-    assert page._preload_worker is None
+    # The preload scheduler is deliberately NOT in this list: it is cancelled
+    # by identity and never joined from the GUI thread. A reader inside the
+    # loader cannot be interrupted, and waiting for it here is exactly the
+    # freeze the scheduler replaced.
     assert page._batch_worker is None
     assert page._preview_worker is None
     assert page._ondemand_workers == []

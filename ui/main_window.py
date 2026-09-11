@@ -2500,6 +2500,33 @@ class MainWindow(QMainWindow):
         self._set_step_active(2)
 
     def _go_to_step1(self):
+        # Step1 reads the handoff from DISK. While a patch edit is still being
+        # written, the newest geometry is in Step0's memory and one revision
+        # ahead of the file, so entering now would run Step1 on the previous
+        # geometry without saying so.
+        # `self.__dict__`, not getattr: a QWidget whose __init__ never ran
+        # raises on a missing attribute rather than returning the default,
+        # and this method is driven that way by the handoff-contract tests.
+        page = self.__dict__.get("_step0")
+        probe = getattr(page, "geometry_persist_busy", None)
+        busy = bool(probe is not None and probe())
+        waits = int(self.__dict__.get("_step1_entry_waits") or 0)
+        if busy and waits < 40:
+            # Bounded: 40 x 150 ms. A write that takes longer than six
+            # seconds is reported, not waited on forever -- and it is still
+            # refused, because the file Step1 would read is the old one.
+            self._step1_entry_waits = waits + 1
+            self.prev_status.setText(
+                "Saving the patch geometry… Step1 opens once the new Step0 "
+                "handoff is on disk.")
+            QtCore.QTimer.singleShot(150, self._go_to_step1)
+            return
+        self._step1_entry_waits = 0
+        if busy:
+            self.prev_status.setText(
+                "Step1 is not ready: the patch geometry is still being saved. "
+                "Try again in a moment.")
+            return
         if not getattr(self, "_step1_context_ready", False):
             accepted = False
             handoff = self.step0_output or {}
@@ -3270,6 +3297,14 @@ class MainWindow(QMainWindow):
         # Before the loaders, because it is the cheapest thing here to stop
         # and it holds the dataset's arrays.
         self._stop_compose_worker("the main window is closing")
+        # Step0's own background workers: the geometry writer and the patch
+        # readers. Both are request-only, so this neither joins a thread nor
+        # can be refused; what it buys is that neither emits into a window
+        # that is going away.
+        page = self.__dict__.get("_step0")
+        stop = getattr(page, "stop_background_jobs", None)
+        if stop is not None:
+            stop()
         # The sink is NOT shut down here. It closes once, at the end of this
         # method, after every managed loader has physically finished and its
         # own `job.end` is queued -- a shutdown before that is followed by

@@ -549,43 +549,86 @@ def _page_for_preload(app):
 
 
 def _warm_cache_sync(p):
-    """Fill the preload cache deterministically by running the worker in-thread."""
-    from block01.ui.step0.step0_page import PreloadWorker
-    p._preload_gen += 1
-    w = PreloadWorker(p.loader, p.patches, p._conditioning_channels(),
-                      p._preload_gen)
-    w.channel_loaded.connect(p._on_preload_channel)
-    w.finished_gen.connect(p._on_preload_finished)
-    p._preload_worker = w
-    w.run()                                  # synchronous -> direct signals
+    """Fill the preload cache through the REAL scheduler and wait for it.
+
+    Rewritten with the scheduler: the old helper ran `PreloadWorker.run()`
+    in-thread, which was the all-patches x all-channels sweep that drawing a
+    patch used to restart. Reading is still what fills the cache -- it is now
+    requested rather than swept, so the helper asks for exactly the tiles the
+    old sweep would have read and waits for the readers.
+    """
+    scheduler = p._preload_scheduler()
+    bboxes = [p._patch_bbox(i) for i in range(len(p.patches))]
+    scheduler.request_many(bboxes, p._conditioning_channels(),
+                           priority="background")
+    assert scheduler.drain(10_000), "the preload readers did not finish"
+    return scheduler
 
 
-def test_preload_worker_emits_all_tiles(app):
-    from block01.ui.step0.step0_page import PreloadWorker
-    ld = _CorrLoader()
-    patches = [(0, 20, 0, 20), (20, 40, 20, 40), (40, 60, 40, 60)]
-    loaded, fin = [], []
-    w = PreloadWorker(ld, patches, ["DAPI", "CD68", "CK19"], 1)
-    w.channel_loaded.connect(lambda g, p, n, a: loaded.append((p, n)))
-    w.finished_gen.connect(lambda g: fin.append(g))
-    w.run()
-    assert len(loaded) == 9                  # 3 patches × 3 channels
-    assert fin == [1]
-    assert {p for p, _ in loaded} == {0, 1, 2}
-
-
-def test_preload_trigger_cancels_and_restarts(app):
+def test_the_scheduler_reads_each_requested_tile_once(app):
+    """What the old `PreloadWorker` test asserted -- every tile arrives -- plus
+    what it could not: asking again reads nothing."""
     p = _page_for_preload(app)
-    p._on_patches_changed(list(p.patches))   # starts preload #1
-    w1 = p._preload_worker
-    gen1 = p._preload_gen
-    p._on_patches_changed([(0, 10, 0, 10)])  # patches change -> cancel + restart
-    assert w1._cancelled is True             # old worker cancelled
-    assert p._preload_gen == gen1 + 1        # new generation
-    # let any live threads finish so teardown is clean
-    for w in (w1, p._preload_worker):
-        if w is not None:
-            w.wait(2000)
+    scheduler = _warm_cache_sync(p)
+    assert len(p.loader.calls) == 9              # 3 patches x 3 channels
+    for idx in range(3):
+        for ch in ("DAPI", "CD68", "CK19"):
+            assert scheduler.resident(p._patch_bbox(idx), ch) is not None
+
+    p.loader.calls.clear()
+    again = scheduler.request_many(
+        [p._patch_bbox(i) for i in range(3)], p._conditioning_channels(),
+        priority="background")
+    assert again == {"hit": 9}, again
+    assert p.loader.calls == []
+
+
+def test_a_new_patch_does_not_re_read_the_patches_already_read(app):
+    """The reason the cache is keyed by BBOX.
+
+    Drawing P4 used to cancel the preload, EMPTY the cache and start 4 x 3
+    reads again -- the arrays for P1..P3 were thrown away because they were
+    keyed by patch index and the indices had moved. They are the same pixels
+    from the same region of the same slide, so they are kept and reused, and
+    only the new patch is read.
+    """
+    p = _page_for_preload(app)
+    scheduler = _warm_cache_sync(p)
+    p.loader.calls.clear()
+
+    p._on_patches_changed(list(p.patches) + [(90, 120, 90, 120)])
+    assert scheduler.drain(10_000)
+
+    assert sorted(p.loader.calls) == ["CD68", "CK19", "DAPI"], (
+        f"an added patch re-read the others: {p.loader.calls}")
+    for idx in range(3):
+        assert scheduler.resident(p._patch_bbox(idx), "CD68") is not None
+
+
+def test_the_current_patch_is_asked_for_before_the_rest(app):
+    """A speculative read may never be in front of the patch on screen.
+
+    Here: what the page ASKS for, and at which priority. That the scheduler
+    then honours the priority is proved with real readers in
+    `test_step0_preload_scheduler.py`.
+    """
+    p = _page_for_preload(app)
+    p.current_channel = "CD68"
+    scheduler = p._preload_scheduler()
+    asked = []
+    scheduler.request = (lambda bbox, channel, priority="foreground", **k:
+                         asked.append((bbox, channel, priority)) or "queued")
+
+    p._start_preload()
+
+    first = p._patch_bbox(0)
+    foreground = [a for a in asked if a[2] == "foreground"]
+    assert (first, "CD68", "foreground") in foreground, asked
+    assert all(a[0] == first for a in foreground), (
+        f"a patch that is not on screen was asked for first: {foreground}")
+    # And everything else is asked for as background work.
+    assert {a[2] for a in asked} == {"foreground", "background"}
+    assert len([a for a in asked if a[2] == "background"]) == 9
 
 
 def test_preload_cache_hit_zero_io(app):
@@ -615,28 +658,47 @@ def test_sync_passes_the_active_channel_eagerly_and_the_rest_lazily(app):
 
 def test_bg_hotswap_updates_corrected_only(app):
     p = _page_for_preload(app)
-    _warm_cache_sync(p)
-    before_cd68 = float(p._preload_cache[0]["CD68"].mean())
-    before_dapi = float(p._preload_cache[0]["DAPI"].mean())
-    p._on_wsi_finished({}, "/tmp/corr.zarr", {"CD68": "tophat", "DAPI": "original"})
-    after_cd68 = float(p._preload_cache[0]["CD68"].mean())
-    assert after_cd68 != before_cd68         # corrected channel hot-swapped
-    assert float(p._preload_cache[0]["DAPI"].mean()) == before_dapi  # untouched
+    scheduler = _warm_cache_sync(p)
+    bbox = p._patch_bbox(0)
+    before_cd68 = float(scheduler.resident(bbox, "CD68").mean())
+    before_dapi = float(scheduler.resident(bbox, "DAPI").mean())
+    p._on_wsi_finished({}, "/tmp/corr.zarr", {"CD68": "tophat",
+                                              "DAPI": "original"})
+    assert float(scheduler.resident(bbox, "CD68").mean()) != before_cd68
+    assert float(scheduler.resident(bbox, "DAPI").mean()) == before_dapi
 
 
 def test_preload_cold_cache_falls_back_to_read(app):
     p = _page_for_preload(app)
-    p._preload_cache = {}
+    p._preload = None
     p.loader.calls.clear()
     p._provide_channel_pixels("CK19")
     assert p.loader.calls == ["CK19"]        # lazy-load fallback fired
 
 
-def test_stale_preload_signals_ignored(app):
+def test_a_read_from_the_previous_dataset_is_discarded(app):
+    """The replacement for "stale preload signals are ignored".
+
+    A read already inside the loader when the slide changes cannot be
+    interrupted, so it finishes -- and must not land in the new dataset's
+    cache, nor reach the page. Keyed by generation, both ways.
+    """
     p = _page_for_preload(app)
-    p._preload_gen = 5
-    p._on_preload_channel(4, 0, "CD68", np.ones((4, 4), np.float32))  # stale gen
-    assert 0 not in p._preload_cache         # cancelled worker's write dropped
+    scheduler = _warm_cache_sync(p)
+    bbox = p._patch_bbox(0)
+    assert scheduler.resident(bbox, "CD68") is not None
+
+    p._dataset_gen += 1
+    scheduler.invalidate(int(p._dataset_gen))
+    assert scheduler.resident(bbox, "CD68") is None
+
+    seen = []
+    p._show_channel_from_cache = lambda ch: seen.append(ch)
+    p._on_preload_loaded({"dataset_gen": int(p._dataset_gen) - 1,
+                          "bbox": bbox, "channel": "CD68",
+                          "array": np.ones((4, 4), np.float32)})
+    assert seen == []
+    assert scheduler.resident(bbox, "CD68") is None
 
 
 def test_preload_build_config_unchanged(app):

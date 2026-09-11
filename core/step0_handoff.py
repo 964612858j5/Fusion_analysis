@@ -1,0 +1,469 @@
+"""Writing the Step0 handoff: the file IO, with no window attached.
+
+WHY THIS IS A MODULE. `Step0Page._write_step0_handoff` did three different
+things in one body -- read the page's geometry, write five artifacts, and
+update labels -- so the writing could only happen on the GUI thread. A patch
+edit therefore paid three JSON writes, a zarr attribute pass, a validating
+scan of the corrected output and an fsync inside the release callback, which
+is why letting go of a dragged patch froze the window.
+
+So the middle third lives here and takes a plain SPEC: paths, geometry and
+numbers the caller has already gathered. One implementation, two callers --
+the page's own Save and the background persist worker -- because a second
+copy of a writer is how the screen and the file on disk drift apart.
+
+ATOMICITY, AND WHY EVERY ARTIFACT GETS IT NOW. The manifest was already
+published through tmp+fsync+replace as the final marker; the other artifacts
+were written in place. With persistence moved to a worker that is allowed to
+be superseded mid-run, an in-place write is a revision leaking onto disk that
+no manifest ever announced -- so every artifact is now staged under a
+revision-tagged temporary name and replaced only at publication, in one place,
+manifest last. A superseded task deletes its own temporaries and publishes
+nothing.
+"""
+
+import json
+import os
+import shutil
+
+import zarr
+
+from .bg_correction import (
+    corrected_zarr_report,
+    stamp_corrected_zarr_provenance,
+    CORRECTED_ZARR_OUTPUT_KIND,
+    CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
+)
+from ..config import CUCIM_SIGMA_DEFAULT, TOPHAT_RADIUS_DEFAULT
+from ..utils.channel_remap_config import channel_remap_config_hash
+from ..utils.roi_project import mark_roi_step
+from ..utils import perf_trace
+
+
+class Superseded(Exception):
+    """Raised inside a write whose task has been replaced by a newer one.
+
+    Not an error: the newer task describes the same geometry plus the edit
+    that replaced it, so the only correct thing to publish is that one.
+    """
+
+
+def _write_json_staged(path, payload, tag):
+    """Stage one JSON artifact next to its destination. Returns the tmp path."""
+    tmp = f"{path}.tmp.{tag}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    return tmp
+
+
+def ensure_empty_corrected_zarr(zarr_path, rois, *, source_ome,
+                                analysis_region_type, roi_id="", roi_dir="",
+                                out_dir=""):
+    """Create the corrected zarr's skeleton: groups and attributes, no pixels."""
+    if os.path.exists(zarr_path):
+        shutil.rmtree(zarr_path, ignore_errors=True)
+    out_dir = out_dir or os.path.dirname(zarr_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    root = zarr.open_group(zarr_path, mode="w")
+    root.attrs["mode"] = "roi_only"
+    root.attrs["analysis_region_type"] = analysis_region_type
+    root.attrs["source_ome"] = os.path.abspath(source_ome) if source_ome else ""
+    root.attrs["output_dir"] = os.path.abspath(out_dir)
+    if roi_id or roi_dir:
+        root.attrs["roi_id"] = roi_id
+        root.attrs["roi_dir"] = os.path.abspath(roi_dir) if roi_dir else ""
+    root.attrs["roi_names"] = [r.get("name", f"ROI_{i}")
+                               for i, r in enumerate(rois, start=1)]
+    root.attrs["created_by"] = "Step0"
+    for idx, roi in enumerate(rois, start=1):
+        name = str(roi.get("name") or f"ROI_{idx}")
+        group = root.create_group(name, overwrite=True)
+        group.attrs["roi_name"] = name
+        group.attrs["analysis_region_type"] = analysis_region_type
+        group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
+        group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
+        group.attrs["shape"] = roi.get("shape") or _shape_from_bbox(
+            roi.get("bbox_fullres"))
+
+
+def _shape_from_bbox(bbox):
+    if not bbox or len(bbox) != 4:
+        return [0, 0]
+    y0, y1, x0, x1 = [int(v) for v in bbox]
+    return [max(0, y1 - y0), max(0, x1 - x0)]
+
+
+def write_handoff(spec, *, superseded=None, tag="0"):
+    """Write and publish one Step0 handoff. Returns a result dict.
+
+    `spec` is plain data -- see `Step0Page._handoff_spec` for the fields.
+    `superseded` is an optional predicate, consulted before anything is
+    published; when it says yes, the staged temporaries are removed, nothing
+    on disk changes and `Superseded` is raised. `tag` isolates this task's
+    temporary files from any other task's, so two revisions cannot stage over
+    each other.
+
+    The GUI-visible consequences are NOT applied here -- they are in the
+    result (`corrected_report`, `manifest`) for the caller's thread to apply.
+    """
+    raw_path = spec["raw_path"]
+    if not raw_path:
+        raise RuntimeError("raw OME-TIFF path is empty")
+    step0_dir = spec["step0_dir"]
+    os.makedirs(step0_dir, exist_ok=True)
+    config = spec["config"]
+    rois = spec["rois"]
+    patches = spec["patches"]
+    corrected_path = spec["corrected_path"]
+    manifest_path = spec["manifest_path"]
+    analysis_region_type = spec["analysis_region_type"]
+    roi_id = spec.get("roi_id", "")
+    roi_dir = spec.get("roi_dir", "")
+    project_dir = spec.get("project_dir", "")
+
+    corr_path = os.path.join(step0_dir, "correction_config.json")
+    roi_path = os.path.join(step0_dir, "roi_config.json")
+    patch_path = os.path.join(step0_dir, "patch_config.json")
+
+    def _check(phase):
+        """Ask whether this task still matters. `phase` names WHERE we are --
+        the last one is "publish", the only check that can still be reached
+        with every artifact staged and nothing durable touched."""
+        if superseded is not None and superseded(phase):
+            raise Superseded()
+
+    staged = []
+    try:
+        with perf_trace.span("handoff.write_json", files=3):
+            for path, payload in ((corr_path, config), (roi_path, rois),
+                                  (patch_path, patches)):
+                staged.append((_write_json_staged(path, payload, tag), path))
+        _check("staged_json")
+
+        if not os.path.exists(corrected_path):
+            ensure_empty_corrected_zarr(
+                corrected_path, rois, source_ome=raw_path,
+                analysis_region_type=analysis_region_type, roi_id=roi_id,
+                roi_dir=roi_dir, out_dir=step0_dir)
+
+        if os.path.exists(corrected_path):
+            try:
+                root = zarr.open_group(corrected_path, mode="a")
+                root.attrs["mode"] = "roi_only"
+                root.attrs["analysis_region_type"] = analysis_region_type
+                root.attrs["source_ome"] = raw_path
+                root.attrs["output_dir"] = os.path.abspath(step0_dir)
+                root.attrs["project_output_dir"] = (
+                    os.path.abspath(project_dir) if project_dir else "")
+                root.attrs["roi_id"] = roi_id
+                root.attrs["roi_dir"] = (os.path.abspath(roi_dir)
+                                         if roi_dir else "")
+                root.attrs["roi_names"] = [
+                    r.get("name", f"ROI_{i}")
+                    for i, r in enumerate(rois, start=1)]
+                root.attrs["created_by"] = "Step0"
+                # v14.4: honest preprocessing provenance (NOT step2_ready).
+                stamp_corrected_zarr_provenance(root)
+                for roi in rois:
+                    name = str(roi.get("name") or "")
+                    group = root[name] if name and name in root else None
+                    if group is None:
+                        for group_name in root.group_keys():
+                            candidate = root[group_name]
+                            if str(candidate.attrs.get("roi_name")
+                                   or group_name) == name:
+                                group = candidate
+                                break
+                    if group is not None:
+                        group.attrs["roi_name"] = name
+                        group.attrs["analysis_region_type"] = (
+                            analysis_region_type)
+                        group.attrs["bbox_fullres"] = (
+                            roi.get("bbox_fullres") or [])
+                        group.attrs["polygon_fullres"] = (
+                            roi.get("polygon_fullres") or [])
+                        group.attrs["shape"] = roi.get("shape") or (
+                            _shape_from_bbox(roi.get("bbox_fullres")))
+            except Superseded:
+                raise
+            except Exception as e:
+                print(f"[Step0] failed to update corrected zarr attrs: {e}")
+                raise RuntimeError(
+                    "failed to commit corrected zarr handoff metadata") from e
+        _check("zarr_attrs")
+
+        # v14.4: validate the corrected output (a directory existing is NOT
+        # proof of a valid corrected zarr) and report it honestly to the UI +
+        # manifest.
+        with perf_trace.span("handoff.zarr_report"):
+            corrected_report = corrected_zarr_report(corrected_path)
+
+        try:
+            raw_stat = os.stat(raw_path)
+            raw_fingerprint = f"{raw_stat.st_size}:{raw_stat.st_mtime_ns}"
+        except OSError as exc:
+            raise RuntimeError(
+                f"raw OME-TIFF identity could not be read: {exc}") from exc
+        source_identity = {
+            "dataset_path": raw_path,
+            "dataset_fingerprint": raw_fingerprint,
+            "stage": "raw",
+            "corrected_artifact": None,
+        }
+        # The manifest names the remap config it is hashed over. A display
+        # mapping commit passes an immutable, hash-named file so that
+        # publishing the manifest is the only moment anything changes for a
+        # consumer.
+        remap_path = spec["remap_path"]
+        remap_hash = ""
+        if os.path.exists(remap_path):
+            try:
+                with open(remap_path, "r", encoding="utf-8") as f:
+                    remap_hash = channel_remap_config_hash(json.load(f))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"invalid Step0 remap config at {remap_path}: "
+                    f"{exc}") from exc
+
+        manifest = {
+            "version": "v6_roi_handoff_1",
+            "handoff_schema_version": 2,
+            "created_from_step": CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
+            "output_kind": CORRECTED_ZARR_OUTPUT_KIND,
+            "corrected_zarr_valid": bool(corrected_report["non_empty"]),
+            "corrected_zarr_n_channel_arrays": int(
+                corrected_report["n_channel_arrays"]),
+            "roi_id": roi_id,
+            "display_name": rois[0]["name"] if rois else "",
+            "analysis_region_type": analysis_region_type,
+            "mode": ("full_wsi" if analysis_region_type == "full_wsi"
+                     else "roi_only"),
+            "project_output_dir": (os.path.abspath(project_dir)
+                                   if project_dir else ""),
+            "roi_dir": os.path.abspath(roi_dir) if roi_dir else "",
+            "step0_dir": os.path.abspath(step0_dir),
+            "step1_dir": spec.get("step1_dir", ""),
+            "step2_dir": spec.get("step2_dir", ""),
+            "output_dir": os.path.abspath(step0_dir),
+            "raw_ome_path": raw_path,
+            "panel_csv_path": spec.get("panel_csv_path", ""),
+            "panel_groups": dict(spec.get("panel_groups") or {}),
+            "panel_nucleus": spec.get("nucleus_channel", ""),
+            "source_identity": source_identity,
+            "channel_remap_config_path": remap_path,
+            "channel_remap_config_hash": remap_hash,
+            "corrected_decisions": {
+                str(ch): str(method).strip().lower()
+                for ch, method in (config.get("channel_decisions")
+                                   or {}).items()
+                if str(method).strip().lower() in {"tophat", "cucim"}
+            },
+            "nucleus_channel": spec.get("nucleus_channel", ""),
+            "corrected_zarr_path": os.path.abspath(corrected_path),
+            "correction_config_path": os.path.abspath(corr_path),
+            "roi_config_path": os.path.abspath(roi_path),
+            "patch_config_path": os.path.abspath(patch_path),
+            "active_roi": rois[0]["name"] if rois else "",
+            "bbox_fullres": rois[0].get("bbox_fullres", []) if rois else [],
+            "shape": rois[0].get("shape", []) if rois else [],
+            "n_rois": len(rois),
+            "n_patches": len(patches),
+        }
+        manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
+        manifest_tmp = f"{manifest_path}.tmp.{tag}"
+        with open(manifest_tmp, "w", encoding="utf-8") as f, \
+                perf_trace.span("handoff.manifest_write"):
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+            f.flush()
+            with perf_trace.span("handoff.fsync"):
+                os.fsync(f.fileno())
+        staged.append((manifest_tmp, manifest_path))
+
+        # PUBLICATION. Last possible moment to find out this task has been
+        # replaced: everything above is a temporary file, so a Superseded here
+        # leaves the published handoff exactly as the previous revision left
+        # it, and the newer task publishes the newer geometry.
+        _check("publish")
+        with perf_trace.span("handoff.publish_replace", files=len(staged)):
+            for tmp, dest in staged:
+                os.replace(tmp, dest)
+        staged = []
+    finally:
+        for tmp, _dest in staged:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
+
+    print(f"[Step0] step0_roi_result={manifest_path}")
+    if roi_id and project_dir:
+        try:
+            mark_roi_step(project_dir, roi_id, "step0", "done")
+        except Exception as e:
+            print(f"[Step0] failed to update ROI index: {e}")
+            # The manifest above is the authoritative handoff commit marker.
+            # ROI index bookkeeping is auxiliary; a stale index must not turn
+            # a durable handoff into a reported save failure.
+    return {"config": config, "rois": rois, "patches": patches,
+            "manifest": manifest, "corrected_report": corrected_report,
+            "manifest_path": os.path.abspath(manifest_path)}
+
+
+def published_handoff(step0_dir):
+    """The handoff already on disk, or None. A pair of file reads.
+
+    On the worker's thread, deliberately: reading the manifest and the
+    correction config used to happen inside the patch-release callback, where
+    two more file reads (`published_geometry`) followed it.
+    """
+    if not step0_dir:
+        return None
+    manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
+    corr_path = os.path.join(step0_dir, "correction_config.json")
+    if not (os.path.exists(manifest_path) and os.path.exists(corr_path)):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        with open(corr_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[Step0] cannot read the published handoff: {exc}")
+        return None
+    if not isinstance(manifest, dict) or not isinstance(config, dict):
+        return None
+    zarr_path = str(manifest.get("corrected_zarr_path")
+                    or os.path.join(step0_dir, "corrected_channels.zarr"))
+    return step0_dir, manifest_path, zarr_path, config, manifest
+
+
+def geometry_bboxes(items):
+    out = []
+    for item in items or []:
+        bbox = item.get("bbox_fullres") if isinstance(item, dict) else item
+        if bbox and len(bbox) == 4:
+            out.append([int(v) for v in bbox])
+    return out
+
+
+def published_geometry(step0_dir):
+    """(roi bboxes, patch bboxes) as they stand in the published files."""
+    def _read(name):
+        path = os.path.join(step0_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:                                   # noqa: BLE001
+            return []
+    return (geometry_bboxes(_read("roi_config.json")),
+            geometry_bboxes(_read("patch_config.json")))
+
+
+def commit_geometry_only(task, *, superseded=None):
+    """Publish a geometry-only update of an already published handoff.
+
+    The whole decision AND the write, off the GUI thread: reading the
+    published manifest, comparing the geometry with what is on disk, refusing
+    an ROI change, and -- only then -- reusing the one handoff writer with the
+    corrected zarr the published manifest already points at. Nothing here
+    recomputes background correction.
+
+    `task` is a snapshot the GUI thread built (see
+    `Step0Page._geometry_persist_task`). Returns a result dict whose
+    `outcome` is one of: committed, no_published_handoff, unchanged,
+    roi_changed, corrected_zarr_missing, write_failed. Raises nothing for a
+    supersession -- that comes back from `write_handoff` as `Superseded` and
+    is the worker's business.
+
+    The checks are ordered so that "did the geometry change at all?" is
+    answered BEFORE any precondition: a precondition failure on unchanged
+    geometry is not an invalidation, it is a no-op.
+    """
+    revision = int(task.get("revision") or 0)
+    info = {"task": task, "revision": revision,
+            "step0_manifest_path": "", "geometry_revision": revision}
+    step0_dir = task.get("step0_dir") or ""
+    published = published_handoff(step0_dir)
+    if published is None:
+        return dict(info, outcome="no_published_handoff")
+    step0_dir, manifest_path, zarr_path, config, _manifest = published
+    info["step0_manifest_path"] = os.path.abspath(manifest_path)
+
+    rois = task["rois"]
+    patches = task["patches"]
+    old_rois, old_patches = published_geometry(step0_dir)
+    roi_changed = (bool(task.get("roi_context_changed"))
+                   or geometry_bboxes(rois) != old_rois)
+    patch_changed = geometry_bboxes(patches) != old_patches
+    if not roi_changed and not patch_changed:
+        return dict(info, outcome="unchanged")
+
+    # An ROI edit moves the analysis region, which mints a NEW roi_context
+    # (roi_id, roi_dir, step directories) and invalidates the corrected zarr
+    # computed for the old region; a NEW ROI has no channel group in that zarr
+    # at all, and a deleted one leaves a zarr that describes a region that no
+    # longer exists. There is no safe cross-ROI reuse rule to apply here, so
+    # this refuses instead of inventing one or quietly running a full Save.
+    if roi_changed:
+        return dict(info, outcome="roi_changed")
+    if not os.path.exists(zarr_path):
+        return dict(info, outcome="corrected_zarr_missing")
+
+    spec = dict(task["spec"])
+    spec["config"] = clean_correction_config(config)
+    spec["corrected_path"] = zarr_path
+    spec["manifest_path"] = manifest_path
+    spec["step0_dir"] = step0_dir
+    try:
+        result = write_handoff(spec, superseded=superseded,
+                               tag=f"rev{revision}")
+    except Superseded:
+        raise
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[Step0] geometry-only commit FAILED: {exc}")
+        return dict(info, outcome="write_failed", reason=f"write_failed: {exc}",
+                    error=str(exc))
+    return dict(info, outcome="committed", result=result,
+                rois=result["rois"], patches=result["patches"])
+
+
+def clean_correction_config(config):
+    """The correction config in the one shape the handoff describes.
+
+    Here rather than on the page because both writers normalise it the same
+    way: a Save's config and the published config a geometry-only commit
+    republishes have to come out identical, or the two paths would write
+    different files from the same numbers.
+    """
+    cfg = dict(config or {})
+    params = dict(cfg.get("method_params") or {})
+    decisions = {}
+    for ch, method in (cfg.get("channel_decisions") or {}).items():
+        m = str(method).strip().lower()
+        if m == "both":
+            m = "original"
+        if m not in {"tophat", "cucim", "original"}:
+            m = "original"
+        decisions[str(ch)] = m
+    channel_params = {}
+    for ch, cp in (cfg.get("channel_params") or {}).items():
+        cp = cp or {}
+        channel_params[str(ch)] = {
+            "tophat_radius": int(cp.get("tophat_radius", params.get(
+                "tophat_radius", TOPHAT_RADIUS_DEFAULT))),
+            "cucim_sigma": int(cp.get("cucim_sigma", params.get(
+                "cucim_sigma", CUCIM_SIGMA_DEFAULT))),
+        }
+    return {
+        "method_params": {
+            "tophat_radius": int(params.get("tophat_radius",
+                                            TOPHAT_RADIUS_DEFAULT)),
+            "cucim_sigma": int(params.get("cucim_sigma",
+                                          CUCIM_SIGMA_DEFAULT)),
+        },
+        "channel_decisions": decisions,
+        "channel_params": channel_params,
+    }

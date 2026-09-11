@@ -531,7 +531,7 @@ def test_busy_probe_checks_running_not_presence(app, monkeypatch):
 def test_a_running_preview_or_preload_worker_does_not_read_as_busy(app):
     """The contract, not the source text.
 
-    `PreloadWorker` only reads -- it corrects nothing, so it must not block
+    The preload scheduler only reads -- it corrects nothing, so it must not block
     the full image. `BackgroundPreviewWorker` is unreachable today (its only
     trigger, `_queue_preview`, has no caller anywhere in the repo), so
     guarding it would be code for a path that cannot run; whoever
@@ -550,7 +550,7 @@ def test_a_running_preview_or_preload_worker_does_not_read_as_busy(app):
     page._ondemand_workers = []
     page._wsi_worker = None
     page._preview_worker = _Running()
-    page._preload_worker = _Running()
+    page._preload = _Running()
 
     assert Step0Page.production_correction_busy(page) is None
 
@@ -811,16 +811,16 @@ def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
 
 
 def test_the_reader_path_does_not_release_explore(gpu_path_page, monkeypatch):
-    """`PreloadWorker` corrects nothing, so preloading must not cost the
-    user their full-image view."""
+    """Preloading corrects nothing, so it must not cost the user their
+    full-image view."""
     timeline = []
     mod = _install_gpu_path_recorders(monkeypatch, timeline)
     page = gpu_path_page
-    monkeypatch.setattr(mod, "PreloadWorker", _preload_recorder(timeline))
+    monkeypatch.setattr(mod, "PreloadScheduler", _preload_recorder(timeline))
 
     page._start_preload()
 
-    assert "preload.start" in timeline, "the preload path never ran"
+    assert "preload.request" in timeline, "the preload path never ran"
     assert not [e for e in timeline if e.startswith("release:")], (
         f"preloading released Explore: {timeline}")
 
@@ -828,21 +828,38 @@ def test_the_reader_path_does_not_release_explore(gpu_path_page, monkeypatch):
 def _preload_recorder(timeline):
     class _Preload:
         def __init__(self, *a, **k):
+            self.loaded = _Signal()
+
+        def set_source(self, *_a, **_k):
             pass
 
-        def __getattr__(self, name):
-            class _S:
-                def connect(self, *_a, **_k):
-                    pass
-            return _S()
+        def resume(self):
+            pass
+
+        def request_many(self, bboxes, channels, **k):
+            timeline.append("preload.request")
+            return {"queued": len(list(bboxes)) * len(list(channels))}
+
+        def request(self, *_a, **_k):
+            timeline.append("preload.request")
+            return "queued"
+
+        def stats(self):
+            return {"foreground_pending": 0, "background_pending": 0,
+                    "in_flight": 0, "hits": 0, "misses": 0, "reads": 0,
+                    "resident": 0, "max_readers": 2, "dataset_gen": 0}
 
         def isRunning(self):
             return False
 
         def start(self):
-            timeline.append("preload.start")
+            pass
 
-        def stop(self):
+        def stop(self, *_a, **_k):
+            return True
+
+    class _Signal:
+        def connect(self, *_a, **_k):
             pass
 
     return _Preload

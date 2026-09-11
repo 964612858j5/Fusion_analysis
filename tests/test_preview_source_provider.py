@@ -59,8 +59,10 @@ def _page(app):
     p._rebuild_channel_list()
     # deterministic pixels through the preload cache (no disk IO); after a
     # real Save, _hotswap_corrected re-reads these as corrected pixels.
-    p._preload_cache = {0: {ch: np.full((32, 32), i + 1, np.float32)
-                            for i, ch in enumerate(["DAPI", "CD3", "CD20"])}}
+    # Keyed by BBOX now (see `PreloadScheduler`), not by patch index.
+    sched = p._preload_scheduler()
+    for i, ch in enumerate(["DAPI", "CD3", "CD20"]):
+        sched.put(p._patch_bbox(0), ch, np.full((32, 32), i + 1, np.float32))
     return p
 
 
@@ -69,7 +71,7 @@ def _mark_saved(page, channel, method, pixels):
     page.loader._corrected_zarr_path = "/fake/corrected_channels.zarr"
     page.loader._corrected_decisions = dict(page.loader._corrected_decisions,
                                             **{channel: method})
-    page._preload_cache[0][channel] = pixels          # hot-swapped cache
+    page._preload.put(page._patch_bbox(0), channel, pixels)   # hot-swapped
 
 
 def test_unsaved_channel_served_raw_and_labeled(app):
@@ -204,7 +206,8 @@ def test_save_invalidation_repulls_into_workbench(app):
     the saved corrected pixels."""
     page = _page(app)
     wb = page._cond_workbench
-    wb.set_channel_images({"CD3": page._preload_cache[0]["CD3"]})
+    wb.set_channel_images(
+        {"CD3": page._preload.resident(page._patch_bbox(0), "CD3")})
     assert float(wb._raw["CD3"][0, 0]) == 2.0
     corrected = np.full((32, 32), 9.0, np.float32)
     _mark_saved(page, "CD3", "tophat", corrected)

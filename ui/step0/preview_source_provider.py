@@ -79,11 +79,11 @@ class Step0PreviewSourceProvider(QObject):
         """Loader-served pixels: SAVED corrected data for channels with a
         saved decision (the preload cache is hot-swapped on Save), raw
         otherwise. Never an unsaved in-memory preview."""
-        page = self._page
-        cached = page._preload_cache.get(page.current_patch_idx, {}).get(channel)
-        if cached is not None:
-            return cached
-        return page._read_cond_patch_channel(channel, normalize=False)
+        # The page's own accessor: resident patch pixels if the preload
+        # scheduler has them, else one live read. A second copy of that rule
+        # here is how this provider and the workbench came to disagree about
+        # which patch they were showing.
+        return self._page._provide_channel_pixels(channel)
 
     # ── mutual state visibility ─────────────────────────────────────────────
     def is_saved_corrected(self, channel):

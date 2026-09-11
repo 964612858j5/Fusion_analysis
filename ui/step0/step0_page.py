@@ -49,8 +49,12 @@ from ...core.bg_correction import (
     CORRECTED_ZARR_OUTPUT_KIND,
     CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
 )
+from ...core import step0_handoff
 from ...core.io_loader import OMETIFFLoader
 from ...core.fusion_engine import FusionEngine
+from ...workers.geometry_persist_worker import GeometryPersistWorker
+from ...workers import preload_scheduler
+from ...workers.preload_scheduler import PreloadScheduler
 from ...workers.cellpose_worker import (
     CellposeWorker, PreviewLoaderThread, run_cellpose_process,
 )
@@ -131,76 +135,6 @@ def _is_non_marker_channel(name):
     """True if a channel name denotes a non-conditioning product (mask/fusion)."""
     low = str(name).lower()
     return any(kw in low for kw in _NON_MARKER_CHANNEL_KEYWORDS)
-
-
-class PreloadWorker(QThread):
-    """Background reader: loads every (patch × channel) tile into the host's
-    conditioning preload cache so patch-switch / All-toggle are zero-IO.
-
-    Emits one channel_loaded(gen, patch_idx, name, array) per tile and
-    finished_gen(gen) at the end. Cancellable between reads. `gen` lets the host
-    discard a stale (cancelled) worker's late signals after patches change.
-    Arrays cross threads via the signal payload (queued, thread-safe) — the
-    worker never writes the host cache directly.
-    """
-
-    channel_loaded = pyqtSignal(int, int, str, object)   # gen, patch_idx, name, arr
-    finished_gen = pyqtSignal(int)                        # gen
-
-    def __init__(self, loader, patches, channels, gen, parent=None):
-        super().__init__(parent)
-        self._loader = loader
-        self._patches = list(patches)
-        self._channels = list(channels)
-        self._gen = int(gen)
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        # Traced as a JOB with both ends and every read inside it, on this
-        # thread and through the same bounded sink the GUI uses. A log of
-        # "started" cannot answer "what was reading when the window froze":
-        # cancel is a flag, and a thread already inside one `read_region`
-        # keeps going until that read returns.
-        with perf_trace.job("step0.preload", gen=self._gen,
-                            patches=len(self._patches),
-                            channels=len(self._channels)) as _job:
-            reads = 0
-            for pidx, bbox in enumerate(self._patches):
-                if self._cancelled:
-                    _job.add(reads=reads, cancelled=1, at_patch=pidx)
-                    return
-                try:
-                    y0, y1, x0, x1 = bbox
-                except Exception:
-                    continue
-                for ch in self._channels:
-                    if self._cancelled:
-                        _job.add(reads=reads, cancelled=1, at_patch=pidx)
-                        return
-                    try:
-                        with _job.read(patch=pidx, channel=ch,
-                                       bbox=f"{y0}:{y1},{x0}:{x1}") as _rd:
-                            arr = self._loader.read_region(
-                                ch, y0, y1, x0, x1, normalize=False)
-                            # A cancel that arrives DURING the read is what
-                            # overlaps two preload rounds; named so the
-                            # overlap is visible rather than inferred.
-                            if self._cancelled:
-                                _rd.add(outcome="cancelled_after_read")
-                        reads += 1
-                        arr = np.asarray(arr, dtype=np.float32)
-                        if arr.ndim == 3 and arr.shape[2] == 1:
-                            arr = arr[:, :, 0]
-                    except Exception:
-                        continue             # a bad read never kills the preload
-                    self.channel_loaded.emit(self._gen, pidx, ch, arr)
-            _job.add(reads=reads, cancelled=int(bool(self._cancelled)))
-            if not self._cancelled:
-                self.finished_gen.emit(self._gen)
-
 
 
 # `COMPARE_SOURCES` is imported from `compare_strip`, which is where the
@@ -289,12 +223,11 @@ class Step0Page(QWidget):
         # survives a move to the nucleus channel (shown as Original) and is
         # restored on the way back.
         self._full_image_source = "original"
-        # Conditioning preload: background QThread caches ALL patches × ALL
-        # channels so patch-switch / All-toggle are zero-IO. _preload_gen tags the
-        # active worker so a cancelled (stale) worker's late signals are ignored.
-        self._preload_cache = {}      # {patch_idx: {channel_name: 2D float32}}
-        self._preload_worker = None
-        self._preload_gen = 0
+        # Conditioning preload: bounded, on-demand patch reads, cached by
+        # BBOX (see `PreloadScheduler`). Not a per-index cache and not a
+        # restart-everything worker -- an added patch must not invalidate the
+        # arrays already read for the others.
+        self._preload = None
         # (#4) Patch-LOCAL conditioning viewport (zoom/pan), keyed by patch bbox.
         # Remap params stay channel-global; only the viewer view is per patch.
         self._conditioning_patch_viewports = {}
@@ -325,6 +258,12 @@ class Step0Page(QWidget):
         # and carried by both geometry signals so a receiver can tell a stale
         # notification from a current one.
         self._geometry_revision = 0
+        # Geometry persistence: a finished patch edit is written by a worker,
+        # so the page has to be able to say whether what is on disk is the
+        # geometry on screen. "saving" is a state a consumer may not read
+        # through -- see `geometry_persist_state`.
+        self._geometry_persist_worker = None
+        self._geometry_persist_state = "idle"
         # The floating Intensity window (owned by the internal remap workbench,
         # re-parented) and the widget it hosts. Both lazily created.
         self._intensity_window = None
@@ -1444,8 +1383,8 @@ class Step0Page(QWidget):
     # while a production run is going.
     #
     # Only the paths that actually reach a GPU worker today are listed.
-    # `PreloadWorker` is excluded on purpose -- it is a plain reader (its
-    # docstring: "background reader"), no correction. `BackgroundPreviewWorker`
+    # The preload SCHEDULER is excluded on purpose -- it is a plain reader,
+    # no correction. `BackgroundPreviewWorker`
     # is excluded because it is currently UNREACHABLE: its only trigger,
     # `_queue_preview`, has no caller anywhere in the repo. Whoever
     # reconnects it must add it here in the same change.
@@ -3575,52 +3514,113 @@ class Step0Page(QWidget):
         """Pixel provider for the workbench: serve from the preload cache (zero
         IO) when warm, else fall back to a single live read for the current
         patch (lazy-load). Always reads the CURRENT patch."""
-        cached = self._preload_cache.get(self.current_patch_idx, {}).get(name)
-        if cached is not None:
-            return cached
+        bbox = self._patch_bbox(self.current_patch_idx)
+        scheduler = getattr(self, "_preload", None)
+        if bbox is not None and scheduler is not None:
+            cached = scheduler.resident(bbox, name)
+            if cached is not None:
+                return cached
         return self._read_cond_patch_channel(name, normalize=False)
 
     def _cancel_preload(self):
-        w = getattr(self, "_preload_worker", None)
-        if w is not None:
-            w.cancel()                       # flag; stale signals ignored by gen
-            self._preload_worker = None
+        """Stop speculative reading, without waiting for a reader.
+
+        A read already inside the loader cannot be interrupted; the GUI thread
+        joining it is the freeze. So this drops the queue and lets the one in
+        flight land -- its result is keyed by bbox and dataset, so it is
+        either still useful or ignored.
+        """
+        scheduler = getattr(self, "_preload", None)
+        if scheduler is not None:
+            scheduler.stop()
+
+    def _preload_scheduler(self):
+        """The one scheduler for this page's patch reads."""
+        scheduler = getattr(self, "_preload", None)
+        if scheduler is None:
+            scheduler = PreloadScheduler(parent=None)
+            scheduler.loaded.connect(self._on_preload_loaded)
+            self._preload = scheduler
+        scheduler.resume()
+        scheduler.set_source(self.loader, int(self._dataset_gen))
+        return scheduler
+
+    def _patch_bbox(self, patch_idx):
+        try:
+            bbox = self.patches[patch_idx]
+        except (IndexError, TypeError):
+            return None
+        try:
+            y0, y1, x0, x1 = [int(v) for v in bbox]
+        except Exception:                                   # noqa: BLE001
+            return None
+        return (y0, y1, x0, x1)
 
     def _start_preload(self):
-        """(Re)start the background preload of all patches × channels. Cancels any
-        running preload and invalidates the cache first (patches changed)."""
-        self._cancel_preload()
-        cleared = sum(len(v) for v in (self._preload_cache or {}).values())
-        self._preload_cache = {}
+        """Ask for what is on screen, and only then for what might be.
+
+        NOT a restart, and NOT a cache clear -- both were what made a second
+        patch expensive. An added patch does not change any other patch's
+        bbox, and the cache is keyed by bbox, so every array already read
+        stays valid and is reused. What this does is:
+
+        * the CURRENT patch's current channel (and the nucleus reference,
+          which is drawn with it) as foreground work;
+        * everything else as background work that a reader only picks up when
+          no foreground request is waiting.
+        """
         if not self.loader or not self.patches:
             return
         channels = self._conditioning_channels()
         if not channels:
             return
-        perf_trace.mark("step0.preload_start", patches=len(self.patches),
-                        channels=len(channels), cleared_arrays=cleared,
-                        gen=self._preload_gen + 1)
-        self._preload_gen += 1
-        gen = self._preload_gen
-        worker = PreloadWorker(self.loader, list(self.patches), channels, gen,
-                               parent=self)
-        # Generation is captured HERE, at connection time (see _gen_slot); the
-        # worker's own `gen` argument only guards a preload restart within the
-        # SAME dataset, not a dataset switch.
-        worker.channel_loaded.connect(self._gen_slot(self._on_preload_channel))
-        worker.finished_gen.connect(self._gen_slot(self._on_preload_finished))
-        self._preload_worker = worker
-        worker.start()
+        scheduler = self._preload_scheduler()
+        current = self._patch_bbox(self.current_patch_idx)
+        wanted = [ch for ch in (self.current_channel, self.nucleus_channel)
+                  if ch and ch in channels]
+        fg = {}
+        if current is not None and wanted:
+            fg = scheduler.request_many([current], wanted,
+                                        priority=preload_scheduler.FOREGROUND)
+        rest_bboxes = [bbox for bbox in
+                       (self._patch_bbox(i) for i in range(len(self.patches)))
+                       if bbox is not None]
+        bg = scheduler.request_many(rest_bboxes, channels,
+                                    priority=preload_scheduler.BACKGROUND)
+        stats = scheduler.stats()
+        # Everything an offline reader needs to answer "how many reads were
+        # actually made, and how many were the current patch's": counts, not
+        # a "started" line.
+        perf_trace.mark("step0.preload_request", patches=len(self.patches),
+                        channels=len(channels),
+                        foreground=int(sum(fg.values())),
+                        background_queued=int(bg.get("queued", 0)),
+                        background_hit=int(bg.get("hit", 0)),
+                        background_dropped=int(bg.get("dropped", 0)),
+                        fg_pending=int(stats["foreground_pending"]),
+                        bg_pending=int(stats["background_pending"]),
+                        in_flight=int(stats["in_flight"]),
+                        cache_hits=int(stats["hits"]),
+                        cache_misses=int(stats["misses"]),
+                        reads=int(stats["reads"]),
+                        resident=int(stats["resident"]),
+                        max_readers=int(stats["max_readers"]),
+                        gen=int(self._dataset_gen))
 
-    def _on_preload_channel(self, gen, patch_idx, name, arr):
-        if gen != self._preload_gen:
-            return                           # stale worker (patches changed)
-        self._preload_cache.setdefault(patch_idx, {})[name] = arr
+    def _on_preload_loaded(self, payload):
+        """One patch channel arrived.
 
-    def _on_preload_finished(self, gen):
-        if gen != self._preload_gen:
-            return
-        self._preload_worker = None
+        Nothing is repainted from here, deliberately. The conditioning
+        workbench is fed from the WHOLE SLIDE (f34b497), not from a patch, and
+        the compare panels are driven by their own results -- so what a
+        finished read changes is only that the NEXT ask for these pixels is
+        answered from memory instead of the disk. Repainting here would be a
+        redraw nobody asked for, on every one of N x M background reads.
+        """
+        if int(payload.get("dataset_gen", -1)) != int(self._dataset_gen):
+            return          # the slide moved while this read was in flight
+        perf_trace.mark("step0.preload_loaded", channel=payload.get("channel"),
+                        gen=int(payload.get("dataset_gen", -1)))
 
     def _sync_step0_to_workbench(self):
         """Feed the workbench from Step0's loader + the whole slide + channel order.
@@ -4514,70 +4514,85 @@ class Step0Page(QWidget):
         print(f"[Step0] display mapping committed for {len(snapshot)} channel(s)")
         return True, "committed"
 
-    def _commit_geometry_only(self):
-        """Publish a geometry-only update of the published handoff.
+    def _geometry_persist(self):
+        """The one persistence worker, started on first use."""
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is None:
+            worker = GeometryPersistWorker(parent=None)
+            worker.published.connect(self._on_geometry_persist_published)
+            worker.skipped.connect(self._on_geometry_persist_skipped)
+            worker.failed.connect(self._on_geometry_persist_failed)
+            self._geometry_persist_worker = worker
+        if not worker.isRunning():
+            worker.start()
+        return worker
 
-        Patch geometry lives in patch_config.json, which only Step0 writes, so
-        an edit made anywhere has to come back through this path or it is not
-        persisted at all.  The one handoff writer is reused verbatim: same
-        artifacts, same schema, same tmp+fsync+os.replace publication of the
-        manifest as the final marker.  Nothing here recomputes background
-        correction — the corrected zarr the published manifest already points
-        at is reused untouched, and `_write_step0_handoff` only ever CREATES a
-        corrected zarr when none exists.
+    def _geometry_persist_task(self):
+        """A snapshot of the edit, built on the GUI thread, with NO file IO.
 
-        The checks are ordered so that "did the geometry change at all?" is
-        answered BEFORE any precondition: a precondition failure on unchanged
-        geometry is not an invalidation, it is a no-op.
-
-        Returns (committed, reason, info).
+        Everything expensive the old inline commit did -- reading the
+        published manifest, comparing against the geometry on disk, writing
+        the artifacts, the fsync -- is now the worker's, so what happens in
+        the callback that ends the gesture is this: read the page's own
+        geometry, stamp it with a dataset generation and a revision, hand it
+        over.
         """
-        info = {"step0_manifest_path": "", "geometry_revision": self._geometry_revision}
-        published = self._published_handoff()
-        if published is None:
-            return False, "no_published_handoff", info
-        step0_dir, manifest_path, zarr_path, config, manifest = published
-        info["step0_manifest_path"] = os.path.abspath(manifest_path)
-
         rois = self._standard_rois()
         patches = self._standard_patches(rois)
-        old_rois, old_patches = self._published_geometry(step0_dir)
-        roi_changed = (self._roi_context_signature(rois) != self._roi_context_sig
-                       or self._geometry_bboxes(rois) != old_rois)
-        patch_changed = self._geometry_bboxes(patches) != old_patches
-        if not roi_changed and not patch_changed:
-            return False, "unchanged", info
-
+        step0_dir = ((self._roi_context or {}).get("step_dirs")
+                     or {}).get("step0") or ""
         self._geometry_revision += 1
-        info["geometry_revision"] = self._geometry_revision
+        return {
+            "revision": int(self._geometry_revision),
+            "dataset_gen": int(self._dataset_gen),
+            "step0_dir": step0_dir,
+            "rois": rois,
+            "patches": patches,
+            # In MEMORY, so the callback answers it without a file: a new
+            # analysis region is refused rather than published.
+            "roi_context_changed": (
+                self._roi_context_signature(rois) != self._roi_context_sig),
+            "spec": self._handoff_spec({}, ""),
+        }
 
-        # An ROI edit moves the analysis region, which mints a NEW roi_context
-        # (roi_id, roi_dir, step directories) and invalidates the corrected
-        # zarr computed for the old region; a NEW ROI has no channel group in
-        # that zarr at all, and a deleted one leaves a zarr that describes a
-        # region that no longer exists.  There is no safe cross-ROI reuse rule
-        # to apply here, so this refuses instead of inventing one or quietly
-        # running a full Save.
-        if roi_changed:
-            return False, "roi_changed", info
-        if not os.path.exists(zarr_path):
-            return False, "corrected_zarr_missing", info
+    def stop_background_jobs(self):
+        """Ask the page's background workers to finish, WITHOUT joining them.
 
-        try:
-            _cfg, rois_out, patches_out, _manifest = self._write_step0_handoff(
-                config, zarr_path)
-        except Exception as exc:
-            print(f"[Step0] geometry-only commit FAILED: {exc}")
-            return False, f"write_failed: {exc}", info
+        Called when the window closes. Both workers are request-only by
+        design: they emit nothing once asked to stop, and a reader inside the
+        loader or a task inside `os.replace` finishes on its own thread
+        rather than being waited for on this one.
+        """
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is not None:
+            worker.stop(timeout_ms=0)
+        scheduler = getattr(self, "_preload", None)
+        if scheduler is not None:
+            scheduler.stop()
 
-        self.geometry_committed.emit({
-            "step0_manifest_path": info["step0_manifest_path"],
-            "geometry_revision": self._geometry_revision,
-            "rois": rois_out,
-            "patches": patches_out,
-        })
-        print(f"[Step0] geometry-only commit published: patches={len(patches_out)}")
-        return True, "committed", info
+    def geometry_persist_state(self):
+        """"idle", "saving", "published", "failed" or "staged".
+
+        A consumer of the handoff needs to know that the file on disk is one
+        revision behind what is on screen; "saving" is the answer it must not
+        read through.
+        """
+        return getattr(self, "_geometry_persist_state", "idle")
+
+    def geometry_persist_busy(self):
+        worker = getattr(self, "_geometry_persist_worker", None)
+        return bool(worker is not None and worker.is_busy())
+
+    def persisted_geometry_revision(self):
+        """The newest geometry revision that is actually ON DISK."""
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is None:
+            return 0
+        return worker.published_revision()
+
+    def geometry_persist_stats(self):
+        worker = getattr(self, "_geometry_persist_worker", None)
+        return dict(worker.stats()) if worker is not None else {}
 
     def _set_geometry_status(self, text):
         if hasattr(self, "_load_status"):
@@ -4587,25 +4602,94 @@ class Step0Page(QWidget):
             popup._bar_label.setText(text)
 
     def _persist_geometry_edit(self):
-        """Persist a finished ROI/patch edit, and never lie about the outcome.
+        """Hand a finished ROI/patch edit to the persistence worker, and RETURN.
 
-        Three outcomes, and only three: published, nothing to do, or the
-        already-published handoff is now stale.  The last case is announced,
-        because the user's edit stays (it is Step0's staged geometry) while
-        every Step1 result derived from the OLD geometry has stopped being
-        true.
+        What this used to do inline is what made letting go of a patch freeze
+        the window: two file reads to find the published handoff, two more to
+        compare the geometry, three JSON writes, the corrected zarr's
+        attributes, a validating scan of it, an fsync and an atomic replace.
+        None of that belongs in the callback that ends a gesture.
+
+        So the outcome is no longer this function's answer -- it is announced
+        later, by one of the three handlers below, and there are still only
+        the same outcomes: published, nothing to do, or the published handoff
+        is now stale (which is announced, because the user's edit stays as
+        Step0's staged geometry while every Step1 result derived from the OLD
+        geometry has stopped being true).
+
+        Returns whether a task was SUBMITTED, which is all that can be known
+        here.
         """
-        with perf_trace.span("patch.commit_geometry_only") as _sp:
-            ok, reason, info = self._commit_geometry_only()
-            _sp.add(ok=bool(ok), reason=reason or "")
-        if ok:
-            self._set_geometry_status("Patch geometry saved to the Step0 handoff.")
-            return True
-        if reason in ("no_published_handoff", "unchanged"):
-            # Nothing published yet, or nothing changed: edits stay staged for
-            # Save, which is what they have always done.  Not an invalidation.
-            return False
+        with perf_trace.span("patch.persist_submit") as _sp:
+            try:
+                task = self._geometry_persist_task()
+            except Exception as exc:                    # noqa: BLE001
+                # Nothing to persist against (no dataset path yet, say). The
+                # edit stays staged for Save -- and, crucially, the gesture
+                # still ends: an exception out of the release callback would
+                # leave the navigator's edit state half applied.
+                _sp.add(submitted=0, error=str(exc))
+                self._geometry_persist_state = "staged"
+                return False
+            worker = self._geometry_persist()
+            submitted = worker.submit(task)
+            stats = worker.stats()
+            # The span's own duration is what the gesture pays. The counters
+            # say what the worker did with the previous ones.
+            _sp.add(revision=task["revision"], submitted=int(bool(submitted)),
+                    geometry_rev=task["revision"],
+                    dataset_gen=task["dataset_gen"],
+                    replaced=int(stats["replaced"]),
+                    published=int(stats["published"]),
+                    skipped=int(stats["skipped"]),
+                    failed=int(stats["failed"]),
+                    published_rev=int(stats["published_revision"]))
+        if submitted:
+            self._geometry_persist_state = "saving"
+            self._set_geometry_status("Saving patch geometry…")
+        return bool(submitted)
 
+    def _on_geometry_persist_published(self, outcome):
+        """The worker put a new manifest on disk. Announce THAT, and only it."""
+        self._geometry_persist_state = "published"
+        result = outcome.get("result") or {}
+        if result:
+            # The GUI-visible half of the write, on this thread: the worker
+            # produced the report, it does not touch a label.
+            self._apply_handoff_result(result)
+        self._set_geometry_status(
+            "Patch geometry saved to the Step0 handoff.")
+        self.geometry_committed.emit({
+            "step0_manifest_path": outcome.get("step0_manifest_path", ""),
+            "geometry_revision": outcome.get("revision", 0),
+            "rois": outcome.get("rois") or [],
+            "patches": outcome.get("patches") or [],
+        })
+        print("[Step0] geometry-only commit published: "
+              f"patches={len(outcome.get('patches') or [])} "
+              f"revision={outcome.get('revision', 0)}")
+
+    def _on_geometry_persist_skipped(self, outcome):
+        """Nothing was published, and there are two different reasons for that.
+
+        Nothing to do (no handoff yet, unchanged geometry, or a newer revision
+        took this one's place) is not an invalidation: edits stay staged for
+        Save, which is what they have always done. A precondition that failed
+        IS one.
+        """
+        reason = str(outcome.get("outcome") or outcome.get("reason") or "")
+        if reason in ("no_published_handoff", "unchanged", "superseded",
+                      "stale_dataset", "stale_revision"):
+            self._geometry_persist_state = "staged"
+            if reason == "unchanged":
+                self._set_geometry_status("Patch geometry unchanged.")
+            elif reason in ("superseded", "stale_revision"):
+                pass          # a newer revision is already being written
+            else:
+                self._set_geometry_status(
+                    "Patch geometry staged for the next Step0 Save.")
+            return
+        self._geometry_persist_state = "failed"
         if reason == "roi_changed":
             message = ("ROI changed. Previous Step1 results are no longer valid; "
                        "run Step0 Save for the new ROI.")
@@ -4618,13 +4702,18 @@ class Step0Page(QWidget):
                        "locked until Step0 Save succeeds.")
         self._set_geometry_status(f"⚠ {message}")
         self.handoff_invalidated.emit({
-            "step0_manifest_path": info.get("step0_manifest_path", ""),
-            "geometry_revision": info.get("geometry_revision", 0),
+            "step0_manifest_path": outcome.get("step0_manifest_path", ""),
+            "geometry_revision": outcome.get("revision", 0),
             "reason": reason,
             "message": message,
         })
         print(f"[Step0] published handoff invalidated: {reason}")
-        return False
+
+    def _on_geometry_persist_failed(self, outcome):
+        """The write itself raised. Same announcement as a failed precondition:
+        the edit is staged, the handoff is stale, and Step1 is locked."""
+        self._on_geometry_persist_skipped(
+            dict(outcome, outcome="write_failed"))
 
     def set_navigator_edit_policy(self, *, roi_policy=None, patch_editable=None):
         """Set which ROI/patch edits the shared navigator accepts.
@@ -5408,6 +5497,12 @@ class Step0Page(QWidget):
         # generation (including signals Qt has already queued) is dropped
         # from this line on.
         self._dataset_gen += 1
+        # Anything queued for persistence describes the PREVIOUS slide's
+        # geometry and would publish it into this slide's directory.
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is not None:
+            worker.invalidate(int(self._dataset_gen))
+        self._geometry_persist_state = "idle"
         # Explore: tear the PREVIOUS dataset's stack down BEFORE self.ome_path
         # moves, so neither its pixels nor its source identity can survive --
         # and so a Full Image that is open right now is unbound before
@@ -5636,9 +5731,10 @@ class Step0Page(QWidget):
             self.current_patch_idx = 0
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             self._preview_status.setText("Select a channel and patch ROI to preview background correction.")
-        # Patches changed (drawn/deleted in the navigator) -> (re)start the
-        # background preload of all patches × channels (cancels any running
-        # one, invalidates the cache).
+        # Patches changed (drawn/deleted in the navigator) -> ASK for what is
+        # needed. Not a restart and not a cache clear: the arrays are keyed by
+        # bbox, so an added patch invalidates nothing already read, and the
+        # current patch's channel is asked for ahead of the speculative work.
         # NO conditioning re-sync: since f34b497 the workbench's pixels are the
         # WHOLE SLIDE, not the current patch, so drawing or deleting a patch
         # changes nothing it shows -- while the rebuild it used to trigger
@@ -8645,9 +8741,11 @@ class Step0Page(QWidget):
         real, still-running thread. Finished on-demand workers are pruned
         here -- the list used to only ever grow."""
         live = []
-        preload = getattr(self, "_preload_worker", None)
-        if preload is not None and preload.isRunning():
-            live.append(("preload", preload, preload.cancel))
+        # The preload SCHEDULER is deliberately absent from this list: it is
+        # cancelled by identity (`invalidate`), its results are discarded by
+        # generation, and it must never be joined from the GUI thread -- a
+        # reader inside the loader cannot be interrupted, so the join is the
+        # freeze. `stop()` is requested in `_cancel_preload`.
         batch = getattr(self, "_batch_worker", None)
         if batch is not None and batch.isRunning():
             live.append(("batch", batch, batch.stop))
@@ -8694,8 +8792,6 @@ class Step0Page(QWidget):
                       f"{int(wait_ms)} ms after stop")
         # Drop the handles we have released; a stuck thread keeps its handle so
         # nothing destroys a running QThread.
-        if getattr(self, "_preload_worker", None) is not None and "preload" not in stuck:
-            self._preload_worker = None
         if getattr(self, "_batch_worker", None) is not None and "batch" not in stuck:
             self._batch_worker = None
         if getattr(self, "_preview_worker", None) is not None and "preview" not in stuck:
@@ -8746,7 +8842,11 @@ class Step0Page(QWidget):
             )
             self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
         self._preview_cache = {}
-        self._preload_cache = {}
+        scheduler = getattr(self, "_preload", None)
+        if scheduler is not None:
+            # Identity, not a join: the reader in the loader right now
+            # finishes and its array is discarded by generation.
+            scheduler.invalidate(int(self._dataset_gen))
         self._computed_channels = set()
         # The per-channel "what produced this" evidence belongs to the OLD
         # dataset's pixels; channel names repeat across datasets, so keeping it
@@ -9112,12 +9212,16 @@ class Step0Page(QWidget):
         stale = list(dict.fromkeys(corrected + sorted(removed or ())))
         if not stale:
             return
-        for pidx, bbox in enumerate(self.patches):
-            try:
-                y0, y1, x0, x1 = bbox
-            except Exception:
+        scheduler = self._preload_scheduler()
+        for ch in stale:
+            # What the channel MEANS changed, so every patch's copy of it is
+            # wrong -- one channel's entries, not the whole store.
+            scheduler.drop_channel(ch)
+        for pidx in range(len(self.patches)):
+            bbox = self._patch_bbox(pidx)
+            if bbox is None:
                 continue
-            pc = self._preload_cache.setdefault(pidx, {})
+            y0, y1, x0, x1 = bbox
             for ch in stale:
                 try:
                     arr = self.loader.read_region(ch, y0, y1, x0, x1,
@@ -9125,7 +9229,7 @@ class Step0Page(QWidget):
                     arr = np.asarray(arr, dtype=np.float32)
                     if arr.ndim == 3 and arr.shape[2] == 1:
                         arr = arr[:, :, 0]
-                    pc[ch] = arr
+                    scheduler.put(bbox, ch, arr)
                 except Exception:
                     continue
         # Announce the store change (the ONLY corrected-stage invalidation
@@ -9160,31 +9264,9 @@ class Step0Page(QWidget):
 
     @staticmethod
     def _clean_correction_config(config):
-        cfg = dict(config or {})
-        params = dict(cfg.get("method_params") or {})
-        decisions = {}
-        for ch, method in (cfg.get("channel_decisions") or {}).items():
-            m = str(method).strip().lower()
-            if m == "both":
-                m = "original"
-            if m not in {"tophat", "cucim", "original"}:
-                m = "original"
-            decisions[str(ch)] = m
-        channel_params = {}
-        for ch, cp in (cfg.get("channel_params") or {}).items():
-            cp = cp or {}
-            channel_params[str(ch)] = {
-                "tophat_radius": int(cp.get("tophat_radius", params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT))),
-                "cucim_sigma": int(cp.get("cucim_sigma", params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT))),
-            }
-        return {
-            "method_params": {
-                "tophat_radius": int(params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)),
-                "cucim_sigma": int(params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT)),
-            },
-            "channel_decisions": decisions,
-            "channel_params": channel_params,
-        }
+        """One implementation, in `step0_handoff`: the Save writer and the
+        background geometry commit must normalise this identically."""
+        return step0_handoff.clean_correction_config(config)
 
     @staticmethod
     def _roi_shape_from_bbox(bbox):
@@ -9258,28 +9340,16 @@ class Step0Page(QWidget):
         return patches
 
     def _ensure_empty_corrected_zarr(self, zarr_path, rois):
-        if os.path.exists(zarr_path):
-            shutil.rmtree(zarr_path, ignore_errors=True)
-        out_dir = os.path.dirname(zarr_path) or self.output_dir
-        os.makedirs(out_dir, exist_ok=True)
-        root = zarr.open_group(zarr_path, mode="w")
-        root.attrs["mode"] = "roi_only"
-        root.attrs["analysis_region_type"] = "full_wsi" if self._is_full_wsi_mode() else "roi"
-        root.attrs["source_ome"] = os.path.abspath(self.ome_path)
-        root.attrs["output_dir"] = os.path.abspath(out_dir)
-        if self._roi_context:
-            root.attrs["roi_id"] = self._roi_context.get("roi_id", "")
-            root.attrs["roi_dir"] = os.path.abspath(self._roi_context.get("roi_dir", ""))
-        root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
-        root.attrs["created_by"] = "Step0"
-        for idx, roi in enumerate(rois, start=1):
-            name = str(roi.get("name") or f"ROI_{idx}")
-            group = root.create_group(name, overwrite=True)
-            group.attrs["roi_name"] = name
-            group.attrs["analysis_region_type"] = "full_wsi" if self._is_full_wsi_mode() else "roi"
-            group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
-            group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
-            group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
+        """Create the corrected zarr's skeleton. One implementation, in
+        `step0_handoff`, because the handoff writer creates the same skeleton
+        when none exists and two copies of it would drift."""
+        ctx = self._roi_context or {}
+        step0_handoff.ensure_empty_corrected_zarr(
+            zarr_path, rois, source_ome=self.ome_path,
+            analysis_region_type=("full_wsi" if self._is_full_wsi_mode()
+                                  else "roi"),
+            roi_id=ctx.get("roi_id", ""), roi_dir=ctx.get("roi_dir", ""),
+            out_dir=os.path.dirname(zarr_path) or self.output_dir)
 
     def _refresh_bg_corrected_status(self, report):
         """Update the corrected-output status label from a corrected_zarr_report.
@@ -9306,180 +9376,76 @@ class Step0Page(QWidget):
                 "Use Intensity for display mapping, or continue to Step1.")
             self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
 
-    def _write_step0_handoff(self, config, zarr_path, remap_config_path=None):
+    def _handoff_spec(self, config, zarr_path, remap_config_path=None):
+        """Everything the writer needs, gathered on the GUI thread, as data.
+
+        Cheap on purpose: reads this page's geometry and paths and touches no
+        file, so it can be taken inside a patch-release callback and handed to
+        a worker. `step0_handoff.write_handoff` does the IO.
+        """
         raw_path = os.path.abspath(self.ome_path) if self.ome_path else ""
         if not raw_path:
             raise RuntimeError("raw OME-TIFF path is empty")
         step0_dir = os.path.dirname(zarr_path) if zarr_path else (
             self._roi_context["step_dirs"]["step0"] if self._roi_context else self.output_dir
         )
-        os.makedirs(step0_dir, exist_ok=True)
-        config = self._clean_correction_config(config)
         rois = self._standard_rois()
         patches = self._standard_patches(rois)
-        corr_path = os.path.join(step0_dir, "correction_config.json")
-        roi_path = os.path.join(step0_dir, "roi_config.json")
-        patch_path = os.path.join(step0_dir, "patch_config.json")
-        corrected_path = zarr_path or os.path.join(step0_dir, "corrected_channels.zarr")
-        manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
-        roi_id = self._roi_context.get("roi_id", "") if self._roi_context else ""
-        roi_dir = self._roi_context.get("roi_dir", "") if self._roi_context else ""
-        project_dir = self._roi_context.get("project_dir", self.output_dir) if self._roi_context else self.output_dir
-        analysis_region_type = "full_wsi" if self._is_full_wsi_mode() else "roi"
-
-        print("[Step0] writing ROI-specific outputs")
-        print(f"[Step0] roi_id={roi_id}")
-        print(f"[Step0] step0_dir={step0_dir}")
-        with perf_trace.span("handoff.write_json", files=3):
-            with open(corr_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            with open(roi_path, "w", encoding="utf-8") as f:
-                json.dump(rois, f, indent=2, ensure_ascii=False)
-            with open(patch_path, "w", encoding="utf-8") as f:
-                json.dump(patches, f, indent=2, ensure_ascii=False)
-
-        if not os.path.exists(corrected_path):
-            self._ensure_empty_corrected_zarr(corrected_path, rois)
-
-        if os.path.exists(corrected_path):
-            try:
-                root = zarr.open_group(corrected_path, mode="a")
-                root.attrs["mode"] = "roi_only"
-                root.attrs["analysis_region_type"] = analysis_region_type
-                root.attrs["source_ome"] = os.path.abspath(self.ome_path)
-                root.attrs["output_dir"] = os.path.abspath(step0_dir)
-                root.attrs["project_output_dir"] = os.path.abspath(project_dir)
-                root.attrs["roi_id"] = roi_id
-                root.attrs["roi_dir"] = os.path.abspath(roi_dir) if roi_dir else ""
-                root.attrs["roi_names"] = [r.get("name", f"ROI_{i}") for i, r in enumerate(rois, start=1)]
-                root.attrs["created_by"] = "Step0"
-                # v14.4: honest preprocessing provenance (NOT step2_ready).
-                stamp_corrected_zarr_provenance(root)
-                for roi in rois:
-                    name = str(roi.get("name") or "")
-                    group = root[name] if name and name in root else None
-                    if group is None:
-                        for group_name in root.group_keys():
-                            candidate = root[group_name]
-                            if str(candidate.attrs.get("roi_name") or group_name) == name:
-                                group = candidate
-                                break
-                    if group is not None:
-                        group.attrs["roi_name"] = name
-                        group.attrs["analysis_region_type"] = analysis_region_type
-                        group.attrs["bbox_fullres"] = roi.get("bbox_fullres") or []
-                        group.attrs["polygon_fullres"] = roi.get("polygon_fullres") or []
-                        group.attrs["shape"] = roi.get("shape") or self._roi_shape_from_bbox(roi.get("bbox_fullres"))
-            except Exception as e:
-                print(f"[Step0] failed to update corrected zarr attrs: {e}")
-                raise RuntimeError("failed to commit corrected zarr handoff metadata") from e
-
-        # v14.4: validate the corrected output (a directory existing is NOT proof
-        # of a valid corrected zarr) and report it honestly to the UI + manifest.
-        with perf_trace.span("handoff.zarr_report"):
-            corrected_report = corrected_zarr_report(corrected_path)
-        self._refresh_bg_corrected_status(corrected_report)
-
-        try:
-            raw_stat = os.stat(raw_path)
-            raw_fingerprint = f"{raw_stat.st_size}:{raw_stat.st_mtime_ns}"
-        except OSError as exc:
-            raise RuntimeError(f"raw OME-TIFF identity could not be read: {exc}") from exc
-        source_identity = {
-            "dataset_path": raw_path,
-            "dataset_fingerprint": raw_fingerprint,
-            "stage": "raw",
-            "corrected_artifact": None,
-        }
-        # The manifest names the remap config it is hashed over. A display
-        # mapping commit passes an immutable, hash-named file so that publishing
-        # the manifest is the only moment anything changes for a consumer.
-        remap_path = os.path.abspath(
-            remap_config_path or os.path.join(step0_dir, "step0_channel_remap.json"))
-        remap_hash = ""
-        if os.path.exists(remap_path):
-            try:
-                with open(remap_path, "r", encoding="utf-8") as f:
-                    remap_hash = channel_remap_config_hash(json.load(f))
-            except Exception as exc:
-                raise RuntimeError(f"invalid Step0 remap config at {remap_path}: {exc}") from exc
-
-        manifest = {
-            "version": "v6_roi_handoff_1",
-            "handoff_schema_version": 2,
-            "created_from_step": CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
-            "output_kind": CORRECTED_ZARR_OUTPUT_KIND,
-            "corrected_zarr_valid": bool(corrected_report["non_empty"]),
-            "corrected_zarr_n_channel_arrays": int(corrected_report["n_channel_arrays"]),
-            "roi_id": roi_id,
-            "display_name": rois[0]["name"] if rois else "",
-            "analysis_region_type": analysis_region_type,
-            "mode": "full_wsi" if analysis_region_type == "full_wsi" else "roi_only",
-            "project_output_dir": os.path.abspath(project_dir),
-            "roi_dir": os.path.abspath(roi_dir) if roi_dir else "",
-            "step0_dir": os.path.abspath(step0_dir),
-            "step1_dir": os.path.abspath(self._roi_context["step_dirs"]["step1"]) if self._roi_context else "",
-            "step2_dir": os.path.abspath(self._roi_context["step_dirs"]["step2"]) if self._roi_context else "",
-            "output_dir": os.path.abspath(step0_dir),
-            "raw_ome_path": raw_path,
-            "panel_csv_path": (os.path.abspath(self.panel_csv_path) if self.panel_csv_path else ""),
+        ctx = self._roi_context or {}
+        step_dirs = ctx.get("step_dirs") or {}
+        return {
+            "raw_path": raw_path,
+            "step0_dir": step0_dir,
+            "config": self._clean_correction_config(config),
+            "rois": rois,
+            "patches": patches,
+            "corrected_path": zarr_path or os.path.join(
+                step0_dir, "corrected_channels.zarr"),
+            "manifest_path": os.path.join(step0_dir, "step0_roi_result.json"),
+            "analysis_region_type": ("full_wsi" if self._is_full_wsi_mode()
+                                     else "roi"),
+            "roi_id": ctx.get("roi_id", ""),
+            "roi_dir": ctx.get("roi_dir", ""),
+            "project_dir": ctx.get("project_dir", self.output_dir),
+            "step1_dir": (os.path.abspath(step_dirs["step1"])
+                          if step_dirs.get("step1") else ""),
+            "step2_dir": (os.path.abspath(step_dirs["step2"])
+                          if step_dirs.get("step2") else ""),
+            "panel_csv_path": (os.path.abspath(self.panel_csv_path)
+                               if self.panel_csv_path else ""),
             "panel_groups": dict(getattr(self, "panel_groups", {}) or {}),
-            "panel_nucleus": self.nucleus_channel,
-            "source_identity": source_identity,
-            "channel_remap_config_path": remap_path,
-            "channel_remap_config_hash": remap_hash,
-            "corrected_decisions": {
-                str(ch): str(method).strip().lower()
-                for ch, method in (config.get("channel_decisions") or {}).items()
-                if str(method).strip().lower() in {"tophat", "cucim"}
-            },
             "nucleus_channel": self.nucleus_channel,
-            "corrected_zarr_path": os.path.abspath(corrected_path),
-            "correction_config_path": os.path.abspath(corr_path),
-            "roi_config_path": os.path.abspath(roi_path),
-            "patch_config_path": os.path.abspath(patch_path),
-            "active_roi": rois[0]["name"] if rois else "",
-            "bbox_fullres": rois[0].get("bbox_fullres", []) if rois else [],
-            "shape": rois[0].get("shape", []) if rois else [],
-            "n_rois": len(rois),
-            "n_patches": len(patches),
+            "remap_path": os.path.abspath(
+                remap_config_path or os.path.join(
+                    step0_dir, "step0_channel_remap.json")),
         }
-        manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
-        # The manifest is the final publication marker.  The individual JSON
-        # artifacts above are intentionally not described as one atomic
-        # transaction; only publication of this marker is atomic, so a
-        # reader never observes a truncated manifest file.
-        manifest_tmp = f"{manifest_path}.tmp.{os.getpid()}"
-        try:
-            with open(manifest_tmp, "w", encoding="utf-8") as f, \
-                    perf_trace.span("handoff.manifest_write"):
-                json.dump(manifest, f, indent=2, ensure_ascii=False)
-                f.flush()
-                with perf_trace.span("handoff.fsync"):
-                    os.fsync(f.fileno())
-            with perf_trace.span("handoff.publish_replace"):
-                os.replace(manifest_tmp, manifest_path)
-        except Exception:
-            try:
-                if os.path.exists(manifest_tmp):
-                    os.unlink(manifest_tmp)
-            except OSError:
-                pass
-            raise
-        print(f"[Step0] correction_config={corr_path}")
-        print(f"[Step0] roi_config={roi_path}")
-        print(f"[Step0] patch_config={patch_path}")
-        print(f"[Step0] corrected_zarr={corrected_path}")
-        print(f"[Step0] step0_roi_result={manifest_path}")
-        if roi_id and project_dir:
-            try:
-                mark_roi_step(project_dir, roi_id, "step0", "done")
-            except Exception as e:
-                print(f"[Step0] failed to update ROI index: {e}")
-                # The manifest above is the authoritative handoff commit
-                # marker.  ROI index bookkeeping is auxiliary; a stale index
-                # must not turn a durable handoff into a reported save failure.
-        return config, rois, patches, manifest
+
+    def _apply_handoff_result(self, result):
+        """The GUI-visible half of a handoff write, on the GUI thread.
+
+        Separate because the writer may have run on a worker: a label set
+        from a background thread is a crash waiting for a repaint.
+        """
+        self._refresh_bg_corrected_status(result.get("corrected_report"))
+        return (result["config"], result["rois"], result["patches"],
+                result["manifest"])
+
+    def _write_step0_handoff(self, config, zarr_path, remap_config_path=None):
+        """Save's synchronous handoff write: spec, write, apply.
+
+        The same three steps the background persist worker takes, in one call,
+        because a Save is a button the user pressed and waited for. The WRITE
+        is `step0_handoff.write_handoff` in both cases -- one implementation,
+        so the file a Save publishes and the file a patch edit publishes
+        cannot describe the handoff differently.
+        """
+        spec = self._handoff_spec(config, zarr_path, remap_config_path)
+        print("[Step0] writing ROI-specific outputs")
+        print(f"[Step0] roi_id={spec['roi_id']}")
+        print(f"[Step0] step0_dir={spec['step0_dir']}")
+        result = step0_handoff.write_handoff(
+            spec, tag=f"save.{os.getpid()}")
+        return self._apply_handoff_result(result)
 
     def _emit_complete(self, config, zarr_path, decisions):
         self._btn_continue.setEnabled(True)

@@ -4,10 +4,16 @@ Patch geometry lives in patch_config.json, which only Step0 writes. Before this,
 a patch edited outside the Save flow lived in memory (and, from Step1, in
 step1_session.json), so re-reading the manifest silently discarded it.
 
-A geometry-only commit reuses `_write_step0_handoff` verbatim: same artifacts,
+A geometry-only commit reuses the ONE handoff writer verbatim: same artifacts,
 same schema, manifest published last via tmp + fsync + os.replace. It never
 recomputes background correction, and it refuses outright when the analysis
 region itself changed, because a different ROI needs its own corrected output.
+
+It is also ASYNCHRONOUS now: the callback that ends a patch gesture submits a
+task and returns, so every test here submits and then SETTLES -- the outcome
+is the worker's answer, delivered on this thread, not the return value of the
+call. What each outcome means is unchanged; `test_step0_patch_release.py`
+covers the scheduling itself.
 
 Own module: page-heavy Step0 suites crash pyqtgraph offscreen when combined.
 """
@@ -88,6 +94,26 @@ def _published(step0_dir, name):
         return json.load(f)
 
 
+def _settle(page, timeout=15.0):
+    """Pump events until the persistence worker is idle, then say what happened.
+
+    The outcome used to be `_persist_geometry_edit`'s return value; it is now
+    announced by the worker through a queued signal, so a test has to let the
+    event loop deliver it.
+    """
+    import time
+    deadline = time.monotonic() + timeout
+    worker = getattr(page, "_geometry_persist_worker", None)
+    while time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        if worker is None or not worker.is_busy():
+            QtWidgets.QApplication.processEvents()
+            break
+        time.sleep(0.005)
+    QtWidgets.QApplication.processEvents()
+    return page.geometry_persist_state()
+
+
 def _patch_bboxes(step0_dir):
     return [p["bbox_fullres"] for p in _published(step0_dir, "patch_config.json")]
 
@@ -98,7 +124,8 @@ def test_an_added_patch_reaches_patch_config_and_the_manifest(app, tmp_path):
         seen = []
         page.geometry_committed.connect(seen.append)
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
-        assert page._persist_geometry_edit() is True
+        assert page._persist_geometry_edit() is True     # submitted
+        assert _settle(page) == "published"
 
         assert _patch_bboxes(step0_dir) == [[0, 16, 0, 16], [16, 32, 16, 32]]
         assert _published(step0_dir, "step0_roi_result.json")["n_patches"] == 2
@@ -113,6 +140,7 @@ def test_a_moved_patch_is_re_read_from_disk_not_from_memory(app, tmp_path):
     try:
         page.overview._patches = [{"roi_idx": 0, "coords": (8, 24, 8, 24)}]
         assert page._persist_geometry_edit() is True
+        assert _settle(page) == "published"
 
         # Re-read the published manifest exactly as the Step1 reader does.
         manifest = _published(step0_dir, "step0_roi_result.json")
@@ -130,6 +158,7 @@ def test_a_deleted_patch_disappears_from_the_published_geometry(app, tmp_path):
     try:
         page.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)}]
         assert page._persist_geometry_edit() is True
+        assert _settle(page) == "published"
         assert _patch_bboxes(step0_dir) == [[0, 16, 0, 16]]
     finally:
         page.deleteLater()
@@ -143,7 +172,8 @@ def test_an_unchanged_geometry_publishes_nothing(app, tmp_path):
         manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
         before = os.stat(manifest_path).st_mtime_ns
 
-        assert page._persist_geometry_edit() is False
+        assert page._persist_geometry_edit() is True      # submitted...
+        assert _settle(page) == "staged"                 # ...and published nothing
         assert seen == []
         assert os.stat(manifest_path).st_mtime_ns == before
     finally:
@@ -158,7 +188,8 @@ def test_a_changed_roi_is_refused_and_says_so(app, tmp_path):
         before = _published(step0_dir, "roi_config.json")
 
         page.overview._rois = [_roi((0, 48, 0, 48))]
-        assert page._persist_geometry_edit() is False
+        assert page._persist_geometry_edit() is True
+        assert _settle(page) == "failed"
 
         # A different analysis region cannot reuse the corrected output that was
         # computed for the old one, so nothing is published and nothing claims
@@ -189,6 +220,7 @@ def test_a_geometry_commit_neither_recomputes_nor_rewrites_corrected_channels(
 
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         assert page._persist_geometry_edit() is True
+        assert _settle(page) == "published"
 
         after = np.asarray(zarr.open_group(zarr_path, mode="r")["ROI_1"]["DAPI"][:])
         assert np.array_equal(before, after)
@@ -208,12 +240,14 @@ def test_a_failed_write_publishes_no_manifest_and_reports_the_failure(
         before_manifest = _published(step0_dir, "step0_roi_result.json")
         before_mtime = os.stat(manifest_path).st_mtime_ns
 
-        def _fail(self, *_a, **_k):
+        def _fail(*_a, **_k):
             raise RuntimeError("disk is full")
 
-        monkeypatch.setattr(type(page), "_write_step0_handoff", _fail)
+        from block01.core import step0_handoff
+        monkeypatch.setattr(step0_handoff, "write_handoff", _fail)
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
-        assert page._persist_geometry_edit() is False
+        assert page._persist_geometry_edit() is True
+        assert _settle(page) == "failed"
 
         assert seen == []
         assert _published(step0_dir, "step0_roi_result.json") == before_manifest
@@ -231,7 +265,8 @@ def test_nothing_is_published_before_the_first_save(app, tmp_path):
         page._roi_context = None            # as before any Step0 Save
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
 
-        assert page._persist_geometry_edit() is False
+        assert page._persist_geometry_edit() is True
+        assert _settle(page) == "staged"
         assert seen == []
     finally:
         page.deleteLater()

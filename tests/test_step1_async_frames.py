@@ -543,10 +543,25 @@ def test_the_snapshot_never_reads_the_slide_or_runs_a_percentile(app, mode,
         monkeypatch.setattr(type(page), "_workbench_pixels",
                             lambda self, name, **k: (touched.append(
                                 ("pixels", name)), None)[1])
-        import block01.core.channel_remap as core
-        monkeypatch.setattr(core, "compute_qupath_auto_minmax",
+        # Both the page and the compose module imported the percentile BY
+        # NAME, so each binding has to be replaced where it is used -- and
+        # they are tagged apart, because "the GUI thread did not run it" and
+        # "the worker did" are two different claims.
+        import block01.ui.step0.step0_page as page_mod
+        monkeypatch.setattr(page_mod, "compute_qupath_auto_minmax",
                             lambda *a, **k: (touched.append(
-                                ("percentile",)), (0.0, 1.0))[1])
+                                ("percentile", "gui")), (0.0, 1.0))[1])
+        monkeypatch.setattr(preview_compose, "compute_qupath_auto_minmax",
+                            lambda *a, **k: (touched.append(
+                                ("percentile", "worker")), (0.0, 1.0))[1])
+        # The fusion preview's fallback for a windowless channel is not a
+        # percentile at all -- it is the loader's own normalisation, which is
+        # exactly why the two caches may not share a key.
+        plain_norm = type(w.loader)._norm
+        monkeypatch.setattr(type(w.loader), "_norm",
+                            staticmethod(lambda arr: (touched.append(
+                                ("fallback_norm", "worker")),
+                                plain_norm(arr))[1]))
         clock = _Clock(w)
         frames = _Frames(w, clock)
 
@@ -560,10 +575,16 @@ def test_the_snapshot_never_reads_the_slide_or_runs_a_percentile(app, mode,
         # A channel whose window is not in memory is named, not computed.
         assert set(snapshot["provisional"]) <= set(snapshot["channels"])
 
-        # And the worker does the provisional mapping, where the percentile
-        # is a patch-sized one.
+        # And the worker does do the provisional mapping -- the percentile is
+        # not skipped, it is moved: a patch-sized one, in the compose step.
         frames.deliver()
-        assert any(entry[0] == "percentile" for entry in touched) or True
+        worker_step = ("percentile", "worker") if mode == "overlay" else (
+            ("fallback_norm", "worker"))
+        assert worker_step in touched, (
+            "nobody computed the provisional window; the frame would be "
+            f"drawn from nothing: {touched[:4]}")
+        assert ("percentile", "gui") not in touched, (
+            "the GUI thread ran a percentile after all")
     finally:
         w.close()
 

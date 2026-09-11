@@ -5736,17 +5736,16 @@ class Step0Page(QWidget):
         self._rebuild_channel_list()
         self._rebuild_patch_buttons()
         if unbound:
-            # A Tissue Preview that could not be emptied is still showing the
-            # previous slide. The dataset IS switched -- the commit cannot be
-            # rolled back -- so this says what is wrong rather than reporting
-            # a clean load over a stale picture.
+            # A panel that could neither be cleared NOR taken off the screen.
+            # The switch cannot be rolled back, so this says what is wrong --
+            # but it is not the reported bug: a panel that merely refused to
+            # clear has had its image item hidden, so the previous slide is
+            # not on screen either way.
             self._load_status.setText(
                 f"⚠ Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px"
                 f"  |  {len(self.loader.ch_map)} channels — "
-                f"{len(unbound)} tissue preview(s) could not be cleared and "
-                f"may still show the previous slide. Reopen the Tissue "
-                f"Preview.")
-            print("[Step0] WARNING: a tissue preview kept the previous slide")
+                f"{len(unbound)} tissue preview(s) could not be emptied.")
+            print("[Step0] WARNING: a tissue preview could not be emptied")
         else:
             self._load_status.setText(
                 f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"

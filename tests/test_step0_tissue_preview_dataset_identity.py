@@ -35,6 +35,7 @@ import gc
 import os
 import threading
 import time
+import weakref
 
 import numpy as np
 import pytest
@@ -719,13 +720,15 @@ def test_a_failed_read_of_the_previous_slide_does_not_touch_the_new_one(
 
 # ── the commit point is fail-safe ───────────────────────────────────────
 
-def test_a_panel_that_cannot_clear_itself_still_lets_go_of_the_pixels(
+def test_a_panel_that_cannot_clear_itself_takes_the_old_picture_off_screen(
         app, tmp_path, monkeypatch):
-    """`img_item.clear()` raising may not leave slide A in the stores.
+    """`img_item.clear()` raising may not leave slide A VISIBLE.
 
-    The stores are what the next repaint draws from, so they go first and the
-    widget work follows; and the page does not report a clean load when a
-    panel could not be emptied.
+    Emptying the two stores is not enough: what the user is looking at is the
+    image item, and "the Tissue Preview still shows the old slide" is the
+    whole complaint. So the item is hidden (or taken out of the view) and the
+    panel counts as empty because nothing of A can be seen -- and the new
+    slide's picture puts a working item back.
     """
     page = _page_showing_a(tmp_path)
     popup = _show_a_everywhere(page)
@@ -735,27 +738,297 @@ def test_a_panel_that_cannot_clear_itself_still_lets_go_of_the_pixels(
         def _refuse():
             raise RuntimeError("the item refuses")
 
-        page.overview.img_item.clear = _refuse
+        panel = page.overview
+        panel.img_item.clear = _refuse
+        a_pixels = np.asarray(panel.img_item.image).copy()
 
         _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
 
-        for name, panel in _panels(page).items():
-            assert panel._channel_rgb is None, name
-            assert panel._overview_arr is None, name
-            assert panel.dataset_token() == page._dataset_token(), name
-        # And the page says so instead of announcing a clean load.
-        assert "could not be cleared" in page._load_status.text(), \
-            page._load_status.text()
-        assert popup is page._tissue_navigator_popup
+        for name, other in _panels(page).items():
+            assert other._channel_rgb is None, name
+            assert other._overview_arr is None, name
+            assert other.dataset_token() == page._dataset_token(), name
+            assert other.is_empty(), f"{name} can still show the old slide"
+        # Nothing of A is on the screen: either the item holds no image, or
+        # it is not being drawn at all.
+        assert not (panel.img_item.isVisible()
+                    and panel.img_item.scene() is not None
+                    and panel.img_item.image is not None
+                    and np.array_equal(np.asarray(panel.img_item.image),
+                                       a_pixels)), "slide A is still visible"
+        # The page reports a clean load: the previous slide is not on screen.
+        assert "could not be emptied" not in page._load_status.text()
 
-        # The panel's own answer is the same: it reports the failure rather
-        # than claiming a clean transition, which is what the page's check
-        # is built on.
-        assert page.overview.forget_pixels() is False
-        assert page.overview.bind_dataset((99, "/C.tif"),
-                                          loader=page.loader) is False
-        assert page.overview.is_empty() is False
+        # B arrives: the panel comes back, showing B and only B.
+        panel._on_overview_loaded(np.full((16, 16), 99.0, np.float32),
+                                  panel._ov_gen, panel.loader,
+                                  panel.dataset_token())
+        assert panel.img_item.isVisible()
+        assert panel.img_item.scene() is not None
+        assert float(np.asarray(panel.img_item.image).max()) == \
+            pytest.approx(99.0)
+        assert popup is page._tissue_navigator_popup
     finally:
+        page.close()
+
+
+def test_a_same_token_rebind_reports_safety_and_keeps_the_picture(app,
+                                                                  tmp_path):
+    """Rebinding to the slide already showing is not a clear -- and the
+    answer is about SAFETY, not about whether anything changed."""
+    page = _page_showing_a(tmp_path)
+    panel = page.overview
+    try:
+        token = page._dataset_token()
+        panel.bind_dataset(token, loader=page.loader, full_shape=(64, 64))
+        panel.set_channel_image(_rgb(200), token)
+        assert panel.img_item.image is not None
+
+        assert panel.bind_dataset(token, loader=page.loader) is True
+        assert panel._channel_rgb is not None, (
+            "a context refresh threw away the current slide's picture")
+
+        # A panel that can neither clear nor hide its item is NOT safe, and
+        # a same-token rebind may not say it is.
+        panel.img_item.clear = lambda: (_ for _ in ()).throw(RuntimeError("x"))
+        panel.img_item.setVisible = lambda _v: None
+        panel.vb.removeItem = lambda _i: (_ for _ in ()).throw(
+            RuntimeError("stuck"))
+        assert panel.bind_dataset((99, "/C.tif"), loader=page.loader) is False
+        assert panel.bind_dataset((99, "/C.tif"), loader=page.loader) is False
+    finally:
+        page.close()
+
+
+# ── a destroyed panel is not a hidden one ───────────────────────────────
+
+@pytest.mark.parametrize("outcome", ["done", "error"])
+def test_a_destroyed_panel_is_never_reached_by_its_own_read(app, tmp_path,
+                                                            outcome, capfd):
+    """The worker outlives the window on purpose; the window must not outlive
+    itself through the worker, and the result must not be delivered into a
+    C++ object that is gone.
+
+    The destruction is made EXPLICIT with `sip.delete`, so the state under
+    test is the one that crashes in production -- a live Python wrapper whose
+    C++ object has been deleted -- rather than whatever the garbage collector
+    happens to do. The panel is also kept referenced here, which is the worse
+    case: a weak reference alone would have gone quiet on its own.
+    """
+    from PyQt5 import sip
+
+    class _Boom(_Loader):
+        def __init__(self, gate):
+            super().__init__(11.0)
+            self.gate = gate
+            self.entered = threading.Event()
+
+        def read_region(self, *_a, **_k):
+            self.entered.set()
+            assert self.gate.wait(30)
+            raise RuntimeError("A is unreadable")
+
+    gate = threading.Event()
+    loader = _Boom(gate) if outcome == "error" else _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    panel = op.OverviewPanel(loader, "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    panel.bind_dataset((1, "/A.tif"), loader=loader, full_shape=(64, 64))
+    panel._load_overview()
+    assert loader.entered.wait(10)
+    worker = (op.live_overview_workers() - before).pop()
+    capfd.readouterr()
+    try:
+        panel.close()
+        sip.delete(panel)
+        assert sip.isdeleted(panel), "the C++ object was not destroyed"
+        assert worker.isRunning(), "the read was abandoned with the panel"
+
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before)), (
+            "the worker never finished")
+
+        out, err = capfd.readouterr()
+        for bad in ("has been deleted", "Traceback",
+                    "Destroyed while thread is still running"):
+            assert bad not in err, err
+            assert bad not in out, out
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+
+
+def test_a_panel_whose_cpp_object_died_without_closing_is_still_safe(
+        app, tmp_path, capfd):
+    """The case the `_disposed` flag cannot catch.
+
+    A panel can lose its C++ object without anyone calling `close()` -- its
+    parent is destroyed, or Qt takes it down. The Python wrapper is still
+    there and still says it is not disposed, so the result would be delivered
+    into a deleted object: "wrapped C/C++ object of type OverviewPanel has
+    been deleted". The relay touches the object before it delivers anything.
+    """
+    from PyQt5 import sip
+
+    gate = threading.Event()
+    loader = _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    panel = op.OverviewPanel(loader, "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    panel.bind_dataset((1, "/A.tif"), loader=loader, full_shape=(64, 64))
+    panel._load_overview()
+    assert loader.entered.wait(10)
+    capfd.readouterr()
+    try:
+        sip.delete(panel)                     # no close(), no dispose flag
+        assert sip.isdeleted(panel)
+        assert panel._disposed is False, (
+            "this test is about the case the dispose flag does NOT cover")
+
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before))
+
+        out, err = capfd.readouterr()
+        for bad in ("has been deleted", "Traceback"):
+            assert bad not in err, err
+            assert bad not in out, out
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+
+
+def test_a_panel_dropped_while_its_read_runs_is_not_kept_alive_by_it(
+        app, tmp_path):
+    """The keep-alive is for the THREAD, not for the window it came from."""
+    gate = threading.Event()
+    loader = _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    panel = op.OverviewPanel(loader, "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    panel.bind_dataset((1, "/A.tif"), loader=loader, full_shape=(64, 64))
+    panel._load_overview()
+    assert loader.entered.wait(10)
+    ref = weakref.ref(panel)
+    try:
+        panel.close()
+        panel.deleteLater()
+        del panel
+        gc.collect()
+        app.processEvents()
+
+        assert ref() is None, (
+            "the worker's connection kept the panel alive")
+        assert (op.live_overview_workers() - before), \
+            "the read was dropped with the panel"
+
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before))
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+
+
+def test_a_hidden_panel_still_takes_the_current_slides_result(app, tmp_path):
+    """Hidden is not disposed: a collapsed or minimised popup is still showing
+    the current dataset and must take its picture."""
+    page = _page_showing_a(tmp_path)
+    popup = _show_a_everywhere(page)
+    try:
+        popup.minimize_to_bar()
+        popup.hide()
+        panel = popup.overview
+        panel.bind_dataset((7, "/B.tif"), loader=page.loader,
+                           full_shape=(64, 64))
+
+        panel._on_overview_loaded(np.full((16, 16), 99.0, np.float32),
+                                  panel._ov_gen, panel.loader,
+                                  panel.dataset_token())
+
+        assert float(np.asarray(panel.img_item.image).max()) == \
+            pytest.approx(99.0)
+    finally:
+        page.close()
+
+
+# ── the application does not exit over a running read ───────────────────
+
+def test_closing_the_application_waits_for_an_overview_read(app, tmp_path):
+    """A read cannot be interrupted, so keeping its thread alive only moves
+    the crash to interpreter teardown unless the application waits too."""
+    from PyQt5 import QtGui
+    from block01.ui.main_window import MainWindow
+
+    gate = threading.Event()
+    loader = _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    w = MainWindow()
+    panel = w._step0.overview
+    panel.loader = loader
+    panel.full_h, panel.full_w = 64, 64
+    panel.bind_dataset((1, "/A.tif"), loader=loader, full_shape=(64, 64))
+    panel._load_overview()
+    assert loader.entered.wait(10)
+    try:
+        event = QtGui.QCloseEvent()
+        w.closeEvent(event)
+        assert not event.isAccepted(), (
+            "the window closed over a running overview read")
+        assert "overview read" in w.prev_status.text().lower(), \
+            w.prev_status.text()
+        assert (op.live_overview_workers() - before)
+
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before))
+
+        event = QtGui.QCloseEvent()
+        w.closeEvent(event)
+        assert event.isAccepted(), "the window would not close afterwards"
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+        w.close()
+
+
+def test_a_normal_load_never_waits_for_the_previous_read(app, tmp_path,
+                                                         monkeypatch):
+    """The waiting is for EXIT only. A Load with a read still in flight must
+    return at once -- the previous slide's read is refused by identity, not
+    waited for."""
+    gate = threading.Event()
+    loader = _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    page = _page_showing_a(tmp_path)
+    page.loader = loader
+    page.overview.loader = loader
+    page.overview.bind_dataset((1, "/A.tif"), loader=loader,
+                               full_shape=(64, 64))
+    page.overview._load_overview()
+    assert loader.entered.wait(10)
+    try:
+        started = time.monotonic()
+        _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0, f"the Load waited {elapsed:.1f}s for a read"
+        assert (op.live_overview_workers() - before), \
+            "the running read was dropped instead of kept"
+
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before))
+        assert _blank(page.overview), "the previous slide's read landed"
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
         page.close()
 
 

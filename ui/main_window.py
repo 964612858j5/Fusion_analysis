@@ -72,6 +72,7 @@ from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
+from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
 from .step2_page import Step2Page
@@ -3349,6 +3350,24 @@ class MainWindow(QMainWindow):
         if self._patch_loaders:
             event.ignore()
             self.prev_status.setText("Waiting for preview loaders to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
+        # An overview read cannot be interrupted -- it is one blocking call
+        # inside the loader -- so the panels keep their workers alive until
+        # those physically finish (see `overview_panel`). That keep-alive only
+        # moves the problem to interpreter teardown unless the APPLICATION
+        # waits for them too: at exit, module teardown releases a running
+        # QThread and the process aborts. Same treatment as the fusion job and
+        # the patch loaders: hold the window open and try again, rather than
+        # block the GUI for seconds. Nothing here waits on a Load, a hidden
+        # popup or a gesture -- only on closing the application.
+        live_reads = [w for w in overview_panel.live_overview_workers()
+                      if w.isRunning()]
+        if live_reads:
+            event.ignore()
+            self.prev_status.setText(
+                f"Waiting for {len(live_reads)} tissue overview read(s) to "
+                f"finish…")
             QtCore.QTimer.singleShot(500, self.close)
             return
         # The sink closes LAST, and finally: every loader has reported its own

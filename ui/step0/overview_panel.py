@@ -9,6 +9,7 @@ import json
 import time
 import traceback
 import shutil
+import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -985,6 +986,57 @@ def _retire_overview_worker(worker):
         pass
 
 
+class _OverviewResultRelay(QtCore.QObject):
+    """Carries one overview read's result back to the panel that asked for it.
+
+    WHY NOT A LAMBDA ON THE PANEL. The worker is kept alive until it
+    physically finishes (it must be -- a running QThread whose last reference
+    goes takes the process with it), and a lambda that closes over `self`
+    would keep the PANEL alive for just as long, which is the opposite of
+    what a closed window should do. This holds a WEAK reference: a panel that
+    has been destroyed is simply not there any more, and the result is
+    dropped instead of delivered into a deleted C++ object.
+
+    Parented to the worker, so it dies with it.
+    """
+
+    def __init__(self, panel, gen, loader, token, parent=None):
+        super().__init__(parent)
+        self._panel = weakref.ref(panel)
+        self._gen = gen
+        self._loader = loader
+        self._token = token
+
+    def _target(self):
+        panel = self._panel()
+        if panel is None:
+            return None
+        if getattr(panel, "_disposed", False):
+            return None
+        try:
+            panel.objectName()          # touches the C++ object
+        except RuntimeError:
+            return None                 # wrapped C/C++ object was deleted
+        return panel
+
+    def on_done(self, arr):
+        panel = self._target()
+        if panel is None:
+            dataset_trace.note("read.rejected", why="panel_gone",
+                               token=self._token)
+            return
+        panel._on_overview_loaded(arr, self._gen, self._loader, self._token)
+
+    def on_error(self, message):
+        panel = self._target()
+        if panel is None:
+            dataset_trace.note("read.error.rejected", why="panel_gone",
+                               token=self._token)
+            return
+        panel._on_overview_failed(message, self._gen, self._loader,
+                                  self._token)
+
+
 class _Unset:
     """"No token given" is not "the token is None": a panel that is bound to
     no dataset has the token None, and a caller that simply does not know the
@@ -1109,6 +1161,16 @@ class OverviewPanel(QWidget):
         # by one that reads the same channel names at the same shape, and
         # every store here has to be able to say which slide it is holding.
         self._dataset_token = None
+        # Set when the image item had to be hidden or removed because it
+        # refused to clear; `_apply_thumbnail` puts a usable one back.
+        self._img_hidden_for_safety = False
+        # Set when neither clearing NOR hiding the item worked: the panel
+        # cannot be made to stop showing what it is showing.
+        self._img_unusable = False
+        # A panel that has been CLOSED/destroyed is not a panel that is
+        # merely hidden: a hidden popup still shows the current dataset and
+        # may accept its results, a disposed one may accept nothing.
+        self._disposed = False
         self._thumb_fitted = None    # the (w, h) the view was last fitted to
         # Whether the USER has moved this panel's camera on the CURRENT
         # dataset. One bit, per panel -- the page's thumbnail and the
@@ -1348,15 +1410,20 @@ class OverviewPanel(QWidget):
         slide's while the pixels are still the old one's, which would let the
         previous slide's picture wear the new slide's identity.
 
-        Returns True when the panel is bound AND empty; a caller that gets
-        False must not report the switch as clean. Idempotent for the same
-        token: rebinding a panel to the slide it is already showing neither
-        clears it nor invalidates its read.
+        RETURNS SAFETY, NOT CHANGE. True means "no pixels of another slide
+        are stored or visible here"; it does not mean anything was cleared.
+        For the SAME token nothing is cleared -- rebinding a panel to the
+        slide it is already showing must not throw away that slide's picture
+        -- and the answer is still about safety: True unless this panel has
+        an image item it can neither clear nor hide, which is the one state
+        in which it may be showing something nobody can take off it. A caller
+        that wants to know whether the dataset CHANGED compares
+        `dataset_token()` before the call, which is what the popup does.
         """
         if token is not None and token == self._dataset_token:
             if loader is not None:
                 self.loader = loader
-            return True
+            return not self._img_unusable
         previous = self._dataset_token
         # Identity first: from this line no result of the previous slide can
         # be accepted, whatever happens below.
@@ -1440,14 +1507,37 @@ class OverviewPanel(QWidget):
                 pass
         try:
             self.img_item.clear()
+            self._img_hidden_for_safety = False
+            self._img_unusable = False
         except Exception as exc:                            # noqa: BLE001
-            # The item could not be cleared. The STORES are empty, so nothing
-            # can redraw the previous slide, but what is on the item right now
-            # is still its pixels: say so rather than report a clean switch.
+            # The item refused to clear. The stores are already empty, so
+            # nothing can redraw the previous slide -- but what the item is
+            # SHOWING is still its pixels, and "the Tissue Preview still shows
+            # the old slide" is the entire complaint. So it is taken off the
+            # screen instead: hidden, and if even that fails, removed from the
+            # view. `_apply_thumbnail` puts a working item back when the new
+            # slide's picture arrives.
             dataset_trace.note("panel.clear_failed",
                                panel=dataset_trace.ident(self), error=exc)
             print(f"[Overview] image item could not be cleared: {exc}")
-            return False
+            self._img_hidden_for_safety = True
+            hidden = False
+            try:
+                self.img_item.setVisible(False)
+                hidden = not self.img_item.isVisible()
+            except Exception:                               # noqa: BLE001
+                hidden = False
+            if not hidden:
+                try:
+                    self.vb.removeItem(self.img_item)
+                    hidden = True
+                except Exception:                           # noqa: BLE001
+                    hidden = False
+            if not hidden:
+                self._img_unusable = True
+                dataset_trace.note("panel.hide_failed",
+                                   panel=dataset_trace.ident(self))
+                return False
         finally:
             try:
                 dataset_trace.note("panel.forget",
@@ -1459,14 +1549,59 @@ class OverviewPanel(QWidget):
                 pass
         return True
 
+    def _restore_image_item(self):
+        """Put a usable, visible image item back after a failed clear.
+
+        The safety path above hides or removes the item rather than leave the
+        previous slide on the screen; the new slide's picture has to have
+        somewhere to go. A replacement is built when the old item cannot be
+        made usable again.
+        """
+        if not getattr(self, "_img_hidden_for_safety", False):
+            return
+        try:
+            self.img_item.clear()
+            self.img_item.setVisible(True)
+            if self.img_item.scene() is None:
+                self.vb.addItem(self.img_item)
+            self._img_hidden_for_safety = False
+            self._img_unusable = False
+            return
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            self.img_item = pg.ImageItem()
+            self.vb.addItem(self.img_item)
+            self._img_hidden_for_safety = False
+            self._img_unusable = False
+            dataset_trace.note("panel.item_replaced",
+                               panel=dataset_trace.ident(self))
+        except Exception as exc:                            # noqa: BLE001
+            dataset_trace.note("panel.item_replace_failed",
+                               panel=dataset_trace.ident(self), error=exc)
+
     def is_empty(self):
-        """True when this panel holds no pixels of any slide."""
+        """True when no pixels of any slide are held OR VISIBLE here.
+
+        The second half is the point: a store that has been emptied while the
+        image item still draws the previous slide is not an empty panel, it
+        is the reported bug. An item that is hidden or out of the scene shows
+        nothing, so it counts as empty whatever it still holds.
+        """
+        if self._channel_rgb is not None or self._overview_arr is not None:
+            return False
         try:
             image = self.img_item.image
         except Exception:                                   # noqa: BLE001
-            image = None
-        return (self._channel_rgb is None and self._overview_arr is None
-                and image is None)
+            return True                    # unusable item: nothing is drawn
+        if image is None:
+            return True
+        try:
+            visible = bool(self.img_item.isVisible()
+                           and self.img_item.scene() is not None)
+        except Exception:                                   # noqa: BLE001
+            visible = False
+        return not visible
 
     def _load_overview(self):
         if self.loader is None or self.full_h == 0:
@@ -1498,15 +1633,15 @@ class OverviewPanel(QWidget):
         _LIVE_OVERVIEW_WORKERS.add(worker)
         worker.finished.connect(lambda _w=worker: _retire_overview_worker(_w))
         self._ov_thread = worker
-        worker.done.connect(
-            lambda arr, _g=gen, _l=loader, _t=token:
-            self._on_overview_loaded(arr, _g, _l, _t))
-        # The FAILURE carries the same identity as the success. A read of the
-        # previous slide that fails after the switch would otherwise turn the
-        # new slide's "Loading…" into "Overview load failed".
-        worker.error.connect(
-            lambda err, _g=gen, _l=loader, _t=token:
-            self._on_overview_failed(err, _g, _l, _t))
+        # Through a relay that holds a WEAK reference to this panel: the
+        # worker outlives a closed window on purpose, and the panel must not
+        # be kept alive by it -- nor reached once it is gone. The failure
+        # carries the same identity as the success, so a read of the previous
+        # slide that fails after the switch cannot turn the new slide's
+        # "Loading…" into "Overview load failed".
+        relay = _OverviewResultRelay(self, gen, loader, token, parent=worker)
+        worker.done.connect(relay.on_done)
+        worker.error.connect(relay.on_error)
         worker.start()
 
     def set_channel_image(self, rgb, token=_UNSET):
@@ -1576,6 +1711,10 @@ class OverviewPanel(QWidget):
         rect = self._thumb_rect()
         if rect is None:
             return
+        # A panel whose item was hidden or removed to get the previous slide
+        # off the screen gets a working one back here -- the new slide's
+        # picture is exactly what it was waiting for.
+        self._restore_image_item()
         rgb = self._channel_rgb
         if rgb is not None:
             self.img_item.setImage(rgb, autoLevels=False)
@@ -1627,6 +1766,10 @@ class OverviewPanel(QWidget):
         another dataset entirely -- which the first two can miss, since a
         generation is per panel and a loader object can be reused.
         """
+        if getattr(self, "_disposed", False):
+            dataset_trace.note(f"{kind}.rejected", why="disposed",
+                               panel=dataset_trace.ident(self))
+            return False
         if gen is not None and gen != getattr(self, "_ov_gen", gen):
             dataset_trace.note(f"{kind}.rejected", why="generation",
                                panel=dataset_trace.ident(self), read_gen=gen,
@@ -3307,7 +3450,23 @@ class OverviewPanel(QWidget):
 
     def closeEvent(self, event):
         self._middle_pan_cancel("the panel was closed")
+        self.dispose()
         super().closeEvent(event)
+
+    def dispose(self):
+        """This panel is going away: accept nothing more.
+
+        NOT the same as being hidden. A popup that is collapsed to its bar or
+        minimised is still showing the current dataset and must take its
+        results; a panel that has been closed must take none, and the read it
+        started must still be allowed to finish on its own thread.
+        """
+        if self._disposed:
+            return
+        self._disposed = True
+        self._ov_gen = getattr(self, "_ov_gen", 0) + 1
+        dataset_trace.note("panel.disposed", panel=dataset_trace.ident(self),
+                           token=self._dataset_token)
 
     def _mid_pan_scene_pos(self, event):
         """`event`'s position in SCENE coordinates.

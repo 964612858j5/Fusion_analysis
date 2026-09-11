@@ -67,16 +67,80 @@ def _window(app):
         for ch in ("DAPI", "CD3", "CD8")}
     w._patch_load_ready.add(0)
     w.config.set_channel_visible("CD3", True)          # in the configuration
+    # Production composes frames on a worker thread; these tests run the same
+    # compose code inline, delivered when the test says. See `_InlineFrames`.
+    w._inline_frames = _InlineFrames(w)
     return w
 
 
+class _InlineFrames:
+    """The frame worker, inline and under the test's control.
+
+    The preview's frames are composed on `PreviewComposeWorker` now, so a test
+    that changes state and reads the picture cannot simply pump the event loop:
+    it would be racing a thread. This stands in for the thread and runs the
+    REAL compose code -- `PreviewComposeWorker._compose` on the real snapshot
+    -- so the pixels are the production ones while delivery happens exactly
+    when the test says.
+
+    `compute_ms` is what a frame costs on the fake clock, for the tests about
+    a computation slower than the input.
+    """
+
+    def __init__(self, w, clock=None, compute_ms=0.0, auto=True):
+        from block01.core import preview_compose
+        from block01.workers.preview_compose_worker import (
+            PreviewComposeWorker,
+        )
+        self._w = w
+        self._clock = clock
+        self.compute_ms = float(compute_ms)
+        self.auto = bool(auto)
+        self.submitted = []
+        self.delivered = []
+        self._composer = PreviewComposeWorker.__new__(PreviewComposeWorker)
+        self._composer.cache = preview_compose.PreviewCache()
+        self._compose = PreviewComposeWorker._compose
+        w._dispatch_frame = self._submit
+
+    def _submit(self, snapshot):
+        self.submitted.append(snapshot)
+        if self.auto and self._clock is None:
+            self.deliver()
+        return True
+
+    def pending(self):
+        return len(self.submitted)
+
+    def deliver(self, count=None):
+        """Compose and deliver the queued snapshots, oldest first."""
+        done = 0
+        while self.submitted and (count is None or done < count):
+            snapshot = self.submitted.pop(0)
+            if self._clock is not None and self.compute_ms:
+                self._clock.advance_ms(self.compute_ms)
+            result = self._compose(self._composer, snapshot)
+            self.delivered.append(result)
+            self._w._on_preview_frame(result)
+            done += 1
+        return done
+
+
 def _settle(w, timeout=2.0):
-    """Let the coalesced publication happen, as the event loop would."""
+    """Let the publication happen, through the inline frame worker."""
     deadline = time.monotonic() + timeout
-    while w._prev_timer.isActive() and time.monotonic() < deadline:
+    frames = getattr(w, "_inline_frames", None)
+    while time.monotonic() < deadline:
         QtWidgets.QApplication.processEvents()
+        if frames is not None and frames.pending():
+            frames.deliver()
+            continue
+        if not w._prev_timer.isActive():
+            break
         time.sleep(0.005)
     QtWidgets.QApplication.processEvents()
+    if frames is not None:
+        frames.deliver()
 
 
 def _screen(w):
@@ -129,8 +193,12 @@ class _FakeClock:
         self.now += float(ms) / 1000.0
 
     def due(self):
+        # A hair of tolerance, because advancing by exactly the wait lands on
+        # 32.99999999999999 for a 33 ms slot and a real timer has coarser
+        # granularity than that anyway.
         return (self.armed_at is not None
-                and (self.now - self.armed_at) * 1000.0 >= self.armed_wait)
+                and (self.now - self.armed_at) * 1000.0
+                >= self.armed_wait - 1e-6)
 
     def run_due_slot(self):
         """Fire the armed slot if its wait has elapsed, as Qt would."""
@@ -411,77 +479,69 @@ def test_the_pending_queue_is_never_deeper_than_one(app):
 
 def test_a_frame_slower_than_the_input_keeps_one_in_flight_and_one_pending(app):
     """When computing is slower than the hand, the answer is to skip, not to
-    queue: one frame being drawn, one revision waiting, and no history."""
+    queue: one frame being composed, one revision waiting, and no history.
+
+    The frame is composed off the GUI thread now, so "in flight" lasts until
+    the result comes back -- which is exactly what makes it single-flight.
+    """
     w = _window(app)
     try:
         w.set_preview_mode("overlay", force=True, reconcile=False)
-        clock = _FakeClock(w, start=0.0)
-        clock.advance_ms(1000)
-        frames = []          # (revision being drawn, pending when it began)
-
-        def slow_frame(*_a, **_k):
-            # Recorded BEFORE the nested input, so the pair says what this
-            # frame is drawing and what was waiting when it started.
-            frames.append((w._frame_drawing_rev, w._frame_pending_rev))
-            clock.advance_ms(80)                  # a frame costs 80 ms
-            # input arriving DURING the frame must not start a second one
-            w._schedule_preview_update()
-            assert w._frame_in_flight is True
-
-        w._refresh_patch_preview = slow_frame
+        clock = _FakeClock(w)
+        frames = _InlineFrames(w, clock=clock, compute_ms=80.0, auto=False)
+        w._inline_frames = frames
 
         for _ in range(20):
-            clock.advance_ms(10)
+            clock.advance_ms(10)              # 100 inputs a second
             w._schedule_preview_update()
             clock.run_due_slot()
+            assert frames.pending() <= 1, \
+                "more than one frame was in flight at once"
+            if frames.pending():
+                assert w._frame_in_flight is True
+                assert w._frame_pending_rev is None or \
+                    w._frame_pending_rev > (frames.submitted[0]["rev"])
+                frames.deliver(1)             # the result comes back
+                assert w._frame_in_flight is False
 
-        assert len(frames) > 1, f"only {len(frames)} frames ran in 200 ms of input"
-        for drawing, pending in frames:
-            assert drawing is not None, frames
-            assert pending is None, (
-                "a frame started while another revision was still pending: "
-                f"drawing {drawing}, pending {pending}")
-        drawn = [drawing for drawing, _ in frames]
-        assert drawn == sorted(drawn) and len(set(drawn)) == len(drawn), \
-            f"frames were drawn out of order or twice: {drawn}"
+        drawn = [result["rev"] for result in frames.delivered]
+        assert len(drawn) > 1, f"only {len(drawn)} frames in 200 ms of input"
+        assert drawn == sorted(drawn) and len(set(drawn)) == len(drawn), drawn
         assert max(drawn) < w._frame_input_rev, \
-            "every input was drawn: this test is not exercising a slow frame"
-        assert w._frame_pending_rev is not None, \
-            "the newest input is still waiting for its slot"
-        assert w._frame_in_flight is False
+            "every input got a frame: this is not exercising a slow frame"
     finally:
         w.close()
 
-
 @pytest.mark.parametrize("mode", ["overlay", "fusion"])
 def test_the_final_value_is_always_published(app, mode):
-    """The hand stops. Whatever the clock was doing, the last revision has to
-    reach the screen."""
+    """The hand stops. Whatever the clock and the worker were doing, the last
+    revision has to reach the screen."""
     w = _window(app)
     try:
         w.set_preview_mode(mode, force=True, reconcile=False)
-        clock = _FakeClock(w, start=0.0)
-        clock.advance_ms(1000)
-        revs = []
-        real = w._refresh_patch_preview
-        w._refresh_patch_preview = lambda *a, **k: (
-            revs.append(w._frame_input_rev), real(*a, **k))[1]
+        clock = _FakeClock(w)
+        frames = _InlineFrames(w, clock=clock, compute_ms=20.0, auto=False)
+        w._inline_frames = frames
 
         for _ in range(12):
             clock.advance_ms(4)               # faster than the clock
             w._schedule_preview_update()
             clock.run_due_slot()
+            frames.deliver()
         last_input = w._frame_input_rev
-        clock.run_all_slots()
 
-        assert revs, "nothing was published"
-        assert revs[-1] == last_input, (
+        # The hand stops: run whatever slots remain and deliver their frames.
+        for _ in range(4):
+            clock.run_all_slots()
+            frames.deliver()
+
+        assert frames.delivered, "nothing was published"
+        assert frames.delivered[-1]["rev"] == last_input, (
             f"the drag ended at revision {last_input} and the screen stopped "
-            f"at {revs[-1]}")
+            f"at {frames.delivered[-1]['rev']}")
         assert w._frame_pending_rev is None
     finally:
         w.close()
-
 
 def test_an_explicit_delay_is_a_floor_not_a_reset(app):
     """A dataset switch asking for 60 ms may not push back a slot that is
@@ -505,24 +565,31 @@ def test_an_explicit_delay_is_a_floor_not_a_reset(app):
 
 
 def test_input_during_a_frame_rides_the_next_slot(app):
+    """Input that arrives while a frame is being composed becomes the next
+    slot's revision -- it is neither dropped nor given a frame of its own."""
     w = _window(app)
     try:
-        clock = _FakeClock(w, start=0.0)
-        clock.advance_ms(1000)
-        arms_before = list(clock.arms)
-        real = w._refresh_patch_preview
+        clock = _FakeClock(w)
+        frames = _InlineFrames(w, clock=clock, compute_ms=50.0, auto=False)
+        w._inline_frames = frames
 
-        def reenter(*a, **k):
-            w._schedule_preview_update()      # Qt can deliver this here
-            return real(*a, **k)
+        w._schedule_preview_update()          # immediate dispatch
+        assert frames.pending() == 1
+        assert w._frame_in_flight is True
 
-        w._refresh_patch_preview = reenter
-        w._schedule_preview_update()
-
+        clock.advance_ms(5)
+        w._schedule_preview_update()          # arrives mid-composition
+        assert frames.pending() == 1, "a second frame was dispatched"
         assert w._frame_pending_rev is not None
-        assert clock.arms != arms_before, \
-            "the input that arrived during the frame armed no slot"
-        assert clock.arms[-1] == float(mw.PREVIEW_FRAME_MS)
+
+        arms_before = len(clock.arms)
+        frames.deliver(1)                     # the first result lands
+
+        assert len(clock.arms) > arms_before, \
+            "the revision that waited was not given a slot"
+        clock.run_all_slots()
+        frames.deliver()
+        assert frames.delivered[-1]["rev"] == w._frame_input_rev
     finally:
         w.close()
 
@@ -566,33 +633,29 @@ def test_the_published_frame_records_what_it_merged(app):
 
 
 def test_a_frame_cannot_start_inside_a_frame(app):
-    """Drawing runs Qt code, and Qt can deliver a queued timeout inside it --
-    `processEvents`, a dialog, a nested event loop. A second frame starting
-    there would composite the same arrays twice and, worse, publish out of
-    order."""
+    """A queued timeout delivered while a frame is in flight -- from
+    `processEvents`, a dialog, a nested event loop -- must not dispatch a
+    second one. With the composition on a worker, "in flight" means "the
+    result has not come back", and that is the whole of the single-flight
+    rule."""
     w = _window(app)
     try:
         clock = _FakeClock(w)
-        depth = []
-        real = w._refresh_patch_preview
+        frames = _InlineFrames(w, clock=clock, compute_ms=10.0, auto=False)
+        w._inline_frames = frames
 
-        def reenter(*a, **k):
-            depth.append(len(depth) + 1)
-            # exactly what a delivered timeout would do
-            w._schedule_preview_update()
-            w._apply_pending_preview_update()
-            return real(*a, **k)
-
-        w._refresh_patch_preview = reenter
         w._schedule_preview_update()
+        assert frames.pending() == 1
 
-        assert depth == [1], f"{len(depth)} frames ran inside one another"
+        clock.advance_ms(100)                 # a slot would be due
+        w._apply_pending_preview_update()     # as a delivered timeout does
+        w._apply_pending_preview_update()
+
+        assert frames.pending() == 1, "a frame was dispatched inside a frame"
+        frames.deliver()
         assert w._frame_in_flight is False
-        assert w._frame_pending_rev is not None, \
-            "the input that arrived during the frame is still pending"
     finally:
         w.close()
-
 
 def test_a_dataset_switch_forgets_the_frame_clock(app):
     """Stopping the timer is not enough. A pending revision, a merge count or

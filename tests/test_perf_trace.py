@@ -530,9 +530,10 @@ def test_background_tracing_is_off_with_the_switch_off(capsys, monkeypatch):
 # ── the instrumented paths: traced when asked, silent otherwise ──────────
 
 def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
-    """The three numbers the Intensity complaint needs, from one redraw: what
-    the frame cost, what the remap inside it cost, and which input revision
-    it published."""
+    """The numbers the Intensity complaint needs, from one redraw: the input
+    with its revision, the slot it was scheduled into, the hand-off to the
+    frame worker, what the per-channel mapping and the composite cost, and
+    which revision was finally published."""
     from PyQt5 import QtWidgets
     import numpy as np
 
@@ -551,6 +552,13 @@ def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
         w._overlay_display_cache.clear()
         w._on_display_mapping_changed("CD3")
         w._apply_pending_preview_update()
+        # The frame is composed on the worker now, so its spans arrive with
+        # the result.
+        deadline = __import__("time").monotonic() + 5.0
+        while (w._frame_in_flight
+               and __import__("time").monotonic() < deadline):
+            QtWidgets.QApplication.processEvents()
+            __import__("time").sleep(0.005)
         _drain()
         err = capsys.readouterr().err
     finally:
@@ -560,13 +568,14 @@ def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
     events = [ln.split(" ev=")[1].split(" ")[0] for ln in _lines(err)]
     assert "step1.mapping_in" in events
     assert "step1.schedule" in events
-    assert "step1.publish" in events
-    assert "step1.frame" in events
-    assert "step1.remap" in events, \
-        "the per-channel remap the Intensity edit invalidates is not timed"
-    published = [ln for ln in _lines(err) if " ev=step1.publish " in ln][0]
-    assert " rev=" in published, \
-        "a published frame has to name the input revision it drew"
+    assert "step1.dispatch" in events, \
+        "the hand-off to the frame worker is not on the timeline"
+    assert "preview.gray" in events or "preview.signal" in events, \
+        "the per-channel mapping the Intensity edit invalidates is not timed"
+    assert "preview.compose" in events or "preview.fuse" in events
+    dispatched = [ln for ln in _lines(err) if " ev=step1.dispatch " in ln][0]
+    assert " rev=" in dispatched, \
+        "a dispatched frame has to name the input revision it will draw"
 
 
 def test_the_instrumented_paths_are_silent_with_the_switch_off(capsys):

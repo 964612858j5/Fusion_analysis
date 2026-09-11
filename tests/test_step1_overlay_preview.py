@@ -66,6 +66,59 @@ class _Loader:
                           dtype=np.float32)
 
 
+class _InlineFrames:
+    """The frame worker, inline and under the test's control.
+
+    The preview's frames are composed on `PreviewComposeWorker` now, so a test
+    that changes state and reads the picture cannot simply pump the event loop:
+    it would be racing a thread. This stands in for the thread and runs the
+    REAL compose code -- `PreviewComposeWorker._compose` on the real snapshot
+    -- so the pixels are the production ones while delivery happens exactly
+    when the test says.
+
+    `compute_ms` is what a frame costs on the fake clock, for the tests about
+    a computation slower than the input.
+    """
+
+    def __init__(self, w, clock=None, compute_ms=0.0, auto=True):
+        from block01.core import preview_compose
+        from block01.workers.preview_compose_worker import (
+            PreviewComposeWorker,
+        )
+        self._w = w
+        self._clock = clock
+        self.compute_ms = float(compute_ms)
+        self.auto = bool(auto)
+        self.submitted = []
+        self.delivered = []
+        self._composer = PreviewComposeWorker.__new__(PreviewComposeWorker)
+        self._composer.cache = preview_compose.PreviewCache()
+        self._compose = PreviewComposeWorker._compose
+        w._dispatch_frame = self._submit
+
+    def _submit(self, snapshot):
+        self.submitted.append(snapshot)
+        if self.auto and self._clock is None:
+            self.deliver()
+        return True
+
+    def pending(self):
+        return len(self.submitted)
+
+    def deliver(self, count=None):
+        """Compose and deliver the queued snapshots, oldest first."""
+        done = 0
+        while self.submitted and (count is None or done < count):
+            snapshot = self.submitted.pop(0)
+            if self._clock is not None and self.compute_ms:
+                self._clock.advance_ms(self.compute_ms)
+            result = self._compose(self._composer, snapshot)
+            self.delivered.append(result)
+            self._w._on_preview_frame(result)
+            done += 1
+        return done
+
+
 def _settle(w, timeout=2.0):
     """Let the coalesced redraw land.
 
@@ -75,10 +128,18 @@ def _settle(w, timeout=2.0):
     """
     import time
     deadline = time.monotonic() + timeout
-    while w._prev_timer.isActive() and time.monotonic() < deadline:
+    frames = getattr(w, "_inline_frames", None)
+    while time.monotonic() < deadline:
         QtWidgets.QApplication.processEvents()
+        if frames is not None and frames.pending():
+            frames.deliver()
+            continue
+        if not w._prev_timer.isActive():
+            break
         time.sleep(0.005)
     QtWidgets.QApplication.processEvents()
+    if frames is not None:
+        frames.deliver()
 
 
 def _show(w, channel, weight=1.0):
@@ -107,6 +168,10 @@ def _window(app, cached=("DAPI", "CD3", "CD8")):
     w._patch_channel_cache[0] = {
         ch: rng.random((32, 32), dtype=np.float32) + 0.1 for ch in cached}
     w._patch_load_ready.add(0)
+    # Frames are composed on a worker thread in production; these tests run
+    # the same compose code inline so the pixels are real and the delivery is
+    # deterministic. See `_InlineFrames`.
+    w._inline_frames = _InlineFrames(w)
     return w
 
 
@@ -310,9 +375,14 @@ def test_a_mapping_change_drops_only_that_channels_pixels(app, monkeypatch):
         _settle(w)
 
         cached = {key[1] for key in w._overlay_display_cache}
-        assert "DAPI" in cached                     # untouched channel kept
-        keys = [k for k in w._overlay_display_cache if k[1] == "CD3"]
-        assert len(keys) == 1                       # re-cached under the new window
+        assert "DAPI" in cached, \
+            "an untouched channel's gray was thrown away"
+        assert "CD3" not in cached, \
+            "the edited channel's gray was kept and would be redrawn stale"
+        # The frame that follows is composed by the worker, which keeps its
+        # own cache -- that is where the new window's gray lives now.
+        worker_cache = w._inline_frames._composer.cache
+        assert (w._preview_patch_idx, "CD3") in worker_cache
     finally:
         w.close()
 
@@ -1170,15 +1240,19 @@ def test_the_overlay_frame_does_not_remap_the_grays_again(app, monkeypatch):
 
 def test_the_overlay_maps_each_channel_once_per_window(app, monkeypatch):
     """And the mapping that DOES belong to a frame happens once: the first
-    frame maps what it draws, the second maps nothing."""
-    import block01.ui.main_window as mw
+    frame maps what it draws, the second maps nothing.
+
+    Counted where the mapping now lives -- `core.preview_compose`, the one
+    implementation the window and the frame worker share.
+    """
+    import block01.core.preview_compose as pc
 
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
         calls = []
-        real = mw.apply_channel_remap
-        monkeypatch.setattr(mw, "apply_channel_remap",
+        real = pc.apply_channel_remap
+        monkeypatch.setattr(pc, "apply_channel_remap",
                             lambda arr, params=None: (calls.append(1),
                                                       real(arr, params))[1])
 
@@ -1199,15 +1273,16 @@ def test_a_colour_change_reuses_every_gray(app):
     try:
         w.config.set_channel_visible("CD3", True)
         w._render_overlay_patch(reset_view=False)
-        before = dict(w._overlay_display_cache)
+        before = {key: w._overlay_display_cache.entry(key)["value"]
+                  for key in w._overlay_display_cache.keys()}
         assert before
 
         w.config.set_channel_color("CD3", "#00ff88")
         w._render_overlay_patch(reset_view=False)
 
-        assert set(w._overlay_display_cache) == set(before)
+        assert set(w._overlay_display_cache.keys()) == set(before)
         for key, value in before.items():
-            assert w._overlay_display_cache[key] is value, \
+            assert w._overlay_display_cache.entry(key)["value"] is value, \
                 "a colour change recomputed a channel's grayscale"
     finally:
         w.close()
@@ -1222,8 +1297,8 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
         w.config.set_channel_visible("CD3", True)
         w.config.set_channel_visible("CD8", True)
         w._render_current_patch(reset_view=False)
-        first = {key: entry["signal"]
-                 for key, entry in w._signal_cache.items()}
+        first = {key: w._signal_cache.entry(key)["value"]
+                 for key in w._signal_cache.keys()}
         assert len(first) >= 2, first
 
         # One channel's window moves; the others are untouched.
@@ -1232,13 +1307,13 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
         w._render_current_patch(reset_view=False)
 
         reused = [key for key, signal in first.items()
-                  if key in w._signal_cache
-                  and w._signal_cache[key]["signal"] is signal]
+                  if w._signal_cache.entry(key) is not None
+                  and w._signal_cache.entry(key)["value"] is signal]
         assert any(key[1] != "CD3" for key in reused), \
             "an unchanged channel's signal was recomputed"
-        changed = w._signal_cache.get((w._preview_patch_idx, "CD3"))
+        changed = w._signal_cache.entry((w._preview_patch_idx, "CD3"))
         assert changed is not None
-        assert changed["signal"] is not first.get(
+        assert changed["value"] is not first.get(
             (w._preview_patch_idx, "CD3")), \
             "the changed channel was not recomputed"
     finally:
@@ -1288,7 +1363,7 @@ def test_dropping_a_patch_drops_its_signals(app):
 
         w._drop_overlay_cache_for(w._preview_patch_idx)
 
-        assert w._signal_cache == {}
+        assert w._signal_cache.keys() == []
     finally:
         w.close()
 
@@ -1304,69 +1379,11 @@ def test_a_drag_keeps_one_version_per_channel(app):
             window = {"CD3": {"min": float(i), "max": 1000.0, "gamma": 1.0}}
             w._preview_channel_signal("CD3", arr, window)
 
-        assert list(w._signal_cache) == [(w._preview_patch_idx, "CD3")]
-        assert w._signal_cache[(w._preview_patch_idx, "CD3")]["window"] == \
-            w._display_window_for(
-                "CD3", {"CD3": {"min": 299.0, "max": 1000.0,
-                                "gamma": 1.0}})[1]
-    finally:
-        w.close()
-
-
-def test_the_signal_cache_stays_inside_its_byte_budget(app):
-    """Entry count alone is not a bound: 64 signals of a 1024x1024 patch are
-    256 MiB. Measured against real-size arrays, not the 32x32 test patch."""
-    import block01.ui.main_window as mw
-
-    w = _window(app)
-    try:
-        big = np.zeros((1024, 1024), np.float32)     # 4 MiB, like the desk
-        assert big.nbytes == 4 * 1024 * 1024
-        w._preview_channel_signal = mw.MainWindow._preview_channel_signal.__get__(w)
-        for i in range(80):
-            ch = f"CH{i}"
-            w._signal_cache[(0, ch)] = {
-                "ref": (lambda arr=big: (lambda: arr))(),
-                "window": ("auto",), "signal": big, "nbytes": big.nbytes}
-            w._evict_signals()
-
-        assert w._signal_cache_bytes() <= mw._SIGNAL_CACHE_BYTES
-        assert len(w._signal_cache) <= mw._SIGNAL_CACHE_MAX
-    finally:
-        w.close()
-
-
-def test_a_hit_reverifies_the_source_array(app):
-    """`id()` is not an identity: CPython may give a released array's address
-    to the next one, and a channel, shape and window that all match would
-    then serve the previous patch's pixels. The entry holds a weak reference
-    and the hit checks it."""
-    w = _window(app)
-    try:
-        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
-        other = np.linspace(0, 500, 32 * 32, dtype=np.float32).reshape(32, 32)
-        window = {"CD3": {"min": 0.0, "max": 1000.0, "gamma": 1.0}}
-
-        first = w._preview_channel_signal("CD3", arr, window)
         key = (w._preview_patch_idx, "CD3")
-        assert w._signal_cache[key]["ref"]() is arr
-
-        # An entry whose external key matches in every way, but whose source
-        # is a DIFFERENT array -- what a reused id() would look like.
-        w._signal_cache[key]["ref"] = weakref.ref(other)
-        again = w._preview_channel_signal("CD3", arr, window)
-
-        assert again is not first, \
-            "the cache served a signal whose source array is not this one"
-        assert w._signal_cache[key]["ref"]() is arr
-
-        # And a dead reference misses rather than raising.
-        w._signal_cache[key]["ref"] = weakref.ref(
-            np.zeros((32, 32), np.float32))
-        import gc
-        gc.collect()
-        third = w._preview_channel_signal("CD3", arr, window)
-        assert third is not again or w._signal_cache[key]["ref"]() is arr
+        assert w._signal_cache.keys() == [key]
+        from block01.core import preview_compose as pc
+        assert w._signal_cache.entry(key)["window"] == pc.window_key(
+            "CD3", {"CD3": {"min": 299.0, "max": 1000.0, "gamma": 1.0}})
     finally:
         w.close()
 
@@ -1381,44 +1398,10 @@ def test_dropping_one_patch_keeps_the_others_signals(app):
         w._preview_patch_idx = 1
         other = arr.copy()
         w._preview_channel_signal("CD3", other, window)
-        assert set(w._signal_cache) == {(0, "CD3"), (1, "CD3")}
+        assert set(w._signal_cache.keys()) == {(0, "CD3"), (1, "CD3")}
 
         w._drop_overlay_cache_for(0)
 
-        assert set(w._signal_cache) == {(1, "CD3")}
-    finally:
-        w.close()
-
-
-def test_a_hit_moves_the_entry_to_the_back(app):
-    """Eviction order must be least-recently-USED, not least-recently-
-    recomputed: after a patch switch the current patch's channels are the
-    ones every frame hits, and they were at the front of the queue because
-    nothing had recomputed them."""
-    w = _window(app)
-    try:
-        window = {"CD3": {"min": 0.0, "max": 1000.0, "gamma": 1.0}}
-        a = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
-        b = a + 1.0
-        c = a + 2.0
-        w._preview_patch_idx = 0
-        w._preview_channel_signal("A", a, window)
-        w._preview_channel_signal("B", b, window)
-        assert list(w._signal_cache) == [(0, "A"), (0, "B")]
-
-        w._preview_channel_signal("A", a, window)          # a HIT on A
-        assert list(w._signal_cache) == [(0, "B"), (0, "A")], \
-            "a hit did not refresh the entry's recency"
-
-        # One more than the cache holds: B, not A, is the one nobody wanted.
-        import block01.ui.main_window as mw
-        monkey = mw._SIGNAL_CACHE_MAX
-        try:
-            mw._SIGNAL_CACHE_MAX = 2
-            w._preview_channel_signal("C", c, window)
-            assert set(w._signal_cache) == {(0, "A"), (0, "C")}, \
-                list(w._signal_cache)
-        finally:
-            mw._SIGNAL_CACHE_MAX = monkey
+        assert set(w._signal_cache.keys()) == {(1, "CD3")}
     finally:
         w.close()

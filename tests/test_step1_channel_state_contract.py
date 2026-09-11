@@ -63,6 +63,9 @@ def _window(app, size=32):
         ch: rng.random((size, size), dtype=np.float32) + 0.1
         for ch in ("DAPI", "CD3", "CD8")}
     w._patch_load_ready.add(0)
+    # Production composes frames on a worker thread; these run the same
+    # compose code inline so delivery is deterministic. See `_InlineFrames`.
+    w._inline_frames = _InlineFrames(w)
     return w
 
 
@@ -251,34 +254,44 @@ def test_a_colour_picked_in_the_intensity_window_comes_back(app):
 
 # ── coalescing ───────────────────────────────────────────────────────────
 
-def test_a_burst_of_weight_changes_draws_once_and_shows_the_last_one(app):
-    """Latest wins. Ten slider steps must not be ten full-array composites,
-    and what is left on screen is the state the user stopped on."""
+def test_a_burst_of_weight_changes_publishes_the_last_state(app):
+    """REWRITTEN for the frame clock and the frame worker.
+
+    It used to assert "nothing drawn mid-drag, then exactly one GUI-thread
+    redraw" -- both halves are now wrong on purpose. Ten slider steps publish
+    far fewer than ten frames (latest-only, one pending revision), none of
+    them computed on the GUI thread, and what is left on screen is the state
+    the user stopped on.
+    """
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(1.0)
         w.set_preview_mode("overlay", force=True, reconcile=False)
-        draws = []
+        _settle(w)
+        gui_draws = []
         real = w._refresh_patch_preview
         w._refresh_patch_preview = lambda reset_view=False: (
-            draws.append(reset_view) or real(reset_view=reset_view))
+            gui_draws.append(reset_view) or real(reset_view=reset_view))
+        w._inline_frames.delivered.clear()
 
-        for value in (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15, 0.1):
+        values = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15, 0.1)
+        for value in values:
             w.config._rows["CD3"].spin.setValue(value)
-        assert draws == []                       # nothing drawn mid-drag
+        _settle(w)
 
-        QtWidgets.QApplication.processEvents()
-        deadline = time.monotonic() + 2.0
-        while not draws and time.monotonic() < deadline:
-            QtWidgets.QApplication.processEvents()
-            time.sleep(0.01)
+        frames = w._inline_frames.delivered
+        assert 0 < len(frames) < len(values), (
+            f"{len(frames)} frames for {len(values)} inputs: latest-only "
+            "means far fewer frames than inputs, and more than none")
+        assert gui_draws == [], \
+            "the GUI thread composed a frame instead of the worker"
+        assert w.config.channel_weight("CD3") == pytest.approx(0.1)
 
-        assert len(draws) == 1
-        coalesced = _image(w)
-
+        # And the picture is the state the drag ended on.
+        published = _image(w)
         w._render_overlay_patch(reset_view=False)
-        assert np.array_equal(coalesced, _image(w))   # the last state, drawn
+        assert np.array_equal(published, _image(w))
     finally:
         w.close()
 
@@ -297,13 +310,74 @@ def test_the_coalesced_redraw_costs_no_disk_read(app):
         w.close()
 
 
+class _InlineFrames:
+    """The frame worker, inline and under the test's control.
+
+    The preview's frames are composed on `PreviewComposeWorker` now, so a test
+    that changes state and reads the picture cannot simply pump the event loop:
+    it would be racing a thread. This stands in for the thread and runs the
+    REAL compose code -- `PreviewComposeWorker._compose` on the real snapshot
+    -- so the pixels are the production ones while delivery happens exactly
+    when the test says.
+
+    `compute_ms` is what a frame costs on the fake clock, for the tests about
+    a computation slower than the input.
+    """
+
+    def __init__(self, w, clock=None, compute_ms=0.0, auto=True):
+        from block01.core import preview_compose
+        from block01.workers.preview_compose_worker import (
+            PreviewComposeWorker,
+        )
+        self._w = w
+        self._clock = clock
+        self.compute_ms = float(compute_ms)
+        self.auto = bool(auto)
+        self.submitted = []
+        self.delivered = []
+        self._composer = PreviewComposeWorker.__new__(PreviewComposeWorker)
+        self._composer.cache = preview_compose.PreviewCache()
+        self._compose = PreviewComposeWorker._compose
+        w._dispatch_frame = self._submit
+
+    def _submit(self, snapshot):
+        self.submitted.append(snapshot)
+        if self.auto and self._clock is None:
+            self.deliver()
+        return True
+
+    def pending(self):
+        return len(self.submitted)
+
+    def deliver(self, count=None):
+        """Compose and deliver the queued snapshots, oldest first."""
+        done = 0
+        while self.submitted and (count is None or done < count):
+            snapshot = self.submitted.pop(0)
+            if self._clock is not None and self.compute_ms:
+                self._clock.advance_ms(self.compute_ms)
+            result = self._compose(self._composer, snapshot)
+            self.delivered.append(result)
+            self._w._on_preview_frame(result)
+            done += 1
+        return done
+
+
 def _settle(w, timeout=2.0):
-    """Let the coalesced redraw land."""
+    """Let the redraw land, through the inline frame worker."""
     deadline = time.monotonic() + timeout
-    while w._prev_timer.isActive() and time.monotonic() < deadline:
+    frames = getattr(w, "_inline_frames", None)
+    while time.monotonic() < deadline:
         QtWidgets.QApplication.processEvents()
+        if frames is not None and frames.pending():
+            frames.deliver()
+            continue
+        if not w._prev_timer.isActive():
+            break
         time.sleep(0.005)
     QtWidgets.QApplication.processEvents()
+    if frames is not None:
+        frames.deliver()
 
 
 @pytest.mark.parametrize("mode", ["overlay", "fusion"])
@@ -337,7 +411,10 @@ def test_the_intensity_window_changes_both_previews(app, mode, monkeypatch):
         w.close()
 
 
-def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
+def test_a_burst_of_mapping_changes_publishes_fewer_frames_than_inputs(
+        app, monkeypatch):
+    """Same rewrite on the Intensity path: a burst is merged into the newest
+    revision, and the frames are composed off the GUI thread."""
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
@@ -346,18 +423,22 @@ def test_a_burst_of_mapping_changes_publishes_once(app, monkeypatch):
         monkeypatch.setattr(type(w), "_display_mapping",
                             lambda self, *a, **k: window)
         w.set_preview_mode("fusion", force=True, reconcile=False)
-        draws = []
+        _settle(w)
+        gui_draws = []
         real = w._refresh_patch_preview
         w._refresh_patch_preview = lambda reset_view=False: (
-            draws.append(1) or real(reset_view=reset_view))
+            gui_draws.append(1) or real(reset_view=reset_view))
+        w._inline_frames.delivered.clear()
 
-        for top in (0.9, 0.7, 0.5, 0.3, 0.2):
+        tops = (0.9, 0.7, 0.5, 0.3, 0.2)
+        for top in tops:
             window["CD3"] = {"min": 0.0, "max": top, "gamma": 1.0}
             w._step0.display_mapping_changed.emit("CD3")
-        assert draws == []
-
         _settle(w)
-        assert len(draws) == 1
+
+        frames = w._inline_frames.delivered
+        assert 0 < len(frames) < len(tops), len(frames)
+        assert gui_draws == []
     finally:
         w.close()
 

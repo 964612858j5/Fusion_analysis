@@ -36,6 +36,7 @@ from ..config import (
 from ..core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
+from ..core import preview_compose
 from ..core.channel_remap import (
     apply_channel_remap, tint_and_sum_grays,
     compute_qupath_auto_minmax,
@@ -65,6 +66,7 @@ from ..utils.roi_project import (
     mark_roi_step,
 )
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
+from ..workers.preview_compose_worker import PreviewComposeWorker
 from ..workers.mesmer_worker import run_mesmer_patch_preview
 from .step0.step0_page import Step0Page
 from .step0.config_panel import ConfigPanel
@@ -99,8 +101,8 @@ STEP1_PATCH_PREVIEW_MAX_PX = 1024
 # So: ONE version per (patch, channel), replaced when its window changes, and
 # a byte ceiling as well as a count -- because 96 small entries and 96 large
 # ones are not the same cache.
-_SIGNAL_CACHE_MAX = 64
-_SIGNAL_CACHE_BYTES = 160 * 1024 * 1024
+_SIGNAL_CACHE_MAX = preview_compose.DEFAULT_MAX_ENTRIES
+_SIGNAL_CACHE_BYTES = preview_compose.DEFAULT_MAX_BYTES
 
 # The preview's frame clock.
 #
@@ -191,10 +193,13 @@ class MainWindow(QMainWindow):
         # from re-running a percentile over every channel: the blend itself is
         # sub-millisecond, the mapping is not.  Cleared wherever the raw patch
         # cache is cleared.
-        self._overlay_display_cache: dict = {}
-        # Per-channel fusion signals, keyed by (patch, channel), ordered by
-        # recency of USE -- see `_preview_channel_signal`.
-        self._signal_cache = collections.OrderedDict()
+        # The window's OWN intermediate arrays, for the frames it still
+        # draws immediately (a patch switch, a mode switch, a restore). The
+        # frame clock's publishes are computed by `_compose_worker`, which
+        # owns a cache of its own -- one dict mutated from two threads is a
+        # different bug every time.
+        self._overlay_display_cache = preview_compose.PreviewCache()
+        self._signal_cache = preview_compose.PreviewCache()
         # What each patch still wants that its RUNNING loader is not fetching.
         # Per channel, not a flag: a read that fails must not take a tick made
         # while it ran down with it.
@@ -217,6 +222,14 @@ class MainWindow(QMainWindow):
         self._frame_input_rev = 0
         self._frame_pending_rev = None
         self._frame_drawing_rev = None
+        # The thread that turns a snapshot into pixels, created on first use.
+        # `_dataset_gen` is the structural identity a result is checked
+        # against: it moves whenever the pixels this window is about to draw
+        # stop being the ones a pending frame was computed from.
+        self._compose_worker = None
+        self._dataset_gen = 0
+        self._frame_request_id = 0
+        self._frame_inflight_request = None
         self._frame_coalesced = 0
         self._frame_in_flight = False
         self._frame_last_publish = 0.0
@@ -985,7 +998,12 @@ class MainWindow(QMainWindow):
         #    can no longer deliver the old dataset's pixels into the new one.
         self._stop_all_loaders()
         self._preload_debounce.stop()
+        # A new dataset's pixels are not the old one's: bump the generation
+        # BEFORE anything else, so a frame already being composed can no
+        # longer be published however late it arrives.
+        self._dataset_gen += 1
         self._reset_frame_clock()
+        self._stop_compose_worker("the Step1 context was discarded")
         self._step1_session_timer.stop()
         self._retire_fusion_worker("the Step1 context was discarded")
         if self.proc is not None:
@@ -3248,6 +3266,9 @@ class MainWindow(QMainWindow):
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
             self._perf_heartbeat = None
+        # Before the loaders, because it is the cheapest thing here to stop
+        # and it holds the dataset's arrays.
+        self._stop_compose_worker("the main window is closing")
         # The sink is NOT shut down here. It closes once, at the end of this
         # method, after every managed loader has physically finished and its
         # own `job.end` is queued -- a shutdown before that is followed by
@@ -3364,12 +3385,8 @@ class MainWindow(QMainWindow):
         (patch, channel) so this evicts exactly that patch, and their weak
         references would not keep the dropped arrays alive in any case.
         """
-        self._overlay_display_cache = {
-            key: value for key, value in self._overlay_display_cache.items()
-            if key[0] != patch_idx}
-        self._signal_cache = collections.OrderedDict(
-            (key, value) for key, value in self._signal_cache.items()
-            if key[0] != patch_idx)
+        self._overlay_display_cache.drop_patch(patch_idx)
+        self._signal_cache.drop_patch(patch_idx)
 
     def _refresh_patch_preview(self, reset_view=False):
         """Draw whichever preview the current mode asks for."""
@@ -3404,25 +3421,13 @@ class MainWindow(QMainWindow):
     def _overlay_gray(self, patch_idx, channel, arr, remap):
         """This channel as a [0,1] image, remapped once and kept.
 
-        Measured on a 1024x1024 patch: the percentile/remap is ~32 ms per
-        channel and the blend that follows is ~0.5 ms, so a tick that
-        recomposited from raw pixels would pay the whole mapping again for
-        every channel already on screen.
+        A thin delegate: the arithmetic and the caching rules live in
+        `core.preview_compose`, so the background frame worker runs the same
+        code with its own cache instead of a copy of this one.
         """
-        params, key_part = self._display_window_for(channel, remap)
-        key = (patch_idx, channel, key_part, arr.shape)
-        hit = self._overlay_display_cache.get(key)
-        if hit is not None:
-            return hit
-        with perf_trace.span("step1.remap", channel=channel,
-                             shape="x".join(str(v) for v in arr.shape)):
-            if params is None:
-                lo, hi = compute_qupath_auto_minmax(arr, exclude_zero=True)
-                params = {"min": float(lo), "max": float(hi)}
-            gray = np.asarray(apply_channel_remap(arr, params),
-                              dtype=np.float32)
-        self._overlay_display_cache[key] = gray
-        return gray
+        return preview_compose.channel_gray(
+            patch_idx, channel, arr, remap, self._overlay_display_cache,
+            span=perf_trace.span)
 
     def _effective_fusion_config(self):
         """The one configuration both previews and every Save consume.
@@ -3482,22 +3487,18 @@ class MainWindow(QMainWindow):
 
         # Only what this frame draws: `ready` is ticked AND in cache.
         remap = self._display_mapping(channels=ready)
-        grays, colors = {}, {}
-        for ch in ready:
-            weight = self._overlay_weight(ch)
-            if weight <= 0:
-                continue
-            gray = self._overlay_gray(idx, ch, cache[ch], remap)
-            grays[ch] = gray if weight >= 1.0 else gray * float(weight)
-            colors[ch] = _hex_to_rgb01(self.config.channel_color(ch))
-        # `_overlay_gray` has already mapped each channel and cached the
-        # result; all that is left is to tint and add them. This used to go
-        # through `compose_multichannel_overlay` with an identity window,
-        # which re-ran the full per-channel remap over every array -- p50
-        # 49.96 ms per frame, measured, while the one channel the user had
-        # actually changed cost about 8 ms to map. Same arithmetic, once.
-        with perf_trace.span("step1.compose", channels=len(grays)):
-            rgb = tint_and_sum_grays(grays, colors)
+        arrays = {ch: cache[ch] for ch in ready}
+        weights = {ch: self._overlay_weight(ch) for ch in ready}
+        colors = {ch: _hex_to_rgb01(self.config.channel_color(ch))
+                  for ch in ready}
+        # The arithmetic lives in `core.preview_compose`, so the background
+        # frame worker runs the SAME code rather than a copy of it -- a second
+        # copy is how the screen and the saved file drifted apart once
+        # already.
+        with perf_trace.span("step1.compose", channels=len(arrays)):
+            rgb = preview_compose.overlay_rgb_u8(
+                idx, arrays, remap, colors, weights,
+                self._overlay_display_cache, span=perf_trace.span)
         if rgb is None:
             self.prev_img.clear()
             self.prev_status.setText(
@@ -3508,8 +3509,7 @@ class MainWindow(QMainWindow):
         preserve = not (first_load or reset_view)
         state = self._save_patch_preview_view_state() if preserve else None
         with perf_trace.span("step1.setImage", kind="overlay"):
-            self.prev_img.setImage(
-                (np.clip(rgb, 0, 1) * 255).astype(np.uint8), autoLevels=False)
+            self.prev_img.setImage(rgb, autoLevels=False)
         if first_load or reset_view:
             self.prev_vb.autoRange()
         else:
@@ -3562,9 +3562,10 @@ class MainWindow(QMainWindow):
             return
         rev = perf_trace.REVISIONS.bump("display_mapping")
         perf_trace.mark("step1.mapping_in", channel=channel, rev=rev)
-        dropped = [key for key in self._overlay_display_cache if key[1] == channel]
-        for key in dropped:
-            self._overlay_display_cache.pop(key, None)
+        # Only this channel's arrays: every other channel is the same pixels
+        # through the same numbers.
+        self._overlay_display_cache.drop_channel(channel)
+        self._signal_cache.drop_channel(channel)
         if channel in self.config.visible_channels():
             self._schedule_preview_update()
 
@@ -3775,6 +3776,7 @@ class MainWindow(QMainWindow):
         self._frame_drawing_rev = None
         self._frame_coalesced = 0
         self._frame_in_flight = False
+        self._frame_inflight_request = None
         self._frame_last_publish = 0.0
         self._frame_input_at = 0.0
 
@@ -3840,14 +3842,158 @@ class MainWindow(QMainWindow):
             return
         self._arm_frame_timer(wait)
 
+    def _stop_compose_worker(self, reason=""):
+        """Retire the frame thread.
+
+        Twice necessary: its cache holds references to the dataset's raw
+        arrays, so a dataset switch has to let go of them; and a window that
+        is closing must not destroy a running QThread, which is what produces
+        "QThread: Destroyed while thread is still running".
+        """
+        worker, self._compose_worker = self._compose_worker, None
+        self._frame_inflight_request = None
+        self._frame_in_flight = False
+        if worker is None:
+            return
+        if reason:
+            print(f"[Step1] frame worker retired: {reason}")
+        try:
+            worker.done.disconnect()
+            worker.failed.disconnect()
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            worker.cache.clear()
+            worker.stop()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    def _compose_worker_ready(self):
+        """The frame thread, started on first use, or None if it cannot run.
+
+        Lazy because a window that never shows a preview should not carry a
+        thread, and because a test driving the synchronous path must not have
+        one appear behind it.
+        """
+        worker = self._compose_worker
+        if worker is not None:
+            return worker
+        try:
+            worker = PreviewComposeWorker(self)
+            worker.done.connect(self._on_preview_frame)
+            worker.failed.connect(self._on_preview_frame_failed)
+            worker.start()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] frame worker unavailable ({exc}); "
+                  "frames will be composed on the GUI thread")
+            return None
+        self._compose_worker = worker
+        return worker
+
+    def _frame_snapshot(self, rev):
+        """Everything one frame needs, as values the GUI thread is done with.
+
+        Returns None when the frame is not a matter of arithmetic -- nothing
+        ticked, nothing cached, a patch still loading -- because those cases
+        are about what the STATUS BAR should say, and that belongs with the
+        rest of the widget work.
+
+        The arrays go in by reference and are never written to: a new read
+        replaces the array object in `_patch_channel_cache` rather than
+        filling the old one, which is what makes handing them to a thread
+        safe and what `array_ids` lets the result be checked against.
+        """
+        idx = self._preview_patch_idx
+        cache = self._patch_channel_cache.get(idx) or {}
+        if not cache:
+            return None
+        mode = self._step1_preview_mode
+        if mode == STEP1_PREVIEW_OVERLAY:
+            ticked = self.config.visible_channels()
+            ready = [ch for ch in ticked if ch in cache]
+            if not ready or len(ready) != len(ticked):
+                return None          # a status line, not a frame
+            weights = {ch: self._overlay_weight(ch) for ch in ready}
+            if not any(w > 0 for w in weights.values()):
+                return None
+            arrays = {ch: cache[ch] for ch in ready}
+            payload = {
+                "colors": {ch: _hex_to_rgb01(self.config.channel_color(ch))
+                           for ch in ready},
+                "weights": weights,
+                "groups": {}, "group_weights": {},
+                "nucleus": ("", 0.0),
+            }
+        else:
+            if idx not in self._patch_load_ready:
+                return None
+            if [ch for ch in self._needed_channels() if ch not in cache]:
+                return None
+            effective = self._effective_fusion_config()
+            groups = {name: dict(data.get("channels") or {})
+                      for name, data in (effective.get("groups") or {}).items()}
+            group_weights = {
+                name: float(data.get("group_weight", 1.0) or 0.0)
+                for name, data in (effective.get("groups") or {}).items()}
+            nuc = effective.get("nucleus") or {}
+            nuc_ch = nuc.get("channel", "")
+            wanted = {nuc_ch} if nuc_ch else set()
+            for ch_weights in groups.values():
+                wanted.update(ch_weights.keys())
+            arrays = {ch: cache[ch] for ch in wanted if ch in cache}
+            if not arrays:
+                return None
+            payload = {
+                "colors": {}, "weights": {},
+                "groups": groups, "group_weights": group_weights,
+                "nucleus": (nuc_ch, float(nuc.get("weight", 0.0) or 0.0)),
+            }
+        self._frame_request_id += 1
+        snapshot = {
+            "request_id": self._frame_request_id,
+            "rev": rev,
+            "mode": mode,
+            "patch": idx,
+            "dataset_gen": self._dataset_gen,
+            "arrays": arrays,
+            "array_ids": tuple(sorted((ch, id(arr))
+                                      for ch, arr in arrays.items())),
+            "channels": tuple(sorted(arrays)),
+            "remap": copy.deepcopy(
+                self._display_mapping(channels=list(arrays)) or {}),
+            "fallback_norm": (self.loader._norm if self.loader is not None
+                              else (lambda a: a)),
+            "to_rgb": self.fusion.to_rgb,
+        }
+        snapshot.update(payload)
+        return snapshot
+
+    def _dispatch_frame(self, snapshot):
+        """Hand a snapshot to the frame thread. A seam, so a test can deliver
+        results under its own control."""
+        worker = self._compose_worker_ready()
+        if worker is None:
+            return False
+        return bool(worker.submit(snapshot))
+
     def _apply_pending_preview_update(self):
         """Publish the newest state, once, and leave the next slot to the
         next input.
 
+        The frame itself is composed on `PreviewComposeWorker`: this builds a
+        snapshot, hands it over and returns, so a 42-85 ms frame -- measured
+        -- is no longer 42-85 ms of GUI thread. `_frame_in_flight` stays true
+        until the result arrives, which is what keeps it single-flight; input
+        that arrives meanwhile replaces the pending revision and rides the
+        slot after the result.
+
+        Frames the worker cannot answer -- nothing ticked, a patch still
+        loading, no worker at all -- are drawn here, synchronously, because
+        what those cases need is the status bar rather than pixels.
+
         Re-entrancy is the thing to get right: drawing runs Qt code, Qt can
-        deliver another parameter event inside it, and that event must NOT
-        start a second frame -- it becomes the pending revision for the slot
-        after this one, which is also how a drag's final value lands.
+        deliver a queued timeout inside it, and that event must NOT start a
+        second frame.
         """
         if self._frame_in_flight:
             return
@@ -3860,10 +4006,33 @@ class MainWindow(QMainWindow):
         self._frame_drawing_rev = rev
         self._preview_update_pending = False
         self._frame_in_flight = True
+
+        snapshot = None
+        try:
+            snapshot = self._frame_snapshot(rev)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] could not snapshot the frame: {exc}")
+        if snapshot is not None:
+            snapshot["coalesced"] = coalesced
+            snapshot["input_rev"] = self._frame_input_rev
+            snapshot["input_at"] = self._frame_input_at
+            snapshot["dispatched_at"] = self._frame_now()
+            self._frame_inflight_request = snapshot["request_id"]
+            perf_trace.mark("step1.dispatch", rev=rev,
+                            request=snapshot["request_id"],
+                            mode=snapshot["mode"], patch=snapshot["patch"],
+                            channels=len(snapshot["arrays"]),
+                            coalesced=coalesced)
+            if self._dispatch_frame(snapshot):
+                return          # published when the pixels come back
+            self._frame_inflight_request = None
+
+        # Degraded, and deliberately: on this path the status text is the
+        # answer, so the GUI thread draws it.
         try:
             with perf_trace.span("step1.publish", rev=rev,
                                  mode=self._step1_preview_mode,
-                                 coalesced=coalesced,
+                                 coalesced=coalesced, where="gui",
                                  input_rev=self._frame_input_rev,
                                  latency_ms=(self._frame_now()
                                              - self._frame_input_at) * 1000.0):
@@ -3873,9 +4042,120 @@ class MainWindow(QMainWindow):
             self._frame_last_publish = self._frame_now()
         self._update_fusion_settings_state()
         if self._frame_pending_rev is not None:
-            # Input arrived while this frame was being drawn; the next slot
-            # carries it. This is how a drag's final value is never lost.
             self._arm_frame_timer(PREVIEW_FRAME_MS)
+
+    def _frame_result_is_current(self, result):
+        """Is this result about the pixels the window would draw NOW?
+
+        STRUCTURAL identity only, and that distinction is the whole design:
+
+        * dataset generation, patch, mode, the channel set and the identity of
+          every source array -- if any of these moved, the result describes
+          something that is no longer on screen and must be dropped.
+        * the Intensity revision is NOT part of it. During a drag a newer
+          input has almost always arrived by the time a frame finishes, so
+          dropping results for being a revision behind would starve the screen
+          exactly while the hand is moving -- the complaint this work exists
+          to fix. A frame one revision old is a good intermediate frame; the
+          newest revision is already pending and gets the next slot.
+        """
+        if result.get("dataset_gen") != self._dataset_gen:
+            return False
+        if result.get("mode") != self._step1_preview_mode:
+            return False
+        if result.get("patch") != self._preview_patch_idx:
+            return False
+        cache = self._patch_channel_cache.get(self._preview_patch_idx) or {}
+        if result.get("mode") == STEP1_PREVIEW_OVERLAY:
+            if tuple(sorted(self.config.visible_channels())) != tuple(
+                    result.get("channels") or ()):
+                return False
+        for channel, ident in result.get("array_ids") or ():
+            arr = cache.get(channel)
+            if arr is None or id(arr) != ident:
+                return False
+        return True
+
+    def _on_preview_frame(self, result):
+        """Pixels from the frame thread: check, publish, and space the next.
+
+        The camera is read and written HERE and nowhere else. A view range
+        belongs to the widget, and asking a worker for one would be asking
+        another thread what the user is looking at.
+        """
+        result = dict(result or {})
+        if result.get("request_id") == self._frame_inflight_request:
+            self._frame_in_flight = False
+            self._frame_inflight_request = None
+        rgb = result.get("rgb")
+        current = self._frame_result_is_current(result)
+        perf_trace.mark("step1.frame_in", rev=result.get("rev"),
+                        request=result.get("request_id"),
+                        current=current, drawn=rgb is not None,
+                        pending=self._frame_pending_rev)
+        if not current:
+            # Structurally stale: the dataset, patch, mode, channel set or the
+            # source arrays have moved on.
+            self._maybe_arm_next_frame()
+            return
+        if rgb is None:
+            self._refresh_patch_preview(reset_view=False)
+            self._frame_last_publish = self._frame_now()
+            self._maybe_arm_next_frame()
+            return
+        with perf_trace.span(
+                "step1.publish", rev=result.get("rev"),
+                mode=result.get("mode"), where="worker",
+                coalesced=result.get("coalesced"),
+                input_rev=result.get("input_rev"),
+                latency_ms=(self._frame_now()
+                            - float(result.get("input_at")
+                                    or self._frame_input_at)) * 1000.0):
+            first_load = (self.prev_img.image is None)
+            state = (None if first_load
+                     else self._save_patch_preview_view_state())
+            with perf_trace.span("step1.setImage", kind=result.get("mode")):
+                self.prev_img.setImage(rgb, autoLevels=False)
+            if first_load:
+                self.prev_vb.autoRange()
+            else:
+                self._restore_patch_preview_view_state(state)
+            self._frame_status(result)
+        self._frame_last_publish = self._frame_now()
+        self._update_fusion_settings_state()
+        self._maybe_arm_next_frame()
+
+    def _frame_status(self, result):
+        """What the status bar says about a published frame."""
+        if result.get("mode") == STEP1_PREVIEW_OVERLAY:
+            cache = self._patch_channel_cache.get(
+                self._preview_patch_idx) or {}
+            ticked = self.config.visible_channels()
+            missing = [ch for ch in ticked if ch not in cache]
+            self.prev_status.setText(
+                f"Overlay: {len(result.get('channels') or ())} channel(s)"
+                + (f"  ({len(missing)} still loading)" if missing else ""))
+        elif result.get("fused_to_nothing"):
+            self.prev_status.setText(
+                "This configuration fuses to nothing: every weight is 0.")
+
+    def _on_preview_frame_failed(self, payload):
+        payload = dict(payload or {})
+        request = dict(payload.get("request") or {})
+        if request.get("request_id") == self._frame_inflight_request:
+            self._frame_in_flight = False
+            self._frame_inflight_request = None
+        print(f"[Step1] frame compose failed: {payload.get('error')}")
+        perf_trace.mark("step1.frame_failed", rev=request.get("rev"),
+                        request=request.get("request_id"))
+        self._maybe_arm_next_frame()
+
+    def _maybe_arm_next_frame(self):
+        """A revision waiting for a slot gets one, spaced by the clock."""
+        if self._frame_pending_rev is None:
+            return
+        since = (self._frame_now() - self._frame_last_publish) * 1000.0
+        self._arm_frame_timer(max(0.0, PREVIEW_FRAME_MS - since))
 
     # ── Phase 1 ─────────────────────────────────────────────────────
 
@@ -5376,86 +5656,13 @@ class MainWindow(QMainWindow):
     def _preview_channel_signal(self, ch, arr, remap):
         """One channel's [0,1] signal for the Step1 fusion PREVIEW, cached.
 
-        `arr` is RAW/corrected native intensity (Step1 loads with normalize=False).
-        A channel with a Step0 manual remap uses apply_channel_remap (Min/Max/Gamma
-        in raw units — same as the disk FullFusionWorker); others use the EXACT
-        loader percentile norm (OMETIFFLoader._norm: 1–99.5, exclude-0,
-        <100-nonzero→0) that the old normalize=True cache used, so their appearance
-        is unchanged. Fixes the all-black preview from feeding normalized [0,1]
-        data to a raw-unit remap window.
-
-        Kept, because a Min/Max drag changes ONE channel and this used to
-        redo every one of them: `step1.signals` measured p50 36.31 ms per
-        frame against a `fuse` of 4 ms. So a colour or weight change reuses
-        every signal and an edit to one channel's window recomputes that
-        channel alone.
-
-        One entry per (patch, channel), holding the window it was computed
-        with and a WEAK reference to the array it was computed from. A hit
-        needs both to match: the window by value, and the source by
-        identity, re-verified through the weak reference rather than trusted
-        through a token -- `id()` can be reused by the next array once the
-        previous one is released. A window the user dragged past is
-        replaced rather than remembered, because nothing will ask for it
-        again and a slider's worth of 4 MiB signals is memory pressure on
-        exactly the slides this work is about.
+        A thin delegate, for the same reason as `_overlay_gray`: one
+        implementation in `core.preview_compose`, two callers -- this window's
+        immediate redraws and the background frame worker.
         """
-        p = remap.get(ch) if remap else None
-        window = self._display_window_for(ch, remap)[1]
-        key = (self._preview_patch_idx, ch)
-        entry = self._signal_cache.get(key)
-        if entry is not None and entry["window"] == window:
-            # The source is re-verified, not inferred from a token: `id()`
-            # alone is not an identity, because CPython may hand a released
-            # array's address to the next one, and a channel, shape and
-            # window that all match would then serve the previous patch's
-            # pixels. A weak reference cannot outlive its array and cannot be
-            # confused with a different one.
-            source = entry["ref"]()
-            if source is arr:
-                # A hit is use, so it moves to the back: eviction order was
-                # "least recently RECOMPUTED", which after a patch switch
-                # would drop the current patch's channels -- the ones every
-                # frame is hitting -- before the previous patch's, which
-                # nothing asks for any more.
-                self._signal_cache.move_to_end(key)
-                return entry["signal"]
-        if p:
-            signal = apply_channel_remap(arr, p).astype(np.float32)
-        else:
-            signal = self.loader._norm(arr)
-        signal = np.asarray(signal)
-        self._signal_cache.pop(key, None)        # one version per channel
-        try:
-            ref = weakref.ref(arr)
-        except TypeError:
-            return signal                        # unreferenceable: don't cache
-        self._signal_cache[key] = {
-            "ref": ref, "window": window, "signal": signal,
-            "nbytes": int(getattr(signal, "nbytes", 0) or 0)}
-        self._evict_signals()
-        return signal
-
-    def _signal_cache_bytes(self):
-        return sum(entry["nbytes"] for entry in self._signal_cache.values())
-
-    def _evict_signals(self):
-        """Keep the cache inside both bounds, oldest first.
-
-        Order IS recency: an entry moves to the back when its window changes
-        and when it is HIT, so what sits at the front is what no recent frame
-        has wanted. Entries whose array has been released go first, whatever
-        their age -- they can never be hit again.
-        """
-        for key, entry in list(self._signal_cache.items()):
-            if entry["ref"]() is None:
-                self._signal_cache.pop(key, None)
-        while (len(self._signal_cache) > _SIGNAL_CACHE_MAX
-               or self._signal_cache_bytes() > _SIGNAL_CACHE_BYTES):
-            oldest = next(iter(self._signal_cache), None)
-            if oldest is None:
-                break
-            self._signal_cache.pop(oldest, None)
+        return preview_compose.channel_signal(
+            self._preview_patch_idx, ch, arr, remap, self._signal_cache,
+            self.loader._norm, span=perf_trace.span)
 
     # ── Save ────────────────────────────────────────────────────────
 

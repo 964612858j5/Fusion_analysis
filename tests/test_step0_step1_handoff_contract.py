@@ -173,6 +173,7 @@ def make_window(run, schema=1, loader_path=None):
     w._signal_cache = collections.OrderedDict()
     w._frame_input_rev = 0
     w._frame_pending_rev = None
+    w._frame_drawing_rev = None
     w._frame_coalesced = 0
     w._frame_in_flight = False
     w._frame_last_publish = 0.0

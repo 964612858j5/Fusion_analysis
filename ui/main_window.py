@@ -7,6 +7,7 @@ import gc
 import glob
 import hashlib
 import json
+import math
 import collections
 import copy
 import time
@@ -215,6 +216,7 @@ class MainWindow(QMainWindow):
         # `_schedule_preview_update`.
         self._frame_input_rev = 0
         self._frame_pending_rev = None
+        self._frame_drawing_rev = None
         self._frame_coalesced = 0
         self._frame_in_flight = False
         self._frame_last_publish = 0.0
@@ -268,10 +270,15 @@ class MainWindow(QMainWindow):
 
         self._prev_timer = QTimer()
         self._prev_timer.setSingleShot(True)
-        # ONE coalesced redraw per burst of state changes, in whichever mode
-        # is showing. Dragging a weight or a Min/Max slider emits per step; a
-        # full-array composite per step would run the GUI thread into the
-        # ground and only the last one is ever seen.
+        # PreciseTimer, because this is a frame clock: Qt's default coarse
+        # timer may fire up to 5% early or late, and a slot that fires early
+        # publishes a frame the budget had not paid for yet.
+        self._prev_timer.setTimerType(Qt.PreciseTimer)
+        # The frame clock's slot. While a control is being dragged the timer
+        # is armed once and left alone, so frames go out every
+        # PREVIEW_FRAME_MS and the newest state is the one drawn; it is NOT
+        # restarted per event, which is what made a drag publish only after
+        # the hand stopped. See `_schedule_preview_update`.
         self._prev_timer.timeout.connect(self._apply_pending_preview_update)
 
         self._proc_poll_timer = QTimer()
@@ -978,7 +985,7 @@ class MainWindow(QMainWindow):
         #    can no longer deliver the old dataset's pixels into the new one.
         self._stop_all_loaders()
         self._preload_debounce.stop()
-        self._prev_timer.stop()
+        self._reset_frame_clock()
         self._step1_session_timer.stop()
         self._retire_fusion_worker("the Step1 context was discarded")
         if self.proc is not None:
@@ -3749,14 +3756,41 @@ class MainWindow(QMainWindow):
         self._schedule_preview_update()
         self._schedule_step1_session_save()
 
+    def _reset_frame_clock(self):
+        """Forget everything the frame clock was doing.
+
+        Stopping the timer is not enough: a pending revision, a merge count
+        or an `in_flight` left standing from the old dataset would make the
+        new one's first input believe a frame is already due (or already
+        running, which silently drops it). The time base goes too, so the
+        first input after a dataset switch is a leading edge rather than a
+        slot measured from the previous slide's last frame.
+        """
+        try:
+            self._prev_timer.stop()
+        except RuntimeError:
+            pass
+        self._preview_update_pending = False
+        self._frame_pending_rev = None
+        self._frame_drawing_rev = None
+        self._frame_coalesced = 0
+        self._frame_in_flight = False
+        self._frame_last_publish = 0.0
+        self._frame_input_at = 0.0
+
     def _frame_now(self):
         """The clock the frame scheduler runs on. A seam, so a test can drive
         two seconds of input without waiting two seconds."""
         return time.monotonic()
 
     def _arm_frame_timer(self, wait_ms):
-        """Ask for the next frame slot. A seam, for the same reason."""
-        self._prev_timer.start(int(max(0, wait_ms)))
+        """Ask for the next frame slot. A seam, for the same reason.
+
+        Rounded UP: `int()` on a 32.7 ms wait asks for 32 and the slot fires
+        before the budget has elapsed, which over a long drag drifts the
+        clock faster than the frame cost it was chosen against.
+        """
+        self._prev_timer.start(int(math.ceil(max(0.0, float(wait_ms)))))
 
     def _schedule_preview_update(self, delay_ms=None):
         """Record that the picture is out of date, and publish on the clock.
@@ -3823,6 +3857,7 @@ class MainWindow(QMainWindow):
             return
         coalesced, self._frame_coalesced = self._frame_coalesced, 0
         self._frame_pending_rev = None
+        self._frame_drawing_rev = rev
         self._preview_update_pending = False
         self._frame_in_flight = True
         try:

@@ -104,6 +104,9 @@ class _FakeClock:
         w._arm_frame_timer = self._arm
         w._prev_timer.stop()
         w._prev_timer.isActive = lambda: self.armed_at is not None
+        # Stopping the timer disarms the slot, here as in Qt -- otherwise a
+        # reset leaves this double claiming a frame is still due.
+        w._prev_timer.stop = self._disarm
         # The window's scheduler state is on the REAL clock until now; move
         # it onto this one, `idle_ms` in the past, so the first input is
         # treated as arriving after an idle period rather than after a frame
@@ -113,6 +116,9 @@ class _FakeClock:
         w._frame_pending_rev = None
         w._frame_coalesced = 0
         w._frame_in_flight = False
+
+    def _disarm(self):
+        self.armed_at = self.armed_wait = None
 
     def _arm(self, wait_ms):
         self.armed_at = self.now
@@ -411,10 +417,12 @@ def test_a_frame_slower_than_the_input_keeps_one_in_flight_and_one_pending(app):
         w.set_preview_mode("overlay", force=True, reconcile=False)
         clock = _FakeClock(w, start=0.0)
         clock.advance_ms(1000)
-        seen = []
+        frames = []          # (revision being drawn, pending when it began)
 
         def slow_frame(*_a, **_k):
-            seen.append(w._frame_pending_rev)
+            # Recorded BEFORE the nested input, so the pair says what this
+            # frame is drawing and what was waiting when it started.
+            frames.append((w._frame_drawing_rev, w._frame_pending_rev))
             clock.advance_ms(80)                  # a frame costs 80 ms
             # input arriving DURING the frame must not start a second one
             w._schedule_preview_update()
@@ -427,9 +435,17 @@ def test_a_frame_slower_than_the_input_keeps_one_in_flight_and_one_pending(app):
             w._schedule_preview_update()
             clock.run_due_slot()
 
-        assert seen, "no frame ran at all"
-        assert all(rev is None or rev == pending
-                   for rev, pending in zip(seen, seen)), seen
+        assert len(frames) > 1, f"only {len(frames)} frames ran in 200 ms of input"
+        for drawing, pending in frames:
+            assert drawing is not None, frames
+            assert pending is None, (
+                "a frame started while another revision was still pending: "
+                f"drawing {drawing}, pending {pending}")
+        drawn = [drawing for drawing, _ in frames]
+        assert drawn == sorted(drawn) and len(set(drawn)) == len(drawn), \
+            f"frames were drawn out of order or twice: {drawn}"
+        assert max(drawn) < w._frame_input_rev, \
+            "every input was drawn: this test is not exercising a slow frame"
         assert w._frame_pending_rev is not None, \
             "the newest input is still waiting for its slot"
         assert w._frame_in_flight is False
@@ -574,5 +590,78 @@ def test_a_frame_cannot_start_inside_a_frame(app):
         assert w._frame_in_flight is False
         assert w._frame_pending_rev is not None, \
             "the input that arrived during the frame is still pending"
+    finally:
+        w.close()
+
+
+def test_a_dataset_switch_forgets_the_frame_clock(app):
+    """Stopping the timer is not enough. A pending revision, a merge count or
+    an `in_flight` left standing from the old dataset makes the new one's
+    first input believe a frame is already due -- or already running, which
+    drops it silently -- and a time base from the old slide's last frame turns
+    the first input into a mid-drag slot instead of a leading edge."""
+    w = _window(app)
+    try:
+        clock = _FakeClock(w)
+        w._schedule_preview_update()          # leading edge, publishes
+        clock.advance_ms(4)
+        w._schedule_preview_update()          # now pending, slot armed
+        w._frame_in_flight = True             # as if a frame were running
+        assert w._frame_pending_rev is not None
+
+        w._reset_frame_clock()
+
+        assert w._frame_pending_rev is None
+        assert w._frame_drawing_rev is None
+        assert w._frame_coalesced == 0
+        assert w._frame_in_flight is False
+        assert w._frame_last_publish == 0.0
+        assert w._frame_input_at == 0.0
+        assert w._preview_update_pending is False
+        assert not w._prev_timer.isActive()
+    finally:
+        w.close()
+
+
+def test_the_discard_path_resets_the_clock(app):
+    """The real caller: `_discard_step1_dataset_state`."""
+    w = _window(app)
+    try:
+        clock = _FakeClock(w)
+        w._schedule_preview_update()
+        clock.advance_ms(4)
+        w._schedule_preview_update()
+        assert w._frame_pending_rev is not None
+
+        w._discard_step1_dataset_state(status_text="switched")
+
+        assert w._frame_pending_rev is None
+        assert w._frame_in_flight is False
+        assert w._frame_last_publish == 0.0
+    finally:
+        w.close()
+
+
+def test_a_slot_is_never_asked_for_early(app):
+    """`int()` on a 32.7 ms wait asks for 32 and fires before the budget has
+    elapsed; over a long drag that drifts the clock faster than the frame cost
+    it was chosen against."""
+    w = _window(app)
+    try:
+        asked = []
+        w._arm_frame_timer = lambda ms: asked.append(ms)
+        clock = _FakeClock(w)
+        w._arm_frame_timer = lambda ms: asked.append(ms)
+        w._frame_last_publish = clock.now - 0.0003      # 0.3 ms ago
+
+        w._schedule_preview_update()
+
+        assert asked, "no slot was asked for"
+        assert asked[0] >= mw.PREVIEW_FRAME_MS - 0.3
+        real = mw.MainWindow._arm_frame_timer
+        waits = []
+        w._prev_timer.start = lambda ms: waits.append(ms)
+        real(w, 32.7)
+        assert waits == [33], waits
     finally:
         w.close()

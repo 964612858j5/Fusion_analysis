@@ -2975,6 +2975,10 @@ class MainWindow(QMainWindow):
         # new step rather than the old one's last picture.
         self._display.coordinator.set_active_context(
             self._STEP_CONTEXTS.get(active))
+        # ...and the Intensity window's rights, from the same transition and
+        # by the same rule: one window, one set of numbers, and what changes
+        # with the step is only what may be edited.
+        self._display.apply_intensity_policy()
         _on = ("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
                "background:#1a2a3a;border-radius:4px;")
         _off = "font-size:12px;color:#555;padding:4px 12px;"
@@ -5281,7 +5285,9 @@ class MainWindow(QMainWindow):
 
     def _unlock_ui(self):
         """Re-enable UI after fusion completes or errors."""
-        self._set_intensity_editing_enabled(True)
+        # Through the policy, not a flat True: unlocking after a run must give
+        # back the rights the CURRENT step has, never more.
+        self._display.apply_intensity_policy()
         self.config.setEnabled(True)
         self.search.setEnabled(True)
         self._btn_back_to_step0.setEnabled(True)

@@ -962,6 +962,35 @@ class Block01DisplayServices(QObject):
         self.coordinator.request_frame(kind="navigator_shown")
         return popup
 
+    # Which steps may EDIT Min/Max/Gamma. Step0 owns the remap config and
+    # Step1 tunes the fusion it feeds; everything downstream consumes a
+    # committed mapping and would be editing numbers its results were not
+    # computed from. Read-only does NOT mean stale: the window still shows
+    # the canonical values for the current channel, because there is one set
+    # of them and every step is looking at it.
+    _INTENSITY_EDITABLE_STEPS = (STEP0, STEP1)
+
+    def intensity_policy(self, step_id=None):
+        """`{"editable": bool}` for a step. Explicit, so "why is this greyed
+        out" has an answer that is not "whatever last called the setter"."""
+        step = self.coordinator.active_context_id() if step_id is None else step_id
+        return {"editable": step in self._INTENSITY_EDITABLE_STEPS}
+
+    def apply_intensity_policy(self, step_id=None):
+        """Give the shared Intensity window the rights the CURRENT step has.
+
+        Called from the one step transition, so an already-open window follows
+        the step immediately -- no reopen, and no window left editable on a
+        page that consumes a committed mapping.
+        """
+        host = self._window_host
+        setter = getattr(host, "set_intensity_editing_enabled", None)
+        if setter is None:
+            return None
+        policy = self.intensity_policy(step_id)
+        setter(bool(policy["editable"]))
+        return policy
+
     def show_intensity(self, channel="", color=None):
         """Put the ONE Intensity window in front, on `channel`.
 
@@ -972,6 +1001,7 @@ class Block01DisplayServices(QObject):
         if host is None:
             return None
         win = host.show_intensity_window()
+        self.apply_intensity_policy()
         if channel:
             focus = getattr(host, "focus_intensity_on", None)
             if callable(focus):

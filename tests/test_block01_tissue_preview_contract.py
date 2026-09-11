@@ -719,6 +719,34 @@ def test_the_gui_thread_composes_nothing_during_a_drag(app):
         w.close()
 
 
+def test_the_intensity_window_follows_the_step_without_forking_its_numbers(app):
+    """One window, one set of Min/Max/Gamma; the step decides only the RIGHTS.
+
+    Step0 owns the remap config and Step1 tunes the fusion it feeds, so both
+    edit. Step2 and Step3 consume a committed mapping, so they read -- and
+    they still READ, showing the canonical values rather than a copy or a
+    blank.
+    """
+    w = _window(app)
+    try:
+        w._display.show_intensity("CD3")
+        panel = w._step0.intensity_panel()
+        lo, hi, _g = w._step0._display_mapping_for("CD3")
+        w._step0.set_display_mapping("CD3", lo, hi / 3.0)
+
+        for step, editable in ((0, True), (1, True), (2, False), (3, False),
+                               (1, True), (0, True)):
+            _goto(w, step)
+            assert w._display.intensity_policy()["editable"] is editable, step
+            if panel is not None:
+                assert panel.isEnabled() is editable, step
+            # The numbers are the same ones in every step: one store, read
+            # through one port, never copied per step.
+            assert w._display.state.mapping("CD3")[1] == pytest.approx(hi / 3.0)
+    finally:
+        w.close()
+
+
 def test_closing_block01_retires_the_shared_worker_once(app):
     w = _window(app)
     co = w._display.coordinator

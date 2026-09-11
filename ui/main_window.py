@@ -165,121 +165,133 @@ class _ArtifactKindMismatch(Exception):
     """The zarr on disk was written for the other Step1 output kind."""
 
 
-class _InheritedTissueContext:
-    """Step2's and Step3's render context: the spec, NOT the picture.
+class _GlobalWeightEditor(QWidget):
+    """The shared weight editor: one view over the one set of weights.
 
-    WHAT WENT WRONG BEFORE. This class used to keep the last composed `rgb`
-    and re-publish it. That is a screenshot: a colour, a Min/Max/Gamma or a
-    weight changed afterwards could not possibly alter pixels that were
-    already baked, so the Tissue Preview went dead the moment the user walked
-    past Step1 -- and a test even pinned that deadness as correct. The
-    requirement is the opposite: the thumbnail follows Intensity and legal
-    weight changes in EVERY step.
+    WHY IT EXISTS. Step1 has the channel panel; Step2 and Step3 have no
+    channel controls at all, so "adjust a legal weight in any step" had no
+    user-reachable entry there -- a service method called from a test is not a
+    product operation. This is that entry, and it is a VIEW, not a second
+    store: every spin box writes through `Block01DisplayServices
+    .set_render_weight`, which goes to the one weight owner (the channel
+    panel), so what the user changes here is the same number Step1 shows, a
+    Save freezes and a session restores.
 
-    WHAT IT KEEPS NOW is the render SPEC -- the semantic description of the
-    picture, which is everything needed to compose it again:
+    One editor for the process, reachable from the Block01 toolbar in every
+    step -- not four copies of a panel.
+    """
 
-      mode, dataset token, the channel list, the per-channel weights, the
-      fusion groups / group weights / nucleus, and the callables for the
-      loader's normalisation and the engine's RGB step.
+    def __init__(self, services, channels, parent=None):
+        super().__init__(parent)
+        self._services = services
+        self._spins = {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+        hint = QLabel("Weights apply to the fusion and to every preview.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#9bd0ff;font-size:10px;")
+        lay.addWidget(hint)
+        for channel in channels:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            label = QLabel(str(channel))
+            label.setStyleSheet("color:#dce5ef;font-size:11px;")
+            label.setMinimumWidth(90)
+            row.addWidget(label)
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(0.0, 1.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setKeyboardTracking(False)
+            spin.valueChanged.connect(
+                lambda value, ch=channel: self._on_spin(ch, value))
+            row.addWidget(spin, stretch=1)
+            self._spins[channel] = spin
+            lay.addLayout(row)
+        lay.addStretch()
+        self._syncing = False
+        self.refresh_from_state()
 
-    Colours and display windows are deliberately NOT in it: those are
-    Block01's canonical state and are read live on every snapshot, so a
-    change to either recomposes. The whole-slide arrays are re-fetched from
-    the low-resolution service by name, so they are shared rather than held.
+    def _on_spin(self, channel, value):
+        if self._syncing:
+            return
+        self._services.set_render_weight(channel, float(value))
 
-    Weights ARE in it, because they are the render spec rather than global
-    display state -- and they are editable from here through
-    `set_render_weight`, which is the entry `Block01DisplayServices` routes a
-    weight change to whichever step is active.
+    def refresh_from_state(self):
+        """Show what the one store says. A view, so it follows rather than
+        argues: the spin boxes are set with signals suppressed."""
+        self._syncing = True
+        try:
+            for channel, spin in self._spins.items():
+                current = self._services.render_weight(channel)
+                if current is None:
+                    continue
+                if abs(float(spin.value()) - float(current)) > 1e-9:
+                    spin.setValue(float(current))
+        finally:
+            self._syncing = False
+
+    def spin_for(self, channel):
+        """The real control, for a caller driving a real drag."""
+        return self._spins.get(channel)
+
+
+class _SharedSpecTissueContext:
+    """Step2's and Step3's render context: the ONE shared spec, read live.
+
+    TWO THINGS WENT WRONG BEFORE, and this class is what each fix looks like.
+
+    It first kept the composed `rgb` and re-published it -- a screenshot, so
+    nothing the user changed afterwards could alter it. It then kept its own
+    writable copy of the render spec, which diverged the other way: a weight
+    moved in Step2 was overwritten by Step1's older spec the moment the user
+    reached Step3, and was gone again on the way back to Step1.
+
+    So it keeps NOTHING. Everything it draws is read at snapshot time:
+
+      * the spec -- mode, channels, weights, fusion configuration -- from
+        `Block01DisplayServices.render_spec()`, which Step1 publishes and
+        which the one weight owner writes;
+      * the colours and display windows from the canonical display state;
+      * the arrays from the shared whole-slide service, by name.
+
+    What it DOES have is an identity: it is registered under its own step id,
+    so a frame composed for the step the user has just left fails the
+    coordinator's owner and generation checks instead of landing.
     """
 
     def __init__(self, services, step_id):
         self._services = services
         self._step_id = step_id
-        self._spec = None
-
-    # ── inheriting ────────────────────────────────────────────────────
-    def inherit(self, spec):
-        """Take a copy of the spec the upstream step is publishing."""
-        if not spec:
-            return
-        self._spec = {
-            "mode": spec.get("mode"),
-            "token": spec.get("token"),
-            "channels": tuple(spec.get("channels") or ()),
-            "weights": dict(spec.get("weights") or {}),
-            "groups": {name: dict(chs) for name, chs
-                       in (spec.get("groups") or {}).items()},
-            "group_weights": dict(spec.get("group_weights") or {}),
-            "nucleus": tuple(spec.get("nucleus") or ("", 0.0)),
-            "fallback_norm": spec.get("fallback_norm"),
-            "to_rgb": spec.get("to_rgb"),
-        }
 
     def spec(self):
-        return None if self._spec is None else dict(self._spec)
+        return self._services.render_spec()
 
     def has_spec(self):
-        return self._spec is not None
-
-    # ── the weight entry a downstream step is driven through ──────────
-    def set_render_weight(self, channel, weight):
-        """A legal weight change, arriving from the global entry.
-
-        Step2 and Step3 have no weight panel of their own, and none is
-        invented here. What they do have is the inherited configuration, and
-        `Block01DisplayServices.set_render_weight` -- the one entry every
-        step's weight edit goes through -- lands here when one of them is
-        active, so the thumbnail recomposes instead of sitting on a baked
-        picture.
-        """
-        if self._spec is None or not channel:
-            return False
-        weight = float(weight)
-        if self._spec["mode"] == tissue_compose.MODE_OVERLAY:
-            if self._spec["weights"].get(channel) == weight:
-                return False
-            self._spec["weights"][channel] = weight
-            return True
-        changed = False
-        for ch_weights in self._spec["groups"].values():
-            if channel in ch_weights and ch_weights[channel] != weight:
-                ch_weights[channel] = weight
-                changed = True
-        nuc_ch, nuc_w = self._spec["nucleus"]
-        if channel == nuc_ch and nuc_w != weight:
-            self._spec["nucleus"] = (nuc_ch, weight)
-            changed = True
-        return changed
-
-    def render_weight(self, channel):
-        if self._spec is None:
-            return None
-        if self._spec["mode"] == tissue_compose.MODE_OVERLAY:
-            return self._spec["weights"].get(channel)
-        for ch_weights in self._spec["groups"].values():
-            if channel in ch_weights:
-                return ch_weights[channel]
-        nuc_ch, nuc_w = self._spec["nucleus"]
-        return nuc_w if channel == nuc_ch else None
+        return self._services.render_spec() is not None
 
     # ── the render context ────────────────────────────────────────────
     def tissue_render_mode(self):
-        return None if self._spec is None else self._spec["mode"]
+        spec = self.spec()
+        return None if spec is None else spec.get("mode")
 
-    def tissue_render_snapshot(self):
-        spec = self._spec
+    def tissue_render_snapshot(self, computed_only=True):
+        spec = self.spec()
         if not spec:
             return None
-        if spec["token"] != self._services.state.dataset_token():
+        if spec.get("token") != self._services.state.dataset_token():
             # The slide moved under it. A spec describing another dataset is
             # exactly the failure `b1aaac6` closed; it is dropped, not drawn.
-            self._spec = None
             return None
         state = self._services.state
+        # The SEMANTIC channel set, not whatever happened to be resident when
+        # Step1 last composed. A channel still loading when the user walked
+        # downstream used to fall out of the spec permanently: never asked
+        # for again, never in the final picture.
+        wanted = tuple(spec.get("channels") or ())
         arrays, loading = {}, []
-        for ch in spec["channels"]:
+        for ch in wanted:
             arr = self._services.lowres_array(ch)
             if arr is None:
                 loading.append(ch)
@@ -287,7 +299,7 @@ class _InheritedTissueContext:
                 arrays[ch] = arr
         if loading:
             loading = list(self._services.ensure_lowres(loading))
-            for ch in spec["channels"]:
+            for ch in wanted:
                 if ch not in arrays:
                     arr = self._services.lowres_array(ch)
                     if arr is not None:
@@ -300,31 +312,46 @@ class _InheritedTissueContext:
             loading.append(ch)
         if not arrays:
             return None
+        # COMPUTED WINDOWS ONLY, and the seed goes to the seed thread.
+        mappings = {}
+        for ch in list(arrays):
+            window = (state.mapping(ch) if computed_only
+                      else state.mapping_or_seed(ch))
+            if window is None:
+                self._services.request_mapping_seed(ch)
+                loading.append(ch)
+                arrays.pop(ch, None)
+            else:
+                mappings[ch] = window
+        if not arrays:
+            return None
+        mode = spec.get("mode")
         snapshot = {
-            "mode": spec["mode"],
-            "token": spec["token"],
+            "mode": mode,
+            "token": spec.get("token"),
             "arrays": arrays,
             # READ LIVE, every frame: this is what makes a colour or a
             # Min/Max/Gamma change downstream a different picture.
-            "mappings": {ch: m for ch, m in
-                         ((c, state.mapping(c)) for c in arrays)
-                         if m is not None},
+            "mappings": mappings,
             "colors": {ch: state.color_rgb01(ch) for ch in arrays},
+            # Named, so a partial picture is visibly partial and the missing
+            # channels are still owed a final frame.
             "loading": tuple(sorted(set(loading))),
         }
-        if spec["mode"] == tissue_compose.MODE_OVERLAY:
-            snapshot["weights"] = {ch: float(spec["weights"].get(ch, 0.0))
+        if mode == tissue_compose.MODE_OVERLAY:
+            weights = spec.get("weights") or {}
+            snapshot["weights"] = {ch: float(weights.get(ch, 0.0))
                                    for ch in arrays}
             if not any(w > 0 for w in snapshot["weights"].values()):
                 return None
         else:
             snapshot.update({
                 "groups": {name: dict(chs) for name, chs
-                           in spec["groups"].items()},
-                "group_weights": dict(spec["group_weights"]),
-                "nucleus": tuple(spec["nucleus"]),
-                "fallback_norm": spec["fallback_norm"],
-                "to_rgb": spec["to_rgb"],
+                           in (spec.get("groups") or {}).items()},
+                "group_weights": dict(spec.get("group_weights") or {}),
+                "nucleus": tuple(spec.get("nucleus") or ("", 0.0)),
+                "fallback_norm": spec.get("fallback_norm"),
+                "to_rgb": spec.get("to_rgb"),
             })
         return snapshot
 
@@ -554,6 +581,38 @@ class MainWindow(QMainWindow):
         step_bar.addWidget(QLabel("  →  "))
         step_bar.addWidget(self._step4_lbl)
         step_bar.addStretch()
+
+        # ── Block01 chrome: the global windows, reachable from EVERY step ──
+        #
+        # Outside the stacked widget on purpose. The per-step buttons on the
+        # Step0 and Step1 pages disappear with their page, so in Step2 and
+        # Step3 the only way back to a closed Intensity window or Tissue
+        # Preview was to walk back to Step1 -- which is not "a global window
+        # for the whole session", it is a Step1 window that happens to stay
+        # open. These three are always there and resolve to the same
+        # instances the page buttons do.
+        self._btn_global_intensity = QPushButton("Intensity…")
+        self._btn_global_intensity.setToolTip(
+            "The shared Intensity window. One set of Min/Max/Gamma for the "
+            "whole session, editable in every step.")
+        self._btn_global_tissue = QPushButton("🗺 Tissue Preview")
+        self._btn_global_tissue.setToolTip(
+            "The shared Tissue Preview. One window for the whole session; "
+            "the picture follows whichever step you are in.")
+        self._btn_global_weights = QPushButton("Weights…")
+        self._btn_global_weights.setToolTip(
+            "The shared channel weights. The same numbers the channel panel "
+            "shows and a Save freezes.")
+        for btn in (self._btn_global_intensity, self._btn_global_tissue,
+                    self._btn_global_weights):
+            btn.setStyleSheet(
+                "QPushButton{color:#9bd0ff;font-size:10px;background:#182230;"
+                "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
+                "QPushButton:hover{background:#23354a;}")
+            step_bar.addWidget(btn)
+        self._btn_global_intensity.clicked.connect(self._open_global_intensity)
+        self._btn_global_tissue.clicked.connect(self._open_global_navigator)
+        self._btn_global_weights.clicked.connect(self._open_global_weights)
         # v14.1: top-nav Skip → Step2/3/4 buttons and the Step 1.5 workflow entry
         # were removed. Direct navigation is still available via the step labels
         # above. The Step15BackgroundCorrectionPage widget and its set_context
@@ -1073,7 +1132,7 @@ class MainWindow(QMainWindow):
                 if self._step1_preview_mode == STEP1_PREVIEW_FUSION
                 else tissue_compose.MODE_OVERLAY)
 
-    def tissue_render_snapshot(self):
+    def tissue_render_snapshot(self, computed_only=True):
         """Everything Step1's whole-slide frame needs, as plain values.
 
         THE WHOLE SLIDE, not the current patch: this is a navigation
@@ -1139,28 +1198,50 @@ class MainWindow(QMainWindow):
             loading.append(ch)
         if not arrays:
             return None
-        mappings = {ch: state.mapping(ch) for ch in arrays}
+        # COMPUTED WINDOWS ONLY: a channel without one is named as loading
+        # and its seed goes to the seed thread. A percentile here would be a
+        # whole-slide pass inside a snapshot callback.
+        mappings = {}
+        for ch in list(arrays):
+            window = (state.mapping(ch) if computed_only
+                      else state.mapping_or_seed(ch))
+            if window is None:
+                self._display.request_mapping_seed(ch)
+                loading.append(ch)
+                arrays.pop(ch, None)
+            else:
+                mappings[ch] = window
+        if not arrays:
+            return None
         token = self._display.state.dataset_token()
         snapshot = {
             "mode": mode,
             "token": token,
             "arrays": arrays,
-            "mappings": {ch: m for ch, m in mappings.items() if m is not None},
+            "mappings": mappings,
             "colors": {ch: state.color_rgb01(ch) for ch in arrays},
             "loading": tuple(sorted(set(loading))),
         }
-        # The SPEC: the semantic description of this picture, kept so a
-        # downstream step can inherit it and COMPOSE IT AGAIN when a colour,
-        # a display window or a weight moves. Not the pixels -- pixels cannot
-        # answer a later change, which is what made Step2/Step3 go dead.
+        # The SPEC: the semantic description of this picture, published so
+        # every step draws the same one and can COMPOSE IT AGAIN when a
+        # colour, a display window or a weight moves. Not the pixels -- pixels
+        # cannot answer a later change, which is what made Step2/Step3 go
+        # dead.
+        #
+        # `wanted`, not `arrays`: the channels this picture is OF, whether or
+        # not they have arrived. Writing the resident set here meant a channel
+        # still loading when the user walked downstream dropped out of the
+        # configuration for good -- never requested again, never in the final
+        # frame.
         spec = {"mode": mode, "token": token,
-                "channels": tuple(sorted(arrays)),
+                "channels": tuple(sorted(wanted)),
                 "weights": {}, "groups": {}, "group_weights": {},
                 "nucleus": ("", 0.0),
                 "fallback_norm": None, "to_rgb": None}
         if mode == tissue_compose.MODE_OVERLAY:
             snapshot["weights"] = {ch: weights.get(ch, 0.0) for ch in arrays}
-            spec["weights"] = dict(snapshot["weights"])
+            spec["weights"] = {ch: float(weights.get(ch, 0.0))
+                               for ch in wanted}
             if not any(w > 0 for w in snapshot["weights"].values()):
                 # Everything ticked is at zero: an empty picture is a real
                 # answer here, and the composer returns None for it. Said as
@@ -1181,29 +1262,104 @@ class MainWindow(QMainWindow):
             }
             snapshot.update(fusion_bits)
             spec.update(fusion_bits)
-        self._tissue_render_spec = spec
+        # Published, not kept: there is ONE spec for the process and the
+        # downstream contexts read it rather than copying it.
+        self._display.publish_render_spec(spec)
         return snapshot
 
     def tissue_render_spec(self):
-        """The spec a downstream step inherits. None until Step1 has drawn."""
-        return getattr(self, "_tissue_render_spec", None)
+        """The spec every step draws. None until Step1 has composed once."""
+        return self._display.render_spec()
 
     def set_render_weight(self, channel, weight):
-        """Step1's half of the global weight entry: move the channel's row.
+        """THE weight write, wherever in Block01 it came from.
 
-        The panel is the weight's owner in Step1, so a global weight change
-        goes through it rather than around it -- the row, the fusion config
-        and the saved session stay one answer.
+        The channel panel is the weight's owner -- it is what a Save freezes
+        and what a session restores -- so a weight moved in Step2 or Step3
+        moves the same row Step1 shows. That is the whole difference between
+        a global weight and a per-step pixel effect: walking on to Step3 and
+        back to Step1 finds the number the user chose, because there was only
+        ever one place it was written.
+
+        Moving the row re-publishes the render spec through the ordinary
+        `config_changed` path, so every reader picks it up without this
+        method telling any of them.
         """
-        if not channel or channel not in getattr(self.config, "_rows", {}):
+        rows = getattr(self.config, "_rows", {})
+        if not channel or channel not in rows:
             return False
         if self.config.channel_weight(channel) == float(weight):
             return False
-        self.config._rows[channel].spin.setValue(float(weight))
+        rows[channel].spin.setValue(float(weight))
+        # Step1's own snapshot is what publishes the spec, and it only runs
+        # when Step1 is the active context. From a downstream step the spec
+        # has to be refreshed here, or the weight would move the panel and
+        # not the picture.
+        if self._display.coordinator.active_context_id() != _CTX_STEP1:
+            self._refresh_published_render_spec()
         return True
 
     def render_weight(self, channel):
         return self.config.channel_weight(channel)
+
+    def _refresh_published_render_spec(self):
+        """Re-publish the spec from the CURRENT panel state.
+
+        Used when the weights move while a downstream step is drawing: Step1
+        is not composing, so nothing else would rebuild the spec, and the
+        shared one would keep the weights the user has just changed away
+        from.
+        """
+        spec = self._display.render_spec()
+        if not spec:
+            return
+        spec = dict(spec)
+        if spec.get("mode") == tissue_compose.MODE_OVERLAY:
+            spec["weights"] = {ch: self._overlay_weight(ch)
+                               for ch in spec.get("channels") or ()}
+        else:
+            effective = self._effective_fusion_config()
+            spec["groups"] = {
+                name: dict(data.get("channels") or {})
+                for name, data in (effective.get("groups") or {}).items()}
+            spec["group_weights"] = {
+                name: float(data.get("group_weight", 1.0) or 0.0)
+                for name, data in (effective.get("groups") or {}).items()}
+            nuc = effective.get("nucleus") or {}
+            spec["nucleus"] = (str(nuc.get("channel", "") or ""),
+                               float(nuc.get("weight", 0.0) or 0.0))
+        self._display.publish_render_spec(spec)
+
+    # ── the global entries, from the Block01 chrome ───────────────────
+    def _open_global_intensity(self):
+        """Open the ONE Intensity window, on the channel being edited.
+
+        The same call in every step. Which channel that is comes from the
+        channel panel, which is the one answer for the process; a step with
+        no channel list of its own still opens the window on it.
+        """
+        return self._display.show_intensity(self.config.current_channel())
+
+    def _open_global_navigator(self):
+        """Open the ONE Tissue Preview, under the active step's policy."""
+        return self._display.show_navigator()
+
+    def _open_global_weights(self):
+        """Open the ONE weight editor."""
+        return self._display.show_weight_editor()
+
+    def weight_editor_widget(self):
+        """The weight editor content port: a VIEW over the one weight store."""
+        channels = [ch for ch in (self.config.all_channels or [])]
+        if not channels:
+            return None
+        return _GlobalWeightEditor(self._display, channels)
+
+    def _refresh_weight_editor(self):
+        panel = self._display.weight_editor_panel()
+        refresh = getattr(panel, "refresh_from_state", None)
+        if refresh is not None:
+            refresh()
 
     def _register_block01_contexts(self):
         """Register every step as a render context for the one Tissue Preview.
@@ -1216,9 +1372,11 @@ class MainWindow(QMainWindow):
         """
         coordinator = self._display.coordinator
         coordinator.register_context(_CTX_STEP1, self)
+        self._display.set_weight_owner(self)
+        self._display.set_weight_editor_content(self)
         self._downstream_contexts = {
-            _CTX_STEP2: _InheritedTissueContext(self._display, _CTX_STEP2),
-            _CTX_STEP3: _InheritedTissueContext(self._display, _CTX_STEP3),
+            _CTX_STEP2: _SharedSpecTissueContext(self._display, _CTX_STEP2),
+            _CTX_STEP3: _SharedSpecTissueContext(self._display, _CTX_STEP3),
         }
         for step_id, context in self._downstream_contexts.items():
             coordinator.register_context(step_id, context)
@@ -1228,19 +1386,6 @@ class MainWindow(QMainWindow):
             self._on_shared_channel_color_changed)
         self.config.set_display_state(self._display.state)
 
-    def _inherit_tissue_spec(self):
-        """Hand the downstream contexts the spec Step1 is drawing from.
-
-        Done at the transition rather than on every published frame: what
-        they inherit is a CONFIGURATION, and it should be the one that was on
-        screen when the user left, not whichever frame happened to land last.
-        """
-        spec = self.tissue_render_spec()
-        if not spec:
-            return
-        for context in (getattr(self, "_downstream_contexts", None)
-                        or {}).values():
-            context.inherit(spec)
 
     def _on_shared_channel_color_changed(self, channel, _hexc):
         """Block01 settled a colour: Step1's pictures take it.
@@ -3124,11 +3269,11 @@ class MainWindow(QMainWindow):
         # being left is structurally stale from this line on -- and then asks
         # the step being entered for its first frame, so the popup shows the
         # new step rather than the old one's last picture.
-        # A step downstream of Step1 draws the configuration Step1 was
-        # drawing -- the spec, so it can be composed again when a colour, a
-        # display window or a weight moves, never a baked picture.
-        if active in (2, 3):
-            self._inherit_tissue_spec()
+        # A step downstream of Step1 draws the ONE published spec -- so it
+        # can be composed again when a colour, a display window or a weight
+        # moves, and so a weight moved there is still that weight in Step3
+        # and back in Step1. Nothing is copied at the transition; copying is
+        # what made a downstream edit disappear on the next step change.
         self._display.coordinator.set_active_context(
             self._STEP_CONTEXTS.get(active))
         # ...and the Intensity window's rights, from the same transition and
@@ -3710,11 +3855,13 @@ class MainWindow(QMainWindow):
         # Before the loaders, because it is the cheapest thing here to stop
         # and it holds the dataset's arrays.
         self._stop_compose_worker("the main window is closing")
-        # Block01's own: new frame requests are refused FIRST so nothing
-        # re-arms behind the stop, and only then is the compose thread
-        # retired. This is the ONLY place it happens -- an ordinary step
-        # change must never take the shared worker with it.
-        self._display.shutdown("the main window is closing")
+        # Block01's own, PHASE ONE ONLY: new frame requests are refused so
+        # nothing re-arms behind the stop, and nothing is destroyed yet. This
+        # close can still be refused a few lines down -- a live overview read
+        # cannot be interrupted -- and a window that goes on living must go
+        # on having its two shared windows and a coordinator that can draw.
+        # The irreversible half is `finalize_close`, at the accept.
+        self._display.begin_close("the main window is closing")
         # Step0's own background workers: the geometry writer and the patch
         # readers. Both are request-only, so this neither joins a thread nor
         # can be refused; what it buys is that neither emits into a window
@@ -3742,11 +3889,14 @@ class MainWindow(QMainWindow):
             # Closing now would destroy a QThread that is still running. Hold
             # the window open and try again; the job was already asked to stop.
             event.ignore()
+            # The window goes on living, so its shared windows go on working.
+            self._display.resume()
             self._fusion_lbl.setText("Waiting for the fusion job to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
         if self._patch_loaders:
             event.ignore()
+            self._display.resume()
             self.prev_status.setText("Waiting for preview loaders to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
@@ -3763,11 +3913,16 @@ class MainWindow(QMainWindow):
                       if w.isRunning()]
         if live_reads:
             event.ignore()
+            self._display.resume()
             self.prev_status.setText(
                 f"Waiting for {len(live_reads)} tissue overview read(s) to "
                 f"finish…")
             QtCore.QTimer.singleShot(500, self.close)
             return
+        # The close is CERTAIN from here: nothing above can refuse it any
+        # more. Now the irreversible half -- the compose thread is retired and
+        # the two shared windows are closed, once.
+        self._display.finalize_close("the main window is closing")
         # The sink closes LAST, and finally: every loader has reported its own
         # `job.end` by now, so nothing is left to write and nothing can start
         # a second writer on a file the first one closed. Bounded, because a
@@ -4252,6 +4407,9 @@ class MainWindow(QMainWindow):
         # not required to publish in the same millisecond, only to end on the
         # same revision.
         self._display.coordinator.request_frame(kind="weight")
+        # The shared editor is a view over these numbers, so it follows them
+        # wherever they were changed -- including from the channel panel.
+        self._refresh_weight_editor()
         self._schedule_step1_session_save()
 
     def _reset_frame_clock(self):

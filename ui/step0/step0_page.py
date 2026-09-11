@@ -6933,8 +6933,11 @@ class Step0Page(QWidget):
             strip.set_display_mapping(lo, hi, gamma, channel=channel)
         strip.set_tint(self._channel_color(channel), channel=channel)
 
-    def _display_mapping_is_real(self, ch):
+    def _display_mapping_is_real(self, ch, nucleus=False):
         """Is this channel's display window derived from ITS OWN pixels yet?
+
+        Per ROLE: the nucleus overlay has its own window and its own
+        provisional state, and a marker-role answer says nothing about it.
 
         A channel whose slide overview has not been read has no window, and
         the placeholder that stands in for one is 0..1 — which, published as
@@ -6944,6 +6947,20 @@ class Step0Page(QWidget):
         the panels keep the range each derives from its own overview record
         until `_on_channel_overview_ready` brings the real numbers.
         """
+        # Block01's shared state first: a window worked out on the seed
+        # thread lands THERE, and neither the workbench nor this page's
+        # fallback hears about it. Asking only those two made a real window
+        # look provisional for as long as it was only in the shared store --
+        # and a provisional window is not published, so the panels kept the
+        # range they had.
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is not None and state.mapping(ch, nucleus=nucleus) is not None:
+            return True
+        if nucleus:
+            # Publishing the 0..1 placeholder as a NUCLEUS window is exactly
+            # the over-exposed overlay this gate exists to prevent, and the
+            # workbench below knows only the marker role.
+            return False
         wb = getattr(self, "_cond_workbench", None)
         if wb is not None:
             try:
@@ -6983,9 +7000,12 @@ class Step0Page(QWidget):
         if not channel:
             return
         strip.set_tint(self._channel_color(channel), channel=channel)
-        lo, hi, gamma = self.display_window(channel)
-        if self._display_mapping_is_real(channel):
-            strip.set_display_mapping(lo, hi, gamma, channel=channel)
+        # `display_window` answers None while the channel is still
+        # provisional -- its pixels have not arrived, so there is no window
+        # to publish and the 0..1 placeholder must never be published as one.
+        window = self.display_window(channel)
+        if window is not None and self._display_mapping_is_real(channel):
+            strip.set_display_mapping(*window, channel=channel)
         else:
             print(f"[Step0] {channel} has no display window yet; "
                   "the panels keep their own range until it is read")
@@ -6995,10 +7015,12 @@ class Step0Page(QWidget):
         strip.set_marker_visible(self._btn_show_marker.isChecked())
         nucleus = self.nucleus_channel
         if nucleus:
-            n_lo, n_hi, n_gamma = self.display_window(nucleus,
-                                                           nucleus=True)
-            if self._display_mapping_is_real(nucleus):
-                strip.set_nucleus_display_mapping(n_lo, n_hi, n_gamma)
+            # Asked for first, so a channel whose pixels have arrived is
+            # seeded rather than left provisional for another round.
+            nuc_window = self.display_window(nucleus, nucleus=True)
+            if nuc_window is not None and self._display_mapping_is_real(
+                    nucleus, nucleus=True):
+                strip.set_nucleus_display_mapping(*nuc_window)
             strip.set_nucleus_tint(self._channel_color(nucleus))
             # Never added to itself: the marker layer IS the nucleus channel
             # when the user has selected that row. Suppression only -- the
@@ -7342,7 +7364,10 @@ class Step0Page(QWidget):
         the direct answer to "what would Step0 draw right now".
         """
         token = self._dataset_token()
-        snapshot = self.tissue_render_snapshot()
+        # Not the frame path: the caller wants the picture before this
+        # returns, so a window that has not been worked out yet is worked out
+        # here rather than deferred to the seed thread.
+        snapshot = self.tissue_render_snapshot(computed_only=False)
         if snapshot is None:
             return None, None
         if self._dataset_token() != token or snapshot.get("token") != token:
@@ -7437,17 +7462,69 @@ class Step0Page(QWidget):
             if self._request_overview_async(ch):
                 started += 1
                 continue
-            # NO BACKGROUND READER IN THIS SESSION. A page with no viewer
-            # open -- the landing before the full image is built, a test --
-            # has nobody to ask, and a thumbnail that waits forever for a
-            # read nobody will start is worse than the read. So the page's
-            # own one-off is taken: `_slide_lowres_array` caches per (dataset,
-            # channel), so this happens at most once per channel per slide
-            # and NEVER once per slider step. It is the same read the display
-            # seed already makes, not a new one on the frame path.
-            self._slide_lowres_array(ch, blocking=False)
+            # NO BACKGROUND READER IN THIS SESSION -- no viewer is open on
+            # this slide, so the shared overview store has no reason to read
+            # it. The channel is simply reported as still missing; Block01's
+            # own read thread picks it up (`_request_lowres_reads`). What this
+            # method must NOT do is read it here: that is the GUI thread, and
+            # the read is 170-230 ms, measured.
             started += 1
         return [ch for ch in missing if self.tissue_lowres_array(ch) is None]
+
+    def read_tissue_lowres_blocking(self, channel):
+        """Read `channel`'s whole-slide array. CALLED ON A WORKER THREAD.
+
+        Touches nothing of this page's: the loader's own pyramid read and
+        numpy, and the array is handed back for the GUI thread to install.
+        A method that mutated page state from here would be the bug this
+        whole separation exists to avoid.
+        """
+        loader = getattr(self, "loader", None)
+        read = getattr(loader, "read_region_lowres", None)
+        shape = getattr(loader, "shape", None)
+        if read is None or not shape or len(shape) < 2 or int(shape[0]) <= 0:
+            return None
+        try:
+            ds = (loader.overview_downsample()
+                  if hasattr(loader, "overview_downsample") else 32)
+            arr = np.asarray(read(channel, 0, int(shape[0]), 0, int(shape[1]),
+                                  ds, normalize=False), dtype=np.float32)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[step0] slide low-res read failed for {channel!r}: {exc}",
+                  flush=True)
+            return None
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        return arr if arr.ndim == 2 and arr.size else None
+
+    def tissue_dataset_token(self):
+        """WHICH SLIDE this data service is serving.
+
+        The page's own identity, which is also what its array cache is keyed
+        by. A background read is submitted under this and checked against it
+        on the way back, so an array read for the previous slide is refused
+        rather than filed as this one's -- and so the two do not disagree
+        about what "this dataset" is while the shared state is still adopting
+        one.
+        """
+        return self._dataset_token()
+
+    def install_tissue_lowres(self, channel, token, array):
+        """Adopt an array read on a worker thread. GUI thread only.
+
+        Filed under the dataset it was read for, so the ordinary token check
+        in `_slide_lowres_array` still refuses it if the page has moved on.
+        """
+        if not channel or array is None:
+            return False
+        cache = getattr(self, "_slide_lowres", None)
+        if cache is None:
+            cache = self._slide_lowres = {}
+        cache[channel] = (token, array)
+        dataset_trace.note("lowres.read", channel=channel, token=token,
+                           shape=getattr(array, "shape", None),
+                           fingerprint=_array_fingerprint(array))
+        return True
 
     def _request_overview_async(self, ch):
         """Ask a viewer to read `ch`'s whole-slide overview in the background.
@@ -7477,8 +7554,15 @@ class Step0Page(QWidget):
     # as it comes.
     _TISSUE_LOWRES_MAX_IN_FLIGHT = 4
 
-    def tissue_render_snapshot(self):
+    def tissue_render_snapshot(self, computed_only=True):
         """Everything Step0's frame needs, as values a worker may hold.
+
+        `computed_only=True` is the FRAME path: a channel whose display
+        window has not been worked out yet is named as loading and its seed
+        goes to the seed thread, because this callback may not do pixel work.
+        `False` is the synchronous "what would this page draw right now"
+        answer -- `_tissue_preview_rgb` and the tests that ask it -- where
+        the numbers are wanted before the call returns.
 
         The single channel the page is showing, plus DAPI when its layer is
         on -- the same two the old GUI-thread renderer composited, under the
@@ -7500,20 +7584,43 @@ class Step0Page(QWidget):
         arrays, loading = {}, []
         for name in wanted:
             arr = self.tissue_lowres_array(name)
+            if arr is None and not computed_only:
+                # The synchronous answer: the caller wants the picture before
+                # this returns, so the array is fetched here. The FRAME path
+                # never reaches this -- it is resident-only, and a missing
+                # array goes to the read thread.
+                arr = self._slide_lowres_array(name, blocking=False)
             if arr is None:
                 loading.append(name)
             else:
                 arrays[name] = arr
         if loading:
-            # Asked for, then looked for again: a channel the page could read
-            # for itself is resident by the time this returns, and one that
-            # went to a worker is still missing and stays named as loading.
-            loading = list(self.ensure_tissue_lowres(loading))
+            # Through Block01's data service, not this page's own method:
+            # the service asks the viewers first and falls back to its OWN
+            # read thread when no viewer is open on this slide. Calling the
+            # page method directly skipped that fallback, so a page with no
+            # viewer waited for a read nobody would ever start.
+            loading = list(self.display.ensure_lowres(loading))
             for name in wanted:
                 if name not in arrays:
                     arr = self.tissue_lowres_array(name)
                     if arr is not None:
                         arrays[name] = arr
+        # COMPUTED WINDOWS ONLY on this path: a channel without one is named
+        # as loading and its seed is worked out on the seed thread. Doing it
+        # here would put a whole-slide percentile inside the callback whose
+        # whole job is to hand values over and return.
+        mappings = {}
+        for name in list(arrays):
+            window = self.display_window(name, nucleus=(name == nuc),
+                                         computed_only=computed_only)
+            if window is None:
+                self.display.request_mapping_seed(name,
+                                                  nucleus=(name == nuc))
+                loading.append(name)
+                arrays.pop(name, None)
+            else:
+                mappings[name] = window
         if ch not in arrays:
             # The marker itself is the picture; DAPI alone is not a frame.
             return None
@@ -7526,11 +7633,9 @@ class Step0Page(QWidget):
             "channel": ch,
             "nucleus_layer": nucleus_layer,
             "arrays": arrays,
-            "mappings": {
-                name: self.display_window(name, nucleus=(name == nuc))
-                for name in arrays},
+            "mappings": mappings,
             "colors": {name: self._channel_color(name) for name in arrays},
-            "loading": tuple(loading),
+            "loading": tuple(sorted(set(loading))),
         }
 
     def _register_block01_display(self):
@@ -7556,6 +7661,7 @@ class Step0Page(QWidget):
         display.set_lowres_source(self)
         display.coordinator.register_context(_CTX_STEP0, self)
         display.coordinator.attach_navigator(self._registered_roi_overviews)
+
         # A colour settled anywhere -- Step1's row, a restored session, this
         # page's own swatch -- is this page's colour too. Mirrored silently:
         # the shared state has already decided, so re-emitting from here
@@ -7570,6 +7676,27 @@ class Step0Page(QWidget):
             # make it the active context, and a Tissue Preview that renders
             # nothing would make every page-level test a test of silence.
             display.coordinator.set_active_context(_CTX_STEP0, request=False)
+
+    def release_block01_display(self):
+        """Hand Block01 back every port this page registered.
+
+        Called when the page is being torn down. The two shared windows and
+        the shared state are NOT this page's and are untouched; what goes is
+        the page's role as a supplier of content and pixels, so nothing calls
+        into it after it is gone. Anything that needed it then fails closed --
+        a frame with no arrays is a Loading frame.
+        """
+        display = getattr(self, "display", None)
+        if display is None:
+            return
+        try:
+            display.state.color_changed.disconnect(self._on_shared_color_changed)
+            display.state.mapping_changed.disconnect(
+                self._on_display_mapping_changed)
+        except (TypeError, RuntimeError):
+            pass
+        display.coordinator.unregister_context(_CTX_STEP0)
+        display.release_ports(self)
 
     def _on_shared_color_changed(self, channel, hexc):
         """Block01 settled a colour: this page's views take it.
@@ -7616,8 +7743,44 @@ class Step0Page(QWidget):
         computation is a QuPath-style percentile over the whole slide's
         tissue at the overview level, and it belongs here because the pixels
         and the remap params do.
+
+        RETURNS NONE WHEN THERE IS NO REAL ANSWER. The 0..1 placeholder a
+        channel carries before its pixels arrive is not a window -- published
+        over 8/16-bit data it saturates every pixel -- so it must never be
+        stored as the canonical one. `_display_mapping_for` writes the
+        workbench params or the page fallback ONLY for a window derived from
+        real pixels, so asking afterwards whether the mapping is real is the
+        same test this page has always applied, reused rather than repeated.
         """
-        return self._display_mapping_for(channel, nucleus=nucleus)
+        if not channel:
+            return None
+        if nucleus:
+            # A NUMBER THE USER TYPED WINS IN BOTH ROLES. The remap params
+            # are per channel, not per role, so a Max set on DAPI in the
+            # Intensity window is DAPI's window wherever DAPI is drawn --
+            # including as the nucleus overlay. Only when nobody has answered
+            # does the role get its own automatic seed, and its realness
+            # comes from that seed rather than from a marker-role entry.
+            params = self._workbench_params(channel)
+            if params is not None:
+                wb = self._cond_workbench
+                try:
+                    answered = bool(wb._user_adjusted.get(channel)
+                                    or wb.channel_params_seeded(channel))
+                except (AttributeError, TypeError):
+                    answered = False
+                if answered:
+                    return (float(params["min"]), float(params["max"]),
+                            float(params.get("gamma", 1.0)))
+            lo, hi, real = self._seed_display_mapping(channel, nucleus=True,
+                                                      strict=True)
+            return (float(lo), float(hi), 1.0) if real else None
+        window = self._display_mapping_for(channel)
+        if window is None:
+            return None
+        if not self._display_mapping_is_real(channel):
+            return None
+        return window
 
     def write_display_window(self, channel, lo, hi, gamma, nucleus=False):
         """The display-window PERSISTENCE port: the shared state moved.
@@ -7629,14 +7792,33 @@ class Step0Page(QWidget):
         """
         self._write_display_window(channel, lo, hi, gamma, nucleus=nucleus)
 
-    def display_window(self, ch, nucleus=False):
-        """`(min, max, gamma)` for `ch` -- Block01's answer, seeded if new.
+    def display_window(self, ch, nucleus=False, computed_only=False):
+        """`(min, max, gamma)` for `ch` -- Block01's answer.
 
         THE read, for this page and for everything it hands numbers to. Goes
         to the shared state, so Step0, Step1, Step2, Step3, the Intensity
         window and both previews cannot be looking at different numbers.
+
+        `computed_only=True` is for the FRAME path, and the distinction is
+        the whole of P1-3: working out a first window is a percentile over a
+        whole-slide array, and a snapshot callback may not do pixel work.
+        There it returns None and the caller names the channel as loading and
+        asks for the seed in the background. Everywhere else -- a compare
+        panel that is about to draw, the full image, the Intensity window
+        opening on a channel -- the numbers are wanted NOW and the seed is
+        taken here.
         """
-        return self.display.state.mapping_or_seed(ch, nucleus=nucleus)
+        if computed_only:
+            return self.display.state.mapping(ch, nucleus=nucleus)
+        window = self.display.state.mapping_or_seed(ch, nucleus=nucleus)
+        if window is not None:
+            return window
+        # PROVISIONAL, and only here. The shared state refused to store this
+        # because the channel's pixels have not arrived and 0..1 is not a
+        # window; the readers that draw right now still need three numbers,
+        # and `_display_mapping_is_real` is what tells them not to PUBLISH
+        # these. The read thread's array turns them into a real window.
+        return self._display_mapping_for(ch, nucleus=nucleus)
 
     def _display_mapping_for(self, ch, payload=None, nucleus=False):
         """`(min, max, gamma)` for `ch` -- the Channel Remap params.
@@ -7738,13 +7920,16 @@ class Step0Page(QWidget):
         rather than a window. Callers that write the result into the single
         source of truth MUST use it: 0..1 saturates an 8/16-bit channel.
         """
-        # Non-blocking: a viewer that is already reading this very level
-        # will hand the record over through `_on_channel_overview_ready`,
-        # and a duplicate read here would block the GUI thread for the
-        # 170-230 ms that made a run of channel switches feel like a
-        # freeze. With nobody reading it, this still reads it itself.
-        arr = self._slide_lowres_array(ch, blocking=False)
+        # RESIDENT ONLY. This runs on the GUI thread, and a whole-slide read
+        # here costs 170-230 ms, measured -- which is what made a run of
+        # channel switches feel like a freeze. It used to read when nobody
+        # else was; it no longer does. A channel whose array has not arrived
+        # yields the provisional answer below (which is deliberately NOT
+        # cached), Block01's read thread fetches it, and its own seed thread
+        # works the window out and writes it to the shared state.
+        arr = self._slide_lowres_array(ch, blocking=False, resident_only=True)
         if arr is None:
+            self.display.ensure_lowres([ch])
             payload = payload if payload is not None else self._last_payload
             if payload is not None:
                 arr = self._payload_array(
@@ -7847,9 +8032,19 @@ class Step0Page(QWidget):
         if params is None:
             self._on_display_mapping_changed(cid)
             return
+        lo = float(params.get("min", 0.0))
+        hi = float(params.get("max", 1.0))
+        gamma = float(params.get("gamma", 1.0))
         changed = self.display.state.set_mapping(
-            cid, float(params.get("min", 0.0)), float(params.get("max", 1.0)),
-            float(params.get("gamma", 1.0)), origin="workbench", persist=False)
+            cid, lo, hi, gamma, origin="workbench", persist=False)
+        if cid == self.nucleus_channel:
+            # The params are per channel, not per role: a number typed for
+            # DAPI is DAPI's window as the nucleus overlay too, and leaving
+            # the nucleus role on its older automatic seed is how the
+            # Intensity window and the overlay came to disagree.
+            changed = self.display.state.set_mapping(
+                cid, lo, hi, gamma, nucleus=True, origin="workbench",
+                persist=False) or changed
         if not changed:
             self._on_display_mapping_changed(cid)
 

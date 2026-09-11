@@ -992,6 +992,10 @@ def test_the_nucleus_is_never_added_to_itself(app):
 def test_the_dapi_mapping_is_its_own_channels(app):
     page = _page(app)
     strip = _enter(page)
+    # A display window is seeded from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now. Warmed here, which is what
+    # the read thread does a moment after the channel appears.
+    page._slide_lowres_array("DAPI")
     page._btn_show_nucleus.setChecked(True)
     QtTest.QTest.qWait(10)
     expected = page._display_mapping_for("DAPI", nucleus=True)
@@ -2927,6 +2931,24 @@ def test_hot_requests_never_outrank_the_foreground(real_strip):
     from block01.viewer.multichannel_prefetch import HOT_PRIORITY_BASE
 
     _page_, strip, _provider = real_strip
+    # A display window is seeded from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now. Warmed here, which is what
+    # the read thread does a moment after the channel appears.
+    for _ch in (_page_.current_channel, _page_.nucleus_channel):
+        if _ch:
+            _page_._slide_lowres_array(_ch)
+            # ...and settle the window itself, so the panels are asking for
+            # tiles rather than waiting for a number. Without this the
+            # foreground traffic this test measures can start after the
+            # camera nudge instead of because of it.
+            _page_.display_window(_ch)
+            if _ch == _page_.nucleus_channel:
+                _page_.display_window(_ch, nucleus=True)
+    _page_._refresh_preview_display(keep_zoom=True)
+    # Let everything the window settling started finish BEFORE the spy goes
+    # on, so what it records is the camera nudge's traffic and not the tail
+    # of the first draw arriving at whatever moment the seed thread landed.
+    _hot_settle(strip)
     scheduler = strip.stacks.scheduler
     seen = []
     real_request = scheduler.request
@@ -2941,7 +2963,11 @@ def test_hot_requests_never_outrank_the_foreground(real_strip):
         # as HOT's -- otherwise "HOT is above the band" would be a claim
         # about a band nothing else was in.
         cx, cy, scale = strip.camera(0)
-        strip.set_camera(cx + 40.0, cy + 40.0, scale)
+        # Far enough that the new view is certainly not already cached: a
+        # 40 px nudge could be answered entirely from tiles the first draw
+        # had already fetched, and then "no foreground request" says nothing
+        # about priorities.
+        strip.set_camera(cx + 400.0, cy + 400.0, scale)
         _hot_settle(strip)
     finally:
         scheduler.request = real_request

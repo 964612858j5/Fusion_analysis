@@ -158,6 +158,11 @@ def _window(app, path="/tmp/dataset.ome.tiff"):
     page.current_channel = "CD3"
     page.overview.loader = loader
     page.overview.full_h, page.overview.full_w = SLIDE_H, SLIDE_W
+    # What a real load does at its commit point: Block01 is told which slide
+    # this is, so every window, colour and frame is checked against it. A
+    # test that skipped this left the shared state unbound and its display
+    # windows in a nameless namespace.
+    page._bind_panels_to_dataset()
 
     w.config.set_channels(loader.channel_names())
     w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
@@ -185,7 +190,7 @@ def _mean_rgb(img):
     return tuple(float(v) for v in arr.reshape(-1, 3).mean(axis=0))
 
 
-def _pump(w, ms=250):
+def _pump(w, ms=600):
     """Let the frame clock reach its slot; the compose is already inline.
 
     A test that has switched delivery off is held to it: nothing is delivered
@@ -194,17 +199,40 @@ def _pump(w, ms=250):
     deadline = time.monotonic() + ms / 1000.0
     co = w._display.coordinator
     frames = w._tissue_frames
+    quiet = 0
     while time.monotonic() < deadline:
         QtWidgets.QApplication.processEvents()
         if frames.auto and frames.pending():
             frames.deliver()
+            quiet = 0
             continue
-        if not co.frame_stats()["pending"]:
+        # A first display window is computed on the seed thread now, so a
+        # channel appearing for the first time has no frame until it lands --
+        # and the frame it then asks for has to be waited for too, which is
+        # what the two quiet rounds are.
+        if _seeding(w) or co.frame_stats()["pending"]:
+            quiet = 0
+            time.sleep(0.002)
+            continue
+        quiet += 1
+        if quiet >= 2:
             return
-        time.sleep(0.002)
+        time.sleep(0.004)
     QtWidgets.QApplication.processEvents()
     if frames.auto:
         frames.deliver()
+
+
+def _seeding(w):
+    """Is Block01 still working out something the next frame needs?
+
+    Both threads: the whole-slide read and the automatic display window. A
+    test that waits only for the frame clock races them.
+    """
+    for worker in (w._display._seed_worker, w._display._read_worker):
+        if worker is not None and worker.is_busy():
+            return True
+    return False
 
 
 def _goto(w, step):
@@ -921,10 +949,14 @@ def test_every_step_with_a_legal_weight_entry_follows_a_weight_drag(app):
             w._display.set_render_weight("CD3", 1.0)
             _pump(w)
         print(f"[evidence] visible weight frames per step: {report}")
-        # Step0 draws one channel through one window; there is no weight in
-        # that picture to move, and inventing one would be a fake entry.
+        # Step0's THUMBNAIL draws one channel through one window: there is no
+        # weight in that picture's arithmetic, and inventing a Step0 weight
+        # control would be a fake entry. The canonical weight still exists and
+        # still reads the same there -- it is one number for the process --
+        # it simply does not appear in what Step0 composes.
         _goto(w, 0)
-        assert w._display.render_weight("CD3") is None
+        assert w._display.render_weight("CD3") == 1.0
+        assert "weights" not in (w._step0.tissue_render_snapshot() or {})
     finally:
         w.close()
 
@@ -1007,14 +1039,21 @@ def test_no_step_reaches_into_step0_for_the_shared_windows():
     assert not offenders, offenders
 
 
-def test_the_shared_windows_survive_the_step0_page_being_let_go(app):
-    """Block01's windows are not a page's to take with it.
+def test_the_shared_windows_survive_step0_being_destroyed(app):
+    """Really destroyed: removed, deregistered, deleted, and weakref-checked.
 
-    The page is dropped from the window's stack and its reference cleared;
-    the shared state, the two windows and the active downstream preview must
-    still be usable, and the data port failing must fail CLOSED (a Loading
-    frame) rather than call into something that is gone.
+    The previous version of this test claimed Step0 had been let go and only
+    set the low-resolution source to None -- a name that asserted a lifecycle
+    fact it never established. This one takes the page out of the stack, has
+    it hand its ports back, deletes the C++ object and runs the event loop,
+    then checks a weak reference. What must survive is Block01's: both shared
+    windows, the canonical colours and windows, and a downstream context that
+    fails CLOSED rather than calling into something that is gone.
     """
+    import gc
+    import weakref
+    import sip
+
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
@@ -1023,23 +1062,34 @@ def test_the_shared_windows_survive_the_step0_page_being_let_go(app):
         intensity = w._display.show_intensity("CD3")
         _goto(w, 1)
         _goto(w, 2)
+        w._display.state.set_mapping("CD3", 4.0, 44.0, 1.1, origin="test")
 
-        w._display.state.set_mapping("CD3", 1.0, 50.0, 1.0, origin="test")
-        _pump(w)
-        assert w._display.state.mapping("CD3") == (1.0, 50.0, 1.0)
+        page = w._step0
+        ref = weakref.ref(page)
+        page.release_block01_display()
+        w._stack.removeWidget(page)
+        page.setParent(None)
+        w._step0 = None
+        sip.delete(page)
+        del page
+        QtWidgets.QApplication.processEvents()
+        gc.collect()
+        QtWidgets.QApplication.processEvents()
 
-        # The data port goes away with the page's dataset.
-        w._display.set_lowres_source(None)
-        w._display.state.set_color("CD3", "#00ffff")
-        _pump(w)
-
+        assert ref() is None or sip.isdeleted(ref()), "Step0 was not destroyed"
+        # Block01's own, all still here and all still answering.
         assert w._display.navigator() is popup
         assert w._display.intensity_window() is intensity
-        assert w._display.state.color("CD3") == "#00ffff"
-        # Fail closed: nothing composable, nothing drawn, no exception.
+        assert w._display.state.mapping("CD3") == (4.0, 44.0, 1.1)
+        assert w._display.state.color("CD3")
+        # ...and the downstream context fails closed rather than reaching
+        # into the page that is gone.
         assert w._downstream_contexts[bd.STEP2].tissue_render_snapshot() is None
+        assert w._display.coordinator.request_frame(kind="after_destroy")
+        QtWidgets.QApplication.processEvents()
     finally:
-        w.close()
+        w._step0 = None
+        w._display.shutdown("test over")
 
 
 def test_the_real_panel_publish_cost_is_measured_not_assumed(app):
@@ -1080,6 +1130,455 @@ def test_the_real_panel_publish_cost_is_measured_not_assumed(app):
               f"{len(costs)} publishes: worst {worst:.2f} ms, "
               f"median {sorted(costs)[len(costs) // 2]:.2f} ms")
         assert worst < 50.0, f"a publish took {worst:.1f} ms on the GUI thread"
+    finally:
+        w.close()
+
+
+# ── P0-1. a display window is about PIXELS, so it is per dataset ─────────
+
+def _switch_dataset(w, path, scale=1.0):
+    """A dataset commit, as the page performs one: new loader, new token."""
+    loader = _Loader(path)
+    loader._scale = scale
+    base = loader._pattern
+
+    def scaled(channel, h, wd, _base=base, _s=scale):
+        return _base(channel, h, wd) * _s
+
+    loader._pattern = scaled
+    w.loader = loader
+    page = w._step0
+    page.loader = loader
+    page.ome_path = path
+    page._dataset_gen += 1
+    page._slide_lowres = {}
+    page._display_fallback = {}
+    page._display_seeded = set()
+    page._bind_panels_to_dataset()
+    page.overview.loader = loader
+    page.overview.full_h, page.overview.full_w = SLIDE_H, SLIDE_W
+    _pump(w)
+    return loader
+
+
+def test_a_display_window_does_not_follow_a_channel_name_across_slides(app):
+    """Slide B's CD3 is not slide A's CD3.
+
+    Keyed by channel name alone, B's first read of CD3 hit A's window and B
+    was never seeded at all: A's tissue contrast on B's picture, with nothing
+    on screen to say so. Colours DO follow the name -- that is an existing
+    product preference about display, not about pixels -- and this pins the
+    difference.
+    """
+    w = _window(app, path="/tmp/A.ome.tiff")
+    try:
+        _goto(w, 0)
+        a_token = w._display.state.dataset_token()
+        w._step0.set_display_mapping("CD3", 11.0, 99.0, 1.4)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        assert w._display.state.mapping("CD3") == (11.0, 99.0, 1.4)
+
+        # B: the same channel names, pixels an order of magnitude apart.
+        _switch_dataset(w, "/tmp/B.ome.tiff", scale=17.0)
+        b_token = w._display.state.dataset_token()
+        assert b_token != a_token
+
+        # Nothing of A's is readable as B's.
+        assert w._display.state.mapping("CD3") != (11.0, 99.0, 1.4)
+        _pump(w)
+        seeded = w._display.state.mapping("CD3")
+        assert seeded is not None, "B was never seeded"
+        assert seeded[1] > 99.0, seeded      # B's own, brighter pixels
+        # ...and the colour, which IS a per-name preference, did follow.
+        assert w._display.state.color("CD3") == "#ff0000"
+
+        # Back to A: A's namespace is intact, not re-seeded from B.
+        _switch_back = w._step0
+        _switch_back._dataset_gen -= 1
+        _switch_back.ome_path = "/tmp/A.ome.tiff"
+        w._display.state.bind_dataset(_switch_back._dataset_token())
+        assert w._display.state.mapping("CD3") == (11.0, 99.0, 1.4)
+    finally:
+        w.close()
+
+
+def test_a_seed_that_finishes_after_a_switch_is_filed_under_its_own_slide(app):
+    w = _window(app, path="/tmp/A.ome.tiff")
+    try:
+        _goto(w, 0)
+        a_token = w._display.state.dataset_token()
+        _switch_dataset(w, "/tmp/B.ome.tiff", scale=17.0)
+        b_before = w._display.state.mapping("CD3")
+
+        # A's seed, arriving now.
+        w._display._on_mapping_seeded(
+            {"token": a_token, "channel": "CD3", "nucleus": False,
+             "min": 11.0, "max": 99.0, "gamma": 1.0})
+
+        assert w._display.state.mapping("CD3") == b_before, "A leaked into B"
+        assert w._display.state._mapping_spaces[a_token][("CD3", False)] == (
+            11.0, 99.0, 1.0)
+    finally:
+        w.close()
+
+
+# ── P0-2. one weight, and it does not roll back ──────────────────────────
+
+def test_a_weight_set_downstream_survives_every_later_step_change(app):
+    """The failure this replaces: Step2 -> 0.3, walk on, and it was 1.0 again.
+
+    Each downstream context kept its own writable copy of the spec and
+    re-inherited Step1's older one on every transition, so a downstream edit
+    was a temporary pixel effect. Nothing is reset in this test -- that is
+    the point; the old tests reset the weight at the end of each step and
+    hid exactly this.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        _goto(w, 2)
+
+        assert w._display.set_render_weight("CD3", 0.3)
+        _pump(w)
+        step2_frame = np.array(_thumb(w), copy=True)
+
+        for step in (3, 2, 1):
+            _goto(w, step)
+            assert w._display.render_weight("CD3") == pytest.approx(0.3), step
+            assert w.config.channel_weight("CD3") == pytest.approx(0.3), step
+            assert w._display.render_spec()["weights"]["CD3"] == pytest.approx(
+                0.3), step
+        # The Step1 row and the effective config agree, so a Save would
+        # freeze what the user actually chose.
+        effective = w._effective_fusion_config()
+        weights = [chs.get("CD3") for chs in
+                   (g.get("channels", {}) for g
+                    in (effective.get("groups") or {}).values())
+                   if "CD3" in chs]
+        assert weights and all(v == pytest.approx(0.3) for v in weights)
+        # ...and the picture is still the 0.3 one.
+        _goto(w, 2)
+        assert np.array_equal(_thumb(w), step2_frame)
+    finally:
+        w.close()
+
+
+def test_a_weight_set_in_step3_reaches_step1_too(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        _goto(w, 3)
+        assert w._display.set_render_weight("CD3", 0.45)
+        _pump(w)
+        _goto(w, 1)
+        assert w.config.channel_weight("CD3") == pytest.approx(0.45)
+        assert w._display.render_weight("CD3") == pytest.approx(0.45)
+    finally:
+        w.close()
+
+
+# ── P0-3. real, reachable entries in every step ──────────────────────────
+
+def test_the_global_windows_open_from_a_real_button_in_every_step(app):
+    """Clicked, not called. The per-page buttons vanish with their page, so
+    Step2 and Step3 had no way back to a closed window."""
+    w = _window(app)
+    try:
+        for step in (0, 1, 2, 3):
+            _goto(w, step)
+            # Closed first, so this is really re-opening rather than finding
+            # a window Step1 happened to leave up.
+            if w._display.intensity_window() is not None:
+                w._display.intensity_window().hide()
+            if w._display.navigator() is not None:
+                w._display.navigator().hide()
+
+            # IN THE BLOCK01 CHROME, not merely constructed: the point is
+            # that these outlive the page the user is on, so each must be a
+            # descendant of the window and NOT of the stacked widget.
+            for btn in (w._btn_global_intensity, w._btn_global_tissue,
+                        w._btn_global_weights):
+                assert w.isAncestorOf(btn), (step, btn.text())
+                assert not w._stack.isAncestorOf(btn), (step, btn.text())
+            w._btn_global_intensity.click()
+            w._btn_global_tissue.click()
+            w._btn_global_weights.click()
+
+            assert w._display.intensity_window() is not None, step
+            assert w._display.intensity_window().isVisible(), step
+            assert w._display.navigator() is not None, step
+            assert w._display.navigator().isVisible(), step
+            assert w._display.weight_editor() is not None, step
+            assert w._display.weight_editor().isVisible(), step
+        # One instance each, across the whole walk.
+        assert w._display.navigator() is w._step0._tissue_navigator_popup
+    finally:
+        w.close()
+
+
+def test_a_real_weight_spinbox_drag_moves_the_picture_in_every_step(app):
+    """The real control, in every step: the shared weight editor's spin box.
+
+    Driven through its `valueChanged` signal exactly as a user's scroll or
+    typed value does, not by calling the service.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w.config._rows["CD8"].spin.setValue(1.0)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
+        _goto(w, 1)
+        w._btn_global_weights.click()
+        editor = w._display.weight_editor_panel()
+        spin = editor.spin_for("CD3")
+        assert spin is not None
+
+        report = {}
+        for step in (1, 2, 3):
+            _goto(w, step)
+            editor.refresh_from_state()
+            frames = _drag_frames(w, [
+                (lambda v=v: spin.setValue(v))
+                for v in (0.8, 0.6, 0.4, 0.2, 0.05)])
+            assert len(frames) >= 4, (step, len(frames))
+            reds = [_mean_rgb(f)[0] for f in frames]
+            assert reds[0] > reds[-1], (step, reds)
+            report[step] = (len(frames), len({f.tobytes() for f in frames}))
+            assert w.config.channel_weight("CD3") == pytest.approx(0.05), step
+        print(f"[evidence] real weight-spinbox frames per step: {report}")
+    finally:
+        w.close()
+
+
+def test_a_real_intensity_spinbox_drag_moves_the_picture_in_every_step(app):
+    """The real Intensity control, in every step.
+
+    The shared window hosts the Channel Remap inspector; this drives that
+    inspector's own Min spin box, which is what a user drags.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        w._btn_global_intensity.click()
+        wb = w._step0._cond_workbench
+        wb.set_active_channel("CD3")
+        # `_sp_max` is the inspector's real Max spin box -- the widget the
+        # user types into or scrolls -- and `valueChanged` is what it emits.
+        spin = wb._sp_max
+        report = {}
+        for step in (0, 1, 2, 3):
+            _goto(w, step)
+            lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+            frames = _drag_frames(w, [
+                (lambda v=v: spin.setValue(hi - (hi - lo) * 0.07 * v))
+                for v in range(1, 7)])
+            assert len(frames) >= 4, (step, len(frames))
+            assert len({f.tobytes() for f in frames}) >= 3, step
+            report[step] = (len(frames), len({f.tobytes() for f in frames}))
+        print(f"[evidence] real Intensity-spinbox frames per step: {report}")
+    finally:
+        w.close()
+
+
+# ── P0-4. a channel still loading stays in the configuration ─────────────
+
+def test_a_channel_still_loading_is_not_lost_by_walking_downstream(app):
+    """The barrier case.
+
+    Step1 wants CD3 and CD8; only CD3 has arrived when the user walks to
+    Step2. The old spec recorded the RESIDENT channels, so CD8 fell out of
+    the configuration for good -- never requested again, never in the final
+    picture.
+    """
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_channel_visible("CD8", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        w.config._rows["CD8"].spin.setValue(1.0)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
+        # DAPI is ticked by default and carries the nucleus weight; its
+        # palette default would put green in the mean this test reads, so it
+        # is pinned to blue and green means CD8 and nothing else.
+        w._step0._apply_nucleus_color((0.0, 0.0, 1.0))
+
+        # The barrier: CD8 cannot be read yet.
+        held = {"CD8"}
+        real_array = w._step0.tissue_lowres_array
+
+        def gated(channel):
+            return None if channel in held else real_array(channel)
+
+        w._step0.tissue_lowres_array = gated
+        _goto(w, 1)
+        partial = np.array(_thumb(w), copy=True)
+        assert _mean_rgb(partial)[0] > 0.0      # CD3 is drawn
+        assert _mean_rgb(partial)[1] == 0.0     # CD8 is not, yet
+        assert "CD8" in (w._display.render_spec()["channels"])
+
+        _goto(w, 2)
+        assert "CD8" in (w._display.render_spec()["channels"])
+
+        # Release it while the user is downstream.
+        held.clear()
+        w._display.coordinator.request_frame(kind="test")
+        _pump(w)
+
+        complete = _thumb(w)
+        assert _mean_rgb(complete)[1] > 0.0, "CD8 never arrived in the picture"
+        assert not np.array_equal(complete, partial)
+    finally:
+        w.close()
+
+
+# ── P1-1. a refused close leaves everything alive ────────────────────────
+
+def test_a_close_that_is_refused_does_not_kill_the_display_services(app):
+    from PyQt5.QtGui import QCloseEvent
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        popup = w._display.show_navigator()
+        intensity = w._display.show_intensity("CD3")
+
+        # Something the close must wait for: a loader that will not stop.
+        class _StuckLoader:
+            def isRunning(self):
+                return True
+
+            def stop(self):
+                pass
+
+            def wait(self, _ms=0):
+                return False
+
+        w._patch_loaders[99] = _StuckLoader()
+        event = QCloseEvent()
+        w.closeEvent(event)
+
+        assert not event.isAccepted(), "the close was not refused"
+        assert not w._display.is_finalized()
+        assert w._display.navigator() is popup
+        assert w._display.intensity_window() is intensity
+        # ...and it can still draw.
+        assert w._display.coordinator.request_frame(kind="after_refusal")
+        _pump(w)
+        assert w._display.coordinator.frame_stats()["published"] > 0
+
+        # Release the blocker; the second close is accepted and finalises once.
+        w._patch_loaders.clear()
+        event2 = QCloseEvent()
+        w.closeEvent(event2)
+        assert w._display.is_finalized()
+        assert not w._display.coordinator.request_frame(kind="after_close")
+        # Idempotent: a repeated close neither restarts nor re-closes.
+        w.closeEvent(QCloseEvent())
+        assert w._display.is_finalized()
+    finally:
+        w.close()
+
+
+# ── P1-3. the GUI thread does no pixel work ──────────────────────────────
+
+def test_no_read_or_percentile_runs_inside_a_tissue_frame_callback(app):
+    """The GUI callback that builds a tissue frame does no pixel work.
+
+    Watched by THREAD and scoped to the callback: a first display window is a
+    percentile over a whole-slide array and a missing array is a 170-230 ms
+    read, and both used to happen inside the snapshot -- the one place whose
+    entire job is to hand values over and return.
+
+    DELIBERATELY NOT IN SCOPE: the Step1 PATCH viewer's own display-mapping
+    path (`display_mapping_for_preview` -> `_auto_display_window`) still
+    computes a window on the GUI thread. That is the third work item's
+    accepted behaviour -- it is documented in `MainWindow._display_mapping`,
+    the user has closed it, and this round does not reopen it. What is
+    asserted here is the Tissue Preview's own callback, plus that the work
+    really did happen on the two worker threads.
+    """
+    import threading
+    from block01.core import display_mapping
+
+    w = _window(app)
+    try:
+        gui = threading.get_ident()
+        inside = {"frame": False}
+        offenders = []
+        real_seed = display_mapping.seed_display_range
+        real_read = _Loader.read_region_lowres
+
+        def watched_seed(arr):
+            if inside["frame"] and threading.get_ident() == gui:
+                offenders.append("percentile")
+            return real_seed(arr)
+
+        def watched_read(self, *a, **k):
+            if inside["frame"] and threading.get_ident() == gui:
+                offenders.append("read")
+            return real_read(self, *a, **k)
+
+        co = w._display.coordinator
+        real_snapshot = co._snapshot
+
+        def watched_snapshot(context, rev):
+            inside["frame"] = True
+            try:
+                return real_snapshot(context, rev)
+            finally:
+                inside["frame"] = False
+
+        co._snapshot = watched_snapshot
+        display_mapping.seed_display_range = watched_seed
+        _Loader.read_region_lowres = watched_read
+        try:
+            # A channel NOBODY has a window for, appearing while the watch is
+            # on: this is the case that needs a percentile at all.
+            w.config.set_channel_visible("CD3", True)
+            w.config._rows["CD3"].spin.setValue(1.0)
+            _goto(w, 1)
+            _pump(w)
+            assert w._display.state.mapping("CD3") is not None, (
+                "CD3 was never seeded, so this test proves nothing")
+            assert w._display._seed_worker is not None
+            assert w._display._seed_worker.stats()["computed"] >= 1
+
+            w.config.set_channel_visible("CD8", True)
+            w.config._rows["CD8"].spin.setValue(1.0)
+            _pump(w)
+            assert w._display.state.mapping("CD8") is not None
+
+            _goto(w, 2)
+            w.config.set_channel_visible("DAPI", True)
+            co.request_frame(kind="test")
+            _pump(w)
+
+            for step in (0, 1, 2, 3):
+                _goto(w, step)
+                lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+                for i in range(1, 6):
+                    w._step0.set_display_mapping(
+                        "CD3", lo, hi - (hi - lo) * 0.08 * i)
+                    _pump(w, 120)
+
+            assert offenders == [], offenders
+            assert co.frame_stats()["gui_composed"] == 0
+            print(f"[evidence] seed thread: "
+                  f"{w._display._seed_worker.stats()}; read thread: "
+                  f"{w._display._read_worker.stats() if w._display._read_worker else 'unused'}")
+        finally:
+            display_mapping.seed_display_range = real_seed
+            _Loader.read_region_lowres = real_read
+            co._snapshot = real_snapshot
     finally:
         w.close()
 

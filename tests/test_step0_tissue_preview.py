@@ -121,10 +121,21 @@ def _settle(page, ms=1500):
     """
     co = page.display.coordinator
     deadline = time.monotonic() + ms / 1000.0
+    quiet = 0
     while time.monotonic() < deadline:
         QtTest.QTest.qWait(5)
+        busy = any(wk is not None and wk.is_busy() for wk in
+                   (page.display._seed_worker, page.display._read_worker))
         stats = co.frame_stats()
-        if not stats["in_flight"] and not stats["pending"]:
+        if busy or stats["in_flight"] or stats["pending"]:
+            quiet = 0
+            continue
+        # TWO quiet rounds, not one. A first display window is computed off
+        # thread, and the frame it then asks for is a second round trip: a
+        # single quiet check lands in the gap between the two and calls it
+        # settled while the picture is still the previous channel's.
+        quiet += 1
+        if quiet >= 3:
             return
     raise AssertionError(f"the frame clock never settled: {co.frame_stats()}")
 
@@ -144,6 +155,9 @@ def test_the_thumbnail_is_the_current_channel(app):
     page = _page(app)
 
     page._update_tissue_preview()
+    # A first display window is computed on the seed thread now: the
+    # synchronous draw starts it, and the picture follows when it lands.
+    _settle(page)
 
     img = _thumb(page)
     assert img is not None, "nothing was drawn"
@@ -222,6 +236,7 @@ def test_switching_channel_switches_the_picture(app):
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._apply_channel_color("CD20", (0.0, 1.0, 0.0))
     page._update_tissue_preview()
+    _settle(page)
     before = np.array(_thumb(page), copy=True)
 
     page._on_channel_selected_by_id("CD20")
@@ -300,6 +315,7 @@ def test_a_mapping_edit_reaches_the_thumbnail(app):
     page = _page(app)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
     page._update_tissue_preview()
+    _settle(page)
     before = np.array(_thumb(page), copy=True)
     lo, hi, _gamma = page._display_mapping_for("CD3")
 
@@ -491,6 +507,7 @@ def test_on_the_landing_the_thumbnail_is_dapi(app):
     assert page.current_channel == "DAPI"
 
     page._update_tissue_preview()
+    _settle(page)
 
     img = _thumb(page)
     assert img is not None
@@ -504,8 +521,10 @@ def test_the_landing_thumbnail_never_composites_dapi_onto_itself(app):
     not brighten the picture by drawing the channel twice."""
     page = _page(app, channel=None)
     page._update_tissue_preview()
+    _settle(page)
     off = _thumb(page).copy()
 
     page._on_nucleus_visibility_toggled(True)
+    _settle(page)
 
     assert np.array_equal(_thumb(page), off)

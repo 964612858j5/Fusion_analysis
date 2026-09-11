@@ -415,12 +415,20 @@ def test_a_frame_requested_for_the_previous_slide_renders_the_new_one(
             assert panel._channel_rgb is None, name
 
         # And when the page CAN render, the push is the new slide's and it is
-        # accepted -- the same path, with B's pixels available.
-        monkeypatch.setattr(type(page), "_slide_lowres_array",
-                            lambda self, ch, **k: np.full((16, 16), 99.0,
-                                                          np.float32))
+        # accepted -- the same path, with B's pixels available. A PATTERNED
+        # array, not a constant: a display window is seeded from these pixels
+        # now, and a constant one has no window to find.
+        monkeypatch.setattr(
+            type(page), "_slide_lowres_array",
+            lambda self, ch, **k: (np.arange(16 * 16, dtype=np.float32)
+                                   .reshape(16, 16) + 99.0))
         page.current_channel = "CD3"
         pushed.clear()
+        # Re-install the spies: the switch rebuilt the panels, so the objects
+        # registered now are not the ones patched before it.
+        for panel in _panels(page).values():
+            panel.set_channel_image = (
+                lambda rgb, token=None, _p=panel: pushed.append((_p, token)))
         page._update_tissue_preview()
         assert pushed, "nothing was rendered for the new slide"
         assert {token for _panel, token in pushed} == {page._dataset_token()}

@@ -78,7 +78,7 @@ def test_a_window_the_page_does_not_have_is_not_published(page_strip):
     """0..1 is "no window read yet", not a window. Publishing it saturates
     every pixel of the channel it is published for."""
     page, strip = page_strip
-    page._slide_lowres_array = lambda ch, blocking=True: None
+    page._slide_lowres_array = lambda ch, blocking=True, resident_only=False: None
     page._preview_provider = None
     wb = page._cond_workbench
     for ch in ("CD3", "CD20"):
@@ -99,6 +99,11 @@ def test_a_window_the_page_does_not_have_is_not_published(page_strip):
 
 def test_the_window_is_published_once_it_is_real(page_strip):
     page, strip = page_strip
+    # The window is seeded from the whole-slide array, and that array is
+    # READ IN THE BACKGROUND now -- the page no longer takes it on the
+    # GUI thread from inside a seed. Warmed here, which is what the
+    # read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD20")
     _select(page, "CD20")
     assert page._display_mapping_is_real("CD20") is True
 
@@ -112,6 +117,12 @@ def test_the_window_arrives_before_the_pixels(page_strip):
     """One publication, not two: the panels know the new channel's window
     when its overview and tiles are installed, rather than a moment after."""
     page, strip = page_strip
+    # The window is seeded from the whole-slide array, and that array is
+    # READ IN THE BACKGROUND now -- the page no longer takes it on the
+    # GUI thread from inside a seed. Warmed here, which is what the
+    # read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD20")
+    page._slide_lowres_array("CD3")
     _select(page, "CD20")            # make CD20's window known
     _select(page, "CD3")
 
@@ -157,10 +168,10 @@ def test_recolouring_the_channel_on_screen_moves_no_camera_and_reads_nothing(pag
     reads = []
     real = page._slide_lowres_array
 
-    def counted(ch, blocking=True):
+    def counted(ch, blocking=True, resident_only=False):
         if ch not in cached:
             reads.append(ch)
-        return real(ch, blocking=blocking)
+        return real(ch, blocking=blocking, resident_only=resident_only)
     page._slide_lowres_array = counted
 
     page._apply_channel_color("CD3", (0.0, 1.0, 0.0))

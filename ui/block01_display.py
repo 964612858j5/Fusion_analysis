@@ -49,6 +49,9 @@ from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 from ..core import tissue_compose
 from ..utils import perf_trace
+from ..workers.display_seed_worker import (
+    DisplaySeedWorker, LowresReadWorker,
+)
 from ..workers.tissue_compose_worker import TissueComposeWorker
 from .widgets.tissue_navigator_popup import TissueNavigatorPopup
 
@@ -63,6 +66,9 @@ STEP0 = "step0"
 STEP1 = "step1"
 STEP2 = "step2"
 STEP3 = "step3"
+
+
+_UNSET = object()
 
 
 def _to_hex(value):
@@ -112,12 +118,19 @@ class ChannelDisplayState(QObject):
         self._token = None
         self._colors = {}
         self._default_source = None
-        # THE display windows, by (channel, is-nucleus-role). Stored here,
-        # not fetched from a step: a shared state that answers by calling
-        # `Step0Page._display_mapping_for` is Step0's store with another
-        # name, and every step then needs Step0 alive and current to know
-        # what Min/Max/Gamma it is drawing with.
-        self._mappings = {}
+        # THE display windows, by (channel, is-nucleus-role), WITHIN one
+        # dataset. Stored here, not fetched from a step: a shared state that
+        # answers by calling `Step0Page._display_mapping_for` is Step0's store
+        # with another name, and every step then needs Step0 alive and current
+        # to know what Min/Max/Gamma it is drawing with.
+        #
+        # One namespace per dataset token, and `_mappings` is the CURRENT
+        # one. A window is a statement about pixels, so it cannot be shared
+        # between two slides that merely have a channel with the same name --
+        # which is what a flat `(channel, nucleus)` key did, and it meant
+        # slide B opened on slide A's contrast and was never seeded.
+        self._mapping_spaces = {}
+        self._mappings = self._mapping_spaces.setdefault(None, {})
         # Two PORTS, and the difference between them is the whole point.
         # `_seed_port` computes a FIRST window for a channel nobody has set
         # one for -- a percentile over whole-slide pixels, which is pixel
@@ -137,18 +150,41 @@ class ChannelDisplayState(QObject):
         return self._token
 
     def bind_dataset(self, token):
-        """Say which slide these answers are about.
+        """Say which slide these answers are about. ONE transaction.
 
-        Colours are NOT cleared: this product treats a channel's colour as a
+        COLOURS ARE NOT CLEARED. This product treats a channel's colour as a
         display preference held by channel NAME (see `Step0Page`'s own note
-        where `_channel_colors` survives a reload), and the two steps have to
-        agree either way. What the token does is make every frame, every
-        panel push and every worker result checkable against the slide they
-        were computed for.
+        where `_channel_colors` survives a reload), and the steps have to
+        agree either way.
+
+        DISPLAY WINDOWS ARE. A Min/Max/Gamma is a statement about PIXELS --
+        slide B's CD3 is not slide A's CD3, and the two can be orders of
+        magnitude apart. Keyed by channel name alone, B's first read of CD3
+        would hit A's window and B would never be seeded at all: A's tissue
+        contrast, on B's picture, with no way for the user to tell. So the
+        store is per dataset, and switching is a NAMESPACE SWITCH.
+
+        The order matters and is the transaction: the token moves and the
+        namespace moves with it, BEFORE `dataset_changed` goes out. An
+        observer woken by that signal reads B and finds B's windows (or none
+        yet), never A's.
         """
         if token == self._token:
             return
-        self._token = token
+        previous, self._token = self._token, token
+        # Namespace first, signal after. A seed or a restore for the previous
+        # slide that lands later is written against ITS token and can no
+        # longer be read as this one's -- see `set_mapping`.
+        space = self._mapping_spaces.setdefault(token, {})
+        if previous is None and not space and self._mapping_spaces.get(None):
+            # ADOPTION, not a switch. Nothing had told this state which slide
+            # it was looking at, so whatever was written meanwhile is about
+            # THIS one -- the same rule an overview panel applies to its first
+            # picture. Moved rather than copied, so the unnamed namespace
+            # cannot be read again later as some other slide's.
+            space.update(self._mapping_spaces.pop(None))
+        self._mappings = space
+        self._mapping_rev += 1
         self.dataset_changed.emit(token)
 
     # ── ports ─────────────────────────────────────────────────────────
@@ -264,11 +300,19 @@ class ChannelDisplayState(QObject):
         return self._color_rev
 
     # ── mappings ──────────────────────────────────────────────────────
-    def mapping(self, channel, nucleus=False):
-        """`(min, max, gamma)` for `channel`, or None when nobody has set one.
+    def _space_for(self, token=_UNSET):
+        """The mapping namespace for `token`, or the current one."""
+        if token is _UNSET or token == self._token:
+            return self._mappings
+        return self._mapping_spaces.setdefault(token, {})
 
-        Reads the STORE. No port is consulted, so this answers the same in
-        every step and keeps answering after a step page is gone.
+    def mapping(self, channel, nucleus=False):
+        """`(min, max, gamma)` for `channel` ON THIS SLIDE, or None.
+
+        Reads the CURRENT namespace. No port is consulted, so this answers
+        the same in every step and keeps answering after a step page is gone
+        -- and a channel this slide has never had a window for answers None
+        rather than the previous slide's numbers.
         """
         if not channel:
             return None
@@ -301,23 +345,37 @@ class ChannelDisplayState(QObject):
         return value
 
     def set_mapping(self, channel, lo, hi, gamma=None, nucleus=False,
-                    origin="", persist=True):
+                    origin="", persist=True, token=_UNSET):
         """Set `channel`'s display window. THE write, from any step.
 
         True when it changed anything. The persistence port is told, so the
         remap params on disk follow; a write that came FROM that port passes
         `persist=False`, which is what stops the two from echoing.
+
+        `token` is the dataset the numbers are ABOUT. A background seed that
+        started on slide A and finishes after the user has loaded B passes
+        the token it was computed for; it is written into A's namespace and
+        cannot be read as B's. Refusing it outright would be worse, not
+        better: going back to A must not have to seed again.
         """
         if not channel:
             return False
+        space = self._space_for(token)
         key = (channel, bool(nucleus))
-        current = self._mappings.get(key)
+        current = space.get(key)
         if gamma is None:
             gamma = current[2] if current else 1.0
         value = (float(lo), float(hi), float(gamma))
         if current == value:
             return False
-        self._mappings[key] = value
+        space[key] = value
+        if space is not self._mappings:
+            # A late answer about a slide nobody is looking at. Recorded, so
+            # coming back to it is instant; announced to nobody, because
+            # nothing on screen is showing it.
+            perf_trace.mark("tissue.seed_late", channel=channel,
+                            origin=origin)
+            return True
         self._mapping_rev += 1
         if persist and self._persist_port is not None and not self._persisting:
             self._persisting = True
@@ -369,10 +427,17 @@ class ChannelDisplayState(QObject):
         """Every stored window, for a caller that is writing them out."""
         return dict(self._mappings)
 
-    def forget_mappings(self):
-        """Drop every window. A new slide's are its own."""
-        self._mappings = {}
-        self._mapping_rev += 1
+    def forget_mappings(self, token=_UNSET):
+        """Drop a slide's windows, so it is seeded again from its own pixels.
+
+        For a RELOAD of the same slide, where the pixels may have changed
+        under the same identity. An ordinary A -> B switch does not need it:
+        B has its own namespace and A's is simply not read.
+        """
+        space = self._space_for(token)
+        space.clear()
+        if space is self._mappings:
+            self._mapping_rev += 1
 
     def note_mapping_changed(self, channel):
         """The numbers for `channel` moved underneath us.
@@ -435,6 +500,7 @@ class TissuePreviewCoordinator(QObject):
         self._timer.timeout.connect(self._apply_pending_frame)
 
         self._worker = None
+        self._worker_retired = False
         self._worker_factory = TissueComposeWorker
         self._retired_workers = []
 
@@ -498,9 +564,16 @@ class TissuePreviewCoordinator(QObject):
 
     # ── transitions ───────────────────────────────────────────────────
     def bind_dataset(self, token):
-        """A new slide. Everything in flight is about the old one."""
+        """A new slide. Everything in flight is about the old one.
+
+        And the new one is asked for at once: its windows have to be seeded
+        from its own pixels, and nothing else would start that -- the request
+        finds no computed window, names the channel as loading and sends the
+        seed to its thread.
+        """
         self.state.bind_dataset(token)
         self._begin_generation("dataset")
+        self.request_frame(kind="dataset")
 
     def set_active_context(self, step_id, *, request=True):
         """Make `step_id` the step that draws. ONE atomic transition.
@@ -550,6 +623,11 @@ class TissuePreviewCoordinator(QObject):
     def _on_shared_mapping_changed(self, channel):
         if self._touches(channel):
             self.request_frame(kind="mapping", channel=channel)
+        elif self._last_published is None:
+            # Nothing has ever been drawn, so there is no "last frame" to
+            # judge relevance against: a first window arriving IS the event
+            # that makes a first frame possible.
+            self.request_frame(kind="mapping", channel=channel)
 
     def _touches(self, channel):
         """Would a change to `channel` change the picture on screen?
@@ -566,6 +644,13 @@ class TissuePreviewCoordinator(QObject):
             return True
         published = self._last_published
         if not published:
+            return True
+        if channel in (published.get("loading") or ()):
+            # A channel the last frame was WAITING for. Its window or colour
+            # arriving is exactly the event that completes the picture, and
+            # judging it by the drawn set would drop the one change that
+            # matters -- the channel would never be drawn and so would never
+            # qualify.
             return True
         channels = published.get("channels")
         if not channels:
@@ -713,7 +798,7 @@ class TissuePreviewCoordinator(QObject):
         self._in_flight = False
         self.on_frame(result)
 
-    def _snapshot(self, context, rev):
+    def _snapshot(self, context, rev, computed_only=True):
         """Everything one frame needs, as values the GUI thread is done with.
 
         The arrays go in by reference and are never written to: a new read
@@ -724,7 +809,15 @@ class TissuePreviewCoordinator(QObject):
         ask = getattr(context, "tissue_render_snapshot", None)
         if ask is None:
             return None
-        payload = ask()
+        # `computed_only` is the difference between the FRAME path and the
+        # explicit synchronous draw: on the clock a context may not do pixel
+        # work and names what it is waiting for; `render_now` means "give me
+        # the picture before you return", so the context is allowed to work
+        # a first display window out on the spot.
+        try:
+            payload = ask(computed_only=computed_only)
+        except TypeError:
+            payload = ask()
         if not payload:
             return None
         arrays = payload.get("arrays") or {}
@@ -789,7 +882,7 @@ class TissuePreviewCoordinator(QObject):
         rev = self._input_rev
         self._input_at = self._now()
         try:
-            snapshot = self._snapshot(context, rev)
+            snapshot = self._snapshot(context, rev, computed_only=False)
         except Exception as exc:                            # noqa: BLE001
             print(f"[Block01] could not snapshot the tissue frame: {exc}")
             return None
@@ -896,6 +989,7 @@ class TissuePreviewCoordinator(QObject):
             "rev": result.get("rev"), "owner": result.get("owner"),
             "mode": result.get("mode"), "token": token,
             "channels": result.get("channel_set"),
+            "loading": tuple(result.get("loading") or ()),
             "color_rev": result.get("color_rev"),
             "mapping_rev": result.get("mapping_rev"),
             "drawn": drawn,
@@ -950,6 +1044,28 @@ class TissuePreviewCoordinator(QObject):
         self._worker = worker
         return worker
 
+    def pause(self, reason=""):
+        """Stop accepting requests. REVERSIBLE, and nothing is destroyed.
+
+        For the first phase of a close that may still be refused: no new
+        frame may be scheduled, the armed slot is dropped, but the worker,
+        the windows and the state are all still there.
+        """
+        self._closing = True
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+        self._pending_rev = None
+        perf_trace.mark("tissue.pause", why=reason, owner=self._active)
+
+    def resume(self):
+        """Take requests again, and draw the state as it is now."""
+        if self._worker_retired:
+            return
+        self._closing = False
+        self.request_frame(kind="resume")
+
     def shutdown(self, reason="close"):
         """Stop taking requests, then retire the thread. In that order.
 
@@ -960,6 +1076,7 @@ class TissuePreviewCoordinator(QObject):
         "Destroyed while thread is still running" happens.
         """
         self._closing = True
+        self._worker_retired = True
         try:
             self._timer.stop()
         except RuntimeError:
@@ -1059,8 +1176,16 @@ class Block01DisplayServices(QObject):
         self._intensity_window = None
         self._intensity_panel = None
         self._navigator_policy = {"roi_policy": "full", "patch_editable": True}
+        self._render_spec = None
+        self._weight_owner = None
+        self._weight_editor_content = None
+        self._seed_worker = None
+        self._read_worker = None
+        self._weight_editor = None
+        self._weight_editor_panel = None
         self._intensity_locked = False
         self._closing = False
+        self._finalized = False
 
     # ── ports ─────────────────────────────────────────────────────────
     def set_navigator_content(self, port):
@@ -1083,6 +1208,142 @@ class Block01DisplayServices(QObject):
         """
         self._intensity_content = port
 
+    # ── the first display window, off the GUI thread ──────────────────
+    #
+    # A channel nobody has set Min/Max/Gamma for needs an automatic one, and
+    # working it out is a percentile over a whole-slide array. That used to
+    # happen inside `mapping_or_seed`, synchronously, from the callback that
+    # builds a frame snapshot -- which is the one place that must not do
+    # pixel work. So the frame path reads COMPUTED windows only; a channel
+    # without one is named as loading and its seed is asked for here.
+    def request_mapping_seed(self, channel, nucleus=False):
+        """Ask for `channel`'s automatic window in the background.
+
+        Returns True when a pass was started or is already running. The
+        answer is pinned to the dataset it was computed under, so a seed that
+        outlives a slide switch is filed against the slide it is about.
+        """
+        if self._closing or not channel:
+            return False
+        if self.state.mapping(channel, nucleus=nucleus) is not None:
+            return False
+        array = self.lowres_array(channel)
+        if array is None:
+            # Nothing to measure yet. The read is asked for; its arrival is
+            # an input, and the frame after it asks for the seed again.
+            self.ensure_lowres([channel])
+            return False
+        worker = self._seed_worker_ready()
+        if worker is None:
+            return False
+        return bool(worker.submit(self.state.dataset_token(), channel, array,
+                                  nucleus=nucleus))
+
+    def mapping_seed_pending(self, channel=None, nucleus=False):
+        worker = self._seed_worker
+        if worker is None:
+            return False if channel is None else False
+        return worker.pending(self.state.dataset_token(), channel, nucleus)
+
+    def _seed_worker_ready(self):
+        if self._closing:
+            return None
+        if self._seed_worker is not None:
+            return self._seed_worker
+        try:
+            worker = DisplaySeedWorker()
+            worker.done.connect(self._on_mapping_seeded)
+            worker.start()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] display seed worker unavailable ({exc})")
+            return None
+        self._seed_worker = worker
+        return worker
+
+    def _on_mapping_seeded(self, result):
+        """A window came back. Filed under the slide it is ABOUT.
+
+        `token` is what the pass was computed under, not what is on screen
+        now: a seed that started on A and finishes after B loaded belongs to
+        A, and writing it as B's would be the cross-slide contamination the
+        namespaces exist to stop. `set_mapping` files it and stays silent
+        when it is not the current slide.
+        """
+        result = dict(result or {})
+        channel = result.get("channel")
+        if not channel:
+            return
+        token = result.get("token")
+        self.state.set_mapping(channel, result["min"], result["max"],
+                               result.get("gamma", 1.0),
+                               nucleus=bool(result.get("nucleus")),
+                               origin="seed", token=token)
+        if token != self.state.dataset_token():
+            return          # filed against the slide it is about, and no more
+        # A SEED ALWAYS ASKS FOR A FRAME, unconditionally. The relevance test
+        # the ordinary mapping fan-out uses -- "is this channel in the last
+        # picture?" -- answers no here by construction: the channel was left
+        # out of that picture BECAUSE it had no window. Judging a seed by it
+        # would mean the channel never drew and so never qualified to draw.
+        self.coordinator.request_frame(kind="seed", channel=channel)
+
+    def set_weight_editor_content(self, port):
+        """Register who FURNISHES the shared weight editor.
+
+        `port` answers `weight_editor_widget()`. Same rule as the other two:
+        content, not lifetime. The window is Block01's so it is reachable
+        from Step2 and Step3, where the step page has no channel panel of its
+        own -- and there is one editor, not one per step.
+        """
+        self._weight_editor_content = port
+
+    def weight_editor(self):
+        return self._weight_editor
+
+    def ensure_weight_editor(self):
+        if self._weight_editor is not None or self._closing:
+            return self._weight_editor
+        port = self._weight_editor_content
+        if port is None:
+            return None
+        try:
+            panel = port.weight_editor_widget()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] the weight editor is unavailable: {exc}")
+            return None
+        if panel is None:
+            return None
+        win = QWidget(
+            self._widget_parent(),
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowStaysOnTopHint,
+        )
+        win.setWindowTitle("Channel Weights")
+        win.setStyleSheet("background:#1c1c1c;")
+        win.setMinimumWidth(260)
+        win.resize(300, 420)
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.addWidget(panel)
+        self._weight_editor = win
+        self._weight_editor_panel = panel
+        return win
+
+    def show_weight_editor(self):
+        win = self.ensure_weight_editor()
+        if win is None:
+            return None
+        refresh = getattr(self._weight_editor_panel, "refresh_from_state", None)
+        if refresh is not None:
+            refresh()
+        _bring_to_front(win)
+        return win
+
+    def weight_editor_panel(self):
+        return self._weight_editor_panel
+
     def set_lowres_source(self, source):
         """Register the whole-slide low-resolution data service.
 
@@ -1093,6 +1354,29 @@ class Block01DisplayServices(QObject):
         channel are the same array rather than two reads of it.
         """
         self._lowres_source = source
+
+    def release_ports(self, owner):
+        """Let go of every port `owner` registered. The windows stay.
+
+        A page being torn down deregisters HERE rather than being held by a
+        strong reference in the services until the process ends. What it took
+        with it is content and data, so the effect is that the shared windows
+        keep their widgets and the shared state keeps its values, while
+        anything that needed the page fails CLOSED -- a frame with no arrays
+        is a Loading frame, not a call into a deleted object.
+        """
+        for name in ("_navigator_content", "_intensity_content",
+                     "_lowres_source", "_weight_editor_content",
+                     "_weight_owner"):
+            if getattr(self, name, None) is owner:
+                setattr(self, name, None)
+        if self.state._seed_port is owner:
+            self.state._seed_port = None
+        if self.state._persist_port is owner:
+            self.state._persist_port = None
+        if self.state._default_source is not None and (
+                getattr(self.state._default_source, "__self__", None) is owner):
+            self.state._default_source = None
 
     def mapping_owner(self):
         """Who answers "what Min/Max/Gamma is this channel drawn with".
@@ -1316,28 +1600,49 @@ class Block01DisplayServices(QObject):
         return policy
 
     # ── the render spec every step draws from ─────────────────────────
+    #
+    # ONE spec, held here, not a copy per step. The previous cut gave each
+    # downstream context its own writable `_spec` and re-inherited it from
+    # Step1 on every transition, so a weight moved in Step2 was overwritten
+    # the moment the user reached Step3 and was gone again in Step1 -- a
+    # local pixel effect, not a global weight. Now Step1 PUBLISHES the spec
+    # here whenever it composes, and the downstream contexts READ it; there
+    # is no second copy to diverge.
+    def publish_render_spec(self, spec):
+        """Step1 says what the picture currently is, semantically."""
+        self._render_spec = dict(spec or {}) or None
+
+    def render_spec(self):
+        return self._render_spec
+
     def set_render_weight(self, channel, weight):
         """THE global entry for "this channel contributes this much".
 
-        Whichever step is active receives it: Step1 through its channel row,
-        a downstream step through the render spec it inherited. This is what
-        makes a weight change a real change downstream instead of something
-        only Step1 can express -- and it is the entry a downstream step's UI
-        would call if and when it grows one.
+        It always goes to the WEIGHT OWNER -- the Step1 channel panel, which
+        is what a Save writes and what a session restores -- whichever step
+        the user is in. That is what makes a weight moved in Step2 the same
+        fact in Step3 and back in Step1, rather than a value that lives only
+        as long as the context that received it.
         """
-        context = self.coordinator.context()
-        setter = getattr(context, "set_render_weight", None)
-        if setter is None:
+        owner = self._weight_owner
+        if owner is None or not channel:
             return False
-        if not setter(channel, float(weight)):
+        if not owner.set_render_weight(channel, float(weight)):
             return False
         self.coordinator.request_frame(kind="weight", channel=channel)
         return True
 
     def render_weight(self, channel):
-        context = self.coordinator.context()
-        getter = getattr(context, "render_weight", None)
-        return None if getter is None else getter(channel)
+        owner = self._weight_owner
+        return None if owner is None else owner.render_weight(channel)
+
+    def set_weight_owner(self, owner):
+        """Register who holds the weights: `set_render_weight(ch, w)` and
+        `render_weight(ch)`. One owner for the process."""
+        self._weight_owner = owner
+
+    def weight_owner(self):
+        return self._weight_owner
 
     # ── whole-slide data ──────────────────────────────────────────────
     def lowres_array(self, channel):
@@ -1367,24 +1672,140 @@ class Block01DisplayServices(QObject):
         if source is None or not wanted:
             return list(wanted)
         try:
-            return list(source.ensure_tissue_lowres(wanted) or [])
+            missing = list(source.ensure_tissue_lowres(wanted) or [])
         except Exception:                                   # noqa: BLE001
-            return list(wanted)
+            missing = list(wanted)
+        if missing:
+            # Nobody is reading them -- no viewer is open on this slide, so
+            # the shared overview store has no reason to. Read them HERE, on
+            # this layer's own thread. The previous fallback took the read on
+            # the GUI thread "only once per channel", and once is 170-230 ms,
+            # measured, landing exactly when a new channel first appears.
+            self._request_lowres_reads(missing)
+        return missing
+
+    def _request_lowres_reads(self, channels):
+        reader = getattr(self._lowres_source, "read_tissue_lowres_blocking",
+                         None)
+        if reader is None or self._closing:
+            return
+        worker = self._read_worker
+        if worker is None:
+            try:
+                worker = LowresReadWorker(reader)
+                worker.done.connect(self._on_lowres_read)
+                worker.start()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Block01] low-res read worker unavailable ({exc})")
+                return
+            self._read_worker = worker
+        token = self._lowres_token()
+        for channel in channels:
+            worker.submit(token, channel)
+
+    def _lowres_token(self):
+        """The identity the DATA SERVICE files its arrays under.
+
+        Its own, not the shared state's: the array cache belongs to the
+        service and is keyed by that identity, so a read submitted under one
+        and installed under the other is refused on arrival and asked for
+        again forever.
+        """
+        getter = getattr(self._lowres_source, "tissue_dataset_token", None)
+        if getter is None:
+            return self.state.dataset_token()
+        try:
+            return getter()
+        except Exception:                                   # noqa: BLE001
+            return self.state.dataset_token()
+
+    def _on_lowres_read(self, result):
+        """An array came back. Installed only if it is about THIS slide."""
+        result = dict(result or {})
+        channel = result.get("channel")
+        array = result.get("array")
+        if not channel or array is None:
+            return
+        if result.get("token") != self._lowres_token():
+            perf_trace.mark("tissue.drop", why="dataset", kind="lowres_read",
+                            channel=channel)
+            return
+        install = getattr(self._lowres_source, "install_tissue_lowres", None)
+        if install is None:
+            return
+        try:
+            install(channel, result["token"], array)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] could not install {channel}'s array: {exc}")
+            return
+        self.coordinator.request_frame(kind="lowres", channel=channel)
+
+    def lowres_read_pending(self, channel=None):
+        worker = self._read_worker
+        if worker is None:
+            return False
+        return worker.pending(self._lowres_token(), channel)
 
     # ── lifetime ──────────────────────────────────────────────────────
-    def shutdown(self, reason="close"):
-        """Block01 is closing. Refuse new work, retire the thread, then close
-        the windows. In that order, and from here only.
+    # ── closing, in two phases ────────────────────────────────────────
+    #
+    # A close attempt can be REFUSED. The window checks whether a patch
+    # loader, a fusion worker or an uninterruptible overview read is still
+    # running and calls `event.ignore()` if one is -- and then goes on living,
+    # waiting for the user to try again. Tearing the display services down
+    # before that check destroyed the two shared windows and left the
+    # coordinator permanently closed on a window the user was still using: it
+    # could not draw, and nothing would ever open again.
+    #
+    # So closing is `begin_close()` -- stop ACCEPTING work, which is
+    # reversible -- and `finalize_close()`, which is not and runs only once
+    # the close is certain.
+    def begin_close(self, reason="close"):
+        """Stop taking new frame requests. Nothing is destroyed.
 
-        A step page being destroyed during an ordinary navigation must never
-        reach this -- which is now structural rather than a convention, since
-        the windows are not a page's to destroy.
+        Idempotent, because a refused close is retried. `resume()` undoes it
+        if the close is refused, so a window that goes on living goes on
+        drawing.
         """
-        if self._closing:
+        self._closing = True
+        self.coordinator.pause(reason)
+
+    def resume(self):
+        """The close was refused; the session continues."""
+        if self._finalized:
             return
+        self._closing = False
+        self.coordinator.resume()
+
+    def finalize_close(self, reason="close"):
+        """The close is certain. Retire the thread, then close the windows.
+
+        From here only, and after `begin_close`. A step page being destroyed
+        during an ordinary navigation must never reach this -- which is
+        structural rather than a convention, since the windows are not a
+        page's to destroy.
+        """
+        if self._finalized:
+            return
+        self._finalized = True
         self._closing = True
         self.coordinator.shutdown(reason)
-        for win in (self._intensity_window, self._navigator):
+        for attr in ("_seed_worker", "_read_worker"):
+            worker = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if worker is None:
+                continue
+            try:
+                worker.done.disconnect()
+                worker.failed.disconnect()
+            except Exception:                               # noqa: BLE001
+                pass
+            try:
+                worker.stop()
+            except Exception:                               # noqa: BLE001
+                pass
+        for win in (self._intensity_window, self._navigator,
+                    self._weight_editor):
             if win is None:
                 continue
             try:
@@ -1394,6 +1815,16 @@ class Block01DisplayServices(QObject):
         self._intensity_window = None
         self._intensity_panel = None
         self._navigator = None
+        self._weight_editor = None
+        self._weight_editor_panel = None
+
+    def shutdown(self, reason="close"):
+        """Both phases, for a caller that knows the close cannot be refused."""
+        self.begin_close(reason)
+        self.finalize_close(reason)
+
+    def is_finalized(self):
+        return self._finalized
 
 
 def _bring_to_front(win):

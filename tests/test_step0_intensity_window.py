@@ -390,6 +390,11 @@ def test_auto_stays_the_workbenchs_own_button(app):
 def test_the_slide_seed_lands_once_and_a_user_value_survives(app):
     page = _page(app, loader=_SeedLoader())
     wb = page._cond_workbench
+    # The slide seed is computed from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now -- the page no longer takes
+    # it on the GUI thread from inside a seed. Warmed here, which is
+    # what the read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD3")
 
     lo, hi, gamma = page._display_mapping_for("CD3")
 
@@ -1038,6 +1043,11 @@ def test_opening_the_window_engages_the_hidden_remap_owner(app):
 def test_the_engaged_window_is_the_source_of_truth_not_the_fallback(app):
     page = _bare_page(app, loader=_SeedLoader())
     wb = page._cond_workbench
+    # The slide seed is computed from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now -- the page no longer takes
+    # it on the GUI thread from inside a seed. Warmed here, which is
+    # what the read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD3")
     # Asked BEFORE the window engaged the workbench: the page-level fallback
     # answers, exactly as it does in the real app when the compare panels
     # paint first. That copy must not survive as a second source.
@@ -1245,6 +1255,11 @@ def test_repeated_syncs_never_move_a_never_activated_channels_window(app):
     """No Intensity window, no channel switch: re-syncing the workbench must
     leave every channel's mapping exactly where it was."""
     page = _bare_page(app, loader=_SeedLoader())
+    # The slide seed is computed from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now -- the page no longer takes
+    # it on the GUI thread from inside a seed. Warmed here, which is
+    # what the read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD20")
     before = page._display_mapping_for("CD20")
     assert before[1] > 1.0, "the fixture never produced a real window"
 
@@ -1264,6 +1279,11 @@ def test_a_provisional_placeholder_is_seeded_not_read_as_a_window(app):
     assert wb._raw.get("CD20") is None, "CD20 was not lazy"
     assert (wb._params["CD20"]["min"], wb._params["CD20"]["max"]) == (0.0, 1.0)
     assert not wb.channel_params_seeded("CD20")
+    # The slide seed is computed from the whole-slide array, and that
+    # array is READ IN THE BACKGROUND now -- the page no longer takes
+    # it on the GUI thread from inside a seed. Warmed here, which is
+    # what the read thread does a moment after the channel appears.
+    page._slide_lowres_array("CD20")
 
     lo, hi, gamma = page._display_mapping_for("CD20")
 

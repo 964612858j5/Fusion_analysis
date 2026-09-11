@@ -9,6 +9,7 @@ import hashlib
 import json
 import copy
 import time
+import weakref
 import traceback
 import multiprocessing as mp
 from queue import Empty
@@ -34,7 +35,7 @@ from ..core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
 from ..core.channel_remap import (
-    apply_channel_remap, compose_multichannel_overlay, tint_and_sum_grays,
+    apply_channel_remap, tint_and_sum_grays,
     compute_qupath_auto_minmax,
 )
 from ..core.io_loader import OMETIFFLoader
@@ -83,11 +84,21 @@ STEP1_PATCH_PREVIEW_MAX_PX = 1024
 # 49.96 ms at the median, measured. A parameter that means "do not do the
 # expensive thing" is worse than an entry point that cannot.
 
-# How many per-channel fusion signals to keep. One per (channel, array,
-# window), and a drag mints a new window per step, so the oldest are dropped
-# rather than the map growing for a session. Large enough that a panel of ~30
-# channels survives a few windows each.
-_SIGNAL_CACHE_MAX = 96
+# The fusion preview's per-channel signal cache, bounded twice.
+#
+# What it is FOR is one frame's working set: the channels the current patch
+# fuses, each mapped through its current window. A 1024x1024 float32 signal
+# is 4 MiB, so a 30-channel panel's working set is about 120 MiB -- and that
+# is the most this may ever hold, because a window the user has dragged past
+# has no reader. Keeping a version per slider step would have been 96 entries
+# = ~384 MiB of history on a large slide, which is trading the stutter for
+# memory pressure in a task that exists to fix behaviour on large slides.
+#
+# So: ONE version per (patch, channel), replaced when its window changes, and
+# a byte ceiling as well as a count -- because 96 small entries and 96 large
+# ones are not the same cache.
+_SIGNAL_CACHE_MAX = 64
+_SIGNAL_CACHE_BYTES = 160 * 1024 * 1024
 
 # How long a burst of state changes is allowed to coalesce into one redraw.
 PREVIEW_COALESCE_MS = 60
@@ -3311,15 +3322,16 @@ class MainWindow(QMainWindow):
     def _drop_overlay_cache_for(self, patch_idx):
         """Forget one patch's remapped images; its raw pixels went too.
 
-        The fusion signals go with them wholesale rather than per patch: they
-        are keyed by the identity of the array they were computed from, so an
-        entry whose array has been dropped can never be hit again, and
-        keeping it would be a leak with no reader.
+        The fusion signals for that patch go with them: they are keyed by
+        (patch, channel) so this evicts exactly that patch, and their weak
+        references would not keep the dropped arrays alive in any case.
         """
         self._overlay_display_cache = {
             key: value for key, value in self._overlay_display_cache.items()
             if key[0] != patch_idx}
-        self._signal_cache.clear()
+        self._signal_cache = {
+            key: value for key, value in self._signal_cache.items()
+            if key[0] != patch_idx}
 
     def _refresh_patch_preview(self, reset_view=False):
         """Draw whichever preview the current mode asks for."""
@@ -5238,29 +5250,71 @@ class MainWindow(QMainWindow):
 
         Kept, because a Min/Max drag changes ONE channel and this used to
         redo every one of them: `step1.signals` measured p50 36.31 ms per
-        frame against a `fuse` of 4 ms. The key is what the answer actually
-        depends on -- the array these pixels came from (its identity and
-        shape: a patch reload or a dataset switch replaces the object) and
-        the window's VALUES. So a colour or weight change reuses every
-        signal, an edit to one channel's window invalidates that channel's
-        entry alone, and an entry cannot outlive the pixels it describes.
+        frame against a `fuse` of 4 ms. So a colour or weight change reuses
+        every signal and an edit to one channel's window recomputes that
+        channel alone.
+
+        One entry per (patch, channel), holding the window it was computed
+        with and a WEAK reference to the array it was computed from. A hit
+        needs both to match: the window by value, and the source by
+        identity, re-verified through the weak reference rather than trusted
+        through a token -- `id()` can be reused by the next array once the
+        previous one is released. A window the user dragged past is
+        replaced rather than remembered, because nothing will ask for it
+        again and a slider's worth of 4 MiB signals is memory pressure on
+        exactly the slides this work is about.
         """
         p = remap.get(ch) if remap else None
-        key = (ch, id(arr), getattr(arr, "shape", None),
-               self._display_window_for(ch, remap)[1])
-        hit = self._signal_cache.get(key)
-        if hit is not None:
-            return hit
+        window = self._display_window_for(ch, remap)[1]
+        key = (self._preview_patch_idx, ch)
+        entry = self._signal_cache.get(key)
+        if entry is not None and entry["window"] == window:
+            # The source is re-verified, not inferred from a token: `id()`
+            # alone is not an identity, because CPython may hand a released
+            # array's address to the next one, and a channel, shape and
+            # window that all match would then serve the previous patch's
+            # pixels. A weak reference cannot outlive its array and cannot be
+            # confused with a different one.
+            source = entry["ref"]()
+            if source is arr:
+                return entry["signal"]
         if p:
             signal = apply_channel_remap(arr, p).astype(np.float32)
         else:
             signal = self.loader._norm(arr)
-        # Bounded: a drag mints a new window per step, so the oldest entries
-        # go rather than the map growing for the length of a session.
-        while len(self._signal_cache) >= _SIGNAL_CACHE_MAX:
-            self._signal_cache.pop(next(iter(self._signal_cache)), None)
-        self._signal_cache[key] = signal
+        signal = np.asarray(signal)
+        self._signal_cache.pop(key, None)        # one version per channel
+        try:
+            ref = weakref.ref(arr)
+        except TypeError:
+            return signal                        # unreferenceable: don't cache
+        self._signal_cache[key] = {
+            "ref": ref, "window": window, "signal": signal,
+            "nbytes": int(getattr(signal, "nbytes", 0) or 0)}
+        self._evict_signals()
         return signal
+
+    def _signal_cache_bytes(self):
+        return sum(entry["nbytes"] for entry in self._signal_cache.values())
+
+    def _evict_signals(self):
+        """Keep the cache inside both bounds, oldest first.
+
+        Insertion order IS recency here: an entry is re-inserted whenever its
+        window changes, and a hit on an unchanged window is the frame's whole
+        point, so what sits at the front is what no recent frame has wanted.
+        Entries whose array has been released go first, whatever their age --
+        they can never be hit again.
+        """
+        for key, entry in list(self._signal_cache.items()):
+            if entry["ref"]() is None:
+                self._signal_cache.pop(key, None)
+        while (len(self._signal_cache) > _SIGNAL_CACHE_MAX
+               or self._signal_cache_bytes() > _SIGNAL_CACHE_BYTES):
+            oldest = next(iter(self._signal_cache), None)
+            if oldest is None:
+                break
+            self._signal_cache.pop(oldest, None)
 
     # ── Save ────────────────────────────────────────────────────────
 

@@ -18,6 +18,8 @@ Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 
 import os
 
+import weakref
+
 import numpy as np
 import pytest
 
@@ -1220,7 +1222,8 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
         w.config.set_channel_visible("CD3", True)
         w.config.set_channel_visible("CD8", True)
         w._render_current_patch(reset_view=False)
-        first = dict(w._signal_cache)
+        first = {key: entry["signal"]
+                 for key, entry in w._signal_cache.items()}
         assert len(first) >= 2, first
 
         # One channel's window moves; the others are untouched.
@@ -1228,11 +1231,15 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
         w._display_mapping = lambda *a, **k: window
         w._render_current_patch(reset_view=False)
 
-        kept = [key for key in first if key in w._signal_cache
-                and w._signal_cache[key] is first[key]]
-        assert any(key[0] != "CD3" for key in kept), \
+        reused = [key for key, signal in first.items()
+                  if key in w._signal_cache
+                  and w._signal_cache[key]["signal"] is signal]
+        assert any(key[1] != "CD3" for key in reused), \
             "an unchanged channel's signal was recomputed"
-        assert any(key[0] == "CD3" for key in w._signal_cache), \
+        changed = w._signal_cache.get((w._preview_patch_idx, "CD3"))
+        assert changed is not None
+        assert changed["signal"] is not first.get(
+            (w._preview_patch_idx, "CD3")), \
             "the changed channel was not recomputed"
     finally:
         w.close()
@@ -1279,25 +1286,105 @@ def test_dropping_a_patch_drops_its_signals(app):
         w._render_current_patch(reset_view=False)
         assert w._signal_cache
 
-        w._drop_overlay_cache_for(0)
+        w._drop_overlay_cache_for(w._preview_patch_idx)
 
         assert w._signal_cache == {}
     finally:
         w.close()
 
 
-def test_the_signal_cache_is_bounded(app):
-    """A drag mints a new window per step; the map must not grow for the
-    length of a session."""
+def test_a_drag_keeps_one_version_per_channel(app):
+    """A slider step is a new window, and the previous one has no reader. On
+    a large slide a signal is 4 MiB, so 300 remembered steps would be over a
+    gigabyte of history for a picture nobody will ask for again."""
+    w = _window(app)
+    try:
+        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
+        for i in range(300):
+            window = {"CD3": {"min": float(i), "max": 1000.0, "gamma": 1.0}}
+            w._preview_channel_signal("CD3", arr, window)
+
+        assert list(w._signal_cache) == [(w._preview_patch_idx, "CD3")]
+        assert w._signal_cache[(w._preview_patch_idx, "CD3")]["window"] == \
+            w._display_window_for(
+                "CD3", {"CD3": {"min": 299.0, "max": 1000.0,
+                                "gamma": 1.0}})[1]
+    finally:
+        w.close()
+
+
+def test_the_signal_cache_stays_inside_its_byte_budget(app):
+    """Entry count alone is not a bound: 64 signals of a 1024x1024 patch are
+    256 MiB. Measured against real-size arrays, not the 32x32 test patch."""
     import block01.ui.main_window as mw
 
     w = _window(app)
     try:
-        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
-        for i in range(mw._SIGNAL_CACHE_MAX * 2):
-            window = {"CD3": {"min": float(i), "max": 1000.0, "gamma": 1.0}}
-            w._preview_channel_signal("CD3", arr, window)
+        big = np.zeros((1024, 1024), np.float32)     # 4 MiB, like the desk
+        assert big.nbytes == 4 * 1024 * 1024
+        w._preview_channel_signal = mw.MainWindow._preview_channel_signal.__get__(w)
+        for i in range(80):
+            ch = f"CH{i}"
+            w._signal_cache[(0, ch)] = {
+                "ref": (lambda arr=big: (lambda: arr))(),
+                "window": ("auto",), "signal": big, "nbytes": big.nbytes}
+            w._evict_signals()
 
+        assert w._signal_cache_bytes() <= mw._SIGNAL_CACHE_BYTES
         assert len(w._signal_cache) <= mw._SIGNAL_CACHE_MAX
+    finally:
+        w.close()
+
+
+def test_a_hit_reverifies_the_source_array(app):
+    """`id()` is not an identity: CPython may give a released array's address
+    to the next one, and a channel, shape and window that all match would
+    then serve the previous patch's pixels. The entry holds a weak reference
+    and the hit checks it."""
+    w = _window(app)
+    try:
+        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
+        other = np.linspace(0, 500, 32 * 32, dtype=np.float32).reshape(32, 32)
+        window = {"CD3": {"min": 0.0, "max": 1000.0, "gamma": 1.0}}
+
+        first = w._preview_channel_signal("CD3", arr, window)
+        key = (w._preview_patch_idx, "CD3")
+        assert w._signal_cache[key]["ref"]() is arr
+
+        # An entry whose external key matches in every way, but whose source
+        # is a DIFFERENT array -- what a reused id() would look like.
+        w._signal_cache[key]["ref"] = weakref.ref(other)
+        again = w._preview_channel_signal("CD3", arr, window)
+
+        assert again is not first, \
+            "the cache served a signal whose source array is not this one"
+        assert w._signal_cache[key]["ref"]() is arr
+
+        # And a dead reference misses rather than raising.
+        w._signal_cache[key]["ref"] = weakref.ref(
+            np.zeros((32, 32), np.float32))
+        import gc
+        gc.collect()
+        third = w._preview_channel_signal("CD3", arr, window)
+        assert third is not again or w._signal_cache[key]["ref"]() is arr
+    finally:
+        w.close()
+
+
+def test_dropping_one_patch_keeps_the_others_signals(app):
+    w = _window(app)
+    try:
+        arr = np.linspace(0, 1000, 32 * 32, dtype=np.float32).reshape(32, 32)
+        window = {"CD3": {"min": 0.0, "max": 1000.0, "gamma": 1.0}}
+        w._preview_patch_idx = 0
+        w._preview_channel_signal("CD3", arr, window)
+        w._preview_patch_idx = 1
+        other = arr.copy()
+        w._preview_channel_signal("CD3", other, window)
+        assert set(w._signal_cache) == {(0, "CD3"), (1, "CD3")}
+
+        w._drop_overlay_cache_for(0)
+
+        assert set(w._signal_cache) == {(1, "CD3")}
     finally:
         w.close()

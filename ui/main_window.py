@@ -36,7 +36,7 @@ from ..config import (
 from ..core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
-from ..core import preview_compose
+from ..core import preview_compose, tissue_compose
 from ..core.channel_remap import (
     apply_channel_remap, tint_and_sum_grays,
     compute_qupath_auto_minmax,
@@ -69,6 +69,10 @@ from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from ..workers.preview_compose_worker import PreviewComposeWorker
 from ..workers.mesmer_worker import run_mesmer_patch_preview
 from .step0.step0_page import Step0Page
+from .block01_display import (
+    Block01DisplayServices, STEP0 as _CTX_STEP0, STEP1 as _CTX_STEP1,
+    STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
+)
 from .step0.config_panel import ConfigPanel
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
@@ -161,6 +165,63 @@ class _ArtifactKindMismatch(Exception):
     """The zarr on disk was written for the other Step1 output kind."""
 
 
+class _PinnedTissueContext:
+    """Step2's and Step3's render context: the last frame, and nothing new.
+
+    THE CHOICE, WRITTEN DOWN. Downstream of Step1 the Tissue Preview is a map:
+    the navigator is read-only there, and no Step2/Step3 control describes
+    what the whole-slide thumbnail should look like. So rather than leave it
+    to whatever Step0's fields happen to say -- which is how a picture of one
+    step ends up on another's screen -- these steps PIN the last frame that
+    was actually published, and re-publish exactly that when they become
+    active.
+
+    It is still a real context, and that is the point: it has an identity, it
+    is bound to a dataset, and a late frame from the step the user just left
+    fails the coordinator's owner check instead of landing. Pinning nothing
+    (arriving downstream without a frame ever having been drawn) means the
+    popup shows the DAPI overview the panel loaded for itself, never another
+    slide's or another step's picture.
+    """
+
+    def __init__(self, services, step_id):
+        self._services = services
+        self._step_id = step_id
+        self._pinned = None
+
+    def note_published(self, result):
+        """Remember a frame that was really on the screen, with its dataset."""
+        rgb = (result or {}).get("rgb")
+        if rgb is None:
+            return
+        self._pinned = {"rgb": rgb, "token": (result or {}).get("token"),
+                        "mode": (result or {}).get("mode")}
+
+    def tissue_render_mode(self):
+        # The mode of the CONTEXT, not of the picture it happens to be
+        # holding. The coordinator checks a result's mode against this to
+        # decide whether it still describes what is on screen, and a pinned
+        # context answering "overlay" would make its own re-publish look
+        # like a Step1 frame arriving late.
+        return tissue_compose.MODE_PINNED
+
+    def tissue_render_snapshot(self):
+        pinned = self._pinned
+        if not pinned:
+            return None
+        if pinned.get("token") != self._services.state.dataset_token():
+            # The slide moved under it. A pinned picture of another dataset is
+            # exactly the failure `b1aaac6` closed; it is dropped, not shown.
+            self._pinned = None
+            return None
+        return {
+            "mode": tissue_compose.MODE_PINNED,
+            "token": pinned["token"],
+            "arrays": {"__pinned__": pinned["rgb"]},
+            "rgb": pinned["rgb"],
+        }
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -169,6 +230,12 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
         self.setMinimumSize(900, 650)
 
+        # Block01's shared display layer, built BEFORE any step page exists
+        # and shut down after all of them. The Intensity window and the Tissue
+        # Preview are this process's, not Step0's: Step1 draws its own overlay
+        # in the same popup, and Step2/Step3 navigate in it. Every step is
+        # handed this object and asks it -- no step reaches into another.
+        self._display = Block01DisplayServices(self)
         self.loader = None   # loaded on demand when user clicks "Load"
         self.fusion = FusionEngine()
         self.worker = None
@@ -400,7 +467,7 @@ class MainWindow(QMainWindow):
         self._stack = QtWidgets.QStackedWidget()
         outer_lay.addWidget(self._stack, stretch=1)
 
-        self._step0 = Step0Page()
+        self._step0 = Step0Page(display_services=self._display)
         self._step0.step0_complete.connect(self._on_step0_complete)
         # A committed dataset switch invalidates every Step1 fact that was
         # derived from the previous dataset.  This is a different event from
@@ -793,6 +860,12 @@ class MainWindow(QMainWindow):
         self._step1_5 = Step15BackgroundCorrectionPage()
         self._stack.addWidget(self._step1_5)
 
+        # Every step is a render context for the ONE Tissue Preview, and they
+        # are all registered before any of them is made active -- so a step
+        # transition never has to create one, and a step with no context
+        # cannot silently leave the previous step's picture live.
+        self._register_block01_contexts()
+
         # Land on the overlay: a fresh dataset shows DAPI and nothing else, so
         # the first tick changes the picture rather than nothing.
         self.set_preview_mode(STEP1_PREVIEW_OVERLAY, force=True)
@@ -876,12 +949,160 @@ class MainWindow(QMainWindow):
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
 
-        Deliberately a one-line delegation, not an attach/detach protocol:
-        Step0Page owns the popup's whole lifecycle, and Step1 borrows nothing
-        but the open entry point.  Nothing here creates or reparents a widget.
+        Through Block01's display layer, not through Step0. The popup is one
+        window for the whole process and the layer is what resolves every
+        step's button to it; a `self._step0.<...>` here would make Step0 a
+        service locator for a window Step1, Step2 and Step3 use as much.
         """
-        self._step0.show_tissue_navigator(
-            roi_policy="delete_only", patch_editable=True)
+        self._display.show_navigator(_CTX_STEP1, roi_policy="delete_only",
+                                     patch_editable=True)
+
+    # ── Step1's render context (what the coordinator asks this window) ──
+
+    def tissue_render_mode(self):
+        return (tissue_compose.MODE_FUSION
+                if self._step1_preview_mode == STEP1_PREVIEW_FUSION
+                else tissue_compose.MODE_OVERLAY)
+
+    def tissue_render_snapshot(self):
+        """Everything Step1's whole-slide frame needs, as plain values.
+
+        THE WHOLE SLIDE, not the current patch: this is a navigation
+        thumbnail, and stretching a patch across it would be a picture of
+        somewhere else. The arrays come from Block01's low-resolution service
+        -- the same ones Step0's thumbnail and the display seed use -- so a
+        weight change re-tints resident pixels and reads nothing.
+
+        ONLY THE CHANNELS THIS FRAME NEEDS. Overlay asks for what is ticked;
+        fusion asks for the effective config's contributors plus the nucleus.
+        A 29- or 57-channel panel must not become 29 or 57 reads because one
+        weight moved.
+
+        Returns None when nothing is drawable yet. Channels that have not
+        arrived are named in `loading` and requested in the background; the
+        frame draws what IS there rather than holding the popup empty or
+        leaving the previous step's picture up.
+        """
+        mode = self.tissue_render_mode()
+        state = self._display.state
+        if mode == tissue_compose.MODE_OVERLAY:
+            wanted = [ch for ch in self.config.visible_channels()]
+            weights = {ch: self._overlay_weight(ch) for ch in wanted}
+        else:
+            effective = self._effective_fusion_config()
+            groups = {name: dict(data.get("channels") or {})
+                      for name, data in (effective.get("groups") or {}).items()}
+            group_weights = {
+                name: float(data.get("group_weight", 1.0) or 0.0)
+                for name, data in (effective.get("groups") or {}).items()}
+            nuc = effective.get("nucleus") or {}
+            nuc_ch = str(nuc.get("channel", "") or "")
+            wanted = list({nuc_ch} if nuc_ch else set())
+            for ch_weights in groups.values():
+                wanted.extend(ch_weights.keys())
+            wanted = sorted(set(ch for ch in wanted if ch))
+        if not wanted:
+            return None
+        arrays, loading = {}, []
+        for ch in wanted:
+            arr = self._display.lowres_array(ch)
+            if arr is None:
+                loading.append(ch)
+            else:
+                arrays[ch] = arr
+        if loading:
+            loading = list(self._display.ensure_lowres(loading))
+            for ch in wanted:
+                if ch not in arrays:
+                    arr = self._display.lowres_array(ch)
+                    if arr is not None:
+                        arrays[ch] = arr
+        if not arrays:
+            return None
+        # Every array in one frame has to be the same picture of the same
+        # slide; a channel off another pyramid level would be composited at
+        # the wrong scale.
+        shape = next(iter(arrays.values())).shape[:2]
+        mismatched = [ch for ch, arr in arrays.items()
+                      if arr.shape[:2] != shape]
+        for ch in mismatched:
+            arrays.pop(ch, None)
+            loading.append(ch)
+        if not arrays:
+            return None
+        mappings = {ch: state.mapping(ch) for ch in arrays}
+        snapshot = {
+            "mode": mode,
+            "token": self._step0._dataset_token(),
+            "arrays": arrays,
+            "mappings": {ch: m for ch, m in mappings.items() if m is not None},
+            "colors": {ch: state.color_rgb01(ch) for ch in arrays},
+            "loading": tuple(sorted(set(loading))),
+        }
+        if mode == tissue_compose.MODE_OVERLAY:
+            snapshot["weights"] = {ch: weights.get(ch, 0.0) for ch in arrays}
+            if not any(w > 0 for w in snapshot["weights"].values()):
+                # Everything ticked is at zero: an empty picture is a real
+                # answer here, and the composer returns None for it. Said as
+                # "nothing to draw" rather than as a frame of black.
+                return None
+        else:
+            snapshot.update({
+                "groups": groups,
+                "group_weights": group_weights,
+                "nucleus": (nuc_ch, float(nuc.get("weight", 0.0) or 0.0)),
+                # The loader's own normalisation and the engine's own
+                # cyto/nucleus-to-RGB step, passed in rather than
+                # reimplemented: the thumbnail and the patch preview are the
+                # same fusion or they are two answers.
+                "fallback_norm": (self.loader._norm if self.loader is not None
+                                  else (lambda a: a)),
+                "to_rgb": self.fusion.to_rgb,
+            })
+        return snapshot
+
+    def _register_block01_contexts(self):
+        """Register every step as a render context for the one Tissue Preview.
+
+        Step1 draws its overlay or its fusion. Step2 and Step3 consume
+        geometry they did not produce and navigate in a picture they do not
+        choose, so their context PINS the last frame Step1 published: an
+        explicit choice, recorded here and tested, rather than "whatever
+        Step0's fields happen to say", which is what reading them would be.
+        """
+        coordinator = self._display.coordinator
+        coordinator.register_context(_CTX_STEP1, self)
+        self._downstream_contexts = {
+            _CTX_STEP2: _PinnedTissueContext(self._display, _CTX_STEP2),
+            _CTX_STEP3: _PinnedTissueContext(self._display, _CTX_STEP3),
+        }
+        for step_id, context in self._downstream_contexts.items():
+            coordinator.register_context(step_id, context)
+        # Every published frame is offered to the downstream contexts, so the
+        # picture they pin is one that was actually on the screen.
+        coordinator.frame_published.connect(self._on_tissue_frame_published)
+        # The canonical colour settled: Step1's rows and its viewer follow it
+        # like every other view, without Step0 and Step1 pushing at each other.
+        self._display.state.color_changed.connect(
+            self._on_shared_channel_color_changed)
+        self.config.set_display_state(self._display.state)
+
+    def _on_tissue_frame_published(self, result):
+        for context in (getattr(self, "_downstream_contexts", None) or {}).values():
+            context.note_published(result)
+
+    def _on_shared_channel_color_changed(self, channel, _hexc):
+        """Block01 settled a colour: Step1's pictures take it.
+
+        One refresh, not two. The panel row and Step0's widgets are mirrors
+        updated by their own subscriptions, and the Tissue Preview is asked
+        by the shared state itself; what is left for this window is the patch
+        viewer.
+        """
+        if self._restoring_display_state:
+            return
+        if self._current_step == 1:
+            self._schedule_preview_update()
 
     def _on_step0_geometry_committed(self, payload):
         """Adopt a geometry-only commit published by Step0.
@@ -2737,12 +2958,23 @@ class MainWindow(QMainWindow):
         self._go_to_step0()
         return True
 
+    _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
+                      3: _CTX_STEP3}
+
     def _set_step_active(self, active):
         self._current_step = active
         # The ONE place the shared navigator's edit policy is decided.  Every
         # navigation path goes through here, so an already-open popup follows
         # the step immediately: no reopen, no extra click.
         self._apply_navigator_policy_for_step(active)
+        # ...and the ONE place the Tissue Preview's render context changes.
+        # An atomic transition: it bumps Block01's generation, so every queued
+        # timer, pending revision and worker result belonging to the step
+        # being left is structurally stale from this line on -- and then asks
+        # the step being entered for its first frame, so the popup shows the
+        # new step rather than the old one's last picture.
+        self._display.coordinator.set_active_context(
+            self._STEP_CONTEXTS.get(active))
         _on = ("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
                "background:#1a2a3a;border-radius:4px;")
         _off = "font-size:12px;color:#555;padding:4px 12px;"
@@ -3317,6 +3549,11 @@ class MainWindow(QMainWindow):
         # Before the loaders, because it is the cheapest thing here to stop
         # and it holds the dataset's arrays.
         self._stop_compose_worker("the main window is closing")
+        # Block01's own: new frame requests are refused FIRST so nothing
+        # re-arms behind the stop, and only then is the compose thread
+        # retired. This is the ONLY place it happens -- an ordinary step
+        # change must never take the shared worker with it.
+        self._display.shutdown("the main window is closing")
         # Step0's own background workers: the geometry writer and the patch
         # readers. Both are request-only, so this neither joins a thread nor
         # can be refused; what it buys is that neither emits into a window
@@ -3450,6 +3687,11 @@ class MainWindow(QMainWindow):
             # forever unless the missing ones are asked for here.
             self._ensure_channels_cached(self._preview_patch_idx)
             self._refresh_patch_preview(reset_view=False)
+            # The popup follows the mode: Overlay and Fusion are two pictures
+            # of the same slide, and the navigator showing the other one is
+            # the disagreement this request removes. Nothing is rebuilt --
+            # same popup, same camera, same ROI and patch artists.
+            self._display.coordinator.request_frame(kind="mode")
             self._schedule_step1_session_save()
 
     def _drop_overlay_cache_for(self, patch_idx):
@@ -3604,6 +3846,11 @@ class MainWindow(QMainWindow):
                 failed.discard(channel)
             self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
+        # A tick changes which channels the whole-slide thumbnail composites,
+        # and the ones it has never held are asked for in the background by
+        # the snapshot rather than read here.
+        self._display.coordinator.request_frame(kind="visibility",
+                                                channel=channel)
         # A tick changes the effective configuration, so it changes whether the
         # screen and the committed snapshot still agree. Said now, not at the
         # next redraw: a panel claiming "saved" while a search would be refused
@@ -3642,6 +3889,12 @@ class MainWindow(QMainWindow):
         self._signal_cache.drop_channel(channel)
         if channel in self.config.visible_channels():
             self._schedule_preview_update()
+        # The thumbnail maps through the same numbers and follows them
+        # through the shared state, which requests its frame -- so this
+        # window does not have to remember to. The compose worker keys its
+        # cache by the window's VALUES, so a moved window misses for this
+        # channel and every other channel hits; the raw whole-slide arrays
+        # are not re-read.
 
     def _on_display_mapping_committed(self, payload):
         """The draft is now on disk and named by a fresh manifest hash.
@@ -3666,21 +3919,24 @@ class MainWindow(QMainWindow):
         """
         if self._restoring_display_state:
             return
-        try:
-            self._step0.adopt_channel_color(channel, color)
-        except Exception as exc:
-            print(f"[Step1] could not share the colour of {channel}: {exc}")
-        self._refresh_patch_preview(reset_view=False)
+        # The panel has already written Block01's shared state, which is what
+        # every view reads; `_on_shared_channel_color_changed` is where the
+        # pictures follow. Nothing is pushed at Step0 from here -- two steps
+        # emitting at each other is how one channel came to have two colours.
+        self._display.state.set_color(channel, color, origin="step1")
         self._schedule_step1_session_save()
 
     def _on_step0_channel_color_changed(self, channel, color):
-        """A colour picked in the Intensity window (or Step0) comes back."""
+        """A colour picked in the Intensity window (or Step0) comes back.
+
+        Kept as the adapter for Step0's own signal, and it does one thing:
+        settle the value in the shared state. Whether that CHANGES anything
+        is the state's decision, so an echo of a colour Step1 just chose ends
+        here instead of starting a second lap.
+        """
         if self._restoring_display_state or not channel:
             return
-        try:
-            self.config.set_channel_color(channel, color)
-        except Exception as exc:
-            print(f"[Step1] could not adopt the colour of {channel}: {exc}")
+        self._display.state.set_color(channel, color, origin="step0")
 
     def _ensure_channels_cached(self, idx):
         """Read what this patch is missing — only that, and only once.
@@ -3719,8 +3975,14 @@ class MainWindow(QMainWindow):
         self._start_loader_for(idx, needed=missing)
 
     def _show_intensity_window(self):
-        """Open the shared Intensity window on the current channel."""
-        self._step0.show_intensity_window()
+        """Open the shared Intensity window on the current channel.
+
+        Through Block01's display layer. There is one Intensity window for
+        the process and one set of Min/Max/Gamma behind it; which step is
+        looking at it decides only what may be edited, never what the numbers
+        are.
+        """
+        self._display.show_intensity(self.config.current_channel())
         current = self.config.current_channel()
         if current:
             self._step0.focus_intensity_on(
@@ -3829,6 +4091,11 @@ class MainWindow(QMainWindow):
         """
         self._ensure_channels_cached(self._preview_patch_idx)
         self._schedule_preview_update()
+        # The Tissue Preview shows the same weights over the whole slide, so
+        # it follows the same drag. Its own frame clock: the two pictures are
+        # not required to publish in the same millisecond, only to end on the
+        # same revision.
+        self._display.coordinator.request_frame(kind="weight")
         self._schedule_step1_session_save()
 
     def _reset_frame_clock(self):

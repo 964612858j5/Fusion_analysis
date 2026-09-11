@@ -268,7 +268,15 @@ class ConfigPanel(QWidget):
         self._weight_initialized = set()
         self._rows = {}            # channel -> ChannelRow
         self._items = {}           # channel -> QListWidgetItem
-        self._colors = {}          # channel -> "#rrggbb" (user picks win)
+        self._colors = {}          # channel -> "#rrggbb" -- A MIRROR, see below
+        # Block01's shared display state, once a host registers it. While it
+        # is set, IT is the answer to "what colour is this channel" and
+        # `_colors` is only the copy the rows are drawn from. Before this
+        # existed the panel dealt its own palette, so the same channel came up
+        # one colour in Step0 and another in Step1 -- and `load_panel`
+        # re-dealt it on every dataset, which is why a colour the user had
+        # picked in Step0 did not survive the walk into Step1.
+        self._display_state = None
         self._current = ""
         self._selecting = False
         self._setup_ui()
@@ -325,7 +333,56 @@ class ConfigPanel(QWidget):
         lay.addLayout(btn_row)
 
     # ── rows ──────────────────────────────────────────────────────────
+    def set_display_state(self, state):
+        """Make this panel a mirror of Block01's canonical colours.
+
+        Registered by the host that owns both. From here the panel reads the
+        shared answer, writes back to it, and repaints when it changes --
+        which is the whole of "one channel, one colour, in every step".
+        """
+        self._display_state = state
+        if state is None:
+            return
+        state.color_changed.connect(self._adopt_shared_color)
+        self._resync_colors_from_state()
+
+    def _resync_colors_from_state(self):
+        """Take every row's colour from the shared state, silently.
+
+        Silent because the state has already decided: re-emitting from here
+        would be a second opinion rather than a confirmation, and it is the
+        loop that made "who wins" a question of signal order.
+        """
+        state = self._display_state
+        if state is None:
+            return
+        for ch, row in self._rows.items():
+            hexc = state.color(ch)
+            self._colors[ch] = hexc
+            row.set_color(hexc)
+
+    def _adopt_shared_color(self, channel, color):
+        """A colour settled anywhere: this panel's row takes it. No re-emit."""
+        if not channel:
+            return
+        self._colors[channel] = str(color)
+        row = self._rows.get(channel)
+        if row is not None:
+            row.set_color(str(color))
+
     def _default_color(self, ch):
+        """The colour a channel wears before anyone picks one.
+
+        Asked of the shared state when there is one, so the palette is dealt
+        ONCE for the whole process. This panel's own `_PALETTE` is the
+        fallback for a panel standing alone (its own tests), and it is no
+        longer a second answer that can disagree with Step0's.
+        """
+        state = self._display_state
+        if state is not None:
+            hexc = state.color(ch)
+            if hexc:
+                return hexc
         try:
             i = self.all_channels.index(ch)
         except ValueError:
@@ -343,6 +400,8 @@ class ConfigPanel(QWidget):
         self._items.clear()
 
         for ch in self.all_channels:
+            # `_default_color` asks the shared state first, so a rebuild takes
+            # the canonical colour rather than re-dealing this panel's palette.
             color = self._colors.get(ch) or self._default_color(ch)
             row = ChannelRow(ch,
                              weight=weights.get(ch, 0.0),
@@ -494,6 +553,15 @@ class ConfigPanel(QWidget):
         self.visibility_changed.emit(channel, bool(visible))
 
     def channel_color(self, channel):
+        """`channel`'s colour -- the shared answer when there is one.
+
+        The ROW is a mirror, not the store. It used to be asked first, which
+        meant a row built before the shared state existed kept answering with
+        the palette this panel dealt for itself.
+        """
+        state = self._display_state
+        if state is not None:
+            return state.color(channel)
         row = self._rows.get(channel)
         if row is not None:
             return row.color()
@@ -503,8 +571,19 @@ class ConfigPanel(QWidget):
         return {ch: self.channel_color(ch) for ch in self._rows}
 
     def set_channel_color(self, channel, color):
+        """Set `channel`'s colour. ONE write, wherever it came from.
+
+        The shared state is written first, because it is the answer every
+        other view reads; the row is repainted because it is this panel's
+        copy of it. `color_changed` still fires for the host, and it is safe
+        to fire: the state swallows a write that changes nothing, so an echo
+        cannot start a second lap.
+        """
         if not color:
             return
+        state = self._display_state
+        if state is not None:
+            state.set_color(channel, color, origin="step1-panel")
         self._colors[channel] = color
         row = self._rows.get(channel)
         if row is not None:
@@ -749,8 +828,13 @@ class ConfigPanel(QWidget):
         Defaults, deliberately: the nucleus is the only channel shown and the
         only one with weight; every marker starts at 0 and unticked.
         """
-        # A new dataset starts with its own colours: nothing is inherited from
-        # the slide that was open before.
+        # The colour MIRROR is emptied, not the answer. Re-dealing a palette
+        # here is precisely what made the same channel two colours: Step0 had
+        # already dealt one (and the user may already have changed it), and
+        # this line then produced a second for the same channel the moment
+        # Step1 opened. What follows `_rebuild_rows` takes them back from
+        # the shared state, so Step1 ADOPTS Step0's colours rather than
+        # inventing its own.
         self._colors = {}
         self._groups = {}
         self._group_channel_weights = {}
@@ -762,6 +846,11 @@ class ConfigPanel(QWidget):
                                          if str(ch) != nuc})
 
         self._rebuild_rows()
+        # The rows were just built; give them the canonical colours before
+        # anything is shown. Without this line Step1 opens on its own palette
+        # and the same channel is two colours -- which is the failure this
+        # round closed, and the mutation the tests check for.
+        self._resync_colors_from_state()
 
         self._nucleus_channel = str(nuc_ch or "")
 
@@ -892,6 +981,15 @@ class ConfigPanel(QWidget):
         back hidden even when it is the current one, and the host should redraw
         once at the end rather than once per channel.
         """
+        state = self._display_state
+        if state is not None and colors:
+            # ONE transaction: the shared store is replaced and every view --
+            # Step0's swatches, the Intensity histogram, both main viewers and
+            # the Tissue Preview -- comes back together. Restoring only this
+            # panel's rows would put the session's colours in Step1 and leave
+            # Step0 on the ones it dealt.
+            state.adopt_colors({str(ch): str(c) for ch, c in colors.items()
+                                if ch and c}, origin="step1-session")
         for ch, color in (colors or {}).items():
             ch = str(ch)
             if not color:

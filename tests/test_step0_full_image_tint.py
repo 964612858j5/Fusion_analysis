@@ -108,11 +108,18 @@ def test_a_grey_channel_is_still_possible(app):
 # ── 2. the page hands the compare colour over ────────────────────────────
 
 def test_the_page_sends_the_compare_panels_colour(app):
+    """Set through the one setter, because the one setter is what a click is.
+
+    `_channel_colors` used to be the store and a test could write it
+    directly; it is a MIRROR of Block01's shared state now, and writing a
+    mirror while asking the store is exactly the divergence this round
+    removed.
+    """
     page = _page(app)
-    page._channel_colors["CD3"] = (0.2, 0.4, 0.9)
+    page._apply_channel_color("CD3", (0.2, 0.4, 0.9))
 
     assert page._full_image_tint() == (0.2, 0.4, 0.9)
-    assert page._full_image_tint("CD3") == page._channel_colors["CD3"]
+    assert page._full_image_tint("CD3") == page._channel_color("CD3")
 
 
 def test_an_uncoloured_channel_falls_back_to_the_marker_colour(app):
@@ -125,7 +132,7 @@ def test_an_uncoloured_channel_falls_back_to_the_marker_colour(app):
 
 def test_showing_the_full_image_passes_the_tint(app):
     page = _page(app)
-    page._channel_colors["CD3"] = (1.0, 0.5, 0.0)
+    page._apply_channel_color("CD3", (1.0, 0.5, 0.0))
 
     page._show_full_image()
 

@@ -90,7 +90,9 @@ from ..widgets.channel_workbench import (
     _hex_to_rgb01 as _channel_hex_to_rgb01,
 )
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
-from ..block01_display import Block01DisplayServices, STEP0 as _CTX_STEP0
+from ..block01_display import (
+    Block01DisplayServices, STEP0 as _CTX_STEP0, _to_hex as _color_hex,
+)
 from .roi_context_model import RoiContextModel
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
@@ -6508,17 +6510,32 @@ class Step0Page(QWidget):
         """THE colour of `ch` as (r, g, b) floats 0-1 -- the one answer every
         view asks for.
 
-        Read from Block01's shared display state, not from a dictionary of
-        this page's: Step0, Step1's channel rows, the Intensity histogram,
-        the compare panels, the full image and the Tissue Preview all ask the
-        same object, so "the same channel is two colours in two steps" is not
-        a state this program can reach. `_channel_colors` is kept as a MIRROR
-        for the code (and the tests) that still read it directly; it is
-        written only by the fan-out below and never consulted for an answer.
+        Block01's shared display state decides it: Step0, Step1's channel
+        rows, the Intensity histogram, the compare panels, the full image and
+        the Tissue Preview all ask the same object, so "the same channel is
+        two colours in two steps" is not a state this program can reach.
+
+        The shared answer is "#rrggbb", because that is what a swatch, a
+        QColor and a saved session all are. This page's floats are kept and
+        returned WHEN THEY AGREE with it -- an 8-bit round trip turns the
+        (0.0, 1.0, 0.3) a caller chose into (0.0, 1.0, 0.302), and a tint
+        handed to the full image should be the number that was chosen, not a
+        re-derivation of it. Agreement is the condition, so this can return a
+        more precise value but never a different colour: the moment another
+        step picks something else, the hex wins and the stale float is
+        ignored.
         """
         if not ch:
             return getattr(self, "_marker_color", (0.0, 1.0, 0.3))
-        return self.display.state.color_rgb01(ch)
+        hexc = self.display.state.color(ch)
+        candidates = [self._channel_colors.get(ch)]
+        if ch == self.nucleus_channel:
+            candidates.append(getattr(self, "_nuc_color", None))
+        candidates.append(self._default_channel_color(ch))
+        for rgb in candidates:
+            if rgb is not None and _color_hex(rgb) == hexc:
+                return tuple(float(v) for v in rgb)
+        return _channel_hex_to_rgb01(hexc)
 
     def _channel_color_hex(self, ch):
         if not ch:
@@ -6576,23 +6593,39 @@ class Step0Page(QWidget):
             self._pick_channel_color(ch)
 
     def _apply_channel_color(self, ch, rgb, push_workbench=True):
-        """Record `rgb` for `ch` and push it to every view: the swatch (via
-        the channel model), the Channel Remap layer list, the compare panels
-        and the full image's tint.
+        """`ch` is this colour now. One write, ONE fan-out.
 
-        The RECORD is Block01's shared state; what follows is this page's
-        fan-out over its own widgets. Writing the shared state first is what
-        makes Step1's row, the Intensity histogram and the Tissue Preview
-        follow a Step0 pick without this page knowing they exist.
+        The write is Block01's shared state -- which is what makes Step1's
+        row, the Intensity histogram and the Tissue Preview follow a Step0
+        pick without this page knowing they exist. The fan-out over this
+        page's own widgets is `_fanout_channel_color`, and it runs exactly
+        once: the shared state calls it back when the colour CHANGED, and
+        this method calls it directly when it did not (a re-pick of the same
+        colour still has to reach a view that was rebuilt since).
+
+        It used to run unconditionally and again through the subscription,
+        so the compare panels were re-tinted twice per pick -- one lookup-table
+        swap too many, and, more to the point, a second answer arriving after
+        the first.
         """
-        self.display.state.set_color(ch, rgb, origin="step0")
         self._channel_colors[ch] = rgb
+        if not self.display.state.set_color(ch, rgb, origin="step0"):
+            self._fanout_channel_color(ch, push_workbench=push_workbench)
+
+    def _fanout_channel_color(self, ch, push_workbench=True):
+        """Give `ch`'s settled colour to every view this page owns.
+
+        The swatch (via the channel model), the Channel Remap layer list, the
+        compare panels and the full image's tint. Reads the colour rather
+        than taking it as an argument, so a fan-out cannot paint something
+        the shared state did not agree to.
+        """
+        rgb = self._channel_color(ch)
         if push_workbench:
             self._push_color_to_workbench(ch, rgb)
         model = self._display_model()
         if model is not None and model.get(ch) is not None:
-            model.set_color(ch, QtGui.QColor(
-                int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)).name())
+            model.set_color(ch, self._channel_color_hex(ch))
         # Invalidate this channel's cached composites, then redraw.
         for k in [k for k in self._preview_cache if k[0] == ch]:
             del self._preview_cache[k]
@@ -6616,11 +6649,8 @@ class Step0Page(QWidget):
             set_tint = getattr(getattr(stack, "controller", None), "set_tint", None)
             if set_tint is not None:
                 set_tint(self._full_image_tint(ch))
-        # ...and so does the Tissue Preview -- for whichever step is drawing
-        # it. A colour is shared state, so the request is made whether or not
-        # this page is the active context; the coordinator decides whose
-        # picture it changes.
-        self._queue_tissue_preview(kind="color", channel=ch)
+        # The Tissue Preview follows the colour too, and it is not asked
+        # here: the shared state's own write is the request.
 
     def _push_channel_tint_to_compare(self, ch):
         """Give the panels `ch`'s colour, tagged with the channel it is for.
@@ -6702,8 +6732,7 @@ class Step0Page(QWidget):
         if overlay is not None:
             overlay.set_tint(self._nuc_color)
         # The thumbnail's DAPI composite is in this colour too, when the
-        # layer is on.
-        self._queue_tissue_preview(kind="color", channel=nuc)
+        # layer is on -- through the shared state's own request.
 
     # ── the DAPI layer switch (the nucleus row's checkbox) ───────────────
     def _sync_nucleus_row_checkbox(self, on):
@@ -7494,22 +7523,22 @@ class Step0Page(QWidget):
 
         Mirror-only. The store is already the answer -- `_channel_color`
         reads it -- so nothing here may write back; what this does is repaint
-        the widgets that hold a copy of the colour (the swatch, the Channel
-        Remap layer list, the compare tints, the full image's table).
+        the widgets that hold a copy of the colour, which is the SAME fan-out
+        a pick made on this page performs. One path, wherever the pick was
+        made, so Step0 cannot end up with a different number of refreshes
+        than Step1 for the same act.
         """
         if not channel:
             return
-        rgb = _channel_hex_to_rgb01(hexc)
-        self._channel_colors[channel] = rgb
+        if _color_hex(self._channel_colors.get(channel)) != hexc:
+            # Only when the precise float this page holds is a DIFFERENT
+            # colour: a pick made here has already recorded the exact value
+            # the user chose, and overwriting it with the 8-bit round trip
+            # would lose it for no reason.
+            self._channel_colors[channel] = _channel_hex_to_rgb01(hexc)
         if channel == self.nucleus_channel:
-            self._nuc_color = rgb
-        self._push_color_to_workbench(channel, rgb)
-        model = self._display_model()
-        if model is not None and model.get(channel) is not None:
-            model.set_color(channel, hexc)
-        for k in [k for k in self._preview_cache if k[0] == channel]:
-            del self._preview_cache[k]
-        self._push_channel_tint_to_compare(channel)
+            self._nuc_color = self._channel_color(channel)
+        self._fanout_channel_color(channel)
 
     # ── display mapping: one per channel, shared by every view ─────────
 
@@ -7719,16 +7748,12 @@ class Step0Page(QWidget):
             if cid in (self.current_channel, self.nucleus_channel):
                 with perf_trace.span("step0.compare_setters", channel=cid):
                     self._refresh_preview_display(keep_zoom=True)
-                # The Tissue Preview is drawn with the same numbers. It is a
-                # whole-slide re-render rather than a levels swap, so it is a
-                # REQUEST on Block01's frame clock -- composed on a worker and
-                # published on the next ~33 ms slot, during the drag, not
-                # after it. Hooked HERE rather than on `params_changed`, so
-                # that the fallback path -- a page whose Channel Remap
-                # workbench has never been engaged, which is every page until
-                # the Intensity window is first opened -- reaches it too; that
-                # path calls this method directly and emits nothing.
-                self._queue_tissue_preview(kind="mapping", channel=cid)
+                # The Tissue Preview follows these numbers too, and it is
+                # NOT asked here: `note_mapping_changed` above told the shared
+                # display state, and a change to that state IS a frame request
+                # on Block01's clock. Which is what makes the guarantee global
+                # -- every step's Min/Max/Gamma arrives the same way, and no
+                # step can be the one that forgot to ask.
             explore_tab = getattr(self, "_explore_tab", None)
             stack = explore_tab.stack if explore_tab is not None else None
             if stack is None:

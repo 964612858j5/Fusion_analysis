@@ -320,6 +320,17 @@ class TissuePreviewCoordinator(QObject):
                        "dropped": 0, "gui_composed": 0, "coalesced": 0}
         self._last_published = None
 
+        # A CHANGE TO THE SHARED STATE IS A FRAME REQUEST, wherever it was
+        # made. This is the entry that makes the contract global rather than
+        # a habit each step has to remember: a colour or a display window
+        # settled in Step0's Intensity window, in Step1's channel row or by a
+        # restored session all arrive here, and the ACTIVE context is the one
+        # asked for the picture. Without it every step needs its own request
+        # next to its own redraw, and the step that forgets is the one whose
+        # Tissue Preview stops following -- which is the reported bug.
+        state.color_changed.connect(self._on_shared_color_changed)
+        state.mapping_changed.connect(self._on_shared_mapping_changed)
+
     # ── wiring ────────────────────────────────────────────────────────
     def attach_navigator(self, panels_source):
         """Register where a published frame is drawn.
@@ -397,6 +408,35 @@ class TissuePreviewCoordinator(QObject):
                         generation=self._generation, owner=self._active)
 
     # ── input ─────────────────────────────────────────────────────────
+    def _on_shared_color_changed(self, channel, _hexc):
+        if self._touches(channel):
+            self.request_frame(kind="color", channel=channel)
+
+    def _on_shared_mapping_changed(self, channel):
+        if self._touches(channel):
+            self.request_frame(kind="mapping", channel=channel)
+
+    def _touches(self, channel):
+        """Would a change to `channel` change the picture on screen?
+
+        A dataset's mapping fan-out names every channel it touches, and at 30
+        FPS a frame recomposed for a channel nothing is drawing is pure cost.
+        The last published frame says which channels are in the picture; when
+        nothing has been published yet, or the frame is pinned, the answer is
+        yes, because "not in the last frame" is then not evidence of anything.
+        A channel that has just BECOME part of the picture arrives through a
+        visibility, mode or context request instead, so it is not missed.
+        """
+        if not channel:
+            return True
+        published = self._last_published
+        if not published:
+            return True
+        channels = published.get("channels")
+        if not channels:
+            return True
+        return channel in channels
+
     def request_frame(self, kind="", channel="", owner=None, delay_ms=None):
         """THE entry point for every state change that changes the picture.
 

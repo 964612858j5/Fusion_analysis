@@ -526,7 +526,20 @@ def test_the_display_state_survives_a_session_round_trip(app):
         w.close()
 
 
-def test_a_new_dataset_does_not_inherit_the_previous_slide_colours(app):
+def test_a_new_dataset_keeps_the_one_colour_and_resets_the_weights(app):
+    """`load_panel` re-deals the WEIGHTS, never the colours.
+
+    It used to re-deal both, from this panel's own palette -- and that is how
+    the same channel came to be two colours. Step0 has always treated a
+    colour as a per-channel-name display preference that survives a reload
+    (`Step0Page._reset_dataset_view_state` says so in as many words, and
+    deliberately does not clear it); Step1 cleared and re-dealt, so the moment
+    a dataset was opened the two steps disagreed about CD3.
+
+    The product decision is unchanged -- the colour follows the channel name.
+    What changed is that there is now ONE store holding it, so both steps
+    give the same answer whether or not it is inherited.
+    """
     w = _window(app)
     try:
         w.config.set_channel_color("CD3", "#123456")
@@ -534,8 +547,13 @@ def test_a_new_dataset_does_not_inherit_the_previous_slide_colours(app):
 
         w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
 
-        assert w.config.channel_color("CD3") != "#123456"
+        assert w.config.channel_color("CD3") == "#123456"
+        assert w._display.state.color("CD3") == "#123456"
+        assert w._step0._channel_color_hex("CD3") == "#123456"
+        # The weights and the ticks ARE a per-dataset answer, and they are
+        # still reset: only DAPI comes back.
         assert w.config.visible_channels() == ["DAPI"]
+        assert w.config.channel_weight("CD3") == 0.0
     finally:
         w.close()
 

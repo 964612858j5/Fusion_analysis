@@ -4181,16 +4181,14 @@ class Step0Page(QWidget):
         return out
 
     def _published_geometry(self, step0_dir):
-        """(roi bboxes, patch bboxes) as they stand in the published files."""
-        def _read(name):
-            path = os.path.join(step0_dir, name)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        return (self._geometry_bboxes(_read("roi_config.json")),
-                self._geometry_bboxes(_read("patch_config.json")))
+        """(roi bboxes, patch bboxes) as the published MANIFEST describes them.
+
+        One implementation, in `step0_handoff`: patch geometry is published
+        under a revision-named file now, and reading `patch_config.json` by
+        name would answer with the compatibility copy instead of with what the
+        current manifest points at.
+        """
+        return step0_handoff.published_geometry(step0_dir)
 
     # ── display mapping: draft in memory, committed on Save ──────────────────
     def set_intensity_editing_enabled(self, enabled):
@@ -4546,6 +4544,13 @@ class Step0Page(QWidget):
             "revision": int(self._geometry_revision),
             "dataset_gen": int(self._dataset_gen),
             "step0_dir": step0_dir,
+            # Carried so an outcome that never got as far as READING the
+            # manifest -- a write that raised -- can still be announced
+            # against the handoff it was for; a consumer binds by this path
+            # and ignores an invalidation it cannot match.
+            "step0_manifest_path": (os.path.abspath(
+                os.path.join(step0_dir, "step0_roi_result.json"))
+                if step0_dir else ""),
             "rois": rois,
             "patches": patches,
             # In MEMORY, so the callback answers it without a file: a new
@@ -4569,6 +4574,34 @@ class Step0Page(QWidget):
         scheduler = getattr(self, "_preload", None)
         if scheduler is not None:
             scheduler.stop()
+
+    def geometry_ready_for_consumers(self):
+        """May a step downstream read the published handoff right now?
+
+        True only when the file on disk describes the geometry THIS page is
+        showing: the current dataset generation, and a revision at least as
+        new as the last edit submitted. Answered from the worker's own state
+        rather than from this page's, because the page learns the outcome
+        through a QUEUED signal -- and between the worker finishing and that
+        signal being delivered there is a window in which "not busy" is true
+        and the handoff is still the previous geometry, or was never written
+        at all.
+
+        A failed write, a refused ROI change and "no handoff published yet"
+        are all refusals: the answer is not "wait", it is "this file is not
+        the geometry you are looking at".
+        """
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is None:
+            return True                 # nothing was ever edited here
+        return bool(worker.consumable(int(self._dataset_gen),
+                                      int(self._geometry_revision)))
+
+    def geometry_blocked_reason(self):
+        """Why the handoff cannot be consumed, or None."""
+        worker = getattr(self, "_geometry_persist_worker", None)
+        blocked = worker.blocked() if worker is not None else None
+        return blocked[1] if blocked else None
 
     def geometry_persist_state(self):
         """"idle", "saving", "published", "failed" or "staged".
@@ -4652,11 +4685,9 @@ class Step0Page(QWidget):
     def _on_geometry_persist_published(self, outcome):
         """The worker put a new manifest on disk. Announce THAT, and only it."""
         self._geometry_persist_state = "published"
-        result = outcome.get("result") or {}
-        if result:
-            # The GUI-visible half of the write, on this thread: the worker
-            # produced the report, it does not touch a label.
-            self._apply_handoff_result(result)
+        # Nothing of the corrected output changed -- a patch edit does not
+        # touch it and no longer rescans it -- so there is no report to apply
+        # here, only the status and the announcement.
         self._set_geometry_status(
             "Patch geometry saved to the Step0 handoff.")
         self.geometry_committed.emit({
@@ -4678,6 +4709,9 @@ class Step0Page(QWidget):
         IS one.
         """
         reason = str(outcome.get("outcome") or outcome.get("reason") or "")
+        manifest_path = str(outcome.get("step0_manifest_path")
+                            or (outcome.get("task") or {}).get(
+                                "step0_manifest_path") or "")
         if reason in ("no_published_handoff", "unchanged", "superseded",
                       "stale_dataset", "stale_revision"):
             self._geometry_persist_state = "staged"
@@ -4702,7 +4736,7 @@ class Step0Page(QWidget):
                        "locked until Step0 Save succeeds.")
         self._set_geometry_status(f"⚠ {message}")
         self.handoff_invalidated.emit({
-            "step0_manifest_path": outcome.get("step0_manifest_path", ""),
+            "step0_manifest_path": manifest_path,
             "geometry_revision": outcome.get("revision", 0),
             "reason": reason,
             "message": message,

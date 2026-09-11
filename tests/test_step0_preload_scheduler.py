@@ -187,6 +187,12 @@ def test_the_backlog_is_bounded_and_the_drops_are_counted(app):
 
 
 def test_no_more_readers_than_the_limit(app):
+    """Two readers is two reads, whatever is asked for.
+
+    Proved with FOREGROUND work: speculative reads can never reach the cap on
+    their own, because one reader is reserved and none of them starts while
+    the current patch is waiting (both below).
+    """
     started = threading.Semaphore(0)
     release = threading.Event()
     live = {"now": 0, "max": 0}
@@ -205,7 +211,7 @@ def test_no_more_readers_than_the_limit(app):
     sched = _scheduler(app, read, max_readers=2)
     try:
         for i in range(6):
-            sched.request((i, i + 4, 0, 4), "CH%d" % i, priority=BACKGROUND)
+            sched.request((i, i + 4, 0, 4), "CH%d" % i, priority=FOREGROUND)
         assert started.acquire(timeout=5.0)
         assert started.acquire(timeout=5.0)
         release.set()
@@ -214,6 +220,80 @@ def test_no_more_readers_than_the_limit(app):
         assert sched.stats()["max_readers"] == 2
     finally:
         release.set()
+        sched.stop()
+
+
+def test_one_reader_is_always_left_for_the_current_patch(app):
+    """The freeze this rule removes: both readers inside speculative reads
+    when the user finishes a new patch. A read cannot be cancelled once it is
+    in the loader, so the next patch would wait for one to finish."""
+    gate = threading.Event()
+    reads = _Reads(hold={"BG0": gate, "BG1": gate, "URGENT": None})
+    sched = _scheduler(app, reads, max_readers=2)
+    try:
+        sched.request((0, 8, 0, 8), "BG0", priority=BACKGROUND)
+        sched.request((8, 16, 0, 8), "BG1", priority=BACKGROUND)
+        assert reads.started.wait(5.0)
+        import time
+        time.sleep(0.05)                  # give a second reader its chance
+        stats = sched.stats()
+        assert stats["background_in_flight"] == 1, stats
+
+        # The current patch arrives and is read AT ONCE, by the reserved
+        # reader, while the speculative one is still stuck.
+        sched.request(P2, "URGENT", priority=FOREGROUND)
+        deadline = time.monotonic() + 5.0
+        while (sched.resident(P2, "URGENT") is None
+               and time.monotonic() < deadline):
+            time.sleep(0.005)
+        assert sched.resident(P2, "URGENT") is not None, (
+            "the current patch waited for a speculative read: "
+            f"{sched.stats()}")
+        assert reads.channels().count("BG1") == 0
+    finally:
+        gate.set()
+        sched.stop()
+
+
+def test_nothing_speculative_starts_while_the_current_patch_is_waiting(app):
+    """"Foreground first" has to mean first in TIME. A background read that
+    starts a microsecond before the foreground request is taken is a
+    foreground request waiting on an uncancellable read."""
+    gate = threading.Event()
+    reads = _Reads(hold={"HELD": gate})
+    sched = _scheduler(app, reads, max_readers=2)
+    try:
+        sched.request(P1, "HELD", priority=FOREGROUND)
+        assert reads.started.wait(5.0)
+        for i in range(4):
+            sched.request((i, i + 8, 0, 8), "BG%d" % i, priority=BACKGROUND)
+        import time
+        time.sleep(0.10)
+        assert reads.channels() == ["HELD"], (
+            f"a speculative read started while the patch was waiting: "
+            f"{reads.channels()}")
+        stats = sched.stats()
+        assert stats["background_in_flight"] == 0, stats
+        gate.set()
+        assert sched.drain(15_000)
+        assert len(reads.channels()) == 5
+    finally:
+        gate.set()
+        sched.stop()
+
+
+def test_an_array_bigger_than_the_whole_budget_is_not_cached(app):
+    """The eviction loop keeps at least one entry, so a single oversized
+    array would sit above the declared ceiling for good."""
+    reads = _Reads(size=256)              # 256x256 float32 = 256 KiB
+    sched = _scheduler(app, reads, max_bytes=64 * 1024)
+    try:
+        sched.request(P1, "HUGE", priority=FOREGROUND)
+        assert sched.drain()
+        assert sched.resident(P1, "HUGE") is None
+        assert sched.nbytes() <= 64 * 1024
+        assert sched.stats()["oversized"] == 1
+    finally:
         sched.stop()
 
 

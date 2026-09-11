@@ -228,7 +228,7 @@ def test_a_failed_patch_write_stages_the_edit_and_locks_step1(app, tmp_path, mon
             raise RuntimeError("disk is full")
 
         from block01.core import step0_handoff
-        monkeypatch.setattr(step0_handoff, "write_handoff", _fail)
+        monkeypatch.setattr(step0_handoff, "commit_geometry_only", _fail)
         ov = w._step0._tissue_navigator_popup.overview
         ov._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         ov.patches_changed.emit(ov._patch_coords())

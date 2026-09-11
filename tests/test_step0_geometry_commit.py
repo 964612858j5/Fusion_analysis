@@ -115,7 +115,16 @@ def _settle(page, timeout=15.0):
 
 
 def _patch_bboxes(step0_dir):
-    return [p["bbox_fullres"] for p in _published(step0_dir, "patch_config.json")]
+    """The published patches, through the MANIFEST'S own path.
+
+    Not through `patch_config.json`: a geometry revision is published as a
+    file named by its revision and the fixed name is refreshed afterwards as a
+    copy, so reading it by name would answer with the copy rather than with
+    what the current handoff points at.
+    """
+    manifest = _published(step0_dir, "step0_roi_result.json")
+    with open(manifest["patch_config_path"], "r", encoding="utf-8") as f:
+        return [p["bbox_fullres"] for p in json.load(f)]
 
 
 def test_an_added_patch_reaches_patch_config_and_the_manifest(app, tmp_path):
@@ -244,7 +253,7 @@ def test_a_failed_write_publishes_no_manifest_and_reports_the_failure(
             raise RuntimeError("disk is full")
 
         from block01.core import step0_handoff
-        monkeypatch.setattr(step0_handoff, "write_handoff", _fail)
+        monkeypatch.setattr(step0_handoff, "commit_geometry_only", _fail)
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         assert page._persist_geometry_edit() is True
         assert _settle(page) == "failed"

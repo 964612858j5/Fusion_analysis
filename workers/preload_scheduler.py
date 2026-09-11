@@ -63,7 +63,10 @@ class PreloadScheduler(QObject):
         self._fg = collections.deque()
         self._bg = collections.deque()
         self._queued = set()
-        self._in_flight = set()
+        # key -> priority. The PRIORITY matters after the read starts: a
+        # reader is kept free for the current patch, so how many speculative
+        # reads are running has to be known, not inferred.
+        self._in_flight = {}
         self._store = collections.OrderedDict()
         self._loader = None
         self._gen = 0
@@ -74,7 +77,7 @@ class PreloadScheduler(QObject):
         self.max_bytes = int(max_bytes)
         self._stats = {"hits": 0, "misses": 0, "reads": 0, "dropped": 0,
                        "stale": 0, "failed": 0, "evicted": 0,
-                       "coalesced": 0}
+                       "coalesced": 0, "oversized": 0}
 
     # ── identity ────────────────────────────────────────────────────
     def set_source(self, loader, dataset_gen):
@@ -133,6 +136,15 @@ class PreloadScheduler(QObject):
                                       downsample), arr)
 
     def _put_locked(self, key, arr):
+        nbytes = int(getattr(arr, "nbytes", 0) or 0)
+        if nbytes > self.max_bytes:
+            # A single array larger than the whole budget cannot be held
+            # without breaking the budget: the eviction loop below stops at
+            # one entry, so keeping it would mean the store is permanently
+            # over its declared ceiling. It is returned to the caller and
+            # simply not cached.
+            self._stats["oversized"] += 1
+            return
         self._store.pop(key, None)
         self._store[key] = arr
         total = sum(int(getattr(a, "nbytes", 0) or 0)
@@ -220,6 +232,12 @@ class PreloadScheduler(QObject):
             out.update({"foreground_pending": len(self._fg),
                         "background_pending": len(self._bg),
                         "in_flight": len(self._in_flight),
+                        "foreground_in_flight": sum(
+                            1 for p in self._in_flight.values()
+                            if p == FOREGROUND),
+                        "background_in_flight": sum(
+                            1 for p in self._in_flight.values()
+                            if p == BACKGROUND),
                         "resident": len(self._store),
                         "max_readers": self.max_readers,
                         "dataset_gen": self._gen})
@@ -284,22 +302,54 @@ class PreloadScheduler(QObject):
                 thread.join(max(0.0, float(timeout_ms) / 1000.0))
         return not self.isRunning()
 
+    def _background_allowed_locked(self):
+        """Whether a reader may start a SPECULATIVE read right now.
+
+        Two rules, and both are about the read that cannot be cancelled once
+        it has begun:
+
+        * a reader is RESERVED for the current patch. With every reader inside
+          a background read, a foreground request that arrives a millisecond
+          later waits for a whole speculative read to finish -- which is the
+          freeze, moved rather than removed.
+        * nothing speculative starts while foreground work is queued or still
+          running. "Foreground first" has to mean first in TIME, not merely
+          first in the queue order.
+        """
+        if self._fg:
+            return False
+        if any(priority == FOREGROUND
+               for priority in self._in_flight.values()):
+            return False
+        running_bg = sum(1 for priority in self._in_flight.values()
+                         if priority == BACKGROUND)
+        # One reader stays free. With a single reader there is nobody to
+        # reserve for, so it does the background work itself.
+        return running_bg < max(1, self.max_readers - 1)
+
+    def _take_locked(self, queue, priority):
+        while queue:
+            key = queue.popleft()
+            self._queued.discard(key)
+            if key[0] != self._gen:
+                self._stats["stale"] += 1
+                continue
+            if key in self._store or key in self._in_flight:
+                continue
+            self._in_flight[key] = priority
+            return key
+        return None
+
     def _next_locked(self):
         # Foreground first, always: a speculative read may not go in front of
         # the patch the user is looking at, not even one that was queued
         # earlier.
-        for queue in (self._fg, self._bg):
-            while queue:
-                key = queue.popleft()
-                self._queued.discard(key)
-                if key[0] != self._gen:
-                    self._stats["stale"] += 1
-                    continue
-                if key in self._store or key in self._in_flight:
-                    continue
-                self._in_flight.add(key)
-                return key
-        return None
+        key = self._take_locked(self._fg, FOREGROUND)
+        if key is not None:
+            return key
+        if not self._background_allowed_locked():
+            return None
+        return self._take_locked(self._bg, BACKGROUND)
 
     def _run(self):
         while True:
@@ -328,7 +378,7 @@ class PreloadScheduler(QObject):
             except Exception as exc:                        # noqa: BLE001
                 error = str(exc)
             with self._lock:
-                self._in_flight.discard(key)
+                self._in_flight.pop(key, None)
                 if error:
                     self._stats["failed"] += 1
                 elif key[0] != self._gen:
@@ -340,6 +390,10 @@ class PreloadScheduler(QObject):
                     self._stats["reads"] += 1
                     self._put_locked(key, arr)
                 stopping = self._stopping
+            with self._wake:
+                # A finished read can be what lets a reserved reader take
+                # background work again, and readers wait on this condition.
+                self._wake.notify_all()
             if arr is not None and not stopping and key[0] == gen:
                 self.loaded.emit({"dataset_gen": key[0], "bbox": key[1],
                                   "channel": key[2], "normalize": key[3],

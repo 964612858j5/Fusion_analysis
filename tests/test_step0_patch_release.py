@@ -121,6 +121,42 @@ def _release_patch(page, coords):
     page.overview.patches_changed.emit(page.overview._patch_coords())
 
 
+def _bind_page(page, tmp_path, patches=((0, 16, 0, 16),)):
+    """Give an existing page (a MainWindow's own Step0) a published handoff."""
+    raw = tmp_path / "raw.ome.tif"
+    raw.write_bytes(b"x" * 16)
+    page.loader = _Loader(raw)
+    page.ome_path = str(raw)
+    page.output_dir = str(tmp_path)
+    page.panel_csv_path = ""
+    page.panel_groups = {}
+    page.nucleus_channel = "DAPI"
+    page._channel_order = ["DAPI", "CD3", "CD8"]
+    page.overview.loader = page.loader
+    page.overview.full_h, page.overview.full_w = 128, 128
+    page.overview.full_wsi_mode = False
+    page.overview._rois = [_roi()]
+    page.overview._patches = [{"roi_idx": 0, "coords": tuple(p)}
+                              for p in patches]
+    page.patches = [tuple(p) for p in patches]
+    step0_dir = tmp_path / "roi1" / "step0"
+    step0_dir.mkdir(parents=True, exist_ok=True)
+    page._roi_context = {
+        "roi_id": "roi1",
+        "roi_dir": str(tmp_path / "roi1"),
+        "project_dir": str(tmp_path),
+        "step_dirs": {"step0": str(step0_dir),
+                      "step1": str(tmp_path / "roi1" / "step1"),
+                      "step2": str(tmp_path / "roi1" / "step2")},
+    }
+    page._roi_context_sig = page._roi_context_signature(page._standard_rois())
+    page._write_step0_handoff(
+        {"method_params": {"tophat_radius": 25, "cucim_sigma": 30},
+         "channel_decisions": {}},
+        str(step0_dir / "corrected_channels.zarr"))
+    return str(step0_dir)
+
+
 def _settle(page, timeout=20.0):
     deadline = time.monotonic() + timeout
     worker = getattr(page, "_geometry_persist_worker", None)
@@ -154,14 +190,14 @@ def test_the_release_callback_returns_while_the_write_is_blocked(
     page, step0_dir = _page(app, tmp_path)
     inside = threading.Event()
     release = threading.Event()
-    real = step0_handoff.write_handoff
+    real = step0_handoff.commit_geometry_only
 
-    def blocking(spec, **kw):
+    def blocking(task, **kw):
         inside.set()
         assert release.wait(10.0)
-        return real(spec, **kw)
+        return real(task, **kw)
 
-    monkeypatch.setattr(step0_handoff, "write_handoff", blocking)
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
     try:
         page.overview._patches.append({"roi_idx": 0,
                                        "coords": (16, 32, 16, 32)})
@@ -270,16 +306,16 @@ def test_only_the_newest_of_a_burst_is_written(app, tmp_path, monkeypatch):
     page, step0_dir = _page(app, tmp_path)
     inside = threading.Event()
     release = threading.Event()
-    real = step0_handoff.write_handoff
+    real = step0_handoff.commit_geometry_only
     writes = []
 
-    def blocking(spec, **kw):
-        writes.append(len(spec["patches"]))
+    def blocking(task, **kw):
+        writes.append(len(task["patches"]))
         inside.set()
         assert release.wait(10.0)
-        return real(spec, **kw)
+        return real(task, **kw)
 
-    monkeypatch.setattr(step0_handoff, "write_handoff", blocking)
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
     try:
         # The first edit occupies the worker...
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
@@ -317,23 +353,23 @@ def test_a_task_replaced_mid_write_publishes_nothing(app, tmp_path,
     before = _patch_bboxes(step0_dir)
     at_publish = threading.Event()
     go = threading.Event()
-    real = step0_handoff.write_handoff
+    real = step0_handoff.commit_geometry_only
     outcomes = []
 
-    def blocking(spec, superseded=None, **kw):
+    def blocking(task, superseded=None, **kw):
         def gate(phase=None):
             if phase != "publish":
                 # Every earlier check passes: this test is about the LAST
-                # one, with every artifact already staged and the manifest
-                # written. Holding at an earlier phase would pass even if the
-                # final check were deleted.
+                # one, with the revision file already written and the manifest
+                # already fsynced. Holding at an earlier phase would pass even
+                # if the final check were deleted.
                 return False
             at_publish.set()
             go.wait(10.0)
             return superseded(phase) if superseded else False
-        return real(spec, superseded=gate, **kw)
+        return real(task, superseded=gate, **kw)
 
-    monkeypatch.setattr(step0_handoff, "write_handoff", blocking)
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
     page._geometry_persist().skipped.connect(
         lambda o: outcomes.append(o.get("outcome")))
     try:
@@ -360,25 +396,143 @@ def test_a_task_replaced_mid_write_publishes_nothing(app, tmp_path,
         page.deleteLater()
 
 
-def test_each_revision_stages_under_its_own_temporary_name(app, tmp_path,
-                                                           monkeypatch):
+def test_each_revision_is_published_as_its_own_immutable_file(app, tmp_path):
+    """Publication is ONE atomic replace, of the manifest.
+
+    A fixed `patch_config.json` cannot give that: while it is being replaced
+    the manifest on disk still names it, so a reader following the published
+    manifest would see the new patches under the old manifest. Each revision
+    gets its own file, which no manifest points at until the manifest that
+    names it is itself replaced.
+    """
     page, step0_dir = _page(app, tmp_path)
-    tags = []
-    real = step0_handoff.write_handoff
-
-    def watch(spec, superseded=None, tag="0", **kw):
-        tags.append(tag)
-        return real(spec, superseded=superseded, tag=tag, **kw)
-
-    monkeypatch.setattr(step0_handoff, "write_handoff", watch)
     try:
+        seen = []
         for i in range(1, 4):
-            page.overview._patches.append(
-                {"roi_idx": 0, "coords": (16 * i, 16 * i + 16, 0, 16)})
-            page._persist_geometry_edit()
-            assert _settle(page) in ("published", "staged")
-        assert len(set(tags)) == len(tags), tags
-        assert all(t.startswith("rev") for t in tags), tags
+            _release_patch(page, (16 * i, 16 * i + 16, 0, 16))
+            assert _settle(page) == "published"
+            manifest = _manifest(step0_dir)
+            path = manifest["patch_config_path"]
+            assert os.path.basename(path) == f"patch_config.rev{i}.json", path
+            assert manifest["geometry_revision"] == i
+            with open(path, "r", encoding="utf-8") as f:
+                assert len(json.load(f)) == i + 1
+            seen.append(path)
+
+        # The superseded revisions' files are gone; nothing points at them.
+        assert [p for p in seen[:-1] if os.path.exists(p)] == []
+        # And the fixed name is kept in step as a copy, for readers that still
+        # open it by name -- written AFTER the manifest, never before.
+        assert _patch_bboxes(step0_dir) == [
+            p["bbox_fullres"] for p in json.load(open(seen[-1]))]
+    finally:
+        page.deleteLater()
+
+
+def test_a_patch_edit_does_not_touch_the_corrected_zarr_at_all(app, tmp_path):
+    """A patch is not a correction. The previous version rewrote the corrected
+    zarr's attributes and rescanned it for a validity report -- before the last
+    supersede check, so a task that published nothing had still written durable
+    state, and a scan of a real corrected output is not free either."""
+    page, step0_dir = _page(app, tmp_path)
+    zarr_path = os.path.join(step0_dir, "corrected_channels.zarr")
+    try:
+        before = {}
+        for root, _dirs, files in os.walk(zarr_path):
+            for name in files:
+                full = os.path.join(root, name)
+                before[full] = os.stat(full).st_mtime_ns
+
+        _release_patch(page, (16, 32, 16, 32))
+        assert _settle(page) == "published"
+
+        after = {}
+        for root, _dirs, files in os.walk(zarr_path):
+            for name in files:
+                full = os.path.join(root, name)
+                after[full] = os.stat(full).st_mtime_ns
+        assert after == before, "the patch edit wrote into the corrected zarr"
+    finally:
+        page.deleteLater()
+
+
+def test_a_superseded_task_leaves_nothing_of_itself_on_disk(app, tmp_path,
+                                                            monkeypatch):
+    """"It has not written anything durable" has to be literally true."""
+    page, step0_dir = _page(app, tmp_path)
+    at_publish = threading.Event()
+    go = threading.Event()
+    real = step0_handoff.commit_geometry_only
+    before = sorted(os.listdir(step0_dir))
+
+    def blocking(task, superseded=None, **kw):
+        def gate(phase=None):
+            if phase != "publish":
+                return False
+            at_publish.set()
+            go.wait(10.0)
+            return True                     # replaced, always
+        return real(task, superseded=gate, **kw)
+
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
+    try:
+        _release_patch(page, (16, 32, 16, 32))
+        assert at_publish.wait(5.0)
+        go.set()
+        _settle(page)
+        assert sorted(os.listdir(step0_dir)) == before, (
+            "a task that published nothing left files behind")
+        assert _manifest(step0_dir)["n_patches"] == 1
+    finally:
+        go.set()
+        _settle(page)
+        page.deleteLater()
+
+
+def test_the_published_geometry_is_read_through_the_manifest(app, tmp_path):
+    """Which file IS the published geometry is the manifest's answer.
+
+    Proved by making the two disagree: the compatibility copy is overwritten
+    with nonsense, and the page must still see the real geometry -- and must
+    still recognise an unchanged edit as unchanged, which is the comparison
+    that decides whether anything is published at all.
+    """
+    page, step0_dir = _page(app, tmp_path)
+    try:
+        _release_patch(page, (16, 32, 16, 32))
+        assert _settle(page) == "published"
+
+        with open(os.path.join(step0_dir, "patch_config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump([{"name": "P9", "bbox_fullres": [1, 2, 3, 4]}], f)
+
+        rois, patches = step0_handoff.published_geometry(step0_dir)
+        assert patches == [[0, 16, 0, 16], [16, 32, 16, 32]], patches
+
+        # The same geometry again: recognised as unchanged, which it only can
+        # be if the comparison followed the manifest.
+        page.overview.patches_changed.emit(page.overview._patch_coords())
+        assert _settle(page) == "staged"
+        assert page.geometry_persist_stats()["published"] == 1
+    finally:
+        page.deleteLater()
+
+
+def test_a_reader_following_the_manifest_never_sees_a_torn_geometry(
+        app, tmp_path):
+    """Read the handoff exactly as Step1 does -- manifest first, then the file
+    it names -- after every edit, and the two always agree."""
+    page, step0_dir = _page(app, tmp_path)
+    try:
+        for i in range(1, 5):
+            _release_patch(page, (16 * i, 16 * i + 16, 0, 16))
+            assert _settle(page) == "published"
+            manifest = _manifest(step0_dir)
+            with open(manifest["patch_config_path"], "r",
+                      encoding="utf-8") as f:
+                patches = json.load(f)
+            assert manifest["n_patches"] == len(patches) == i + 1
+            assert manifest["geometry_revision"] == i
     finally:
         page.deleteLater()
 
@@ -417,16 +571,16 @@ def test_a_dataset_switch_kills_the_queued_geometry(app, tmp_path,
     page, step0_dir = _page(app, tmp_path)
     inside = threading.Event()
     release = threading.Event()
-    real = step0_handoff.write_handoff
+    real = step0_handoff.commit_geometry_only
     written = []
 
-    def blocking(spec, **kw):
-        written.append(len(spec["patches"]))
+    def blocking(task, **kw):
+        written.append(len(task["patches"]))
         inside.set()
         assert release.wait(10.0)
-        return real(spec, **kw)
+        return real(task, **kw)
 
-    monkeypatch.setattr(step0_handoff, "write_handoff", blocking)
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
     try:
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         page._persist_geometry_edit()
@@ -562,18 +716,92 @@ def test_step1_does_not_open_on_geometry_that_is_not_on_disk_yet(app):
 
     w = MainWindow()
     try:
-        w._step0.geometry_persist_busy = lambda: True
+        w._step0.geometry_ready_for_consumers = lambda: False
         w._step1_context_ready = True
         before = w._stack.currentIndex()
         w._go_to_step1()
         assert w._stack.currentIndex() == before, "Step1 opened anyway"
         assert "Saving the patch geometry" in w.prev_status.text()
 
-        w._step0.geometry_persist_busy = lambda: False
+        w._step0.geometry_ready_for_consumers = lambda: True
         w._go_to_step1()
         assert w._stack.currentIndex() == 1
     finally:
         w.close()
+
+
+def test_step1_is_refused_before_the_page_hears_that_the_write_failed(
+        app, tmp_path, monkeypatch):
+    """The window between the worker finishing and the page being told.
+
+    The outcome reaches the page through a QUEUED signal. If the gate asked
+    "is the worker busy?", then in the moment after the worker finished and
+    before that signal is delivered the answer would be "no" -- and Step1
+    would open on a handoff that the write FAILED to update.
+
+    So this test deliberately never lets the event loop run: the worker is
+    driven to completion with `wait()`, and the page's handler has provably
+    not run (its state is still "saving").
+    """
+    from block01.ui.main_window import MainWindow
+
+    w = MainWindow()
+    page = w._step0
+    _bind_page(page, tmp_path)
+    w._step1_context_ready = True
+    w.step0_output = {"step0_manifest_path": os.path.join(
+        page._roi_context["step_dirs"]["step0"], "step0_roi_result.json")}
+    entered = []
+    w._load_step0_roi_result = lambda **_kw: entered.append(True) or True
+    try:
+        def _fail(*_a, **_k):
+            raise RuntimeError("disk is full")
+
+        monkeypatch.setattr(step0_handoff, "commit_geometry_only", _fail)
+        page.overview._patches.append({"roi_idx": 0,
+                                       "coords": (16, 32, 16, 32)})
+        assert page._persist_geometry_edit() is True
+        worker = page._geometry_persist_worker
+        assert worker.wait_idle()           # finished; nothing delivered yet
+        assert worker.is_busy() is False
+        assert page.geometry_persist_state() == "saving", (
+            "the page was told; this test proves nothing")
+
+        w._go_to_step1()
+        assert w._stack.currentIndex() != 1, (
+            "Step1 opened on a handoff whose write had failed")
+        assert page.geometry_ready_for_consumers() is False
+        assert page.geometry_blocked_reason() in ("failed", "write_failed")
+
+        # And the successful case in the same window is safe to enter.
+        monkeypatch.undo()
+        page.overview._patches.append({"roi_idx": 0, "coords": (32, 48, 0, 16)})
+        page._persist_geometry_edit()
+        assert worker.wait_idle()
+        assert page.geometry_persist_state() == "saving"   # still not told
+        assert page.geometry_ready_for_consumers() is True
+        w._go_to_step1()
+        assert w._stack.currentIndex() == 1
+    finally:
+        page.stop_background_jobs()
+        w.close()
+
+
+def test_an_unchanged_geometry_counts_as_confirmed_not_as_pending(
+        app, tmp_path):
+    """Nothing to write is not the same as "not written yet": the file on
+    disk already describes this geometry, so a consumer may read it."""
+    page, step0_dir = _page(app, tmp_path)
+    try:
+        page.overview.patches_changed.emit(page.overview._patch_coords())
+        worker = page._geometry_persist_worker
+        assert worker.wait_idle()
+        assert page.geometry_ready_for_consumers() is True
+        assert page.geometry_blocked_reason() is None
+        assert _settle(page) == "staged"
+        assert page.geometry_ready_for_consumers() is True
+    finally:
+        page.deleteLater()
 
 
 def test_the_page_reports_the_revision_that_is_actually_on_disk(
@@ -581,14 +809,14 @@ def test_the_page_reports_the_revision_that_is_actually_on_disk(
     page, step0_dir = _page(app, tmp_path)
     inside = threading.Event()
     release = threading.Event()
-    real = step0_handoff.write_handoff
+    real = step0_handoff.commit_geometry_only
 
-    def blocking(spec, **kw):
+    def blocking(task, **kw):
         inside.set()
         assert release.wait(10.0)
-        return real(spec, **kw)
+        return real(task, **kw)
 
-    monkeypatch.setattr(step0_handoff, "write_handoff", blocking)
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
     try:
         page.overview._patches.append({"roi_idx": 0, "coords": (16, 32, 16, 32)})
         page._persist_geometry_edit()

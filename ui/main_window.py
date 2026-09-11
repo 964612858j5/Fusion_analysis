@@ -2508,10 +2508,17 @@ class MainWindow(QMainWindow):
         # raises on a missing attribute rather than returning the default,
         # and this method is driven that way by the handoff-contract tests.
         page = self.__dict__.get("_step0")
-        probe = getattr(page, "geometry_persist_busy", None)
-        busy = bool(probe is not None and probe())
+        ready = getattr(page, "geometry_ready_for_consumers", None)
+        # NOT "is the worker busy": the page is told the outcome through a
+        # queued signal, so there is a window in which the worker has finished
+        # and nothing has been announced yet. The question is whether the file
+        # on disk describes the geometry on screen -- which is false while a
+        # write is in flight AND after one that failed.
+        waiting = bool(ready is not None and not ready())
+        blocked = getattr(page, "geometry_blocked_reason", None)
+        blocked = blocked() if blocked is not None else None
         waits = int(self.__dict__.get("_step1_entry_waits") or 0)
-        if busy and waits < 40:
+        if waiting and blocked is None and waits < 40:
             # Bounded: 40 x 150 ms. A write that takes longer than six
             # seconds is reported, not waited on forever -- and it is still
             # refused, because the file Step1 would read is the old one.
@@ -2522,10 +2529,12 @@ class MainWindow(QMainWindow):
             QtCore.QTimer.singleShot(150, self._go_to_step1)
             return
         self._step1_entry_waits = 0
-        if busy:
+        if waiting:
             self.prev_status.setText(
-                "Step1 is not ready: the patch geometry is still being saved. "
-                "Try again in a moment.")
+                "Step1 is not ready: the patch geometry on disk is not the "
+                "geometry on screen"
+                + (f" ({blocked})." if blocked else
+                   " — the write is still running."))
             return
         if not getattr(self, "_step1_context_ready", False):
             accepted = False

@@ -54,8 +54,10 @@ class GeometryPersistWorker(QObject):
     def __init__(self, commit=None, parent=None):
         super().__init__(parent)
         # Injected so a test can block inside the write and prove the GUI
-        # thread was not waiting for it. The default IS the production path.
-        self._commit = commit or step0_handoff.commit_geometry_only
+        # thread was not waiting for it. Left as None for the production path,
+        # which is looked up when it is CALLED -- so a test may replace the
+        # module function without having to exist before this worker does.
+        self._commit = commit
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._pending = None
@@ -64,6 +66,14 @@ class GeometryPersistWorker(QObject):
         self._thread = None
         self._dataset_gen = None
         self._published_rev = 0
+        # What a CONSUMER of the handoff may rely on, updated on this thread
+        # the moment an outcome is known -- BEFORE the queued signal that
+        # tells the page about it. A gate that waited for the signal would
+        # have a window in which the worker is no longer busy, the page still
+        # believes the write is in flight, and Step1 opens on the old file.
+        self._confirmed_rev = 0
+        self._confirmed_gen = None
+        self._blocked = None           # (revision, outcome) or None
         self._stats = {"submitted": 0, "replaced": 0, "published": 0,
                        "skipped": 0, "failed": 0, "stale_dataset": 0}
 
@@ -89,6 +99,9 @@ class GeometryPersistWorker(QObject):
                 self._pending = None
                 self._stats["stale_dataset"] += 1
             self._published_rev = 0
+            self._confirmed_rev = 0
+            self._confirmed_gen = dataset_gen
+            self._blocked = None
             self._wake.notify_all()
 
     def stats(self):
@@ -137,6 +150,20 @@ class GeometryPersistWorker(QObject):
         thread.join(max(0.0, float(timeout_ms) / 1000.0))
         return not thread.is_alive()
 
+    def wait_idle(self, timeout_ms=10_000):
+        """Block until nothing is pending or in flight.
+
+        For TESTS and for teardown reporting -- never for a callback the user
+        is waiting on, which is the whole point of this class.
+        """
+        import time
+        deadline = time.monotonic() + max(0.0, float(timeout_ms) / 1000.0)
+        while time.monotonic() < deadline:
+            if not self.is_busy():
+                return True
+            time.sleep(0.002)
+        return not self.is_busy()
+
     def stop(self, timeout_ms=2000):
         """Ask the thread to finish. Request only -- nothing is reached into.
 
@@ -170,14 +197,16 @@ class GeometryPersistWorker(QObject):
             with self._lock:
                 self._current = None
                 stopping = self._stopping
-                if outcome.get("outcome") == "committed":
-                    self._published_rev = max(
-                        self._published_rev, int(task.get("revision") or 0))
+                name = outcome.get("outcome")
+                revision = int(task.get("revision") or 0)
+                if name == "committed":
+                    self._published_rev = max(self._published_rev, revision)
                     self._stats["published"] += 1
-                elif outcome.get("outcome") == "failed":
+                elif name == "failed":
                     self._stats["failed"] += 1
                 else:
                     self._stats["skipped"] += 1
+                self._note_consumable(task, revision, name)
             if stopping:
                 continue
             if outcome.get("outcome") == "committed":
@@ -186,6 +215,58 @@ class GeometryPersistWorker(QObject):
                 self.failed.emit(outcome)
             else:
                 self.skipped.emit(outcome)
+
+    def _note_consumable(self, task, revision, name):
+        """Record whether the handoff on disk now describes THIS revision.
+
+        Called with the lock held, on this thread, before anything is
+        emitted. Three groups, and the difference matters to whoever is about
+        to read the handoff:
+
+        * "committed" -- the new geometry is published; that revision is what
+          a consumer gets.
+        * "unchanged", "superseded", "stale_revision" -- nothing was written
+          BECAUSE there was nothing to write or a newer task covers it. The
+          file on disk already describes this geometry, so the revision is
+          confirmed rather than left pending forever.
+        * everything else (a failed write, a refused ROI change, no published
+          handoff at all) -- the file does NOT describe the geometry in
+          memory. It is recorded as BLOCKED, and a consumer must be refused
+          rather than quietly handed the previous geometry.
+        """
+        gen = task.get("dataset_gen")
+        if name in ("committed", "unchanged", "superseded", "stale_revision"):
+            if self._confirmed_gen != gen:
+                self._confirmed_gen = gen
+                self._confirmed_rev = 0
+            self._confirmed_rev = max(self._confirmed_rev, revision)
+            if self._blocked is not None and self._blocked[0] <= revision:
+                self._blocked = None
+            return
+        if name == "stale_dataset":
+            return                      # it belonged to a slide nobody reads
+        self._blocked = (revision, name)
+
+    def consumable(self, dataset_gen, revision):
+        """Is a handoff describing `revision` of `dataset_gen` on disk?
+
+        The question a step downstream has to ask before reading the file.
+        Answered from the worker's own state, so it is true as soon as the
+        worker knows it -- not once a queued signal has been delivered.
+        """
+        with self._lock:
+            if self._blocked is not None:
+                return False
+            if self._current is not None or self._pending is not None:
+                return False
+            if self._confirmed_gen is not None and (
+                    self._confirmed_gen != dataset_gen):
+                return False
+            return self._confirmed_rev >= int(revision)
+
+    def blocked(self):
+        with self._lock:
+            return self._blocked
 
     def _superseded(self, task, gen, phase=None):
         """Asked at each phase of a write, and last immediately before it
@@ -212,7 +293,8 @@ class GeometryPersistWorker(QObject):
         with perf_trace.span("patch.persist_worker", revision=revision,
                              dataset_gen=task.get("dataset_gen")) as _sp:
             try:
-                result = self._commit(
+                commit = self._commit or step0_handoff.commit_geometry_only
+                result = commit(
                     task,
                     superseded=lambda phase=None: self._superseded(
                         task, gen, phase))

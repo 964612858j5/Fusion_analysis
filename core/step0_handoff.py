@@ -349,38 +349,94 @@ def geometry_bboxes(items):
     return out
 
 
-def published_geometry(step0_dir):
-    """(roi bboxes, patch bboxes) as they stand in the published files."""
-    def _read(name):
-        path = os.path.join(step0_dir, name)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:                                   # noqa: BLE001
-            return []
-    return (geometry_bboxes(_read("roi_config.json")),
-            geometry_bboxes(_read("patch_config.json")))
+def published_geometry(step0_dir, manifest=None):
+    """(roi bboxes, patch bboxes) as the PUBLISHED MANIFEST describes them.
+
+    Through the manifest's own paths, never through fixed names: a geometry
+    revision is published as a file named by its revision, and
+    `patch_config.json` is a copy written after the fact. Reading the fixed
+    name would answer with whatever was last copied there rather than with
+    what the current handoff points at.
+    """
+    if manifest is None:
+        published = published_handoff(step0_dir)
+        manifest = published[4] if published else {}
+    roi_path, patch_path = manifest_geometry_paths(manifest, step0_dir)
+    return (geometry_bboxes(_read_json(roi_path)),
+            geometry_bboxes(_read_json(patch_path)))
+
+
+PATCH_CONFIG_NAME = "patch_config.json"
+ROI_CONFIG_NAME = "roi_config.json"
+
+
+def patch_config_revision_name(revision):
+    """The immutable name a geometry revision's patches are written under.
+
+    Immutable because publication has to be ATOMIC, and a fixed name cannot
+    be: while `patch_config.json` is being replaced, the manifest on disk
+    still points at that name, so a reader following the published manifest
+    sees the NEW patches under the OLD manifest. One file per revision, named
+    by it, means the only moment anything a manifest points at changes is the
+    moment the manifest itself is replaced.
+    """
+    return f"patch_config.rev{int(revision)}.json"
+
+
+def _resolve(path, base):
+    if not path:
+        return ""
+    return path if os.path.isabs(path) else os.path.join(base, path)
+
+
+def manifest_geometry_paths(manifest, step0_dir):
+    """The geometry files the MANIFEST names, falling back to the fixed names.
+
+    Every reader of the published geometry has to come through here: with
+    revision-named patch files, "the geometry Step0 published" is whatever the
+    published manifest points at, and `patch_config.json` is only a
+    compatibility copy written afterwards.
+    """
+    manifest = manifest or {}
+    patch_path = _resolve(manifest.get("patch_config_path"), step0_dir) or \
+        os.path.join(step0_dir, PATCH_CONFIG_NAME)
+    roi_path = _resolve(manifest.get("roi_config_path"), step0_dir) or \
+        os.path.join(step0_dir, ROI_CONFIG_NAME)
+    return roi_path, patch_path
+
+
+def _read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                                       # noqa: BLE001
+        return [] if default is None else default
 
 
 def commit_geometry_only(task, *, superseded=None):
-    """Publish a geometry-only update of an already published handoff.
+    """Publish a patch-geometry revision of an already published handoff.
 
-    The whole decision AND the write, off the GUI thread: reading the
-    published manifest, comparing the geometry with what is on disk, refusing
-    an ROI change, and -- only then -- reusing the one handoff writer with the
-    corrected zarr the published manifest already points at. Nothing here
-    recomputes background correction.
+    ATOMIC, which the general writer is not and cannot cheaply be made:
 
-    `task` is a snapshot the GUI thread built (see
-    `Step0Page._geometry_persist_task`). Returns a result dict whose
-    `outcome` is one of: committed, no_published_handoff, unchanged,
-    roi_changed, corrected_zarr_missing, write_failed. Raises nothing for a
-    supersession -- that comes back from `write_handoff` as `Superseded` and
-    is the worker's business.
+    * the patches are written to a file named by their REVISION, which no
+      manifest points at yet;
+    * nothing else on disk is touched -- not the correction config, not the
+      ROI config, and in particular NOT the corrected zarr, whose attributes a
+      patch edit does not change and whose validity scan it cannot affect. The
+      previous version rewrote those attributes before the last supersede
+      check, so a task that published nothing had still changed durable state;
+    * the new manifest names the revision file and carries `geometry_revision`;
+    * the manifest is replaced, once. That replace IS the publication, and
+      before it a superseded task deletes its own file and leaves the
+      published handoff exactly as the previous revision left it;
+    * `patch_config.json` is refreshed afterwards as a NON-AUTHORITATIVE copy
+      for anything that still opens it by name. It is written after the
+      manifest deliberately: it is a convenience, and a reader that follows
+      the manifest never sees it.
 
-    The checks are ordered so that "did the geometry change at all?" is
-    answered BEFORE any precondition: a precondition failure on unchanged
-    geometry is not an invalidation, it is a no-op.
+    Returns a result dict whose `outcome` is one of: committed,
+    no_published_handoff, unchanged, roi_changed, corrected_zarr_missing,
+    write_failed.
     """
     revision = int(task.get("revision") or 0)
     info = {"task": task, "revision": revision,
@@ -389,12 +445,14 @@ def commit_geometry_only(task, *, superseded=None):
     published = published_handoff(step0_dir)
     if published is None:
         return dict(info, outcome="no_published_handoff")
-    step0_dir, manifest_path, zarr_path, config, _manifest = published
+    step0_dir, manifest_path, zarr_path, _config, manifest = published
     info["step0_manifest_path"] = os.path.abspath(manifest_path)
 
     rois = task["rois"]
     patches = task["patches"]
-    old_rois, old_patches = published_geometry(step0_dir)
+    old_roi_path, old_patch_path = manifest_geometry_paths(manifest, step0_dir)
+    old_rois = geometry_bboxes(_read_json(old_roi_path))
+    old_patches = geometry_bboxes(_read_json(old_patch_path))
     roi_changed = (bool(task.get("roi_context_changed"))
                    or geometry_bboxes(rois) != old_rois)
     patch_changed = geometry_bboxes(patches) != old_patches
@@ -412,22 +470,97 @@ def commit_geometry_only(task, *, superseded=None):
     if not os.path.exists(zarr_path):
         return dict(info, outcome="corrected_zarr_missing")
 
-    spec = dict(task["spec"])
-    spec["config"] = clean_correction_config(config)
-    spec["corrected_path"] = zarr_path
-    spec["manifest_path"] = manifest_path
-    spec["step0_dir"] = step0_dir
+    def _check(phase):
+        if superseded is not None and superseded(phase):
+            raise Superseded()
+
+    patch_path = os.path.join(step0_dir,
+                              patch_config_revision_name(revision))
+    written = []
     try:
-        result = write_handoff(spec, superseded=superseded,
-                               tag=f"rev{revision}")
+        _check("start")
+        tmp = _write_json_staged(patch_path, patches, f"rev{revision}")
+        os.replace(tmp, patch_path)
+        written.append(patch_path)
+
+        new_manifest = dict(manifest)
+        new_manifest["patch_config_path"] = os.path.abspath(patch_path)
+        new_manifest["n_patches"] = len(patches)
+        new_manifest["geometry_revision"] = revision
+        new_manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
+
+        manifest_tmp = f"{manifest_path}.tmp.rev{revision}"
+        with open(manifest_tmp, "w", encoding="utf-8") as f, \
+                perf_trace.span("handoff.manifest_write"):
+            json.dump(new_manifest, f, indent=2, ensure_ascii=False)
+            f.flush()
+            with perf_trace.span("handoff.fsync"):
+                os.fsync(f.fileno())
+        written.append(manifest_tmp)
+
+        # THE publication. One replace, of one file, and every path it names
+        # already exists with its final contents.
+        _check("publish")
+        with perf_trace.span("handoff.publish_replace", files=1):
+            os.replace(manifest_tmp, manifest_path)
+        written = []
     except Superseded:
+        for path in written:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                pass
         raise
     except Exception as exc:                                # noqa: BLE001
+        for path in written:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                pass
         print(f"[Step0] geometry-only commit FAILED: {exc}")
-        return dict(info, outcome="write_failed", reason=f"write_failed: {exc}",
-                    error=str(exc))
-    return dict(info, outcome="committed", result=result,
-                rois=result["rois"], patches=result["patches"])
+        return dict(info, outcome="write_failed",
+                    reason=f"write_failed: {exc}", error=str(exc))
+
+    _refresh_compat_patch_config(step0_dir, patches, revision)
+    _drop_superseded_patch_revisions(step0_dir, revision)
+    print(f"[Step0] geometry-only commit published: patches={len(patches)} "
+          f"revision={revision}")
+    return dict(info, outcome="committed", rois=rois, patches=patches,
+                patch_config_path=os.path.abspath(patch_path),
+                result={"manifest_path": os.path.abspath(manifest_path)})
+
+
+def _refresh_compat_patch_config(step0_dir, patches, revision):
+    """Keep `patch_config.json` in step with the published revision.
+
+    A COPY, not the source of truth: written after publication, and a failure
+    here is not a failure of the commit -- the manifest already names the file
+    that matters.
+    """
+    path = os.path.join(step0_dir, PATCH_CONFIG_NAME)
+    try:
+        tmp = _write_json_staged(path, patches, f"compat{revision}")
+        os.replace(tmp, path)
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[Step0] compatibility patch_config.json not refreshed: {exc}")
+
+
+def _drop_superseded_patch_revisions(step0_dir, revision):
+    """Remove revision files no published manifest can name any more."""
+    keep = patch_config_revision_name(revision)
+    try:
+        names = os.listdir(step0_dir)
+    except OSError:
+        return
+    for name in names:
+        if (name.startswith("patch_config.rev") and name.endswith(".json")
+                and name != keep):
+            try:
+                os.unlink(os.path.join(step0_dir, name))
+            except OSError:
+                pass
 
 
 def clean_correction_config(config):

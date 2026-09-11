@@ -225,17 +225,20 @@ class GeometryPersistWorker(QObject):
 
         * "committed" -- the new geometry is published; that revision is what
           a consumer gets.
-        * "unchanged", "superseded", "stale_revision" -- nothing was written
-          BECAUSE there was nothing to write or a newer task covers it. The
-          file on disk already describes this geometry, so the revision is
-          confirmed rather than left pending forever.
+        * "unchanged" -- nothing was written because the file on disk already
+          describes this geometry (which `commit_geometry_only` established by
+          COMPARING them). Confirmed, rather than left pending forever.
+        * "stale_revision_confirmed" -- an out-of-order task whose geometry
+          was checked against the files and found to be what they say.
+          "Superseded" is deliberately NOT here: a newer task is still to run
+          and it is that one's outcome that says what is on disk.
         * everything else (a failed write, a refused ROI change, no published
           handoff at all) -- the file does NOT describe the geometry in
           memory. It is recorded as BLOCKED, and a consumer must be refused
           rather than quietly handed the previous geometry.
         """
         gen = task.get("dataset_gen")
-        if name in ("committed", "unchanged", "superseded", "stale_revision"):
+        if name in ("committed", "unchanged", "stale_revision_confirmed"):
             if self._confirmed_gen != gen:
                 self._confirmed_gen = gen
                 self._confirmed_rev = 0
@@ -286,10 +289,21 @@ class GeometryPersistWorker(QObject):
             return {"task": task, "outcome": "stale_dataset",
                     "reason": "stale_dataset"}
         if revision and revision <= published_rev:
-            # Older than what is on disk. Writing it would move the published
-            # handoff backwards.
-            return {"task": task, "outcome": "stale_revision",
-                    "reason": "stale_revision"}
+            # Older than what this worker has already published. Writing it
+            # would move the published handoff backwards -- but whether a
+            # CONSUMER may read the handoff is a different question, and a
+            # revision number cannot answer it: the files are compared
+            # instead, here, on this thread.
+            matches = False
+            try:
+                matches = step0_handoff.geometry_matches(
+                    task.get("step0_dir") or "", task.get("rois") or [],
+                    task.get("patches") or [])
+            except Exception:                               # noqa: BLE001
+                matches = False
+            outcome = ("stale_revision_confirmed" if matches
+                       else "stale_revision_unconfirmed")
+            return {"task": task, "outcome": outcome, "reason": outcome}
         with perf_trace.span("patch.persist_worker", revision=revision,
                              dataset_gen=task.get("dataset_gen")) as _sp:
             try:

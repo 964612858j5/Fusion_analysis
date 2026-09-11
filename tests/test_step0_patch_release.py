@@ -69,7 +69,7 @@ class _Loader:
         return np.ones(((y1 - y0) or 1, (x1 - x0) or 1), np.float32)
 
 
-def _page(app, tmp_path, patches=((0, 16, 0, 16),), hold=None):
+def _page(app, tmp_path, patches=((0, 16, 0, 16),), hold=None, publish=True):
     """A Step0 page with ONE published handoff on disk, as after a real Save."""
     from block01.ui.step0 import step0_page as sp
 
@@ -103,9 +103,13 @@ def _page(app, tmp_path, patches=((0, 16, 0, 16),), hold=None):
                       "step2": str(tmp_path / "roi1" / "step2")},
     }
     page._roi_context_sig = page._roi_context_signature(page._standard_rois())
-    config = {"method_params": {"tophat_radius": 25, "cucim_sigma": 30},
-              "channel_decisions": {}}
-    page._write_step0_handoff(config, str(step0_dir / "corrected_channels.zarr"))
+    if publish:
+        # As after a real Save. `publish=False` is a page that came up on a
+        # directory somebody else published -- a restart.
+        page._write_step0_handoff(
+            {"method_params": {"tophat_radius": 25, "cucim_sigma": 30},
+             "channel_decisions": {}},
+            str(step0_dir / "corrected_channels.zarr"))
     return page, str(step0_dir)
 
 
@@ -413,7 +417,9 @@ def test_each_revision_is_published_as_its_own_immutable_file(app, tmp_path):
             assert _settle(page) == "published"
             manifest = _manifest(step0_dir)
             path = manifest["patch_config_path"]
-            assert os.path.basename(path) == f"patch_config.rev{i}.json", path
+            name = os.path.basename(path)
+            assert name.startswith(f"patch_config.rev{i}."), name
+            assert name.endswith(".json"), name
             assert manifest["geometry_revision"] == i
             with open(path, "r", encoding="utf-8") as f:
                 assert len(json.load(f)) == i + 1
@@ -703,6 +709,230 @@ def test_drawing_patches_quickly_keeps_the_work_bounded(app, tmp_path):
     finally:
         page._preload.stop()
         _settle(page)
+        page.deleteLater()
+
+
+# ── the revision survives the application ───────────────────────────────
+
+def test_a_restarted_page_never_writes_over_the_published_revision(
+        app, tmp_path, monkeypatch):
+    """The counter lives in a PAGE; the revisions live in a DIRECTORY.
+
+    Page A publishes revision 1 and is destroyed. Page B comes up on the same
+    manifest with a counter of zero, and its first edit would be "revision 1"
+    again -- straight onto the file the published manifest is pointing at,
+    which is the atomicity gone. Held at the publication so the old manifest
+    can be read WHILE the new geometry is being written.
+    """
+    page_a, step0_dir = _page(app, tmp_path)
+    _release_patch(page_a, (16, 32, 16, 32))
+    assert _settle(page_a) == "published"
+    first = _manifest(step0_dir)
+    first_patch_path = first["patch_config_path"]
+    assert first["geometry_revision"] == 1
+    first_bytes = open(first_patch_path, "rb").read()
+    page_a.stop_background_jobs()
+    page_a.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+    # A NEW page, on the same directory, counting from zero.
+    page_b, _dir = _page(app, tmp_path, publish=False,
+                         patches=((0, 16, 0, 16), (16, 32, 16, 32)))
+    assert page_b._geometry_revision == 0
+
+    at_publish = threading.Event()
+    go = threading.Event()
+    real = step0_handoff.commit_geometry_only
+
+    def blocking(task, superseded=None, **kw):
+        def gate(phase=None):
+            if phase == "publish":
+                at_publish.set()
+                go.wait(10.0)
+            return superseded(phase) if superseded else False
+        return real(task, superseded=gate, **kw)
+
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
+    try:
+        _release_patch(page_b, (32, 48, 0, 16))
+        assert at_publish.wait(5.0)
+
+        # Held one step before publication: the old manifest still reads out
+        # the old geometry, and its file is byte-for-byte untouched.
+        held = _manifest(step0_dir)
+        assert held["geometry_revision"] == 1
+        assert held["patch_config_path"] == first_patch_path
+        with open(first_patch_path, "r", encoding="utf-8") as f:
+            assert [p["bbox_fullres"] for p in json.load(f)] == [
+                [0, 16, 0, 16], [16, 32, 16, 32]]
+        assert open(first_patch_path, "rb").read() == first_bytes
+
+        go.set()
+        assert _settle(page_b) == "published"
+        after = _manifest(step0_dir)
+        assert after["geometry_revision"] > 1, after["geometry_revision"]
+        assert after["patch_config_path"] != first_patch_path
+        with open(after["patch_config_path"], "r", encoding="utf-8") as f:
+            assert [p["bbox_fullres"] for p in json.load(f)] == [
+                [0, 16, 0, 16], [16, 32, 16, 32], [32, 48, 0, 16]]
+    finally:
+        go.set()
+        _settle(page_b)
+        page_b.stop_background_jobs()
+        page_b.deleteLater()
+
+
+def test_a_save_keeps_the_geometry_baseline(app, tmp_path):
+    """A Save republishes the whole manifest. Dropping `geometry_revision`
+    there would hand the next patch edit a number a file already uses."""
+    page, step0_dir = _page(app, tmp_path)
+    try:
+        _release_patch(page, (16, 32, 16, 32))
+        assert _settle(page) == "published"
+        assert _manifest(step0_dir)["geometry_revision"] == 1
+
+        page._write_step0_handoff(
+            {"method_params": {"tophat_radius": 25, "cucim_sigma": 30},
+             "channel_decisions": {}},
+            os.path.join(step0_dir, "corrected_channels.zarr"))
+        assert _manifest(step0_dir)["geometry_revision"] == 1
+        assert page._geometry_revision >= 1
+    finally:
+        page.deleteLater()
+
+
+def test_a_manifest_without_a_revision_still_cannot_be_written_over(
+        app, tmp_path, monkeypatch):
+    """The baseline can be missing -- a handoff published before the field
+    existed, or one somebody rewrote. The numbering then starts at 1 again,
+    so the NAME is what keeps the published file safe: it carries the
+    geometry's hash and a random token, and a path that already exists is
+    refused rather than replaced.
+
+    Held at the publication, because that is the window in which the old file
+    is still the one the manifest names. (Afterwards it is unreferenced and
+    is deleted, which is the point of deleting it.)
+    """
+    page_a, step0_dir = _page(app, tmp_path)
+    _release_patch(page_a, (16, 32, 16, 32))
+    assert _settle(page_a) == "published"
+    first = _manifest(step0_dir)["patch_config_path"]
+    first_bytes = open(first, "rb").read()
+    page_a.stop_background_jobs()
+    page_a.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+    # The baseline disappears; the file it points at does not.
+    manifest = _manifest(step0_dir)
+    manifest.pop("geometry_revision", None)
+    with open(os.path.join(step0_dir, "step0_roi_result.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(manifest, f)
+
+    page_b, _dir = _page(app, tmp_path, publish=False,
+                         patches=((0, 16, 0, 16), (16, 32, 16, 32)))
+    at_publish = threading.Event()
+    go = threading.Event()
+    real = step0_handoff.commit_geometry_only
+
+    def blocking(task, superseded=None, **kw):
+        def gate(phase=None):
+            if phase == "publish":
+                at_publish.set()
+                go.wait(10.0)
+            return superseded(phase) if superseded else False
+        return real(task, superseded=gate, **kw)
+
+    monkeypatch.setattr(step0_handoff, "commit_geometry_only", blocking)
+    try:
+        _release_patch(page_b, (32, 48, 0, 16))
+        assert at_publish.wait(5.0)
+
+        # The new revision is written, the old manifest still names the old
+        # file, and that file is byte-for-byte what it was.
+        assert _manifest(step0_dir)["patch_config_path"] == first
+        assert open(first, "rb").read() == first_bytes, (
+            "the new revision was written over the file the published "
+            "manifest was pointing at")
+
+        go.set()
+        assert _settle(page_b) == "published"
+        assert _manifest(step0_dir)["patch_config_path"] != first
+    finally:
+        go.set()
+        _settle(page_b)
+        page_b.stop_background_jobs()
+        page_b.deleteLater()
+
+
+def test_a_restarted_page_keeps_publishing_after_its_first_edit(
+        app, tmp_path):
+    """The page has to ADOPT the number the worker published.
+
+    Otherwise its counter stays behind the directory's: the first edit is
+    bumped to 2 and published, the second is submitted as 2 again -- which the
+    worker refuses as out of order, and refusing it is not harmless, because
+    the geometry on screen is then not what is on disk and Step1 is locked.
+    """
+    page_a, step0_dir = _page(app, tmp_path)
+    _release_patch(page_a, (16, 32, 16, 32))
+    assert _settle(page_a) == "published"
+    page_a.stop_background_jobs()
+    page_a.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+    page_b, _dir = _page(app, tmp_path, publish=False,
+                         patches=((0, 16, 0, 16), (16, 32, 16, 32)))
+    try:
+        _release_patch(page_b, (32, 48, 0, 16))
+        assert _settle(page_b) == "published"
+        assert page_b._geometry_revision >= 2, page_b._geometry_revision
+
+        _release_patch(page_b, (48, 64, 0, 16))
+        assert _settle(page_b) == "published", (
+            "the second edit after a restart was refused as out of order")
+        assert len(_patch_bboxes(step0_dir)) == 4
+        assert page_b.geometry_ready_for_consumers() is True
+    finally:
+        page_b.stop_background_jobs()
+        page_b.deleteLater()
+
+
+def test_an_out_of_order_task_is_only_confirmed_if_the_disk_agrees(app,
+                                                                   tmp_path):
+    """"Older than what we published" says nothing about whether the file on
+    disk describes the geometry on screen -- so the files are compared, and a
+    consumer is refused when they differ."""
+    from block01.workers.geometry_persist_worker import GeometryPersistWorker
+
+    page, step0_dir = _page(app, tmp_path)
+    try:
+        _release_patch(page, (16, 32, 16, 32))
+        assert _settle(page) == "published"
+
+        worker = page._geometry_persist_worker
+        published = page.persisted_geometry_revision()
+        rois = page._standard_rois()
+
+        # (a) an out-of-order task describing exactly what is published
+        worker.submit({"revision": 1, "dataset_gen": int(page._dataset_gen),
+                       "step0_dir": step0_dir, "rois": rois,
+                       "patches": page._standard_patches(rois),
+                       "roi_context_changed": False, "spec": {}})
+        assert worker.wait_idle()
+        assert worker.consumable(int(page._dataset_gen), published) is True
+
+        # (b) one describing something else entirely
+        worker.submit({"revision": 1, "dataset_gen": int(page._dataset_gen),
+                       "step0_dir": step0_dir, "rois": rois,
+                       "patches": [{"name": "P1",
+                                    "bbox_fullres": [99, 115, 99, 115]}],
+                       "roi_context_changed": False, "spec": {}})
+        assert worker.wait_idle()
+        assert worker.consumable(int(page._dataset_gen), published) is False
+        assert worker.blocked()[1] == "stale_revision_unconfirmed"
+    finally:
+        page.stop_background_jobs()
         page.deleteLater()
 
 

@@ -4560,6 +4560,22 @@ class Step0Page(QWidget):
             "spec": self._handoff_spec({}, ""),
         }
 
+    def adopt_published_geometry_revision(self, manifest):
+        """Take the geometry baseline from a manifest that was just read.
+
+        The counter is per PAGE and starts at zero; the revisions on disk are
+        per DIRECTORY and survive the application. A page that has just been
+        pointed at a published handoff -- a Save it wrote, a project it
+        loaded -- must not start numbering at 1 again, because the file of
+        that name is the one the published manifest is pointing at.
+        """
+        try:
+            revision = int((manifest or {}).get("geometry_revision") or 0)
+        except (TypeError, ValueError):
+            return self._geometry_revision
+        self._geometry_revision = max(int(self._geometry_revision), revision)
+        return self._geometry_revision
+
     def stop_background_jobs(self):
         """Ask the page's background workers to finish, WITHOUT joining them.
 
@@ -4688,6 +4704,10 @@ class Step0Page(QWidget):
         # Nothing of the corrected output changed -- a patch edit does not
         # touch it and no longer rescans it -- so there is no report to apply
         # here, only the status and the announcement.
+        # The worker may have numbered this ABOVE what was asked for, when
+        # the revision on disk was ahead of this page's counter (a restart).
+        self._geometry_revision = max(int(self._geometry_revision),
+                                      int(outcome.get("revision") or 0))
         self._set_geometry_status(
             "Patch geometry saved to the Step0 handoff.")
         self.geometry_committed.emit({
@@ -4713,11 +4733,11 @@ class Step0Page(QWidget):
                             or (outcome.get("task") or {}).get(
                                 "step0_manifest_path") or "")
         if reason in ("no_published_handoff", "unchanged", "superseded",
-                      "stale_dataset", "stale_revision"):
+                      "stale_dataset", "stale_revision_confirmed"):
             self._geometry_persist_state = "staged"
             if reason == "unchanged":
                 self._set_geometry_status("Patch geometry unchanged.")
-            elif reason in ("superseded", "stale_revision"):
+            elif reason in ("superseded", "stale_revision_confirmed"):
                 pass          # a newer revision is already being written
             else:
                 self._set_geometry_status(
@@ -9452,6 +9472,10 @@ class Step0Page(QWidget):
             "remap_path": os.path.abspath(
                 remap_config_path or os.path.join(
                     step0_dir, "step0_channel_remap.json")),
+            # A Save republishes the whole manifest; without this it would
+            # drop the geometry baseline and the next patch edit would be
+            # numbered over a file the manifest still names.
+            "geometry_revision": int(self._geometry_revision),
         }
 
     def _apply_handoff_result(self, result):
@@ -9460,6 +9484,7 @@ class Step0Page(QWidget):
         Separate because the writer may have run on a worker: a label set
         from a background thread is a crash waiting for a repaint.
         """
+        self.adopt_published_geometry_revision(result.get("manifest"))
         self._refresh_bg_corrected_status(result.get("corrected_report"))
         return (result["config"], result["rois"], result["patches"],
                 result["manifest"])

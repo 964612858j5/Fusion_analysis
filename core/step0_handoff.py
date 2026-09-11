@@ -22,8 +22,10 @@ manifest last. A superseded task deletes its own temporaries and publishes
 nothing.
 """
 
+import hashlib
 import json
 import os
+import secrets
 import shutil
 
 import zarr
@@ -270,6 +272,16 @@ def write_handoff(spec, *, superseded=None, tag="0"):
             "shape": rois[0].get("shape", []) if rois else [],
             "n_rois": len(rois),
             "n_patches": len(patches),
+            # Carried through a full Save as well: it is the baseline every
+            # later geometry revision is numbered above, and a Save that
+            # dropped it would hand the next patch edit a number that a file
+            # on disk already uses. Never LOWERED either -- the page's counter
+            # starts at zero every time the application does, and a Save from
+            # a page that has not adopted the published baseline would
+            # otherwise reset it.
+            "geometry_revision": max(
+                int(spec.get("geometry_revision") or 0),
+                published_revision(step0_dir)),
         }
         manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
         manifest_tmp = f"{manifest_path}.tmp.{tag}"
@@ -370,7 +382,7 @@ PATCH_CONFIG_NAME = "patch_config.json"
 ROI_CONFIG_NAME = "roi_config.json"
 
 
-def patch_config_revision_name(revision):
+def patch_config_revision_name(revision, token=""):
     """The immutable name a geometry revision's patches are written under.
 
     Immutable because publication has to be ATOMIC, and a fixed name cannot
@@ -379,8 +391,53 @@ def patch_config_revision_name(revision):
     sees the NEW patches under the OLD manifest. One file per revision, named
     by it, means the only moment anything a manifest points at changes is the
     moment the manifest itself is replaced.
+
+    The TOKEN is what makes that true across a restart. A revision counter
+    lives in a page, and a page starts at zero: restart the application, edit
+    a patch, and revision 1 comes round again -- straight on top of
+    `patch_config.rev1.json`, which the manifest on disk is pointing at right
+    now. A name nothing can collide with cannot be built from a counter
+    alone, so it carries a content hash and a random token as well.
     """
-    return f"patch_config.rev{int(revision)}.json"
+    revision = int(revision)
+    if not token:
+        return f"patch_config.rev{revision}.json"
+    return f"patch_config.rev{revision}.{token}.json"
+
+
+def _revision_token(patches):
+    digest = hashlib.sha1(
+        json.dumps(patches, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+    return f"{digest}{secrets.token_hex(3)}"
+
+
+def published_revision(step0_dir, manifest=None):
+    """The geometry revision the manifest ON DISK describes.
+
+    Read at every commit, not remembered from this process: the counter in
+    memory says nothing about what a previous run published, and a commit that
+    trusted it would write a revision number that is already taken.
+    """
+    if manifest is None:
+        published = published_handoff(step0_dir)
+        manifest = published[4] if published else {}
+    try:
+        return int((manifest or {}).get("geometry_revision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def geometry_matches(step0_dir, rois, patches):
+    """Does the published handoff already describe exactly this geometry?
+
+    The question behind "that task was superseded / was older than what is on
+    disk, is the file still safe to read?". Answered from the files, not from
+    a revision number: two revisions can describe the same rectangles, and a
+    number can be stale in either direction.
+    """
+    old_rois, old_patches = published_geometry(step0_dir)
+    return (geometry_bboxes(rois) == old_rois
+            and geometry_bboxes(patches) == old_patches)
 
 
 def _resolve(path, base):
@@ -447,6 +504,12 @@ def commit_geometry_only(task, *, superseded=None):
         return dict(info, outcome="no_published_handoff")
     step0_dir, manifest_path, zarr_path, _config, manifest = published
     info["step0_manifest_path"] = os.path.abspath(manifest_path)
+    # The baseline comes from DISK. A fresh page counts from zero, so after a
+    # restart its "revision 1" is a revision the published manifest already
+    # used -- and the file of that name is the one it is pointing at.
+    disk_revision = published_revision(step0_dir, manifest)
+    revision = max(revision, disk_revision + 1)
+    info["revision"] = info["geometry_revision"] = revision
 
     rois = task["rois"]
     patches = task["patches"]
@@ -474,8 +537,17 @@ def commit_geometry_only(task, *, superseded=None):
         if superseded is not None and superseded(phase):
             raise Superseded()
 
-    patch_path = os.path.join(step0_dir,
-                              patch_config_revision_name(revision))
+    patch_path = os.path.join(
+        step0_dir, patch_config_revision_name(revision,
+                                              _revision_token(patches)))
+    if os.path.exists(patch_path) or os.path.abspath(patch_path) == \
+            os.path.abspath(old_patch_path):
+        # Cannot happen with a token in the name; asserted anyway, because
+        # the whole atomicity argument rests on this file being one nothing
+        # else names.
+        return dict(info, outcome="write_failed",
+                    reason="revision_file_collision",
+                    error=f"{patch_path} already exists")
     written = []
     try:
         _check("start")
@@ -524,7 +596,7 @@ def commit_geometry_only(task, *, superseded=None):
                     reason=f"write_failed: {exc}", error=str(exc))
 
     _refresh_compat_patch_config(step0_dir, patches, revision)
-    _drop_superseded_patch_revisions(step0_dir, revision)
+    _drop_superseded_patch_revisions(step0_dir, os.path.basename(patch_path))
     print(f"[Step0] geometry-only commit published: patches={len(patches)} "
           f"revision={revision}")
     return dict(info, outcome="committed", rois=rois, patches=patches,
@@ -547,9 +619,8 @@ def _refresh_compat_patch_config(step0_dir, patches, revision):
         print(f"[Step0] compatibility patch_config.json not refreshed: {exc}")
 
 
-def _drop_superseded_patch_revisions(step0_dir, revision):
+def _drop_superseded_patch_revisions(step0_dir, keep):
     """Remove revision files no published manifest can name any more."""
-    keep = patch_config_revision_name(revision)
     try:
         names = os.listdir(step0_dir)
     except OSError:

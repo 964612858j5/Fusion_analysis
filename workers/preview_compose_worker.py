@@ -109,36 +109,62 @@ class PreviewComposeWorker(QObject):
         return not thread.is_alive()
 
     def stop(self, timeout_ms=2000):
+        """Ask the thread to finish. Nothing of the worker's is touched here.
+
+        The caller may NOT clear the cache: this thread could be in the
+        middle of reading it, and "the worker owns its cache" is not a rule
+        that holds only while it is idle. So the request is a flag, the
+        thread empties its own cache on the way out, and a stop that times
+        out leaves everything alone -- the object stays referenced and the
+        daemon thread finishes the array it is on. It emits nothing after
+        being asked to stop, so a late result cannot reach a window that is
+        closing.
+        """
         with self._wake:
             self._stopping = True
             self._pending = None
             self._wake.notify_all()
-        self.wait(timeout_ms)
+        return self.wait(timeout_ms)
 
     # ── consumer side (this thread) ─────────────────────────────────
     def run(self):
-        """The composing loop. Returns when `stop()` is called."""
-        while True:
-            with self._wake:
-                while self._pending is None and not self._stopping:
-                    self._wake.wait(0.05)
-                if self._stopping:
-                    return
-                request = self._pending
-                self._pending = None
-                self._busy = True
-            try:
-                result = self._compose(request)
-            except Exception as exc:                        # noqa: BLE001
+        """The composing loop. Returns when `stop()` is called.
+
+        The cache is emptied HERE, on the way out, because it belongs to this
+        thread: a GUI thread clearing it while a frame is being composed is
+        the same class of bug as sharing it in the first place.
+        """
+        try:
+            while True:
+                with self._wake:
+                    while self._pending is None and not self._stopping:
+                        self._wake.wait(0.05)
+                    if self._stopping:
+                        return
+                    request = self._pending
+                    self._pending = None
+                    self._busy = True
+                try:
+                    result = self._compose(request)
+                except Exception as exc:                    # noqa: BLE001
+                    with self._lock:
+                        self._busy = False
+                        stopping = self._stopping
+                    if not stopping:
+                        self.failed.emit({"request": request,
+                                          "error": str(exc)})
+                    continue
                 with self._lock:
                     self._busy = False
-                self.failed.emit({"request": request, "error": str(exc)})
-                continue
-            with self._lock:
-                self._busy = False
-                self._computed += 1
-            if result is not None:
-                self.done.emit(result)
+                    self._computed += 1
+                    stopping = self._stopping
+                if result is not None and not stopping:
+                    self.done.emit(result)
+        finally:
+            try:
+                self.cache.clear()
+            except Exception:                               # noqa: BLE001
+                pass
 
     def _compose(self, request):
         mode = request.get("mode")

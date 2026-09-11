@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         # against: it moves whenever the pixels this window is about to draw
         # stop being the ones a pending frame was computed from.
         self._compose_worker = None
+        self._retired_compose_workers = []
         self._dataset_gen = 0
         self._frame_request_id = 0
         self._frame_inflight_request = None
@@ -3843,12 +3844,19 @@ class MainWindow(QMainWindow):
         self._arm_frame_timer(wait)
 
     def _stop_compose_worker(self, reason=""):
-        """Retire the frame thread.
+        """Retire the frame thread, without reaching into it.
 
-        Twice necessary: its cache holds references to the dataset's raw
-        arrays, so a dataset switch has to let go of them; and a window that
-        is closing must not destroy a running QThread, which is what produces
-        "QThread: Destroyed while thread is still running".
+        Necessary because its cache holds references to the dataset's raw
+        arrays, so a dataset switch has to let go of them -- but the CLEARING
+        is the worker's own job, on its own thread, as it exits. Doing it from
+        here would be the GUI thread emptying a cache a frame may be reading,
+        which is the very thing keeping the cache private was for.
+
+        A worker that does not stop in time is kept referenced rather than
+        forced: it is a daemon thread finishing one array, it emits nothing
+        once asked to stop, and dropping the last reference to its QObject
+        while the thread runs is how a live thread loses the object its
+        signals belong to.
         """
         worker, self._compose_worker = self._compose_worker, None
         self._frame_inflight_request = None
@@ -3862,11 +3870,20 @@ class MainWindow(QMainWindow):
             worker.failed.disconnect()
         except Exception:                                   # noqa: BLE001
             pass
+        stopped = False
         try:
-            worker.cache.clear()
-            worker.stop()
+            stopped = bool(worker.stop())
         except Exception:                                   # noqa: BLE001
             pass
+        if not stopped:
+            # Still composing. Hold it so its QObject outlives its thread,
+            # and drop it the next time we look.
+            self._retired_compose_workers = [
+                held for held in getattr(self, "_retired_compose_workers", [])
+                if held.isRunning()]
+            self._retired_compose_workers.append(worker)
+            print("[Step1] frame worker still composing; holding a reference "
+                  "until it finishes")
 
     def _compose_worker_ready(self):
         """The frame thread, started on first use, or None if it cannot run.
@@ -3879,7 +3896,10 @@ class MainWindow(QMainWindow):
         if worker is not None:
             return worker
         try:
-            worker = PreviewComposeWorker(self)
+            # No parent: a QObject destroyed with the window while its
+            # thread is still composing would leave that thread emitting
+            # through a deleted C++ object.
+            worker = PreviewComposeWorker()
             worker.done.connect(self._on_preview_frame)
             worker.failed.connect(self._on_preview_frame_failed)
             worker.start()
@@ -3948,6 +3968,19 @@ class MainWindow(QMainWindow):
                 "groups": groups, "group_weights": group_weights,
                 "nucleus": (nuc_ch, float(nuc.get("weight", 0.0) or 0.0)),
             }
+        # ALREADY-COMPUTED WINDOWS ONLY, and nothing else this thread could
+        # be made to do. `_display_mapping` with its default completes the
+        # draft by working out an automatic window for any channel it has not
+        # seen -- a whole-slide read AND a percentile pass, measured at
+        # ~267 ms per channel, inside the callback whose whole job is to hand
+        # a snapshot over and return. `resident_only` only stops the READ; if
+        # the array happens to be resident the percentile still runs here,
+        # which is most of that cost. So: the draft, plus the windows already
+        # memoised, and a channel without one is named `provisional` and
+        # drawn by the worker from the patch it is holding. When the real
+        # window is computed, the mapping change schedules a new frame.
+        remap = self._display_mapping(channels=list(arrays),
+                                      computed_only=True) or {}
         self._frame_request_id += 1
         snapshot = {
             "request_id": self._frame_request_id,
@@ -3959,8 +3992,12 @@ class MainWindow(QMainWindow):
             "array_ids": tuple(sorted((ch, id(arr))
                                       for ch, arr in arrays.items())),
             "channels": tuple(sorted(arrays)),
-            "remap": copy.deepcopy(
-                self._display_mapping(channels=list(arrays)) or {}),
+            "remap": copy.deepcopy(remap),
+            # Channels drawn from the patch because their whole-slide window
+            # is not ready: named, so a reader of the timeline can tell a
+            # provisional frame from a final one.
+            "provisional": tuple(sorted(ch for ch in arrays
+                                        if ch not in remap)),
             "fallback_norm": (self.loader._norm if self.loader is not None
                               else (lambda a: a)),
             "to_rgb": self.fusion.to_rgb,
@@ -4022,6 +4059,7 @@ class MainWindow(QMainWindow):
                             request=snapshot["request_id"],
                             mode=snapshot["mode"], patch=snapshot["patch"],
                             channels=len(snapshot["arrays"]),
+                            provisional=len(snapshot["provisional"]),
                             coalesced=coalesced)
             if self._dispatch_frame(snapshot):
                 return          # published when the pixels come back
@@ -5688,7 +5726,7 @@ class MainWindow(QMainWindow):
             return False, f"commit raised: {exc}"
 
     def _display_mapping(self, channels=None, blocking=True,
-                         resident_only=False):
+                         resident_only=False, computed_only=False):
         """The Min/Max/Gamma Step1 should DRAW with, for the channels asked for.
 
         The draft: what the Intensity window is showing the user right now.
@@ -5727,7 +5765,8 @@ class MainWindow(QMainWindow):
             try:
                 draft = step0.display_mapping_for_preview(
                     channels=channels, blocking=blocking,
-                    resident_only=resident_only) or {}
+                    resident_only=resident_only,
+                    computed_only=computed_only) or {}
             except Exception as exc:
                 print(f"[Step1] could not read the display mapping: {exc}")
                 draft = {}

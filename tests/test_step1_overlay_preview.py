@@ -382,7 +382,7 @@ def test_a_mapping_change_drops_only_that_channels_pixels(app, monkeypatch):
         # The frame that follows is composed by the worker, which keeps its
         # own cache -- that is where the new window's gray lives now.
         worker_cache = w._inline_frames._composer.cache
-        assert (w._preview_patch_idx, "CD3") in worker_cache
+        assert (w._preview_patch_idx, "CD3", "gray") in worker_cache
     finally:
         w.close()
 
@@ -1311,10 +1311,11 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
                   and w._signal_cache.entry(key)["value"] is signal]
         assert any(key[1] != "CD3" for key in reused), \
             "an unchanged channel's signal was recomputed"
-        changed = w._signal_cache.entry((w._preview_patch_idx, "CD3"))
+        changed = w._signal_cache.entry(
+            (w._preview_patch_idx, "CD3", "signal"))
         assert changed is not None
         assert changed["value"] is not first.get(
-            (w._preview_patch_idx, "CD3")), \
+            (w._preview_patch_idx, "CD3", "signal")), \
             "the changed channel was not recomputed"
     finally:
         w.close()
@@ -1379,7 +1380,7 @@ def test_a_drag_keeps_one_version_per_channel(app):
             window = {"CD3": {"min": float(i), "max": 1000.0, "gamma": 1.0}}
             w._preview_channel_signal("CD3", arr, window)
 
-        key = (w._preview_patch_idx, "CD3")
+        key = (w._preview_patch_idx, "CD3", "signal")
         assert w._signal_cache.keys() == [key]
         from block01.core import preview_compose as pc
         assert w._signal_cache.entry(key)["window"] == pc.window_key(
@@ -1398,10 +1399,11 @@ def test_dropping_one_patch_keeps_the_others_signals(app):
         w._preview_patch_idx = 1
         other = arr.copy()
         w._preview_channel_signal("CD3", other, window)
-        assert set(w._signal_cache.keys()) == {(0, "CD3"), (1, "CD3")}
+        assert set(w._signal_cache.keys()) == {(0, "CD3", "signal"),
+                                              (1, "CD3", "signal")}
 
         w._drop_overlay_cache_for(0)
 
-        assert set(w._signal_cache.keys()) == {(1, "CD3")}
+        assert set(w._signal_cache.keys()) == {(1, "CD3", "signal")}
     finally:
         w.close()

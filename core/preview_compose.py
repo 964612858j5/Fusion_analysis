@@ -49,6 +49,11 @@ class PreviewCache:
     Order is recency of USE (a hit moves its entry to the back), because
     after a patch switch the current patch's channels are the ones every
     frame hits while the previous patch's are what nothing asks for.
+
+    Keys are `(patch, channel, kind)`, where `kind` names the computation --
+    "gray" for the overlay's remap, "signal" for the fusion's. A channel with
+    no explicit window produces a DIFFERENT array in each of them, so a key
+    without the kind lets one preview serve the other's pixels.
     """
 
     def __init__(self, max_entries=DEFAULT_MAX_ENTRIES,
@@ -156,8 +161,15 @@ def channel_gray(patch, channel, arr, remap, cache, span=None):
     and the blend that follows is ~0.5 ms, so a tick that recomposited from
     raw pixels would pay the whole mapping again for every channel already on
     screen.
+
+    KEYED BY "gray", because a channel with no explicit window means two
+    different arrays here and in `channel_signal`: the overlay's fallback is
+    a patch percentile (`compute_qupath_auto_minmax`) and the fusion's is the
+    loader's own normalisation. Both used to key on (patch, channel) with the
+    window `("auto",)`, so switching from one preview to the other could hand
+    back the other's array -- a cache hit that is not the same picture.
     """
-    key = (patch, channel)
+    key = (patch, channel, "gray")
     window = window_key(channel, remap)
     hit = cache.get(key, arr, window) if cache is not None else None
     if hit is not None:
@@ -181,8 +193,11 @@ def channel_signal(patch, channel, arr, remap, cache, fallback_norm,
     uses `apply_channel_remap` (Min/Max/Gamma in raw units -- the same as the
     disk worker); others use `fallback_norm`, which is the loader's own
     percentile normalisation, so their appearance is unchanged.
+
+    KEYED BY "signal" -- see `channel_gray` for why the two cannot share a
+    key.
     """
-    key = (patch, channel)
+    key = (patch, channel, "signal")
     window = window_key(channel, remap)
     hit = cache.get(key, arr, window) if cache is not None else None
     if hit is not None:

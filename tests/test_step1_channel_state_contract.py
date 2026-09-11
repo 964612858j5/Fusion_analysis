@@ -1041,10 +1041,12 @@ def _mapping_requests(w, monkeypatch):
     page = w._step0
     real = type(page).display_mapping_for_preview
 
-    def spy(self, channels=None, blocking=True, resident_only=False):
+    def spy(self, channels=None, blocking=True, resident_only=False,
+            computed_only=False):
         asked.append(None if channels is None else list(channels))
         return real(self, channels=channels, blocking=blocking,
-                    resident_only=resident_only)
+                    resident_only=resident_only,
+                    computed_only=computed_only)
 
     monkeypatch.setattr(type(page), "display_mapping_for_preview", spy)
     return asked
@@ -1228,5 +1230,46 @@ def test_a_resident_only_window_request_reads_nothing_either(app):
         assert reads == [("CD3", True)]
         assert "CD3" not in page._auto_window_cache, \
             "a channel whose pixels never arrived was cached as having no window"
+    finally:
+        w.close()
+
+
+def test_the_computed_only_mapping_touches_no_pixels(app, monkeypatch):
+    """The interface the frame snapshot needs.
+
+    `resident_only=True` only refuses the READ: if the whole-slide array is
+    already in memory it still runs a percentile over it, which is most of the
+    ~267 ms measured per channel -- and that is on whichever thread asked.
+    `computed_only=True` returns the draft plus the windows already worked
+    out, and asks the pixels nothing.
+    """
+    w = _window(app)
+    try:
+        page = w._step0
+        page.loader = w.loader
+        page._auto_window_cache.clear()
+        touched = []
+        monkeypatch.setattr(type(page), "_workbench_pixels",
+                            lambda self, name, **k: (touched.append(name),
+                                                     None)[1])
+        monkeypatch.setattr(type(page), "_auto_display_window",
+                            lambda self, ch, **k: (touched.append(ch),
+                                                   None)[1])
+
+        answered = page.display_mapping_for_preview(
+            channels=["CD3", "CD8"], computed_only=True)
+
+        assert touched == [], f"the pixels were consulted: {touched}"
+        assert set(answered) <= set(page.display_mapping_draft())
+
+        # A window that HAS been computed is served from the memo.
+        page._auto_window_cache["CD3"] = {"min": 1.0, "max": 2.0,
+                                          "gamma": 1.0}
+        answered = page.display_mapping_for_preview(
+            channels=["CD3", "CD8"], computed_only=True)
+
+        assert answered.get("CD3") == {"min": 1.0, "max": 2.0, "gamma": 1.0}
+        assert "CD8" not in answered
+        assert touched == [], "a memo hit still went to the pixels"
     finally:
         w.close()

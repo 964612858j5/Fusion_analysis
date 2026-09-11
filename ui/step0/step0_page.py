@@ -4229,7 +4229,8 @@ class Step0Page(QWidget):
         return out
 
     def display_mapping_for_preview(self, channels=None, blocking=True,
-                                    resident_only=False):
+                                    resident_only=False,
+                                    computed_only=False):
         """The draft, completed with the same automatic windows a Save freezes.
 
         A project whose Intensity window has never been opened still has to draw
@@ -4245,11 +4246,18 @@ class Step0Page(QWidget):
         first frame after a patch was drawn spent 7.47 seconds seeding windows
         for 28 channels it did not show.
 
-        `resident_only=True` is the render path's other half: complete what
-        is already in memory, and never start a whole-slide read or a
-        percentile pass for a channel whose pixels have not arrived. Such a
-        channel is simply absent from the answer, and the caller draws it
-        with a cheap provisional window until the real one lands.
+        `resident_only=True` is the weaker of the two refusals: do not READ,
+        but if the pixels happen to be resident, compute the window from
+        them. That still means a percentile pass over a whole-slide array,
+        which is most of the ~267 ms measured per channel, so it is not
+        enough for a caller on the GUI thread.
+
+        `computed_only=True` is that caller's answer: the draft plus the
+        automatic windows ALREADY computed, and nothing else -- no pixel
+        access of any kind, no percentile, no memoisation. A channel whose
+        window has not been worked out yet is simply absent, and the frame
+        worker draws it from the patch it is holding until the real window
+        exists.
         """
         draft = self.display_mapping_draft()
         if channels is None:
@@ -4263,6 +4271,11 @@ class Step0Page(QWidget):
             names = [str(ch) for ch in channels]
         for ch in names:
             if ch in draft:
+                continue
+            if computed_only:
+                auto = self._auto_window_cache.get(ch)
+                if auto is not None:
+                    draft[ch] = dict(auto)
                 continue
             if ch not in self._auto_window_cache:
                 auto = self._auto_display_window(

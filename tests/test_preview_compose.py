@@ -268,15 +268,17 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel():
     pc.fusion_rgb_u8(0, arrays, remap, {"g": {"CD3": 1.0}}, {"g": 1.0},
                      ("DAPI", 1.0), cache, lambda a: a, to_rgb)
     before = {key: cache.entry(key)["value"] for key in cache.keys()}
-    assert set(before) == {(0, "DAPI"), (0, "CD3")}
+    assert set(before) == {(0, "DAPI", "signal"), (0, "CD3", "signal")}
 
     remap["CD3"] = {"min": 5.0, "max": 900.0, "gamma": 1.0}
     pc.fusion_rgb_u8(0, arrays, remap, {"g": {"CD3": 1.0}}, {"g": 1.0},
                      ("DAPI", 1.0), cache, lambda a: a, to_rgb)
 
-    assert cache.entry((0, "DAPI"))["value"] is before[(0, "DAPI")], \
+    assert cache.entry((0, "DAPI", "signal"))["value"] is before[
+        (0, "DAPI", "signal")], \
         "an unchanged channel's signal was recomputed"
-    assert cache.entry((0, "CD3"))["value"] is not before[(0, "CD3")], \
+    assert cache.entry((0, "CD3", "signal"))["value"] is not before[
+        (0, "CD3", "signal")], \
         "the changed channel was not recomputed"
 
 
@@ -299,3 +301,59 @@ def test_the_module_needs_no_qt():
     source = open(mod.__file__, encoding="utf-8").read()
     assert "PyQt5" not in source
     assert "QtCore" not in source
+
+
+# ── the overlay's gray and the fusion's signal are not the same array ────
+
+def test_a_channel_with_no_window_means_two_different_arrays():
+    """The cross-use this key guards against.
+
+    With no explicit window, the overlay's fallback is a patch percentile and
+    the fusion's is the loader's own normalisation -- two different pictures
+    of the same channel. Both used to key on (patch, channel) with the window
+    `("auto",)`, so switching preview modes could hand back the other one's
+    array: a cache hit that is not the same picture.
+    """
+    cache = pc.PreviewCache()
+    arr = _arr(11, scale=5000.0)
+
+    def loud_norm(a):
+        return np.full_like(np.asarray(a, np.float32), 0.25)
+
+    gray = pc.channel_gray(0, "CD3", arr, {}, cache)
+    signal = pc.channel_signal(0, "CD3", arr, {}, cache, loud_norm)
+
+    assert not np.allclose(gray, signal), \
+        "the two fallbacks produce the same array; this test proves nothing"
+    assert float(signal.max()) == pytest.approx(0.25)
+    assert pc.channel_gray(0, "CD3", arr, {}, cache) is gray
+    assert pc.channel_signal(0, "CD3", arr, {}, cache, loud_norm) is signal
+    assert set(cache.keys()) == {(0, "CD3", "gray"), (0, "CD3", "signal")}
+
+
+def test_switching_modes_back_and_forth_never_crosses(app=None):
+    """Both directions, repeatedly: overlay, fusion, overlay, fusion."""
+    cache = pc.PreviewCache()
+    arrays = {"DAPI": _arr(1, scale=4000.0), "CD3": _arr(2, scale=4000.0)}
+    colors = {"DAPI": (1.0, 1.0, 1.0), "CD3": (1.0, 0.0, 0.0)}
+    weights = {"DAPI": 1.0, "CD3": 1.0}
+    to_rgb = lambda cyto, nuc: np.stack([cyto, cyto, nuc], axis=-1)
+
+    def flat_norm(a):
+        return np.full_like(np.asarray(a, np.float32), 0.5)
+
+    first_overlay = pc.overlay_rgb_u8(0, arrays, {}, colors, weights, cache)
+    first_fusion, _ = pc.fusion_rgb_u8(
+        0, arrays, {}, {"g": {"CD3": 1.0}}, {"g": 1.0}, ("DAPI", 1.0),
+        cache, flat_norm, to_rgb)
+    again_overlay = pc.overlay_rgb_u8(0, arrays, {}, colors, weights, cache)
+    again_fusion, _ = pc.fusion_rgb_u8(
+        0, arrays, {}, {"g": {"CD3": 1.0}}, {"g": 1.0}, ("DAPI", 1.0),
+        cache, flat_norm, to_rgb)
+
+    assert np.array_equal(first_overlay, again_overlay), \
+        "the overlay changed after a fusion frame: it was served the fusion's"
+    assert np.array_equal(first_fusion, again_fusion), \
+        "the fusion changed after an overlay frame"
+    assert not np.array_equal(first_overlay, first_fusion), \
+        "the two modes produced identical pixels; the test cannot see a cross"

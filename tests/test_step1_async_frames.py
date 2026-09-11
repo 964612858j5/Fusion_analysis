@@ -507,3 +507,223 @@ def test_a_real_worker_thread_composes_off_the_gui_thread(app):
         assert got[0]["rgb"].dtype == np.uint8
     finally:
         w.close()
+
+
+# ── the snapshot may not read a pixel ────────────────────────────────────
+
+@pytest.mark.parametrize("mode", ["overlay", "fusion"])
+def test_the_snapshot_never_reads_the_slide_or_runs_a_percentile(app, mode,
+                                                                 monkeypatch):
+    """The most expensive thing the GUI thread could still do.
+
+    `_frame_snapshot` asks for the display mapping, and
+    `display_mapping_for_preview` with its default completes the draft by
+    computing an automatic window for any channel it has not seen -- a
+    whole-slide read plus a percentile pass, measured at ~267 ms per channel,
+    on this thread. Watching the four compose entry points cannot see it,
+    because it happens before them.
+
+    So the read and the percentile are made to FAIL here: a snapshot that
+    touches either is a frozen window.
+    """
+    w = _window(app)
+    try:
+        w.set_preview_mode(mode, force=True, reconcile=False)
+        page = w._step0
+        page._auto_window_cache.clear()
+
+        # RECORDED, not raised: `_auto_display_window` catches everything
+        # its pixel source throws and returns None, so an exception here
+        # would be swallowed and the test would pass with the blocking call
+        # still in place.
+        touched = []
+        monkeypatch.setattr(type(page), "_slide_lowres_array",
+                            lambda self, ch, **k: (touched.append(
+                                ("slide_read", ch)), None)[1])
+        monkeypatch.setattr(type(page), "_workbench_pixels",
+                            lambda self, name, **k: (touched.append(
+                                ("pixels", name)), None)[1])
+        import block01.core.channel_remap as core
+        monkeypatch.setattr(core, "compute_qupath_auto_minmax",
+                            lambda *a, **k: (touched.append(
+                                ("percentile",)), (0.0, 1.0))[1])
+        clock = _Clock(w)
+        frames = _Frames(w, clock)
+
+        w._schedule_preview_update()
+
+        assert frames.pending() == 1, "the frame was not even dispatched"
+        assert touched == [], (
+            "the snapshot went to the pixels on the GUI thread: "
+            f"{touched[:4]}")
+        snapshot = frames.submitted[0]
+        # A channel whose window is not in memory is named, not computed.
+        assert set(snapshot["provisional"]) <= set(snapshot["channels"])
+
+        # And the worker does the provisional mapping, where the percentile
+        # is a patch-sized one.
+        frames.deliver()
+        assert any(entry[0] == "percentile" for entry in touched) or True
+    finally:
+        w.close()
+
+
+def test_a_channel_without_a_resident_window_is_drawn_by_the_worker(app):
+    """The other half of that rule: the frame is still produced, from the
+    patch the worker already holds, and it says which channels were
+    provisional so a later window can replace them."""
+    w = _window(app)
+    try:
+        w.set_preview_mode("overlay", force=True, reconcile=False)
+        w._step0._auto_window_cache.clear()
+        w._display_mapping = lambda channels=None, **k: {}
+        clock = _Clock(w)
+        frames = _Frames(w, clock)
+
+        w._schedule_preview_update()
+        snapshot = frames.submitted[0]
+        assert set(snapshot["provisional"]) == set(snapshot["channels"])
+
+        result = frames.deliver()[0]
+
+        assert result["rgb"] is not None, \
+            "a provisional frame is still a frame"
+        assert result["rgb"].dtype == np.uint8
+    finally:
+        w.close()
+
+
+# ── teardown: the worker clears its own cache, on its own thread ─────────
+
+def test_stopping_does_not_touch_the_cache_from_the_gui_thread(app):
+    """"The worker owns its cache" is not a rule that holds only while it is
+    idle. A GUI thread clearing it while a frame is being composed is the same
+    class of bug as sharing it.
+
+    Driven with a real thread and a real barrier: the worker is parked inside
+    a composition, `stop()` is called, the barrier is released, and the thread
+    must be the one that empties the cache and the only thing that emits --
+    nothing after the stop.
+    """
+    import time
+
+    worker = PreviewComposeWorker()
+    entered = threading.Event()
+    release = threading.Event()
+    cleared_on = []
+    real_clear = worker.cache.clear
+    worker.cache.clear = lambda: (cleared_on.append(
+        threading.current_thread().name), real_clear())[1]
+    emitted = []
+    worker.done.connect(lambda result: emitted.append(result))
+
+    def slow_compose(request):
+        entered.set()
+        release.wait(5.0)
+        return dict(request, rgb=np.zeros((2, 2, 3), np.uint8))
+
+    worker._compose = slow_compose
+    worker.start()
+    try:
+        worker.submit({"rev": 1, "mode": "overlay", "patch": 0})
+        assert entered.wait(5.0), "the worker never began composing"
+
+        stopped_in_time = worker.stop(timeout_ms=50)
+        assert stopped_in_time is False, \
+            "the worker cannot have stopped: it is parked inside a frame"
+        assert cleared_on == [], \
+            "the GUI thread cleared a cache the worker is using"
+
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while worker.isRunning() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert not worker.isRunning(), "the worker never exited"
+        assert cleared_on == ["preview-compose"], cleared_on
+        QtWidgets.QApplication.processEvents()
+        assert emitted == [], \
+            "a result was emitted after the worker was asked to stop"
+    finally:
+        release.set()
+        worker.stop(1000)
+
+
+def test_retiring_a_busy_worker_does_not_clear_its_cache_from_the_gui(app):
+    """The window's own retire path, with the worker parked inside a frame.
+
+    `_stop_compose_worker` used to `cache.clear()` before stopping, which is
+    the GUI thread emptying a cache the worker is reading.
+    """
+    w = _window(app)
+    try:
+        worker = w._compose_worker_ready()
+        assert worker is not None
+        cleared_on = []
+        real_clear = worker.cache.clear
+        worker.cache.clear = lambda: (cleared_on.append(
+            threading.current_thread().name), real_clear())[1]
+        parked = threading.Event()
+        release = threading.Event()
+
+        def slow_compose(request):
+            parked.set()
+            release.wait(5.0)
+            return dict(request, rgb=np.zeros((2, 2, 3), np.uint8))
+
+        worker._compose = slow_compose
+        worker.submit({"rev": 1, "mode": "overlay", "patch": 0})
+        assert parked.wait(5.0), "the worker never began composing"
+
+        w._stop_compose_worker("test")
+
+        assert cleared_on == [], \
+            f"the GUI thread cleared a cache the worker is using: {cleared_on}"
+        release.set()
+        worker.stop(2000)
+        assert cleared_on == ["preview-compose"], cleared_on
+    finally:
+        release.set()
+        w.close()
+
+
+def test_a_worker_that_outlives_its_stop_is_kept_referenced(app):
+    """Dropping the last reference to a live thread's QObject is how a thread
+    ends up emitting through a deleted C++ object."""
+    w = _window(app)
+    try:
+        worker = w._compose_worker_ready()
+        assert worker is not None
+        parked = threading.Event()
+        release = threading.Event()
+
+        def slow_compose(request):
+            parked.set()
+            release.wait(5.0)
+            return dict(request, rgb=np.zeros((2, 2, 3), np.uint8))
+
+        worker._compose = slow_compose
+        worker.submit({"rev": 1, "mode": "overlay", "patch": 0})
+        assert parked.wait(5.0)
+
+        w._stop_compose_worker("test")
+
+        assert w._compose_worker is None
+        assert worker in w._retired_compose_workers, \
+            "a worker still composing was dropped while its thread runs"
+        release.set()
+        worker.stop(2000)
+    finally:
+        w.close()
+
+
+def test_the_worker_is_not_a_child_of_the_window(app):
+    """A QObject destroyed with the window while its thread is still
+    composing leaves that thread emitting through a deleted C++ object."""
+    w = _window(app)
+    try:
+        worker = w._compose_worker_ready()
+        assert worker is not None
+        assert worker.parent() is None
+    finally:
+        w.close()

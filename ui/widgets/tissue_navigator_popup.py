@@ -180,12 +180,7 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         fallback for callers that have no token.
         """
         if dataset_token is not None:
-            if self._overview.bind_dataset(
-                    dataset_token, loader=loader, nuc_ch=nuc_ch,
-                    full_shape=getattr(loader, "shape", None)):
-                # A different slide: the thumbnail loaded for the previous one
-                # is not this one's, whatever loader object serves it.
-                self._overview_loaded_for = None
+            self.bind_dataset(dataset_token, loader=loader, nuc_ch=nuc_ch)
         elif loader is not None:
             if loader is not self._overview.loader:
                 # Another slide. Its thumbnail is not this one's, so it goes
@@ -212,6 +207,27 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._ensure_overview_thumbnail_loaded()
         self._refresh_bar_text()
         self._update_empty_state()
+
+    def bind_dataset(self, token, *, loader=None, nuc_ch=None):
+        """Put this popup's overview on a dataset, marker included.
+
+        The popup owns `_overview_loaded_for`, so the "already loaded" marker
+        cannot fall out of step with the panel's identity -- a host reaching
+        into it to clear it is a second, partial state transition, and the
+        next entry point that forgets the second half puts the previous
+        slide's thumbnail back up for good.
+
+        Returns what the panel reports: True only when it is bound AND empty.
+        """
+        changed = token != self._overview.dataset_token()
+        ok = self._overview.bind_dataset(
+            token, loader=loader, nuc_ch=nuc_ch,
+            full_shape=getattr(loader, "shape", None))
+        if changed:
+            # A different slide: the thumbnail loaded for the previous one is
+            # not this one's, whatever loader object serves it.
+            self._overview_loaded_for = None
+        return ok
 
     def _ensure_overview_thumbnail_loaded(self):
         """Load the tissue thumbnail once for the current loader (reuses the Step0

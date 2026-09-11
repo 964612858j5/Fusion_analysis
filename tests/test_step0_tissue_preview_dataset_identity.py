@@ -33,6 +33,8 @@ Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 
 import gc
 import os
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -43,6 +45,7 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets  # noqa: E402
 
+from block01.ui.step0 import overview_panel as op  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 
 
@@ -346,27 +349,75 @@ def test_a_push_rendered_for_the_previous_slide_is_refused(
         page.close()
 
 
-def test_a_preview_timer_armed_for_the_previous_slide_draws_nothing(
+def test_a_preview_timer_armed_for_the_previous_slide_renders_the_new_one(
         app, tmp_path, monkeypatch):
     """The debounce timer is armed while A is current and fires after the
-    switch. Whatever it renders, it may not put A back."""
+    switch -- the real sequence, driven through the real timer.
+
+    What it must NOT do is put A back. What it DOES do is the honest half of
+    the contract: the timer carries no picture, so when it fires it renders
+    from the page's CURRENT state and its push is the new slide's. With B's
+    pixels not read yet there is nothing to render, and the panels stay
+    empty -- which is what "Loading" means.
+    """
     page = _page_showing_a(tmp_path)
     _show_a_everywhere(page)
     try:
+        pushed = []
+        for panel in _panels(page).values():
+            panel.set_channel_image = (
+                lambda rgb, token=None, _p=panel: pushed.append((_p, token)))
+
         page._queue_tissue_preview()
         assert page._tissue_preview_timer.isActive()
-        stale_token = page._dataset_token()
-        _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
+        a_token = page._dataset_token()
 
-        # The timer's own slot, with the previous slide's picture in hand.
+        _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
+        # The real timer, fired by the real event loop.
+        _pump(app, 1.0, until=lambda: not page._tissue_preview_timer.isActive())
+
+        assert all(token != a_token for _panel, token in pushed), pushed
+        for name, panel in _panels(page).items():
+            assert panel._channel_rgb is None, name
+
+        # And when the page CAN render, the push is the new slide's and it is
+        # accepted -- the same path, with B's pixels available.
+        monkeypatch.setattr(type(page), "_slide_lowres_array",
+                            lambda self, ch, **k: np.full((16, 16), 99.0,
+                                                          np.float32))
+        page.current_channel = "CD3"
+        pushed.clear()
+        page._update_tissue_preview()
+        assert pushed, "nothing was rendered for the new slide"
+        assert {token for _panel, token in pushed} == {page._dataset_token()}
+    finally:
+        page.close()
+
+
+def test_the_pushed_picture_carries_the_dataset_it_was_rendered_from(
+        app, tmp_path, monkeypatch):
+    """The identity is captured where the picture is PRODUCED.
+
+    Not guessed at the panel from the page's state at install time: the
+    render and the token are taken together, so a picture cannot be handed
+    the identity of a slide that arrived after it was made.
+    """
+    page = _page_showing_a(tmp_path)
+    _show_a_everywhere(page)
+    try:
+        seen = []
         monkeypatch.setattr(type(page), "_tissue_preview_rgb",
-                            lambda self: _rgb(200))
-        monkeypatch.setattr(type(page), "_dataset_token",
-                            lambda self: stale_token)
+                            lambda self: (seen.append(self._dataset_token())
+                                          or _rgb(200)))
+        pushed = []
+        for panel in _panels(page).values():
+            panel.set_channel_image = (
+                lambda rgb, token=None: pushed.append(token))
+
         page._update_tissue_preview()
 
-        for name, panel in _panels(page).items():
-            assert _blank(panel), f"{name} was repainted with the old slide"
+        assert seen, "nothing was rendered"
+        assert pushed and set(pushed) == {seen[-1]}, (seen, pushed)
     finally:
         page.close()
 
@@ -504,6 +555,232 @@ def test_three_slides_completing_out_of_order_end_on_the_last(
         for name, panel in _panels(page).items():
             assert float(np.asarray(panel.img_item.image).max()) == \
                 pytest.approx(33.0), name
+    finally:
+        page.close()
+
+
+# ── real overview threads: lifetime, not just which pixels win ──────────
+
+class _BarrierLoader(_Loader):
+    """A loader whose read blocks until it is released, per slide."""
+
+    def __init__(self, value, gate):
+        super().__init__(value)
+        self.gate = gate
+        self.entered = threading.Event()
+
+    def read_region(self, ch, y0, y1, x0, x1, downsample=1, normalize=True,
+                    **_kw):
+        self.entered.set()
+        assert self.gate.wait(30), "a read was never released"
+        return super().read_region(ch, y0, y1, x0, x1, downsample=downsample,
+                                   normalize=normalize, **_kw)
+
+
+def _pump(app, seconds=2.0, until=None):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if until is not None and until():
+            return True
+        time.sleep(0.005)
+    app.processEvents()
+    return until() if until is not None else True
+
+
+def test_three_real_reads_may_be_in_flight_and_only_the_last_one_lands(
+        app, tmp_path):
+    """Real `OverviewLoaderThread`s, a real event loop, and a barrier.
+
+    The panel used to keep ONE reference (`self._ov_thread`), so starting the
+    next slide's read dropped the previous one's QThread while it was still
+    inside `read_region` -- "QThread: Destroyed while thread is still
+    running". Refusing a result by identity says nothing about the object's
+    lifetime; these are two different problems.
+    """
+    gates = [threading.Event() for _ in range(3)]
+    loaders = [_BarrierLoader(v, g) for v, g in zip((11.0, 22.0, 33.0), gates)]
+    panel = op.OverviewPanel(loaders[0], "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    started = set(op.live_overview_workers())
+    try:
+        for i, loader in enumerate(loaders):
+            panel.bind_dataset((i, f"/slide{i}.tif"), loader=loader,
+                               full_shape=(64, 64))
+            panel._load_overview()
+            assert loader.entered.wait(10), f"read {i} never started"
+
+        mine = op.live_overview_workers() - started
+        assert len(mine) == 3, (
+            f"a running overview thread lost its last reference: {mine}")
+        assert all(w.isRunning() for w in mine)
+
+        # Released in the order that is worst for a panel keeping one
+        # reference: the oldest last.
+        for gate in reversed(gates):
+            gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - started)), (
+            "a finished worker was never retired")
+
+        shown = panel.img_item.image
+        assert shown is not None
+        assert float(np.asarray(shown).max()) == pytest.approx(33.0), (
+            "a previous slide's read landed")
+        assert panel.dataset_token() == (2, "/slide2.tif")
+    finally:
+        for gate in gates:
+            gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - started))
+        panel.deleteLater()
+
+
+def test_a_panel_that_is_closed_does_not_release_a_running_read(app,
+                                                                tmp_path):
+    """The panel dies first; the thread must not die with it."""
+    gate = threading.Event()
+    loader = _BarrierLoader(11.0, gate)
+    before = set(op.live_overview_workers())
+    panel = op.OverviewPanel(loader, "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    panel.bind_dataset((1, "/A.tif"), loader=loader, full_shape=(64, 64))
+    panel._load_overview()
+    assert loader.entered.wait(10)
+    try:
+        worker = (op.live_overview_workers() - before).pop()
+        panel.close()
+        panel.deleteLater()
+        del panel
+        gc.collect()
+        app.processEvents()
+
+        assert worker.isRunning(), "the read was abandoned with the panel"
+        gate.set()
+        assert _pump(app, 10.0,
+                     until=lambda: not (op.live_overview_workers() - before))
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+
+
+def test_a_failed_read_of_the_previous_slide_does_not_touch_the_new_one(
+        app, tmp_path):
+    """The FAILURE has an identity too.
+
+    A read of slide A that fails after the switch would otherwise turn the new
+    slide's "Loading…" into "Overview load failed" -- the previous slide
+    writing over the current one's state, which is the same defect as
+    installing its pixels.
+    """
+    class _Boom(_Loader):
+        def __init__(self, value, gate):
+            super().__init__(value)
+            self.gate = gate
+            self.entered = threading.Event()
+
+        def read_region(self, *_a, **_k):
+            self.entered.set()
+            assert self.gate.wait(30)
+            raise RuntimeError("A is unreadable")
+
+    gate = threading.Event()
+    bad = _Boom(11.0, gate)
+    before = set(op.live_overview_workers())
+    panel = op.OverviewPanel(bad, "DAPI", lazy=True)
+    panel.full_h, panel.full_w = 64, 64
+    try:
+        panel.bind_dataset((1, "/A.tif"), loader=bad, full_shape=(64, 64))
+        panel._load_overview()
+        assert bad.entered.wait(10)
+
+        good = _Loader(99.0)
+        panel.bind_dataset((2, "/B.tif"), loader=good, full_shape=(64, 64))
+        panel.status.setText("Loading overview, please wait...")
+
+        gate.set()                       # A fails, after the switch
+        _pump(app, 2.0,
+              until=lambda: not (op.live_overview_workers() - before))
+
+        assert "failed" not in panel.status.text().lower(), panel.status.text()
+        assert _blank(panel)
+
+        # B's own failure IS reported.
+        panel._on_overview_failed("B is unreadable", panel._ov_gen,
+                                  panel.loader, panel.dataset_token())
+        assert "failed" in panel.status.text().lower()
+    finally:
+        gate.set()
+        _pump(app, 5.0,
+              until=lambda: not (op.live_overview_workers() - before))
+        panel.deleteLater()
+
+
+# ── the commit point is fail-safe ───────────────────────────────────────
+
+def test_a_panel_that_cannot_clear_itself_still_lets_go_of_the_pixels(
+        app, tmp_path, monkeypatch):
+    """`img_item.clear()` raising may not leave slide A in the stores.
+
+    The stores are what the next repaint draws from, so they go first and the
+    widget work follows; and the page does not report a clean load when a
+    panel could not be emptied.
+    """
+    page = _page_showing_a(tmp_path)
+    popup = _show_a_everywhere(page)
+    try:
+        # This panel's item only: patching the CLASS would break every other
+        # image item on the page and prove nothing about this contract.
+        def _refuse():
+            raise RuntimeError("the item refuses")
+
+        page.overview.img_item.clear = _refuse
+
+        _switch_to_b(page, tmp_path, monkeypatch, load_overview=False)
+
+        for name, panel in _panels(page).items():
+            assert panel._channel_rgb is None, name
+            assert panel._overview_arr is None, name
+            assert panel.dataset_token() == page._dataset_token(), name
+        # And the page says so instead of announcing a clean load.
+        assert "could not be cleared" in page._load_status.text(), \
+            page._load_status.text()
+        assert popup is page._tissue_navigator_popup
+
+        # The panel's own answer is the same: it reports the failure rather
+        # than claiming a clean transition, which is what the page's check
+        # is built on.
+        assert page.overview.forget_pixels() is False
+        assert page.overview.bind_dataset((99, "/C.tif"),
+                                          loader=page.loader) is False
+        assert page.overview.is_empty() is False
+    finally:
+        page.close()
+
+
+def test_a_bound_panel_refuses_a_picture_that_cannot_name_its_slide(
+        app, tmp_path):
+    """Fail closed. An install path that cannot say which dataset it is for
+    is a path that cannot be checked, and those are what put the previous
+    slide back."""
+    page = _page_showing_a(tmp_path)
+    panel = page.overview
+    try:
+        panel.bind_dataset(page._dataset_token(), loader=page.loader,
+                           full_shape=(64, 64))
+        assert panel.set_channel_image(_rgb(200)) is False
+        assert _blank(panel)
+        assert panel.set_channel_image(_rgb(200),
+                                       page._dataset_token()) is not False
+        assert panel.img_item.image is not None
+
+        # A panel nobody has bound is standalone: it still draws, which is
+        # what the camera and drawing tests need.
+        loose = op.OverviewPanel(page.loader, "DAPI", lazy=True)
+        loose.full_h, loose.full_w = 64, 64
+        assert loose.set_channel_image(_rgb(120)) is not False
+        loose.deleteLater()
     finally:
         page.close()
 

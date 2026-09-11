@@ -8,6 +8,10 @@ image again, and the popup was never touched at all. The read in flight for A
 also had nothing to say which slide it was for, so it could land in a panel
 already bound to B.
 
+A panel that has been bound to a dataset now REFUSES a picture or a read
+result that cannot name one, so the installs below name it -- which is what a
+production caller does too.
+
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
 
@@ -97,8 +101,11 @@ def test_the_popup_panel_loses_them_too(app, tmp_path, monkeypatch):
     try:
         page.show_tissue_navigator()
         popup = page._tissue_navigator_popup
-        popup.overview._on_overview_loaded(np.zeros((16, 16), np.float32))
-        popup.overview.set_channel_image(_rgb(180))
+        token = popup.overview.dataset_token()
+        popup.overview._on_overview_loaded(
+            np.zeros((16, 16), np.float32), popup.overview._ov_gen,
+            popup.overview.loader, token)
+        popup.overview.set_channel_image(_rgb(180), token)
         assert popup.overview.img_item.image is not None
 
         _switch_to_b(page, tmp_path, monkeypatch)
@@ -118,8 +125,11 @@ def test_the_new_slides_picture_is_the_only_one_that_arrives(app, tmp_path, monk
         _switch_to_b(page, tmp_path, monkeypatch, new_loader=new_loader)
         assert page.overview.img_item.image is None
 
-        page.overview._on_overview_loaded(np.full((16, 16), 7.0, np.float32))
-        shown = page.overview.img_item.image
+        panel = page.overview
+        panel._on_overview_loaded(np.full((16, 16), 7.0, np.float32),
+                                  panel._ov_gen, panel.loader,
+                                  panel.dataset_token())
+        shown = panel.img_item.image
 
         assert shown is not None
         assert float(np.asarray(shown).max()) == pytest.approx(7.0)

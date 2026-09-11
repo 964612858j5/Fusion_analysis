@@ -4115,24 +4115,35 @@ class Step0Page(QWidget):
         its pixels, invalidates the read it has in flight and records the new
         dataset, so a late result or a host push from the previous slide is
         refused by identity rather than by luck.
+
+        And it is CHECKED. `bind_dataset` cannot raise, but it can fail (a
+        widget that refuses to clear), and a panel that failed is a panel that
+        may still be showing slide A while this page says it is showing B.
+        The failures are collected and returned; the caller reports them
+        instead of announcing a clean load.
         """
         token = self._dataset_token()
-        shape = getattr(self.loader, "shape", None)
-        bound = 0
-        for panel in self._registered_roi_overviews():
-            try:
-                if panel.bind_dataset(token, loader=self.loader,
-                                      nuc_ch=self.nucleus_channel,
-                                      full_shape=shape):
-                    bound += 1
-            except Exception as exc:                        # noqa: BLE001
-                print(f"[Step0] could not rebind a tissue panel: {exc}")
+        failed = []
         popup = self._tissue_navigator_popup
-        if popup is not None:
-            popup._overview_loaded_for = None
-        dataset_trace.note("page.bind", token=token, panels=bound,
+        for panel in self._registered_roi_overviews():
+            owner = (popup if (popup is not None
+                               and panel is popup.overview) else panel)
+            # Through the popup where there is one: it owns the marker that
+            # says which dataset its thumbnail was loaded for, and a host
+            # setting that field itself is a second, partial transition.
+            try:
+                ok = owner.bind_dataset(token, loader=self.loader,
+                                        nuc_ch=self.nucleus_channel)
+            except Exception as exc:                        # noqa: BLE001
+                ok = False
+                print(f"[Step0] a tissue panel could not be rebound: {exc}")
+            if not ok or not panel.is_empty():
+                failed.append(panel)
+        dataset_trace.note("page.bind", token=token,
+                           panels=len(self._registered_roi_overviews()),
+                           failed=len(failed),
                            loader=dataset_trace.ident(self.loader))
-        return token
+        return failed
 
     def _feed_popup_from_model(self):
         """Render the popup overview from the single model (loader/nuc/rois/patches)."""
@@ -5635,7 +5646,7 @@ class Step0Page(QWidget):
         # refused from this line on. Doing it further down -- inside the
         # overview rebuild, or in the popup feed -- made the previous slide's
         # departure depend on every step in between running.
-        self._bind_panels_to_dataset()
+        unbound = self._bind_panels_to_dataset()
         self.panel_csv_path = panel_csv
         self.panel_groups = {}
         self.nucleus_channel = NUCLEUS_CONFIG["channel"]
@@ -5724,9 +5735,22 @@ class Step0Page(QWidget):
         self._load_existing_config()
         self._rebuild_channel_list()
         self._rebuild_patch_buttons()
-        self._load_status.setText(
-            f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"
-        )
+        if unbound:
+            # A Tissue Preview that could not be emptied is still showing the
+            # previous slide. The dataset IS switched -- the commit cannot be
+            # rolled back -- so this says what is wrong rather than reporting
+            # a clean load over a stale picture.
+            self._load_status.setText(
+                f"⚠ Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px"
+                f"  |  {len(self.loader.ch_map)} channels — "
+                f"{len(unbound)} tissue preview(s) could not be cleared and "
+                f"may still show the previous slide. Reopen the Tissue "
+                f"Preview.")
+            print("[Step0] WARNING: a tissue preview kept the previous slide")
+        else:
+            self._load_status.setText(
+                f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"
+            )
 
         # The workspace is full-image-first: a loaded slide LANDS on the whole
         # slide, not on three empty compare panels.
@@ -7188,12 +7212,18 @@ class Step0Page(QWidget):
         if timer is not None:
             timer.stop()
         with perf_trace.span("step0.tissue_preview_render") as _sp:
+            # The identity is taken WITH the picture, not at the moment it is
+            # installed: the pixels come from this dataset's arrays, so the
+            # token that travels with them is the one that was current when
+            # they were read, and a panel can check the two against each
+            # other instead of trusting whatever the page happens to be
+            # showing by the time the push lands.
+            token = self._dataset_token()
             rgb = self._tissue_preview_rgb()
             if rgb is None:
                 _sp.add(drawn=0)
                 return None
             drawn = 0
-            token = self._dataset_token()
             for panel in self._registered_roi_overviews():
                 # A panel that has never been through a switch has no dataset
                 # yet; it adopts this one rather than refusing every picture.

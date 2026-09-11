@@ -954,6 +954,37 @@ class _PanViewBox(pg.ViewBox):
     """
 
 
+# Overview reads that have not physically finished, kept alive at MODULE
+# level rather than on the panel.
+#
+# A `QThread` whose last Python reference is dropped while it is still
+# running takes the process with it -- "QThread: Destroyed while thread is
+# still running" -- and the panel that started the read is exactly the object
+# most likely to die first: a dataset switch replaces what it holds, a popup
+# is closed, a page is torn down. Refusing the RESULT by identity (which the
+# panel does) says nothing about the object's lifetime; these are two
+# different problems and this is the second one.
+#
+# A worker leaves this set when Qt says it has finished, and is deleted then.
+# Nothing here waits: the GUI thread must never block on a read it cannot
+# cancel.
+_LIVE_OVERVIEW_WORKERS = set()
+
+
+def live_overview_workers():
+    """The overview reads that have not physically finished. For tests and
+    for teardown reporting; never a thing to wait on in a callback."""
+    return set(_LIVE_OVERVIEW_WORKERS)
+
+
+def _retire_overview_worker(worker):
+    _LIVE_OVERVIEW_WORKERS.discard(worker)
+    try:
+        worker.deleteLater()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 class _Unset:
     """"No token given" is not "the token is None": a panel that is bound to
     no dataset has the token None, and a caller that simply does not know the
@@ -1310,16 +1341,27 @@ class OverviewPanel(QWidget):
         between the two), and the panel records which dataset it is now
         showing so a host push or a read result can be checked against it.
 
-        Idempotent for the same token: rebinding a panel to the slide it is
-        already showing neither clears it nor invalidates its read.
+        NEVER RAISES, and the order is the fail-safe: the generation moves and
+        the pixel stores are emptied before anything that can fail is touched.
+        A caller on the far side of a dataset commit cannot roll back, so this
+        may not leave the panel half-transitioned -- token already the new
+        slide's while the pixels are still the old one's, which would let the
+        previous slide's picture wear the new slide's identity.
+
+        Returns True when the panel is bound AND empty; a caller that gets
+        False must not report the switch as clean. Idempotent for the same
+        token: rebinding a panel to the slide it is already showing neither
+        clears it nor invalidates its read.
         """
         if token is not None and token == self._dataset_token:
             if loader is not None:
                 self.loader = loader
-            return False
+            return True
         previous = self._dataset_token
-        self._dataset_token = token
+        # Identity first: from this line no result of the previous slide can
+        # be accepted, whatever happens below.
         self._ov_gen = getattr(self, "_ov_gen", 0) + 1
+        self._dataset_token = token
         if loader is not None:
             self.loader = loader
         if nuc_ch:
@@ -1330,12 +1372,23 @@ class OverviewPanel(QWidget):
                 self.full_w = int(full_shape[1])
             except Exception:                               # noqa: BLE001
                 pass
-        dataset_trace.note("panel.bind", panel=dataset_trace.ident(self),
-                           token=token, was=previous,
-                           loader=dataset_trace.ident(self.loader),
-                           ov_gen=self._ov_gen)
-        self.forget_pixels()
-        return True
+        try:
+            dataset_trace.note("panel.bind", panel=dataset_trace.ident(self),
+                               token=token, was=previous,
+                               loader=dataset_trace.ident(self.loader),
+                               ov_gen=self._ov_gen)
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            cleared = self.forget_pixels()
+        except Exception as exc:                            # noqa: BLE001
+            # `forget_pixels` guards itself; this is the last line of defence
+            # and it still has to leave the stores empty.
+            self._channel_rgb = None
+            self._overview_arr = None
+            print(f"[Overview] forget_pixels failed: {exc}")
+            cleared = False
+        return bool(cleared and self.is_empty())
 
     def dataset_token(self):
         return self._dataset_token
@@ -1358,7 +1411,7 @@ class OverviewPanel(QWidget):
         return True
 
     def forget_pixels(self):
-        """Drop every pixel this panel is holding, and say so.
+        """Drop every pixel this panel is holding, and never raise doing it.
 
         A new slide is a new subject: the previous one's thumbnail must leave
         the screen when the switch is committed, not when the replacement
@@ -1367,22 +1420,53 @@ class OverviewPanel(QWidget):
         drawn again by the next `_apply_thumbnail`. The overview's geometry
         goes with them, so the new slide is never stretched onto the old
         slide's rectangle.
+
+        ORDER MATTERS, and so does the fail-safe. The two arrays are dropped
+        FIRST, before any widget is touched, and every UI step after them is
+        individually guarded: an exception from `img_item.clear()` or from the
+        status label must not be able to leave this panel holding the previous
+        slide's pixels under the new slide's identity. Returns True when the
+        panel is provably empty.
         """
         self._channel_rgb = None
         self._overview_arr = None
         self._thumb_fitted = None
         self._thumbnail_camera_touched = False
         for attr in ("ov_h", "ov_w"):
-            if hasattr(self, attr):
-                delattr(self, attr)
+            try:
+                if hasattr(self, attr):
+                    delattr(self, attr)
+            except Exception:                               # noqa: BLE001
+                pass
         try:
             self.img_item.clear()
+        except Exception as exc:                            # noqa: BLE001
+            # The item could not be cleared. The STORES are empty, so nothing
+            # can redraw the previous slide, but what is on the item right now
+            # is still its pixels: say so rather than report a clean switch.
+            dataset_trace.note("panel.clear_failed",
+                               panel=dataset_trace.ident(self), error=exc)
+            print(f"[Overview] image item could not be cleared: {exc}")
+            return False
+        finally:
+            try:
+                dataset_trace.note("panel.forget",
+                                   panel=dataset_trace.ident(self),
+                                   token=self._dataset_token,
+                                   loader=dataset_trace.ident(self.loader))
+                self.status.setText("Loading overview, please wait...")
+            except Exception:                               # noqa: BLE001
+                pass
+        return True
+
+    def is_empty(self):
+        """True when this panel holds no pixels of any slide."""
+        try:
+            image = self.img_item.image
         except Exception:                                   # noqa: BLE001
-            pass
-        dataset_trace.note("panel.forget", panel=dataset_trace.ident(self),
-                           token=self._dataset_token,
-                           loader=dataset_trace.ident(self.loader))
-        self.status.setText("Loading overview, please wait...")
+            image = None
+        return (self._channel_rgb is None and self._overview_arr is None
+                and image is None)
 
     def _load_overview(self):
         if self.loader is None or self.full_h == 0:
@@ -1406,16 +1490,24 @@ class OverviewPanel(QWidget):
         dataset_trace.note("read.begin", panel=dataset_trace.ident(self),
                            token=token, loader=dataset_trace.ident(loader),
                            ov_gen=gen, channel=self.nuc_ch)
-        self._ov_thread = OverviewLoaderThread(
-            self.loader, self.nuc_ch, self.ds
-        )
-        self._ov_thread.done.connect(
+        worker = OverviewLoaderThread(self.loader, self.nuc_ch, self.ds)
+        # Kept alive until Qt says it has FINISHED, not until the next read
+        # replaces it. `self._ov_thread` used to be the only reference, so
+        # starting the next slide's read while this one was still inside
+        # `read_region` dropped a running QThread.
+        _LIVE_OVERVIEW_WORKERS.add(worker)
+        worker.finished.connect(lambda _w=worker: _retire_overview_worker(_w))
+        self._ov_thread = worker
+        worker.done.connect(
             lambda arr, _g=gen, _l=loader, _t=token:
             self._on_overview_loaded(arr, _g, _l, _t))
-        self._ov_thread.error.connect(
-            lambda e: self.status.setText(f"Overview load failed: {e}")
-        )
-        self._ov_thread.start()
+        # The FAILURE carries the same identity as the success. A read of the
+        # previous slide that fails after the switch would otherwise turn the
+        # new slide's "Loading…" into "Overview load failed".
+        worker.error.connect(
+            lambda err, _g=gen, _l=loader, _t=token:
+            self._on_overview_failed(err, _g, _l, _t))
+        worker.start()
 
     def set_channel_image(self, rgb, token=_UNSET):
         """Show `rgb` -- an (H, W, 3) uint8 image of the WHOLE slide -- as the
@@ -1441,8 +1533,19 @@ class OverviewPanel(QWidget):
         is not this panel's is dropped; omitting the token (the tests, and
         hosts that have no dataset of their own) skips the check.
         """
-        if token is not _UNSET and token != self._dataset_token:
-            dataset_trace.note("push.rejected",
+        if token is _UNSET:
+            if self._dataset_token is not None:
+                # Fail CLOSED: a panel that knows its dataset does not take a
+                # picture that cannot say which slide it is of. Only a
+                # STANDALONE panel -- one no host has bound -- accepts an
+                # unidentified picture, which is what the camera and drawing
+                # tests drive.
+                dataset_trace.note("push.rejected", why="no_token",
+                                   panel=dataset_trace.ident(self),
+                                   token=self._dataset_token)
+                return False
+        elif token != self._dataset_token:
+            dataset_trace.note("push.rejected", why="token",
                                panel=dataset_trace.ident(self),
                                token=self._dataset_token, pushed=token)
             return False
@@ -1509,6 +1612,62 @@ class OverviewPanel(QWidget):
             if not self._thumbnail_camera_touched:
                 self.vb.setRange(rect, padding=0.01)
 
+    def _result_is_mine(self, kind, gen=None, loader=None, token=_UNSET):
+        """Is a finished read still this panel's, and this DATASET's?
+
+        One judgement for both outcomes. A read of the previous slide that
+        FAILS must not be able to change this panel either: turning the new
+        slide's "Loading…" into "Overview load failed" is the previous slide
+        writing over the current one's state, which is the same defect as
+        installing its pixels.
+
+        Three independent ways a result can be foreign, because no one of
+        them catches every case: the panel started another read (generation),
+        the panel was rebound to another loader (loader), or the panel is on
+        another dataset entirely -- which the first two can miss, since a
+        generation is per panel and a loader object can be reused.
+        """
+        if gen is not None and gen != getattr(self, "_ov_gen", gen):
+            dataset_trace.note(f"{kind}.rejected", why="generation",
+                               panel=dataset_trace.ident(self), read_gen=gen,
+                               ov_gen=getattr(self, "_ov_gen", None))
+            print("[Overview] dropped a late overview read from a previous load")
+            return False
+        if loader is not None and loader is not self.loader:
+            dataset_trace.note(f"{kind}.rejected", why="loader",
+                               panel=dataset_trace.ident(self),
+                               read_loader=dataset_trace.ident(loader),
+                               loader=dataset_trace.ident(self.loader))
+            print("[Overview] dropped an overview read for another dataset")
+            return False
+        if token is _UNSET:
+            # Fail CLOSED once this panel knows which dataset it is on: an
+            # install path that cannot name the dataset is a path that cannot
+            # be checked, and those are what put the previous slide back.
+            if self._dataset_token is not None:
+                dataset_trace.note(f"{kind}.rejected", why="no_token",
+                                   panel=dataset_trace.ident(self),
+                                   token=self._dataset_token)
+                return False
+            return True
+        if token != self._dataset_token:
+            dataset_trace.note(f"{kind}.rejected", why="token",
+                               panel=dataset_trace.ident(self),
+                               read_token=token, token=self._dataset_token)
+            print("[Overview] dropped an overview read for another dataset")
+            return False
+        return True
+
+    def _on_overview_failed(self, message, gen=None, loader=None,
+                            token=_UNSET):
+        """A read failed. Only the CURRENT dataset's failure is reported."""
+        if not self._result_is_mine("read.error", gen, loader, token):
+            return
+        dataset_trace.note("read.error.accepted",
+                           panel=dataset_trace.ident(self),
+                           token=self._dataset_token, ov_gen=gen)
+        self.status.setText(f"Overview load failed: {message}")
+
     def _on_overview_loaded(self, arr, gen=None, loader=None, token=_UNSET):
         """Install a finished overview read — if it is still this panel's.
 
@@ -1516,28 +1675,7 @@ class OverviewPanel(QWidget):
         pixels are that slide's and must be dropped rather than drawn under the
         new slide's name.
         """
-        if gen is not None and gen != getattr(self, "_ov_gen", gen):
-            dataset_trace.note("read.rejected", why="generation",
-                               panel=dataset_trace.ident(self), read_gen=gen,
-                               ov_gen=getattr(self, "_ov_gen", None))
-            print("[Overview] dropped a late overview read from a previous load")
-            return
-        if loader is not None and loader is not self.loader:
-            dataset_trace.note("read.rejected", why="loader",
-                               panel=dataset_trace.ident(self),
-                               read_loader=dataset_trace.ident(loader),
-                               loader=dataset_trace.ident(self.loader))
-            print("[Overview] dropped an overview read for another dataset")
-            return
-        if token is not _UNSET and token != self._dataset_token:
-            # The panel was rebound between this read starting and finishing.
-            # Neither of the checks above catches every way that happens: a
-            # generation is per PANEL and a loader can be rebound after the
-            # read was handed its own reference.
-            dataset_trace.note("read.rejected", why="token",
-                               panel=dataset_trace.ident(self),
-                               read_token=token, token=self._dataset_token)
-            print("[Overview] dropped an overview read for another dataset")
+        if not self._result_is_mine("read", gen, loader, token):
             return
         dataset_trace.note("read.accepted", panel=dataset_trace.ident(self),
                            token=self._dataset_token, ov_gen=gen,

@@ -81,6 +81,7 @@ from ...utils.roi_project import (
 # user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
 # schema/widget modules Step1.5 and Step3 use; no promotion / resolver /
 # Step2-runtime import is introduced here.
+from ...utils import dataset_trace
 from ...utils import perf_trace
 from ..widgets.channel_workbench import (
     ChannelWorkbench,
@@ -4091,6 +4092,48 @@ class Step0Page(QWidget):
             panels.append(self._tissue_navigator_popup.overview)
         return panels
 
+    def _dataset_token(self):
+        """This page's identity for the slide it is showing.
+
+        The generation AND the path: the generation alone repeats across
+        pages/sessions, and the path alone does not change when the same file
+        is reloaded. Panels, host-pushed pictures and overview reads are all
+        checked against this, because none of them can be identified by the
+        loader object, the channel names or the image shape -- two slides of
+        one panel have the same channels and can have the same shape.
+        """
+        return (int(getattr(self, "_dataset_gen", 0)),
+                os.path.abspath(self.ome_path) if self.ome_path else "")
+
+    def _bind_panels_to_dataset(self):
+        """Put every Tissue Preview on the CURRENT dataset, now.
+
+        Called at the commit point, before the rest of the reload -- the
+        rebuilds, the ROI reset, the popup feed. That ordering is the
+        contract: the previous slide leaves the screen because the switch was
+        committed, not because a later step happened to run. Each panel drops
+        its pixels, invalidates the read it has in flight and records the new
+        dataset, so a late result or a host push from the previous slide is
+        refused by identity rather than by luck.
+        """
+        token = self._dataset_token()
+        shape = getattr(self.loader, "shape", None)
+        bound = 0
+        for panel in self._registered_roi_overviews():
+            try:
+                if panel.bind_dataset(token, loader=self.loader,
+                                      nuc_ch=self.nucleus_channel,
+                                      full_shape=shape):
+                    bound += 1
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step0] could not rebind a tissue panel: {exc}")
+        popup = self._tissue_navigator_popup
+        if popup is not None:
+            popup._overview_loaded_for = None
+        dataset_trace.note("page.bind", token=token, panels=bound,
+                           loader=dataset_trace.ident(self.loader))
+        return token
+
     def _feed_popup_from_model(self):
         """Render the popup overview from the single model (loader/nuc/rois/patches)."""
         popup = self._tissue_navigator_popup
@@ -4100,7 +4143,8 @@ class Step0Page(QWidget):
         popup.set_overview_context(
             loader=m.loader, nuc_ch=m.nucleus_channel,
             rois=list(m.rois), patches=list(m.patches),
-            full_wsi_mode=m.full_wsi_mode)
+            full_wsi_mode=m.full_wsi_mode,
+            dataset_token=self._dataset_token())
 
     def _reconcile_roi_edit(self, source_panel):
         """Single-model write-back: adopt the edited panel's authoritative state
@@ -5584,6 +5628,14 @@ class Step0Page(QWidget):
 
         self.ome_path = OME_TIFF_FILE
         self.output_dir = OUTPUT_DIR
+        # The identity transition, here: as soon as the page IS the new
+        # dataset and before any of the rebuilding below. Both Tissue Preview
+        # panels drop the previous slide's pixels, their in-flight reads stop
+        # being able to land, and anything rendered for the previous slide is
+        # refused from this line on. Doing it further down -- inside the
+        # overview rebuild, or in the popup feed -- made the previous slide's
+        # departure depend on every step in between running.
+        self._bind_panels_to_dataset()
         self.panel_csv_path = panel_csv
         self.panel_groups = {}
         self.nucleus_channel = NUCLEUS_CONFIG["channel"]
@@ -7141,11 +7193,24 @@ class Step0Page(QWidget):
                 _sp.add(drawn=0)
                 return None
             drawn = 0
+            token = self._dataset_token()
             for panel in self._registered_roi_overviews():
+                # A panel that has never been through a switch has no dataset
+                # yet; it adopts this one rather than refusing every picture.
+                # Adoption keeps its pixels -- the CHECK is what is being
+                # installed here, not another clear.
+                adopt = getattr(panel, "adopt_dataset", None)
+                if callable(adopt):
+                    adopt(token)
                 setter = getattr(panel, "set_channel_image", None)
                 if callable(setter):
-                    setter(rgb)
-                    drawn += 1
+                    # With the dataset this picture was rendered FROM: this
+                    # render is asynchronous (a debounce timer, a finished
+                    # overview read), so one of the previous slide can arrive
+                    # after the switch, and a picture cannot say which slide
+                    # it is of.
+                    if setter(rgb, token) is not False:
+                        drawn += 1
             _sp.add(drawn=drawn,
                     shape="x".join(str(v) for v in getattr(rgb, "shape", ())))
             return rgb

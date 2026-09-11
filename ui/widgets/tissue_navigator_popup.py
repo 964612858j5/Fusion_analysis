@@ -65,7 +65,10 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._minimized = False
         self._restore_size = self.size()
         self._viewport_rect = None   # stored canonical image-local rect or None
-        self._overview_loaded_for = None   # loader the thumbnail was loaded for
+        # The loader the thumbnail was loaded for. What makes a reload happen
+        # when the SLIDE changes under a familiar loader is not this marker
+        # but `set_overview_context`, which clears it when the token changes.
+        self._overview_loaded_for = None
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
@@ -163,16 +166,34 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         return self._overview
 
     def set_overview_context(self, loader=None, nuc_ch=None, rois=None,
-                             patches=None, full_wsi_mode=False):
+                             patches=None, full_wsi_mode=False,
+                             dataset_token=None):
         """Thin adapter to feed the reused OverviewPanel. v14.2a stores context;
-        live sync with the Step0 main viewer is v14.2b. Never creates files."""
-        if loader is not None:
+        live sync with the Step0 main viewer is v14.2b. Never creates files.
+
+        `dataset_token` is the host's identity for the slide. It is what
+        decides whether this is another dataset -- not the loader OBJECT,
+        which is a weaker test in both directions: a host may rebind a panel
+        without replacing its loader, and two loaders of the same slide are
+        not two slides. The panel clears, invalidates its in-flight read and
+        reloads when the token changes; the loader comparison is kept as the
+        fallback for callers that have no token.
+        """
+        if dataset_token is not None:
+            if self._overview.bind_dataset(
+                    dataset_token, loader=loader, nuc_ch=nuc_ch,
+                    full_shape=getattr(loader, "shape", None)):
+                # A different slide: the thumbnail loaded for the previous one
+                # is not this one's, whatever loader object serves it.
+                self._overview_loaded_for = None
+        elif loader is not None:
             if loader is not self._overview.loader:
                 # Another slide. Its thumbnail is not this one's, so it goes
                 # now — before the new loader is bound — rather than staying up
                 # under the new dataset's name until a replacement arrives.
                 self._overview.forget_pixels()
                 self._overview_loaded_for = None
+        if loader is not None:
             self._overview.loader = loader
             try:
                 self._overview.full_h = loader.shape[0]

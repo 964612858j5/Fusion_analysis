@@ -286,7 +286,10 @@ def test_a_burst_of_slider_steps_renders_once(app):
     page = _page(app)
     page._update_tissue_preview()
     rendered = []
-    page.overview.set_channel_image = lambda rgb: rendered.append(rgb)
+    # The push carries the dataset it was rendered from now; a spy that
+    # cannot take it would swallow every render as a TypeError.
+    page.overview.set_channel_image = (
+        lambda rgb, token=None: rendered.append(rgb))
 
     lo, hi, _g = page._display_mapping_for("CD3")
     for i in range(1, 11):

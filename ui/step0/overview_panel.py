@@ -34,6 +34,7 @@ from ...core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
 from ...core.channel_remap import apply_channel_remap
+from ...utils import dataset_trace
 from ...utils import perf_trace
 
 class TileSelectDialog(QDialog):
@@ -953,6 +954,20 @@ class _PanViewBox(pg.ViewBox):
     """
 
 
+class _Unset:
+    """"No token given" is not "the token is None": a panel that is bound to
+    no dataset has the token None, and a caller that simply does not know the
+    dataset must not be told its picture is for the wrong one."""
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<unset>"
+
+
+_UNSET = _Unset()
+
+
 class OverviewPanel(QWidget):
     """
     Left panel showing the DAPI overview.
@@ -1058,6 +1073,11 @@ class OverviewPanel(QWidget):
         # order and the load is asynchronous.
         self._overview_arr = None
         self._channel_rgb = None
+        # Which DATASET these pixels belong to. Not the loader object and not
+        # the channel name: a panel can be rebound, a loader can be replaced
+        # by one that reads the same channel names at the same shape, and
+        # every store here has to be able to say which slide it is holding.
+        self._dataset_token = None
         self._thumb_fitted = None    # the (w, h) the view was last fitted to
         # Whether the USER has moved this panel's camera on the CURRENT
         # dataset. One bit, per panel -- the page's thumbnail and the
@@ -1279,6 +1299,64 @@ class OverviewPanel(QWidget):
 
     # ── Overview loading ──────────────────────────────────────────────
 
+    def bind_dataset(self, token, *, loader=None, nuc_ch=None,
+                     full_shape=None):
+        """Bind this panel to a dataset, and take the previous one off it.
+
+        ONE call, because the three things a switch has to do are not
+        independent: the pixels go, every read that is still in flight for the
+        previous slide is invalidated (the generation moves HERE, not at the
+        next `_load_overview`, so a late result cannot land in the window
+        between the two), and the panel records which dataset it is now
+        showing so a host push or a read result can be checked against it.
+
+        Idempotent for the same token: rebinding a panel to the slide it is
+        already showing neither clears it nor invalidates its read.
+        """
+        if token is not None and token == self._dataset_token:
+            if loader is not None:
+                self.loader = loader
+            return False
+        previous = self._dataset_token
+        self._dataset_token = token
+        self._ov_gen = getattr(self, "_ov_gen", 0) + 1
+        if loader is not None:
+            self.loader = loader
+        if nuc_ch:
+            self.nuc_ch = nuc_ch
+        if full_shape:
+            try:
+                self.full_h = int(full_shape[0])
+                self.full_w = int(full_shape[1])
+            except Exception:                               # noqa: BLE001
+                pass
+        dataset_trace.note("panel.bind", panel=dataset_trace.ident(self),
+                           token=token, was=previous,
+                           loader=dataset_trace.ident(self.loader),
+                           ov_gen=self._ov_gen)
+        self.forget_pixels()
+        return True
+
+    def dataset_token(self):
+        return self._dataset_token
+
+    def adopt_dataset(self, token):
+        """Record the dataset of a panel that has never been bound to one.
+
+        Not a transition: no pixels are dropped and no read is invalidated.
+        It is how a panel that was set up directly -- a host that assigned its
+        loader rather than switching datasets -- gets an identity, so that
+        every LATER push and read result can be checked against it. A panel
+        that already knows its dataset is left alone; changing that is
+        `bind_dataset`, which clears.
+        """
+        if self._dataset_token is not None or token is None:
+            return False
+        self._dataset_token = token
+        dataset_trace.note("panel.adopt", panel=dataset_trace.ident(self),
+                           token=token)
+        return True
+
     def forget_pixels(self):
         """Drop every pixel this panel is holding, and say so.
 
@@ -1301,6 +1379,9 @@ class OverviewPanel(QWidget):
             self.img_item.clear()
         except Exception:                                   # noqa: BLE001
             pass
+        dataset_trace.note("panel.forget", panel=dataset_trace.ident(self),
+                           token=self._dataset_token,
+                           loader=dataset_trace.ident(self.loader))
         self.status.setText("Loading overview, please wait...")
 
     def _load_overview(self):
@@ -1321,17 +1402,22 @@ class OverviewPanel(QWidget):
         # in the panel that now shows another slide.
         self._ov_gen = getattr(self, "_ov_gen", 0) + 1
         gen, loader = self._ov_gen, self.loader
+        token = self._dataset_token
+        dataset_trace.note("read.begin", panel=dataset_trace.ident(self),
+                           token=token, loader=dataset_trace.ident(loader),
+                           ov_gen=gen, channel=self.nuc_ch)
         self._ov_thread = OverviewLoaderThread(
             self.loader, self.nuc_ch, self.ds
         )
         self._ov_thread.done.connect(
-            lambda arr, _g=gen, _l=loader: self._on_overview_loaded(arr, _g, _l))
+            lambda arr, _g=gen, _l=loader, _t=token:
+            self._on_overview_loaded(arr, _g, _l, _t))
         self._ov_thread.error.connect(
             lambda e: self.status.setText(f"Overview load failed: {e}")
         )
         self._ov_thread.start()
 
-    def set_channel_image(self, rgb):
+    def set_channel_image(self, rgb, token=_UNSET):
         """Show `rgb` -- an (H, W, 3) uint8 image of the WHOLE slide -- as the
         thumbnail, in place of the DAPI overview.
 
@@ -1347,9 +1433,25 @@ class OverviewPanel(QWidget):
         works in overview pixels, and none of it moves.
 
         `None` gives the DAPI overview back.
+
+        `token` is the DATASET the picture was rendered from. A host renders
+        this asynchronously -- a debounce timer, a finished overview read --
+        so a picture of the previous slide can arrive after the switch, and a
+        picture has no way of saying which slide it is of. A push whose token
+        is not this panel's is dropped; omitting the token (the tests, and
+        hosts that have no dataset of their own) skips the check.
         """
+        if token is not _UNSET and token != self._dataset_token:
+            dataset_trace.note("push.rejected",
+                               panel=dataset_trace.ident(self),
+                               token=self._dataset_token, pushed=token)
+            return False
         self._channel_rgb = None if rgb is None else np.asarray(rgb)
+        dataset_trace.note("push.accepted", panel=dataset_trace.ident(self),
+                           token=self._dataset_token,
+                           shape=getattr(self._channel_rgb, "shape", None))
         self._apply_thumbnail()
+        return True
 
     def _thumb_rect(self):
         """The overview's own rectangle, in overview pixels.
@@ -1407,7 +1509,7 @@ class OverviewPanel(QWidget):
             if not self._thumbnail_camera_touched:
                 self.vb.setRange(rect, padding=0.01)
 
-    def _on_overview_loaded(self, arr, gen=None, loader=None):
+    def _on_overview_loaded(self, arr, gen=None, loader=None, token=_UNSET):
         """Install a finished overview read — if it is still this panel's.
 
         A read started for the previous slide finishes after the switch; its
@@ -1415,11 +1517,31 @@ class OverviewPanel(QWidget):
         new slide's name.
         """
         if gen is not None and gen != getattr(self, "_ov_gen", gen):
+            dataset_trace.note("read.rejected", why="generation",
+                               panel=dataset_trace.ident(self), read_gen=gen,
+                               ov_gen=getattr(self, "_ov_gen", None))
             print("[Overview] dropped a late overview read from a previous load")
             return
         if loader is not None and loader is not self.loader:
+            dataset_trace.note("read.rejected", why="loader",
+                               panel=dataset_trace.ident(self),
+                               read_loader=dataset_trace.ident(loader),
+                               loader=dataset_trace.ident(self.loader))
             print("[Overview] dropped an overview read for another dataset")
             return
+        if token is not _UNSET and token != self._dataset_token:
+            # The panel was rebound between this read starting and finishing.
+            # Neither of the checks above catches every way that happens: a
+            # generation is per PANEL and a loader can be rebound after the
+            # read was handed its own reference.
+            dataset_trace.note("read.rejected", why="token",
+                               panel=dataset_trace.ident(self),
+                               read_token=token, token=self._dataset_token)
+            print("[Overview] dropped an overview read for another dataset")
+            return
+        dataset_trace.note("read.accepted", panel=dataset_trace.ident(self),
+                           token=self._dataset_token, ov_gen=gen,
+                           shape=getattr(arr, "shape", None))
         self.ov_h, self.ov_w = arr.shape
         self._overview_arr = arr
         self._apply_thumbnail()

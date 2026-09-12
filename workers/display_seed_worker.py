@@ -54,14 +54,18 @@ class DisplaySeedWorker(QObject):
         self._thread = None
 
     # ── producer side (GUI thread) ──────────────────────────────────
-    def submit(self, token, channel, array, nucleus=False):
+    def submit(self, binding, channel, array, nucleus=False):
         """Ask for `channel`'s window. True when this request was taken.
 
-        False when the same `(dataset, channel, role)` is already queued or
+        False when the same `(binding, channel, role)` is already queued or
         being computed: three views wanting the same channel is one pass, and
         a re-request while it is in flight must not become a second one.
+
+        `binding` is opaque here -- a `DisplayBinding`, carried out and back
+        so the caller can check WHICH SLIDE and WHICH BINDING the answer is
+        about. This thread only has to keep it with the request.
         """
-        key = (token, channel, bool(nucleus))
+        key = (binding, channel, bool(nucleus))
         with self._wake:
             if self._stopping:
                 return False
@@ -73,11 +77,11 @@ class DisplaySeedWorker(QObject):
             self._wake.notify()
         return True
 
-    def pending(self, token=None, channel=None, nucleus=False):
+    def pending(self, binding=None, channel=None, nucleus=False):
         with self._lock:
             if channel is None:
                 return len(self._queued_keys)
-            return (token, channel, bool(nucleus)) in self._queued_keys
+            return (binding, channel, bool(nucleus)) in self._queued_keys
 
     def stats(self):
         with self._lock:
@@ -129,12 +133,12 @@ class DisplaySeedWorker(QObject):
                     return
                 key, array = self._queue.popleft()
                 self._busy = True
-            token, channel, nucleus = key
+            binding, channel, nucleus = key
             try:
                 with perf_trace.span("tissue.seed", channel=channel,
                                      nucleus=nucleus):
                     lo, hi = seed_display_range(array)
-                result = {"token": token, "channel": channel,
+                result = {"binding": binding, "channel": channel,
                           "nucleus": nucleus, "min": float(lo),
                           "max": float(hi), "gamma": 1.0}
             except Exception as exc:                        # noqa: BLE001

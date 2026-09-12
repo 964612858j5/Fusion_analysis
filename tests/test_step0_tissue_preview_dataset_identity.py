@@ -472,8 +472,19 @@ def test_the_pushed_picture_carries_the_dataset_it_was_rendered_from(
         for panel in _panels(page).values():
             panel.bind_dataset(b_token, loader=page.loader,
                                full_shape=(64, 64))
-        monkeypatch.setattr(type(page), "_tissue_preview_rgb",
-                            lambda self: (_rgb(200), a_token))
+        # A renderer that reports the PREVIOUS slide's token. Patched on the
+        # render context's snapshot, which is what the frame pipeline asks --
+        # `_tissue_preview_rgb` is the page's own synchronous answer and is
+        # no longer on this path.
+        real_snapshot = page.tissue_render_snapshot
+
+        def stale_snapshot(computed_only=True):
+            snap = real_snapshot(computed_only=computed_only)
+            if snap is not None:
+                snap = dict(snap, token=a_token)
+            return snap
+
+        monkeypatch.setattr(page, "tissue_render_snapshot", stale_snapshot)
 
         page._update_tissue_preview()
 

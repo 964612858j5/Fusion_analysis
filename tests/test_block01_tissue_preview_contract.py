@@ -1206,18 +1206,43 @@ def test_a_seed_that_finishes_after_a_switch_is_filed_under_its_own_slide(app):
     w = _window(app, path="/tmp/A.ome.tiff")
     try:
         _goto(w, 0)
-        a_token = w._display.state.dataset_token()
+        a_binding = w._display.state.binding()
+        state = w._display.state
+        # A channel A has NO window for: the precondition a seed carries is
+        # "this field was absent", and CD3 was seeded the moment Step0 drew.
+        assert state.mapping("CD8") is None
         _switch_dataset(w, "/tmp/B.ome.tiff", scale=17.0)
-        b_before = w._display.state.mapping("CD3")
+        b_before = state.mapping("CD8")
 
-        # A's seed, arriving now.
+        # A's seed, arriving now. It carries the BINDING it was started
+        # under, which names both the slide and the visit.
         w._display._on_mapping_seeded(
-            {"token": a_token, "channel": "CD3", "nucleus": False,
+            {"binding": a_binding, "channel": "CD8", "nucleus": False,
              "min": 11.0, "max": 99.0, "gamma": 1.0})
 
-        assert w._display.state.mapping("CD3") == b_before, "A leaked into B"
-        assert w._display.state._mapping_spaces[a_token][("CD3", False)] == (
-            11.0, 99.0, 1.0)
+        assert state.mapping("CD8") == b_before, "A leaked into B"
+        assert state.mapping_in(a_binding.identity, "CD8") == (11.0, 99.0, 1.0)
+    finally:
+        w.close()
+
+
+def test_a_seed_is_refused_when_the_field_is_no_longer_absent(app):
+    """A seed is started BECAUSE the window is absent. If it is not absent
+    any more -- the user typed a number while the percentile was running --
+    the automatic answer is stale and the user's stands."""
+    w = _window(app, path="/tmp/A.ome.tiff")
+    try:
+        _goto(w, 0)
+        state = w._display.state
+        binding = state.binding()
+        assert state.mapping("CD8") is None
+        state.set_mapping("CD8", 3.0, 33.0, 1.0, origin="user")
+
+        w._display._on_mapping_seeded(
+            {"binding": binding, "channel": "CD8", "nucleus": False,
+             "min": 11.0, "max": 99.0, "gamma": 1.0})
+
+        assert state.mapping("CD8") == (3.0, 33.0, 1.0), "the seed overwrote"
     finally:
         w.close()
 

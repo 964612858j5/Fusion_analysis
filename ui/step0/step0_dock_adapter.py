@@ -17,6 +17,7 @@ No correction/remap math, worker behavior, or config semantics change here.
 
 from PyQt5.QtCore import QObject, Qt
 
+from ...core.display_identity import ChannelCapabilities
 from ..widgets.channel_dock import (
     ChannelDock, ChannelSetModel, ChannelState, Step0ChannelRow,
     SCOPE_PROCESSING,
@@ -156,6 +157,36 @@ class Step0ChannelDockAdapter(QObject):
                 scope=SCOPE_PROCESSING,
             ))
         self.model.set_channels(states)
+
+        # ONE ATOMIC INSTALL of the display state this rebuild describes:
+        # order, capabilities and the current display visibility, written to
+        # Block01's shared state before anything is announced. The page's own
+        # widgets remain the behavioural entry for B2 (Step0's marker
+        # checkbox still means correction participation, and B4 is where that
+        # is split) -- what is recorded here is the DISPLAY answer, so
+        # selection, visibility, order and capabilities have one owner.
+        display = getattr(page, "display", None)
+        if display is not None:
+            caps = {}
+            visibility = {}
+            for ch in page._channel_order:
+                is_nucleus = (ch == page.nucleus_channel)
+                caps[ch] = ChannelCapabilities(
+                    is_nucleus=is_nucleus,
+                    # The nucleus row's checkbox IS its display toggle today;
+                    # every other row's is a correction decision, so B2 does
+                    # not claim it can be toggled as display yet.
+                    display_toggleable=is_nucleus,
+                    weight_editable=not is_nucleus,
+                    correction_eligible=not is_nucleus,
+                )
+                visibility[ch] = (_dapi_visible(page) if is_nucleus
+                                  else bool(ch in page._channel_methods))
+            display.state.install({
+                "order": tuple(page._channel_order),
+                "capabilities": caps,
+                "visibility": visibility,
+            })
 
         # The uniform name-column width is the DOCK's now
         # (`template.uniform_name_width`, applied in `ChannelDock.rebuild`),

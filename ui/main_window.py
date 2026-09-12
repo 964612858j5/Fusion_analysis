@@ -281,7 +281,7 @@ class _SharedSpecTissueContext:
         spec = self.spec()
         if not spec:
             return None
-        if spec.get("token") != self._services.state.dataset_token():
+        if spec.get("token") != self._services.coordinator._panel_token():
             # The slide moved under it. A spec describing another dataset is
             # exactly the failure `b1aaac6` closed; it is dropped, not drawn.
             return None
@@ -1224,7 +1224,9 @@ class MainWindow(QMainWindow):
                 mappings[ch] = window
         if not arrays:
             return None
-        token = self._display.state.dataset_token()
+        # The page's dataset key: the token travels with the pixels to the
+        # overview panels. See `Step0Page.tissue_render_snapshot`.
+        token = self._step0.tissue_dataset_token()
         snapshot = {
             "mode": mode,
             "token": token,

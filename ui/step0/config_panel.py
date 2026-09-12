@@ -321,11 +321,18 @@ class ConfigPanel(QWidget):
 
     # ── rows ──────────────────────────────────────────────────────────
     def set_display_state(self, state):
-        """Make this panel a mirror of Block01's canonical colours.
+        """Make this panel a view over Block01's shared display state.
 
         Registered by the host that owns both. From here the panel reads the
-        shared answer, writes back to it, and repaints when it changes --
-        which is the whole of "one channel, one colour, in every step".
+        shared answer for colour, writes back to it, and repaints when it
+        changes -- which is the whole of "one channel, one colour, in every
+        step" -- and records the display answers for SELECTION and
+        VISIBILITY.
+
+        Recording, not delegating: in B2 this panel's checkbox still drives
+        both display visibility and fusion participation, and its spinbox is
+        still the weight. Splitting those is B3's, and nothing here reads the
+        shared state back to decide behaviour.
         """
         self._display_state = state
         if state is None:
@@ -475,8 +482,17 @@ class ConfigPanel(QWidget):
         finally:
             self._selecting = False
         if newly_visible:
+            self._record_display_visible(channel, True)
             self.visibility_changed.emit(channel, True)
         if changed:
+            # The DISPLAY answer for "which channel is being edited", in the
+            # one place every step reads it. A plain write: programmatic
+            # restore reaches it too and still shows nothing, because
+            # `auto_show` above is what a click means and it is already
+            # decided by here.
+            state = self._display_state
+            if state is not None:
+                state.set_selected_channel(channel, origin="step1-panel")
             self.current_channel_changed.emit(channel)
 
     def _mark_weight_given(self, channel):
@@ -534,6 +550,7 @@ class ConfigPanel(QWidget):
         """
         if visible:
             self._first_enable_weight(channel)
+        self._record_display_visible(channel, visible)
         self.visibility_changed.emit(channel, bool(visible))
 
     def visible_channels(self):
@@ -555,7 +572,20 @@ class ConfigPanel(QWidget):
         if visible:
             self._first_enable_weight(channel)
         row.set_visible(visible)
+        self._record_display_visible(channel, visible)
         self.visibility_changed.emit(channel, bool(visible))
+
+    def _record_display_visible(self, channel, visible):
+        """Record the DISPLAY answer in the shared state. Behaviour-free.
+
+        Nothing reads this back yet: B2 records it so that display visibility
+        has one owner, B3 is where `effective_config` stops being driven by
+        the same tick.
+        """
+        state = self._display_state
+        if state is not None and channel:
+            state.set_display_visible(channel, bool(visible),
+                                      origin="step1-panel")
 
     def channel_color(self, channel):
         """`channel`'s colour -- the shared answer when there is one.

@@ -39,6 +39,7 @@ decides: ownership, lifetime, the active context, who may publish a frame,
 and which results are refused. A step no longer answers any of those.
 """
 
+import collections
 import math
 import time
 
@@ -47,6 +48,7 @@ from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
+from ..core import display_identity as _identity
 from ..core import tissue_compose
 from ..utils import perf_trace
 from ..workers.display_seed_worker import (
@@ -111,26 +113,28 @@ class ChannelDisplayState(QObject):
 
     color_changed = pyqtSignal(str, str)        # channel, "#rrggbb"
     mapping_changed = pyqtSignal(str)           # channel
-    dataset_changed = pyqtSignal(object)        # token
+    dataset_changed = pyqtSignal(object)        # DatasetIdentity
+    selection_changed = pyqtSignal(str)         # channel, "" = nothing
+    visibility_changed = pyqtSignal(str, bool)  # channel, visible
+    # ONE completion notice per transaction. An observer that only wants to
+    # know "the state is now whole" listens here rather than counting field
+    # signals -- which is what made a restore look like a run of user actions.
+    state_installed = pyqtSignal(object)        # DisplayBinding
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._token = None
+        # WHICH SLIDE and WHICH BINDING, separately. See
+        # `core.display_identity` for why one value could not do both jobs.
+        self._binding = None
+        self._generation = 0
+        # Display namespaces, most-recently-bound last, at most
+        # `NAMESPACE_LIMIT` of them. Keyed by the STABLE identity, so walking
+        # A -> B -> A finds A's own selection, visibility and windows again
+        # instead of an empty space and a re-seed.
+        self._namespaces = collections.OrderedDict()
+        self._ns = _identity.DisplayNamespace()   # the current one, always set
         self._colors = {}
         self._default_source = None
-        # THE display windows, by (channel, is-nucleus-role), WITHIN one
-        # dataset. Stored here, not fetched from a step: a shared state that
-        # answers by calling `Step0Page._display_mapping_for` is Step0's store
-        # with another name, and every step then needs Step0 alive and current
-        # to know what Min/Max/Gamma it is drawing with.
-        #
-        # One namespace per dataset token, and `_mappings` is the CURRENT
-        # one. A window is a statement about pixels, so it cannot be shared
-        # between two slides that merely have a channel with the same name --
-        # which is what a flat `(channel, nucleus)` key did, and it meant
-        # slide B opened on slide A's contrast and was never seeded.
-        self._mapping_spaces = {}
-        self._mappings = self._mapping_spaces.setdefault(None, {})
         # Two PORTS, and the difference between them is the whole point.
         # `_seed_port` computes a FIRST window for a channel nobody has set
         # one for -- a percentile over whole-slide pixels, which is pixel
@@ -146,46 +150,205 @@ class ChannelDisplayState(QObject):
         self._persisting = False
 
     # ── identity ──────────────────────────────────────────────────────
+    # How many datasets' display state this process keeps. Bounded on
+    # purpose: the whole point of keeping A's namespace is a quick walk back
+    # to it, and a session that opens fifty slides should not carry fifty
+    # namespaces to make the fiftieth-but-one instant.
+    NAMESPACE_LIMIT = 8
+
+    # ── identity and binding ──────────────────────────────────────────
+    def binding(self):
+        """The current `DisplayBinding`, or None before the first bind."""
+        return self._binding
+
+    def identity(self):
+        """WHICH SLIDE, or None before the first bind."""
+        return None if self._binding is None else self._binding.identity
+
+    def generation(self):
+        """WHICH BINDING. Never repeats, A -> B -> A included."""
+        return 0 if self._binding is None else self._binding.generation
+
     def dataset_token(self):
-        return self._token
+        """The identity, for the callers that only need "which slide".
 
-    def bind_dataset(self, token):
-        """Say which slide these answers are about. ONE transaction.
-
-        COLOURS ARE NOT CLEARED. This product treats a channel's colour as a
-        display preference held by channel NAME (see `Step0Page`'s own note
-        where `_channel_colors` survives a reload), and the steps have to
-        agree either way.
-
-        DISPLAY WINDOWS ARE. A Min/Max/Gamma is a statement about PIXELS --
-        slide B's CD3 is not slide A's CD3, and the two can be orders of
-        magnitude apart. Keyed by channel name alone, B's first read of CD3
-        would hit A's window and B would never be seeded at all: A's tissue
-        contrast, on B's picture, with no way for the user to tell. So the
-        store is per dataset, and switching is a NAMESPACE SWITCH.
-
-        The order matters and is the transaction: the token moves and the
-        namespace moves with it, BEFORE `dataset_changed` goes out. An
-        observer woken by that signal reads B and finds B's windows (or none
-        yet), never A's.
+        Kept as a name because a lot of code and several tests ask for it.
+        What it returns is now the STABLE identity, so two visits to the same
+        file compare equal -- which is the whole B2 change.
         """
-        if token == self._token:
-            return
-        previous, self._token = self._token, token
-        # Namespace first, signal after. A seed or a restore for the previous
-        # slide that lands later is written against ITS token and can no
-        # longer be read as this one's -- see `set_mapping`.
-        space = self._mapping_spaces.setdefault(token, {})
-        if previous is None and not space and self._mapping_spaces.get(None):
-            # ADOPTION, not a switch. Nothing had told this state which slide
-            # it was looking at, so whatever was written meanwhile is about
-            # THIS one -- the same rule an overview panel applies to its first
-            # picture. Moved rather than copied, so the unnamed namespace
-            # cannot be read again later as some other slide's.
-            space.update(self._mapping_spaces.pop(None))
-        self._mappings = space
+        return self.identity()
+
+    def namespace_identities(self):
+        """The identities whose display state is resident, oldest first."""
+        return list(self._namespaces)
+
+    def bind(self, identity, *, install=None):
+        """Bind to `identity` and return the new `DisplayBinding`.
+
+        ONE TRANSACTION. The binding moves, the namespace moves with it, the
+        optional `install` payload is written, and only then does anything go
+        out -- so an observer woken by `dataset_changed` reads the new slide
+        and finds the new slide's answers, never a mixture.
+
+        A NEW GENERATION EVERY TIME, including a return to a slide already
+        resident. That is what lets A's namespace come back while a task
+        started under A's first binding is still refused.
+
+        `identity` must be a resolved `DatasetIdentity`. An unresolved one is
+        refused rather than guessed at: see `core.display_identity`.
+        """
+        if identity is None or not getattr(identity, "path", ""):
+            raise ValueError(
+                "a display binding needs a DatasetIdentity with a path; "
+                f"got {identity!r}. Fail closed rather than sign unknown "
+                "pixels with the current slide.")
+        if not identity.resolved:
+            # Honest, not fatal: an unresolved identity keys a namespace for
+            # THIS run and can never be mistaken for the resolved one, but a
+            # slide whose file is not on disk still gets display state. See
+            # `core.display_identity.resolve_identity`.
+            perf_trace.mark("display.identity_unresolved",
+                            path=identity.path)
+        self._generation += 1
+        self._binding = _identity.DisplayBinding(identity=identity,
+                                                 generation=self._generation)
+        ns = self._namespaces.get(identity)
+        if ns is None:
+            ns = _identity.DisplayNamespace()
+            self._namespaces[identity] = ns
+        self._ns = ns
+        self._namespaces.move_to_end(identity)
+        self._evict_over_limit()
+        if install:
+            self._install_into(ns, install)
         self._mapping_rev += 1
-        self.dataset_changed.emit(token)
+        self.dataset_changed.emit(identity)
+        self.state_installed.emit(self._binding)
+        return self._binding
+
+    def install(self, payload, *, identity=None):
+        """Write a whole display state for the current slide, atomically.
+
+        For a restore or a handoff. Same rule as `bind`: everything lands
+        before anything is announced, so nothing observes "the new mapping
+        with the old selection". Writing the fields individually is what used
+        to make a restore look like a series of user actions.
+        """
+        if identity is not None and identity != self.identity():
+            return False
+        if self._binding is None:
+            return False
+        if not self._install_into(self._ns, payload):
+            return False
+        self._mapping_rev += 1
+        self.state_installed.emit(self._binding)
+        return True
+
+    def _install_into(self, ns, payload):
+        """Write `payload` into `ns`. No signals; the caller announces once.
+
+        Returns True when anything changed -- an install of exactly what is
+        already there announces nothing, because a repaint is not an event.
+        """
+        changed = False
+        order = payload.get("order")
+        if order is not None and tuple(order) != ns.order:
+            ns.order = tuple(order)
+            ns.bump("order")
+            changed = True
+        caps = payload.get("capabilities")
+        if caps is not None and dict(caps) != ns.capabilities:
+            ns.capabilities = dict(caps)
+            ns.bump("capabilities")
+            changed = True
+        if "selection" in payload:
+            sel = str(payload.get("selection") or "")
+            if sel != ns.selection:
+                ns.selection = sel
+                ns.bump("selection")
+                changed = True
+        visibility = payload.get("visibility")
+        if visibility is not None:
+            new_vis = {str(ch): bool(v) for ch, v in visibility.items()}
+            if new_vis != ns.visibility:
+                ns.visibility = new_vis
+                ns.bump("visibility")
+                changed = True
+        mappings = payload.get("mappings")
+        if mappings is not None:
+            for key, value in mappings.items():
+                ch, nucleus = (key if isinstance(key, tuple) else (key, False))
+                if value is None:
+                    continue
+                lo, hi, gamma = value
+                new = (float(lo), float(hi), float(gamma))
+                mkey = (str(ch), bool(nucleus))
+                if ns.mappings.get(mkey) != new:
+                    ns.mappings[mkey] = new
+                    ns.bump(("mapping", mkey))
+                    changed = True
+        colors = payload.get("colors")
+        if colors:
+            # Process-level, so written to the colour store rather than the
+            # namespace -- but inside this transaction, so the one completion
+            # notice covers it too.
+            for ch, value in colors.items():
+                hexc = _to_hex(value)
+                if hexc and self._colors.get(str(ch)) != hexc:
+                    self._colors[str(ch)] = hexc
+                    self._color_rev += 1
+                    changed = True
+        return changed
+
+    def _evict_over_limit(self):
+        """Drop the oldest namespaces past the limit. Never the current one."""
+        while len(self._namespaces) > self.NAMESPACE_LIMIT:
+            oldest, _ns = next(iter(self._namespaces.items()))
+            if oldest == self.identity():
+                # Cannot happen with `move_to_end` above, but a namespace
+                # limit that could evict the slide on screen would be worse
+                # than no limit at all.
+                break
+            self._namespaces.pop(oldest, None)
+            perf_trace.mark("display.namespace_evicted", identity=str(oldest),
+                            resident=len(self._namespaces))
+
+    def _namespace_for(self, identity=_UNSET):
+        """The namespace for `identity`, or None when it is not resident.
+
+        NEVER CREATES. A late callback for an evicted slide must not bring its
+        namespace back: the state would then hold a space nothing is bound to,
+        built from one stale value, and the limit would be a suggestion. Only
+        `bind` admits an identity.
+        """
+        if identity is _UNSET or identity is None or identity == self.identity():
+            return self._ns
+        return self._namespaces.get(identity)
+
+    # ── the compatibility adapter ─────────────────────────────────────
+    def bind_dataset(self, token):
+        """Bind from a legacy `(generation, path)` token or a path.
+
+        The callers that still hold the old token shape reach the new identity
+        through here: the PATH is the stable half and the fingerprint is read
+        from disk, while the token's own counter is discarded -- it was the
+        thing preventing A -> B -> A from finding A again.
+        """
+        path = token
+        if isinstance(token, tuple) and len(token) == 2:
+            path = token[1]
+        elif isinstance(token, _identity.DatasetIdentity):
+            return self.bind(token)
+        resolved = _identity.resolve_identity(path)
+        if resolved is None:
+            perf_trace.mark("display.identity_unresolved", path=str(path))
+            return None
+        if self._binding is not None and resolved == self.identity():
+            # Same slide, re-announced. A new binding generation all the same:
+            # the caller is telling us a fresh bind happened, and any task
+            # from before it is now stale.
+            return self.bind(resolved)
+        return self.bind(resolved)
 
     # ── ports ─────────────────────────────────────────────────────────
     def set_default_source(self, fn):
@@ -300,12 +463,6 @@ class ChannelDisplayState(QObject):
         return self._color_rev
 
     # ── mappings ──────────────────────────────────────────────────────
-    def _space_for(self, token=_UNSET):
-        """The mapping namespace for `token`, or the current one."""
-        if token is _UNSET or token == self._token:
-            return self._mappings
-        return self._mapping_spaces.setdefault(token, {})
-
     def mapping(self, channel, nucleus=False):
         """`(min, max, gamma)` for `channel` ON THIS SLIDE, or None.
 
@@ -316,7 +473,18 @@ class ChannelDisplayState(QObject):
         """
         if not channel:
             return None
-        return self._mappings.get((channel, bool(nucleus)))
+        return self._ns.mappings.get((channel, bool(nucleus)))
+
+    def mapping_in(self, identity, channel, nucleus=False):
+        """`channel`'s window in a NAMED namespace, or None.
+
+        For a late task checking its own precondition against the slide it
+        was computed for rather than against whatever is on screen now.
+        """
+        ns = self._namespace_for(identity)
+        if ns is None or not channel:
+            return None
+        return ns.mappings.get((channel, bool(nucleus)))
 
     def mapping_or_seed(self, channel, nucleus=False):
         """`mapping()`, and if nothing is stored, seed one and store it.
@@ -340,7 +508,8 @@ class ChannelDisplayState(QObject):
         # Stored WITHOUT going back to the persistence port: a seed is what
         # that port just told us, and writing it back would be an echo.
         value = (float(lo), float(hi), float(gamma))
-        self._mappings[(channel, bool(nucleus))] = value
+        self._ns.mappings[(channel, bool(nucleus))] = value
+        self._ns.bump(("mapping", (channel, bool(nucleus))))
         self._mapping_rev += 1
         return value
 
@@ -352,24 +521,34 @@ class ChannelDisplayState(QObject):
         remap params on disk follow; a write that came FROM that port passes
         `persist=False`, which is what stops the two from echoing.
 
-        `token` is the dataset the numbers are ABOUT. A background seed that
-        started on slide A and finishes after the user has loaded B passes
-        the token it was computed for; it is written into A's namespace and
-        cannot be read as B's. Refusing it outright would be worse, not
-        better: going back to A must not have to seed again.
+        `token` is the dataset the numbers are ABOUT -- a `DatasetIdentity`
+        from a background task. A seed that started on slide A and finishes
+        after the user has loaded B is written into A's namespace and cannot
+        be read as B's; refusing it outright would be worse, because going
+        back to A must not have to seed again.
+
+        AN EVICTED IDENTITY IS REFUSED, not recreated. A late write is not a
+        reason to bring a namespace back: the state would then hold a space
+        nothing is bound to, built from one stale value.
         """
         if not channel:
             return False
-        space = self._space_for(token)
+        space_ns = self._namespace_for(token)
+        if space_ns is None:
+            perf_trace.mark("display.late_write_refused", channel=channel,
+                            origin=origin, why="evicted",
+                            identity=str(token))
+            return False
         key = (channel, bool(nucleus))
-        current = space.get(key)
+        current = space_ns.mappings.get(key)
         if gamma is None:
             gamma = current[2] if current else 1.0
         value = (float(lo), float(hi), float(gamma))
         if current == value:
             return False
-        space[key] = value
-        if space is not self._mappings:
+        space_ns.mappings[key] = value
+        space_ns.bump(("mapping", key))
+        if space_ns is not self._ns:
             # A late answer about a slide nobody is looking at. Recorded, so
             # coming back to it is instant; announced to nobody, because
             # nothing on screen is showing it.
@@ -404,16 +583,17 @@ class ChannelDisplayState(QObject):
                 continue
             lo, hi, gamma = value
             new = (float(lo), float(hi), float(gamma))
-            if self._mappings.get((channel, bool(nucleus))) == new:
+            if self._ns.mappings.get((channel, bool(nucleus))) == new:
                 continue
-            self._mappings[(channel, bool(nucleus))] = new
+            self._ns.mappings[(channel, bool(nucleus))] = new
+            self._ns.bump(("mapping", (channel, bool(nucleus))))
             changed.append((channel, bool(nucleus)))
         if not changed:
             return []
         self._mapping_rev += 1
         for channel, nucleus in changed:
             if persist and self._persist_port is not None:
-                value = self._mappings[(channel, nucleus)]
+                value = self._ns.mappings[(channel, nucleus)]
                 try:
                     self._persist_port.write_display_window(
                         channel, *value, nucleus=nucleus)
@@ -425,7 +605,7 @@ class ChannelDisplayState(QObject):
 
     def mappings(self):
         """Every stored window, for a caller that is writing them out."""
-        return dict(self._mappings)
+        return dict(self._ns.mappings)
 
     def forget_mappings(self, token=_UNSET):
         """Drop a slide's windows, so it is seeded again from its own pixels.
@@ -434,9 +614,12 @@ class ChannelDisplayState(QObject):
         under the same identity. An ordinary A -> B switch does not need it:
         B has its own namespace and A's is simply not read.
         """
-        space = self._space_for(token)
-        space.clear()
-        if space is self._mappings:
+        ns = self._namespace_for(token)
+        if ns is None:
+            return
+        ns.mappings.clear()
+        ns.bump("mappings")
+        if ns is self._ns:
             self._mapping_rev += 1
 
     def note_mapping_changed(self, channel):
@@ -453,6 +636,80 @@ class ChannelDisplayState(QObject):
 
     def mapping_revision(self):
         return self._mapping_rev
+
+    def field_revision(self, key, identity=_UNSET):
+        """How many times `key` has been written in a namespace.
+
+        A background task records this when it starts and hands it back when
+        it finishes; a value that has moved since means the answer is about a
+        state nobody is in any more. `("mapping", (channel, nucleus))` is the
+        key a display window uses; `None` means "the field was ABSENT when I
+        started", which is the precondition an automatic seed carries.
+        """
+        ns = self._namespace_for(identity)
+        return None if ns is None else ns.revision(key)
+
+    # ── selection ─────────────────────────────────────────────────────
+    def selected_channel(self):
+        """The channel the steps are editing. Dataset-scoped."""
+        return self._ns.selection
+
+    def set_selected_channel(self, channel, origin=""):
+        """THE selection write. True when it changed anything.
+
+        Programmatic restore reaches this too, and it stays a plain write: it
+        shows nothing, ticks nothing and enables nothing. Auto-show on
+        selection is a PAGE's rule about a user click, not a property of the
+        selection itself.
+        """
+        channel = str(channel or "")
+        if channel == self._ns.selection:
+            return False
+        self._ns.selection = channel
+        self._ns.bump("selection")
+        self.selection_changed.emit(channel)
+        return True
+
+    # ── display visibility ────────────────────────────────────────────
+    def display_visible(self, channel, default=False):
+        """Whether `channel` is shown. A VIEW fact, dataset-scoped.
+
+        Not fusion participation: that is Step1's scientific draft and is not
+        this model's (see the plan, 2.1). B2 records the display answer; B3
+        and B4 separate the scientific one.
+        """
+        return bool(self._ns.visibility.get(str(channel), default))
+
+    def display_visibility(self):
+        return dict(self._ns.visibility)
+
+    def set_display_visible(self, channel, visible, origin=""):
+        """THE display-visibility write. True when it changed anything."""
+        channel = str(channel or "")
+        if not channel:
+            return False
+        visible = bool(visible)
+        if self._ns.visibility.get(channel) == visible:
+            return False
+        self._ns.visibility[channel] = visible
+        self._ns.bump("visibility")
+        self.visibility_changed.emit(channel, visible)
+        return True
+
+    # ── channel identity, order and capabilities ──────────────────────
+    def channel_order(self):
+        return tuple(self._ns.order)
+
+    def capabilities(self, channel):
+        """What may be done to `channel`, as separate facts.
+
+        A channel this state has never been told about answers with the
+        permissive default rather than None: a caller asking "may I toggle
+        this?" before the order is installed should not have to special-case
+        an absence.
+        """
+        return self._ns.capabilities.get(
+            str(channel), _identity.ChannelCapabilities())
 
 
 class TissuePreviewCoordinator(QObject):
@@ -494,6 +751,7 @@ class TissuePreviewCoordinator(QObject):
         # a second view over the same ROI model, so "which panels" is a
         # question with a different answer at different times.
         self._panels_source = None
+        self._panel_token_source = None
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -563,17 +821,29 @@ class TissuePreviewCoordinator(QObject):
         return self._generation
 
     # ── transitions ───────────────────────────────────────────────────
-    def bind_dataset(self, token):
-        """A new slide. Everything in flight is about the old one.
+    def bind_dataset(self, token, *, install=None):
+        """A new binding. Everything in flight is about the old one.
 
-        And the new one is asked for at once: its windows have to be seeded
-        from its own pixels, and nothing else would start that -- the request
-        finds no computed window, names the channel as loading and sends the
-        seed to its thread.
+        And the new one is asked for at once: a slide the state has never
+        held has no windows, and nothing else would start the seeds -- the
+        request finds no computed window, names the channel as loading and
+        sends the seed to its thread. A slide whose namespace is still
+        resident answers immediately instead, from what it already has.
+
+        `install` is the optional atomic payload (order, capabilities,
+        selection, visibility, colours, mappings) so a bind and its restore
+        are ONE transaction rather than a bind followed by a run of writes.
         """
-        self.state.bind_dataset(token)
+        binding = self.state.bind_dataset(token) if install is None else None
+        if install is not None:
+            identity = (token if isinstance(token, _identity.DatasetIdentity)
+                        else _identity.resolve_identity(
+                            token[1] if isinstance(token, tuple) else token))
+            binding = (None if identity is None
+                       else self.state.bind(identity, install=install))
         self._begin_generation("dataset")
         self.request_frame(kind="dataset")
+        return binding
 
     def set_active_context(self, step_id, *, request=True):
         """Make `step_id` the step that draws. ONE atomic transition.
@@ -823,9 +1093,16 @@ class TissuePreviewCoordinator(QObject):
         arrays = payload.get("arrays") or {}
         if not arrays:
             return None
-        token = self.state.dataset_token()
+        # THE FRAME'S TOKEN IS THE PAGE'S DATASET KEY, and only that. It
+        # travels with the pixels to the overview panels, which the page
+        # bound under the same key, and it is what `_result_is_current`
+        # judges a returning frame by. Block01's `DatasetIdentity` is a
+        # different question -- which NAMESPACE the display answers live in --
+        # and running both through this pipeline only made each of them
+        # answer the other's question sometimes.
+        token = self._panel_token()
         context_token = payload.get("token", token)
-        if token is None:
+        if token is None and context_token is not None:
             # Never bound. ADOPTED rather than refused -- the same rule an
             # overview panel applies to its first picture: a coordinator that
             # has not been through a dataset switch has no slide to defend,
@@ -833,7 +1110,6 @@ class TissuePreviewCoordinator(QObject):
             # that only ever loads one dataset never draws at all. The CHECK
             # is what is being installed here; from the next switch on it is
             # strict.
-            self.state.bind_dataset(context_token)
             token = context_token
         elif context_token != token:
             # The context is describing a slide this coordinator has already
@@ -922,7 +1198,7 @@ class TissuePreviewCoordinator(QObject):
         """
         if result.get("generation") != self._generation:
             return False, "generation"
-        if result.get("token") != self.state.dataset_token():
+        if result.get("token") != self._panel_token():
             return False, "dataset"
         if result.get("owner") != self._active:
             return False, "owner"
@@ -963,6 +1239,10 @@ class TissuePreviewCoordinator(QObject):
             self._maybe_arm_next()
             return False
         drawn = 0
+        # The token that travels WITH THE PIXELS: the page's own dataset key,
+        # which is what the overview panels were bound under and what they
+        # check a push against. The frame's `identity` answered a different
+        # question a moment ago, in `_result_is_current`.
         token = result.get("token")
         with perf_trace.span("tissue.publish", rev=result.get("rev"),
                              owner=result.get("owner"),
@@ -1008,6 +1288,26 @@ class TissuePreviewCoordinator(QObject):
         print(f"[Block01] tissue frame failed: {payload.get('error')}")
         self._stats["dropped"] += 1
         self._maybe_arm_next()
+
+    def _panel_token(self, fallback=None):
+        """The dataset key the overview panels were BOUND with.
+
+        Asked of the page that owns them, because it is the page that binds
+        them -- and it is therefore the one value a frame can be judged by
+        that the panels will also accept.
+        """
+        source = getattr(self, "_panel_token_source", None)
+        getter = getattr(source, "tissue_dataset_token", None)
+        if getter is None:
+            return fallback
+        try:
+            return getter()
+        except Exception:                                   # noqa: BLE001
+            return fallback
+
+    def set_panel_token_source(self, source):
+        """Register who binds the overview panels (and with what key)."""
+        self._panel_token_source = source
 
     def _panels(self):
         if self._panels_source is None:
@@ -1219,13 +1519,20 @@ class Block01DisplayServices(QObject):
     def request_mapping_seed(self, channel, nucleus=False):
         """Ask for `channel`'s automatic window in the background.
 
-        Returns True when a pass was started or is already running. The
-        answer is pinned to the dataset it was computed under, so a seed that
-        outlives a slide switch is filed against the slide it is about.
+        Returns True when a pass was started or is already running.
+
+        The request carries the WHOLE precondition it was started under: the
+        stable identity, the binding generation, and the fact that this
+        field was ABSENT. All three are checked on the way back, so a seed
+        cannot land on another slide, cannot land after A -> B -> A, and
+        cannot overwrite a value the user typed while it was running.
         """
         if self._closing or not channel:
             return False
         if self.state.mapping(channel, nucleus=nucleus) is not None:
+            return False
+        binding = self._ensure_binding()
+        if binding is None:
             return False
         array = self.lowres_array(channel)
         if array is None:
@@ -1236,14 +1543,32 @@ class Block01DisplayServices(QObject):
         worker = self._seed_worker_ready()
         if worker is None:
             return False
-        return bool(worker.submit(self.state.dataset_token(), channel, array,
-                                  nucleus=nucleus))
+        return bool(worker.submit(binding, channel, array, nucleus=nucleus))
+
+    def _ensure_binding(self):
+        """The current binding, binding from the data source if there is none.
+
+        A page that has never been through a dataset commit -- the landing
+        before the first Load, a standalone page, a tool script -- still has
+        a path, and the display state can be bound from it. Binding lazily
+        here rather than refusing keeps "there is always a namespace to
+        answer from" true without making every caller check.
+        """
+        binding = self.state.binding()
+        if binding is not None:
+            return binding
+        source = self._lowres_source
+        getter = getattr(source, "tissue_dataset_identity", None)
+        identity = None if getter is None else getter()
+        if identity is None:
+            return None
+        return self.state.bind(identity)
 
     def mapping_seed_pending(self, channel=None, nucleus=False):
         worker = self._seed_worker
         if worker is None:
-            return False if channel is None else False
-        return worker.pending(self.state.dataset_token(), channel, nucleus)
+            return False
+        return worker.pending(self.state.binding(), channel, nucleus)
 
     def _seed_worker_ready(self):
         if self._closing:
@@ -1261,24 +1586,57 @@ class Block01DisplayServices(QObject):
         return worker
 
     def _on_mapping_seeded(self, result):
-        """A window came back. Filed under the slide it is ABOUT.
+        """A window came back. THREE checks before it may land.
 
-        `token` is what the pass was computed under, not what is on screen
-        now: a seed that started on A and finishes after B loaded belongs to
-        A, and writing it as B's would be the cross-slide contamination the
-        namespaces exist to stop. `set_mapping` files it and stays silent
-        when it is not the current slide.
+        1. THE BINDING. A seed started under A's first binding is refused
+           after A -> B -> A even though the identity says A both times --
+           the generation is what tells the two visits apart.
+        2. THE NAMESPACE. An identity that has been evicted is refused
+           rather than resurrected, so a late answer cannot recreate a space
+           nothing is bound to.
+        3. THE PRECONDITION. This pass was started because the field was
+           ABSENT. If it is no longer absent -- the user typed a number while
+           the percentile was running -- the automatic answer is stale and
+           the user's stands.
+
+        A seed that survives all three but is about a slide the user has
+        moved off is still FILED in its own namespace, silently: going back
+        to it must not have to seed again.
         """
         result = dict(result or {})
         channel = result.get("channel")
-        if not channel:
+        binding = result.get("binding")
+        if not channel or binding is None:
             return
-        token = result.get("token")
+        nucleus = bool(result.get("nucleus"))
+        identity = getattr(binding, "identity", None)
+        current = self.state.binding()
+        is_current = (current is not None and binding == current)
+        if not is_current and (current is None
+                               or identity != current.identity):
+            # A different slide: allowed, into its own namespace, if it is
+            # still resident.
+            pass
+        elif not is_current:
+            # SAME slide, OLD binding -- A -> B -> A. Refused.
+            perf_trace.mark("display.seed_refused", why="binding",
+                            channel=channel, seed=str(binding),
+                            current=str(current))
+            return
+        if self.state.field_revision(("mapping", (channel, nucleus)),
+                                     identity) is None:
+            perf_trace.mark("display.seed_refused", why="evicted",
+                            channel=channel, seed=str(binding))
+            return
+        if self.state.mapping_in(identity, channel, nucleus=nucleus) is not None:
+            # The precondition is gone: somebody answered while we measured.
+            perf_trace.mark("display.seed_refused", why="answered",
+                            channel=channel, seed=str(binding))
+            return
         self.state.set_mapping(channel, result["min"], result["max"],
-                               result.get("gamma", 1.0),
-                               nucleus=bool(result.get("nucleus")),
-                               origin="seed", token=token)
-        if token != self.state.dataset_token():
+                               result.get("gamma", 1.0), nucleus=nucleus,
+                               origin="seed", token=identity)
+        if not is_current:
             return          # filed against the slide it is about, and no more
         # A SEED ALWAYS ASKS FOR A FRAME, unconditionally. The relevance test
         # the ordinary mapping fan-out uses -- "is this channel in the last
@@ -1347,6 +1705,10 @@ class Block01DisplayServices(QObject):
     def set_lowres_source(self, source):
         """Register the whole-slide low-resolution data service.
 
+        ALSO the panel-token source: the page that owns the whole-slide
+        arrays is the page that binds the overview panels, so it is the one
+        that can say which dataset key those panels were bound with.
+
         `source` answers `tissue_lowres_array(channel)` -- RESIDENT ONLY,
         never a read on the GUI thread -- and `ensure_tissue_lowres(channels)`,
         which asks for the missing ones in the background. One service for
@@ -1354,6 +1716,7 @@ class Block01DisplayServices(QObject):
         channel are the same array rather than two reads of it.
         """
         self._lowres_source = source
+        self.coordinator.set_panel_token_source(source)
 
     def release_ports(self, owner):
         """Let go of every port `owner` registered. The windows stay.

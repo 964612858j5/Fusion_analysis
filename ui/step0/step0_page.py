@@ -62,7 +62,7 @@ from .overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
 from .step0_explore_tab import Step0ExploreTab
 from .compare_strip import COMPARE_SOURCES, CompareStrip
 from ...core.display_mapping import build_display_lut, seed_display_range
-from ...core import tissue_compose
+from ...core import display_identity, tissue_compose
 from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
 from .search_ctrl import (
@@ -6881,6 +6881,12 @@ class Step0Page(QWidget):
             print(f"[step0] DAPI layer {'shown' if on else 'hidden'}", flush=True)
         finally:
             self._nucleus_vis_syncing = False
+        # The DAPI layer switch IS a display-visibility answer -- the one
+        # per-channel display toggle Step0 has today -- so it is recorded in
+        # the shared state. Nothing about correction changes here.
+        if self.nucleus_channel:
+            self.display.state.set_display_visible(
+                self.nucleus_channel, on, origin="step0-dapi")
         # One switch, every view: the thumbnail's DAPI composite appears and
         # disappears with the full image's overlay and the panels'.
         self._queue_tissue_preview(kind="dapi_layer")
@@ -7491,6 +7497,16 @@ class Step0Page(QWidget):
             arr = arr[:, :, 0]
         return arr if arr.ndim == 2 and arr.size else None
 
+    def tissue_dataset_identity(self):
+        """Block01's STABLE identity for the slide this page is showing.
+
+        Resolved from the path, so it is the same value the second time a
+        slide is opened -- which is what the display namespaces are keyed by.
+        A page that has not been bound yet still answers, so a standalone
+        page (its own tests, a tool script) is not left without one.
+        """
+        return display_identity.resolve_identity(self.ome_path)
+
     def tissue_dataset_token(self):
         """WHICH SLIDE this data service is serving.
 
@@ -7570,6 +7586,10 @@ class Step0Page(QWidget):
         ch = self.current_channel
         if not ch:
             return None
+        # The token travels WITH THE PIXELS to the overview panels, which the
+        # page bound under this same key. Block01's `DatasetIdentity` is a
+        # different question -- which namespace the display answers live in --
+        # and is not what a frame is stamped with.
         token = self._dataset_token()
         nuc = self.nucleus_channel
         wanted = [ch]
@@ -8635,7 +8655,15 @@ class Step0Page(QWidget):
 
     def _on_channel_selected_by_id(self, cid):
         """The shared dock's selection, as a channel id, routed to the
-        legacy row handler. `""` is the model's "nothing selected"."""
+        legacy row handler. `""` is the model's "nothing selected".
+
+        Also recorded in Block01's shared display state, which is the ONE
+        answer to "which channel is being edited" for every step. A plain
+        write: it shows nothing and enables nothing, because auto-show on
+        selection is this page's rule about a user click, not a property of
+        the selection.
+        """
+        self.display.state.set_selected_channel(cid, origin="step0")
         if not cid:
             self._on_channel_row_changed(-1)
             return

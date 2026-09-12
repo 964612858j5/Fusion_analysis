@@ -44,7 +44,15 @@ class Config:
     all_channels = []
     nuc_combo = Combo()
 
-    def load_panel(self, *_args): pass
+    loaded_panels = None
+
+    def load_panel(self, *args):
+        # A FRESH DATASET's initialisation. Recorded, because a handoff
+        # republished for the same slide must not run it: it resets groups,
+        # weights, provenance and participation to a new project's defaults.
+        if self.loaded_panels is None:
+            self.loaded_panels = []
+        self.loaded_panels.append(args)
 
     def set_channels(self, channels, prune=True):
         # `prune=False` is what a restore passes: the install that follows
@@ -202,7 +210,13 @@ def make_window(run, schema=1, loader_path=None):
     # double carries a real one -- parentless, because this MainWindow never
     # ran `__init__` and cannot be a QObject parent.
     from block01.core.fusion_domain import FusionDomainModel
-    w._display = SimpleNamespace(fusion=FusionDomainModel())
+    from block01.ui.block01_display import ChannelDisplayState
+    state = ChannelDisplayState()
+    fusion = FusionDomainModel()
+    # The two halves agree about the current slide the same way production
+    # wires them: a display bind is a scientific bind.
+    state.dataset_changed.connect(fusion.bind_dataset)
+    w._display = SimpleNamespace(fusion=fusion, state=state)
     w._fusion_settings_label = None
     w._btn_save_fusion_settings = None
     w._step1_preview_mode = "overlay"
@@ -624,6 +638,15 @@ def test_v2_session_cannot_override_manifest_geometry_sources_or_remap(
     assert w.step0_output["channel_remap_config_path"] == str(run.remap)
     assert w.step0_output["channel_remap_config_hash"] == run.manifest[
         "channel_remap_config_hash"]
+    # ...and the SCIENCE is bound to the same slide the manifest named. The
+    # loader was already proved un-redirectable; the fusion draft used to take
+    # its identity from the session's own `raw_ome_path`, so a session that
+    # could not move the pixels could still split the identity in two.
+    identity = w._display.fusion.scientific_identity()
+    assert identity is not None
+    assert identity.path == str(run.raw), identity.path
+    assert w._display.state.binding() is not None
+    assert w._display.state.binding().identity.path == str(run.raw)
 
     # A stale session hint must not downgrade a schema-2 manifest to the
     # legacy session reader; its conflicting geometry remains ignored.
@@ -802,3 +825,99 @@ def test_a_v1_session_without_the_field_migrates_the_same_way(tmp_path,
     assert draft is not None
     assert draft["enabled"] == ["DAPI"]          # no group members to enable
     assert draft["provenance"] == {"DAPI": "authoritative"}
+
+
+# ── a republished handoff is not a new project ───────────────────────────
+#
+# The user sets weights in Step1, goes back to Step0 to move an ROI, saves,
+# and the authoritative reader runs again. It used to call `load_panel`
+# unconditionally -- a FRESH DATASET's initialisation -- so a legal draft for
+# the same slide came back as groups at 0.0 with no provenance and nothing
+# taking part. The earlier test for this drove `state.bind(same identity)`,
+# which is not the entry that clears anything.
+
+def test_republishing_the_same_handoff_keeps_the_fusion_draft(
+        tmp_path, monkeypatch, app):
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output, step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    assert w._load_step0_roi_result(auto=True) is True
+    assert w.config.loaded_panels, "the first load did not initialise the panel"
+
+    # The user's project for THIS slide.
+    model = w._display.fusion
+    model.install_draft({
+        "groups": {"A": {"group_weight": 1.0,
+                         "channels": {"CD3": 0.2, "CD8": 0.0}},
+                   "B": {"group_weight": 1.0, "channels": {"CD3": 0.7}}},
+        "nucleus": {"channel": "DAPI", "weight": 1.0},
+        "enabled": ["CD3", "DAPI"],
+        "provenance": {"CD3": "authoritative", "CD8": "explicit",
+                       "DAPI": "authoritative"},
+    })
+    before_full = model.full_config()
+    before_effective = model.effective_config()
+    before_draft = model.draft_snapshot()
+    w.config.loaded_panels = []
+
+    # ROI moved, handoff republished, the authoritative reader runs again.
+    assert w._load_step0_roi_result(auto=True) is True
+
+    assert w.config.loaded_panels == [], \
+        "a republished handoff re-initialised the panel as a new dataset"
+    groups = model.groups()
+    assert groups["A"]["CD3"] == 0.2 and groups["B"]["CD3"] == 0.7
+    assert groups["A"]["CD8"] == 0.0
+    assert model.weight_provenance("CD8") == "explicit"
+    assert model.weight_provenance("CD3") == "authoritative"
+    assert model.fusion_enabled("CD3") is True
+    assert model.full_config() == before_full
+    assert model.effective_config() == before_effective
+    assert model.draft_snapshot() == before_draft
+    assert model.scientific_identity() is not None
+    assert model.scientific_identity().path == str(run.raw)
+
+
+def test_another_dataset_still_starts_from_fresh_defaults(
+        tmp_path, monkeypatch, app):
+    """Only a REAL new dataset gets the new-project initialisation."""
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    run = make_run(first_dir)
+    other = make_run(second_dir)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    assert w._load_step0_roi_result(auto=True) is True
+    model = w._display.fusion
+    model.install_draft({
+        "groups": {"g": {"group_weight": 1.0, "channels": {"CD3": 0.4}}},
+        "nucleus": {"channel": "DAPI", "weight": 1.0},
+        "enabled": ["CD3"], "provenance": {"CD3": "explicit"},
+    })
+    w.config.loaded_panels = []
+
+    # Another slide, through the same authoritative reader.
+    second = make_window(other)
+    second.step0_output = dict(second.step0_output,
+                               step0_manifest_path=str(other.manifest_path))
+    second._display = w._display                    # the process's one model
+    second._update_next_button = lambda: None
+    assert second._load_step0_roi_result(auto=True) is True
+
+    assert second.config.loaded_panels, \
+        "another dataset did not get the fresh-project initialisation"
+    assert model.weight_provenance("CD3") == "absent"
+    assert model.fusion_enabled("CD3") is False
+    assert model.scientific_identity().path == str(other.raw)

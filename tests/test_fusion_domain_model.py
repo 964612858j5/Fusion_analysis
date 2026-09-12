@@ -1072,7 +1072,7 @@ def test_loading_a_third_slide_clears_the_second_and_binds_the_third(
         w.close()
 
 
-def test_a_v2_session_restore_binds_the_identity_its_source_names(
+def test_a_session_restore_binds_both_halves_to_its_authoritative_source(
         app, tmp_path):
     """5. The restored draft belongs to a dataset, and the formal bind that
     follows -- same slide, same identity -- leaves it alone."""
@@ -1105,8 +1105,14 @@ def test_a_v2_session_restore_binds_the_identity_its_source_names(
             "a restored project belonged to no dataset"
         from block01.core.display_identity import resolve_identity
         assert identity.fingerprint == resolve_identity(str(raw)).fingerprint
+        # CLOSED BY THE RESTORE ITSELF: the display is already bound to the
+        # same slide, so this is not a test that binds on the code's behalf.
+        binding = w._display.state.binding()
+        assert binding is not None
+        assert binding.identity.path == str(raw)
+        assert binding.identity.fingerprint == identity.fingerprint
 
-        # The handoff's own bind lands on the same slide: nothing is cleared.
+        # A later formal bind lands on the same slide: nothing is cleared.
         w._display.state.bind(resolve_identity(str(raw)))
         _pump()
         assert model.groups()["A"]["CD3"] == pytest.approx(0.2)

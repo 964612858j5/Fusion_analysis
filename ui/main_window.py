@@ -1986,8 +1986,31 @@ class MainWindow(QMainWindow):
                     }
                 }
                 source = "default_all_channels"
-            self.config.set_channels(channels)
-            self.config.load_panel(panel_groups, nucleus_channel)
+            # WHICH SLIDE THIS HANDOFF IS FOR, before anything is written.
+            # A republished handoff for the SAME slide -- the user went back
+            # to Step0, moved an ROI and saved -- is not a new project: its
+            # groups, its per-group weights, its provenance and which
+            # channels take part are still true, and `load_panel` below
+            # initialises all of them to a fresh dataset's defaults.
+            #
+            # `bind_dataset` answers the question and does the switching in
+            # one: True when this is genuinely another dataset (or the first
+            # one), False when the draft already belongs to this slide.
+            fresh = self._display.fusion.bind_dataset(
+                self._source_identity(
+                    getattr(self.loader, "filepath", "")
+                    or self.step0_output.get("ome_tiff_path", "")),
+                reason="Step0 handoff loaded")
+            if fresh:
+                self.config.set_channels(channels)
+                self.config.load_panel(panel_groups, nucleus_channel)
+            else:
+                # Same slide: the channel universe is re-read (a channel that
+                # is gone takes its answers with it, announced like any other
+                # scientific change) and the project stands.
+                self.config.set_channels(channels)
+                print("[Step1] handoff republished for the same dataset; "
+                      "the fusion draft was kept")
             self.config.set_nucleus(nucleus_channel, 1.0)   # Step0's answer
             # `zero_marker_weights()` is NOT called here any more, and that
             # is the whole of this fix. It is the Reset weights BUTTON --
@@ -2534,7 +2557,7 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
 
-    def _restore_step1_scientific_state(self, sess):
+    def _restore_step1_scientific_state(self, sess, source_path=""):
         """Put back the scientific state of ANY session shape, in one go.
 
         The four shapes -- legacy flat weights, grouped-without-visibility,
@@ -2545,6 +2568,13 @@ class MainWindow(QMainWindow):
         a restored project: the model installs the whole draft and announces
         it once.
 
+        `source_path` is the AUTHORITY's slide -- the loader the manifest
+        reader accepted -- and it is what the restored project is bound to.
+        The session's own `raw_ome_path` is not trusted for this: a session
+        may not redirect a v2 handoff, and taking the identity from it would
+        have left the display bound to the manifest's slide while the science
+        claimed another one.
+
         Returns the display visibility the session implies, for the display
         restore that follows.
         """
@@ -2554,9 +2584,10 @@ class MainWindow(QMainWindow):
         # it in the SAME transaction as the install below, so the restored
         # project belongs to a slide rather than to nothing -- and the formal
         # bind that follows a handoff load finds the same identity and leaves
-        # the restored answers alone.
+        # the restored answers alone. The AUTHORITY's path, never the
+        # session's own claim about it.
         identity = self._source_identity(
-            str(sess.get("raw_ome_path") or "")
+            str(source_path or "")
             or str(getattr(self.loader, "filepath", "") or ""))
         # No pruning: the install below replaces the whole draft, and pruning
         # first would announce an intermediate nobody meant.
@@ -2568,7 +2599,19 @@ class MainWindow(QMainWindow):
         print(f"[Step1] session shape={fusion_domain.classify_session(sess)} "
               f"enabled={len(spec.get('enabled') or [])} "
               f"visible={sum(1 for v in visibility.values() if v)}")
+        # The SCIENCE first, bound and installed in one transaction, then the
+        # display on the same identity. That order is the point: the display
+        # bind announces the dataset, and the science follows a dataset bind,
+        # so binding the display first would have cleared the project a
+        # moment before the install put it back -- one announced empty draft
+        # in between. This way the display's bind finds the identity already
+        # current and says nothing about it.
         self.config.install_fusion_draft(spec, visibility, identity=identity)
+        if identity is not None:
+            # ONE identity for both halves of Block01, established by the
+            # restore itself: a later formal bind for the same slide is a
+            # no-op and cannot wipe what was just restored.
+            self._display.state.bind(identity)
         return visibility
 
     def _apply_step1_fusion_config(self, cfg):
@@ -2669,7 +2712,8 @@ class MainWindow(QMainWindow):
         # call _on_patches with session data or reconstruct an ROI.
         patches = list(self._all_patches or [])
 
-        visibility = self._restore_step1_scientific_state(sess)
+        visibility = self._restore_step1_scientific_state(
+            sess, source_path=raw_ome)
         self._apply_step1_display_state(sess, visibility)
 
         self._p2_params = sess.get("p2_params")
@@ -2960,8 +3004,10 @@ class MainWindow(QMainWindow):
 
             # One migration for every session shape, weight provenance and
             # participation included -- so this path no longer has to restore
-            # a separate "which zeros are answers" marker afterwards.
-            self._restore_step1_scientific_state(sess)
+            # a separate "which zeros are answers" marker afterwards. The
+            # slide is the LOADER's, not the session's claim about it.
+            self._restore_step1_scientific_state(
+                sess, source_path=getattr(self.loader, "filepath", ""))
 
             rois = list(sess.get("rois") or [])
             if not rois and sess.get("roi_bbox"):

@@ -74,6 +74,7 @@ from .block01_display import (
     STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
 )
 from .step0.config_panel import ConfigPanel
+from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
 from .step0 import overview_panel
@@ -720,7 +721,15 @@ class MainWindow(QMainWindow):
         # thumbnail left empty.  It is constructed in its final home rather than
         # built elsewhere and reparented, so there is never a moment with two
         # parents or two instances.
-        ll.addWidget(self._make_label("② Channels", bold=True))
+        # The SAME outer Channels frame Step0 draws: one border, one title
+        # rule, one set of colours, from `channel_dock.template`. Step1 used
+        # to carry a plain bold label instead, so the two steps framed the
+        # same list differently.
+        channels_box = QtWidgets.QGroupBox("② Channels")
+        channels_box.setStyleSheet(channel_template.frame_qss())
+        channels_box_lay = QVBoxLayout(channels_box)
+        channels_box_lay.setContentsMargins(4, 4, 4, 4)
+        channels_box_lay.setSpacing(4)
         self.config = ConfigPanel([])
         self.config.setMinimumHeight(220)
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -732,7 +741,9 @@ class MainWindow(QMainWindow):
         # or in Step0 is the same channel's colour.
         self._step0.channel_color_changed.connect(
             self._on_step0_channel_color_changed)
-        ll.addWidget(self.config, stretch=1)
+        channels_box_lay.addWidget(self.config, stretch=1)
+        ll.addWidget(channels_box, stretch=1)
+        self._step1_channels_box = channels_box
 
         # The commit point for everything above it. The preview follows the
         # panel live; a segmentation search and the final fused.zarr run on

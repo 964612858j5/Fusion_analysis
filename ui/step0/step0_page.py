@@ -90,6 +90,7 @@ from ..widgets.channel_workbench import (
     _hex_to_rgb01 as _channel_hex_to_rgb01,
 )
 from ..widgets.tissue_navigator_popup import TissueNavigatorPopup
+from ..widgets.channel_dock import template as channel_template
 from ..block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, _to_hex as _color_hex,
 )
@@ -5529,16 +5530,9 @@ class Step0Page(QWidget):
 
     @staticmethod
     def _box_style(color):
-        # Reserve vertical room for the title (margin-top) AND explicitly position
-        # the title sub-control in that margin so it sits ABOVE the border/body —
-        # without the ::title rule + enough margin, the first body child rides up
-        # and occludes the title (the styled-QGroupBox "eats its title" bug).
-        return (
-            f"QGroupBox{{border:1px solid {color};border-radius:5px;margin-top:16px;"
-            f"font-weight:bold;color:{color};font-size:11px;}}"
-            f"QGroupBox::title{{subcontrol-origin:margin;subcontrol-position:top left;"
-            f"left:8px;padding:0 4px;}}"
-        )
+        """This page's group-box look. ONE definition, in the channel
+        template, so the Channels frame is the same object in every step."""
+        return channel_template.frame_qss(color)
 
     @staticmethod
     def _hint_label(text):

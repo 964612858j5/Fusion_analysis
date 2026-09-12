@@ -64,24 +64,18 @@ from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor
 
 from ...config import NUCLEUS_CONFIG
+from ..widgets.channel_dock import template
 
 DEFAULT_GROUP = "markers"
 
-# Dealt by channel order to any channel nobody has picked a colour for. Same
-# spirit as Step0's palette: a channel has a colour before anyone chooses one.
-_PALETTE = [
-    "#4d96ff", "#6bcb77", "#ff6b6b", "#ffd93d", "#c678dd",
-    "#19e0e0", "#ff9f45", "#98c379", "#e06c75", "#61afef",
-]
-
-_LIST_STYLE = """
-QListWidget { background:#101620; border:1px solid #253246; border-radius:4px; }
-QListWidget::item { border-bottom:1px solid #202c3b; }
-QListWidget::item:hover { background:#1a3e33; }
-QListWidget::item:selected { background:#1a2b3e; }
-"""
-
-ROW_HEIGHT = 26
+# THE palette and THE row height, from the shared template. This module used
+# to carry a second palette of its own -- ten different colours in a different
+# order -- and a second list stylesheet that was the dock's minus the
+# `item:selected:hover` rule, so a selected row under the cursor turned green
+# here and stayed blue in Step0. Both are gone; these names remain because
+# callers and tests import them.
+_PALETTE = template.CHANNEL_PALETTE
+ROW_HEIGHT = template.ROW_HEIGHT
 
 
 class ChannelRow(QWidget):
@@ -108,31 +102,28 @@ class ChannelRow(QWidget):
         self.channel = channel
         self._busy = False
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 2, 6, 2)
-        lay.setSpacing(5)
+        # The common columns come from the shared template -- checkbox, the
+        # always-present state slot, swatch and name -- so this row and the
+        # dock's `ChannelRowBase` cannot drift apart in geometry or style.
+        # Everything below is this row's ACCESSORY: the weight controls.
+        # `tooltips=False`: this panel's rows carry no hover text on their
+        # controls, by the product decision recorded in the class docstring.
+        core = template.build_row_core(self, name=channel, tooltips=False)
+        lay = core.layout
+        self.checkbox = core.checkbox
+        self.state_slot = core.state_slot
+        self.swatch = core.swatch
+        self.name_label = core.name_label
 
-        self.checkbox = QCheckBox()
         self.checkbox.setChecked(bool(visible))
         self.checkbox.toggled.connect(self._on_toggled)
-        lay.addWidget(self.checkbox)
-
-        self.swatch = QLabel()
-        self.swatch.setFixedSize(13, 13)
-        self.swatch.setCursor(Qt.PointingHandCursor)
-        lay.addWidget(self.swatch)
-
-        self.name_label = QLabel(channel)
-        self.name_label.setStyleSheet("color:#dce5ef;font-size:11px;")
-        self.name_label.setMinimumWidth(52)
-        lay.addWidget(self.name_label, stretch=1)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(int(round(float(weight) * 100)))
         self.slider.setFixedHeight(16)
         self.slider.setMinimumWidth(60)
-        lay.addWidget(self.slider, stretch=2)
+        template.add_accessory(lay, self.slider, stretch=2)
 
         self.spin = QDoubleSpinBox()
         self.spin.setRange(0.0, 1.0)
@@ -141,14 +132,11 @@ class ChannelRow(QWidget):
         self.spin.setValue(float(weight))
         self.spin.setFixedWidth(56)
         self.spin.setAlignment(Qt.AlignRight)
-        self.spin.setStyleSheet(
-            "QDoubleSpinBox{background:#182230;color:#dce5ef;"
-            "border:1px solid #354a63;border-radius:3px;font-size:10px;}")
-        lay.addWidget(self.spin)
+        self.spin.setStyleSheet(template.ACCESSORY_SPINBOX_QSS)
+        template.add_accessory(lay, template.fit_accessory(self.spin))
 
         self.slider.valueChanged.connect(self._on_slider)
         self.spin.valueChanged.connect(self._on_spin)
-        self.setStyleSheet("*{background:transparent;}")
         self.set_color(color)
 
     # -- weight (the spinbox is the authority; the slider follows it) -------
@@ -213,8 +201,7 @@ class ChannelRow(QWidget):
     # -- colour -------------------------------------------------------------
     def set_color(self, color):
         self._color = color
-        self.swatch.setStyleSheet(
-            f"background:{color};border:1px solid #354a63;border-radius:2px;")
+        template.apply_swatch_color(self.swatch, color)
 
     def color(self):
         return self._color
@@ -307,7 +294,7 @@ class ConfigPanel(QWidget):
         lay.addLayout(nuc_row)
 
         self._list = QListWidget()
-        self._list.setStyleSheet(_LIST_STYLE)
+        template.apply_list_style(self._list)
         self._list.setSelectionMode(QListWidget.SingleSelection)
         self._list.currentItemChanged.connect(self._on_current_item)
         lay.addWidget(self._list, stretch=1)
@@ -374,9 +361,11 @@ class ConfigPanel(QWidget):
         """The colour a channel wears before anyone picks one.
 
         Asked of the shared state when there is one, so the palette is dealt
-        ONCE for the whole process. This panel's own `_PALETTE` is the
-        fallback for a panel standing alone (its own tests), and it is no
-        longer a second answer that can disagree with Step0's.
+        ONCE for the whole process. A panel standing alone (its own tests)
+        falls back to the SHARED template palette -- the same list, in the
+        same order, that the rest of Block01 deals from. It used to fall back
+        to a private one, which meant "no shared state yet" was a licence to
+        show a different colour.
         """
         state = self._display_state
         if state is not None:
@@ -387,13 +376,21 @@ class ConfigPanel(QWidget):
             i = self.all_channels.index(ch)
         except ValueError:
             i = len(self._rows)
-        return _PALETTE[i % len(_PALETTE)]
+        return template.palette_color(i)
 
     def _rebuild_rows(self):
-        """Rebuild the visible list from `all_channels`, keeping state."""
+        """Rebuild the visible list from `all_channels`, keeping state.
+
+        Scroll position and keyboard focus belong to the LIST, not to the
+        data: rebuilding is the same channels drawn again, and landing the
+        user back at the top of a long panel is not part of that. Same rule
+        as `ChannelDock.rebuild`.
+        """
         weights = {ch: row.weight() for ch, row in self._rows.items()}
         visible = {ch: row.is_visible() for ch, row in self._rows.items()}
         current = self._current
+        keep_scroll = self._list.verticalScrollBar().value()
+        keep_focus = self._list.hasFocus()
 
         self._list.clear()
         self._rows.clear()
@@ -412,10 +409,18 @@ class ConfigPanel(QWidget):
             row.weight_edited.connect(self._on_row_weight_edited)
             row.color_clicked.connect(self._pick_color)
             item = QListWidgetItem(self._list)
-            item.setSizeHint(QSize(200, ROW_HEIGHT))
+            item.setSizeHint(template.item_size_hint(row, width=200))
             self._list.setItemWidget(item, row)
             self._rows[ch] = row
             self._items[ch] = item
+
+        # ONE name column for the list -- the longest name -- computed by the
+        # same template helper the dock uses, so the two lists put the
+        # accessory at the same x for the same channel names.
+        template.uniform_name_width(list(self._rows.values()))
+        self._list.verticalScrollBar().setValue(keep_scroll)
+        if keep_focus:
+            self._list.setFocus(Qt.OtherFocusReason)
 
         # A channel that is gone takes its history with it; one that is
         # still here keeps it, because rebuilding the rows is not a new

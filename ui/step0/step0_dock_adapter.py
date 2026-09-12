@@ -157,14 +157,10 @@ class Step0ChannelDockAdapter(QObject):
             ))
         self.model.set_channels(states)
 
-        # One uniform name-column width = the longest name, so the method
-        # combos align across rows while sitting right next to the names.
-        rows = [self.dock.row(ch) for ch in self.model.order()]
-        if rows:
-            name_w = max(r.name_label.fontMetrics().boundingRect(
-                r.name_label.text()).width() for r in rows) + 6
-            for r in rows:
-                r.name_label.setFixedWidth(name_w)
+        # The uniform name-column width is the DOCK's now
+        # (`template.uniform_name_width`, applied in `ChannelDock.rebuild`),
+        # so both channel lists compute it the same way and this adapter no
+        # longer reaches into the rows to set it.
 
         # Legacy registry: same keys/widgets the page code mutates directly.
         for ch in self.model.order():

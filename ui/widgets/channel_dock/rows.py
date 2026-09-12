@@ -11,32 +11,26 @@ Rows write user interaction into the ChannelSetModel and follow model signals
 for their channel; they never touch config files.
 """
 
-import os
-
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 
+from . import template
 from .model import ChannelSetModel
 
-_NAME_STYLE = "color:#dce5ef;font-size:11px;"
-
-_CHECK_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "check.svg").replace(os.sep, "/")
-
-# Shared checkbox template: explicitly drawn indicator that sits visibly on
-# top of the list highlight; a CHECKMARK (not a filled box) when checked.
-# Pages may override per-widget (e.g. Step0's green filled "done" state).
-CHECKBOX_INDICATOR_QSS = (
-    "QCheckBox::indicator{width:13px;height:13px;border-radius:2px;"
-    "border:1px solid #6d8196;background:#182230;}"
-    "QCheckBox::indicator:checked{background:#182230;"
-    f"border:1px solid #9bd0ff;image:url({_CHECK_ICON});}}"
-    "QCheckBox::indicator:disabled{border:1px solid #3a4a5c;background:#141b26;}"
-)
+# Re-exported so the existing importers keep working; the definition lives in
+# `template`, which is the one place a channel row's look is decided.
+CHECKBOX_INDICATOR_QSS = template.CHECKBOX_INDICATOR_QSS
+_NAME_STYLE = template.NAME_QSS
 
 
 class ChannelRowBase(QtWidgets.QWidget):
-    """Color swatch + visibility + name. Click anywhere selects the channel."""
+    """The shared row: the template's core, plus this class's model wiring.
+
+    The core -- checkbox, state slot, swatch, name -- is built by
+    `channel_dock.template`, so this row and Step1's `ConfigPanel.ChannelRow`
+    cannot drift apart in geometry or style. A subclass appends its accessory
+    to `self._extras_layout` and touches nothing else.
+    """
 
     color_clicked = pyqtSignal(str)
 
@@ -47,35 +41,18 @@ class ChannelRowBase(QtWidgets.QWidget):
         self._cid = cid
         st = model.get(cid)
 
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(6, 2, 6, 2)
-        lay.setSpacing(5)
+        core = template.build_row_core(
+            self, name=(st.name if st else cid),
+            show_visibility=show_visibility,
+            checkable=not (st and st.locked))
+        self.checkbox = core.checkbox
+        self.state_slot = core.state_slot
+        self.swatch = core.swatch
+        self.name_label = core.name_label
+        self._extras_layout = core.layout   # subclasses append here
 
-        self.checkbox = QtWidgets.QCheckBox()
         self.checkbox.setChecked(bool(st and st.visible))
-        self.checkbox.setEnabled(not (st and st.locked))
         self.checkbox.toggled.connect(self._on_visibility_toggled)
-        self.checkbox.setVisible(show_visibility)
-        lay.addWidget(self.checkbox)
-
-        self.swatch = QtWidgets.QLabel()
-        self.swatch.setFixedSize(13, 13)
-        self.swatch.setCursor(Qt.PointingHandCursor)
-        self.swatch.setToolTip("Click to change display color")
-        lay.addWidget(self.swatch)
-
-        self.name_label = QtWidgets.QLabel(st.name if st else cid)
-        self.name_label.setStyleSheet(_NAME_STYLE)
-        self.name_label.setToolTip(st.name if st else cid)
-        self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
-                                      QtWidgets.QSizePolicy.Preferred)
-        lay.addWidget(self.name_label, stretch=1)
-
-        self._extras_layout = lay          # subclasses append here
-        # Rows and their children stay transparent so the list's hover/selected
-        # highlight paints through; host pages (e.g. Step0's #1c1c1c section
-        # stylesheet) would otherwise cascade opaque boxes onto each child.
-        self.setStyleSheet("*{background:transparent;}" + CHECKBOX_INDICATOR_QSS)
         self._apply_color(st.color if st else "#888888")
 
         model.color_changed.connect(self._on_model_color)
@@ -98,8 +75,7 @@ class ChannelRowBase(QtWidgets.QWidget):
             self.checkbox.blockSignals(False)
 
     def _apply_color(self, color):
-        self.swatch.setStyleSheet(
-            f"background:{color};border:1px solid #354a63;border-radius:2px;")
+        template.apply_swatch_color(self.swatch, color)
 
     # -- widget -> model ---------------------------------------------------
     def _on_visibility_toggled(self, checked):
@@ -162,48 +138,35 @@ class Step0ChannelRow(ChannelRowBase):
         super().__init__(model, cid, parent)
         st = model.get(cid)
 
-        # Fixed geometry so rows never shift: the checkbox keeps a constant
-        # footprint even when the page restyles its indicator (green "done"
-        # state), and the name column is non-stretching so the method combo
-        # sits directly after the name. The host (adapter) sets one uniform
-        # name width across rows — the longest name — so combos align.
-        self.checkbox.setFixedSize(22, 18)
-
-        # The compute-state glyph, immediately after the checkbox. Fixed
-        # width so a state change never re-flows the row.
-        self.state_lbl = QtWidgets.QLabel("")
-        self.state_lbl.setAlignment(Qt.AlignCenter)
-        self.state_lbl.setFixedWidth(12)
-        self._extras_layout.insertWidget(1, self.state_lbl)
+        # The checkbox footprint, the state column and the name geometry are
+        # the TEMPLATE's now -- this row no longer sets any of them, which is
+        # what stops Step0 and Step1 from drifting apart again. `state_lbl`
+        # is the template's state slot under its historical name, so the
+        # existing callers and tests keep working.
+        self.state_lbl = self.state_slot
         self.set_state(st.status if st else "")
-
-        self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
-                                      QtWidgets.QSizePolicy.Preferred)
-        self.name_label.setFixedWidth(self.name_label.sizeHint().width() + 2)
-        self._extras_layout.setStretchFactor(self.name_label, 0)
 
         self.method_cb = QtWidgets.QComboBox()
         self.method_cb.addItems(self.METHODS)
         self.method_cb.setFixedWidth(64)
         self.method_cb.setEnabled(not (st and st.locked))
-        self.method_cb.setStyleSheet(
-            "QComboBox{background:#182230;color:#dce5ef;border:1px solid #354a63;"
-            "border-radius:3px;padding:1px 2px;font-size:10px;}"
-            "QComboBox::drop-down{border:none;}"
-            "QComboBox:disabled{color:#555;}")
+        self.method_cb.setStyleSheet(template.ACCESSORY_COMBO_QSS)
         if st and st.bg_final_method:
             idx = self._method_index(st.bg_final_method)
             if idx >= 0:
                 self.method_cb.setCurrentIndex(idx)
         self.method_cb.currentTextChanged.connect(
             lambda txt: self.method_changed.emit(self._cid, txt))
-        self._extras_layout.addWidget(self.method_cb)
-        self._extras_layout.addStretch(1)   # push only the status badge right
+        template.add_accessory(self._extras_layout,
+                               template.fit_accessory(self.method_cb))
 
         self.status_lbl = QtWidgets.QLabel("—")
         self.status_lbl.setAlignment(Qt.AlignCenter)
         self.status_lbl.setFixedWidth(20)
-        self.status_lbl.setStyleSheet("color:#6d8196;font-size:12px;")
+        self.status_lbl.setStyleSheet(f"color:{template.COLOR_MUTED};"
+                                      "font-size:12px;")
+        # After the template's trailing stretch, so the badge stays at the
+        # right edge while the method combo sits next to the name.
         self._extras_layout.addWidget(self.status_lbl)
 
         model.status_changed.connect(self._on_model_status)
@@ -267,7 +230,7 @@ class WeightChannelRow(ChannelRowBase):
         self.slider.setValue(int(round(w * 100)))
         self.slider.setFixedHeight(16)
         self.slider.setMinimumWidth(70)
-        self._extras_layout.addWidget(self.slider, stretch=2)
+        template.add_accessory(self._extras_layout, self.slider, stretch=2)
 
         self.spin = QtWidgets.QDoubleSpinBox()
         self.spin.setRange(0.0, 1.0)
@@ -276,10 +239,9 @@ class WeightChannelRow(ChannelRowBase):
         self.spin.setValue(w)
         self.spin.setFixedWidth(52)
         self.spin.setAlignment(Qt.AlignRight)
-        self.spin.setStyleSheet(
-            "QDoubleSpinBox{background:#182230;color:#dce5ef;"
-            "border:1px solid #354a63;border-radius:3px;font-size:10px;}")
-        self._extras_layout.addWidget(self.spin)
+        self.spin.setStyleSheet(template.ACCESSORY_SPINBOX_QSS)
+        template.add_accessory(self._extras_layout,
+                               template.fit_accessory(self.spin))
 
         self.slider.valueChanged.connect(self._on_slider)
         self.spin.valueChanged.connect(self._on_spin)

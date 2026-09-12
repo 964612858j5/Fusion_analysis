@@ -156,6 +156,16 @@ class FusionDomainModel(QObject):
         # another measurement, and a draft that followed the name across a
         # dataset switch would put one slide's numbers into another's project.
         self._identity = None
+        # HAS THIS SLIDE HAD ITS FIRST HANDOFF YET. Binding a dataset and
+        # initialising its science are two different facts, and one boolean
+        # answering "did the identity move" cannot say both: Step0 binds the
+        # display in the middle of a load, the science follows that bind, and
+        # the reader that arrives afterwards must still build this slide's
+        # groups even though the identity did not move again.
+        self._initialized = False
+        # A restore in progress: the state is written, the notice is held
+        # until the display half has been bound to the same identity.
+        self._pending_restore = None
         # Bumped once per logical command. The window that refreshes the
         # preview, the Unsaved label and the session uses it to do that ONCE
         # for one command, however many field signals the command produced.
@@ -172,10 +182,30 @@ class FusionDomainModel(QObject):
         """
         self._hash_provider = fn
 
+    #: The draft has no dataset at all.
+    UNBOUND = "unbound"
+    #: Bound to a slide whose first handoff has not been read yet. A weight
+    #: named now is a PENDING answer for this slide: real, and waiting for
+    #: the groups that will adopt it.
+    BOUND_UNINITIALIZED = "bound_uninitialized"
+    #: Bound, and this slide's groups, nucleus and participation exist.
+    INITIALIZED = "initialized"
+
     # ── the dataset this draft belongs to ────────────────────────────
     def scientific_identity(self):
         """The dataset whose science this draft is, or None when unbound."""
         return self._identity
+
+    def lifecycle(self):
+        """Where this draft is: unbound, bound but not yet initialised, or
+        initialised. The reader asks THIS, not whether a bind moved."""
+        if self._identity is None:
+            return self.UNBOUND
+        return self.INITIALIZED if self._initialized \
+            else self.BOUND_UNINITIALIZED
+
+    def is_initialized(self):
+        return self.lifecycle() == self.INITIALIZED
 
     def draft_revision(self):
         """How many logical commands have changed the draft."""
@@ -211,6 +241,10 @@ class FusionDomainModel(QObject):
             if not same:
                 self._identity = identity
                 self._reset_scientific_state()
+                # A new slide has had no handoff yet: whatever is named for
+                # it now is pending, and the first handoff still has to build
+                # its groups.
+                self._initialized = False
             if install is not None:
                 self._apply_spec(dict(install), reset=True)
         finally:
@@ -224,7 +258,107 @@ class FusionDomainModel(QObject):
         if not same:
             self.dataset_bound.emit(identity)
         if install is not None:
+            self._initialized = True
             self.draft_restored.emit()
+        self.draft_changed.emit()
+        return True
+
+    def initialize_dataset(self, groups, nucleus_channel, channels=None):
+        """THIS SLIDE's first handoff: build its project. ONE notice.
+
+        Group membership comes from the handoff's panel, every marker starts
+        as a placeholder rather than an answer, and the nucleus is the
+        handoff's channel at the first-enable default -- so the first `f`
+        tick of each marker still answers 1.0.
+
+        The exception is a PENDING answer: a weight named for this slide
+        before Step1 built any group to hold it, in Step0 or through the
+        shared Weights window. Those are this dataset's, they are adopted by
+        the groups being built, and `0.0` is one of them.
+        """
+        nuc = str(nucleus_channel or "")
+        known = {str(ch) for ch in (channels or [])}
+        spec_groups = {}
+        for name, members in (groups or {}).items():
+            spec_groups[str(name)] = {
+                "group_weight": 1.0,
+                "channels": {str(ch): 0.0 for ch in members
+                             if str(ch) != nuc}}
+        pending = self.pending_answers()
+        provenance = {nuc: AUTHORITATIVE} if nuc else {}
+        weights = {nuc: 1.0} if nuc else {}
+        for ch, (value, prov) in pending.items():
+            if ch == nuc or (known and ch not in known):
+                continue
+            provenance[ch] = prov
+            weights[ch] = value
+        self._installing = True
+        try:
+            self._apply_spec({
+                "groups": spec_groups,
+                "nucleus": {"channel": nuc, "weight": 1.0 if nuc else 0.0},
+                "enabled": [nuc] if nuc else [],
+                "provenance": provenance,
+                "channel_weight": weights,
+            }, reset=True)
+            # The groups were built from the handoff's placeholder zeros; a
+            # pending answer replaces its own channel's placeholder in every
+            # one of them, the way the first group always adopts it.
+            for ch, (value, prov) in pending.items():
+                if ch in weights and ch != nuc:
+                    self._write_weight(ch, value, prov)
+        finally:
+            self._installing = False
+        self._initialized = True
+        self._draft_rev += 1
+        self.draft_restored.emit()
+        self.draft_changed.emit()
+        return True
+
+    def prepare_restore(self, identity, spec):
+        """Write a restored project WITHOUT announcing it.
+
+        The session restore is one fact about two owners: this draft and the
+        display state. Announcing as soon as the science is in leaves every
+        handler that reads BOTH -- and the frame clock is one -- looking at a
+        new project against the display's previous slide. So the science is
+        written silently here, the display is bound to the same identity, and
+        `commit_restore` publishes once, with both halves final.
+        """
+        before = self.draft_snapshot()
+        same = (_identity_key(identity) is not None
+                and _identity_key(identity) == _identity_key(self._identity))
+        self._pending_restore = {"before": before, "same": same,
+                                 "was_initialized": self._initialized}
+        self._installing = True
+        try:
+            self._identity = identity
+            self._reset_scientific_state()
+            self._apply_spec(dict(spec or {}), reset=True)
+            self._initialized = True
+        finally:
+            self._installing = False
+        return True
+
+    def commit_restore(self, reason=""):
+        """Publish the prepared restore. ONE notice, both owners final."""
+        pending = self._pending_restore
+        if not pending:
+            return False
+        self._pending_restore = None
+        # A restore that put back exactly what was already there, on the
+        # slide that was already current, is not a change: announcing it
+        # makes every consumer redraw, re-dirty and re-save a state nobody
+        # moved.
+        if (pending["same"] and pending["was_initialized"]
+                and self.draft_snapshot() == pending["before"]):
+            return False
+        if reason:
+            print(f"[Block01] fusion draft restored for "
+                  f"{_identity_key(self._identity) or 'nothing'} ({reason})")
+        self._draft_rev += 1
+        self.dataset_bound.emit(self._identity)
+        self.draft_restored.emit()
         self.draft_changed.emit()
         return True
 
@@ -241,6 +375,7 @@ class FusionDomainModel(QObject):
             return False
         self._identity = None
         self._reset_scientific_state()
+        self._initialized = False
         if reason:
             print(f"[Block01] fusion draft discarded ({reason})")
         self._draft_rev += 1
@@ -681,6 +816,10 @@ class FusionDomainModel(QObject):
             self._apply_spec(spec, reset=reset)
         finally:
             self._installing = False
+        # INSTALLING A WHOLE DRAFT IS THIS SLIDE'S INITIALISATION, whether or
+        # not it moved anything: a handoff that re-installs an identical
+        # project has still been read.
+        self._initialized = True
         if self.draft_snapshot() == before:
             return False
         self._draft_rev += 1

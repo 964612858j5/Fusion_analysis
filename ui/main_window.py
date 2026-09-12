@@ -1993,25 +1993,46 @@ class MainWindow(QMainWindow):
             # channels take part are still true, and `load_panel` below
             # initialises all of them to a fresh dataset's defaults.
             #
-            # `bind_dataset` answers the question and does the switching in
-            # one: True when this is genuinely another dataset (or the first
-            # one), False when the draft already belongs to this slide.
-            fresh = self._display.fusion.bind_dataset(
+            # `bind_dataset` switches the identity; it does NOT answer this
+            # question. Step0 binds the display in the middle of its load and
+            # the science follows that bind, so by the time this reader runs
+            # the identity has usually stopped moving -- and the slide has
+            # still never had a handoff. The LIFECYCLE answers it: a draft
+            # that is bound but not yet initialised needs this slide's groups
+            # built, whatever the bind returned.
+            fusion = self._display.fusion
+            fusion.bind_dataset(
                 self._source_identity(
                     getattr(self.loader, "filepath", "")
                     or self.step0_output.get("ome_tiff_path", "")),
                 reason="Step0 handoff loaded")
-            if fresh:
+            nucleus_before = fusion.nucleus()
+            if not fusion.is_initialized():
+                # FIRST handoff for this slide: build its groups, its nucleus
+                # and its participation defaults. Any weight already named
+                # for THIS slide -- in Step0, before Step1 existed -- is
+                # adopted by the groups being built, `0.0` included.
                 self.config.set_channels(channels)
                 self.config.load_panel(panel_groups, nucleus_channel)
+                self.config.set_nucleus(nucleus_channel, 1.0)
             else:
-                # Same slide: the channel universe is re-read (a channel that
-                # is gone takes its answers with it, announced like any other
-                # scientific change) and the project stands.
+                # Same slide, read again: the channel universe is re-read (a
+                # channel that is gone takes its answers with it, announced
+                # like any other scientific change) and the project stands.
                 self.config.set_channels(channels)
-                print("[Step1] handoff republished for the same dataset; "
-                      "the fusion draft was kept")
-            self.config.set_nucleus(nucleus_channel, 1.0)   # Step0's answer
+                if nucleus_before[0] != nucleus_channel:
+                    # The handoff names ANOTHER nucleus: a real scientific
+                    # change, and the new one starts at the same default a
+                    # first initialisation gives it.
+                    self.config.set_nucleus(nucleus_channel, 1.0)
+                    print(f"[Step1] handoff changed the nucleus channel to "
+                          f"{nucleus_channel}")
+                else:
+                    # ...and its WEIGHT is the project's, not this reader's:
+                    # writing 1.0 back on every republish overwrote a 0.6 a
+                    # session or an API had set.
+                    print("[Step1] handoff republished for the same dataset; "
+                          "the fusion draft was kept")
             # `zero_marker_weights()` is NOT called here any more, and that
             # is the whole of this fix. It is the Reset weights BUTTON --
             # a user saying "zero" -- and since the weights each marker has
@@ -2599,19 +2620,17 @@ class MainWindow(QMainWindow):
         print(f"[Step1] session shape={fusion_domain.classify_session(sess)} "
               f"enabled={len(spec.get('enabled') or [])} "
               f"visible={sum(1 for v in visibility.values() if v)}")
-        # The SCIENCE first, bound and installed in one transaction, then the
-        # display on the same identity. That order is the point: the display
-        # bind announces the dataset, and the science follows a dataset bind,
-        # so binding the display first would have cleared the project a
-        # moment before the install put it back -- one announced empty draft
-        # in between. This way the display's bind finds the identity already
-        # current and says nothing about it.
+        # ONE FACT, TWO OWNERS, ONE NOTICE. The science is written silently,
+        # the display is bound to the same identity, and only then is the
+        # restore published -- so every handler woken by it reads ONE slide
+        # from both halves and the final project from this one. Neither order
+        # works on its own: binding the display first clears the science
+        # through the dataset wire, and announcing the science first shows a
+        # new project against the previous slide's display.
         self.config.install_fusion_draft(spec, visibility, identity=identity)
         if identity is not None:
-            # ONE identity for both halves of Block01, established by the
-            # restore itself: a later formal bind for the same slide is a
-            # no-op and cannot wipe what was just restored.
             self._display.state.bind(identity)
+            self._display.fusion.commit_restore("session restore")
         return visibility
 
     def _apply_step1_fusion_config(self, cfg):

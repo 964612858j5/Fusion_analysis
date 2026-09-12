@@ -45,14 +45,29 @@ class Config:
     nuc_combo = Combo()
 
     loaded_panels = None
+    _fusion = None
 
-    def load_panel(self, *args):
-        # A FRESH DATASET's initialisation. Recorded, because a handoff
-        # republished for the same slide must not run it: it resets groups,
-        # weights, provenance and participation to a new project's defaults.
+    _display_state = None
+
+    def bind_display_state(self, state):
+        self._display_state = state
+
+    def bind_fusion(self, fusion):
+        """The real model this stand-in edits. NOT a no-op double: every
+        call below does to the model exactly what `ConfigPanel` does, so a
+        test can assert on the model and mean it."""
+        self._fusion = fusion
+
+    def load_panel(self, groups, nuc_ch):
+        # A FRESH DATASET's initialisation -- recorded, because a handoff
+        # republished for the same slide must not run it, AND performed, so
+        # the assertions are about real groups rather than a call log.
         if self.loaded_panels is None:
             self.loaded_panels = []
-        self.loaded_panels.append(args)
+        self.loaded_panels.append((groups, nuc_ch))
+        if self._fusion is not None:
+            self._fusion.initialize_dataset(groups or {}, nuc_ch,
+                                            channels=self.all_channels)
 
     def set_channels(self, channels, prune=True):
         # `prune=False` is what a restore passes: the install that follows
@@ -60,18 +75,25 @@ class Config:
         # intermediate nobody meant.
         self.all_channels = list(channels or [])
         self.pruned = bool(prune)
+        if prune and self._fusion is not None:
+            self._fusion.forget_channels_outside(self.all_channels)
 
     def set_nucleus_weight(self, _w): pass
 
-    def set_nucleus(self, _channel, _weight=None): pass
+    def set_nucleus(self, channel, weight=None):
+        # REAL: writing 1.0 back over a project's 0.6 has to be visible.
+        if self._fusion is not None:
+            self._fusion.set_nucleus(channel, weight)
 
-    def nucleus_channel(self): return ""
+    def nucleus_channel(self):
+        return "" if self._fusion is None else self._fusion.nucleus()[0]
 
     def zero_marker_weights(self): pass
 
     def apply_full_config(self, _cfg): pass
 
-    def get_groups(self): return {}
+    def get_groups(self):
+        return {} if self._fusion is None else self._fusion.groups()
 
     def visible_channels(self): return []
 
@@ -84,6 +106,29 @@ class Config:
     def set_channel_visible(self, _ch, _v): pass
 
     def set_current_channel(self, _ch): pass
+
+    restored_display = None
+
+    def restore_display_state(self, colors=None, visibility=None,
+                              current_channel=""):
+        # The display half of a restore, as `ConfigPanel` does it: one public
+        # transaction into the shared state, no user commands.
+        self.restored_display = {"colors": dict(colors or {}),
+                                 "visibility": dict(visibility or {}),
+                                 "current": str(current_channel or "")}
+        state = getattr(self, "_display_state", None)
+        if state is None:
+            return
+        payload = {}
+        if colors:
+            payload["colors"] = {str(c): str(v) for c, v in colors.items()}
+        if visibility:
+            payload["visibility"] = {str(c): bool(v)
+                                     for c, v in visibility.items()}
+        if current_channel:
+            payload["selection"] = str(current_channel)
+        if payload:
+            state.install(payload)
 
     # The weight history a session carries: which zeros are answers rather
     # than absences. Since B3 it arrives as the migrated draft's PROVENANCE,
@@ -99,9 +144,18 @@ class Config:
         self.restored_weight_history = list(channels or [])
 
     def install_fusion_draft(self, spec, visibility=None, identity=None):
+        # RECORDED and PERFORMED, exactly as `ConfigPanel` does it: prepared
+        # silently when an identity comes with it, so the host can bind the
+        # display half before anything is announced.
         self.installed_draft = dict(spec or {})
         self.installed_visibility = dict(visibility or {})
         self.installed_identity = identity
+        if self._fusion is None:
+            return
+        if identity is not None:
+            self._fusion.prepare_restore(identity, spec or {})
+        else:
+            self._fusion.install_draft(spec or {})
 
 
 class StepPage:
@@ -216,7 +270,12 @@ def make_window(run, schema=1, loader_path=None):
     # The two halves agree about the current slide the same way production
     # wires them: a display bind is a scientific bind.
     state.dataset_changed.connect(fusion.bind_dataset)
-    w._display = SimpleNamespace(fusion=fusion, state=state)
+    w._display = SimpleNamespace(
+        fusion=fusion, state=state,
+        # The shared Weights window's entry, as `Block01DisplayServices`
+        # implements it: a command to the model and nothing else.
+        set_render_weight=lambda channel, weight: fusion.edit_channel_weight(
+            channel, float(weight), origin="shared-weights"))
     w._fusion_settings_label = None
     w._btn_save_fusion_settings = None
     w._step1_preview_mode = "overlay"
@@ -225,6 +284,8 @@ def make_window(run, schema=1, loader_path=None):
     w._preview_patch_idx = -1
     w._step2, w._step4 = StepPage(), StepPage()
     w.config = Config()
+    w.config.bind_fusion(w._display.fusion)
+    w.config.bind_display_state(w._display.state)
     w.prev_status = SimpleNamespace(setText=lambda _v: None)
     w._stop_all_loaders = lambda: None
     w._filter_patches_to_roi = lambda p, _r: p
@@ -604,11 +665,15 @@ def test_v2_session_cannot_override_manifest_geometry_sources_or_remap(
 
     session_path = run.step1 / "conflicting-v2-session.json"
     run.step1.mkdir(parents=True, exist_ok=True)
+    # A REAL file, so the identity it names could be resolved if anything
+    # were foolish enough to trust the session about its own slide.
+    evil_raw = tmp_path / "evil.ome.tif"
+    evil_raw.write_bytes(b"evil")
     write_json(session_path, {
         "handoff_schema_version": 2,
         "step0_manifest_path": str(run.manifest_path),
         "source_identity": run.manifest["source_identity"],
-        "raw_ome_path": str(tmp_path / "evil.ome.tif"),
+        "raw_ome_path": str(evil_raw),
         "corrected_zarr_path": str(tmp_path / "evil.zarr"),
         "output_dir": str(tmp_path / "evil-output"),
         "step0_dir": str(tmp_path / "evil-step0"),
@@ -645,8 +710,15 @@ def test_v2_session_cannot_override_manifest_geometry_sources_or_remap(
     identity = w._display.fusion.scientific_identity()
     assert identity is not None
     assert identity.path == str(run.raw), identity.path
-    assert w._display.state.binding() is not None
-    assert w._display.state.binding().identity.path == str(run.raw)
+    binding = w._display.state.binding()
+    assert binding is not None
+    assert binding.identity.path == str(run.raw)
+    # ONE semantic identity for both owners, and the evil path in neither.
+    assert binding.identity == identity
+    assert str(evil_raw) != str(run.raw)
+    assert identity.path != str(evil_raw)
+    assert binding.identity.path != str(evil_raw)
+    assert w._display.fusion.lifecycle() == w._display.fusion.INITIALIZED
 
     # A stale session hint must not downgrade a schema-2 manifest to the
     # legacy session reader; its conflicting geometry remains ignored.
@@ -852,13 +924,11 @@ def test_republishing_the_same_handoff_keeps_the_fusion_draft(
     # The user's project for THIS slide.
     model = w._display.fusion
     model.install_draft({
-        "groups": {"A": {"group_weight": 1.0,
-                         "channels": {"CD3": 0.2, "CD8": 0.0}},
-                   "B": {"group_weight": 1.0, "channels": {"CD3": 0.7}}},
+        "groups": {"A": {"group_weight": 1.0, "channels": {"CD68": 0.2}},
+                   "B": {"group_weight": 1.0, "channels": {"CD68": 0.7}}},
         "nucleus": {"channel": "DAPI", "weight": 1.0},
-        "enabled": ["CD3", "DAPI"],
-        "provenance": {"CD3": "authoritative", "CD8": "explicit",
-                       "DAPI": "authoritative"},
+        "enabled": ["CD68", "DAPI"],
+        "provenance": {"CD68": "authoritative", "DAPI": "authoritative"},
     })
     before_full = model.full_config()
     before_effective = model.effective_config()
@@ -871,11 +941,9 @@ def test_republishing_the_same_handoff_keeps_the_fusion_draft(
     assert w.config.loaded_panels == [], \
         "a republished handoff re-initialised the panel as a new dataset"
     groups = model.groups()
-    assert groups["A"]["CD3"] == 0.2 and groups["B"]["CD3"] == 0.7
-    assert groups["A"]["CD8"] == 0.0
-    assert model.weight_provenance("CD8") == "explicit"
-    assert model.weight_provenance("CD3") == "authoritative"
-    assert model.fusion_enabled("CD3") is True
+    assert groups["A"]["CD68"] == 0.2 and groups["B"]["CD68"] == 0.7
+    assert model.weight_provenance("CD68") == "authoritative"
+    assert model.fusion_enabled("CD68") is True
     assert model.full_config() == before_full
     assert model.effective_config() == before_effective
     assert model.draft_snapshot() == before_draft
@@ -902,9 +970,9 @@ def test_another_dataset_still_starts_from_fresh_defaults(
     assert w._load_step0_roi_result(auto=True) is True
     model = w._display.fusion
     model.install_draft({
-        "groups": {"g": {"group_weight": 1.0, "channels": {"CD3": 0.4}}},
+        "groups": {"g": {"group_weight": 1.0, "channels": {"CD68": 0.4}}},
         "nucleus": {"channel": "DAPI", "weight": 1.0},
-        "enabled": ["CD3"], "provenance": {"CD3": "explicit"},
+        "enabled": ["CD68"], "provenance": {"CD68": "explicit"},
     })
     w.config.loaded_panels = []
 
@@ -918,6 +986,310 @@ def test_another_dataset_still_starts_from_fresh_defaults(
 
     assert second.config.loaded_panels, \
         "another dataset did not get the fresh-project initialisation"
-    assert model.weight_provenance("CD3") == "absent"
-    assert model.fusion_enabled("CD3") is False
+    assert model.weight_provenance("CD68") == "absent"
+    assert model.fusion_enabled("CD68") is False
     assert model.scientific_identity().path == str(other.raw)
+
+
+# ── the dataset lifecycle, in the order the product runs it ──────────────
+#
+# Step0 binds the display in the MIDDLE of its load, and the science follows
+# that bind. So by the time the authoritative reader runs, the identity has
+# usually stopped moving -- and the slide has still never had a handoff.
+# Asking "did the bind move the identity" answered the wrong question and
+# skipped the first initialisation; the reader asks the LIFECYCLE instead.
+
+def _prebind(w, path):
+    """What Step0 does in the middle of a load, before it announces."""
+    from block01.core.display_identity import resolve_identity
+    w._display.state.bind(resolve_identity(str(path)))
+    return w._display.fusion
+
+
+def test_the_first_handoff_initialises_even_when_step0_bound_first(
+        tmp_path, monkeypatch, app):
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    model = _prebind(w, run.raw)
+    assert model.lifecycle() == model.BOUND_UNINITIALIZED
+
+    # Weights named for THIS slide before Step1 exists.
+    assert w._display.set_render_weight("CD68", 0.0) is True
+    # A name this slide does not have IS accepted as a command -- the model
+    # cannot know the channel list -- but the initialisation below drops it:
+    # only this dataset's channels get a place in this dataset's project.
+    assert w._display.set_render_weight("DRAQ5", 0.25) is True
+    assert model.lifecycle() == model.BOUND_UNINITIALIZED, \
+        "a pending answer is not a handoff"
+    restored = []
+    model.draft_restored.connect(lambda: restored.append(1))
+
+    assert w._load_step0_roi_result(auto=True) is True
+
+    assert w.config.loaded_panels, "the first handoff built no groups"
+    groups = model.groups()
+    assert groups, "marker groups were never established"
+    marker = next(iter(groups.values()))
+    assert marker.get("CD68") == 0.0, groups
+    assert model.weight_provenance("CD68") == "explicit"
+    assert model.nucleus()[0] == "DAPI"
+    assert "DRAQ5" not in model.channels(), model.channels()
+    assert model.lifecycle() == model.INITIALIZED
+    assert len(restored) == 1, f"{len(restored)} completion notices"
+
+    # ...and the first enable does not replace an explicit zero.
+    model.set_fusion_enabled("CD68", True)
+    assert model.channel_weight("CD68") == 0.0
+
+
+def test_a_full_republish_keeps_the_project_and_its_nucleus_weight(
+        tmp_path, monkeypatch, app):
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    _prebind(w, run.raw)
+    assert w._load_step0_roi_result(auto=True) is True
+    model = w._display.fusion
+
+    model.install_draft({
+        "groups": {"A": {"group_weight": 1.0, "channels": {"CD68": 0.2}},
+                   "B": {"group_weight": 1.0, "channels": {"CD68": 0.7}}},
+        "nucleus": {"channel": "DAPI", "weight": 0.6},
+        "enabled": ["DAPI"],
+        "provenance": {"CD68": "authoritative", "DAPI": "authoritative"},
+    })
+    before_full = model.full_config()
+    before_effective = model.effective_config()
+    before_draft = model.draft_snapshot()
+    w.config.loaded_panels = []
+    changed = []
+    model.draft_changed.connect(lambda: changed.append(1))
+
+    # The real loop: the handoff stops holding, Step0 saves, the reader runs
+    # again. The invalidation's own page teardown is a MainWindow method this
+    # stand-in cannot run, so it is recorded rather than executed -- what is
+    # under test is the reader that follows it.
+    discarded = []
+    w._discard_step1_dataset_state = lambda **kw: discarded.append(kw)
+    w._return_to_step0 = lambda _why="": None
+    w._on_step0_handoff_invalidated(
+        {"step0_manifest_path": str(run.manifest_path),
+         "reason": "geometry", "message": "run Step0 Save"})
+    assert discarded, "the invalidation did not reach the page teardown"
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    assert w._load_step0_roi_result(auto=True) is True
+
+    assert w.config.loaded_panels == [], "a republish re-initialised the slide"
+    assert model.groups()["A"]["CD68"] == pytest.approx(0.2)
+    assert model.groups()["B"]["CD68"] == pytest.approx(0.7)
+    assert model.weight_provenance("CD68") == "authoritative"
+    assert model.fusion_enabled("DAPI") is True
+    assert model.fusion_enabled("CD68") is False
+    assert model.nucleus() == ("DAPI", pytest.approx(0.6)), \
+        "the reader wrote 1.0 back over the project's nucleus weight"
+    assert model.full_config() == before_full
+    assert model.effective_config() == before_effective
+    assert model.draft_snapshot() == before_draft
+    assert changed == [], f"an unchanged re-read announced {len(changed)} times"
+
+
+def test_another_slide_is_initialised_even_when_bound_first(
+        tmp_path, monkeypatch, app):
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    run = make_run(first_dir)
+    other = make_run(second_dir)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    _prebind(w, run.raw)
+    assert w._load_step0_roi_result(auto=True) is True
+    model = w._display.fusion
+    model.edit_channel_weight("CD68", 0.4)
+    assert model.weight_provenance("CD68") == "explicit"
+
+    # Step0 binds C in the middle of ITS load, then the reader runs.
+    second = make_window(other)
+    second.step0_output = dict(second.step0_output,
+                               step0_manifest_path=str(other.manifest_path))
+    second._display = w._display                    # the process's one model
+    second.config.bind_fusion(model)
+    second._update_next_button = lambda: None
+    _prebind(second, other.raw)
+    assert model.lifecycle() == model.BOUND_UNINITIALIZED, \
+        "binding another slide left it looking initialised"
+    assert second._load_step0_roi_result(auto=True) is True
+
+    assert second.config.loaded_panels, "the new slide got no initialisation"
+    assert model.lifecycle() == model.INITIALIZED
+    assert model.weight_provenance("CD68") == "absent", \
+        "the previous slide's weights leaked into this one"
+    assert model.channel_weight("CD68") == 0.0
+    assert model.nucleus()[0] == "DAPI"
+    assert model.scientific_identity().path == str(other.raw)
+
+
+def test_a_session_restore_is_one_fact_for_both_owners(
+        tmp_path, monkeypatch, app):
+    """E: every observable callback sees ONE slide and the final project.
+
+    The restore used to announce the science first and bind the display
+    after, so a handler reading both -- the frame clock is one -- saw a new
+    project against the previous slide.
+    """
+    run = make_run(tmp_path, remap=True)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    session_path = run.step1 / "atomic-v2-session.json"
+    run.step1.mkdir(parents=True, exist_ok=True)
+    write_json(session_path, {
+        "handoff_schema_version": 2,
+        "step0_manifest_path": str(run.manifest_path),
+        "source_identity": run.manifest["source_identity"],
+        "rois": [], "patches": [],
+        "version": 2,
+        "fusion_draft": {
+            "groups": {"A": {"weight": 1.0, "members": ["CD68"]},
+                       "B": {"weight": 1.0, "members": ["CD68"]}},
+            "group_weights": {"A": {"CD68": 0.2}, "B": {"CD68": 0.7}},
+            "nucleus": {"channel": "DAPI", "weight": 0.6},
+            "enabled": ["CD68", "DAPI"],
+            "provenance": {"CD68": "authoritative", "DAPI": "authoritative"},
+            "channel_weight": {},
+        },
+        "display_visibility": {"DAPI": True, "CD68": False},
+    })
+
+    w = make_window(run)
+    w.step0_output = {}
+    w._update_next_button = lambda: None
+    model, state = w._display.fusion, w._display.state
+    # Step0 binds the slide in the middle of its own load, which is the state
+    # the product is in when a session is restored; binding here keeps the
+    # harness faithful to that rather than to a window that never loaded.
+    _prebind(w, run.raw)
+    seen = []
+
+    phase = {"restoring": False}
+
+    def look(*_a):
+        binding = state.binding()
+        seen.append({
+            "restoring": phase["restoring"],
+            "display": None if binding is None else binding.identity,
+            "fusion": model.scientific_identity(),
+            "groups": model.groups(),
+            "nucleus": model.nucleus(),
+            "enabled": model.enabled_channels(),
+            "provenance": dict(model.draft_snapshot()["provenance"]),
+        })
+
+    state.dataset_changed.connect(look)
+    state.state_installed.connect(look)
+    model.dataset_bound.connect(look)
+    model.draft_restored.connect(look)
+    model.draft_changed.connect(look)
+    saves = []
+    w._schedule_step1_session_save = lambda: saves.append(1)
+    # WHICH EVENT a callback belongs to. A session load runs two of them: the
+    # authoritative reader initialising this slide, and the restore putting
+    # the saved project back. The identity invariant holds across both; the
+    # final-project invariant is about the restore.
+    real_restore = w._restore_step1_scientific_state
+
+    def restoring(sess, source_path=""):
+        phase["restoring"] = True
+        try:
+            return real_restore(sess, source_path=source_path)
+        finally:
+            phase["restoring"] = False
+
+    w._restore_step1_scientific_state = restoring
+
+    assert w._load_previous_step1_session(
+        auto=True, path=str(session_path)) is True
+
+    assert seen, "the restore announced nothing at all"
+    final_identity = model.scientific_identity()
+    assert final_identity is not None
+    for shot in seen:
+        assert shot["display"] is not None, "a callback saw no display slide"
+        assert shot["display"] == final_identity, shot["display"]
+        assert shot["fusion"] == final_identity, shot["fusion"]
+    restored_shots = [shot for shot in seen if shot["restoring"]]
+    assert restored_shots, "the restore itself announced nothing"
+    for shot in restored_shots:
+        assert shot["groups"]["A"]["CD68"] == pytest.approx(0.2), shot
+        assert shot["groups"]["B"]["CD68"] == pytest.approx(0.7), shot
+        assert shot["nucleus"] == ("DAPI", pytest.approx(0.6)), shot
+        assert shot["enabled"] == ["CD68", "DAPI"], shot
+        assert shot["provenance"]["CD68"] == "authoritative", shot
+    assert model.lifecycle() == model.INITIALIZED
+
+    # F: the same session again moves nothing and says nothing.
+    quiet = []
+    model.draft_changed.connect(lambda: quiet.append(1))
+    model.draft_restored.connect(lambda: quiet.append(1))
+    before = model.draft_snapshot()
+    visibility = w._restore_step1_scientific_state(
+        json.loads(session_path.read_text(encoding="utf-8")),
+        source_path=str(run.raw))
+    assert model.draft_snapshot() == before
+    assert visibility["CD68"] is False
+    assert quiet == [], f"a repeated restore announced {len(quiet)} times"
+
+
+def test_a_channel_that_disappears_is_one_revision_and_one_notice(
+        tmp_path, monkeypatch, app):
+    """F: pruning a channel out of the project is a real change, announced
+    once; re-reading the same channel set is silent."""
+    run = make_run(tmp_path)
+    import block01.ui.main_window as mw
+    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
+    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
+
+    w = make_window(run)
+    w.step0_output = dict(w.step0_output,
+                          step0_manifest_path=str(run.manifest_path))
+    w._update_next_button = lambda: None
+    _prebind(w, run.raw)
+    assert w._load_step0_roi_result(auto=True) is True
+    model = w._display.fusion
+    model.edit_channel_weight("CD68", 0.4)
+    _ = model.draft_revision()
+    changed = []
+    model.draft_changed.connect(lambda: changed.append(1))
+    rev = model.draft_revision()
+
+    # Re-reading the same universe says nothing.
+    w.config.set_channels(["DAPI", "CD68"])
+    assert changed == []
+    assert model.draft_revision() == rev
+
+    # ...and a channel that is gone takes its answers with it, once.
+    w.config.set_channels(["DAPI"])
+    assert changed == [1]
+    assert model.draft_revision() == rev + 1
+    assert model.weight_provenance("CD68") == "absent"

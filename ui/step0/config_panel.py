@@ -853,42 +853,12 @@ class ConfigPanel(QWidget):
         # inventing its own.
         self._colors = {}
         nuc = str(nuc_ch or "")
-        spec_groups = {}
-        for gname, channels in (groups or {}).items():
-            spec_groups[str(gname)] = {
-                "group_weight": 1.0,
-                "channels": {str(ch): 0.0 for ch in channels
-                             if str(ch) != nuc}}
-        # ONE install: a new dataset inherits nothing from the slide before
-        # it -- no provenance, no participation, no weights -- and nobody
-        # observes it half-built.
-        #
-        # Except an answer that has nowhere to live yet: a weight named in
-        # Step0, for THIS dataset, before Step1 built any group to hold it.
-        # It is carried across and the groups below adopt it. A channel that
-        # HAS been in a group is not pending -- its numbers belong to the
-        # slide those groups describe, and they go with it.
-        pending = self._fusion.pending_answers()
-        provenance = {nuc: "authoritative"} if nuc else {}
-        weights = {nuc: 1.0} if nuc else {}
-        for ch, (value, prov) in pending.items():
-            if ch == nuc or (self.all_channels and ch not in self.all_channels):
-                continue
-            provenance[ch] = prov
-            weights[ch] = value
-        self._fusion.install_draft({
-            "groups": spec_groups,
-            "nucleus": {"channel": nuc, "weight": 1.0 if nuc else 0.0},
-            "enabled": [nuc] if nuc else [],
-            "provenance": provenance,
-            "channel_weight": weights,
-        })
-        # The groups were installed from the handoff's placeholder zeros; a
-        # pending answer replaces its own channel's placeholder in every one
-        # of them, the way the first group always adopts it.
-        for ch, (value, prov) in pending.items():
-            if ch in weights and ch != nuc:
-                self._fusion.set_channel_answer(ch, value, prov)
+        # ONE install for this slide's first handoff, in the model: groups
+        # at placeholder zeros, the nucleus at its default, and any answer
+        # named for THIS dataset before a group existed adopted by the groups
+        # being built. Nobody observes it half-built.
+        self._fusion.initialize_dataset(groups or {}, nuc,
+                                        channels=self.all_channels)
 
         self._rebuild_rows()
         # The rows were just built; give them the canonical colours before
@@ -992,8 +962,10 @@ class ConfigPanel(QWidget):
         the gap between them is an empty project nobody meant.
         """
         if identity is not None:
-            self._fusion.bind_dataset(identity, reason="session restore",
-                                      install=spec or {})
+            # PREPARED, not announced: the host binds the display half to the
+            # same identity and then commits, so nobody is woken while one
+            # owner still describes the previous slide.
+            self._fusion.prepare_restore(identity, spec or {})
         else:
             self._fusion.install_draft(spec or {})
         self._sync_rows_from_model()

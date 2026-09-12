@@ -50,6 +50,7 @@ from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 from ..core import display_identity as _identity
 from ..core import tissue_compose
+from ..core.fusion_domain import FusionDomainModel
 from ..utils import perf_trace
 from ..workers.display_seed_worker import (
     DisplaySeedWorker, LowresReadWorker,
@@ -1544,6 +1545,10 @@ class Block01DisplayServices(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.state = ChannelDisplayState(self)
+        # Block01's SCIENTIFIC state, built here for the same reason as the
+        # display state: it has to answer before the first page exists and
+        # after the last one is gone. The Step1 panel is an editor of it.
+        self.fusion = FusionDomainModel(self)
         self.coordinator = TissuePreviewCoordinator(self.state, self)
         self._navigator_content = None
         self._intensity_content = None
@@ -1553,7 +1558,6 @@ class Block01DisplayServices(QObject):
         self._intensity_panel = None
         self._navigator_policy = {"roi_policy": "full", "patch_editable": True}
         self._render_spec = None
-        self._weight_owner = None
         self._weight_editor_content = None
         self._seed_worker = None
         self._read_worker = None
@@ -1802,8 +1806,7 @@ class Block01DisplayServices(QObject):
         is a Loading frame, not a call into a deleted object.
         """
         for name in ("_navigator_content", "_intensity_content",
-                     "_lowres_source", "_weight_editor_content",
-                     "_weight_owner"):
+                     "_lowres_source", "_weight_editor_content"):
             if getattr(self, name, None) is owner:
                 setattr(self, name, None)
         if self.state._seed_port is owner:
@@ -2054,31 +2057,26 @@ class Block01DisplayServices(QObject):
     def set_render_weight(self, channel, weight):
         """THE global entry for "this channel contributes this much".
 
-        It always goes to the WEIGHT OWNER -- the Step1 channel panel, which
-        is what a Save writes and what a session restores -- whichever step
-        the user is in. That is what makes a weight moved in Step2 the same
-        fact in Step3 and back in Step1, rather than a value that lives only
-        as long as the context that received it.
+        It goes straight to the fusion model, whichever step the user is in.
+        It used to go to a registered WEIGHT OWNER -- the Step1 channel panel
+        -- which made a Step3 edit depend on a built, populated widget on
+        another page; the model is the owner now and the panel follows it.
         """
-        owner = self._weight_owner
-        if owner is None or not channel:
+        if not channel:
             return False
-        if not owner.set_render_weight(channel, float(weight)):
+        if not self.fusion.edit_channel_weight(channel, float(weight),
+                                               origin="shared-weights"):
             return False
         self.coordinator.request_frame(kind="weight", channel=channel)
         return True
 
     def render_weight(self, channel):
-        owner = self._weight_owner
-        return None if owner is None else owner.render_weight(channel)
-
-    def set_weight_owner(self, owner):
-        """Register who holds the weights: `set_render_weight(ch, w)` and
-        `render_weight(ch)`. One owner for the process."""
-        self._weight_owner = owner
-
-    def weight_owner(self):
-        return self._weight_owner
+        """What this channel weighs scientifically, or None when the model
+        has never heard of it."""
+        if not channel:
+            return None
+        rep = self.fusion.representative_weight(channel)
+        return None if rep.absent and not rep.values else float(rep.value)
 
     # ── whole-slide data ──────────────────────────────────────────────
     def lowres_array(self, channel):

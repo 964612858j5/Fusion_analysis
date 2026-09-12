@@ -176,10 +176,10 @@ def _restore_window(app, tmp_path):
     w.config.load_panel({"g": ["CD3"]}, "DAPI")
     w.config.set_nucleus("DAPI", 1.0)
     w.config.set_channel_weight("CD3", 0.5)
-    w.config._edited_channels.add("CD3")
-    # Ticked, so it is part of the effective configuration the identity is
-    # taken over: an unticked channel's weight belongs to no result.
+    # In the fusion, so it is part of the effective configuration the identity
+    # is taken over: a channel that is out of the science belongs to no result.
     w.config.set_channel_visible("CD3", True)
+    w.config.set_fusion_enabled("CD3", True)
     w._active_segmentation_method = "cellpose_wholecell_fusion"
     mw.OUTPUT_DIR = str(tmp_path)
     return w
@@ -251,7 +251,6 @@ def test_a_session_store_from_other_weights_is_refused(app, tmp_path):
         assert w._restorable_fused_zarr(path) == path
 
         w.config.set_channel_weight("CD3", 0.9)
-        w.config._edited_channels.add("CD3")
         assert w._restorable_fused_zarr(path) == ""
     finally:
         w.close()

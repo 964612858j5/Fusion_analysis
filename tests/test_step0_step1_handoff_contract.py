@@ -73,12 +73,19 @@ class Config:
     def set_current_channel(self, _ch): pass
 
     # The weight history a session carries: which zeros are answers rather
-    # than absences. Recorded so a restore path can be asked whether it put
-    # it back.
+    # than absences. Since B3 it arrives as the migrated draft's PROVENANCE,
+    # in the same transaction as the groups and the participation. Recorded
+    # so a restore path can be asked what it installed.
     restored_weight_history = None
+    installed_draft = None
+    installed_visibility = None
 
     def restore_weight_initialization(self, channels):
         self.restored_weight_history = list(channels or [])
+
+    def install_fusion_draft(self, spec, visibility=None):
+        self.installed_draft = dict(spec or {})
+        self.installed_visibility = dict(visibility or {})
 
 
 class StepPage:
@@ -183,7 +190,11 @@ def make_window(run, schema=1, loader_path=None):
     w._preview_update_pending = False
     # Step1 now has a commit point between the live settings and the settings a
     # job runs on; a restore consults it, so the double needs the same fields.
-    w._fusion_settings_snapshot = None
+    # The committed snapshot belongs to the FUSION MODEL since B3, so the
+    # double carries a real one -- parentless, because this MainWindow never
+    # ran `__init__` and cannot be a QObject parent.
+    from block01.core.fusion_domain import FusionDomainModel
+    w._display = SimpleNamespace(fusion=FusionDomainModel())
     w._fusion_settings_label = None
     w._btn_save_fusion_settings = None
     w._step1_preview_mode = "overlay"
@@ -703,18 +714,16 @@ def test_step0_write_failure_does_not_emit(monkeypatch):
     assert emitted == []
 
 
-# ── the weight history is restored on the OLDER path too ─────────────────
+# ── the older path migrates the whole scientific state too ───────────────
 #
-# `channel_weight_initialized` says which of a session's zero weights are
-# somebody's answer and which are "nobody has said yet". Only the second may
-# be replaced by the first tick's 1.0. The v2 restore puts it back through the
-# display state; the older path restores no display state at all, and without
-# this it silently dropped the field -- so a workspace on the old schema, with
-# a session THIS program wrote, came back with every 0 counted as an answer
-# and a channel nobody had ever enabled stayed invisible at 0 on its first
-# tick after a restart.
+# Both restore paths now go through one migration, so the older one no longer
+# has to remember to put a separate weight-history field back. What it must
+# install is the RULED answer for the shape it was handed: a grouped session
+# with no visibility field is one in which group membership itself was the
+# participating set, so every member comes back enabled and every restored
+# weight is authoritative -- zero included, and whatever the old marker says.
 
-def test_the_v1_restore_puts_back_which_zeros_are_answers(tmp_path, monkeypatch):
+def test_the_v1_restore_migrates_a_grouped_session_whole(tmp_path, monkeypatch):
     run = make_run(tmp_path)
     import block01.ui.main_window as mw
     monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
@@ -743,16 +752,21 @@ def test_the_v1_restore_puts_back_which_zeros_are_answers(tmp_path, monkeypatch)
     w._update_next_button = lambda: None
     assert w._load_previous_step1_session(auto=True, path=str(session)) is True
 
-    assert w.config.restored_weight_history == [], (
-        "the older restore path dropped the weight history, so every 0 in "
-        "the config counted as an answer")
+    draft = w.config.installed_draft
+    assert draft is not None, "the older restore path installed no draft"
+    assert draft["enabled"] == ["CD68", "DAPI"], (
+        "group membership WAS the participating set before the split")
+    assert draft["provenance"]["CD68"] == "authoritative", (
+        "a zero-weight group member is a member whose weight somebody wrote; "
+        "an empty marker cannot turn it back into an absence")
+    assert w.config.installed_visibility == {"CD68": True, "DAPI": True}
 
 
-def test_a_v1_session_without_the_field_restores_nothing_of_it(tmp_path,
-                                                               monkeypatch):
-    """The migration stays conservative: with no field there is nothing to
-    put back, and `apply_full_config` has already treated the saved weights as
-    authoritative."""
+def test_a_v1_session_without_the_field_migrates_the_same_way(tmp_path,
+                                                              monkeypatch):
+    """The marker's absence changes nothing: the shape is read from which
+    fields the session has, and a grouped session with no visibility is
+    migrated by the same rule whether or not it carries the old marker."""
     run = make_run(tmp_path)
     import block01.ui.main_window as mw
     monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
@@ -776,4 +790,7 @@ def test_a_v1_session_without_the_field_restores_nothing_of_it(tmp_path,
     w._update_next_button = lambda: None
     assert w._load_previous_step1_session(auto=True, path=str(session)) is True
 
-    assert w.config.restored_weight_history is None
+    draft = w.config.installed_draft
+    assert draft is not None
+    assert draft["enabled"] == ["DAPI"]          # no group members to enable
+    assert draft["provenance"] == {"DAPI": "authoritative"}

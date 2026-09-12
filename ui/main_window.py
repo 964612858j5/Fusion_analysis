@@ -36,7 +36,7 @@ from ..config import (
 from ..core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
-from ..core import preview_compose, tissue_compose
+from ..core import fusion_domain, preview_compose, tissue_compose
 from ..core.channel_remap import (
     apply_channel_remap, tint_and_sum_grays,
     compute_qupath_auto_minmax,
@@ -174,9 +174,10 @@ class _GlobalWeightEditor(QWidget):
     user-reachable entry there -- a service method called from a test is not a
     product operation. This is that entry, and it is a VIEW, not a second
     store: every spin box writes through `Block01DisplayServices
-    .set_render_weight`, which goes to the one weight owner (the channel
-    panel), so what the user changes here is the same number Step1 shows, a
-    Save freezes and a session restores.
+    .set_render_weight`, which goes to the `FusionDomainModel` -- the one
+    owner of the scientific weights -- so what the user changes here is the
+    same number Step1's row shows, a Save freezes and a session restores,
+    and it works with the Step1 page not even built.
 
     One editor for the process, reachable from the Block01 toolbar in every
     step -- not four copies of a panel.
@@ -439,8 +440,9 @@ class MainWindow(QMainWindow):
         self._frame_last_publish = 0.0
         self._frame_input_at = 0.0
         # The settings a segmentation search or a fused.zarr run will use, as
-        # opposed to the ones on screen. None until the user saves them.
-        self._fusion_settings_snapshot = None
+        # opposed to the ones on screen, are held by the FUSION MODEL. This
+        # window no longer keeps a second copy: it writes the file, and hands
+        # the model what it wrote.
         self._fused_zarr_path    = None
         self._rois               = []
         self._active_roi         = None
@@ -730,11 +732,20 @@ class MainWindow(QMainWindow):
         channels_box_lay = QVBoxLayout(channels_box)
         channels_box_lay.setContentsMargins(4, 4, 4, 4)
         channels_box_lay.setSpacing(4)
-        self.config = ConfigPanel([])
+        # The panel EDITS Block01's fusion model; it does not own it. Handed
+        # in at construction, so there is never a moment when a second model
+        # exists to be written to.
+        self.config = ConfigPanel([], fusion=self._display.fusion)
         self.config.setMinimumHeight(220)
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
         self.config.visibility_changed.connect(self._on_channel_visibility_changed)
+        # The two scientific facts, straight from the model -- so an edit made
+        # in Step0 or Step3, with this page not even built, reaches the same
+        # handlers as one made on a row here.
+        self._display.fusion.participation_changed.connect(
+            self._on_fusion_participation_changed)
+        self._display.fusion.weight_changed.connect(self._on_fusion_weight_changed)
         self.config.current_channel_changed.connect(self._on_current_channel_changed)
         self.config.color_changed.connect(self._on_channel_color_changed)
         # ...and the other direction: a colour picked in the Intensity window
@@ -1285,38 +1296,20 @@ class MainWindow(QMainWindow):
         return self._display.render_spec()
 
     def set_render_weight(self, channel, weight):
-        """THE weight write, wherever in Block01 it came from.
+        """A weight write from this window. A FACADE over the model.
 
-        The channel panel is the weight's owner -- it is what a Save freezes
-        and what a session restores -- so a weight moved in Step2 or Step3
-        moves the same row Step1 shows. That is the whole difference between
-        a global weight and a per-step pixel effect: walking on to Step3 and
-        back to Step1 finds the number the user chose, because there was only
-        ever one place it was written.
-
-        Moving the row re-publishes the render spec through the ordinary
-        `config_changed` path, so every reader picks it up without this
-        method telling any of them.
+        It used to be the owner's entry: the services held this object as the
+        "weight owner" and moved a Step1 row. The model owns the number now,
+        and everything that has to happen when it moves happens in
+        `_on_fusion_weight_changed`, wherever the edit came from.
         """
-        rows = getattr(self.config, "_rows", {})
-        if not channel or channel not in rows:
-            return False
-        if self.config.channel_weight(channel) == float(weight):
-            return False
-        rows[channel].spin.setValue(float(weight))
-        # Step1's own snapshot is what publishes the spec, and it only runs
-        # when Step1 is the active context. From a downstream step the spec
-        # has to be refreshed here, or the weight would move the panel and
-        # not the picture.
-        if self._display.coordinator.active_context_id() != _CTX_STEP1:
-            self._refresh_published_render_spec()
-        return True
+        return self._display.set_render_weight(channel, weight)
 
     def render_weight(self, channel):
-        return self.config.channel_weight(channel)
+        return self._display.render_weight(channel)
 
     def _refresh_published_render_spec(self):
-        """Re-publish the spec from the CURRENT panel state.
+        """Re-publish the spec from the CURRENT model state.
 
         Used when the weights move while a downstream step is drawing: Step1
         is not composing, so nothing else would rebuild the spec, and the
@@ -1362,8 +1355,16 @@ class MainWindow(QMainWindow):
         return self._display.show_weight_editor()
 
     def weight_editor_widget(self):
-        """The weight editor content port: a VIEW over the one weight store."""
-        channels = [ch for ch in (self.config.all_channels or [])]
+        """The weight editor content port: a VIEW over the one weight store.
+
+        The channel LIST comes from the dataset, not from the channel panel:
+        the numbers are the model's, and a window opened in Step3 must not
+        need a built Step1 page to know which channels exist.
+        """
+        channels = [str(ch) for ch in
+                    (self.loader.channel_names() if self.loader else [])]
+        if not channels:
+            channels = [ch for ch in (self.config.all_channels or [])]
         if not channels:
             return None
         return _GlobalWeightEditor(self._display, channels)
@@ -1385,7 +1386,10 @@ class MainWindow(QMainWindow):
         """
         coordinator = self._display.coordinator
         coordinator.register_context(_CTX_STEP1, self)
-        self._display.set_weight_owner(self)
+        # The model derives `Unsaved` through THIS window's hash algorithm --
+        # the fusion config plus the display mapping, canonicalised and
+        # digested exactly as old projects are named. It is not a second one.
+        self._display.fusion.set_hash_provider(self._fusion_settings_hash)
         self._display.set_weight_editor_content(self)
         self._downstream_contexts = {
             _CTX_STEP2: _SharedSpecTissueContext(self._display, _CTX_STEP2),
@@ -2304,7 +2308,7 @@ class MainWindow(QMainWindow):
                 item["bbox_local"] = [y0 - ry0, y1 - ry0, x0 - rx0, x1 - rx0]
             patches.append(item)
 
-        fusion_cfg = self.config.get_full_config()
+        fusion_cfg = self._display.fusion.full_config()
         channel_weights = {}
         for gdata in fusion_cfg.get("groups", {}).values():
             for ch, weight in (gdata.get("channels") or {}).items():
@@ -2312,14 +2316,17 @@ class MainWindow(QMainWindow):
         nuc = fusion_cfg.get("nucleus") or {}
         if nuc.get("channel"):
             channel_weights[nuc["channel"]] = float(nuc.get("weight", 0.0))
-        # Display state, Step1's own.  `channel_visibility` used to be a shadow
-        # of "weight > 0" that nothing read; it now carries the real ticks.
+        # DISPLAY visibility -- what is drawn. Written under both names: the
+        # new one says what it is, the old one keeps working for a reader
+        # that predates the split. It is no longer the same fact as taking
+        # part in the fusion, which is written separately below.
         visible = set(self.config.visible_channels())
         channel_visibility = {ch: (ch in visible)
                               for ch in (self.config.all_channels or [])}
+        fusion_draft = self._display.fusion.draft_snapshot()
 
         return {
-            "version": 1,
+            "version": fusion_domain.SESSION_SCHEMA_VERSION,
             "mode": "roi" if active_roi else "full_wsi",
             "roi_id": (self.step0_output or {}).get("roi_id", ""),
             "roi_dir": (self.step0_output or {}).get("roi_dir", ""),
@@ -2342,10 +2349,19 @@ class MainWindow(QMainWindow):
             "fusion_config": fusion_cfg,
             "channel_weights": channel_weights,
             "channel_visibility": channel_visibility,
-            # Which weights are ANSWERS rather than absences. Without it a
-            # restored session cannot tell a marker nobody ever enabled from
-            # one the user deliberately set to 0.00 -- both are 0.0 in
-            # `channel_weights` -- and the next first tick would guess.
+            "display_visibility": channel_visibility,
+            # THE SCIENCE, said separately from the screen. The draft carries
+            # participation, complete per-group weights, group membership, the
+            # nucleus and each weight's provenance -- so a restored project
+            # can be visible but not fused, or fused but not visible, and an
+            # explicit 0.00 can still be told from a weight nobody ever gave.
+            "fusion_draft": fusion_draft,
+            "fusion_enabled": sorted(fusion_draft.get("enabled") or []),
+            "channel_weight_provenance": dict(fusion_draft.get("provenance")
+                                              or {}),
+            # The old marker, still written for a reader that predates the
+            # provenance field: which weights are answers rather than
+            # absences.
             "channel_weight_initialized":
                 self.config.weight_initialized_channels(),
             "channel_colors": self.config.channel_colors(),
@@ -2502,6 +2518,33 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
 
+    def _restore_step1_scientific_state(self, sess):
+        """Put back the scientific state of ANY session shape, in one go.
+
+        The four shapes -- legacy flat weights, grouped-without-visibility,
+        the current format with one `channel_visibility` tick, and the new
+        split schema -- are told apart ONCE, by
+        `fusion_domain.classify_session`, and turned into one install spec.
+        Nothing here sniffs a field a second time, and nothing observes half
+        a restored project: the model installs the whole draft and announces
+        it once.
+
+        Returns the display visibility the session implies, for the display
+        restore that follows.
+        """
+        sess = dict(sess or {})
+        names = self.loader.channel_names() if self.loader else []
+        self.config.set_channels(names)
+        fusion_cfg = (sess.get("fusion_config")
+                      or self._fusion_config_from_flat_weights(sess))
+        spec, visibility = fusion_domain.migrate_session(
+            sess, fusion_config=fusion_cfg, channels=names)
+        print(f"[Step1] session shape={fusion_domain.classify_session(sess)} "
+              f"enabled={len(spec.get('enabled') or [])} "
+              f"visible={sum(1 for v in visibility.values() if v)}")
+        self.config.install_fusion_draft(spec, visibility)
+        return visibility
+
     def _apply_step1_fusion_config(self, cfg):
         """Restore the fusion config into the one channel panel.
 
@@ -2517,19 +2560,14 @@ class MainWindow(QMainWindow):
     def _restore_step1_weight_history(self, sess):
         """Put back which weights are answers rather than absences.
 
+        THE COMPATIBILITY PATH, and the only caller left is a display-state
+        restore handed a session on its own -- `_restore_step1_scientific_state`
+        migrates the provenance with the rest of the draft, and says which
+        KIND of answer each weight is rather than only that it is one.
+
         Presence of the KEY is the test, not its truth: an empty list is a
         session in which nobody had weighted anything yet, and reading that as
-        "absent" would let the next first tick leave the channel invisible at
-        0. A session written before this field existed falls back to the
-        conservative migration `apply_full_config` has already performed --
-        every weight in the saved fusion config treated as authoritative, 0
-        included -- so opening an old project and ticking a channel cannot
-        silently rewrite a weight it had stored.
-
-        Called from BOTH restore paths. The v2 path reaches it through the
-        display state; the older path restores no display state at all, but it
-        still loads a session this program may have written, and that session
-        knows which of its zeros nobody ever chose.
+        "absent" would let the next first enable overwrite a stored weight.
         """
         sess = dict(sess or {})
         if "channel_weight_initialized" not in sess:
@@ -2538,7 +2576,7 @@ class MainWindow(QMainWindow):
         if isinstance(recorded, (list, tuple, dict)):
             self.config.restore_weight_initialization(recorded)
 
-    def _apply_step1_display_state(self, sess):
+    def _apply_step1_display_state(self, sess, visibility=None):
         """Restore Step1's own display state: ticks, colours, current channel,
         preview mode.
 
@@ -2561,10 +2599,17 @@ class MainWindow(QMainWindow):
         if mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION):
             self.set_preview_mode(mode, force=True, reconcile=False)
 
-        self._restore_step1_weight_history(sess)
+        # The weight history is the MODEL's now, restored with the rest of
+        # the scientific state; this path only carries it for sessions
+        # restored without one (a caller that hands this method a session on
+        # its own, as the old display-only entry did).
+        if visibility is None:
+            self._restore_step1_weight_history(sess)
 
         colors = sess.get("channel_colors")
-        visibility = sess.get("channel_visibility")
+        if visibility is None:
+            visibility = (sess.get("display_visibility")
+                          or sess.get("channel_visibility"))
         current = str(sess.get("current_channel") or "")
         if colors or visibility or current:
             self._restoring_display_state = True
@@ -2598,9 +2643,8 @@ class MainWindow(QMainWindow):
         # call _on_patches with session data or reconstruct an ROI.
         patches = list(self._all_patches or [])
 
-        fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
-        self._apply_step1_fusion_config(fusion_cfg)
-        self._apply_step1_display_state(sess)
+        visibility = self._restore_step1_scientific_state(sess)
+        self._apply_step1_display_state(sess, visibility)
 
         self._p2_params = sess.get("p2_params")
         if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):
@@ -2888,14 +2932,10 @@ class MainWindow(QMainWindow):
             self._corrected_decisions = decisions
             self._corrected_zarr_mode = str(sess.get("corrected_zarr_mode") or "")
 
-            self.config.set_channels(self.loader.channel_names())
-            fusion_cfg = sess.get("fusion_config") or self._fusion_config_from_flat_weights(sess)
-            self._apply_step1_fusion_config(fusion_cfg)
-            # This path restores no display state, but the weight history is
-            # not display state: without it every 0 in the config counts as
-            # somebody's answer, and a channel nobody ever enabled stays
-            # invisible at 0 on its first tick after a restart.
-            self._restore_step1_weight_history(sess)
+            # One migration for every session shape, weight provenance and
+            # participation included -- so this path no longer has to restore
+            # a separate "which zeros are answers" marker afterwards.
+            self._restore_step1_scientific_state(sess)
 
             rois = list(sess.get("rois") or [])
             if not rois and sess.get("roi_bbox"):
@@ -3751,7 +3791,7 @@ class MainWindow(QMainWindow):
             self._patch_load_ready.add(patch_idx)
         self._set_patch_btn_state(patch_idx, 'ready')
 
-        nuc_ch, _ = self.config.get_nucleus()
+        nuc_ch, _ = self._display.fusion.nucleus()
         y0, y1, x0, x1 = self._all_patches[patch_idx]
         h = next(iter(cache.values())).shape[0] if cache else 0
         w = next(iter(cache.values())).shape[1] if cache else 0
@@ -4077,14 +4117,12 @@ class MainWindow(QMainWindow):
     def _effective_fusion_config(self):
         """The one configuration both previews and every Save consume.
 
-        `ConfigPanel.effective_config` drops the unticked channels; the panel
-        keeps their weights so re-ticking restores them, but nothing that
-        produces pixels or files may see them.
+        Straight from the MODEL: the enabled subset, with the disabled
+        channels' groups and weights still held so enabling one brings its own
+        numbers back. Display visibility has no vote in it -- that was the
+        coupling B3 removed.
         """
-        cfg = self.config
-        if hasattr(cfg, "effective_config"):
-            return cfg.effective_config()
-        return cfg.get_full_config()
+        return self._display.fusion.effective_config()
 
     def _overlay_weight(self, channel):
         """How strongly a ticked channel shows: the same 0..1 the fusion uses.
@@ -4093,10 +4131,10 @@ class MainWindow(QMainWindow):
         in several groups shows at the strongest of them, which is what the
         fusion's max-over-groups does with it too.
         """
-        nuc_ch, nuc_w = self.config.get_nucleus()
+        nuc_ch, nuc_w = self._display.fusion.nucleus()
         if channel == nuc_ch:
             return float(nuc_w or 0.0)
-        groups = self.config.get_groups()
+        groups = self._display.fusion.groups()
         group_weights = self.config.get_group_weights()
         best = 0.0
         for gname, ch_weights in groups.items():
@@ -4165,11 +4203,19 @@ class MainWindow(QMainWindow):
             + (f"  ({len(missing)} still loading)" if missing else ""))
 
     def _on_channel_visibility_changed(self, channel, visible):
-        """A tick changed which channels are in play."""
+        """A DISPLAY tick changed what is drawn.
+
+        The picture, and nothing else. This handler used to end by
+        recomputing the settings state, because the same tick also decided
+        the effective configuration -- so looking at one channel instead of
+        another could make a saved project say `Unsaved` and get a search
+        refused. Since B3 the configuration does not contain the answer to
+        this question, so there is nothing here to make stale.
+        """
         if self._restoring_display_state:
             return
         if visible:
-            # Ticking a channel again is the user asking for it, so a previous
+            # Showing a channel again is the user asking for it, so a previous
             # failure stops standing in the way.
             for failed in self._failed_channels.values():
                 failed.discard(channel)
@@ -4180,10 +4226,49 @@ class MainWindow(QMainWindow):
         # the snapshot rather than read here.
         self._display.coordinator.request_frame(kind="visibility",
                                                 channel=channel)
-        # A tick changes the effective configuration, so it changes whether the
-        # screen and the committed snapshot still agree. Said now, not at the
-        # next redraw: a panel claiming "saved" while a search would be refused
-        # is the disagreement this label exists to show.
+        self._schedule_step1_session_save()
+
+    def _on_fusion_participation_changed(self, channel, enabled):
+        """A channel entered or left the SCIENCE, from wherever it was said.
+
+        This one does change the effective configuration, so it changes
+        whether the screen and the committed snapshot still agree -- said
+        now, not at the next redraw, because a panel claiming "saved" while a
+        search would be refused is the disagreement the label exists to show.
+        """
+        if self._restoring_display_state:
+            return
+        self._ensure_channels_cached(self._preview_patch_idx)
+        # COALESCED, not drawn here: a first enable also answers the weight,
+        # and one logical act must leave one repaint rather than two.
+        self._schedule_preview_update()
+        self._display.coordinator.request_frame(kind="fusion",
+                                                channel=channel)
+        self._update_fusion_settings_state()
+        self._schedule_step1_session_save()
+
+    def _on_fusion_weight_changed(self, channel):
+        """A scientific weight moved, on a row here or in the shared Weights
+        window while this page was not even visible.
+
+        The preview, the shared render spec, the Unsaved state and the session
+        all follow the model rather than the control that happened to be
+        touched -- which is what makes a weight edited in Step3 the same fact
+        back in Step1.
+        """
+        if self._restoring_display_state:
+            return
+        self._ensure_channels_cached(self._preview_patch_idx)
+        # The same coalesced path a slider drag has always taken: ten steps
+        # leave one composed frame, and none of them on the GUI thread.
+        self._schedule_preview_update()
+        self._display.coordinator.request_frame(kind="weight", channel=channel)
+        if self._display.coordinator.active_context_id() != _CTX_STEP1:
+            # Step1 is not composing, so nothing else would rebuild the spec
+            # and the shared picture would keep the weight the user has just
+            # changed away from.
+            self._refresh_published_render_spec()
+        self._refresh_weight_editor()
         self._update_fusion_settings_state()
         self._schedule_step1_session_save()
 
@@ -4976,7 +5061,7 @@ class MainWindow(QMainWindow):
         self._params_source = "direct_patch_preview"
         self._check_save_unlock()
 
-        nuc_ch, _ = self.config.get_nucleus()
+        nuc_ch, _ = self._display.fusion.nucleus()
         print(f"[Step1] patch preview mode={method}")
         print(f"[Step1] preview patches={len(patches)}")
         print(f"[Step1] input=DAPI channel={nuc_ch}")
@@ -5333,14 +5418,16 @@ class MainWindow(QMainWindow):
 
     def _committed_fusion_settings(self):
         """The snapshot the workers use, or None when nothing is committed."""
-        return getattr(self, "_fusion_settings_snapshot", None)
+        return self._display.fusion.committed_snapshot()
 
     def _fusion_settings_dirty(self):
-        """Does the screen show something the committed snapshot does not?"""
-        snapshot = self._committed_fusion_settings()
-        if not snapshot:
-            return True
-        return snapshot.get("hash") != self._fusion_settings_hash()
+        """Does the DRAFT say something the committed snapshot does not?
+
+        Derived by the model from the two hashes, through this window's own
+        hash algorithm. Display visibility is not in the draft, so hiding a
+        channel cannot make a saved project look unsaved.
+        """
+        return self._display.fusion.is_dirty()
 
     def _fusion_settings_path(self, output_dir=None):
         out = output_dir or (self.step0_output or {}).get("step1_dir") \
@@ -5355,7 +5442,7 @@ class MainWindow(QMainWindow):
         republished, describes settings this session cannot reproduce, so it is
         left on disk and the draft simply counts as unsaved.
         """
-        self._fusion_settings_snapshot = None
+        self._display.fusion.install_committed_snapshot(None)
         path = self._fusion_settings_path()
         if not os.path.exists(path):
             self._update_fusion_settings_state()
@@ -5406,7 +5493,7 @@ class MainWindow(QMainWindow):
         })
         if not stored or stored != actual:
             return _refuse("its contents do not match its hash")
-        self._fusion_settings_snapshot = snapshot
+        self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings restored: {snapshot['hash'][:12]}")
         self._update_fusion_settings_state()
         return snapshot
@@ -5453,7 +5540,7 @@ class MainWindow(QMainWindow):
                 f"committed.\n\nReason: {exc}")
             self._update_fusion_settings_state()
             return False
-        self._fusion_settings_snapshot = snapshot
+        self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings committed: {snapshot['hash'][:12]}")
         self._update_fusion_settings_state()
         self._schedule_step1_session_save()
@@ -5514,7 +5601,7 @@ class MainWindow(QMainWindow):
             # settings belong to, so neither keeps the claim.
             self._forget_fusion_settings("the rebind could not be written")
             return False, str(exc)
-        self._fusion_settings_snapshot = rebound
+        self._display.fusion.install_committed_snapshot(rebound)
         print(f"[Step1] fusion settings rebound to the republished handoff "
               f"({rebound['hash'][:12]} unchanged)")
         self._update_fusion_settings_state()
@@ -5523,9 +5610,9 @@ class MainWindow(QMainWindow):
     def _forget_fusion_settings(self, reason=""):
         """Another dataset, or a handoff that no longer holds: the snapshot
         described settings for a slide that is no longer on screen."""
-        if getattr(self, "_fusion_settings_snapshot", None) is not None:
+        if self._committed_fusion_settings() is not None:
             print(f"[Step1] fusion settings dropped{': ' + reason if reason else ''}")
-        self._fusion_settings_snapshot = None
+        self._display.fusion.install_committed_snapshot(None)
         self._update_fusion_settings_state()
 
     def _update_fusion_settings_state(self):

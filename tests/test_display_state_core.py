@@ -680,7 +680,8 @@ def test_the_real_step1_restore_registers_display_state_once(app):
         # No scientific side effect: no first-enable, no weight edit.
         assert {ch: panel.channel_weight(ch)
                 for ch in ("DAPI", "CD3", "CD8")} == weights_before
-        assert panel._edited_channels == set()
+        assert all(panel.weight_provenance(ch) != "explicit"
+                   for ch in ("DAPI", "CD3", "CD8"))
     finally:
         panel.deleteLater()
 

@@ -66,7 +66,9 @@ def _window(app):
         ch: rng.random((32, 32), dtype=np.float32) * 0.8 + 0.1
         for ch in ("DAPI", "CD3", "CD8")}
     w._patch_load_ready.add(0)
-    w.config.set_channel_visible("CD3", True)          # in the configuration
+    # In the configuration -- two commands since B3: drawn, and in the science.
+    w.config.set_channel_visible("CD3", True)
+    w.config.set_fusion_enabled("CD3", True)
     # Production composes frames on a worker thread; these tests run the same
     # compose code inline, delivered when the test says. See `_InlineFrames`.
     w._inline_frames = _InlineFrames(w)

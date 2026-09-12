@@ -30,6 +30,17 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def _enable(w, channel, on=True):
+    """Show a channel AND put it in the fusion.
+
+    Since B3 those are two commands: the left box draws the channel, the row's
+    `\u0192` box decides whether it is in the science. Every "ticked" in this
+    module means "in the configuration", so both are said here.
+    """
+    w.config.set_channel_visible(channel, on)
+    w.config.set_fusion_enabled(channel, on)
+
+
 @pytest.fixture(autouse=True)
 def _no_modal_dialogs(monkeypatch):
     warned = []
@@ -165,7 +176,7 @@ def test_every_job_refuses_while_the_settings_are_unsaved(app, tmp_path,
 def test_saving_the_settings_clears_the_warning(app, tmp_path):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
 
         assert w._commit_fusion_settings() is True
@@ -185,7 +196,7 @@ def test_a_running_job_keeps_the_settings_it_started_with(app, tmp_path,
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         assert w._commit_fusion_settings() is True
         committed = w._committed_fusion_settings()["hash"]
@@ -196,7 +207,7 @@ def test_a_running_job_keeps_the_settings_it_started_with(app, tmp_path,
 
         # The user keeps working while it runs.
         w.config._rows["CD3"].spin.setValue(0.9)
-        w.config.set_channel_visible("CD8", True)
+        _enable(w, "CD8", True)
 
         assert json.dumps(seen["args"]["groups"], sort_keys=True) == started_with
         assert w._committed_fusion_settings()["hash"] == committed
@@ -211,7 +222,7 @@ def test_the_next_job_is_refused_until_it_is_saved_again(app, tmp_path,
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         first = w._committed_fusion_settings()["hash"]
@@ -238,7 +249,7 @@ def test_an_unticked_channel_never_reaches_a_job(app, tmp_path, monkeypatch):
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w.config._rows["CD8"].spin.setValue(0.7)      # weighted, not ticked
         w._commit_fusion_settings()
@@ -256,7 +267,7 @@ def test_a_failed_save_leaves_the_previous_snapshot_standing(app, tmp_path,
                                                              _no_modal_dialogs):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         assert w._commit_fusion_settings() is True
         good = w._committed_fusion_settings()["hash"]
@@ -284,7 +295,7 @@ def test_a_failed_save_leaves_the_previous_snapshot_standing(app, tmp_path,
 def test_a_dataset_switch_forgets_the_snapshot(app, tmp_path):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -299,7 +310,7 @@ def test_a_dataset_switch_forgets_the_snapshot(app, tmp_path):
 def test_a_snapshot_from_another_handoff_is_not_adopted(app, tmp_path):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -311,7 +322,7 @@ def test_a_snapshot_from_another_handoff_is_not_adopted(app, tmp_path):
         with open(path, "w") as f:
             json.dump(snapshot, f)
 
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         assert w._restore_fusion_settings() is None
         assert w._fusion_settings_dirty() is True
     finally:
@@ -321,12 +332,12 @@ def test_a_snapshot_from_another_handoff_is_not_adopted(app, tmp_path):
 def test_a_matching_snapshot_is_adopted(app, tmp_path):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         wanted = w._committed_fusion_settings()["hash"]
 
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         restored = w._restore_fusion_settings()
 
         assert restored is not None and restored["hash"] == wanted
@@ -343,14 +354,14 @@ def test_a_job_is_built_from_the_snapshot_not_from_the_panel(app, tmp_path,
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
         # The panel moves on, and a job starts anyway (the gate is bypassed
         # here on purpose: what is under test is where the numbers come from).
         w.config._rows["CD3"].spin.setValue(0.9)
-        w.config.set_channel_visible("CD8", True)
+        _enable(w, "CD8", True)
         w.config._rows["CD8"].spin.setValue(0.8)
         w._launch_worker([(0, (0, 32, 0, 32), {"diameter": 30})])
 
@@ -369,7 +380,7 @@ def test_a_job_uses_the_mapping_that_was_frozen_with_it(app, tmp_path,
         mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_display_mapping",
                             lambda self, *a, **k: mapping)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -396,7 +407,7 @@ def test_the_fused_zarr_uses_the_mapping_that_was_saved_with_it(app, tmp_path,
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
                             lambda self: ({"CD3": {"min": 0.0, "max": 0.1,
                                                    "gamma": 1.0}}, "stale.json"))
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -422,7 +433,7 @@ def test_params_searched_on_other_settings_are_refused(app, tmp_path,
         started = []
         monkeypatch.setattr(type(w), "_start_fusion_worker",
                             lambda self, *a, **k: started.append(a))
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         w._run_p1([None])
@@ -450,7 +461,7 @@ def test_hand_written_params_make_no_claim(app, tmp_path):
     they are not tied to any settings."""
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w._commit_fusion_settings()
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
         w._params_source = "manual"
@@ -474,7 +485,7 @@ def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it)
     the hash it used to have."""
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -492,7 +503,7 @@ def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it)
         with open(path, "w") as f:
             json.dump(snapshot, f)
 
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         assert w._restore_fusion_settings() is None
         assert w._fusion_settings_dirty() is True
     finally:
@@ -506,7 +517,7 @@ def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
     describe this handoff."""
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         assert w._fusion_settings_dirty() is False
@@ -514,7 +525,7 @@ def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
         # Same path, same source identity, different contents.
         _publish_manifest(tmp_path, w.loader, remap_hash="remap-2", roi="ROI_2")
 
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         assert w._restore_fusion_settings() is None
         assert w._fusion_settings_dirty() is True
     finally:
@@ -524,12 +535,12 @@ def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
 def test_the_label_follows_a_tick_at_once(app, tmp_path):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         assert "saved" in w._fusion_settings_label.text().lower()
 
-        w.config.set_channel_visible("CD8", True)
+        _enable(w, "CD8", True)
 
         assert w._fusion_settings_dirty() is True
         assert "Unsaved" in w._fusion_settings_label.text()
@@ -542,7 +553,7 @@ def test_a_failed_save_leaves_no_half_written_file(app, tmp_path, monkeypatch,
                                                    _no_modal_dialogs):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         monkeypatch.setattr(os, "replace", lambda *a, **k: (
             (_ for _ in ()).throw(OSError("no space left on device"))))
 
@@ -560,13 +571,13 @@ def test_a_snapshot_that_names_nothing_is_refused(app, tmp_path):
     session's, and "neither of us said" is not proof that we agree."""
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w._commit_fusion_settings()
 
         # No published handoff to compare against at all.
         w.step0_output["step0_manifest_path"] = ""
 
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         assert w._restore_fusion_settings() is None
     finally:
         w.close()
@@ -601,7 +612,7 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
                 return QtWidgets.QDialog.Rejected
         monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
 
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
@@ -623,7 +634,7 @@ def test_params_that_already_know_their_settings_are_never_re_stamped(app,
     one — a guess dressed as a record."""
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
 
@@ -647,7 +658,7 @@ def test_an_old_result_selected_later_keeps_its_own_hash(app, tmp_path,
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         first = w._committed_fusion_settings()["hash"]
@@ -699,7 +710,7 @@ def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path
         monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
 
         # 1. save the settings, 2. search on them
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         assert w._commit_fusion_settings() is True
         saved_hash = w._committed_fusion_settings()["hash"]
@@ -724,7 +735,7 @@ def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path
         assert w._fusion_settings_dirty() is False
 
         # ...and a fresh session restores exactly this snapshot.
-        w._fusion_settings_snapshot = None
+        w._display.fusion.install_committed_snapshot(None)
         restored = w._restore_fusion_settings()
         assert restored is not None
         assert restored["hash"] == saved_hash
@@ -757,7 +768,7 @@ def test_a_rebind_that_cannot_be_written_fuses_nothing(app, tmp_path,
         # Unstubbed, this opens a real modal under offscreen Qt and the test
         # hangs instead of failing.
         monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
@@ -785,7 +796,7 @@ def test_a_republish_that_changes_nothing_leaves_the_snapshot_alone(app, tmp_pat
                                                                    monkeypatch):
     w = _window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3", True)
         w._commit_fusion_settings()
         before = dict(w._committed_fusion_settings())
 

@@ -74,6 +74,19 @@ def _image(w):
 
 
 # ── the tick / weight contract ───────────────────────────────────────────
+#
+# SINCE B3 there are TWO ticks. The left box says whether a channel is DRAWN;
+# the row's `\u0192` box says whether it takes part in the FUSION. They were one
+# tick, and that is why hiding a channel used to shrink the configuration a
+# Save would freeze. The scientific rules below -- the first-enable default,
+# which zeros are answers, what reaches the groups -- belong to the `\u0192` box.
+
+
+def _enable(w, channel, on=True):
+    """Show a channel AND put it in the fusion: the two user acts the single
+    old tick used to do at once."""
+    w.config.set_channel_visible(channel, on)
+    w.config.set_fusion_enabled(channel, on)
 
 def test_a_new_dataset_shows_only_the_nucleus(app):
     w = _window(app)
@@ -84,21 +97,33 @@ def test_a_new_dataset_shows_only_the_nucleus(app):
         w.close()
 
 
-def test_a_first_tick_gives_the_channel_weight_one(app):
-    """A channel the user just asked to see and cannot see is not an answer.
+def test_a_first_fusion_tick_gives_the_channel_weight_one(app):
+    """A channel asked into the fusion at nothing is not an answer.
 
-    The first tick a marker ever gets in this dataset sets its weight to 1.0.
-    Only the first: from then on the number is the user's, and this panel does
-    not replace it. (This module previously pinned the opposite -- a first tick
-    leaving the weight at 0 -- which is what made a newly ticked channel
-    invisible until the user found the slider.)
+    The first `\u0192` tick a marker ever gets in this dataset sets its weight to
+    1.0. Only the first: from then on the number is the user's.
     """
     w = _window(app)
     try:
         assert w.config.channel_weight("CD3") == 0.0     # nobody has said yet
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0
+        assert "CD3" in w.config.fusion_channels()
+    finally:
+        w.close()
+
+
+def test_showing_a_channel_is_not_a_scientific_act(app):
+    """The display tick draws it and says nothing about the science."""
+    w = _window(app)
+    try:
+        before = w.config.get_full_config()
+        w.config.set_channel_visible("CD3", True)
+
         assert "CD3" in w.config.visible_channels()
+        assert w.config.fusion_enabled("CD3") is False
+        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.get_full_config() == before
     finally:
         w.close()
 
@@ -120,9 +145,9 @@ def test_re_ticking_brings_back_the_weight_unchanged(app):
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.35)
-        w.config.set_channel_visible("CD3", True)
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
     finally:
         w.close()
@@ -145,7 +170,7 @@ def test_ticking_another_channel_does_not_move_the_selection(app):
 def test_the_weight_changes_the_overlay_and_the_fusion_alike(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3")
         w.config._rows["CD3"].spin.setValue(1.0)
 
         w.set_preview_mode("overlay", force=True, reconcile=False)
@@ -172,12 +197,12 @@ def test_the_weight_changes_the_overlay_and_the_fusion_alike(app):
         w.close()
 
 
-def test_an_unticked_channel_reaches_neither_preview_nor_the_saved_config(app):
+def test_a_disabled_channel_reaches_neither_preview_nor_the_saved_config(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3")
         w.config._rows["CD3"].spin.setValue(0.8)
-        w.config.set_channel_visible("CD3", False)
+        w.config.set_fusion_enabled("CD3", False)
 
         effective = w._effective_fusion_config()
         weighted = set()
@@ -185,17 +210,17 @@ def test_an_unticked_channel_reaches_neither_preview_nor_the_saved_config(app):
             weighted.update(data["channels"])
         assert "CD3" not in weighted
         assert "CD3" not in w._fusion_weighted_channels()
-        # ...and the panel still remembers it for when it is ticked again.
+        # ...and the model still remembers it for when it is enabled again.
         assert w.config.channel_weight("CD3") == pytest.approx(0.8)
         assert "CD3" in w.config.get_full_config()["groups"]["markers"]["channels"]
     finally:
         w.close()
 
 
-def test_unticking_the_nucleus_takes_it_out_of_the_fusion(app):
+def test_disabling_the_nucleus_takes_it_out_of_the_fusion(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("DAPI", False)
+        w.config.set_fusion_enabled("DAPI", False)
         assert w._effective_fusion_config()["nucleus"]["weight"] == 0.0
     finally:
         w.close()
@@ -265,7 +290,7 @@ def test_a_burst_of_weight_changes_publishes_the_last_state(app):
     """
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3")
         w.config._rows["CD3"].spin.setValue(1.0)
         w.set_preview_mode("overlay", force=True, reconcile=False)
         _settle(w)
@@ -387,7 +412,7 @@ def test_the_intensity_window_changes_both_previews(app, mode, monkeypatch):
     just moved away from."""
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3")
         w.config._rows["CD3"].spin.setValue(1.0)
         window = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0},
                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
@@ -456,7 +481,7 @@ def test_a_new_dataset_starts_from_zero(app):
 
         assert w.config.channel_weight("CD3") == 0.0
         assert w.config.weight_initialized_channels() == []
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0
     finally:
         w.close()
@@ -498,6 +523,9 @@ def test_a_channel_row_has_no_hover_text_on_its_controls(app):
             assert row.swatch.toolTip() == ""
             assert row.slider.toolTip() == ""
             assert row.spin.toolTip() == ""
+            # The one exception, and the reason it is one: the `\u0192` box sits
+            # next to a tick box that means something else entirely.
+            assert "FUSION" in row.fusion_box.toolTip()
     finally:
         w.close()
 
@@ -523,48 +551,52 @@ def test_the_nucleus_row_stays_read_only_without_saying_so_on_hover(app):
 # panel records WHO said it, apart from the numbers. `weight == 0` can never
 # be the test: it would overwrite the decision with the default.
 
-def test_all_three_enable_entries_answer_the_same(app):
-    """The checkbox, `set_channel_visible` and clicking a hidden row are one
-    decision in one place, not three rules that can drift apart."""
+def test_both_fusion_entries_answer_the_same(app):
+    """The row's `\u0192` box and `set_fusion_enabled` are one decision in one
+    place, not two rules that can drift apart."""
     w = _window(app)
     try:
-        # 1. the checkbox itself
-        w.config._rows["CD3"].checkbox.setChecked(True)
+        # 1. the box itself
+        w.config._rows["CD3"].fusion_box.setChecked(True)
         assert w.config.channel_weight("CD3") == 1.0
 
-        # 2. the programmatic tick
-        w.config.set_channel_visible("CD8", True)
+        # 2. the programmatic command
+        w.config.set_fusion_enabled("CD8", True)
         assert w.config.channel_weight("CD8") == 1.0
     finally:
         w.close()
 
 
-def test_clicking_a_hidden_row_selects_ticks_and_weighs_it(app):
+def test_clicking_a_hidden_row_shows_it_without_enlisting_it(app):
+    """Selecting something you cannot see is a dead end, so a click shows the
+    channel. Clicking a name is not a scientific act, so it does not put the
+    channel in the fusion or give it a weight."""
     w = _window(app)
     try:
         w.config.set_current_channel("CD3", auto_show=True)
 
         assert w.config.current_channel() == "CD3"
         assert "CD3" in w.config.visible_channels()
-        assert w.config.channel_weight("CD3") == 1.0
+        assert w.config.fusion_enabled("CD3") is False
+        assert w.config.channel_weight("CD3") == 0.0
     finally:
         w.close()
 
 
-def test_an_edited_weight_survives_unticking_and_re_ticking(app):
+def test_an_edited_weight_survives_disabling_and_re_enabling(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.35)
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
 
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
     finally:
         w.close()
 
 
-def test_a_deliberate_zero_survives_unticking_and_re_ticking(app):
+def test_a_deliberate_zero_survives_disabling_and_re_enabling(app):
     """The case a `weight == 0` test would get wrong: the user said 0.00, and
     a re-tick must not read that as "nobody has said anything"."""
     w = _window(app)
@@ -636,17 +668,17 @@ def test_the_nucleus_weight_is_not_touched_by_the_first_tick_rule(app):
         w.close()
 
 
-def test_a_visibility_observer_already_sees_the_final_weight(app):
-    """The atomicity requirement: whoever handles the tick reads 1.0, not a
-    weight of 0 that changes a moment later. Anything else shows a blank frame
-    first, or saves an intermediate state."""
+def test_a_participation_observer_already_sees_the_final_weight(app):
+    """The atomicity requirement: whoever handles the scientific tick reads
+    1.0, not a weight of 0 that changes a moment later. Anything else shows a
+    blank frame first, or saves an intermediate state."""
     w = _window(app)
     try:
         seen = []
-        w.config.visibility_changed.connect(
-            lambda ch, vis: seen.append((ch, vis, w.config.channel_weight(ch))))
+        w._display.fusion.participation_changed.connect(
+            lambda ch, on: seen.append((ch, on, w.config.channel_weight(ch))))
 
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
 
         assert seen == [("CD3", True, 1.0)]
     finally:
@@ -661,7 +693,7 @@ def test_a_first_tick_does_not_announce_a_separate_weight_change(app):
         cfg_signals = []
         w.config.config_changed.connect(lambda: cfg_signals.append(1))
 
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
 
         assert cfg_signals == []
         assert w.config.channel_weight("CD3") == 1.0
@@ -669,13 +701,14 @@ def test_a_first_tick_does_not_announce_a_separate_weight_change(app):
         w.close()
 
 
-def test_a_first_tick_redraws_once_and_reads_nothing_twice(app):
-    """One logical act, one repaint.
+def test_a_first_tick_composes_once_and_reads_nothing_twice(app):
+    """One logical act, one composed frame.
 
     The channel's pixels are already in hand, so the only thing that could
-    draw twice is the state changing twice -- a weight announced separately
-    from the tick schedules a second, coalesced redraw of what the first one
-    already showed. Waited out past the coalescing window rather than only
+    compose twice is the state changing twice -- and a first enable DOES
+    change two things, participation and the weight. Both are one act, so
+    they leave one frame between them, composed by the worker rather than on
+    the GUI thread. Waited out past the coalescing window rather than only
     pumping events, so a pending timer is not simply missed.
     """
     from PyQt5 import QtTest
@@ -683,24 +716,24 @@ def test_a_first_tick_redraws_once_and_reads_nothing_twice(app):
     try:
         # Building the panel already scheduled one coalesced redraw
         # (`load_panel` announces the config it just loaded). Let it happen
-        # before counting, or the tick inherits it and the count says two for
-        # a reason that has nothing to do with the tick.
-        QtTest.QTest.qWait(200)
+        # before counting, or the tick inherits it.
+        _settle(w)
         w.loader.reads.clear()
-        redraws = []
-        original = w._refresh_patch_preview
+        w._inline_frames.delivered.clear()
+        gui_draws = []
+        real = w._refresh_patch_preview
+        w._refresh_patch_preview = lambda reset_view=False: (
+            gui_draws.append(reset_view) or real(reset_view=reset_view))
 
-        def counting(*a, **kw):
-            redraws.append(1)
-            return original(*a, **kw)
-
-        w._refresh_patch_preview = counting
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         QtTest.QTest.qWait(200)
 
         assert w.loader.reads == [], \
             f"a cached channel was read again: {w.loader.reads}"
-        assert len(redraws) == 1, f"{len(redraws)} redraws for one tick"
+        assert len(w._inline_frames.delivered) == 1, \
+            f"{len(w._inline_frames.delivered)} frames for one tick"
+        assert gui_draws == [], \
+            "the GUI thread composed a frame instead of the worker"
         assert w.config.channel_weight("CD3") == 1.0
     finally:
         w.close()
@@ -709,16 +742,16 @@ def test_a_first_tick_redraws_once_and_reads_nothing_twice(app):
 def test_the_saved_config_carries_the_first_tick_weight(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
 
         eff = w.config.effective_config()
         markers = eff["groups"]["markers"]["channels"]
         assert markers["CD3"] == 1.0
 
-        w.config.set_channel_visible("CD3", False)
+        w.config.set_fusion_enabled("CD3", False)
         eff = w.config.effective_config()
         assert "CD3" not in eff["groups"]["markers"]["channels"], \
-            "an unticked channel is out of what gets fused"
+            "a disabled channel is out of what gets fused"
         full = w.config.get_full_config()
         assert full["groups"]["markers"]["channels"]["CD3"] == 1.0, \
             "but the full config and the panel still show its weight"
@@ -750,14 +783,14 @@ def test_weights_loaded_from_a_file_are_answers_including_zero(app):
 def test_a_new_dataset_does_not_inherit_the_previous_history(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
         assert w.config.weight_initialized_channels() == ["CD3"]
 
         w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
 
         assert w.config.weight_initialized_channels() == []
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0
     finally:
         w.close()
@@ -766,14 +799,14 @@ def test_a_new_dataset_does_not_inherit_the_previous_history(app):
 def test_a_removed_channel_takes_its_history_with_it(app):
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
 
         w.config.set_channels(["DAPI", "CD8"])
         assert w.config.weight_initialized_channels() == []
 
         w.config.set_channels(["DAPI", "CD3", "CD8"])
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0, \
             "a channel that left and came back is new again"
     finally:
@@ -794,8 +827,8 @@ def test_a_host_set_weight_is_not_overwritten_by_the_first_tick(app):
         w.config.set_channel_weight("CD3", 0.5)
         w.config.set_channel_weight("CD8", 0.0)
 
-        w.config.set_channel_visible("CD3", True)
-        w.config.set_channel_visible("CD8", True)
+        w.config.set_fusion_enabled("CD3", True)
+        w.config.set_fusion_enabled("CD8", True)
 
         assert w.config.channel_weight("CD3") == pytest.approx(0.5)
         assert w.config.channel_weight("CD8") == 0.0
@@ -836,7 +869,7 @@ def test_an_external_weight_reaches_the_groups_and_not_just_the_row(app):
     w = _window(app)
     try:
         w.config.set_channel_weight("CD3", 0.5)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
 
         assert w.config.channel_weight("CD3") == pytest.approx(0.5)
         assert w.config.get_groups()["markers"]["CD3"] == pytest.approx(0.5)
@@ -851,7 +884,7 @@ def test_a_first_tick_reaches_the_groups_too(app):
     is what gets fused and saved."""
     w = _window(app)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
 
         assert w.config.get_groups()["markers"]["CD3"] == 1.0
         eff = w.config.effective_config()
@@ -940,10 +973,10 @@ def test_the_real_handoff_leaves_markers_unanswered(app, tmp_path):
         w.close()
 
 
-def test_after_the_real_handoff_the_checkbox_weighs_one(app, tmp_path):
+def test_after_the_real_handoff_the_fusion_box_weighs_one(app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
-        w.config._rows["CD3"].checkbox.setChecked(True)
+        w.config._rows["CD3"].fusion_box.setChecked(True)
 
         assert w.config.channel_weight("CD3") == 1.0
         assert w.config.get_groups()["markers"]["CD3"] == 1.0
@@ -953,15 +986,17 @@ def test_after_the_real_handoff_the_checkbox_weighs_one(app, tmp_path):
         w.close()
 
 
-def test_after_the_real_handoff_clicking_a_row_weighs_one(app, tmp_path):
+def test_after_the_real_handoff_clicking_a_row_only_shows_it(app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
         w.config.set_current_channel("CD8", auto_show=True)
 
         assert w.config.current_channel() == "CD8"
         assert "CD8" in w.config.visible_channels()
-        assert w.config.channel_weight("CD8") == 1.0
-        assert w.config.get_groups()["markers"]["CD8"] == 1.0
+        # Looking at a channel does not enlist it in the science.
+        assert w.config.fusion_enabled("CD8") is False
+        assert w.config.channel_weight("CD8") == 0.0
+        assert w.config.get_groups()["markers"]["CD8"] == 0.0
     finally:
         w.close()
 
@@ -970,15 +1005,15 @@ def test_after_the_real_handoff_an_edited_weight_survives_both_entries(
         app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.35)
 
-        w.config.set_channel_visible("CD3", False)
-        w.config._rows["CD3"].checkbox.setChecked(True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config._rows["CD3"].fusion_box.setChecked(True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
 
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_current_channel("CD3", auto_show=True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
     finally:
         w.close()
@@ -987,15 +1022,15 @@ def test_after_the_real_handoff_an_edited_weight_survives_both_entries(
 def test_after_the_real_handoff_a_deliberate_zero_survives(app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
 
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 0.0
 
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_current_channel("CD3", auto_show=True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 0.0
     finally:
         w.close()
@@ -1008,15 +1043,15 @@ def test_the_reset_button_still_remembers_its_zeros_after_a_real_handoff(
     the user's behalf during a load."""
     w = _handoff_window(app, tmp_path)
     try:
-        w.config.set_channel_visible("CD3", True)
+        _enable(w, "CD3")
         assert w.config.channel_weight("CD3") == 1.0
 
         w.config.zero_marker_weights()          # what the button does
         assert w.config.channel_weight("CD3") == 0.0
         assert "CD3" in w.config.visible_channels()
 
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 0.0
         assert "CD8" in w.config.weight_initialized_channels(), \
             "the button answers for every marker, ticked or not"

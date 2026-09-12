@@ -134,9 +134,9 @@ def test_the_preview_draws_what_the_core_computes(app):
         w.config.set_group_weight("g", 0.6)
         for ch, val in (("CD3", 0.5), ("CD8", 0.2)):
             w.config.set_channel_weight(ch, val)
-            w.config._edited_channels.add(ch)
         for ch in chans:
             w.config.set_channel_visible(ch, True)
+            w.config.set_fusion_enabled(ch, True)
 
         s = _signals((32, 32))
         w._all_patches = [(0, 32, 0, 32)]
@@ -229,9 +229,9 @@ def _preview_rgb(app, raw, groups, gws, nuc_w):
             w.config.set_group_weight(g, gws.get(g, 1.0))
             for ch, val in chw.items():
                 w.config.set_channel_weight(ch, val)
-                w.config._edited_channels.add(ch)
         for ch in chans:
             w.config.set_channel_visible(ch, True)
+            w.config.set_fusion_enabled(ch, True)
         w._all_patches = [(0, H, 0, W)]
         w._preview_patch_idx = 0
         w._patch_channel_cache[0] = {c: a.copy() for c, a in raw.items()}
@@ -347,7 +347,6 @@ def test_an_all_zero_configuration_draws_nothing_and_says_so(app):
         w.config.set_nucleus("DAPI", 0.0)
         w.config.set_group_weight("g", 1.0)
         w.config.set_channel_weight("CD3", 0.0)
-        w.config._edited_channels.add("CD3")
         w._all_patches = [(0, H, 0, W)]
         w._preview_patch_idx = 0
         w._patch_channel_cache[0] = {c: a.copy() for c, a in raw.items()}

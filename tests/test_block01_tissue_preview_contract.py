@@ -1280,6 +1280,7 @@ def test_a_weight_set_downstream_survives_every_later_step_change(app):
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)   # in the science, too
         w.config._rows["CD3"].spin.setValue(1.0)
         _goto(w, 1)
         _goto(w, 2)
@@ -1767,7 +1768,8 @@ def test_a_restore_still_fires_no_user_or_scientific_signal(app):
         assert forbidden == [], forbidden
         assert {ch: w.config.channel_weight(ch)
                 for ch in ("DAPI", "CD3", "CD8")} == weights
-        assert w.config._edited_channels == set()
+        assert all(w.config.weight_provenance(ch) != "explicit"
+                   for ch in ("DAPI", "CD3", "CD8"))
         assert w._fusion_settings_dirty() == dirty_before
     finally:
         w.close()

@@ -143,14 +143,21 @@ def _settle(w, timeout=2.0):
 
 
 def _show(w, channel, weight=1.0):
-    """Put a channel in the picture: tick it AND give it a weight.
+    """Put a channel in the picture: draw it, fuse it AND weigh it.
 
-    The two are independent now — a tick says "part of the configuration", a
-    weight says "this much" — so a test that wants to see something has to say
-    both, exactly as a user does.
+    Three independent facts since B3 -- the left box draws it, the row's `\u0192`
+    box puts it in the science, the weight says how much -- so a test that
+    wants to see something says all three, exactly as a user does.
     """
     w.config.set_channel_visible(channel, True)
+    w.config.set_fusion_enabled(channel, True)
     w.config._rows[channel].spin.setValue(weight)
+
+
+def _hide(w, channel):
+    """Take a channel out of the picture AND out of the science."""
+    w.config.set_channel_visible(channel, False)
+    w.config.set_fusion_enabled(channel, False)
 
 
 def _window(app, cached=("DAPI", "CD3", "CD8")):
@@ -265,17 +272,17 @@ def test_a_weight_never_ticks_or_unticks_anything(app):
 
 
 def test_a_first_tick_weighs_one_and_later_ticks_leave_it_alone(app):
-    """The first tick answers 1.0 so the channel is actually in the picture;
-    every tick after that brings back the weight the user left."""
+    """The first FUSION tick answers 1.0 so the channel is actually in the
+    picture; every tick after that brings back the weight the user left."""
     w = _window(app)
     try:
         w.config.set_channel_visible("DAPI", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0
 
         w.config._rows["CD3"].spin.setValue(0.6)
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.6)
     finally:
         w.close()
@@ -296,13 +303,13 @@ def test_unticking_keeps_the_weight_and_re_ticking_restores_it(app):
         w.close()
 
 
-def test_an_unticked_channel_takes_part_in_nothing(app):
-    """Not the overlay, not the fusion, not what a Save writes — even though
-    the panel still remembers the weight for when it is ticked again."""
+def test_a_disabled_channel_takes_part_in_nothing(app):
+    """Not the fusion and not what a Save writes — even though the model
+    still remembers the weight for when it is enabled again."""
     w = _window(app)
     try:
         _show(w, "CD3", 0.7)
-        w.config.set_channel_visible("CD3", False)
+        _hide(w, "CD3")
 
         effective = w._effective_fusion_config()
         weighted = set()
@@ -702,7 +709,7 @@ def test_both_modes_want_the_same_channels(app):
         w.set_preview_mode("overlay")
         assert "CD3" in w._needed_channels()
 
-        w.config.set_channel_visible("CD3", False)   # out of the picture
+        _hide(w, "CD3")                              # out of the picture
         assert "CD3" not in w._needed_channels()
         w.set_preview_mode("fusion")
         assert "CD3" not in w._needed_channels()
@@ -1077,7 +1084,7 @@ def test_a_session_round_trips_which_zeros_are_answers(app):
     w = _window(app)
     try:
         # CD3: the user says 0.00 on purpose. CD8: never enabled at all.
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
         payload = w._step1_session_payload()
 
@@ -1089,15 +1096,14 @@ def test_a_session_round_trips_which_zeros_are_answers(app):
 
     w = _window(app)
     try:
-        w._apply_step1_fusion_config(payload["fusion_config"])
-        w._apply_step1_display_state(payload)
+        w._restore_step1_scientific_state(payload)
 
-        w.config.set_channel_visible("CD3", False)
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 0.0, \
             "the user's own 0.00 came back as a default"
 
-        w.config.set_channel_visible("CD8", True)
+        w.config.set_fusion_enabled("CD8", True)
         assert w.config.channel_weight("CD8") == 1.0, \
             "a channel nobody ever enabled is still un-initialised"
     finally:
@@ -1118,10 +1124,9 @@ def test_an_empty_history_field_is_not_read_as_a_missing_one(app):
 
     w = _window(app)
     try:
-        w._apply_step1_fusion_config(payload["fusion_config"])
-        w._apply_step1_display_state(payload)
+        w._restore_step1_scientific_state(payload)
 
-        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
         assert w.config.channel_weight("CD3") == 1.0
     finally:
         w.close()
@@ -1320,8 +1325,8 @@ def test_the_fusion_preview_recomputes_only_the_changed_channel(app):
     w = _window(app)
     try:
         w.set_preview_mode("fusion", force=True, reconcile=False)
-        w.config.set_channel_visible("CD3", True)
-        w.config.set_channel_visible("CD8", True)
+        _show(w, "CD3")
+        _show(w, "CD8")
         w._render_current_patch(reset_view=False)
         first = {key: w._signal_cache.entry(key)["value"]
                  for key in w._signal_cache.keys()}

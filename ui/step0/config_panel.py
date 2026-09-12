@@ -1,51 +1,44 @@
 """
 block01/ui/step0/config_panel.py — Step1's ONE channel panel.
 
-One flat channel list, one state owner. Each row carries the three things a
-channel has in Step1:
+One flat channel list, and NO state of its own. Each row carries the four
+things a channel has in Step1:
 
     click the row  -> it becomes the CURRENT channel (what Intensity edits)
-    the checkbox   -> whether it takes part in the multi-channel overlay
-    the weight box -> its 0..1 contribution to the FUSION preview
+    the checkbox   -> whether it is DRAWN
+    the \u0192 box       -> whether it takes part in the FUSION
+    the weight box -> its 0..1 scientific contribution
 
-THE STATE TABLE. Both previews read exactly this, and so does everything a
-Save writes:
+WHERE THE ANSWERS LIVE. Not here. Colour, the current channel and display
+visibility belong to `ChannelDisplayState`; groups, per-group weights, the
+nucleus, participation and weight provenance belong to `FusionDomainModel`.
+Both are owned by `Block01DisplayServices`, so they answer before this page is
+built and after it is gone. These rows are editors and projections.
 
-    selected/current  the channel the Intensity window edits
-    checked/visible   whether this channel takes part in the picture at all
-    weight 0..1       how strongly it takes part, in overlay and in fusion
-    colour            what colour the overlay draws it in
-    Min/Max/Gamma     the one live display mapping for this channel
+TWO TICKS, TWO FACTS. There used to be one, and it meant both -- so hiding a
+channel to look at another silently shrank the configuration a Save would
+freeze, and a project could be changed by looking at it. Now:
 
-Checked and weight are INDEPENDENT. The tick says whether a channel is part of
-the configuration; the weight says how much it contributes. Neither moves the
-other:
+  * the left box is DISPLAY. Hiding a channel changes the picture and nothing
+    else: the configuration, the settings hash and the committed snapshot are
+    the same afterwards, and a Search or Generate is not refused because of it;
+  * the \u0192 box is SCIENCE. Unticking it takes the channel out of the effective
+    configuration while keeping its group memberships and every per-group
+    weight, so ticking it again brings that channel's own numbers back --
+    an explicit 0.00 included, and an old project's 0.2/0.7 group for group;
+  * the FIRST \u0192 tick of a channel nobody has ever weighted answers 1.0, once.
+    It is an answer, not an edit: it does not unify a channel that sits in
+    several groups at different weights;
+  * clicking a row selects it and SHOWS it -- selecting something invisible is
+    a dead end -- but it does not put it in the fusion;
+  * moving a weight is the scientific edit: it applies to every group the
+    channel belongs to, 0.00 included, and it never ticks anything.
 
-  * clicking a row selects it AND ticks it -- selecting something invisible is
-    a dead end;
-  * ticking or unticking some OTHER channel never moves the selection;
-  * a weight of 0 on a ticked channel is a legal state: the channel is in the
-    configuration and contributes nothing right now;
-  * moving a weight never ticks or unticks anything, and `Reset weights` zeroes
-    the markers without touching the ticks;
-  * the FIRST tick a marker ever gets in this dataset sets its weight to 1.0,
-    because a channel the user just asked to see and cannot see is not an
-    answer to anything. It happens once, before the tick is announced, so
-    nothing ever observes the channel ticked at 0;
-  * every tick after that leaves the number alone: unticking by hand keeps the
-    weight exactly as it was, so re-ticking brings that number back -- 0.00
-    included, because a 0 the user chose, or `Reset weights` set, or a file
-    supplied, is a decision and not an absence. Which zeros are which is
-    recorded apart from the numbers (`_weight_initialized`), carried in the
-    session, and cleared for a new dataset;
-  * while a channel is unticked the effective configuration -- overlay, fusion
-    preview, and what a Save fuses -- excludes it completely.
+`get_full_config` is the whole configuration, disabled channels included,
+because that is what a session must round-trip. `effective_config` is the
+enabled subset: what is fused and what a Save freezes.
 
-`get_full_config` is still the whole panel including unticked channels, because
-that is what a session must round-trip. `effective_config` is what is drawn and
-what is fused.
-
-Channel GROUPS are still here, they are just not on screen any more. Group
+Channel GROUPS are still carried, they are just not on screen. Group
 membership and group weight remain in the model and in every file that carries
 them, because folding `group_weight x channel_weight` into one number would
 change old projects, the HQ workers, Mesmer and the on-disk fusion. New
@@ -64,6 +57,7 @@ from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor
 
 from ...config import NUCLEUS_CONFIG
+from ...core.fusion_domain import ABSENT, FusionDomainModel
 from ..widgets.channel_dock import template
 
 DEFAULT_GROUP = "markers"
@@ -79,25 +73,29 @@ ROW_HEIGHT = template.ROW_HEIGHT
 
 
 class ChannelRow(QWidget):
-    """One channel: select / show / weight.
+    """One channel: select / show / fuse / weight.
 
-    No hover text on any of the three controls. A tick box, a colour swatch
-    and a 0..1 slider in a list of channels are read at a glance, and a
-    popup over every one of them in a list this long is in the way of the
-    work rather than an explanation of it. The rules the tooltips used to
-    recite live in this module's docstring, where they are read once. The
-    only hover text left in the panel is on things that carry information
-    the widget cannot show: the read-only nucleus line, and the warning on
-    a row whose channel is in several groups at different weights.
+    No hover text on the controls that are read at a glance -- the display
+    tick box, the colour swatch, the 0..1 slider. A popup over every one of
+    them in a list this long is in the way of the work rather than an
+    explanation of it, and the rules they would recite live in this module's
+    docstring, where they are read once.
+
+    The hover text that is left is on the things a widget cannot show by
+    itself: the read-only nucleus line, the warning on a row whose channel is
+    in several groups at different weights, and the `\u0192` box -- the only
+    control here whose meaning is not the obvious reading of its position,
+    because it sits next to a tick box that means something else.
     """
 
     selected = pyqtSignal(str)
     visibility_toggled = pyqtSignal(str, bool)
+    fusion_toggled = pyqtSignal(str, bool)
     weight_edited = pyqtSignal(str)
     color_clicked = pyqtSignal(str)
 
     def __init__(self, channel, weight=0.0, visible=False, color="#888888",
-                 parent=None):
+                 fusion=False, parent=None):
         super().__init__(parent)
         self.channel = channel
         self._busy = False
@@ -117,6 +115,22 @@ class ChannelRow(QWidget):
 
         self.checkbox.setChecked(bool(visible))
         self.checkbox.toggled.connect(self._on_toggled)
+
+        # FUSION PARTICIPATION -- the scientific tick, and the one control
+        # in this row that carries hover text, because it is the one whose
+        # meaning is not the obvious reading of the box next to the name.
+        # The left checkbox says whether you can SEE the channel; this says
+        # whether it takes part in the fusion at all. They were one tick
+        # until B3 and are two facts.
+        self.fusion_box = QCheckBox("\u0192")
+        self.fusion_box.setChecked(bool(fusion))
+        self.fusion_box.setToolTip(
+            "Take part in the FUSION. Unticking keeps this channel's groups "
+            "and weights; it simply stops contributing. The box on the left "
+            "only controls whether it is drawn.")
+        self.fusion_box.setStyleSheet(template.CHECKBOX_INDICATOR_QSS)
+        self.fusion_box.toggled.connect(self._on_fusion_toggled)
+        template.add_accessory(lay, template.fit_accessory(self.fusion_box))
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 100)
@@ -198,6 +212,21 @@ class ChannelRow(QWidget):
     def _on_toggled(self, checked):
         self.visibility_toggled.emit(self.channel, bool(checked))
 
+    # -- fusion participation -----------------------------------------------
+    def is_fusion_enabled(self):
+        return self.fusion_box.isChecked()
+
+    def set_fusion_enabled(self, enabled):
+        """Show the scientific answer. Silent: a row FOLLOWS the model."""
+        if self.fusion_box.isChecked() == bool(enabled):
+            return
+        self.fusion_box.blockSignals(True)
+        self.fusion_box.setChecked(bool(enabled))
+        self.fusion_box.blockSignals(False)
+
+    def _on_fusion_toggled(self, checked):
+        self.fusion_toggled.emit(self.channel, bool(checked))
+
     # -- colour -------------------------------------------------------------
     def set_color(self, color):
         self._color = color
@@ -218,41 +247,34 @@ class ChannelRow(QWidget):
 
 
 class ConfigPanel(QWidget):
-    """The one owner of Step1's channel state."""
+    """Step1's channel editor: a view over two owners, and neither is here.
 
-    config_changed = pyqtSignal()                 # weights / nucleus changed
-    visibility_changed = pyqtSignal(str, bool)    # overlay membership changed
+    Display answers come from `ChannelDisplayState`, scientific answers from
+    `FusionDomainModel`. This panel draws them and sends commands.
+    """
+
+    config_changed = pyqtSignal()                 # the configuration moved
+    visibility_changed = pyqtSignal(str, bool)    # DISPLAY visibility only
     current_channel_changed = pyqtSignal(str)     # what Intensity should edit
     color_changed = pyqtSignal(str, str)          # overlay colour changed
 
-    def __init__(self, all_channels):
+    def __init__(self, all_channels, fusion=None):
         super().__init__()
         self.all_channels = list(all_channels or [])
-        # group membership and group weight: model-only, never on screen
-        self._groups = {}          # group -> {"weight": float, "members": [ch]}
-        # The per-(group, channel) weights EXACTLY as they were loaded.  A row
-        # can only show one number, but an old project may put the same channel
-        # in two groups at two weights; those values are kept here so a session
-        # nobody edited round-trips value for value.
-        self._group_channel_weights = {}   # group -> {channel: float}
-        self._nucleus_channel = ""
-        self._nucleus_weight = 0.0
-        # Channels whose weight the USER moved since the config was loaded.
-        # Only those are written back, and then to every group they belong to.
-        self._edited_channels = set()
-        # Channels whose weight is an ANSWER rather than an absence.
+        # THE scientific state, which this panel no longer owns. Groups,
+        # per-group weights, the nucleus, who takes part and whose weight is
+        # an answer all live in the model -- outside this widget, so Step0 and
+        # Step3 can ask and answer without Step1 being built, and so tearing
+        # this page down does not take the project's numbers with it.
         #
-        # Kept apart from the numbers on purpose. A marker starts a dataset at
-        # 0 because nobody has said anything about it yet, and a user can also
-        # deliberately set one to 0.00 -- the same number, two different
-        # facts, and only one of them may be replaced by a default. So this
-        # records who said it rather than what it says: the user moved the
-        # weight, `Reset weights` set it, or a config/weights file supplied
-        # it. `weight == 0` can never be the test (it would overwrite a 0 the
-        # user chose), and neither can `_edited_channels`, which already means
-        # something else -- which channels' rows get written back to every
-        # group they belong to in an old multi-group project.
-        self._weight_initialized = set()
+        # A panel constructed without one makes its own rather than keeping a
+        # second copy of the state: it is still ONE owner, it is just this
+        # panel's until a host hands it Block01's.
+        self._fusion = fusion if fusion is not None else FusionDomainModel(self)
+        self._fusion.weight_changed.connect(self._on_model_weight_changed)
+        self._fusion.participation_changed.connect(
+            self._on_model_participation_changed)
+        self._fusion.draft_restored.connect(self._on_model_draft_restored)
         self._rows = {}            # channel -> ChannelRow
         self._items = {}           # channel -> QListWidgetItem
         self._colors = {}          # channel -> "#rrggbb" -- A MIRROR, see below
@@ -268,6 +290,52 @@ class ConfigPanel(QWidget):
         self._selecting = False
         self._setup_ui()
         self._rebuild_rows()
+
+    # ── the scientific model ──────────────────────────────────────────
+    def fusion_model(self):
+        """The one owner of this panel's scientific answers."""
+        return self._fusion
+
+    def _on_model_weight_changed(self, channel):
+        """A weight moved in the model -- from this panel, the shared Weights
+        window, Step0 or a restore. The row FOLLOWS it; it does not re-write
+        it, so an edit cannot start a second lap."""
+        self._sync_row_weight(channel, self._fusion.channel_weight(channel))
+        self._refresh_ambiguity(channel)
+
+    def _on_model_participation_changed(self, channel, enabled):
+        row = self._rows.get(channel)
+        if row is not None:
+            row.set_fusion_enabled(bool(enabled))
+
+    def _on_model_draft_restored(self):
+        """A whole draft arrived at once: every row catches up, silently."""
+        self._sync_rows_from_model()
+
+    def _sync_rows_from_model(self):
+        for ch, row in self._rows.items():
+            row.set_weight(self._fusion.channel_weight(ch))
+            row.set_fusion_enabled(self._fusion.fusion_enabled(ch))
+            self._refresh_ambiguity(ch)
+        self._refresh_nucleus_display()
+
+    def _refresh_ambiguity(self, channel):
+        """Name a channel whose groups disagree; one row cannot show two
+        numbers, and quietly showing the largest without saying so is how an
+        old project gets flattened by being looked at."""
+        row = self._rows.get(channel)
+        if row is None:
+            return
+        rep = self._fusion.representative_weight(channel)
+        if rep.mixed:
+            row.name_label.setText(f"{channel} *")
+            row.setToolTip(
+                f"{channel} is in several groups at different weights "
+                f"({', '.join(str(v) for v in rep.values)}). The row shows the "
+                "largest; editing it applies that weight to every group.")
+        else:
+            row.name_label.setText(str(channel))
+            row.setToolTip("")
 
     # ── construction ──────────────────────────────────────────────────
     def _setup_ui(self):
@@ -393,7 +461,6 @@ class ConfigPanel(QWidget):
         user back at the top of a long panel is not part of that. Same rule
         as `ChannelDock.rebuild`.
         """
-        weights = {ch: row.weight() for ch, row in self._rows.items()}
         visible = {ch: row.is_visible() for ch, row in self._rows.items()}
         current = self._current
         keep_scroll = self._list.verticalScrollBar().value()
@@ -407,12 +474,18 @@ class ConfigPanel(QWidget):
             # `_default_color` asks the shared state first, so a rebuild takes
             # the canonical colour rather than re-dealing this panel's palette.
             color = self._colors.get(ch) or self._default_color(ch)
+            # The weight and the fusion tick come from the MODEL, not from
+            # the row that is being replaced: a rebuild is the same channels
+            # drawn again, and the row was only ever showing what the model
+            # says.
             row = ChannelRow(ch,
-                             weight=weights.get(ch, 0.0),
+                             weight=self._fusion.channel_weight(ch),
                              visible=visible.get(ch, False),
+                             fusion=self._fusion.fusion_enabled(ch),
                              color=color)
             row.selected.connect(self._on_row_selected)
             row.visibility_toggled.connect(self._on_row_visibility)
+            row.fusion_toggled.connect(self._on_row_fusion_toggled)
             row.weight_edited.connect(self._on_row_weight_edited)
             row.color_clicked.connect(self._pick_color)
             item = QListWidgetItem(self._list)
@@ -429,11 +502,8 @@ class ConfigPanel(QWidget):
         if keep_focus:
             self._list.setFocus(Qt.OtherFocusReason)
 
-        # A channel that is gone takes its history with it; one that is
-        # still here keeps it, because rebuilding the rows is not a new
-        # dataset.
-        self._weight_initialized &= set(self._rows)
-
+        for ch in self._rows:
+            self._refresh_ambiguity(ch)
         self._refresh_nucleus_display()
         if current in self._rows:
             self.set_current_channel(current)
@@ -469,10 +539,10 @@ class ConfigPanel(QWidget):
         row = self._rows[channel]
         newly_visible = auto_show and not row.is_visible()
         if newly_visible:
-            # A click on a hidden row is that channel's first tick as much as
-            # the checkbox is, so it goes through the same decision, before
-            # the tick is announced.
-            self._first_enable_weight(channel)
+            # A click SHOWS a hidden channel, because selecting something you
+            # cannot see is a dead end. It does not put the channel into the
+            # fusion: that is the row's own scientific tick, and clicking a
+            # name is not a scientific act.
             row.set_visible(True)
         changed = (channel != self._current)
         self._current = channel
@@ -495,93 +565,61 @@ class ConfigPanel(QWidget):
                 state.set_selected_channel(channel, origin="step1-panel")
             self.current_channel_changed.emit(channel)
 
-    def _mark_weight_given(self, channel):
-        """Record that somebody named this channel's weight.
-
-        The nucleus is never in this set: its weight comes from the Step0
-        handoff, it is read-only here, and the first-tick rule does not apply
-        to it -- so recording it would only put a channel in the session's
-        history that the history has nothing to say about.
-        """
-        if not channel or channel == self._nucleus_channel:
-            return
-        self._weight_initialized.add(channel)
-
-    def _first_enable_weight(self, channel):
-        """Give a channel nobody has weighted yet the weight 1.0.
-
-        The FIRST time a marker is ticked it becomes visible, and a channel
-        that is visible at weight 0 is a channel the user asked to see and
-        cannot: the tick is the moment to answer, and the answer is 1.0.
-        Afterwards the weight is the user's, whatever it is -- so this runs
-        once per channel per dataset and never again.
-
-        Silent by design. The weight is set BEFORE the tick is announced, and
-        `config_changed` is deliberately NOT emitted for it: the visibility
-        handler already reloads the channel, redraws, marks the settings
-        unsaved and schedules the session save, so announcing the weight
-        separately would either draw the picture twice or draw it once with
-        the channel ticked at 0 -- a blank frame the user sees before the real
-        one. One logical act, one notification, the state already final when
-        it arrives.
-
-        The nucleus is untouched: its weight comes from the Step0 handoff and
-        is read-only here.
-        """
-        if not channel or channel == self._nucleus_channel:
-            return False
-        if channel in self._weight_initialized:
-            return False
-        row = self._rows.get(channel)
-        if row is None:
-            return False
-        self._mark_weight_given(channel)
-        row.set_weight(1.0)
-        self._edited_channels.add(channel)
-        return True
-
     def _on_row_visibility(self, channel, visible):
-        """The user ticked or unticked a row.
+        """The user ticked or unticked the DISPLAY box.
 
-        Ticking for the FIRST time gives the channel weight 1.0 -- see
-        `_first_enable_weight`. Ticking it again does not: unticking keeps the
-        number, so re-ticking brings back exactly what the user left, 0.00
-        included. Unticking never touches the weight at all.
+        Display only, since B3. This tick used to do two jobs at once: it
+        decided whether the channel was drawn AND whether it was part of the
+        fusion, so hiding a channel silently shrank the configuration a Save
+        would freeze. Whether a channel takes part is now the row's own
+        `\u0192` box, which is a scientific command; this one is about the
+        screen and nothing else.
         """
-        if visible:
-            self._first_enable_weight(channel)
         self._record_display_visible(channel, visible)
         self.visibility_changed.emit(channel, bool(visible))
+
+    def _on_row_fusion_toggled(self, channel, enabled):
+        """The user ticked or unticked FUSION PARTICIPATION.
+
+        A scientific command, straight to the model: it keeps the channel's
+        groups and every per-group weight, and the first enable of a channel
+        nobody has weighted answers 1.0 there -- once, and not as an edit.
+        """
+        self._fusion.set_fusion_enabled(channel, bool(enabled), origin="step1-row")
+
+    def fusion_enabled(self, channel):
+        return self._fusion.fusion_enabled(channel)
+
+    def set_fusion_enabled(self, channel, enabled):
+        """The same scientific act as clicking the row's `\u0192` box."""
+        return self._fusion.set_fusion_enabled(channel, bool(enabled),
+                                               origin="api")
+
+    def fusion_channels(self):
+        """The scientific input set, in the panel's channel order."""
+        return [ch for ch in self.all_channels
+                if self._fusion.fusion_enabled(ch)]
 
     def visible_channels(self):
         return [ch for ch in self.all_channels
                 if ch in self._rows and self._rows[ch].is_visible()]
 
     def set_channel_visible(self, channel, visible):
-        """Tick or untick `channel` — the same act as clicking its box.
+        """Show or hide `channel` — the same act as clicking its box.
 
-        The same act, so the same rule: a first tick brings weight 1.0 with
-        it, through the one decision in `_first_enable_weight`. Restoring a
-        saved session does NOT come through here; it sets the rows directly,
-        so a session brings back exactly what was saved -- including a marker
-        the user never enabled, which stays at 0 and un-initialised.
+        Display only, so it has no scientific consequence at all: the
+        configuration, the settings hash and the committed snapshot are the
+        same afterwards. Use `set_fusion_enabled` for the scientific act.
         """
         row = self._rows.get(channel)
         if row is None or row.is_visible() == bool(visible):
             return
-        if visible:
-            self._first_enable_weight(channel)
         row.set_visible(visible)
         self._record_display_visible(channel, visible)
         self.visibility_changed.emit(channel, bool(visible))
 
     def _record_display_visible(self, channel, visible):
-        """Record the DISPLAY answer in the shared state. Behaviour-free.
-
-        Nothing reads this back yet: B2 records it so that display visibility
-        has one owner, B3 is where `effective_config` stops being driven by
-        the same tick.
-        """
+        """Write the DISPLAY answer to its one owner, the shared state."""
         state = self._display_state
         if state is not None and channel:
             state.set_display_visible(channel, bool(visible),
@@ -633,19 +671,20 @@ class ConfigPanel(QWidget):
 
     # ── weights ───────────────────────────────────────────────────────
     def channel_weight(self, channel):
-        row = self._rows.get(channel)
-        return float(row.weight()) if row is not None else 0.0
+        """What the channel weighs scientifically. The ROW is not asked: it
+        shows this number, it does not hold it."""
+        return float(self._fusion.channel_weight(channel))
+
+    def weight_provenance(self, channel):
+        return self._fusion.weight_provenance(channel)
 
     def _sync_row_weight(self, channel, weight):
         """Put a number in a row, and say nothing about who chose it.
 
-        The panel's own bookkeeping uses this: showing the representative of
-        an old project's several group weights, showing the nucleus weight the
-        handoff gave. None of that is an answer ABOUT the channel -- it is the
-        row catching up with the model -- so it must not mark the weight as
-        given (which would defeat the first-tick default) and must not mark
-        the channel as edited (which would write one row's number into every
-        group it belongs to and flatten an old project's per-group weights).
+        The row catching up with the model is not an answer ABOUT the
+        channel: it must not claim provenance and must not unify a channel
+        that sits in several groups at different weights. Only
+        `FusionDomainModel.edit_channel_weight` does either.
         """
         row = self._rows.get(channel)
         if row is None:
@@ -668,200 +707,119 @@ class ConfigPanel(QWidget):
         The panel's own row-syncing does NOT come through here; it uses
         `_sync_row_weight`, which claims neither.
         """
-        row = self._rows.get(channel)
-        if row is None:
-            return
-        self._mark_weight_given(channel)
-        self._edited_channels.add(channel)
-        row.set_weight(weight)
+        self._fusion.edit_channel_weight(channel, weight, origin="api")
 
     def nucleus_channel(self):
-        return self._nucleus_channel
+        return self._fusion.nucleus()[0]
 
     def set_nucleus(self, channel, weight=None):
         """Adopt the nucleus Step0 handed over.  Not a user-editable choice."""
-        self._nucleus_channel = str(channel or "")
-        if weight is not None:
-            self._nucleus_weight = float(weight)
+        self._fusion.set_nucleus(channel, weight)
         self._refresh_nucleus_display()
 
     def set_nucleus_weight(self, weight):
-        self._nucleus_weight = float(weight)
+        self._fusion.set_nucleus_weight(weight)
         self._refresh_nucleus_display()
 
     def _refresh_nucleus_display(self):
-        nuc = self._nucleus_channel
+        nuc, nuc_w = self._fusion.nucleus()
         self._nuc_value.setText(
-            f"{nuc}  (weight {self._nucleus_weight:.2f})" if nuc else "—")
+            f"{nuc}  (weight {nuc_w:.2f})" if nuc else "\u2014")
         for ch, row in self._rows.items():
             is_nuc = bool(nuc) and ch == nuc
             row.set_weight_editable(not is_nuc)
             if is_nuc:
-                row.set_weight(self._nucleus_weight)
+                row.set_weight(nuc_w)
 
     def _on_row_weight_edited(self, channel):
-        """The user moved a weight: from now on it is theirs.
+        """The user moved a weight: the scientific edit, straight to the model.
 
-        The rule for a channel that an old project put in several groups is
-        stated once, here: an edited weight applies to EVERY group the channel
-        belongs to. Until it is edited, each group keeps the value it was
-        loaded with.
+        An edited weight applies to EVERY group the channel belongs to -- the
+        model's rule, stated there -- and it is an answer from then on, 0.00
+        included. The ticks are not touched: how much a channel contributes is
+        not whether it contributes.
         """
-        self._edited_channels.add(channel)
-        # And it is an answer from now on: a weight the user set is never
-        # replaced by the first-tick default, including 0.00, which is a
-        # deliberate "in the configuration, contributing nothing".
-        self._mark_weight_given(channel)
-        # The tick is not touched. A weight is how much a channel contributes,
-        # not whether it is part of the configuration, and moving one must not
-        # silently add or remove a channel behind the user.
-        self.config_changed.emit()
+        # No `config_changed` from here: the MODEL announces the weight, and
+        # the host follows that one signal. Announcing both drew the same
+        # state twice -- once for the row and once for the number.
+        self._fusion.edit_channel_weight(channel, self._rows[channel].weight(),
+                                         origin="step1-row")
 
     def effective_config(self):
-        """What is actually drawn and actually fused.
+        """What is actually fused and what a Save freezes.
 
-        `get_full_config` is the panel's whole state, unticked channels
-        included, because a session has to round-trip it. This is the subset
-        that takes part: an unticked channel keeps its weight on screen and
-        contributes nothing, here and on disk alike, so what is saved can
-        never contain a marker the picture does not show.
+        The ENABLED subset, from the model. It used to be the VISIBLE subset,
+        computed here from the row ticks, so hiding a channel quietly shrank
+        the science; display visibility has no vote in it any more.
         """
-        cfg = self.get_full_config()
-        shown = set(self.visible_channels())
-        nuc = cfg.get("nucleus") or {}
-        if nuc.get("channel") and nuc["channel"] not in shown:
-            cfg["nucleus"] = {"channel": nuc.get("channel"), "weight": 0.0}
-        groups = {}
-        for name, data in (cfg.get("groups") or {}).items():
-            channels = {ch: w for ch, w in (data.get("channels") or {}).items()
-                        if ch in shown}
-            groups[name] = {"group_weight": data.get("group_weight", 1.0),
-                            "channels": channels}
-        cfg["groups"] = groups
-        return cfg
-
-    def _stored_weights_for(self, channel):
-        """Every weight this channel was LOADED with, one per group it is in
-        (plus the nucleus slot when it is the nucleus)."""
-        values = [weights[channel]
-                  for weights in self._group_channel_weights.values()
-                  if channel in weights]
-        if channel and channel == self._nucleus_channel:
-            values.append(float(self._nucleus_weight))
-        return values
-
-    def _representative_weight(self, channel):
-        values = self._stored_weights_for(channel)
-        if not values:
-            return 0.0
-        return max(values)
+        return self._fusion.effective_config()
 
     def ambiguous_channels(self):
-        """Channels whose loaded weights disagree between groups: one row
-        cannot show two numbers, so the disagreement is named rather than
-        quietly resolved."""
-        out = {}
-        for ch in self._rows:
-            values = self._stored_weights_for(ch)
-            if len(set(round(v, 6) for v in values)) > 1:
-                out[ch] = sorted(set(round(v, 6) for v in values))
-        return out
-
-    def _effective_weight(self, group, channel):
-        """What `get_groups` reports for one (group, channel) pair."""
-        if channel in self._edited_channels:
-            return self.channel_weight(channel)
-        stored = self._group_channel_weights.get(group, {})
-        if channel in stored:
-            return float(stored[channel])
-        return self.channel_weight(channel)
+        """Channels whose loaded weights disagree between groups."""
+        return self._fusion.ambiguous_channels()
 
     def zero_marker_weights(self):
         """Every channel but the nucleus back to 0 — the fresh-project state.
 
-        This is a real edit, not a repaint: the zero is what every group the
-        channel belongs to reports afterwards, so what the user sees and what
-        gets fused and saved are the same number.  One signal, at the end.
+        A real edit, not a repaint: the zero is what every group the channel
+        belongs to reports afterwards, and it is an ANSWER, so a later first
+        enable does not replace it with the default. The ticks are not
+        touched: this resets weights, and a reset that also removed channels
+        from the configuration would be doing something the button does not
+        say.
         """
-        nuc = self._nucleus_channel
-        for ch, row in self._rows.items():
+        nuc = self.nucleus_channel()
+        for ch in self._rows:
             if ch != nuc:
-                row.set_weight(0.0)
-                self._edited_channels.add(ch)
-                # The button is the user saying "zero", so these zeros are
-                # answers: a channel unticked and re-ticked after a Reset
-                # comes back at 0, not at the first-tick default.
-                self._mark_weight_given(ch)
-                # The ticks are NOT touched: this resets weights, and a reset
-                # that also removed channels from the configuration would be
-                # doing something the button does not say.
+                self._fusion.edit_channel_weight(ch, 0.0, origin="reset")
         self.config_changed.emit()
 
     def _reset_all_channel_weights(self):
         self.zero_marker_weights()
 
-    # ── groups: model only ────────────────────────────────────────────
+    # ── groups: the model's, projected here ───────────────────────────
     def _group_of(self, channel):
-        for name, data in self._groups.items():
-            if channel in data["members"]:
+        for name, members in self._fusion.groups().items():
+            if channel in members:
                 return name
         return None
 
     def _add_group(self, name, channel_weights=None):
-        if name in self._groups:
-            return
-        self._groups[name] = {"weight": 1.0, "members": []}
-        for ch, w in (channel_weights or {}).items():
-            self._add_to_group(name, ch, w)
+        self._fusion.add_group(name, channel_weights)
 
     def _add_to_group(self, name, channel, weight=0.0):
-        data = self._groups.setdefault(name, {"weight": 1.0, "members": []})
-        if channel not in data["members"]:
-            data["members"].append(channel)
-        self._group_channel_weights.setdefault(name, {})[channel] = float(weight)
-        self._sync_row_weight(channel, self._representative_weight(channel))
+        self._fusion.add_to_group(name, channel, weight)
+        self._sync_row_weight(channel, self._fusion.channel_weight(channel))
 
     def _del_group(self, name):
-        self._groups.pop(name, None)
-        self._group_channel_weights.pop(name, None)
+        self._fusion.remove_group(name)
 
     def group_weight(self, name):
-        data = self._groups.get(name)
-        return float(data["weight"]) if data else 1.0
+        return self._fusion.group_weight(name)
 
     def set_group_weight(self, name, weight):
-        data = self._groups.setdefault(name, {"weight": 1.0, "members": []})
-        data["weight"] = float(weight)
+        self._fusion.set_group_weight(name, weight)
 
     # ── the config contract (unchanged shape) ─────────────────────────
     def get_groups(self):
-        return {name: {ch: self._effective_weight(name, ch)
-                       for ch in data["members"]}
-                for name, data in self._groups.items()}
+        return self._fusion.groups()
 
     def get_group_weights(self):
-        return {name: float(data["weight"]) for name, data in self._groups.items()}
+        return self._fusion.group_weights()
 
     def get_nucleus(self):
-        return self._nucleus_channel, float(self._nucleus_weight)
+        return self._fusion.nucleus()
 
     def get_full_config(self):
-        nuc_ch, nuc_w = self.get_nucleus()
-        return {
-            "nucleus": {"channel": nuc_ch, "weight": nuc_w},
-            "groups": {
-                name: {"group_weight": float(data["weight"]),
-                       "channels": {ch: self._effective_weight(name, ch)
-                                    for ch in data["members"]}}
-                for name, data in self._groups.items()
-            },
-        }
+        return self._fusion.full_config()
 
     def load_panel(self, groups, nuc_ch):
         """Load the panel for a freshly opened dataset.
 
-        Defaults, deliberately: the nucleus is the only channel shown and the
-        only one with weight; every marker starts at 0 and unticked.
+        Defaults, deliberately: the nucleus is the only channel shown, the
+        only one in the fusion and the only one with weight. Every marker
+        starts absent -- not at zero-as-an-answer -- so its first enable
+        answers 1.0.
         """
         # The colour MIRROR is emptied, not the answer. Re-dealing a palette
         # here is precisely what made the same channel two colours: Step0 had
@@ -871,14 +829,43 @@ class ConfigPanel(QWidget):
         # the shared state, so Step1 ADOPTS Step0's colours rather than
         # inventing its own.
         self._colors = {}
-        self._groups = {}
-        self._group_channel_weights = {}
-        self._edited_channels = set()
-        self._nucleus_weight = 0.0
         nuc = str(nuc_ch or "")
+        spec_groups = {}
         for gname, channels in (groups or {}).items():
-            self._add_group(str(gname), {str(ch): 0.0 for ch in channels
-                                         if str(ch) != nuc})
+            spec_groups[str(gname)] = {
+                "group_weight": 1.0,
+                "channels": {str(ch): 0.0 for ch in channels
+                             if str(ch) != nuc}}
+        # ONE install: a new dataset inherits nothing from the slide before
+        # it -- no provenance, no participation, no weights -- and nobody
+        # observes it half-built.
+        #
+        # Except an answer that has nowhere to live yet: a weight named in
+        # Step0, for THIS dataset, before Step1 built any group to hold it.
+        # It is carried across and the groups below adopt it. A channel that
+        # HAS been in a group is not pending -- its numbers belong to the
+        # slide those groups describe, and they go with it.
+        pending = self._fusion.pending_answers()
+        provenance = {nuc: "authoritative"} if nuc else {}
+        weights = {nuc: 1.0} if nuc else {}
+        for ch, (value, prov) in pending.items():
+            if ch == nuc or (self.all_channels and ch not in self.all_channels):
+                continue
+            provenance[ch] = prov
+            weights[ch] = value
+        self._fusion.install_draft({
+            "groups": spec_groups,
+            "nucleus": {"channel": nuc, "weight": 1.0 if nuc else 0.0},
+            "enabled": [nuc] if nuc else [],
+            "provenance": provenance,
+            "channel_weight": weights,
+        })
+        # The groups were installed from the handoff's placeholder zeros; a
+        # pending answer replaces its own channel's placeholder in every one
+        # of them, the way the first group always adopts it.
+        for ch, (value, prov) in pending.items():
+            if ch in weights and ch != nuc:
+                self._fusion.set_channel_answer(ch, value, prov)
 
         self._rebuild_rows()
         # The rows were just built; give them the canonical colours before
@@ -887,27 +874,15 @@ class ConfigPanel(QWidget):
         # round closed, and the mutation the tests check for.
         self._resync_colors_from_state()
 
-        self._nucleus_channel = str(nuc_ch or "")
-
         for ch, row in self._rows.items():
-            row.set_weight(0.0)
             row.set_visible(False)
-        # A new dataset's markers have never been weighted by ANYONE: their 0
-        # is an absence again, and the first tick of each will answer 1.0.
-        # Cleared here, at the end, because building the groups and zeroing
-        # the rows above writes those zeros through the same setters a host
-        # would use -- and those, being somebody's answer, mark the weight as
-        # given. Nothing is inherited from the slide that was open before.
-        self._weight_initialized = set()
-        if nuc_ch and nuc_ch in self._rows:
-            self._nucleus_weight = 1.0
-            self._sync_row_weight(nuc_ch, 1.0)
-            self._refresh_nucleus_display()
-            self._rows[nuc_ch].set_visible(True)
-            self._current = nuc_ch
+        self._refresh_nucleus_display()
+        if nuc and nuc in self._rows:
+            self._rows[nuc].set_visible(True)
+            self._current = nuc
             self._selecting = True
             try:
-                self._list.setCurrentItem(self._items[nuc_ch])
+                self._list.setCurrentItem(self._items[nuc])
             finally:
                 self._selecting = False
         else:
@@ -926,23 +901,21 @@ class ConfigPanel(QWidget):
         The nucleus is also kept OUT of the marker groups: a channel that is
         both the nucleus and a marker would contribute twice, once as blue and
         once as red. Dropping it is announced rather than done quietly.
+
+        Weights that arrive in a file are ANSWERS, not absences: an explicit 0
+        in a project's fusion config is a decision somebody made, and a later
+        first enable must not overwrite it with 1.0.
         """
         cfg = dict(cfg or {})
         nucleus_cfg = cfg.get("nucleus") or {}
         groups_cfg = cfg.get("groups") or {}
 
-        if adopt_nucleus or not self._nucleus_channel:
-            self._nucleus_channel = str(nucleus_cfg.get("channel") or "")
-            self._nucleus_weight = float(nucleus_cfg.get("weight", 0.0) or 0.0)
-        nuc_ch = self._nucleus_channel
+        nuc_ch, nuc_w = self._fusion.nucleus()
+        if adopt_nucleus or not nuc_ch:
+            nuc_ch = str(nucleus_cfg.get("channel") or "")
+            nuc_w = float(nucleus_cfg.get("weight", 0.0) or 0.0)
 
-        self._groups = {}
-        self._group_channel_weights = {}
-        self._edited_channels = set()
-        # Weights that arrive in a file or a saved config are answers, not
-        # absences -- an explicit 0 in a project's fusion config is a decision
-        # somebody made, and a first tick afterwards must not overwrite it
-        # with 1.0. Collected as the groups are read, below.
+        spec_groups = {}
         loaded = set()
         dropped = []
         for gname, gdata in groups_cfg.items():
@@ -956,57 +929,78 @@ class ConfigPanel(QWidget):
                     continue
                 channels[ch] = float(w)
                 loaded.add(ch)
-            self._add_group(str(gname), channels)
-            self.set_group_weight(str(gname),
-                                  float((gdata or {}).get("group_weight", 1.0)))
+            spec_groups[str(gname)] = {
+                "group_weight": float((gdata or {}).get("group_weight", 1.0)),
+                "channels": channels}
         if dropped:
             print("[Step1] nucleus channel removed from marker groups "
                   f"(it would contribute twice): {sorted(dropped)}")
-        self._weight_initialized = {ch for ch in loaded if ch != nuc_ch}
+
+        provenance = {ch: "authoritative" for ch in loaded}
         if nuc_ch:
-            self._sync_row_weight(nuc_ch,
-                                  self._representative_weight(nuc_ch))
-        self._refresh_nucleus_display()
+            provenance[nuc_ch] = "authoritative"
+        # A config says what the science IS; it does not say what is on
+        # screen. Participation comes with it (these are the channels the
+        # configuration contains); visibility is restored separately.
+        enabled = set(loaded) | ({nuc_ch} if nuc_ch else set())
+        self._fusion.install_draft({
+            "groups": spec_groups,
+            "nucleus": {"channel": nuc_ch, "weight": nuc_w},
+            "enabled": sorted(enabled),
+            "provenance": provenance,
+        })
+        self._sync_rows_from_model()
         ambiguous = self.ambiguous_channels()
-        for ch, values in ambiguous.items():
-            row = self._rows.get(ch)
-            if row is not None:
-                row.name_label.setText(f"{ch} *")
-                row.setToolTip(
-                    f"{ch} is in several groups at different weights "
-                    f"({', '.join(str(v) for v in values)}). The row shows the "
-                    "largest; editing it applies that weight to every group.")
         if ambiguous:
             print(f"[Step1] channels in several groups at different weights: "
                   f"{sorted(ambiguous)}")
         self.config_changed.emit()
 
-    def weight_initialized_channels(self):
-        """The channels whose weight is an answer, for a session to carry.
+    def install_fusion_draft(self, spec, visibility=None):
+        """Install a whole migrated draft, and the display answers with it.
 
-        Without this a session cannot tell its own zeros apart: a marker
-        nobody ever enabled and a marker the user deliberately set to 0.00
-        both save as 0.0, and after a restart the first tick would either
-        overwrite the user's decision or leave the untouched channel invisible
-        at 0. The numbers alone cannot say which is which; this says it.
+        The one entry a session restore uses. The scientific fields go in as
+        one transaction with one notice, and the ticks follow -- so no
+        observer ever sees a restored group against the participation set of
+        the project before it.
         """
-        return sorted(self._weight_initialized)
+        self._fusion.install_draft(spec or {})
+        self._sync_rows_from_model()
+        if visibility is not None:
+            for ch, on in visibility.items():
+                row = self._rows.get(str(ch))
+                if row is not None:
+                    row.set_visible(bool(on))
+        self.config_changed.emit()
+
+    def weight_initialized_channels(self):
+        """The channels whose weight is an ANSWER rather than an absence.
+
+        Kept for the sessions that carry the old marker. What it means now is
+        "provenance is not absent"; the new schema writes the provenance
+        itself, which says WHICH kind of answer it is.
+        """
+        nuc = self.nucleus_channel()
+        return sorted(ch for ch in self._rows
+                      if ch != nuc
+                      and self._fusion.weight_provenance(ch) != ABSENT)
 
     def restore_weight_initialization(self, channels):
-        """Put back exactly which weights are answers. Not a click.
-
-        Replaces whatever loading the config marked, because the session knows
-        better: `apply_full_config` has to treat every weight in a file as
-        authoritative (it cannot see who wrote it), while a session written by
-        this panel recorded the truth. Channels that no longer exist are
-        dropped rather than remembered.
-        """
+        """Put back exactly which weights are answers. Not a click."""
         if isinstance(channels, dict):
             channels = [ch for ch, flag in channels.items() if flag]
         known = set(self._rows) or set(self.all_channels or [])
-        self._weight_initialized = {str(ch) for ch in (channels or [])
-                                    if str(ch) in known
-                                    and str(ch) != self._nucleus_channel}
+        marked = {str(ch) for ch in (channels or []) if str(ch) in known}
+        nuc = self.nucleus_channel()
+        spec = self._fusion.draft_snapshot()
+        provenance = dict(spec.get("provenance") or {})
+        for ch in known:
+            if ch == nuc:
+                continue
+            provenance[ch] = "authoritative" if ch in marked else ABSENT
+        spec["provenance"] = provenance
+        self._fusion.install_draft(spec)
+        self._sync_rows_from_model()
 
     def restore_display_state(self, colors=None, visibility=None,
                               current_channel=""):
@@ -1093,5 +1087,12 @@ class ConfigPanel(QWidget):
 
     # ── channel universe ──────────────────────────────────────────────
     def set_channels(self, channels):
+        """The channel universe changed -- another dataset, or a re-read.
+
+        A channel that is gone takes its scientific history with it: coming
+        back later it is new again, and its first enable answers 1.0 rather
+        than inheriting a weight from a slide that no longer has it.
+        """
         self.all_channels = list(channels or [])
+        self._fusion.forget_channels_outside(self.all_channels)
         self._rebuild_rows()

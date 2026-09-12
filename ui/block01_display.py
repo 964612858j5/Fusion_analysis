@@ -226,11 +226,13 @@ class ChannelDisplayState(QObject):
         # stale activity would keep an old namespace alive past its turn.
         self._namespaces.move_to_end(identity)
         self._evict_over_limit()
+        installed_colors, installed_mappings = [], []
         if install:
-            self._install_into(ns, install)
+            _changed, installed_colors, installed_mappings = \
+                self._install_into(ns, install)
         self._mapping_rev += 1
         self.dataset_changed.emit(identity)
-        self.state_installed.emit(self._binding)
+        self._announce_install(installed_colors, installed_mappings)
         return self._binding
 
     def install(self, payload, *, identity=None):
@@ -245,19 +247,24 @@ class ChannelDisplayState(QObject):
             return False
         if self._binding is None:
             return False
-        if not self._install_into(self._ns, payload):
+        changed, colors, mappings = self._install_into(self._ns, payload)
+        if not changed:
             return False
         self._mapping_rev += 1
-        self.state_installed.emit(self._binding)
+        self._announce_install(colors, mappings)
         return True
 
     def _install_into(self, ns, payload):
-        """Write `payload` into `ns`. No signals; the caller announces once.
+        """Write `payload` into `ns`. No signals; the caller announces.
 
-        Returns True when anything changed -- an install of exactly what is
-        already there announces nothing, because a repaint is not an event.
+        Returns `(changed, colors, mappings)`: whether anything moved, and
+        WHICH colours and display windows did. The caller needs the lists
+        because a completion notice on its own reaches nobody -- see
+        `_announce_install`.
         """
         changed = False
+        changed_colors = []
+        changed_mappings = []
         order = payload.get("order")
         if order is not None and tuple(order) != ns.order:
             ns.order = tuple(order)
@@ -293,6 +300,7 @@ class ChannelDisplayState(QObject):
                 if ns.mappings.get(mkey) != new:
                     ns.mappings[mkey] = new
                     ns.bump(("mapping", mkey))
+                    changed_mappings.append(mkey)
                     changed = True
         colors = payload.get("colors")
         if colors:
@@ -304,8 +312,38 @@ class ChannelDisplayState(QObject):
                 if hexc and self._colors.get(str(ch)) != hexc:
                     self._colors[str(ch)] = hexc
                     self._color_rev += 1
+                    changed_colors.append(str(ch))
                     changed = True
-        return changed
+        return changed, changed_colors, changed_mappings
+
+    def _announce_install(self, colors, mappings):
+        """Tell the views what an install changed, AFTER it is whole.
+
+        A completion notice alone reached nobody. The display consumers --
+        Step0's swatches and its Channel Remap layer list, the compare
+        panels, the full image, the Tissue Preview's frame clock, Step1's
+        viewer -- listen for `color_changed` and `mapping_changed`, so a
+        session restore moved the state's answer while every view went on
+        drawing the previous one.
+
+        ORDER MATTERS AND IS THE POINT. The completion notice goes first,
+        then the per-field signals, and every one of them is emitted with the
+        transaction ALREADY WRITTEN -- so a handler that reads selection,
+        visibility, colour or mapping sees the finished state, never the
+        half of it that happens to have been announced.
+
+        Selection and visibility are deliberately NOT announced here: those
+        signals mean "somebody chose this", and a restore is not a choice.
+        Their consumers follow the completion notice instead.
+        """
+        self.state_installed.emit(self._binding)
+        for channel in colors:
+            self.color_changed.emit(channel, self._colors[channel])
+        # One `mapping_changed` per CHANNEL: the signal names a channel, and
+        # a channel whose marker and nucleus windows both moved has not
+        # changed twice as far as a view is concerned.
+        for channel in dict.fromkeys(ch for ch, _nucleus in mappings):
+            self.mapping_changed.emit(channel)
 
     def _evict_over_limit(self):
         """Drop the oldest namespaces past the limit. Never the current one."""

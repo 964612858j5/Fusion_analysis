@@ -1636,3 +1636,159 @@ def test_closing_block01_retires_the_shared_worker_once(app):
     assert co._closing
     assert not co.request_frame(kind="after_close")
     assert co._worker is None
+
+
+# ── an atomic install must REACH the views, not just the store ───────────
+#
+# `install()` used to emit only a completion notice, and no production
+# consumer subscribed to it. The display consumers -- Step0's swatch and its
+# Channel Remap layer list, the compare panels, the full image, the Tissue
+# Preview's frame clock, Step1's viewer -- listen for `color_changed` and
+# `mapping_changed`. So a session restore moved the state's answer while
+# every view went on drawing the previous one, and a colour-getter assertion
+# could not see it, because the getter reads the state.
+
+def test_a_restored_colour_reaches_the_real_views_not_just_the_store(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        _pump(w)
+        page = w._step0
+        # The Channel Remap layer list, fed from its real entry.
+        page._sync_step0_to_workbench()
+        workbench = page._cond_workbench
+        frames_before = w._display.coordinator.frame_stats()["inputs"]
+
+        # The real Step1 restore entry, as a session replay calls it.
+        w.config.restore_display_state(colors={"CD3": "#00ccff"},
+                                       visibility={"CD3": True},
+                                       current_channel="CD3")
+        _pump(w)
+
+        state = w._display.state
+        assert state.color("CD3") == "#00ccff"
+        # ...and the REAL views, not the getter that reads the state:
+        assert page._dock_adapter.model.get("CD3").color == "#00ccff", \
+            "the Step0 channel model never heard about the restore"
+        swatch = page._dock_adapter.dock.row("CD3").swatch.styleSheet()
+        assert "#00ccff" in swatch, f"the Step0 swatch still reads {swatch}"
+        assert workbench._colors["CD3"].lower() == "#00ccff", \
+            "the Channel Remap layer list never heard about the restore"
+        assert w.config._rows["CD3"].color().lower() == "#00ccff"
+        # ...and the Tissue Preview asked for a frame in the new colour.
+        assert w._display.coordinator.frame_stats()["inputs"] > frames_before
+        published = w._display.coordinator.last_published()
+        assert published.get("color_rev") == state.color_revision()
+    finally:
+        w.close()
+
+
+def test_an_atomic_mapping_install_redraws_the_viewers(app):
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(1.0)
+        _goto(w, 1)
+        _pump(w)
+        state = w._display.state
+        seen = []
+        state.mapping_changed.connect(seen.append)
+        before = np.array(_thumb(w), copy=True)
+        lo, hi, _g = state.mapping_or_seed("CD3")
+
+        state.install({"mappings": {"CD3": (lo, hi / 4.0, 1.0)}})
+        _pump(w)
+
+        assert seen == ["CD3"], seen
+        assert state.mapping("CD3") == (lo, hi / 4.0, 1.0)
+        after = _thumb(w)
+        assert not np.array_equal(after, before), \
+            "the Tissue Preview kept the window the restore replaced"
+    finally:
+        w.close()
+
+
+def test_an_install_callback_sees_the_whole_transaction(app):
+    """Every compatibility signal is emitted with the transaction already
+    written, so a handler can read any field and get the final answer."""
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        state = w._display.state
+        lo, hi, _g = state.mapping_or_seed("CD3")
+        seen = []
+
+        def look(*_a):
+            seen.append((state.selected_channel(),
+                         state.display_visible("CD8"),
+                         state.color("CD3"),
+                         state.mapping("CD3")))
+
+        state.state_installed.connect(look)
+        state.color_changed.connect(look)
+        state.mapping_changed.connect(look)
+
+        state.install({"selection": "CD8",
+                       "visibility": {"CD8": True},
+                       "colors": {"CD3": "#ff00aa"},
+                       "mappings": {"CD3": (lo, hi / 3.0, 1.1)}})
+
+        whole = ("CD8", True, "#ff00aa", (lo, hi / 3.0, 1.1))
+        assert seen and all(s == whole for s in seen), seen
+        # the completion notice comes first, then the field fan-out
+        assert len(seen) == 3
+    finally:
+        w.close()
+
+
+def test_a_restore_still_fires_no_user_or_scientific_signal(app):
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        forbidden = []
+        w.config.visibility_changed.connect(
+            lambda *a: forbidden.append(("visibility",) + a))
+        w.config.config_changed.connect(lambda: forbidden.append(("config",)))
+        w._display.state.visibility_changed.connect(
+            lambda *a: forbidden.append(("state-visibility",) + a))
+        w._display.state.selection_changed.connect(
+            lambda c: forbidden.append(("state-selection", c)))
+        weights = {ch: w.config.channel_weight(ch)
+                   for ch in ("DAPI", "CD3", "CD8")}
+        dirty_before = w._fusion_settings_dirty()
+
+        w.config.restore_display_state(colors={"CD3": "#00ccff"},
+                                       visibility={"CD3": True},
+                                       current_channel="CD3")
+        _pump(w)
+
+        assert forbidden == [], forbidden
+        assert {ch: w.config.channel_weight(ch)
+                for ch in ("DAPI", "CD3", "CD8")} == weights
+        assert w.config._edited_channels == set()
+        assert w._fusion_settings_dirty() == dirty_before
+    finally:
+        w.close()
+
+
+def test_repeating_a_restore_announces_nothing(app):
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        payload = dict(colors={"CD3": "#00ccff"}, visibility={"CD3": True},
+                       current_channel="CD3")
+        w.config.restore_display_state(**payload)
+        _pump(w)
+        seen = []
+        state = w._display.state
+        state.state_installed.connect(lambda b: seen.append("installed"))
+        state.color_changed.connect(lambda *a: seen.append("color"))
+        state.mapping_changed.connect(lambda *a: seen.append("mapping"))
+
+        w.config.restore_display_state(**payload)
+
+        assert seen == [], seen
+    finally:
+        w.close()

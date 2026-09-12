@@ -32,6 +32,10 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets  # noqa: E402
 
+from block01.core.fusion_domain import (  # noqa: E402
+    FusionDomainModel,
+)
+
 from block01.core.display_identity import (  # noqa: E402
     ChannelCapabilities, DatasetIdentity, ephemeral_identity, resolve_identity,
 )
@@ -646,7 +650,7 @@ def test_the_real_step1_restore_registers_display_state_once(app):
 
     services = Block01DisplayServices()
     services.state.bind(_identity("A"))
-    panel = ConfigPanel(["DAPI", "CD3", "CD8"])
+    panel = ConfigPanel(["DAPI", "CD3", "CD8"], fusion=FusionDomainModel())
     panel.set_display_state(services.state)
     try:
         installs, panel_signals = [], []
@@ -691,7 +695,7 @@ def test_a_restore_of_what_is_already_there_announces_nothing(app):
 
     services = Block01DisplayServices()
     services.state.bind(_identity("A"))
-    panel = ConfigPanel(["DAPI", "CD3"])
+    panel = ConfigPanel(["DAPI", "CD3"], fusion=FusionDomainModel())
     panel.set_display_state(services.state)
     try:
         payload = dict(colors={"CD3": "#123456"},

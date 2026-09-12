@@ -685,3 +685,291 @@ def test_a_visual_fallback_is_never_saved_as_a_scientific_weight(app):
         assert "CD8" not in payload["fusion_enabled"]
     finally:
         w.close()
+
+
+# ── the five counter-examples the independent review reproduced ──────────
+#
+# Each of these failed on f0d2777. The suite that passed there could not see
+# them: the S4 round-trip used only zeros, the dataset switch was never
+# driven, and nobody counted the notifications or the frame requests.
+
+def _bind(w, path, fingerprint="1:1"):
+    """Bind Block01 to a stable dataset identity, the way a commit does."""
+    from block01.core.display_identity import DatasetIdentity
+    identity = DatasetIdentity(path=str(path), fingerprint=str(fingerprint))
+    w._display.state.bind(identity)
+    _pump()
+    return identity
+
+
+def test_a_heterogeneous_project_survives_the_whole_session_round_trip(app):
+    """P1: 0.2/0.7 through the real writer, JSON, and the real restore.
+
+    The S4 branch carried `groups` (membership) but not `group_weights` (the
+    numbers), so `install_draft` filled every group/channel value with 0.0 and
+    a project came back flattened. The old round-trip test used an explicit
+    0.0, which is indistinguishable from the corruption.
+    """
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        model.install_draft({
+            "groups": {"A": {"group_weight": 1.0,
+                             "channels": {"CD3": 0.2, "CD8": 0.0}},
+                       "B": {"group_weight": 0.5, "channels": {"CD3": 0.7}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3", "DAPI"],
+            "provenance": {"CD3": AUTHORITATIVE, "CD8": EXPLICIT,
+                           "DAPI": AUTHORITATIVE},
+        })
+        w.config.set_channel_visible("CD8", True)      # visible, not fused
+        before_full = w._display.fusion.full_config()
+        before_eff = w._effective_fusion_config()
+        before_hash = w._fusion_settings_hash()
+
+        payload = json.loads(json.dumps(w._step1_session_payload()))
+    finally:
+        w.close()
+
+    w = _window(app)
+    try:
+        visibility = w._restore_step1_scientific_state(payload)
+        model = w._display.fusion
+
+        groups = model.groups()
+        assert groups["A"]["CD3"] == pytest.approx(0.2), groups
+        assert groups["B"]["CD3"] == pytest.approx(0.7), groups
+        assert model.group_weights()["B"] == pytest.approx(0.5)
+        rep = model.representative_weight("CD3")
+        assert (rep.value, rep.mixed) == (pytest.approx(0.7), True)
+        # An explicit zero is still not an absence.
+        assert groups["A"]["CD8"] == 0.0
+        assert model.weight_provenance("CD8") == EXPLICIT
+        # Display and science stayed apart.
+        assert visibility["CD8"] is True
+        assert model.fusion_enabled("CD8") is False
+        # ...and the whole configuration, and its hash, are what was saved.
+        assert model.full_config() == before_full
+        assert w._effective_fusion_config() == before_eff
+        assert w._fusion_settings_hash() == before_hash
+
+        # Neither a repaint, nor a first enable, nor another save flattens it.
+        w.config._rebuild_rows()
+        model.set_fusion_enabled("CD8", True)
+        json.loads(json.dumps(w._step1_session_payload()))
+        groups = model.groups()
+        assert groups["A"]["CD3"] == pytest.approx(0.2)
+        assert groups["B"]["CD3"] == pytest.approx(0.7)
+        assert groups["A"]["CD8"] == 0.0, \
+            "the first enable replaced an explicit zero with the default"
+    finally:
+        w.close()
+
+
+def test_a_pending_answer_does_not_follow_the_channel_name_to_another_slide(
+        app, tmp_path):
+    """P1: A's pre-group 0.25 must not become B's.
+
+    `pending_answers()` selected by "not in a group yet", which is a fact
+    about this model's shape and not about which slide it is describing. With
+    no dataset binding, B's first `load_panel` adopted A's number because both
+    slides have a channel called CD3.
+    """
+    w = _bare_window()
+    try:
+        _bind(w, tmp_path / "A.ome.tiff", "11:11")
+        w._display.set_render_weight("CD3", 0.25)
+        assert w._display.fusion.weight_provenance("CD3") == EXPLICIT
+
+        # A committed switch to another slide.
+        w._on_step0_dataset_committed({"gen": 7})
+        _pump()
+        assert w._display.fusion.weight_provenance("CD3") == ABSENT, \
+            "the previous slide's project survived the switch"
+
+        _bind(w, tmp_path / "B.ome.tiff", "22:22")
+        w.loader = _Loader()
+        w.config.set_channels(w.loader.channel_names())
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
+
+        assert w.config.weight_provenance("CD3") == ABSENT
+        assert w.config.get_groups()["markers"]["CD3"] == 0.0
+        # ...and B's first enable answers the default, not A's number.
+        w.config.set_fusion_enabled("CD3", True)
+        assert w.config.channel_weight("CD3") == 1.0
+    finally:
+        w.close()
+
+
+def test_an_answer_given_after_binding_b_is_adopted_by_bs_first_groups(
+        app, tmp_path):
+    """The other half: a weight named for THIS slide, before Step1 built any
+    group for it, is the answer its first group takes -- 0.00 included."""
+    w = _bare_window()
+    try:
+        _bind(w, tmp_path / "B.ome.tiff", "22:22")
+        w._display.set_render_weight("CD3", 0.0)
+        assert w._display.fusion.weight_provenance("CD3") == EXPLICIT
+
+        w.loader = _Loader()
+        w.config.set_channels(w.loader.channel_names())
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
+
+        assert w.config.weight_provenance("CD3") == EXPLICIT
+        w.config.set_fusion_enabled("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0, \
+            "the first enable overwrote a zero this slide's user chose"
+    finally:
+        w.close()
+
+
+def test_republishing_the_same_slides_handoff_keeps_its_draft(app, tmp_path):
+    """A handoff invalidation/republish for the SAME dataset is not a switch:
+    the geometry moved, the science did not."""
+    w = _bare_window()
+    try:
+        identity = _bind(w, tmp_path / "A.ome.tiff", "11:11")
+        w._display.set_render_weight("CD3", 0.35)
+        w.step0_output = {"step0_manifest_path": str(tmp_path / "m.json")}
+
+        w._on_step0_handoff_invalidated(
+            {"step0_manifest_path": str(tmp_path / "m.json"),
+             "reason": "geometry", "message": "run Step0 Save"})
+        _pump()
+        # ...and the republished handoff binds the same identity again.
+        w._display.state.bind(identity)
+        _pump()
+
+        assert w._display.fusion.weight_provenance("CD3") == EXPLICIT
+        assert w._display.render_weight("CD3") == pytest.approx(0.35)
+    finally:
+        w.close()
+
+
+def test_reinstalling_the_same_state_says_nothing(app):
+    """P2: a restore that changes nothing is not a change.
+
+    An install that announced itself unconditionally made every consumer
+    redraw, re-dirty and re-save a state nobody had moved.
+    """
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        spec = {
+            "groups": {"markers": {"group_weight": 1.0,
+                                   "channels": {"CD3": 0.4}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3"], "provenance": {"CD3": AUTHORITATIVE},
+        }
+        assert model.install_draft(spec) is True
+        _pump()
+        seen = []
+        model.draft_restored.connect(lambda: seen.append("restored"))
+        model.draft_changed.connect(lambda: seen.append("changed"))
+        committed = []
+        model.committed_changed.connect(lambda: committed.append(1))
+        frames_before = w._display.coordinator.frame_stats()["inputs"]
+        saves = []
+        w._schedule_step1_session_save = lambda: saves.append(1)
+
+        assert model.install_draft(spec) is False
+        assert model.install_committed_snapshot(None) is False
+        snapshot = {"hash": "abc"}
+        assert model.install_committed_snapshot(snapshot) is True
+        assert model.install_committed_snapshot(dict(snapshot)) is False
+
+        assert seen == [], seen
+        assert committed == [1], committed
+        assert w._display.coordinator.frame_stats()["inputs"] == frames_before
+        assert saves == [], saves
+    finally:
+        w.close()
+
+
+def test_a_real_group_or_nucleus_edit_is_announced_like_any_other(app):
+    """P2: the structural setters changed state in silence, so a group weight
+    the user moved never reached the Unsaved label or the session."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        model.install_draft({
+            "groups": {"A": {"group_weight": 1.0, "channels": {"CD3": 0.4}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3", "DAPI"], "provenance": {"CD3": AUTHORITATIVE},
+        })
+        model.install_committed_snapshot({"hash": w._fusion_settings_hash()})
+        assert w._fusion_settings_dirty() is False
+        _pump()
+        changed = []
+        model.draft_changed.connect(lambda: changed.append(1))
+        saves = []
+        w._schedule_step1_session_save = lambda: saves.append(1)
+
+        assert model.set_group_weight("A", 0.8) is True
+
+        assert changed == [1]
+        assert saves == [1]
+        assert model.group_weights()["A"] == pytest.approx(0.8)
+        assert w._fusion_settings_dirty() is True
+
+        # The same value again is not an edit.
+        assert model.set_group_weight("A", 0.8) is False
+        assert changed == [1]
+        assert saves == [1]
+
+        # ...and so for the nucleus.
+        assert model.set_nucleus_weight(0.6) is True
+        assert changed == [1, 1]
+        assert model.set_nucleus_weight(0.6) is False
+        assert changed == [1, 1]
+    finally:
+        w.close()
+
+
+def test_one_weight_edit_asks_for_one_frame(app):
+    """P2: the service asked for a frame AND its observer asked again, so one
+    edit queued the same request twice."""
+    w = _window(app)
+    try:
+        w.config.set_channel_visible("CD3", True)
+        w.config.set_fusion_enabled("CD3", True)
+        _pump()
+
+        def requests():
+            return w._display.coordinator.frame_stats()["inputs"]
+
+        before = requests()
+        assert w._display.set_render_weight("CD3", 0.3) is True
+        assert requests() - before == 1, "one edit, two queued frames"
+
+        before = requests()
+        w.config._rows["CD3"].spin.setValue(0.6)
+        assert requests() - before == 1
+
+        # A first enable moves participation AND answers the weight: still one
+        # logical refresh, not one per field.
+        before = requests()
+        w.config.set_fusion_enabled("CD8", True)
+        assert w.config.channel_weight("CD8") == 1.0
+        assert requests() - before == 1
+    finally:
+        w.close()
+
+
+def test_a_panel_without_a_model_fails_at_once(app):
+    """P2: the panel used to make its own scientific model when none was
+    passed, which would hide a missing wire instead of failing on it."""
+    from block01.ui.step0.config_panel import ConfigPanel
+    with pytest.raises(ValueError):
+        ConfigPanel(["DAPI", "CD3"])
+
+    w = _window(app)
+    try:
+        assert w.config.fusion_model() is w._display.fusion
+        model = w._display.fusion
+        w.config.setParent(None)
+        w.config.deleteLater()
+        _pump()
+        assert model.channel_weight("CD3") == model.channel_weight("CD3")
+    finally:
+        w.close()

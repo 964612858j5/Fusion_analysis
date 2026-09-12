@@ -740,12 +740,14 @@ class MainWindow(QMainWindow):
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
         self.config.visibility_changed.connect(self._on_channel_visibility_changed)
-        # The two scientific facts, straight from the model -- so an edit made
-        # in Step0 or Step3, with this page not even built, reaches the same
-        # handlers as one made on a row here.
-        self._display.fusion.participation_changed.connect(
-            self._on_fusion_participation_changed)
-        self._display.fusion.weight_changed.connect(self._on_fusion_weight_changed)
+        # ONE refresh owner for the science, wherever the command came from:
+        # a row here, the shared Weights window in Step3, a restore. The
+        # per-field signals are for the ROWS to follow; this window follows
+        # the draft itself, so one logical command leaves one repaint, one
+        # frame request, one dirty recompute and one session save -- even
+        # when that command moved two fields (a first enable answers the
+        # weight as well as the participation).
+        self._display.fusion.draft_changed.connect(self._on_fusion_draft_changed)
         self.config.current_channel_changed.connect(self._on_current_channel_changed)
         self.config.color_changed.connect(self._on_channel_color_changed)
         # ...and the other direction: a colour picked in the Intensity window
@@ -1301,7 +1303,7 @@ class MainWindow(QMainWindow):
         It used to be the owner's entry: the services held this object as the
         "weight owner" and moved a Step1 row. The model owns the number now,
         and everything that has to happen when it moves happens in
-        `_on_fusion_weight_changed`, wherever the edit came from.
+        `_on_fusion_draft_changed`, wherever the edit came from.
         """
         return self._display.set_render_weight(channel, weight)
 
@@ -1472,8 +1474,14 @@ class MainWindow(QMainWindow):
             return
         self._dataset_gen_seen = max(gen, self._dataset_gen_seen)
 
-        # The snapshot described the previous slide's channels.
+        # The snapshot described the previous slide's channels -- and so did
+        # the draft, its groups, its provenance and any weight named before
+        # Step1 built a group to hold it. A committed switch ends that
+        # project; a handoff REPUBLISHED for the same slide does not, which
+        # is why this is here and not in `_discard_step1_dataset_state`.
         self._forget_fusion_settings("another dataset was committed")
+        self._display.fusion.discard_dataset_state(
+            "another dataset was committed")
         self.step0_done = False
         self._step1_context_ready = False
         self.step1_done = False
@@ -4228,44 +4236,28 @@ class MainWindow(QMainWindow):
                                                 channel=channel)
         self._schedule_step1_session_save()
 
-    def _on_fusion_participation_changed(self, channel, enabled):
-        """A channel entered or left the SCIENCE, from wherever it was said.
+    def _on_fusion_draft_changed(self):
+        """The scientific draft moved. ONE refresh, once per command.
 
-        This one does change the effective configuration, so it changes
-        whether the screen and the committed snapshot still agree -- said
-        now, not at the next redraw, because a panel claiming "saved" while a
-        search would be refused is the disagreement the label exists to show.
+        Keyed by the model's draft revision: a command that also reaches this
+        window through the panel's own `config_changed` is refreshed for the
+        revision it produced, not once per signal. A restore that installs a
+        whole project is one revision too.
         """
         if self._restoring_display_state:
             return
-        self._ensure_channels_cached(self._preview_patch_idx)
-        # COALESCED, not drawn here: a first enable also answers the weight,
-        # and one logical act must leave one repaint rather than two.
-        self._schedule_preview_update()
-        self._display.coordinator.request_frame(kind="fusion",
-                                                channel=channel)
-        self._update_fusion_settings_state()
-        self._schedule_step1_session_save()
-
-    def _on_fusion_weight_changed(self, channel):
-        """A scientific weight moved, on a row here or in the shared Weights
-        window while this page was not even visible.
-
-        The preview, the shared render spec, the Unsaved state and the session
-        all follow the model rather than the control that happened to be
-        touched -- which is what makes a weight edited in Step3 the same fact
-        back in Step1.
-        """
-        if self._restoring_display_state:
+        rev = self._display.fusion.draft_revision()
+        if rev == getattr(self, "_fusion_refresh_rev", None):
             return
+        self._fusion_refresh_rev = rev
         self._ensure_channels_cached(self._preview_patch_idx)
-        # The same coalesced path a slider drag has always taken: ten steps
-        # leave one composed frame, and none of them on the GUI thread.
+        # COALESCED, never composed here: ten slider steps leave one frame,
+        # and none of them on the GUI thread.
         self._schedule_preview_update()
-        self._display.coordinator.request_frame(kind="weight", channel=channel)
+        self._display.coordinator.request_frame(kind="weight")
         if self._display.coordinator.active_context_id() != _CTX_STEP1:
             # Step1 is not composing, so nothing else would rebuild the spec
-            # and the shared picture would keep the weight the user has just
+            # and the shared picture would keep the value the user has just
             # changed away from.
             self._refresh_published_render_spec()
         self._refresh_weight_editor()
@@ -4491,24 +4483,15 @@ class MainWindow(QMainWindow):
             self._restore_patch_preview_view_state(state)
 
     def _on_cfg_changed(self):
-        """A weight or the nucleus channel changed.
+        """The channel panel says its configuration moved.
 
-        BOTH previews read weights now, so both redraw. A weight that has just
-        risen above zero can make one channel newly necessary, and that one
-        channel is read; everything already in hand stays, and nothing is
-        evicted.
+        THE SAME refresh as any other scientific command, through the same
+        owner: the panel and the model both announce a row edit, and doing
+        the work twice queued two frames for one drag step. Whichever notice
+        arrives first does it for that draft revision; the second finds the
+        revision already refreshed and returns.
         """
-        self._ensure_channels_cached(self._preview_patch_idx)
-        self._schedule_preview_update()
-        # The Tissue Preview shows the same weights over the whole slide, so
-        # it follows the same drag. Its own frame clock: the two pictures are
-        # not required to publish in the same millisecond, only to end on the
-        # same revision.
-        self._display.coordinator.request_frame(kind="weight")
-        # The shared editor is a view over these numbers, so it follows them
-        # wherever they were changed -- including from the channel panel.
-        self._refresh_weight_editor()
-        self._schedule_step1_session_save()
+        self._on_fusion_draft_changed()
 
     def _reset_frame_clock(self):
         """Forget everything the frame clock was doing.

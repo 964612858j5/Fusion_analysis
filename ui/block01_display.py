@@ -1549,6 +1549,11 @@ class Block01DisplayServices(QObject):
         # display state: it has to answer before the first page exists and
         # after the last one is gone. The Step1 panel is an editor of it.
         self.fusion = FusionDomainModel(self)
+        # ONE dataset answer for both halves. The display state already binds
+        # every slide to B2's stable identity; the science follows the same
+        # bind, so a committed switch takes the previous project's weights
+        # with it and a handoff republished for the SAME slide keeps them.
+        self.state.dataset_changed.connect(self._on_dataset_identity_changed)
         self.coordinator = TissuePreviewCoordinator(self.state, self)
         self._navigator_content = None
         self._intensity_content = None
@@ -2054,6 +2059,10 @@ class Block01DisplayServices(QObject):
     def render_spec(self):
         return self._render_spec
 
+    def _on_dataset_identity_changed(self, identity):
+        """The display bound another slide: the science binds with it."""
+        self.fusion.bind_dataset(identity, reason="dataset bind")
+
     def set_render_weight(self, channel, weight):
         """THE global entry for "this channel contributes this much".
 
@@ -2061,14 +2070,16 @@ class Block01DisplayServices(QObject):
         It used to go to a registered WEIGHT OWNER -- the Step1 channel panel
         -- which made a Step3 edit depend on a built, populated widget on
         another page; the model is the owner now and the panel follows it.
+
+        A COMMAND, and nothing else. It does not ask for a frame: the model's
+        consumer does that for every scientific change from every entry, so
+        asking here as well queued the same frame twice for one edit -- once
+        from the caller and once from the observer.
         """
         if not channel:
             return False
-        if not self.fusion.edit_channel_weight(channel, float(weight),
-                                               origin="shared-weights"):
-            return False
-        self.coordinator.request_frame(kind="weight", channel=channel)
-        return True
+        return bool(self.fusion.edit_channel_weight(channel, float(weight),
+                                                    origin="shared-weights"))
 
     def render_weight(self, channel):
         """What this channel weighs scientifically, or None when the model

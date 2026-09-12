@@ -57,7 +57,7 @@ from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor
 
 from ...config import NUCLEUS_CONFIG
-from ...core.fusion_domain import ABSENT, FusionDomainModel
+from ...core.fusion_domain import ABSENT
 from ..widgets.channel_dock import template
 
 DEFAULT_GROUP = "markers"
@@ -260,17 +260,23 @@ class ConfigPanel(QWidget):
 
     def __init__(self, all_channels, fusion=None):
         super().__init__()
+        # INJECTED, never invented. A panel that made its own model when none
+        # was passed would hide a missing wire: production would still be
+        # correct while a page built without the services quietly edited a
+        # model nobody else reads, and the failure would only show up as
+        # weights that do not reach a Save.
+        if fusion is None:
+            raise ValueError(
+                "ConfigPanel needs Block01's FusionDomainModel: pass "
+                "`fusion=services.fusion` (a standalone caller may own a "
+                "`FusionDomainModel()` of its own and pass that).")
         self.all_channels = list(all_channels or [])
         # THE scientific state, which this panel no longer owns. Groups,
         # per-group weights, the nucleus, who takes part and whose weight is
         # an answer all live in the model -- outside this widget, so Step0 and
         # Step3 can ask and answer without Step1 being built, and so tearing
         # this page down does not take the project's numbers with it.
-        #
-        # A panel constructed without one makes its own rather than keeping a
-        # second copy of the state: it is still ONE owner, it is just this
-        # panel's until a host hands it Block01's.
-        self._fusion = fusion if fusion is not None else FusionDomainModel(self)
+        self._fusion = fusion
         self._fusion.weight_changed.connect(self._on_model_weight_changed)
         self._fusion.participation_changed.connect(
             self._on_model_participation_changed)
@@ -769,9 +775,26 @@ class ConfigPanel(QWidget):
         say.
         """
         nuc = self.nucleus_channel()
+        spec = self._fusion.draft_snapshot()
+        weights = dict(spec.get("channel_weight") or {})
+        provenance = dict(spec.get("provenance") or {})
+        group_weights = {name: dict(values) for name, values
+                         in (spec.get("group_weights") or {}).items()}
         for ch in self._rows:
-            if ch != nuc:
-                self._fusion.edit_channel_weight(ch, 0.0, origin="reset")
+            if ch == nuc:
+                continue
+            weights[ch] = 0.0
+            provenance[ch] = "explicit"
+            for values in group_weights.values():
+                if ch in values:
+                    values[ch] = 0.0
+        spec["channel_weight"] = weights
+        spec["provenance"] = provenance
+        spec["group_weights"] = group_weights
+        # ONE transaction for the whole button: zeroing twenty markers is one
+        # thing the user asked for, not twenty redraws and twenty saves.
+        self._fusion.install_draft(spec)
+        self._sync_rows_from_model()
         self.config_changed.emit()
 
     def _reset_all_channel_weights(self):

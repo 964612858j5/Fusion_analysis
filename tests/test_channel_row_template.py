@@ -27,6 +27,10 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets  # noqa: E402
 
+from block01.core.fusion_domain import (  # noqa: E402
+    FusionDomainModel,
+)
+
 from block01.ui.widgets.channel_dock import template  # noqa: E402
 
 
@@ -46,7 +50,7 @@ def _both(app, channels=("DAPI", "CD3", "CD8")):
     model = ChannelSetModel()
     model.set_channels([ChannelState(channel_id=c, name=c) for c in channels])
     dock = ChannelDock(model, row_factory=Step0ChannelRow, title="")
-    panel = ConfigPanel(list(channels))
+    panel = ConfigPanel(list(channels), fusion=FusionDomainModel())
     host = QtWidgets.QWidget()
     lay = QtWidgets.QHBoxLayout(host)
     lay.addWidget(dock)
@@ -223,7 +227,7 @@ def test_a_standalone_step1_panel_uses_the_shared_palette(app):
     palette, not a private one of its own."""
     from block01.ui.step0.config_panel import ConfigPanel
 
-    panel = ConfigPanel(["DAPI", "CD3", "CD8"])
+    panel = ConfigPanel(["DAPI", "CD3", "CD8"], fusion=FusionDomainModel())
     try:
         assert panel._display_state is None, "the test needs a standalone panel"
         for i, ch in enumerate(["DAPI", "CD3", "CD8"]):
@@ -341,7 +345,7 @@ def test_an_empty_list_is_not_an_error(app):
 
     model = ChannelSetModel()
     dock = ChannelDock(model, row_factory=None, title="")
-    panel = ConfigPanel([])
+    panel = ConfigPanel([], fusion=FusionDomainModel())
     try:
         assert dock.rows() == {}
         assert panel._rows == {}

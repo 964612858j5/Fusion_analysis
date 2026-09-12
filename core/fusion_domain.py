@@ -56,6 +56,26 @@ AUTHORITATIVE = "authoritative"
 FIRST_ENABLE_WEIGHT = 1.0
 
 
+def _identity_key(identity):
+    """The comparable form of a `DatasetIdentity`, or None.
+
+    A dataset with no fingerprint cannot be shown to be the same dataset
+    twice, so it compares equal to nothing -- including itself.
+    """
+    if identity is None:
+        return None
+    path = str(getattr(identity, "path", "") or "")
+    fingerprint = str(getattr(identity, "fingerprint", "") or "")
+    if not path or not fingerprint:
+        return None
+    if getattr(identity, "ephemeral", False):
+        # An ephemeral identity is a nonce for ONE bind. It may be compared
+        # with itself (a rebind of the same object is not a new slide) but a
+        # fresh nonce for the same path is a different one.
+        return (path, fingerprint)
+    return (path, fingerprint)
+
+
 class RepresentativeWeight:
     """What one row may show for a channel that may be in several groups.
 
@@ -106,6 +126,9 @@ class FusionDomainModel(QObject):
     draft_restored = pyqtSignal()
     #: The immutable committed snapshot was replaced.
     committed_changed = pyqtSignal()
+    #: The draft was bound to another dataset (or to none). Carries the
+    #: `DatasetIdentity`, or None.
+    dataset_bound = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,6 +151,15 @@ class FusionDomainModel(QObject):
         self._committed = None
         self._hash_provider = None
         self._installing = False
+        # WHICH DATASET this draft is about. A scientific weight is not a
+        # process preference keyed by channel NAME: `CD3` on another slide is
+        # another measurement, and a draft that followed the name across a
+        # dataset switch would put one slide's numbers into another's project.
+        self._identity = None
+        # Bumped once per logical command. The window that refreshes the
+        # preview, the Unsaved label and the session uses it to do that ONCE
+        # for one command, however many field signals the command produced.
+        self._draft_rev = 0
 
     # ── ports ─────────────────────────────────────────────────────────
     def set_hash_provider(self, fn):
@@ -139,6 +171,74 @@ class FusionDomainModel(QObject):
         one. `fn(draft_or_None) -> str`.
         """
         self._hash_provider = fn
+
+    # ── the dataset this draft belongs to ────────────────────────────
+    def scientific_identity(self):
+        """The dataset whose science this draft is, or None when unbound."""
+        return self._identity
+
+    def draft_revision(self):
+        """How many logical commands have changed the draft."""
+        return self._draft_rev
+
+    def bind_dataset(self, identity, reason=""):
+        """Bind the draft to `identity`. A CHANGE wipes the previous project.
+
+        Reuses B2's stable dataset identity -- canonical path plus source
+        fingerprint -- so a handoff republished for the SAME slide rebinds to
+        the same identity and keeps a legal draft, while a committed switch to
+        another slide arrives as a different identity and takes the old
+        project's groups, weights, provenance, participation and committed
+        snapshot with it.
+
+        Fail closed on both sides of "unknown": an unresolvable source gets an
+        ephemeral identity that is new every time, so it never inherits; and
+        answers given while NOTHING was bound cannot be signed over to the
+        first real slide that arrives.
+        """
+        key = _identity_key(identity)
+        if key is not None and key == _identity_key(self._identity):
+            return False                       # same slide: nothing to wipe
+        self._identity = identity
+        self._reset_scientific_state()
+        if reason:
+            print(f"[Block01] fusion draft bound to {key or 'nothing'}"
+                  f" ({reason})")
+        self._draft_rev += 1
+        self.dataset_bound.emit(identity)
+        self.draft_changed.emit()
+        return True
+
+    def discard_dataset_state(self, reason=""):
+        """Another dataset was committed: this project is over.
+
+        Called from the dataset SWITCH, not from a handoff invalidation --
+        republishing the same slide's geometry does not make its weights
+        untrue, and clearing them there would delete a legal draft.
+        """
+        if (self._identity is None and not self._groups
+                and not self._channel_weight and not self._enabled
+                and self._committed is None):
+            return False
+        self._identity = None
+        self._reset_scientific_state()
+        if reason:
+            print(f"[Block01] fusion draft discarded ({reason})")
+        self._draft_rev += 1
+        self.dataset_bound.emit(None)
+        self.draft_changed.emit()
+        return True
+
+    def _reset_scientific_state(self):
+        """Drop every scientific answer, in one go. No field signals."""
+        self._groups = {}
+        self._group_weights = {}
+        self._nucleus_channel = ""
+        self._nucleus_weight = 0.0
+        self._enabled = set()
+        self._provenance = {}
+        self._channel_weight = {}
+        self._committed = None
 
     # ── channel universe ──────────────────────────────────────────────
     def channels(self):
@@ -190,6 +290,10 @@ class FusionDomainModel(QObject):
             self._enabled.discard(channel)
         if self._installing:
             return True
+        # ONE logical command, whatever it had to write: a first enable moves
+        # participation AND answers the weight, and the window that redraws
+        # must not do it twice for that.
+        self._draft_rev += 1
         if weighted:
             self.weight_changed.emit(channel)
         self.participation_changed.emit(channel, enabled)
@@ -239,6 +343,7 @@ class FusionDomainModel(QObject):
         moved = self._write_weight(channel, value, EXPLICIT)
         if not moved or self._installing:
             return moved
+        self._draft_rev += 1
         self.weight_changed.emit(channel)
         self.draft_changed.emit()
         return True
@@ -252,6 +357,7 @@ class FusionDomainModel(QObject):
         moved = self._write_weight(channel, value, AUTHORITATIVE)
         if not moved or self._installing:
             return moved
+        self._draft_rev += 1
         self.weight_changed.emit(channel)
         self.draft_changed.emit()
         return True
@@ -267,6 +373,7 @@ class FusionDomainModel(QObject):
         moved = self._write_weight(channel, value, provenance)
         if not moved or self._installing:
             return moved
+        self._draft_rev += 1
         self.weight_changed.emit(channel)
         self.draft_changed.emit()
         return True
@@ -315,15 +422,51 @@ class FusionDomainModel(QObject):
 
     # ── groups and nucleus ────────────────────────────────────────────
     def add_group(self, name, channel_weights=None, group_weight=1.0):
-        name = str(name)
-        data = self._groups.setdefault(name, {"weight": float(group_weight),
-                                              "members": []})
-        data["weight"] = float(group_weight)
-        for ch, w in (channel_weights or {}).items():
-            self.add_to_group(name, ch, w)
-        return data
+        """Create or update a group. ONE notice for the whole group.
 
-    def add_to_group(self, name, channel, weight=0.0):
+        The members go in with `_installing` set, so building a group of
+        twenty channels is one logical command rather than twenty.
+        """
+        name = str(name)
+        before = self._group_fingerprint()
+        was_installing = self._installing
+        self._installing = True
+        try:
+            data = self._groups.setdefault(
+                name, {"weight": float(group_weight), "members": []})
+            data["weight"] = float(group_weight)
+            for ch, w in (channel_weights or {}).items():
+                self.add_to_group(name, ch, w)
+        finally:
+            self._installing = was_installing
+        self._announce_structure(before)
+        return self._groups[name]
+
+    def _group_fingerprint(self):
+        """Everything `groups`, the nucleus and membership currently say."""
+        return (
+            {name: (float(data["weight"]), tuple(data["members"]))
+             for name, data in self._groups.items()},
+            {name: dict(weights)
+             for name, weights in self._group_weights.items()},
+            self._nucleus_channel, float(self._nucleus_weight),
+        )
+
+    def _announce_structure(self, before):
+        """Announce a structural change, and only a real one.
+
+        A setter that writes the value it already held is not a change: it
+        must not dirty the settings, redraw a preview or schedule a session
+        save. A setter that DOES move something goes through the same one
+        notice as every other scientific command.
+        """
+        if self._installing or before == self._group_fingerprint():
+            return False
+        self._draft_rev += 1
+        self.draft_changed.emit()
+        return True
+
+    def add_to_group(self, name, channel, weight=0.0):  # noqa: D401
         """Put a channel in a group.
 
         A channel that already has a scientific answer with nowhere to live --
@@ -336,24 +479,30 @@ class FusionDomainModel(QObject):
         data = self._groups.setdefault(name, {"weight": 1.0, "members": []})
         if channel not in data["members"]:
             data["members"].append(channel)
+        before = self._group_fingerprint()
         pending = self._channel_weight.get(channel)
         if pending is not None and self.weight_provenance(channel) != ABSENT:
             weight = pending
         self._group_weights.setdefault(name, {})[channel] = float(weight)
+        self._announce_structure(before)
 
     def remove_group(self, name):
         name = str(name)
+        before = self._group_fingerprint()
         self._groups.pop(name, None)
         self._group_weights.pop(name, None)
+        return self._announce_structure(before)
 
     def group_weight(self, name):
         data = self._groups.get(str(name))
         return float(data["weight"]) if data else 1.0
 
     def set_group_weight(self, name, weight):
+        before = self._group_fingerprint()
         data = self._groups.setdefault(str(name), {"weight": 1.0,
                                                    "members": []})
         data["weight"] = float(weight)
+        return self._announce_structure(before)
 
     def groups(self):
         """`{group: {channel: weight}}` -- a copy."""
@@ -369,12 +518,16 @@ class FusionDomainModel(QObject):
         return self._nucleus_channel, float(self._nucleus_weight)
 
     def set_nucleus(self, channel, weight=None):
+        before = self._group_fingerprint()
         self._nucleus_channel = str(channel or "")
         if weight is not None:
             self._nucleus_weight = float(weight)
+        return self._announce_structure(before)
 
     def set_nucleus_weight(self, weight):
+        before = self._group_fingerprint()
         self._nucleus_weight = float(weight)
+        return self._announce_structure(before)
 
     def pending_answers(self):
         """Scientific answers that have nowhere to live yet.
@@ -486,6 +639,11 @@ class FusionDomainModel(QObject):
         unification. It puts back what it was given.
         """
         spec = dict(spec or {})
+        # WHAT IT WOULD BECOME, before anything is written. A restore that
+        # puts back exactly what is already there is not a change, and a
+        # completion notice for it makes every consumer redraw, re-dirty and
+        # re-save a state nobody moved.
+        before = self.draft_snapshot()
         self._installing = True
         try:
             if reset:
@@ -545,15 +703,28 @@ class FusionDomainModel(QObject):
                 self._enabled = {str(ch) for ch in enabled}
         finally:
             self._installing = False
+        if self.draft_snapshot() == before:
+            return False
+        self._draft_rev += 1
         self.draft_restored.emit()
         self.draft_changed.emit()
+        return True
 
     # ── committed snapshot ────────────────────────────────────────────
     def install_committed_snapshot(self, snapshot):
         """Adopt the frozen scientific fact. Immutable here: a copy goes in,
-        a copy comes out, and a failed commit never reaches this method."""
-        self._committed = copy.deepcopy(snapshot) if snapshot else None
+        a copy comes out, and a failed commit never reaches this method.
+
+        Re-adopting the SAME snapshot -- a restore that read back what is
+        already held, `None` over `None` -- says nothing: nothing about what
+        a job would run on has changed.
+        """
+        incoming = copy.deepcopy(snapshot) if snapshot else None
+        if incoming == self._committed:
+            return False
+        self._committed = incoming
         self.committed_changed.emit()
+        return True
 
     def committed_snapshot(self):
         return copy.deepcopy(self._committed) if self._committed else None
@@ -657,16 +828,31 @@ def migrate_session(sess, fusion_config=None, channels=None):
 
     if shape == S4_SPLIT:
         draft = dict(sess.get("fusion_draft") or {})
+        # PRESENCE, not truthiness. An empty group set, an empty enabled list
+        # and an empty provenance map are all legal states of a real project,
+        # and `x or legacy` silently replaced each of them with the legacy
+        # field -- or, for `group_weights`, dropped the numbers entirely and
+        # let every group/channel value come back as 0.0.
+        #
+        # The draft snapshot keeps MEMBERSHIP and VALUES apart:
+        #   groups        -> {group: {weight, members}}
+        #   group_weights -> {group: {channel: scientific weight}}
+        #   channel_weight-> {channel: the answer with no group to live in}
+        # so all three have to travel, and none of them may be reconstructed
+        # from the representative maximum of another.
         spec = {
-            "groups": draft.get("groups") or groups,
-            "nucleus": draft.get("nucleus") or nucleus,
-            "enabled": draft.get("enabled") or [],
-            "provenance": draft.get("provenance") or {},
-            "channel_weight": draft.get("channel_weight") or {},
+            "groups": draft["groups"] if "groups" in draft else groups,
+            "group_weights": draft.get("group_weights", {}),
+            "nucleus": draft["nucleus"] if "nucleus" in draft else nucleus,
+            "enabled": draft.get("enabled", []),
+            "provenance": draft.get("provenance", {}),
+            "channel_weight": draft.get("channel_weight", {}),
         }
-        visibility = {str(ch): bool(v) for ch, v in
-                      (sess.get("display_visibility")
-                       or sess.get("channel_visibility") or {}).items()}
+        if "display_visibility" in sess:
+            recorded = sess.get("display_visibility") or {}
+        else:
+            recorded = sess.get("channel_visibility") or {}
+        visibility = {str(ch): bool(v) for ch, v in recorded.items()}
         return spec, visibility
 
     provenance = {ch: AUTHORITATIVE for ch in members}

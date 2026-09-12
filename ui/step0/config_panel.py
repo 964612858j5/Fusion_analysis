@@ -1016,15 +1016,34 @@ class ConfigPanel(QWidget):
         back hidden even when it is the current one, and the host should redraw
         once at the end rather than once per channel.
         """
+        # ONE PUBLIC TRANSACTION for every DISPLAY field this restore
+        # resolved -- colours, visibility and the current channel -- so the
+        # shared state comes back whole and every view (Step0's swatches, the
+        # Intensity histogram, both main viewers, the Tissue Preview) follows
+        # one completion notice. Registering only the colours left selection
+        # and visibility in this panel's widgets, where a public getter would
+        # have had to fall back to a QWidget to find them.
+        #
+        # DISPLAY ONLY. Fusion participation, groups, weights and their
+        # provenance are not interpreted here; they stay this panel's until
+        # B3 migrates the session schema.
         state = self._display_state
-        if state is not None and colors:
-            # ONE transaction: the shared store is replaced and every view --
-            # Step0's swatches, the Intensity histogram, both main viewers and
-            # the Tissue Preview -- comes back together. Restoring only this
-            # panel's rows would put the session's colours in Step1 and leave
-            # Step0 on the ones it dealt.
-            state.adopt_colors({str(ch): str(c) for ch, c in colors.items()
-                                if ch and c}, origin="step1-session")
+        if state is not None:
+            payload = {}
+            if colors:
+                payload["colors"] = {str(ch): str(c)
+                                     for ch, c in colors.items() if ch and c}
+            if visibility:
+                known = set(self.all_channels or []) or set(self._rows)
+                merged = dict(state.display_visibility())
+                merged.update({str(ch): bool(v)
+                               for ch, v in visibility.items()
+                               if str(ch) in known})
+                payload["visibility"] = merged
+            if current_channel and current_channel in self._rows:
+                payload["selection"] = str(current_channel)
+            if payload:
+                state.install(payload)
         for ch, color in (colors or {}).items():
             ch = str(ch)
             if not color:
@@ -1034,6 +1053,8 @@ class ConfigPanel(QWidget):
             if row is not None:
                 row.set_color(str(color))
 
+        # The widgets follow the SAME resolved answer, silently. They are a
+        # view of it, not a second place to look it up.
         if visibility:
             for ch in list(self.all_channels or []):
                 if ch in visibility:

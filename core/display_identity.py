@@ -23,8 +23,12 @@ keyed by one and a worker can carry the other across a thread boundary.
 """
 
 import os
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+EPHEMERAL_PREFIX = "ephemeral:"
 
 
 @dataclass(frozen=True)
@@ -36,56 +40,78 @@ class DatasetIdentity:
     the same thing to the handoff and to the display state. A file that has
     been rewritten under the same name is a DIFFERENT identity, which is what
     stops a stale window being restored over new pixels.
+
+    An identity whose fingerprint begins with `ephemeral:` is NOT a verified
+    slide identity: see `ephemeral_identity`.
     """
 
     path: str
     fingerprint: str = ""
 
     @property
-    def resolved(self) -> bool:
-        """True when the fingerprint was actually read.
+    def ephemeral(self) -> bool:
+        """True when this identity is a one-bind nonce, not a source version."""
+        return self.fingerprint.startswith(EPHEMERAL_PREFIX)
 
-        An unresolved identity is not a weaker identity, it is an ABSENCE:
-        callers fail closed rather than guessing, because signing an unknown
-        slide with the current one is exactly how one dataset's window ends up
-        on another's pixels.
+    @property
+    def resolved(self) -> bool:
+        """True when this identity actually describes a source VERSION.
+
+        A path alone is not an identity: two sources at the same path that
+        cannot be shown to be the same file are not the same dataset, and a
+        namespace keyed on the path would restore one's display state over
+        the other's pixels. An ephemeral nonce is deliberately not resolved.
         """
-        return bool(self.path) and bool(self.fingerprint)
+        return (bool(self.path) and bool(self.fingerprint)
+                and not self.ephemeral)
 
     def __str__(self):
-        return f"{os.path.basename(self.path) or '<none>'}@{self.fingerprint or '?'}"
+        kind = "ephemeral" if self.ephemeral else (
+            self.fingerprint or "unresolved")
+        return f"{os.path.basename(self.path) or '<none>'}@{kind}"
 
 
 def resolve_identity(path) -> Optional[DatasetIdentity]:
-    """`DatasetIdentity` for `path`, or None when there is no path at all.
+    """`DatasetIdentity` for `path`, or None when it cannot be established.
 
-    A path that cannot be stat'd yields an identity with an EMPTY
-    fingerprint. That is deliberate and is not the same as guessing one:
+    FAIL CLOSED. A path that cannot be stat'd has no source version, so there
+    is nothing to key a restorable namespace on: two sources at that same
+    path cannot be shown to be the same dataset, and treating them as one
+    would restore the first's display state over the second's pixels. The
+    caller decides what to do with None -- `ephemeral_identity` is the answer
+    for "show something now, promise nothing across binds".
 
-    * `resolved` is False, so anything that must not act on a guess can see
-      it and say so;
-    * the identity still compares equal to itself, so within THIS process run
-      two visits to the same path share a namespace and a late result can
-      still be matched or refused by value;
-    * it can never compare equal to a resolved identity for the same path, so
-      once the file does exist the state starts a clean namespace rather than
-      inheriting one keyed on an absence.
-
-    Refusing to produce anything here would have meant a slide whose file is
-    not yet on disk -- a synthetic source, a test harness, a project being
-    assembled -- had no display state at all, which is a worse failure than a
-    namespace that is honest about what it does not know.
+    A caller with a synthetic source that DOES want restoration across binds
+    supplies its own non-empty fingerprint describing that source's version,
+    through `DatasetIdentity` directly.
     """
     if not path:
         return None
-    full = str(path)
     try:
-        full = os.path.abspath(full)
+        full = os.path.abspath(str(path))
         st = os.stat(full)
     except (OSError, TypeError, ValueError):
-        return DatasetIdentity(path=full, fingerprint="")
+        return None
     return DatasetIdentity(path=full,
                            fingerprint=f"{st.st_size}:{st.st_mtime_ns}")
+
+
+def ephemeral_identity(path) -> DatasetIdentity:
+    """A ONE-BIND identity for a source whose version cannot be established.
+
+    It keeps a slide that is not (yet) on disk usable -- a synthetic source, a
+    test harness, a project being assembled still gets display state for as
+    long as it is bound. What it deliberately does NOT do is promise
+    restoration: every call produces a different nonce, so binding the same
+    unresolvable path twice yields two identities, two namespaces, and no
+    chance of one visit's answers being shown as another's.
+
+    The nonce is a `uuid4`, not an object `id()`: an address is reused by the
+    next object and would make two unrelated binds compare equal.
+    """
+    full = os.path.abspath(str(path)) if path else ""
+    return DatasetIdentity(path=full,
+                           fingerprint=f"{EPHEMERAL_PREFIX}{uuid.uuid4().hex}")
 
 
 @dataclass(frozen=True)
@@ -118,6 +144,14 @@ class DisplayNamespace:
     be refused when the user has moved it since.
     """
 
+    # The generation of the LATEST formal bind of this identity. A result
+    # carries the binding it started under; comparing it against this, rather
+    # than against whatever is bound NOW, is what makes an old visit's work
+    # permanently stale. Compared only with the current binding, the sequence
+    # A1 -> B -> A2 -> C -> A1-returns let A1 write back into resident A,
+    # because at that moment A was "some other dataset" and its own second
+    # visit was invisible to the check.
+    binding_generation: int = 0
     order: tuple = ()
     capabilities: dict = field(default_factory=dict)   # channel -> Capabilities
     selection: str = ""

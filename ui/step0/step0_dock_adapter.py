@@ -159,31 +159,47 @@ class Step0ChannelDockAdapter(QObject):
         self.model.set_channels(states)
 
         # ONE ATOMIC INSTALL of the display state this rebuild describes:
-        # order, capabilities and the current display visibility, written to
-        # Block01's shared state before anything is announced. The page's own
-        # widgets remain the behavioural entry for B2 (Step0's marker
-        # checkbox still means correction participation, and B4 is where that
-        # is split) -- what is recorded here is the DISPLAY answer, so
-        # selection, visibility, order and capabilities have one owner.
+        # the channel order, the per-channel capabilities, and the ONE display
+        # visibility Step0 actually knows -- written to Block01's shared state
+        # before anything is announced.
+        #
+        # FROM THE LOADER, NOT `page._channel_order`. That list is emptied at
+        # the top of this method and refilled further down, in the legacy
+        # registry loop, so reading it here installed an empty order, empty
+        # capabilities and an empty visibility map.
         display = getattr(page, "display", None)
-        if display is not None:
+        # A page that has never been through a dataset commit still has a
+        # path, and an install needs a namespace to go into. Binding lazily
+        # here is what makes "the order is always installed" true for the
+        # landing state as well as after a Load.
+        if display is not None and display._ensure_binding() is not None:
+            order = tuple(st.channel_id for st in states)
             caps = {}
-            visibility = {}
-            for ch in page._channel_order:
+            for ch in order:
                 is_nucleus = (ch == page.nucleus_channel)
                 caps[ch] = ChannelCapabilities(
                     is_nucleus=is_nucleus,
                     # The nucleus row's checkbox IS its display toggle today;
-                    # every other row's is a correction decision, so B2 does
-                    # not claim it can be toggled as display yet.
+                    # a marker row's checkbox is a CORRECTION decision, so
+                    # Step0 has no marker display toggle to report yet. B4-A
+                    # is where that is split.
                     display_toggleable=is_nucleus,
                     weight_editable=not is_nucleus,
                     correction_eligible=not is_nucleus,
                 )
-                visibility[ch] = (_dapi_visible(page) if is_nucleus
-                                  else bool(ch in page._channel_methods))
+            # MERGED, NOT REPLACED, and only for the nucleus. Deriving a
+            # marker's display visibility from `_channel_methods` would be
+            # publishing correction participation under another name -- the
+            # two are different facts and Step0 only has the correction one.
+            # A marker whose display answer nobody has given stays ABSENT
+            # until B3/B4 supplies the real initialisation; one that Step1
+            # has already recorded is left exactly as it is.
+            visibility = dict(display.state.display_visibility())
+            nucleus = page.nucleus_channel
+            if nucleus and nucleus in order:
+                visibility[nucleus] = _dapi_visible(page)
             display.state.install({
-                "order": tuple(page._channel_order),
+                "order": order,
                 "capabilities": caps,
                 "visibility": visibility,
             })

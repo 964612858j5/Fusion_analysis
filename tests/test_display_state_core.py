@@ -33,7 +33,7 @@ pytest.importorskip("PyQt5")
 from PyQt5 import QtWidgets  # noqa: E402
 
 from block01.core.display_identity import (  # noqa: E402
-    ChannelCapabilities, DatasetIdentity, resolve_identity,
+    ChannelCapabilities, DatasetIdentity, ephemeral_identity, resolve_identity,
 )
 from block01.ui.block01_display import (  # noqa: E402
     Block01DisplayServices, ChannelDisplayState,
@@ -335,17 +335,190 @@ def test_eviction_touches_only_display_state(app):
 
 # ── identity itself ──────────────────────────────────────────────────────
 
-def test_an_unresolvable_path_is_marked_rather_than_guessed(tmp_path):
-    missing = resolve_identity(str(tmp_path / "not-there.ome.tiff"))
-    assert missing is not None
-    assert missing.resolved is False
-    assert missing.fingerprint == ""
+def test_an_unresolvable_path_has_no_identity(tmp_path):
+    """FAIL CLOSED. A path with no readable version is not an identity: two
+    sources there cannot be shown to be the same dataset, and a namespace
+    keyed on the path alone would restore one's state over the other's."""
+    assert resolve_identity(str(tmp_path / "not-there.ome.tiff")) is None
 
     real = tmp_path / "there.ome.tiff"
     real.write_bytes(b"x" * 10)
     found = resolve_identity(str(real))
     assert found.resolved is True
-    assert found != DatasetIdentity(path=str(real), fingerprint="")
+    assert found.ephemeral is False
+
+
+def test_an_ephemeral_identity_is_never_reused(tmp_path):
+    """Usable now, restorable never: two binds of the same unreadable path
+    are two datasets, because nothing can show that they are one."""
+    missing = str(tmp_path / "not-there.ome.tiff")
+    a = ephemeral_identity(missing)
+    b = ephemeral_identity(missing)
+    assert a != b
+    assert a.ephemeral is True and a.resolved is False
+    assert "ephemeral" in str(a)
+
+
+def test_binding_an_unreadable_path_twice_gives_two_namespaces(app, tmp_path):
+    st = _state(app)
+    missing = str(tmp_path / "not-there.ome.tiff")
+
+    first = st.bind_dataset(missing)
+    st.set_mapping("CD3", 11.0, 99.0, 1.4)
+    second = st.bind_dataset(missing)
+
+    assert first.identity != second.identity
+    assert st.mapping("CD3") is None, "an unverified source was restored"
+    assert len(st.namespace_identities()) == 2
+
+
+def test_work_from_a_first_unresolved_bind_cannot_land_on_the_second(app, tmp_path):
+    services = Block01DisplayServices()
+    st = services.state
+    missing = str(tmp_path / "not-there.ome.tiff")
+    first = st.bind_dataset(missing)
+    st.bind_dataset(missing)
+
+    services._on_mapping_seeded({"binding": first, "channel": "CD3",
+                                 "nucleus": False, "min": 1.0, "max": 2.0,
+                                 "gamma": 1.0})
+
+    assert st.mapping("CD3") is None
+
+
+def test_an_explicit_synthetic_fingerprint_restores_across_binds(app):
+    """A synthetic source that WANTS restoration says so, by describing its
+    own version. That is a fingerprint, not a guess."""
+    st = _state(app)
+    synthetic = DatasetIdentity(path="/synthetic/A.ome.tiff",
+                                fingerprint="synthetic-v1")
+    assert synthetic.resolved is True
+
+    st.bind(synthetic)
+    st.set_mapping("CD3", 11.0, 99.0, 1.4)
+    st.bind(_identity("B"))
+    st.bind(synthetic)
+
+    assert st.mapping("CD3") == (11.0, 99.0, 1.4)
+
+
+def test_an_unresolved_bind_does_not_touch_a_resolved_dataset(app, tmp_path):
+    st = _state(app)
+    real = tmp_path / "A.ome.tiff"
+    real.write_bytes(b"x" * 10)
+    resolved = resolve_identity(str(real))
+
+    st.bind(resolved)
+    st.set_mapping("CD3", 5.0, 50.0, 1.0)
+    st.bind_dataset(str(tmp_path / "not-there.ome.tiff"))
+
+    assert st.mapping("CD3") is None, "the ephemeral bind saw A's namespace"
+    st.bind(resolved)
+    assert st.mapping("CD3") == (5.0, 50.0, 1.0), "A was disturbed"
+
+
+def test_a_path_that_appears_later_gets_a_fresh_resolved_namespace(app, tmp_path):
+    st = _state(app)
+    path = tmp_path / "late.ome.tiff"
+
+    ephemeral = st.bind_dataset(str(path)).identity
+    st.set_mapping("CD3", 1.0, 2.0, 1.0)
+
+    path.write_bytes(b"x" * 10)
+    resolved = st.bind_dataset(str(path)).identity
+
+    assert resolved != ephemeral
+    assert resolved.resolved is True
+    assert st.mapping("CD3") is None
+
+
+def test_a_rewritten_file_is_a_different_identity(tmp_path):
+    path = tmp_path / "slide.ome.tiff"
+    path.write_bytes(b"x" * 10)
+    before = resolve_identity(str(path))
+    path.write_bytes(b"y" * 20)
+    after = resolve_identity(str(path))
+    assert before != after, "the same name is not the same pixels"
+
+
+def test_a_binding_needs_a_source_version(app):
+    st = _state(app)
+    with pytest.raises(ValueError):
+        st.bind(None)
+    with pytest.raises(ValueError):
+        st.bind(DatasetIdentity(path="", fingerprint=""))
+    with pytest.raises(ValueError):
+        # A path with no version is exactly what must not become a
+        # restorable namespace.
+        st.bind(DatasetIdentity(path="/tmp/x.ome.tiff", fingerprint=""))
+
+
+# ── the per-identity latest binding ──────────────────────────────────────
+
+def test_a_result_from_a_still_current_visit_writes_back_silently(app):
+    """A1 -> B, with A still resident and not re-bound: A1's answer belongs
+    to A and is filed there, announced to nobody."""
+    services = Block01DisplayServices()
+    st = services.state
+    a, b = _identity("A"), _identity("B")
+    a1 = st.bind(a)
+    st.bind(b)
+    seen = []
+    st.mapping_changed.connect(lambda c: seen.append(c))
+
+    services._on_mapping_seeded({"binding": a1, "channel": "CD3",
+                                 "nucleus": False, "min": 1.0, "max": 2.0,
+                                 "gamma": 1.0})
+
+    assert st.mapping_in(a, "CD3") == (1.0, 2.0, 1.0)
+    assert st.mapping("CD3") is None, "it landed on B"
+    assert seen == [], "a silent write announced itself"
+
+
+def test_a_result_from_a_superseded_visit_is_refused_from_anywhere(app):
+    """A1 -> B -> A2 -> C, then A1 returns. Compared only against the CURRENT
+    binding, A1 looked like "some other dataset" at that moment and was let
+    through -- and A3 would then have restored it."""
+    services = Block01DisplayServices()
+    st = services.state
+    a, b, c = _identity("A"), _identity("B"), _identity("C")
+    a1 = st.bind(a)
+    st.bind(b)
+    st.bind(a)                      # A2 supersedes A1, for ever
+    st.bind(c)
+    # CD3 is left ABSENT in A on purpose: the only thing that can refuse this
+    # result is the binding rule. With a value already there the precondition
+    # check would refuse it too, and the test would pass without proving
+    # anything about superseded visits.
+    assert st.mapping_in(a, "CD3") is None
+
+    services._on_mapping_seeded({"binding": a1, "channel": "CD3",
+                                 "nucleus": False, "min": 1.0, "max": 2.0,
+                                 "gamma": 1.0})
+
+    assert st.mapping_in(a, "CD3") is None, "A1 wrote back into resident A"
+    st.bind(a)
+    assert st.mapping("CD3") is None, "A3 restored A1's superseded answer"
+
+
+def test_a_refused_result_does_not_refresh_the_store_ordering(app):
+    """BIND-RECENCY: a formal bind is what keeps a namespace alive. Stale
+    background activity must not extend an old one's turn."""
+    services = Block01DisplayServices()
+    st = services.state
+    oldest = _identity("D0")
+    first = st.bind(oldest)
+    for i in range(1, ChannelDisplayState.NAMESPACE_LIMIT):
+        st.bind(_identity(f"D{i}"))
+    assert oldest == st.namespace_identities()[0]
+
+    services._on_mapping_seeded({"binding": first, "channel": "CD3",
+                                 "nucleus": False, "min": 1.0, "max": 2.0,
+                                 "gamma": 1.0})
+
+    assert st.namespace_identities()[0] == oldest, "a late result reordered"
+    st.bind(_identity("D99"))
+    assert oldest not in st.namespace_identities()
 
 
 def test_a_rewritten_file_is_a_different_identity(tmp_path):
@@ -363,3 +536,171 @@ def test_a_binding_needs_a_path(app):
         st.bind(None)
     with pytest.raises(ValueError):
         st.bind(DatasetIdentity(path="", fingerprint=""))
+
+
+# ── the real Step0 rebuild, and the real Step1 restore ───────────────────
+#
+# Driven through the product entries, not through `install()`: the defects
+# these catch were both in the CALLERS -- an adapter reading a list it had
+# just emptied, and a restore that put half its answer in QWidgets.
+
+def _step0_page(app):
+    """A real Step0 page over a synthetic three-channel loader."""
+    import numpy as np
+    from block01.ui.step0 import step0_page as sp
+
+    class _Loader:
+        filepath = "/tmp/b2-step0.ome.tiff"
+        shape = (256, 128)
+
+        @staticmethod
+        def channel_names():
+            return ["DAPI", "CD3", "CD8"]
+
+        @staticmethod
+        def overview_downsample():
+            return 8
+
+        def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+            return np.zeros(((y1 - y0) // ds or 1, (x1 - x0) // ds or 1),
+                            dtype=np.float32)
+
+    page = sp.Step0Page()
+    page.loader = _Loader()
+    page.ome_path = _Loader.filepath
+    page.nucleus_channel = "DAPI"
+    page.patches = []
+    return page
+
+
+def test_the_real_step0_rebuild_installs_the_loaders_order(app):
+    """The adapter used to read `page._channel_order`, which it empties at
+    the top of the same method -- so the real install was an empty order, no
+    capabilities and no visibility at all."""
+    page = _step0_page(app)
+    try:
+        page._rebuild_channel_list()
+        st = page.display.state
+
+        assert st.channel_order() == ("DAPI", "CD3", "CD8")
+
+        dapi = st.capabilities("DAPI")
+        assert dapi.is_nucleus is True
+        assert dapi.display_toggleable is True
+        assert dapi.weight_editable is False
+        assert dapi.correction_eligible is False
+
+        for marker in ("CD3", "CD8"):
+            caps = st.capabilities(marker)
+            assert caps.is_nucleus is False, marker
+            # Step0 has no per-marker DISPLAY toggle yet; its row checkbox is
+            # a correction decision. B4-A is where that is split.
+            assert caps.display_toggleable is False, marker
+            assert caps.weight_editable is True, marker
+            assert caps.correction_eligible is True, marker
+    finally:
+        page.close()
+
+
+def test_correction_membership_never_becomes_display_visibility(app):
+    """CD3 is selected for correction and CD8 is not. That difference is
+    about background correction and must not decide either channel's public
+    display visibility."""
+    page = _step0_page(app)
+    try:
+        page._channel_methods = {"CD3": "tophat"}
+        page._rebuild_channel_list()
+        st = page.display.state
+
+        visibility = st.display_visibility()
+        assert "CD3" not in visibility, visibility
+        assert "CD8" not in visibility, visibility
+        # DAPI's layer switch IS a display answer, so it is recorded.
+        assert "DAPI" in visibility
+    finally:
+        page.close()
+
+
+def test_a_step0_rebuild_keeps_a_marker_visibility_someone_else_recorded(app):
+    page = _step0_page(app)
+    try:
+        page._rebuild_channel_list()
+        st = page.display.state
+        st.set_display_visible("CD3", True, origin="step1")
+        st.set_display_visible("CD8", False, origin="step1")
+
+        page._channel_methods = {"CD8": "tophat"}
+        page._rebuild_channel_list()
+
+        assert st.display_visible("CD3") is True, "a rebuild dropped it"
+        assert st.display_visible("CD8") is False, "correction decided it"
+    finally:
+        page.close()
+
+
+def test_the_real_step1_restore_registers_display_state_once(app):
+    """`ConfigPanel.restore_display_state` used to register only the colours;
+    selection and visibility stayed in the QWidgets, where a public getter
+    would have had to look them up."""
+    from block01.ui.step0.config_panel import ConfigPanel
+
+    services = Block01DisplayServices()
+    services.state.bind(_identity("A"))
+    panel = ConfigPanel(["DAPI", "CD3", "CD8"])
+    panel.set_display_state(services.state)
+    try:
+        installs, panel_signals = [], []
+        services.state.state_installed.connect(lambda b: installs.append(b))
+        # The FORBIDDEN ones: a restore is not a click, so nothing may tick,
+        # show, first-enable, edit a weight or dirty the fusion settings.
+        # `current_channel_changed` is not in that set -- the current channel
+        # really did change, and the host is entitled to hear it once.
+        panel.visibility_changed.connect(
+            lambda *a: panel_signals.append(("visibility",) + a))
+        panel.config_changed.connect(lambda: panel_signals.append(("config",)))
+        panel.weight_edited = None      # not a signal on the panel; see rows
+        currents = []
+        panel.current_channel_changed.connect(currents.append)
+        weights_before = {ch: panel.channel_weight(ch)
+                          for ch in ("DAPI", "CD3", "CD8")}
+
+        panel.restore_display_state(
+            colors={"CD3": "#123456"},
+            visibility={"DAPI": True, "CD3": True, "CD8": False},
+            current_channel="CD3")
+
+        assert len(installs) == 1, f"{len(installs)} completion notices"
+        assert panel_signals == [], panel_signals
+        assert currents == ["CD3"], currents
+        st = services.state
+        assert st.selected_channel() == "CD3"
+        assert st.display_visible("CD3") is True
+        assert st.display_visible("CD8") is False
+        assert st.color("CD3") == "#123456"
+        # No scientific side effect: no first-enable, no weight edit.
+        assert {ch: panel.channel_weight(ch)
+                for ch in ("DAPI", "CD3", "CD8")} == weights_before
+        assert panel._edited_channels == set()
+    finally:
+        panel.deleteLater()
+
+
+def test_a_restore_of_what_is_already_there_announces_nothing(app):
+    from block01.ui.step0.config_panel import ConfigPanel
+
+    services = Block01DisplayServices()
+    services.state.bind(_identity("A"))
+    panel = ConfigPanel(["DAPI", "CD3"])
+    panel.set_display_state(services.state)
+    try:
+        payload = dict(colors={"CD3": "#123456"},
+                       visibility={"CD3": True}, current_channel="CD3")
+        panel.restore_display_state(**payload)
+        installs = []
+        services.state.state_installed.connect(lambda b: installs.append(b))
+
+        panel.restore_display_state(**payload)
+
+        assert installs == []
+    finally:
+        panel.deleteLater()

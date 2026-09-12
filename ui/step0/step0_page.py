@@ -7502,10 +7502,15 @@ class Step0Page(QWidget):
 
         Resolved from the path, so it is the same value the second time a
         slide is opened -- which is what the display namespaces are keyed by.
-        A page that has not been bound yet still answers, so a standalone
-        page (its own tests, a tool script) is not left without one.
+
+        A path whose version cannot be read has no restorable identity (see
+        `core.display_identity.resolve_identity`), and this answers with a
+        one-bind EPHEMERAL one instead: a source that is not on disk -- a
+        synthetic loader, a project being assembled -- still gets display
+        state for as long as it is bound, and promises nothing across binds.
         """
-        return display_identity.resolve_identity(self.ome_path)
+        return (display_identity.resolve_identity(self.ome_path)
+                or display_identity.ephemeral_identity(self.ome_path))
 
     def tissue_dataset_token(self):
         """WHICH SLIDE this data service is serving.

@@ -142,8 +142,26 @@ class _InlineTissueFrames:
         return done
 
 
+def _ensure_source_file(path):
+    """Give the synthetic slide a real file.
+
+    Block01 keys its display namespaces on a source VERSION -- path plus
+    `size:mtime_ns` -- and fails closed when it cannot read one, so a path
+    that does not exist gets a one-bind ephemeral identity and no restoration
+    across binds. A harness that wants to exercise A -> B -> A therefore has
+    to put something on disk, exactly as a real slide is.
+    """
+    import pathlib
+    p = pathlib.Path(path)
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"synthetic slide " + p.name.encode())
+    return str(p)
+
+
 def _window(app, path="/tmp/dataset.ome.tiff"):
     from block01.ui.main_window import MainWindow
+    path = _ensure_source_file(path)
     w = MainWindow()
     loader = _Loader(path)
     w.loader = loader
@@ -1138,6 +1156,7 @@ def test_the_real_panel_publish_cost_is_measured_not_assumed(app):
 
 def _switch_dataset(w, path, scale=1.0):
     """A dataset commit, as the page performs one: new loader, new token."""
+    path = _ensure_source_file(path)
     loader = _Loader(path)
     loader._scale = scale
     base = loader._pattern

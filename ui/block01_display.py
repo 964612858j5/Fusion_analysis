@@ -202,13 +202,16 @@ class ChannelDisplayState(QObject):
                 "a display binding needs a DatasetIdentity with a path; "
                 f"got {identity!r}. Fail closed rather than sign unknown "
                 "pixels with the current slide.")
-        if not identity.resolved:
-            # Honest, not fatal: an unresolved identity keys a namespace for
-            # THIS run and can never be mistaken for the resolved one, but a
-            # slide whose file is not on disk still gets display state. See
-            # `core.display_identity.resolve_identity`.
-            perf_trace.mark("display.identity_unresolved",
-                            path=identity.path)
+        if identity.ephemeral:
+            # Usable now, restorable never. `ephemeral` says so in the name
+            # and in the log; it is not a verified slide identity.
+            perf_trace.mark("display.identity_ephemeral", path=identity.path)
+        elif not identity.resolved:
+            raise ValueError(
+                f"a display binding needs a source version; {identity!r} has "
+                "no fingerprint. Use ephemeral_identity() for a source whose "
+                "version cannot be established, or supply an explicit "
+                "fingerprint for a synthetic source that must be restorable.")
         self._generation += 1
         self._binding = _identity.DisplayBinding(identity=identity,
                                                  generation=self._generation)
@@ -216,7 +219,11 @@ class ChannelDisplayState(QObject):
         if ns is None:
             ns = _identity.DisplayNamespace()
             self._namespaces[identity] = ns
+        ns.binding_generation = self._binding.generation
         self._ns = ns
+        # BIND-RECENCY: a formal bind is what refreshes the store's ordering.
+        # A background read, a late seed or a refused result must not, or
+        # stale activity would keep an old namespace alive past its turn.
         self._namespaces.move_to_end(identity)
         self._evict_over_limit()
         if install:
@@ -341,13 +348,18 @@ class ChannelDisplayState(QObject):
             return self.bind(token)
         resolved = _identity.resolve_identity(path)
         if resolved is None:
+            if not path:
+                return None
+            # FAIL CLOSED on restoration, not on usability: a source whose
+            # version cannot be read gets a fresh one-bind identity, so it
+            # displays now and promises nothing across binds. Two binds of
+            # the same unreadable path are two datasets, because nothing can
+            # show that they are one.
             perf_trace.mark("display.identity_unresolved", path=str(path))
-            return None
-        if self._binding is not None and resolved == self.identity():
-            # Same slide, re-announced. A new binding generation all the same:
-            # the caller is telling us a fresh bind happened, and any task
-            # from before it is now stale.
-            return self.bind(resolved)
+            return self.bind(_identity.ephemeral_identity(path))
+        # A new binding generation every time, the same slide included: the
+        # caller is telling us a fresh bind happened, and any task from
+        # before it is now stale.
         return self.bind(resolved)
 
     # ── ports ─────────────────────────────────────────────────────────
@@ -636,6 +648,32 @@ class ChannelDisplayState(QObject):
 
     def mapping_revision(self):
         return self._mapping_rev
+
+    def latest_binding_generation(self, identity=_UNSET):
+        """The generation of the most recent formal bind of a namespace.
+
+        None when the identity is not resident. This, not the CURRENT
+        binding, is what a returning result must match: compared only with
+        what is bound now, the sequence A1 -> B -> A2 -> C -> A1-returns let
+        A1 write into resident A, because at that moment A was merely "some
+        other dataset" and its own second visit was invisible to the check.
+        """
+        ns = self._namespace_for(identity)
+        return None if ns is None else ns.binding_generation
+
+    def accepts_binding(self, binding):
+        """May work started under `binding` still be written?
+
+        Only when its namespace is still resident AND that namespace has not
+        been bound again since. A -> B with A still resident: yes, silently.
+        Once A has been bound a second time, no -- for ever, whatever is
+        current now.
+        """
+        if binding is None:
+            return False
+        latest = self.latest_binding_generation(
+            getattr(binding, "identity", None))
+        return latest is not None and latest == binding.generation
 
     def field_revision(self, key, identity=_UNSET):
         """How many times `key` has been written in a namespace.
@@ -1612,21 +1650,18 @@ class Block01DisplayServices(QObject):
         identity = getattr(binding, "identity", None)
         current = self.state.binding()
         is_current = (current is not None and binding == current)
-        if not is_current and (current is None
-                               or identity != current.identity):
-            # A different slide: allowed, into its own namespace, if it is
-            # still resident.
-            pass
-        elif not is_current:
-            # SAME slide, OLD binding -- A -> B -> A. Refused.
-            perf_trace.mark("display.seed_refused", why="binding",
+        # AGAINST ITS OWN NAMESPACE'S LATEST BIND, not against whatever is
+        # current. Compared only with the current binding, A1 -> B -> A2 -> C
+        # -> A1-returns let A1 write into resident A: at that moment A was
+        # merely "some other dataset", and A's own second visit -- which is
+        # exactly what made A1 stale -- was invisible to the check.
+        if not self.state.accepts_binding(binding):
+            perf_trace.mark("display.seed_refused",
+                            why=("evicted" if self.state.
+                                 latest_binding_generation(identity) is None
+                                 else "binding"),
                             channel=channel, seed=str(binding),
                             current=str(current))
-            return
-        if self.state.field_revision(("mapping", (channel, nucleus)),
-                                     identity) is None:
-            perf_trace.mark("display.seed_refused", why="evicted",
-                            channel=channel, seed=str(binding))
             return
         if self.state.mapping_in(identity, channel, nucleus=nucleus) is not None:
             # The precondition is gone: somebody answered while we measured.

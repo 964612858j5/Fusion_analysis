@@ -181,7 +181,7 @@ class FusionDomainModel(QObject):
         """How many logical commands have changed the draft."""
         return self._draft_rev
 
-    def bind_dataset(self, identity, reason=""):
+    def bind_dataset(self, identity, reason="", install=None):
         """Bind the draft to `identity`. A CHANGE wipes the previous project.
 
         Reuses B2's stable dataset identity -- canonical path plus source
@@ -195,17 +195,36 @@ class FusionDomainModel(QObject):
         ephemeral identity that is new every time, so it never inherits; and
         answers given while NOTHING was bound cannot be signed over to the
         first real slide that arrives.
+
+        `install` makes the bind and its restore ONE transaction. Without it a
+        session restore is two announcements -- the bind clearing the previous
+        slide, then the install putting this one back -- and an observer sees
+        an empty project in between that nobody ever meant.
         """
         key = _identity_key(identity)
-        if key is not None and key == _identity_key(self._identity):
+        same = key is not None and key == _identity_key(self._identity)
+        if same and install is None:
             return False                       # same slide: nothing to wipe
-        self._identity = identity
-        self._reset_scientific_state()
+        before = self.draft_snapshot()
+        self._installing = True
+        try:
+            if not same:
+                self._identity = identity
+                self._reset_scientific_state()
+            if install is not None:
+                self._apply_spec(dict(install), reset=True)
+        finally:
+            self._installing = False
+        if same and self.draft_snapshot() == before:
+            return False
         if reason:
             print(f"[Block01] fusion draft bound to {key or 'nothing'}"
                   f" ({reason})")
         self._draft_rev += 1
-        self.dataset_bound.emit(identity)
+        if not same:
+            self.dataset_bound.emit(identity)
+        if install is not None:
+            self.draft_restored.emit()
         self.draft_changed.emit()
         return True
 
@@ -550,11 +569,20 @@ class FusionDomainModel(QObject):
 
         The nucleus is kept whatever the list says: it is the Step0 handoff's
         answer, not a row in this list.
+
+        A REAL scientific change when it removes anything -- group members,
+        per-group weights, provenance, participation -- so it is announced
+        like every other one. It used to prune in silence, which left the
+        Unsaved label, the preview and the session describing a configuration
+        that no longer existed. A caller that is about to replace the whole
+        draft anyway passes the pruning by and lets `install_draft` do it in
+        one transaction.
         """
         keep = {str(ch) for ch in (channels or [])}
         if not keep:
             return False
         keep.add(self._nucleus_channel)
+        before = self.draft_snapshot()
         moved = False
         for name, weights in self._group_weights.items():
             for ch in [ch for ch in weights if ch not in keep]:
@@ -573,7 +601,11 @@ class FusionDomainModel(QObject):
         for ch in [ch for ch in self._enabled if ch not in keep]:
             self._enabled.discard(ch)
             moved = True
-        return moved
+        if not moved or self._installing or self.draft_snapshot() == before:
+            return False
+        self._draft_rev += 1
+        self.draft_changed.emit()
+        return True
 
     # ── the configuration ─────────────────────────────────────────────
     def full_config(self):
@@ -646,61 +678,7 @@ class FusionDomainModel(QObject):
         before = self.draft_snapshot()
         self._installing = True
         try:
-            if reset:
-                self._groups = {}
-                self._group_weights = {}
-                self._enabled = set()
-                self._provenance = {}
-                self._channel_weight = {}
-                self._nucleus_channel = ""
-                self._nucleus_weight = 0.0
-            nucleus = spec.get("nucleus")
-            if nucleus is not None:
-                self._nucleus_channel = str(nucleus.get("channel") or "")
-                self._nucleus_weight = float(nucleus.get("weight", 0.0) or 0.0)
-            groups = spec.get("groups")
-            if groups is not None:
-                self._groups = {}
-                self._group_weights = {}
-                stored = dict(spec.get("group_weights") or {})
-                for name, data in groups.items():
-                    data = dict(data or {})
-                    # Two shapes, both of them ours: a CONFIG says
-                    # `{group_weight, channels}`; a DRAFT SNAPSHOT says
-                    # `{weight, members}` with the numbers alongside in
-                    # `group_weights`. Neither is guessed at.
-                    members = data.get("members")
-                    if isinstance(members, (list, tuple)):
-                        numbers = dict(stored.get(name) or {})
-                        channels = {str(ch): float(numbers.get(ch, 0.0))
-                                    for ch in members}
-                    else:
-                        channels = {str(ch): float(w) for ch, w
-                                    in (data.get("channels") or {}).items()}
-                    self._groups[str(name)] = {
-                        "weight": float(data.get("group_weight",
-                                                 data.get("weight", 1.0))),
-                        "members": list(channels)}
-                    self._group_weights[str(name)] = channels
-            provenance = spec.get("provenance")
-            if provenance is not None:
-                self._provenance = {str(ch): str(p)
-                                    for ch, p in provenance.items()}
-            weights = spec.get("channel_weight")
-            if weights is not None:
-                self._channel_weight = {str(ch): float(w)
-                                        for ch, w in weights.items()}
-            else:
-                # Keep the channel-level answer in step with the groups, so a
-                # later group adopts the restored number rather than a stale
-                # one from the dataset before.
-                for ch in self.channels():
-                    values = self.stored_weights(ch)
-                    if values:
-                        self._channel_weight[ch] = max(values)
-            enabled = spec.get("enabled")
-            if enabled is not None:
-                self._enabled = {str(ch) for ch in enabled}
+            self._apply_spec(spec, reset=reset)
         finally:
             self._installing = False
         if self.draft_snapshot() == before:
@@ -709,6 +687,64 @@ class FusionDomainModel(QObject):
         self.draft_restored.emit()
         self.draft_changed.emit()
         return True
+
+    def _apply_spec(self, spec, reset=True):
+        """Write a draft spec into the model. No signals; the caller speaks."""
+        if reset:
+            self._groups = {}
+            self._group_weights = {}
+            self._enabled = set()
+            self._provenance = {}
+            self._channel_weight = {}
+            self._nucleus_channel = ""
+            self._nucleus_weight = 0.0
+        nucleus = spec.get("nucleus")
+        if nucleus is not None:
+            self._nucleus_channel = str(nucleus.get("channel") or "")
+            self._nucleus_weight = float(nucleus.get("weight", 0.0) or 0.0)
+        groups = spec.get("groups")
+        if groups is not None:
+            self._groups = {}
+            self._group_weights = {}
+            stored = dict(spec.get("group_weights") or {})
+            for name, data in groups.items():
+                data = dict(data or {})
+                # Two shapes, both of them ours: a CONFIG says
+                # `{group_weight, channels}`; a DRAFT SNAPSHOT says
+                # `{weight, members}` with the numbers alongside in
+                # `group_weights`. Neither is guessed at.
+                members = data.get("members")
+                if isinstance(members, (list, tuple)):
+                    numbers = dict(stored.get(name) or {})
+                    channels = {str(ch): float(numbers.get(ch, 0.0))
+                                for ch in members}
+                else:
+                    channels = {str(ch): float(w) for ch, w
+                                in (data.get("channels") or {}).items()}
+                self._groups[str(name)] = {
+                    "weight": float(data.get("group_weight",
+                                             data.get("weight", 1.0))),
+                    "members": list(channels)}
+                self._group_weights[str(name)] = channels
+        provenance = spec.get("provenance")
+        if provenance is not None:
+            self._provenance = {str(ch): str(p)
+                                for ch, p in provenance.items()}
+        weights = spec.get("channel_weight")
+        if weights is not None:
+            self._channel_weight = {str(ch): float(w)
+                                    for ch, w in weights.items()}
+        else:
+            # Keep the channel-level answer in step with the groups, so a
+            # later group adopts the restored number rather than a stale
+            # one from the dataset before.
+            for ch in self.channels():
+                values = self.stored_weights(ch)
+                if values:
+                    self._channel_weight[ch] = max(values)
+        enabled = spec.get("enabled")
+        if enabled is not None:
+            self._enabled = {str(ch) for ch in enabled}
 
     # ── committed snapshot ────────────────────────────────────────────
     def install_committed_snapshot(self, snapshot):

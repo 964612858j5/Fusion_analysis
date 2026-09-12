@@ -46,7 +46,12 @@ class Config:
 
     def load_panel(self, *_args): pass
 
-    def set_channels(self, channels): self.all_channels = list(channels or [])
+    def set_channels(self, channels, prune=True):
+        # `prune=False` is what a restore passes: the install that follows
+        # replaces the whole draft, so pruning first would announce an
+        # intermediate nobody meant.
+        self.all_channels = list(channels or [])
+        self.pruned = bool(prune)
 
     def set_nucleus_weight(self, _w): pass
 
@@ -79,13 +84,16 @@ class Config:
     restored_weight_history = None
     installed_draft = None
     installed_visibility = None
+    installed_identity = None
+    pruned = None
 
     def restore_weight_initialization(self, channels):
         self.restored_weight_history = list(channels or [])
 
-    def install_fusion_draft(self, spec, visibility=None):
+    def install_fusion_draft(self, spec, visibility=None, identity=None):
         self.installed_draft = dict(spec or {})
         self.installed_visibility = dict(visibility or {})
+        self.installed_identity = identity
 
 
 class StepPage:

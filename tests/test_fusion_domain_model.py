@@ -694,9 +694,15 @@ def test_a_visual_fallback_is_never_saved_as_a_scientific_weight(app):
 # driven, and nobody counted the notifications or the frame requests.
 
 def _bind(w, path, fingerprint="1:1"):
-    """Bind Block01 to a stable dataset identity, the way a commit does."""
-    from block01.core.display_identity import DatasetIdentity
-    identity = DatasetIdentity(path=str(path), fingerprint=str(fingerprint))
+    """Bind Block01 to a stable dataset identity, the way a load does.
+
+    A real file is bound through `resolve_identity`, exactly as Step0 does, so
+    the fingerprint here is the one every other entry computes for it.
+    """
+    from block01.core.display_identity import DatasetIdentity, resolve_identity
+    identity = (resolve_identity(str(path))
+                or DatasetIdentity(path=str(path),
+                                   fingerprint=str(fingerprint)))
     w._display.state.bind(identity)
     _pump()
     return identity
@@ -971,5 +977,210 @@ def test_a_panel_without_a_model_fails_at_once(app):
         w.config.deleteLater()
         _pump()
         assert model.channel_weight("CD3") == model.channel_weight("CD3")
+    finally:
+        w.close()
+
+
+# ── the REAL dataset-load order ──────────────────────────────────────────
+#
+# Step0 binds the new slide's display identity in the MIDDLE of its reload and
+# announces `dataset_committed` at the END. The earlier tests drove the
+# opposite order -- commit, then bind -- so they never saw the commit handler
+# undo the binding that had just been made and leave the model describing no
+# dataset at all.
+
+def _committed(w, path, gen):
+    """What Step0 emits at the end of a successful reload."""
+    w._on_step0_dataset_committed({"gen": int(gen),
+                                   "ome_path": str(path),
+                                   "output_dir": ""})
+    _pump()
+
+
+def test_the_real_load_order_leaves_the_new_slide_bound(app, tmp_path):
+    w = _bare_window()
+    try:
+        b = tmp_path / "B.ome.tiff"
+        b.write_bytes(b"b")
+        identity = _bind(w, b, "22:22")           # 1. Step0 binds B
+        model = w._display.fusion
+        migrations = []
+        model.dataset_bound.connect(lambda i: migrations.append(i))
+        rev_after_bind = model.draft_revision()
+
+        _committed(w, b, 4)                       # 2. ...then announces it
+
+        assert model.scientific_identity() is not None, \
+            "the commit handler discarded the identity Step0 had just bound"
+        assert model.scientific_identity().fingerprint == identity.fingerprint
+        assert model.scientific_identity().path == str(b)
+        # 4. ONE observable migration for one switch, not a bind and a discard.
+        assert migrations == [], migrations
+        assert model.draft_revision() == rev_after_bind
+    finally:
+        w.close()
+
+
+def test_an_edit_after_the_commit_is_adopted_by_the_first_groups(app, tmp_path):
+    """2. B is committed and Step1 has not been opened: a weight named now --
+    0.0 included -- is the answer B's first group takes."""
+    w = _bare_window()
+    try:
+        b = tmp_path / "B.ome.tiff"
+        b.write_bytes(b"b")
+        _bind(w, b, "22:22")
+        _committed(w, b, 4)
+
+        w._display.set_render_weight("CD3", 0.0)
+        w._display.set_render_weight("CD8", 0.25)
+
+        w.loader = _Loader()
+        w.config.set_channels(w.loader.channel_names())
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
+
+        assert w.config.weight_provenance("CD3") == EXPLICIT
+        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.get_groups()["markers"]["CD8"] == pytest.approx(0.25)
+        w.config.set_fusion_enabled("CD3", True)
+        assert w.config.channel_weight("CD3") == 0.0, \
+            "the first enable overwrote a zero this slide's user chose"
+    finally:
+        w.close()
+
+
+def test_loading_a_third_slide_clears_the_second_and_binds_the_third(
+        app, tmp_path):
+    """3. C arrives in the same real order; B's answers go with B."""
+    w = _bare_window()
+    try:
+        b, c = tmp_path / "B.ome.tiff", tmp_path / "C.ome.tiff"
+        b.write_bytes(b"b")
+        c.write_bytes(b"c")
+        _bind(w, b, "22:22")
+        _committed(w, b, 4)
+        w._display.set_render_weight("CD3", 0.25)
+        model = w._display.fusion
+
+        _bind(w, c, "33:33")                      # Step0 binds C...
+        _committed(w, c, 5)                       # ...then announces it
+
+        assert model.weight_provenance("CD3") == ABSENT, \
+            "B's project survived the switch to C"
+        assert model.scientific_identity() is not None
+        assert model.scientific_identity().path == str(c)
+    finally:
+        w.close()
+
+
+def test_a_v2_session_restore_binds_the_identity_its_source_names(
+        app, tmp_path):
+    """5. The restored draft belongs to a dataset, and the formal bind that
+    follows -- same slide, same identity -- leaves it alone."""
+    raw = tmp_path / "A.ome.tiff"
+    raw.write_bytes(b"a")
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        model.install_draft({
+            "groups": {"A": {"group_weight": 1.0,
+                             "channels": {"CD3": 0.2}},
+                       "B": {"group_weight": 1.0, "channels": {"CD3": 0.7}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3", "DAPI"],
+            "provenance": {"CD3": AUTHORITATIVE, "DAPI": AUTHORITATIVE},
+        })
+        payload = json.loads(json.dumps(w._step1_session_payload()))
+        payload["raw_ome_path"] = str(raw)
+    finally:
+        w.close()
+
+    w = _window(app)
+    try:
+        w.loader.filepath = str(raw)
+        w._restore_step1_scientific_state(payload)
+        model = w._display.fusion
+
+        identity = model.scientific_identity()
+        assert identity is not None and identity.path == str(raw), \
+            "a restored project belonged to no dataset"
+        from block01.core.display_identity import resolve_identity
+        assert identity.fingerprint == resolve_identity(str(raw)).fingerprint
+
+        # The handoff's own bind lands on the same slide: nothing is cleared.
+        w._display.state.bind(resolve_identity(str(raw)))
+        _pump()
+        assert model.groups()["A"]["CD3"] == pytest.approx(0.2)
+        assert model.groups()["B"]["CD3"] == pytest.approx(0.7)
+        assert model.fusion_enabled("CD3") is True
+    finally:
+        w.close()
+
+
+def test_pruning_a_channel_out_of_the_project_is_announced(app):
+    """6. Dropping a channel's group membership, weights, provenance and
+    participation is a scientific change, so it goes through the same one
+    notice as every other one -- it used to happen in silence."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        model.install_draft({
+            "groups": {"g": {"group_weight": 1.0,
+                             "channels": {"CD3": 0.2, "CD8": 0.4}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3", "CD8", "DAPI"],
+            "provenance": {"CD3": AUTHORITATIVE, "CD8": AUTHORITATIVE},
+        })
+        model.install_committed_snapshot({"hash": w._fusion_settings_hash()})
+        assert w._fusion_settings_dirty() is False
+        _pump()
+        changed = []
+        model.draft_changed.connect(lambda: changed.append(1))
+        rev = model.draft_revision()
+        saves = []
+        w._schedule_step1_session_save = lambda: saves.append(1)
+
+        assert model.forget_channels_outside(["DAPI", "CD3"]) is True
+
+        assert model.draft_revision() == rev + 1
+        assert changed == [1]
+        assert saves == [1]
+        assert "CD8" not in model.groups()["g"]
+        assert model.fusion_enabled("CD8") is False
+        assert w._fusion_settings_dirty() is True
+
+        # Pruning nothing says nothing.
+        assert model.forget_channels_outside(["DAPI", "CD3"]) is False
+        assert changed == [1]
+    finally:
+        w.close()
+
+
+def test_a_restore_does_not_announce_a_pruned_intermediate(app):
+    """The other half of 6: a caller that installs a whole draft immediately
+    afterwards folds the pruning into that one transaction."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        model.install_draft({
+            "groups": {"g": {"group_weight": 1.0, "channels": {"CD3": 0.3}}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3"], "provenance": {"CD3": AUTHORITATIVE},
+        })
+        _pump()
+        seen = []
+        model.draft_changed.connect(
+            lambda: seen.append(dict(model.groups())))
+
+        w._restore_step1_scientific_state({
+            "version": 1,
+            "fusion_config": {"nucleus": {"channel": "DAPI", "weight": 1.0},
+                              "groups": {"g": {"group_weight": 1.0,
+                                               "channels": {"CD8": 0.6}}}},
+        })
+
+        assert seen, "the restore announced nothing at all"
+        assert all(s.get("g", {}).get("CD8") == pytest.approx(0.6)
+                   for s in seen), \
+            f"an intermediate state was announced: {seen}"
     finally:
         w.close()

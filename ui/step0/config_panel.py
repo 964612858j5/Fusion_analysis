@@ -979,15 +979,23 @@ class ConfigPanel(QWidget):
                   f"{sorted(ambiguous)}")
         self.config_changed.emit()
 
-    def install_fusion_draft(self, spec, visibility=None):
+    def install_fusion_draft(self, spec, visibility=None, identity=None):
         """Install a whole migrated draft, and the display answers with it.
 
         The one entry a session restore uses. The scientific fields go in as
         one transaction with one notice, and the ticks follow -- so no
         observer ever sees a restored group against the participation set of
         the project before it.
+
+        `identity` binds the draft to the dataset it describes in the SAME
+        transaction: binding first and installing after is two notices, and
+        the gap between them is an empty project nobody meant.
         """
-        self._fusion.install_draft(spec or {})
+        if identity is not None:
+            self._fusion.bind_dataset(identity, reason="session restore",
+                                      install=spec or {})
+        else:
+            self._fusion.install_draft(spec or {})
         self._sync_rows_from_model()
         if visibility is not None:
             for ch, on in visibility.items():
@@ -1109,13 +1117,19 @@ class ConfigPanel(QWidget):
                 f"Failed to apply weight configuration:\n{e}")
 
     # ── channel universe ──────────────────────────────────────────────
-    def set_channels(self, channels):
+    def set_channels(self, channels, prune=True):
         """The channel universe changed -- another dataset, or a re-read.
 
         A channel that is gone takes its scientific history with it: coming
         back later it is new again, and its first enable answers 1.0 rather
-        than inheriting a weight from a slide that no longer has it.
+        than inheriting a weight from a slide that no longer has it. Dropping
+        those answers IS a scientific change, so the model announces it.
+
+        `prune=False` is for a caller that installs a whole draft straight
+        afterwards: the install replaces everything anyway, and pruning first
+        would leave an announced intermediate state that nothing ever meant.
         """
         self.all_channels = list(channels or [])
-        self._fusion.forget_channels_outside(self.all_channels)
+        if prune:
+            self._fusion.forget_channels_outside(self.all_channels)
         self._rebuild_rows()

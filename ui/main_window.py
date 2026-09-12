@@ -36,7 +36,9 @@ from ..config import (
 from ..core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
-from ..core import fusion_domain, preview_compose, tissue_compose
+from ..core import (
+    display_identity, fusion_domain, preview_compose, tissue_compose,
+)
 from ..core.channel_remap import (
     apply_channel_remap, tint_and_sum_grays,
     compute_qupath_auto_minmax,
@@ -1476,12 +1478,18 @@ class MainWindow(QMainWindow):
 
         # The snapshot described the previous slide's channels -- and so did
         # the draft, its groups, its provenance and any weight named before
-        # Step1 built a group to hold it. A committed switch ends that
-        # project; a handoff REPUBLISHED for the same slide does not, which
-        # is why this is here and not in `_discard_step1_dataset_state`.
+        # Step1 built a group to hold it.
+        #
+        # BOUND, not discarded. Step0 binds the new slide's display identity
+        # in the middle of its reload and announces the commit at the end, so
+        # a blanket discard here undid the binding that had just been made and
+        # left the model describing no dataset at all. Binding to the slide
+        # this signal names is the same protection -- a DIFFERENT slide takes
+        # the old project with it -- and it is idempotent for the one that is
+        # already bound, so a real switch is one migration rather than two.
         self._forget_fusion_settings("another dataset was committed")
-        self._display.fusion.discard_dataset_state(
-            "another dataset was committed")
+        self._bind_fusion_dataset(str(info.get("ome_path") or ""),
+                                  reason=f"dataset switch committed (gen={gen})")
         self.step0_done = False
         self._step1_context_ready = False
         self.step1_done = False
@@ -2542,7 +2550,17 @@ class MainWindow(QMainWindow):
         """
         sess = dict(sess or {})
         names = self.loader.channel_names() if self.loader else []
-        self.config.set_channels(names)
+        # The dataset this session was written against. The draft is bound to
+        # it in the SAME transaction as the install below, so the restored
+        # project belongs to a slide rather than to nothing -- and the formal
+        # bind that follows a handoff load finds the same identity and leaves
+        # the restored answers alone.
+        identity = self._source_identity(
+            str(sess.get("raw_ome_path") or "")
+            or str(getattr(self.loader, "filepath", "") or ""))
+        # No pruning: the install below replaces the whole draft, and pruning
+        # first would announce an intermediate nobody meant.
+        self.config.set_channels(names, prune=False)
         fusion_cfg = (sess.get("fusion_config")
                       or self._fusion_config_from_flat_weights(sess))
         spec, visibility = fusion_domain.migrate_session(
@@ -2550,7 +2568,7 @@ class MainWindow(QMainWindow):
         print(f"[Step1] session shape={fusion_domain.classify_session(sess)} "
               f"enabled={len(spec.get('enabled') or [])} "
               f"visible={sum(1 for v in visibility.values() if v)}")
-        self.config.install_fusion_draft(spec, visibility)
+        self.config.install_fusion_draft(spec, visibility, identity=identity)
         return visibility
 
     def _apply_step1_fusion_config(self, cfg):
@@ -4235,6 +4253,31 @@ class MainWindow(QMainWindow):
         self._display.coordinator.request_frame(kind="visibility",
                                                 channel=channel)
         self._schedule_step1_session_save()
+
+    @staticmethod
+    def _source_identity(path):
+        """The stable identity of the slide at `path`, or None.
+
+        The same one the display state uses -- canonical path plus source
+        fingerprint -- so the two halves of Block01 agree about which dataset
+        is current. An unresolvable path gets an ephemeral identity, which is
+        new every time: an unprovable source never inherits another slide's
+        project.
+        """
+        path = str(path or "")
+        if not path:
+            return None
+        return (display_identity.resolve_identity(path)
+                or display_identity.ephemeral_identity(path))
+
+    def _bind_fusion_dataset(self, path, reason=""):
+        """Bind the fusion draft to the slide at `path`. Fail closed: with no
+        path at all there is no dataset, so the project is discarded."""
+        identity = self._source_identity(path)
+        if identity is None:
+            return self._display.fusion.discard_dataset_state(
+                reason or "no source path")
+        return self._display.fusion.bind_dataset(identity, reason=reason)
 
     def _on_fusion_draft_changed(self):
         """The scientific draft moved. ONE refresh, once per command.

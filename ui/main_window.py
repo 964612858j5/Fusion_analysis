@@ -750,6 +750,11 @@ class MainWindow(QMainWindow):
         # when that command moved two fields (a first enable answers the
         # weight as well as the participation).
         self._display.fusion.draft_changed.connect(self._on_fusion_draft_changed)
+        # ...and ONE notice for a session restore, which may move the display
+        # half alone (same slide, same draft, other ticks or colours). The
+        # draft signal cannot speak for that case, and following the display
+        # field signals would refresh once per field.
+        self._display.session_restored.connect(self._on_session_restored)
         self.config.current_channel_changed.connect(self._on_current_channel_changed)
         self.config.color_changed.connect(self._on_channel_color_changed)
         # ...and the other direction: a colour picked in the Intensity window
@@ -2620,17 +2625,35 @@ class MainWindow(QMainWindow):
         print(f"[Step1] session shape={fusion_domain.classify_session(sess)} "
               f"enabled={len(spec.get('enabled') or [])} "
               f"visible={sum(1 for v in visibility.values() if v)}")
-        # ONE FACT, TWO OWNERS, ONE NOTICE. The science is written silently,
-        # the display is bound to the same identity, and only then is the
-        # restore published -- so every handler woken by it reads ONE slide
-        # from both halves and the final project from this one. Neither order
-        # works on its own: binding the display first clears the science
-        # through the dataset wire, and announcing the science first shows a
-        # new project against the previous slide's display.
-        self.config.install_fusion_draft(spec, visibility, identity=identity)
-        if identity is not None:
-            self._display.state.bind(identity)
-            self._display.fusion.commit_restore("session restore")
+        # ONE FACT, TWO OWNERS, ONE NOTICE -- and the display fields are
+        # part of the fact, not a second step after it. Colours, ticks and
+        # the current channel go into the SAME transaction as the science, so
+        # no handler woken by the restore can read the restored project
+        # against the previous session's visibility or selection.
+        #
+        # The transaction itself belongs to `Block01DisplayServices`: this
+        # window says what the session means, it puts both owners there and
+        # announces once. A restore that changes neither owner returns False
+        # having announced nothing and burned no binding generation.
+        colors = sess.get("channel_colors")
+        display_payload = self.config.display_restore_payload(
+            colors=colors if isinstance(colors, dict) else None,
+            visibility=visibility,
+            current_channel=str(sess.get("current_channel") or ""))
+        # The panel is a VIEW during a restore: the models are told once,
+        # this window refreshes once from the completion notice, and the
+        # rows are re-read afterwards. The flag keeps the per-field handlers
+        # from treating the restore as a run of user actions.
+        self._restoring_display_state = True
+        try:
+            changed = self._display.restore_session_state(
+                identity, spec, display_payload, reason="session restore")
+        finally:
+            self._restoring_display_state = False
+        if changed:
+            self.config.sync_after_restore()
+        else:
+            print("[Step1] session restore changed nothing; nothing announced")
         return visibility
 
     def _apply_step1_fusion_config(self, cfg):
@@ -2664,7 +2687,8 @@ class MainWindow(QMainWindow):
         if isinstance(recorded, (list, tuple, dict)):
             self.config.restore_weight_initialization(recorded)
 
-    def _apply_step1_display_state(self, sess, visibility=None):
+    def _apply_step1_display_state(self, sess, visibility=None,
+                                   display_installed=False):
         """Restore Step1's own display state: ticks, colours, current channel,
         preview mode.
 
@@ -2694,6 +2718,14 @@ class MainWindow(QMainWindow):
         if visibility is None:
             self._restore_step1_weight_history(sess)
 
+        if display_installed:
+            # The display fields came back inside the session transaction --
+            # identity, colours, visibility and selection at once -- so there
+            # is nothing to install here and nothing to announce a second
+            # time. The transaction's completion notice already asked this
+            # window for its one refresh and its one save.
+            self._on_display_state_restored(schedule_save=False)
+            return
         colors = sess.get("channel_colors")
         if visibility is None:
             visibility = (sess.get("display_visibility")
@@ -2712,12 +2744,18 @@ class MainWindow(QMainWindow):
         else:
             self._on_display_state_restored()
 
-    def _on_display_state_restored(self):
-        """One load and one redraw after a bulk restore."""
+    def _on_display_state_restored(self, schedule_save=True):
+        """One load and one redraw after a bulk restore.
+
+        `schedule_save=False` is for the session transaction, whose single
+        completion notice has already asked for the one save this restore
+        gets; asking again here made one restore two.
+        """
         self._restore_fusion_settings()
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
-        self._schedule_step1_session_save()
+        if schedule_save:
+            self._schedule_step1_session_save()
 
     def _apply_step1_session_fields(self, sess, out_dir, raw_ome, roi_dir,
                                     step2_dir, roi_id=""):
@@ -2733,7 +2771,8 @@ class MainWindow(QMainWindow):
 
         visibility = self._restore_step1_scientific_state(
             sess, source_path=raw_ome)
-        self._apply_step1_display_state(sess, visibility)
+        self._apply_step1_display_state(sess, visibility,
+                                        display_installed=True)
 
         self._p2_params = sess.get("p2_params")
         if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):
@@ -4358,11 +4397,33 @@ class MainWindow(QMainWindow):
         if rev == getattr(self, "_fusion_refresh_rev", None):
             return
         self._fusion_refresh_rev = rev
+        self._refresh_for_draft()
+
+    def _on_session_restored(self, result):
+        """A session restore finished, both owners final: refresh ONCE.
+
+        The transaction's own completion notice, and the only thing this
+        window follows for a restore. The per-owner signals are suppressed
+        for it -- the draft one by `_restoring_display_state`, the display
+        fields by not being a user action -- so this is the single refresh,
+        the single frame request and the single session save a restore gets,
+        whether the science moved, the display moved, or both.
+        """
+        self._fusion_refresh_rev = self._display.fusion.draft_revision()
+        # The frame clock follows the display state itself: a restore that
+        # installed one answered it with ONE frame already, and asking again
+        # here is the second request a restore must not make.
+        self._refresh_for_draft(
+            request_frame=not getattr(result, "display_announced", False))
+
+    def _refresh_for_draft(self, request_frame=True):
+        """The refresh one scientific command gets. Called once per command."""
         self._ensure_channels_cached(self._preview_patch_idx)
         # COALESCED, never composed here: ten slider steps leave one frame,
         # and none of them on the GUI thread.
         self._schedule_preview_update()
-        self._display.coordinator.request_frame(kind="weight")
+        if request_frame:
+            self._display.coordinator.request_frame(kind="weight")
         if self._display.coordinator.active_context_id() != _CTX_STEP1:
             # Step1 is not composing, so nothing else would rebuild the spec
             # and the shared picture would keep the value the user has just

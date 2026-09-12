@@ -467,7 +467,13 @@ class ConfigPanel(QWidget):
         user back at the top of a long panel is not part of that. Same rule
         as `ChannelDock.rebuild`.
         """
+        # WHICH CHANNELS ARE SHOWN is the shared state's answer, not the old
+        # widgets': a rebuild that took it from the rows it is replacing kept
+        # a tick the state no longer holds, and a restore that hid a channel
+        # saw it come back.
         visible = {ch: row.is_visible() for ch, row in self._rows.items()}
+        if self._display_state is not None:
+            visible.update(self._display_state.display_visibility())
         current = self._current
         keep_scroll = self._list.verticalScrollBar().value()
         keep_focus = self._list.hasFocus()
@@ -512,7 +518,11 @@ class ConfigPanel(QWidget):
             self._refresh_ambiguity(ch)
         self._refresh_nucleus_display()
         if current in self._rows:
-            self.set_current_channel(current)
+            # NOT a click: rebuilding the list is not the user choosing
+            # something, so it must not show a channel that is deliberately
+            # hidden -- which is how a rebuild used to write display
+            # visibility nobody asked for.
+            self.set_current_channel(current, auto_show=False)
         else:
             self._current = ""
 
@@ -949,33 +959,6 @@ class ConfigPanel(QWidget):
                   f"{sorted(ambiguous)}")
         self.config_changed.emit()
 
-    def install_fusion_draft(self, spec, visibility=None, identity=None):
-        """Install a whole migrated draft, and the display answers with it.
-
-        The one entry a session restore uses. The scientific fields go in as
-        one transaction with one notice, and the ticks follow -- so no
-        observer ever sees a restored group against the participation set of
-        the project before it.
-
-        `identity` binds the draft to the dataset it describes in the SAME
-        transaction: binding first and installing after is two notices, and
-        the gap between them is an empty project nobody meant.
-        """
-        if identity is not None:
-            # PREPARED, not announced: the host binds the display half to the
-            # same identity and then commits, so nobody is woken while one
-            # owner still describes the previous slide.
-            self._fusion.prepare_restore(identity, spec or {})
-        else:
-            self._fusion.install_draft(spec or {})
-        self._sync_rows_from_model()
-        if visibility is not None:
-            for ch, on in visibility.items():
-                row = self._rows.get(str(ch))
-                if row is not None:
-                    row.set_visible(bool(on))
-        self.config_changed.emit()
-
     def weight_initialized_channels(self):
         """The channels whose weight is an ANSWER rather than an absence.
 
@@ -1004,6 +987,55 @@ class ConfigPanel(QWidget):
         spec["provenance"] = provenance
         self._fusion.install_draft(spec)
         self._sync_rows_from_model()
+
+    def display_restore_payload(self, colors=None, visibility=None,
+                                current_channel=""):
+        """What a saved session MEANS for the shared display state.
+
+        PURE: it writes nothing and announces nothing. The session restore is
+        one transaction across both owners, coordinated by
+        `Block01DisplayServices.restore_session_state`, and this panel's job
+        there is to say what the session's display fields resolve to -- not
+        to install them itself, which is what used to wake the views with the
+        science still half-restored.
+        """
+        payload = {}
+        if colors:
+            payload["colors"] = {str(ch): str(c)
+                                 for ch, c in colors.items() if ch and c}
+        if visibility:
+            known = set(self.all_channels or []) or set(self._rows)
+            state = self._display_state
+            merged = dict(state.display_visibility()) if state else {}
+            merged.update({str(ch): bool(v) for ch, v in visibility.items()
+                           if str(ch) in known})
+            payload["visibility"] = merged
+        current = str(current_channel or "")
+        if current and (current in self._rows
+                        or current in (self.all_channels or [])):
+            payload["selection"] = current
+        return payload
+
+    def sync_after_restore(self):
+        """Make the widgets show what the two models now say.
+
+        A VIEW UPDATE, not a command: no scientific call, no display write
+        and no `config_changed`. The models were restored as one transaction
+        and have already announced it; re-announcing from a widget is how a
+        restore used to reach this window as a run of user actions.
+        """
+        self._sync_rows_from_model()
+        self._resync_colors_from_state()
+        state = self._display_state
+        if state is None:
+            return
+        visibility = state.display_visibility()
+        for ch, row in self._rows.items():
+            if ch in visibility:
+                row.set_visible(bool(visibility[ch]))
+        selected = state.selected_channel()
+        if selected and selected in self._rows:
+            self.set_current_channel(selected, auto_show=False)
 
     def restore_display_state(self, colors=None, visibility=None,
                               current_channel=""):

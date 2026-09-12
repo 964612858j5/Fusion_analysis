@@ -40,6 +40,7 @@ and which results are refused. A step no longer answers any of those.
 """
 
 import collections
+import copy
 import math
 import time
 
@@ -149,6 +150,13 @@ class ChannelDisplayState(QObject):
         self._mapping_rev = 0
         self._applying = False
         self._persisting = False
+        # True while a whole-state install is being announced. See
+        # `install_fanout_active`.
+        self._announcing_install = False
+        # A session restore staged but not yet announced. See
+        # `prepare_restore`: the writes are done, the notices are held until
+        # the scientific half is final too.
+        self._pending_restore = None
 
     # ── identity ──────────────────────────────────────────────────────
     # How many datasets' display state this process keeps. Bounded on
@@ -213,6 +221,20 @@ class ChannelDisplayState(QObject):
                 "no fingerprint. Use ephemeral_identity() for a source whose "
                 "version cannot be established, or supply an explicit "
                 "fingerprint for a synthetic source that must be restorable.")
+        self._drop_pending_restore("another slide was bound")
+        installed_colors, installed_mappings = self._bind_into(
+            identity, install)
+        self.dataset_changed.emit(identity)
+        self._announce_install(installed_colors, installed_mappings)
+        return self._binding
+
+    def _bind_into(self, identity, install=None):
+        """Do a bind's WRITES. No signals; the caller announces.
+
+        Split out so a session restore can take the binding and the payload
+        in silence and announce them with the scientific half, rather than
+        waking every view halfway through the transaction.
+        """
         self._generation += 1
         self._binding = _identity.DisplayBinding(identity=identity,
                                                  generation=self._generation)
@@ -232,9 +254,115 @@ class ChannelDisplayState(QObject):
             _changed, installed_colors, installed_mappings = \
                 self._install_into(ns, install)
         self._mapping_rev += 1
-        self.dataset_changed.emit(identity)
-        self._announce_install(installed_colors, installed_mappings)
-        return self._binding
+        return installed_colors, installed_mappings
+
+    # ── the session restore transaction ───────────────────────────────
+    #
+    # A session restore is ONE fact about two owners -- this state and the
+    # fusion model -- and it is coordinated by `Block01DisplayServices`. This
+    # half stages its writes here, silently, and announces them only when the
+    # scientific half is final too. Nothing else may use it: a bind, an
+    # install or a close takes a staged restore back rather than leaving it
+    # to be announced over whatever arrived in the meantime.
+
+    def prepare_restore(self, identity, payload=None):
+        """Stage a whole display state for `identity`. No signals.
+
+        IDENTITY SAME, NO REBIND. A restore of the session already loaded is
+        not a visit to another slide: rebinding would burn a generation and
+        retire every frame, seed and read in flight for a state that did not
+        move. The payload is written into the CURRENT namespace instead, and
+        `_install_into` already ignores the fields that are equal.
+        """
+        if self._pending_restore is not None:
+            self.cancel_restore("superseded")
+        payload = dict(payload or {})
+        moved = identity is not None and identity != self.identity()
+        before = self._restore_snapshot()
+        if moved:
+            colors, mappings = self._bind_into(identity, payload)
+            changed = True
+        elif self._binding is None:
+            # Nothing bound and no identity to bind: there is no display half
+            # to restore. Staged as a no-op so the caller's cancel/commit
+            # pairing still holds.
+            colors, mappings, changed = [], [], False
+        else:
+            changed, colors, mappings = self._install_into(self._ns, payload)
+            if changed:
+                self._mapping_rev += 1
+        self._pending_restore = {"before": before, "moved": bool(moved),
+                                 "colors": colors, "mappings": mappings,
+                                 "changed": bool(changed)}
+        return True
+
+    def restore_pending(self):
+        """Is a prepared restore waiting to be committed or cancelled."""
+        return self._pending_restore is not None
+
+    def pending_restore_changes(self):
+        """Would committing the prepared restore change anything at all."""
+        pending = self._pending_restore
+        return bool(pending and pending["changed"])
+
+    def commit_restore(self):
+        """Announce a prepared restore. One completion notice, then fields."""
+        pending = self._pending_restore
+        if not pending:
+            return False
+        self._pending_restore = None
+        if not pending["changed"]:
+            return False
+        if pending["moved"]:
+            self.dataset_changed.emit(self.identity())
+        self._announce_install(pending["colors"], pending["mappings"])
+        return True
+
+    def cancel_restore(self, reason=""):
+        """Take a prepared restore back: no signals, and no trace of it."""
+        pending = self._pending_restore
+        if not pending:
+            return False
+        self._pending_restore = None
+        self._restore_from_snapshot(pending["before"])
+        if reason:
+            perf_trace.mark("display.restore_cancelled", reason=str(reason))
+        return True
+
+    def _drop_pending_restore(self, why):
+        """Something else moved this state: a staged restore is void."""
+        if self._pending_restore is None:
+            return False
+        self.cancel_restore(why)
+        return True
+
+    def _restore_snapshot(self):
+        """Everything a staged restore may touch, deep-copied."""
+        return {
+            "binding": self._binding,
+            "generation": self._generation,
+            "namespaces": collections.OrderedDict(
+                (key, copy.deepcopy(ns))
+                for key, ns in self._namespaces.items()),
+            "current": self.identity(),
+            "ns": copy.deepcopy(self._ns),
+            "colors": dict(self._colors),
+            "color_rev": self._color_rev,
+            "mapping_rev": self._mapping_rev,
+        }
+
+    def _restore_from_snapshot(self, shot):
+        self._binding = shot["binding"]
+        self._generation = shot["generation"]
+        self._namespaces = shot["namespaces"]
+        current = shot["current"]
+        if current is not None and current in self._namespaces:
+            self._ns = self._namespaces[current]
+        else:
+            self._ns = shot["ns"]
+        self._colors = shot["colors"]
+        self._color_rev = shot["color_rev"]
+        self._mapping_rev = shot["mapping_rev"]
 
     def install(self, payload, *, identity=None):
         """Write a whole display state for the current slide, atomically.
@@ -248,6 +376,7 @@ class ChannelDisplayState(QObject):
             return False
         if self._binding is None:
             return False
+        self._drop_pending_restore("an install landed before the commit")
         changed, colors, mappings = self._install_into(self._ns, payload)
         if not changed:
             return False
@@ -337,6 +466,23 @@ class ChannelDisplayState(QObject):
         signals mean "somebody chose this", and a restore is not a choice.
         Their consumers follow the completion notice instead.
         """
+        self._announcing_install = True
+        try:
+            self._announce_install_fields(colors, mappings)
+        finally:
+            self._announcing_install = False
+
+    def install_fanout_active(self):
+        """Is a whole-state install being announced right now.
+
+        A consumer that reacts to EVERY field -- the frame clock does -- asks
+        this so one transaction costs it one reaction instead of one per
+        colour and one per window. The fields are still announced: a view
+        that draws one channel needs to know which one moved.
+        """
+        return bool(self._announcing_install)
+
+    def _announce_install_fields(self, colors, mappings):
         self.state_installed.emit(self._binding)
         for channel in colors:
             self.color_changed.emit(channel, self._colors[channel])
@@ -866,6 +1012,11 @@ class TissuePreviewCoordinator(QObject):
         # Tissue Preview stops following -- which is the reported bug.
         state.color_changed.connect(self._on_shared_color_changed)
         state.mapping_changed.connect(self._on_shared_mapping_changed)
+        # ...and ONE request for a whole-state install. Its fields are
+        # announced too, but a transaction is one event: reacting to each of
+        # its colours and windows asked for the same picture several times
+        # over, and a session restore is the transaction that shows it.
+        state.state_installed.connect(self._on_state_installed)
 
     # ── wiring ────────────────────────────────────────────────────────
     def attach_navigator(self, panels_source):
@@ -963,11 +1114,19 @@ class TissuePreviewCoordinator(QObject):
                         generation=self._generation, owner=self._active)
 
     # ── input ─────────────────────────────────────────────────────────
+    def _on_state_installed(self, _binding):
+        """A whole display state landed at once: ONE frame for all of it."""
+        self.request_frame(kind="install")
+
     def _on_shared_color_changed(self, channel, _hexc):
+        if self.state.install_fanout_active():
+            return                      # counted once, by `_on_state_installed`
         if self._touches(channel):
             self.request_frame(kind="color", channel=channel)
 
     def _on_shared_mapping_changed(self, channel):
+        if self.state.install_fanout_active():
+            return
         if self._touches(channel):
             self.request_frame(kind="mapping", channel=channel)
         elif self._last_published is None:
@@ -1517,6 +1676,14 @@ def _fingerprint(rgb):
     return int(np.asarray(flat[::step], dtype=np.int64).sum())
 
 
+#: What a session restore did, for the ONE host that refreshes after it.
+#: `display_announced` says the display half announced an install -- which
+#: the frame clock already answered with one frame, so the host must not ask
+#: for a second one.
+SessionRestore = collections.namedtuple(
+    "SessionRestore", "binding display_announced draft_announced")
+
+
 class Block01DisplayServices(QObject):
     """The Block01-level handle every step is given, and the only one it uses.
 
@@ -1541,6 +1708,9 @@ class Block01DisplayServices(QObject):
     """
 
     navigator_created = pyqtSignal(object)      # the popup, once
+    #: A session restore finished: BOTH owners are final. The one notice a
+    #: host follows to refresh once for a restore, whichever half moved.
+    session_restored = pyqtSignal(object)      # a `SessionRestore`
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2063,6 +2233,59 @@ class Block01DisplayServices(QObject):
         """The display bound another slide: the science binds with it."""
         self.fusion.bind_dataset(identity, reason="dataset bind")
 
+    # ── the session restore transaction ───────────────────────────────
+    def restore_session_state(self, identity, fusion_spec,
+                              display_payload=None, reason="session restore"):
+        """Put a saved session back into BOTH owners as one fact.
+
+        THE ONLY ENTRY for a session restore, and the reason it exists is
+        that a session names one slide's science AND its display answers,
+        while the two live in two objects. Restoring them one after the other
+        -- whatever the order -- leaves a window in which a synchronous
+        handler reads a new project against the previous slide's visibility,
+        selection and colours. So:
+
+        1. the whole input is staged SILENTLY in both owners;
+        2. a restore that moves neither of them is taken back and returns
+           False, having emitted nothing and burned no generation;
+        3. otherwise the display announces, the science announces, and
+           `session_restored` says the transaction is over.
+
+        Every one of those notices is emitted with BOTH halves already
+        written, which is what makes "no callback sees half a restore" a
+        property of this method rather than of each caller's ordering.
+
+        The same session restored again is a NO-OP by the same test: same
+        identity, same draft, same display payload -- no rebind, no
+        generation, no revision, no signal.
+        """
+        if identity is None:
+            return False
+        try:
+            self.fusion.prepare_restore(identity, fusion_spec or {})
+            self.state.prepare_restore(identity, display_payload or {})
+        except Exception:
+            self.fusion.cancel_restore("restore failed")
+            self.state.cancel_restore("restore failed")
+            raise
+        if not (self.fusion.pending_restore_changes()
+                or self.state.pending_restore_changes()):
+            self.fusion.cancel_restore()
+            self.state.cancel_restore()
+            perf_trace.mark("display.restore_noop", reason=str(reason))
+            return False
+        # The display half first: its `dataset_changed` reaches this object's
+        # own handler, and the science it would bind is already staged to the
+        # same identity, so that bind is a no-op rather than a second
+        # announcement over the restore.
+        display_announced = self.state.commit_restore()
+        draft_announced = self.fusion.commit_restore(reason)
+        self.session_restored.emit(SessionRestore(
+            binding=self.state.binding(),
+            display_announced=bool(display_announced),
+            draft_announced=bool(draft_announced)))
+        return True
+
     def set_render_weight(self, channel, weight):
         """THE global entry for "this channel contributes this much".
 
@@ -2213,6 +2436,11 @@ class Block01DisplayServices(QObject):
         drawing.
         """
         self._closing = True
+        # A staged restore may never outlive the session it belongs to: it is
+        # a write waiting for a notice, and a close that left one behind
+        # would keep a project nobody committed.
+        self.fusion.cancel_restore("close")
+        self.state.cancel_restore("close")
         self.coordinator.pause(reason)
 
     def resume(self):

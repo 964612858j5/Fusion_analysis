@@ -235,6 +235,13 @@ class FusionDomainModel(QObject):
         same = key is not None and key == _identity_key(self._identity)
         if same and install is None:
             return False                       # same slide: nothing to wipe
+        # A REAL bind overrules a restore nobody committed: the staged
+        # project describes the slide this bind is leaving, and committing it
+        # afterwards would announce it over the slide that arrived.
+        if self._pending_restore is not None:
+            self._pending_restore = None
+            print("[Block01] fusion restore dropped: another dataset was "
+                  "bound before it was committed")
         before = self.draft_snapshot()
         self._installing = True
         try:
@@ -325,11 +332,19 @@ class FusionDomainModel(QObject):
         written silently here, the display is bound to the same identity, and
         `commit_restore` publishes once, with both halves final.
         """
+        if self._pending_restore is not None:
+            # A second prepare over an uncommitted one would strand the first
+            # one's rollback point. Take the earlier one back first, so the
+            # state this one is measured against is the real one.
+            self.cancel_restore("superseded")
         before = self.draft_snapshot()
         same = (_identity_key(identity) is not None
                 and _identity_key(identity) == _identity_key(self._identity))
         self._pending_restore = {"before": before, "same": same,
-                                 "was_initialized": self._initialized}
+                                 "was_initialized": self._initialized,
+                                 "identity_before": self._identity,
+                                 "committed_before": copy.deepcopy(
+                                     self._committed)}
         self._installing = True
         try:
             self._identity = identity
@@ -340,18 +355,60 @@ class FusionDomainModel(QObject):
             self._installing = False
         return True
 
+    def restore_pending(self):
+        """Is a prepared restore waiting to be committed or cancelled."""
+        return self._pending_restore is not None
+
+    def pending_restore_changes(self):
+        """Would committing the prepared restore change anything at all.
+
+        Asked BEFORE the display half is announced, because a restore that
+        moves neither owner must announce nothing on either side -- and the
+        coordinator cannot know that from this half alone after the fact.
+        """
+        pending = self._pending_restore
+        if not pending:
+            return False
+        # A restore that put back exactly what was already there, on the
+        # slide that was already current, is not a change: announcing it
+        # makes every consumer redraw, re-dirty and re-save a state nobody
+        # moved.
+        return not (pending["same"] and pending["was_initialized"]
+                    and self.draft_snapshot() == pending["before"])
+
+    def cancel_restore(self, reason=""):
+        """Take a prepared restore back, leaving no trace of it.
+
+        The staging is a WRITE, so abandoning it has to undo that write --
+        otherwise a failure halfway through a session load, or a restore the
+        coordinator decides is a no-op, would leave this model describing a
+        project nobody committed.
+        """
+        pending = self._pending_restore
+        if not pending:
+            return False
+        self._pending_restore = None
+        self._installing = True
+        try:
+            self._identity = pending["identity_before"]
+            self._reset_scientific_state()
+            self._apply_spec(dict(pending["before"]), reset=True)
+            self._committed = copy.deepcopy(pending["committed_before"])
+            self._initialized = bool(pending["was_initialized"])
+        finally:
+            self._installing = False
+        if reason:
+            print(f"[Block01] fusion restore cancelled ({reason})")
+        return True
+
     def commit_restore(self, reason=""):
         """Publish the prepared restore. ONE notice, both owners final."""
         pending = self._pending_restore
         if not pending:
             return False
+        announce = self.pending_restore_changes()
         self._pending_restore = None
-        # A restore that put back exactly what was already there, on the
-        # slide that was already current, is not a change: announcing it
-        # makes every consumer redraw, re-dirty and re-save a state nobody
-        # moved.
-        if (pending["same"] and pending["was_initialized"]
-                and self.draft_snapshot() == pending["before"]):
+        if not announce:
             return False
         if reason:
             print(f"[Block01] fusion draft restored for "
@@ -369,6 +426,12 @@ class FusionDomainModel(QObject):
         republishing the same slide's geometry does not make its weights
         untrue, and clearing them there would delete a legal draft.
         """
+        if self._pending_restore is not None:
+            # Same rule as a bind: a discard ends the project a pending
+            # restore belongs to, so that restore may never be committed.
+            self._pending_restore = None
+            print("[Block01] fusion restore dropped: the dataset state was "
+                  "discarded before it was committed")
         if (self._identity is None and not self._groups
                 and not self._channel_weight and not self._enabled
                 and self._committed is None):

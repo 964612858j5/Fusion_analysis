@@ -93,6 +93,30 @@ def make_panel(channels, fusion, state):
     return panel
 
 
+class Toggle:
+    """A mode button: checked or not, like the real one."""
+
+    def __init__(self):
+        self._checked = False
+
+    def setChecked(self, value):
+        self._checked = bool(value)
+
+    def isChecked(self):
+        return self._checked
+
+
+class Label:
+    def __init__(self):
+        self._text = ""
+
+    def setText(self, value):
+        self._text = str(value)
+
+    def text(self):
+        return self._text
+
+
 class StepPage:
     def __init__(self):
         self._out_edit = SimpleNamespace(setText=lambda _v: None)
@@ -210,6 +234,13 @@ def make_window(run, schema=1, loader_path=None, display=None):
     state, fusion = w._display.state, w._display.fusion
     w._fusion_settings_label = None
     w._btn_save_fusion_settings = None
+    # The mode's WIDGETS, so the production setter can run for real: the mode
+    # is not one value but three -- the field, the two buttons and the title
+    # -- and a rollback that put back only the field would still leave the
+    # window saying the other thing.
+    w._btn_mode_overlay = Toggle()
+    w._btn_mode_fusion = Toggle()
+    w._preview_title = Label()
     w._step1_preview_mode = "overlay"
     w.prev_img = SimpleNamespace(image=None, clear=lambda: None,
                                  setImage=lambda *a, **k: None)
@@ -1370,11 +1401,13 @@ def _wire_window(w, watchers=None):
     w._schedule_step1_session_save = count("session_save")
     w._refresh_patch_preview = count("patch_preview")
     w._restore_fusion_settings = count("restore_settings")
+    # THE REAL SETTER, counted. It is what writes the mode, both buttons and
+    # the title, so a rollback can be asserted on all three.
+    real_set_preview_mode = w.set_preview_mode
+
     def set_preview_mode(mode, force=False, reconcile=True):
-        # FAITHFUL: the real setter records the mode, and "is it already in
-        # this mode" is the question the restore asks before touching it.
         count("preview_mode")()
-        w._step1_preview_mode = mode
+        return real_set_preview_mode(mode, force=force, reconcile=reconcile)
 
     w.set_preview_mode = set_preview_mode
     # WHAT EACH FRAME REQUEST WOULD DRAW. A request is composed from the
@@ -1874,3 +1907,131 @@ def test_a_restore_that_moves_the_mode_and_the_owners_draws_one_new_frame(
                  "restore_settings", "display.state_installed",
                  "fusion.draft_changed", "config_changed"):
         assert counts[name] == 0, (name, counts)
+
+
+def _mode_view(w):
+    """What the window SAYS the mode is: the field and both widgets."""
+    return {"mode": w._step1_preview_mode,
+            "overlay_checked": w._btn_mode_overlay.isChecked(),
+            "fusion_checked": w._btn_mode_fusion.isChecked(),
+            "title": w._preview_title.text()}
+
+
+def _assert_failed_restore_changed_nothing(w, counts, before, mode_before):
+    assert _mode_view(w) == mode_before, (
+        "a failed restore left the window in the failed session's mode")
+    assert w._display.state.identity() == before["display_identity"]
+    assert w._display.state.generation() == before["generation"]
+    assert dict(w._display.state.display_visibility()) == before["visibility"]
+    assert w._display.fusion.scientific_identity() == before["fusion_identity"]
+    assert w._display.fusion.draft_snapshot() == before["draft"]
+    assert w._display.fusion.draft_revision() == before["revision"]
+    assert w._display.state.restore_pending() is False
+    assert w._display.fusion.restore_pending() is False
+    for name in ("config_changed", "display.dataset_changed",
+                 "display.state_installed", "display.color_changed",
+                 "display.mapping_changed", "display.selection_changed",
+                 "display.visibility_changed", "fusion.dataset_bound",
+                 "fusion.draft_restored", "fusion.draft_changed",
+                 "frame", "preview", "session_save", "cache",
+                 "patch_preview", "restore_settings"):
+        assert counts[name] == 0, (name, counts)
+
+
+def _failed_restore_fixture(tmp_path, monkeypatch):
+    """A window mid-session, and a session that wants the OTHER mode."""
+    run = make_run(tmp_path, remap=True)
+    w = _restore_window(run, monkeypatch)
+    first = _atomic_session(run)
+    counts, _shots = _wire_window(w)
+    _prebind(w, run.raw)
+    assert w._load_previous_step1_session(auto=True, path=str(first)) is True
+    assert w._step1_preview_mode == "overlay"
+    state, model = w._display.state, w._display.fusion
+    before = {
+        "display_identity": state.identity(),
+        "generation": state.generation(),
+        "visibility": dict(state.display_visibility()),
+        "fusion_identity": model.scientific_identity(),
+        "draft": model.draft_snapshot(),
+        "revision": model.draft_revision(),
+    }
+    # The window in a fully WRITTEN Overlay: field, both buttons and the
+    # title, so the rollback is asserted against a real mode rather than
+    # against widgets nothing has touched yet.
+    w.set_preview_mode("overlay", force=True, reconcile=False)
+    mode_before = _mode_view(w)
+    assert mode_before["overlay_checked"] is True
+    assert mode_before["fusion_checked"] is False
+    assert "Overlay" in mode_before["title"]
+    fusion_session = _atomic_session(run, name="atomic-session-failing.json",
+                                     preview_mode="fusion",
+                                     display_visibility={"DAPI": False,
+                                                         "CD68": True})
+    counts.clear()
+    del w._frames_seen[:]
+    sess = json.loads(fusion_session.read_text(encoding="utf-8"))
+    return w, counts, before, mode_before, sess, run
+
+
+def test_a_failed_transaction_puts_the_preview_mode_back(tmp_path, monkeypatch,
+                                                         app):
+    """The mode is written before the work that can fail, so it rolls back.
+
+    Both owners undo themselves; the mode is not part of either snapshot, and
+    a restore that raised left the window -- the field, both buttons and the
+    title -- in the failed session's mode. That is the same half-state one
+    layer up.
+    """
+    w, counts, before, mode_before, sess, run = _failed_restore_fixture(
+        tmp_path, monkeypatch)
+
+    def explode(_ns, _payload):
+        raise ValueError("the display payload could not be written")
+
+    monkeypatch.setattr(w._display.state, "_install_into", explode)
+
+    with pytest.raises(ValueError):
+        w._restore_step1_scientific_state(sess, source_path=str(run.raw))
+
+    _assert_failed_restore_changed_nothing(w, counts, before, mode_before)
+
+
+def test_a_failed_migration_puts_the_preview_mode_back(tmp_path, monkeypatch,
+                                                       app):
+    """...and so does a failure BEFORE the transaction starts.
+
+    `set_channels` and the session migration both run after the mode is
+    written, so a session this build cannot read must leave the mode alone
+    too.
+    """
+    w, counts, before, mode_before, sess, run = _failed_restore_fixture(
+        tmp_path, monkeypatch)
+    import block01.ui.main_window as mw
+
+    def explode(*_a, **_k):
+        raise ValueError("this session shape cannot be migrated")
+
+    monkeypatch.setattr(mw.fusion_domain, "migrate_session", explode)
+
+    with pytest.raises(ValueError):
+        w._restore_step1_scientific_state(sess, source_path=str(run.raw))
+
+    _assert_failed_restore_changed_nothing(w, counts, before, mode_before)
+
+
+def test_a_failed_channel_universe_puts_the_preview_mode_back(
+        tmp_path, monkeypatch, app):
+    """The first thing after the mode: the channel universe."""
+    w, counts, before, mode_before, sess, run = _failed_restore_fixture(
+        tmp_path, monkeypatch)
+
+    def explode(*_a, **_k):
+        raise ValueError("the channel universe could not be read")
+
+    monkeypatch.setattr(w.config, "set_channels", explode)
+
+    with pytest.raises(ValueError):
+        w._restore_step1_scientific_state(sess, source_path=str(run.raw))
+
+    _assert_failed_restore_changed_nothing(w, counts, before, mode_before)

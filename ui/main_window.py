@@ -2633,8 +2633,31 @@ class MainWindow(QMainWindow):
         mode = str(sess.get("preview_mode") or "")
         mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
                       and mode != self._step1_preview_mode)
+        previous_mode = self._step1_preview_mode
         if mode_moved:
             self.set_preview_mode(mode, force=True, reconcile=False)
+        # ...AND IT ROLLS BACK WITH THE REST. The mode is written before the
+        # work that can fail -- the channel universe, the migration, the two
+        # owners -- and it is not part of either owner's snapshot, so a
+        # restore that raised used to leave the window in the failed
+        # session's mode while both owners went back. That is the same
+        # half-state one layer up. `reconcile=False` on the way back too: a
+        # rollback asks for no frame, no redraw and no save, and announces
+        # nothing.
+        try:
+            return self._restore_step1_session_owners(
+                sess, names, identity, mode_moved)
+        except Exception:
+            if mode_moved:
+                self.set_preview_mode(previous_mode, force=True,
+                                      reconcile=False)
+            raise
+
+    def _restore_step1_session_owners(self, sess, names, identity,
+                                      mode_moved):
+        """The rest of the restore: the channel universe, the migration and
+        the two-owner transaction. Split out so the mode written before it
+        has one place to be taken back from."""
         # No pruning: the install below replaces the whole draft, and pruning
         # first would announce an intermediate nobody meant.
         self.config.set_channels(names, prune=False)

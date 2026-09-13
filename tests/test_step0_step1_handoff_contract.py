@@ -1181,11 +1181,12 @@ def test_a_session_restore_is_one_fact_for_both_owners(
     model.draft_changed.connect(lambda: quiet.append(1))
     model.draft_restored.connect(lambda: quiet.append(1))
     before = model.draft_snapshot()
-    visibility = w._restore_step1_scientific_state(
+    restored = w._restore_step1_scientific_state(
         json.loads(session_path.read_text(encoding="utf-8")),
         source_path=str(run.raw))
     assert model.draft_snapshot() == before
-    assert visibility["CD68"] is False
+    assert restored.visibility["CD68"] is False
+    assert restored.changed is False, "a repeated restore reported a change"
     assert quiet == [], f"a repeated restore announced {len(quiet)} times"
 
 
@@ -1369,7 +1370,13 @@ def _wire_window(w, watchers=None):
     w._schedule_step1_session_save = count("session_save")
     w._refresh_patch_preview = count("patch_preview")
     w._restore_fusion_settings = count("restore_settings")
-    w.set_preview_mode = count("preview_mode")
+    def set_preview_mode(mode, force=False, reconcile=True):
+        # FAITHFUL: the real setter records the mode, and "is it already in
+        # this mode" is the question the restore asks before touching it.
+        count("preview_mode")()
+        w._step1_preview_mode = mode
+
+    w.set_preview_mode = set_preview_mode
     w._display.coordinator.request_frame = count("frame")
     if watchers:
         for signal, name in watchers:
@@ -1458,9 +1465,10 @@ def test_a_real_restore_costs_one_refresh_one_frame_and_one_save(
     counts.clear()
 
     sess = json.loads(session_path.read_text(encoding="utf-8"))
-    visibility = w._restore_step1_scientific_state(
+    restored = w._restore_step1_scientific_state(
         sess, source_path=str(run.raw))
-    assert visibility == {"DAPI": True, "CD68": False}
+    assert restored.visibility == {"DAPI": True, "CD68": False}
+    assert restored.changed is True
 
     assert w._display.fusion.draft_revision() == before_rev + 1, \
         "a restore is ONE logical command on the draft"
@@ -1635,3 +1643,156 @@ def test_a_present_channel_pending_answer_reaches_every_group(tmp_path,
     assert model.groups()["markers"]["CD68"] == pytest.approx(0.0)
     assert model.groups()["markers"]["CD8"] == pytest.approx(0.25)
     assert model.groups()["second"]["CD8"] == pytest.approx(0.25)
+
+
+def test_a_failed_prepare_leaves_neither_owner_moved(tmp_path, monkeypatch,
+                                                     app):
+    """A prepare that raises part way through takes itself back.
+
+    Staging is a WRITE. The rollback point used to be armed only after those
+    writes had succeeded, so a bind or an install that raised left the display
+    on the new slide with nothing recorded to undo it: the host's
+    `cancel_restore` found no pending restore, and the transaction ended with
+    the science rolled back to A and the display standing on B.
+    """
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    other = make_run(first_dir)             # A: the slide on screen
+    run = make_run(second_dir, remap=True)  # B: the session's slide
+    w = _restore_window(run, monkeypatch)
+    session_path = _atomic_session(run)
+    counts, _shots = _wire_window(w)
+    _prebind(w, other.raw)
+    state, model = w._display.state, w._display.fusion
+    state.set_display_visible("DAPI", True, origin="test")
+    state.set_color("CD68", "#123456", origin="test")
+    state.set_mapping("DAPI", 3.0, 4.0, 1.0, origin="test")
+    before = {
+        "identity": state.identity(),
+        "generation": state.generation(),
+        "visibility": dict(state.display_visibility()),
+        "selection": state.selected_channel(),
+        "colors": {ch: state.color(ch) for ch in ("DAPI", "CD68")},
+        "mapping": state.mapping("DAPI"),
+        "mapping_rev": state.mapping_revision(),
+        "color_rev": state.color_revision(),
+        "namespaces": list(state.namespace_identities()),
+        "fusion_identity": model.scientific_identity(),
+        "draft": model.draft_snapshot(),
+        "revision": model.draft_revision(),
+        "lifecycle": model.lifecycle(),
+    }
+    counts.clear()
+
+    boom = ValueError("the payload could not be written")
+
+    def explode(_ns, _payload):
+        raise boom
+
+    monkeypatch.setattr(state, "_install_into", explode)
+
+    sess = json.loads(session_path.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError):
+        w._restore_step1_scientific_state(sess, source_path=str(run.raw))
+
+    assert state.restore_pending() is False
+    assert model.restore_pending() is False
+    assert state.identity() == before["identity"], "the display kept the slide"
+    assert state.generation() == before["generation"], \
+        "a failed prepare burned a binding generation"
+    assert dict(state.display_visibility()) == before["visibility"]
+    assert state.selected_channel() == before["selection"]
+    assert {ch: state.color(ch) for ch in ("DAPI", "CD68")} == before["colors"]
+    assert state.mapping("DAPI") == before["mapping"]
+    assert state.mapping_revision() == before["mapping_rev"]
+    assert state.color_revision() == before["color_rev"]
+    assert list(state.namespace_identities()) == before["namespaces"]
+    assert model.scientific_identity() == before["fusion_identity"], \
+        "the science moved to the session's slide while the display did not"
+    assert model.draft_snapshot() == before["draft"]
+    assert model.draft_revision() == before["revision"]
+    assert model.lifecycle() == before["lifecycle"]
+    for name in ("config_changed", "display.dataset_changed",
+                 "display.state_installed", "display.color_changed",
+                 "display.mapping_changed", "display.selection_changed",
+                 "display.visibility_changed", "fusion.dataset_bound",
+                 "fusion.draft_restored", "fusion.draft_changed",
+                 "frame", "preview", "session_save", "cache",
+                 "patch_preview", "restore_settings"):
+        assert counts[name] == 0, (name, counts)
+
+
+def test_an_already_loaded_session_costs_nothing_in_the_whole_load(
+        tmp_path, monkeypatch, app):
+    """The WHOLE second load, not only the part inside the transaction.
+
+    The transaction returned "nothing moved" and the window went on into the
+    display-restore chain anyway, so an identical session still reloaded the
+    Fusion Settings, re-checked the channel cache and redrew the patch
+    preview. Counting only what happened while the restore was on the stack
+    could not see it, because that chain runs after the restore returns.
+    """
+    run = make_run(tmp_path, remap=True)
+    w = _restore_window(run, monkeypatch)
+    session_path = _atomic_session(run)
+    counts, _shots = _wire_window(w)
+    _prebind(w, run.raw)
+
+    assert w._load_previous_step1_session(
+        auto=True, path=str(session_path)) is True
+    settled = _full_snapshot(w)
+    counts.clear()
+
+    assert w._load_previous_step1_session(
+        auto=True, path=str(session_path)) is True
+
+    assert _full_snapshot(w) == settled
+    for name in ("cache", "patch_preview", "restore_settings", "preview",
+                 "frame", "preview_mode", "config_changed",
+                 "display.state_installed", "fusion.draft_changed"):
+        assert counts[name] == 0, (name, counts)
+    # The authoritative reader's own save is the only work the second load
+    # does, and it is the reader's, not the session overlay's.
+    assert counts["session_save"] == 1, counts
+
+
+def test_a_session_that_only_changes_the_preview_mode_refreshes_once(
+        tmp_path, monkeypatch, app):
+    """Mode moved, owners did not: one mode switch and ONE refresh chain."""
+    run = make_run(tmp_path, remap=True)
+    w = _restore_window(run, monkeypatch)
+    first = _atomic_session(run)
+    counts, _shots = _wire_window(w)
+    _prebind(w, run.raw)
+    assert w._load_previous_step1_session(auto=True, path=str(first)) is True
+    assert w._step1_preview_mode == "overlay"
+    gen = w._display.state.generation()
+    rev = w._display.fusion.draft_revision()
+    counts.clear()
+
+    other_mode = _atomic_session(run, name="atomic-session-fusion.json",
+                                 preview_mode="fusion")
+    assert w._load_previous_step1_session(
+        auto=True, path=str(other_mode)) is True
+
+    assert w._step1_preview_mode == "fusion"
+    assert counts["preview_mode"] == 1, counts
+    # ONE redraw for the mode, and no second one: the owners did not move, so
+    # nothing announced a restore and the chain ran exactly once.
+    assert counts["restore_settings"] == 1, counts
+    assert counts["patch_preview"] == 1, counts
+    assert counts["cache"] == 1, counts
+    assert counts["frame"] == 0, counts
+    assert counts["display.state_installed"] == 0, counts
+    assert counts["fusion.draft_changed"] == 0, counts
+    assert w._display.state.generation() == gen
+    assert w._display.fusion.draft_revision() == rev
+
+    # ...and loading it AGAIN, now that the mode matches, costs nothing.
+    counts.clear()
+    assert w._load_previous_step1_session(
+        auto=True, path=str(other_mode)) is True
+    for name in ("preview_mode", "restore_settings", "patch_preview", "cache",
+                 "frame", "preview"):
+        assert counts[name] == 0, (name, counts)

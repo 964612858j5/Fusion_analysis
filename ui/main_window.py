@@ -360,6 +360,13 @@ class _SharedSpecTissueContext:
         return snapshot
 
 
+#: What a session restore put back: the display visibility the session
+#: implies, and WHETHER either owner actually moved. The second half is what
+#: tells "restore this session" from "this session is already loaded" for
+#: everything that follows the transaction.
+Step1Restore = collections.namedtuple("Step1Restore", "visibility changed")
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -2654,7 +2661,11 @@ class MainWindow(QMainWindow):
             self.config.sync_after_restore()
         else:
             print("[Step1] session restore changed nothing; nothing announced")
-        return visibility
+        # WHETHER ANYTHING MOVED travels with the visibility, because what
+        # follows this -- the mode, the Fusion Settings reload, the channel
+        # cache and the patch preview -- is part of the same restore and must
+        # not run for a session that put nothing back.
+        return Step1Restore(visibility=visibility, changed=bool(changed))
 
     def _apply_step1_fusion_config(self, cfg):
         """Restore the fusion config into the one channel panel.
@@ -2688,7 +2699,8 @@ class MainWindow(QMainWindow):
             self.config.restore_weight_initialization(recorded)
 
     def _apply_step1_display_state(self, sess, visibility=None,
-                                   display_installed=False):
+                                   display_installed=False,
+                                   restore_changed=True):
         """Restore Step1's own display state: ticks, colours, current channel,
         preview mode.
 
@@ -2707,8 +2719,14 @@ class MainWindow(QMainWindow):
         # which channels the restored ticks require depends on it — and then
         # reconciled once, so a restore is one load and one redraw rather than
         # a chain of them.
+        #
+        # SETTING THE MODE IT IS ALREADY IN IS NOT A RESTORE. It used to be
+        # written unconditionally, which made every reload of an unchanged
+        # session look like a change to everything downstream of it.
         mode = str(sess.get("preview_mode") or "")
-        if mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION):
+        mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
+                      and mode != self._step1_preview_mode)
+        if mode_moved:
             self.set_preview_mode(mode, force=True, reconcile=False)
 
         # The weight history is the MODEL's now, restored with the rest of
@@ -2724,6 +2742,14 @@ class MainWindow(QMainWindow):
             # is nothing to install here and nothing to announce a second
             # time. The transaction's completion notice already asked this
             # window for its one refresh and its one save.
+            if not (restore_changed or mode_moved):
+                # NOTHING MOVED, in either owner or in the mode. Then this is
+                # not a restore at all: reloading the same session must not
+                # reload the Fusion Settings, re-check the channel cache or
+                # redraw the patch preview, which is what made an identical
+                # session still cost work.
+                print("[Step1] session already loaded; nothing to restore")
+                return
             self._on_display_state_restored(schedule_save=False)
             return
         colors = sess.get("channel_colors")
@@ -2769,10 +2795,11 @@ class MainWindow(QMainWindow):
         # call _on_patches with session data or reconstruct an ROI.
         patches = list(self._all_patches or [])
 
-        visibility = self._restore_step1_scientific_state(
+        restored = self._restore_step1_scientific_state(
             sess, source_path=raw_ome)
-        self._apply_step1_display_state(sess, visibility,
-                                        display_installed=True)
+        self._apply_step1_display_state(sess, restored.visibility,
+                                        display_installed=True,
+                                        restore_changed=restored.changed)
 
         self._p2_params = sess.get("p2_params")
         if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):

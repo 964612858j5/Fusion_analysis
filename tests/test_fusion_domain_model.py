@@ -79,6 +79,17 @@ def _bare_window():
     return MainWindow()
 
 
+def _visibility_of(restored):
+    """The display visibility a restore resolved.
+
+    `_restore_step1_scientific_state` answers with WHAT it restored and
+    WHETHER anything moved, because everything that follows the transaction
+    -- the preview mode, the Fusion Settings reload, the patch preview --
+    must not run for a session that put nothing back.
+    """
+    return restored.visibility
+
+
 def _window(app, size=32):
     w = _bare_window()
     w.loader = _Loader()
@@ -371,7 +382,7 @@ def test_an_s1_flat_session_restores_every_member_enabled(app):
     try:
         sess = {"version": 1,
                 "channel_weights": {"DAPI": 1.0, "CD3": 0.0, "CD8": 0.6}}
-        visibility = w._restore_step1_scientific_state(sess)
+        visibility = _visibility_of(w._restore_step1_scientific_state(sess))
 
         model = w._display.fusion
         assert model.fusion_enabled("CD3") is True, \
@@ -418,7 +429,7 @@ def test_an_s3_session_keeps_a_hidden_members_numbers_and_leaves_it_out(app):
         sess = dict(_s2_session(),
                     channel_visibility={"DAPI": True, "CD3": False,
                                         "CD8": True})
-        visibility = w._restore_step1_scientific_state(sess)
+        visibility = _visibility_of(w._restore_step1_scientific_state(sess))
 
         model = w._display.fusion
         assert model.fusion_enabled("CD3") is False, \
@@ -479,7 +490,7 @@ def test_the_new_schema_says_display_and_fusion_separately(app):
 
     w = _window(app)
     try:
-        visibility = w._restore_step1_scientific_state(payload)
+        visibility = _visibility_of(w._restore_step1_scientific_state(payload))
         model = w._display.fusion
 
         assert visibility["CD3"] is True and model.fusion_enabled("CD3") is False
@@ -739,7 +750,7 @@ def test_a_heterogeneous_project_survives_the_whole_session_round_trip(app):
 
     w = _window(app)
     try:
-        visibility = w._restore_step1_scientific_state(payload)
+        visibility = _visibility_of(w._restore_step1_scientific_state(payload))
         model = w._display.fusion
 
         groups = model.groups()

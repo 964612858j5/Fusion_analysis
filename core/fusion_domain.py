@@ -351,6 +351,13 @@ class FusionDomainModel(QObject):
             self._reset_scientific_state()
             self._apply_spec(dict(spec or {}), reset=True)
             self._initialized = True
+        except Exception:
+            # Same rule as the display half: a prepare that fails part way
+            # through takes itself back rather than leaving a project nobody
+            # asked for standing against the other owner.
+            self._installing = False
+            self.cancel_restore("prepare failed")
+            raise
         finally:
             self._installing = False
         return True

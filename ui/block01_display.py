@@ -278,22 +278,37 @@ class ChannelDisplayState(QObject):
             self.cancel_restore("superseded")
         payload = dict(payload or {})
         moved = identity is not None and identity != self.identity()
-        before = self._restore_snapshot()
-        if moved:
-            colors, mappings = self._bind_into(identity, payload)
-            changed = True
-        elif self._binding is None:
-            # Nothing bound and no identity to bind: there is no display half
-            # to restore. Staged as a no-op so the caller's cancel/commit
-            # pairing still holds.
-            colors, mappings, changed = [], [], False
-        else:
-            changed, colors, mappings = self._install_into(self._ns, payload)
-            if changed:
-                self._mapping_rev += 1
-        self._pending_restore = {"before": before, "moved": bool(moved),
-                                 "colors": colors, "mappings": mappings,
-                                 "changed": bool(changed)}
+        # THE ROLLBACK POINT IS TAKEN AND ARMED BEFORE THE FIRST WRITE. A
+        # snapshot that is only armed afterwards is no rollback point at all:
+        # a bind or an install that raises half way through left this state on
+        # the new slide with nothing recorded to take it back, so the host's
+        # `cancel_restore` found no pending restore, returned False, and the
+        # transaction ended with the science on A and the display on B --
+        # exactly the half-state it exists to prevent.
+        self._pending_restore = {"before": self._restore_snapshot(),
+                                 "moved": bool(moved), "colors": [],
+                                 "mappings": [], "changed": False}
+        try:
+            if moved:
+                colors, mappings = self._bind_into(identity, payload)
+                changed = True
+            elif self._binding is None:
+                # Nothing bound and no identity to bind: there is no display
+                # half to restore. Staged as a no-op so the caller's
+                # cancel/commit pairing still holds.
+                colors, mappings, changed = [], [], False
+            else:
+                changed, colors, mappings = self._install_into(self._ns,
+                                                               payload)
+                if changed:
+                    self._mapping_rev += 1
+        except Exception:
+            # Whatever was written before it failed goes back, and nothing was
+            # announced: a failed prepare leaves no trace either way.
+            self.cancel_restore("prepare failed")
+            raise
+        self._pending_restore.update({"colors": colors, "mappings": mappings,
+                                      "changed": bool(changed)})
         return True
 
     def restore_pending(self):

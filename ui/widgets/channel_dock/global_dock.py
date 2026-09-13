@@ -28,7 +28,7 @@ copy is what let two lists disagree.
 import weakref
 
 from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import Qt, QObject, pyqtSignal
+from PyQt5.QtCore import Qt, QEvent, QObject, pyqtSignal
 
 from . import template
 
@@ -114,6 +114,13 @@ class GlobalChannelRow(QtWidgets.QWidget):
         #: the tests that write through it keep working.
         self.state_lbl = core.state_slot
         self.swatch = core.swatch
+        # THE SWATCH EATS ITS OWN CLICKS. It is a control, not a piece of the
+        # row: letting the press through reached the row (a selection) and
+        # the LIST under it (a current-item change), so picking a colour for
+        # a hidden channel also selected it and, by the click rule, showed
+        # it. Consuming press and release here is what makes "the swatch only
+        # changes a colour" true of a real mouse rather than of a signal.
+        self.swatch.installEventFilter(self)
         self.name_label = core.name_label
         # NO HOVER TEXT ON THE CORE CONTROLS. The tick box, the swatch, the
         # name and the weight are read at a glance, and a popup over every one
@@ -402,13 +409,49 @@ class GlobalChannelRow(QtWidgets.QWidget):
     def _on_method_text(self, text):
         self.method_changed.emit(self._cid, str(text))
 
+    def _on_swatch(self, ev):
+        """Is this press or release on the colour swatch?"""
+        return self.swatch.geometry().contains(ev.pos())
+
+    def eventFilter(self, obj, ev):
+        """The swatch's own mouse handling: consume, and ask for a colour."""
+        if obj is self.swatch:
+            if ev.type() == QEvent.MouseButtonPress:
+                return True
+            if ev.type() == QEvent.MouseButtonRelease:
+                if ev.button() == Qt.LeftButton:
+                    self.color_clicked.emit(self._cid)
+                return True
+        return super().eventFilter(obj, ev)
+
     def mousePressEvent(self, ev):
+        """A click on the ROW selects the channel -- unless it landed on the
+        swatch, which is a control of its own.
+
+        THE SWATCH ONLY CHANGES A COLOUR. It used to sit inside the row's
+        click target, so picking a colour for a hidden channel also selected
+        it and, by the click rule, showed it: one press produced a selection,
+        a visibility write and a colour write, and the two extra ones were
+        not what the user asked for by clicking a colour chip.
+        """
+        if self._on_swatch(ev):
+            # CONSUMED, not merely unhandled: an ignored press walks up to
+            # the LIST, and the list selects whatever item it lands in -- so
+            # letting it through would select the row by another route.
+            ev.accept()
+            return
         self.row_clicked.emit(self._cid)
         super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        if self.swatch.geometry().contains(ev.pos()):
-            self.color_clicked.emit(self._cid)
+        # The swatch's own filter handles a real click on it; this covers a
+        # release that reaches the ROW over the swatch's rectangle (a drag
+        # that started elsewhere, and the synthetic events tests post).
+        if self._on_swatch(ev):
+            if not self.swatch.underMouse():
+                self.color_clicked.emit(self._cid)
+            ev.accept()
+            return
         super().mouseReleaseEvent(ev)
 
 
@@ -523,6 +566,12 @@ class GlobalChannelDock(QtWidgets.QWidget):
         self._step = step
         for row in self._rows.values():
             row.set_step(step)
+        if step != was:
+            # THE NAME FOLLOWS THE STEP, because the mixed-weight marker does:
+            # a repaint of a label is not a command, so nothing is written
+            # and no row is rebuilt.
+            for cid in list(self._rows):
+                self._refresh_name(cid)
         if step == STEP0 and was != STEP0:
             # Entering Step0 re-asks the correction owner for its answers.
             # Silently: a row catching up with a decision somebody already
@@ -686,8 +735,14 @@ class GlobalChannelDock(QtWidgets.QWidget):
             # a display capability that a page may never have installed.
             if fusion.nucleus()[0] == cid:
                 row.set_weight_editable(False)
-        row.set_name(self._name_of(cid),
-                     mixed_values=(rep.values if (rep and rep.mixed) else ()))
+        # THE MIXED MARKER BELONGS TO THE WEIGHT, so it is shown where the
+        # weight is: in Step1. A `CD3 *` with its "several groups at
+        # different weights" tooltip in Step0, Step2 or Step3 describes a
+        # field that step does not show -- and Step2/Step3 draw a plain
+        # channel name by the ruling.
+        mixed = (rep.values if (rep and rep.mixed and self._step == STEP1)
+                 else ())
+        row.set_name(self._name_of(cid), mixed_values=mixed)
         # CORRECTION IS STEP0'S FIELD. Asking for it in another step would
         # draw a claim about a background-correction result in a step that
         # does not correct -- which is what left `not computed` glowing in
@@ -742,8 +797,7 @@ class GlobalChannelDock(QtWidgets.QWidget):
             return
         rep = self._fusion.representative_weight(cid)
         row.set_weight(rep.value)
-        row.set_name(self._name_of(cid),
-                     mixed_values=(rep.values if rep.mixed else ()))
+        self._refresh_name(cid)
 
     def _on_fusion_participation(self, cid, enabled):
         row = self._rows.get(cid)
@@ -790,6 +844,19 @@ class GlobalChannelDock(QtWidgets.QWidget):
         if self._fusion is not None:
             self._fusion.set_fusion_enabled(cid, bool(enabled),
                                             origin=f"dock-step{self._step}")
+
+    def _refresh_name(self, cid):
+        """Draw one row's name, with the mixed marker only where it means
+        something (Step1). Silent."""
+        row = self._rows.get(cid)
+        if row is None:
+            return
+        mixed = ()
+        if self._fusion is not None and self._step == STEP1:
+            rep = self._fusion.representative_weight(cid)
+            if rep.mixed:
+                mixed = rep.values
+        row.set_name(self._name_of(cid), mixed_values=mixed)
 
     def _refresh_correction(self, cid):
         """Draw Step0's correction answers on one row. Silent."""

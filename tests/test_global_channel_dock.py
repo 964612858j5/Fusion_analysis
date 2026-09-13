@@ -934,3 +934,169 @@ def test_the_production_window_builds_no_legacy_channel_list(app):
         assert w.config._nuc_value.text().startswith("DAPI")
     finally:
         _close(w)
+
+
+# ── the swatch is a control, not part of the row's click target ─────────────
+
+def _click_row(dock, cid, control=None):
+    """A REAL mouse click, delivered where a mouse delivers one.
+
+    A row is an item WIDGET inside the list's viewport, so a press lands on
+    the row (or on the control under the cursor) and reaches the list only by
+    propagation -- which is why a swatch that does not consume its press ends
+    up selecting the row as well. Posting straight at the viewport would skip
+    the row and prove nothing about that.
+    """
+    from PyQt5.QtTest import QTest
+    row = dock.row(cid)
+    # Offscreen, a row's children keep their pre-layout positions until the
+    # layout is activated; a click computed from those lands nowhere.
+    row.layout().activate()
+    # `QTest` posts the event to the target and does NOT translate it as it
+    # propagates to the list underneath, so the row under test is brought to
+    # the top of the list (the way a user searching for it would) and its
+    # coordinates and the viewport's coincide.
+    assert dock.list_widget.visualItemRect(dock.item(cid)).top() == 0, \
+        "bring the row to the top of the list before clicking it"
+
+    target = control if control is not None else row
+    pos = (target.rect().center() if control is not None
+           else row.name_label.geometry().center())
+    QTest.mouseClick(target, Qt.LeftButton, Qt.NoModifier, pos)
+    QtWidgets.QApplication.processEvents()
+
+
+def test_a_real_click_on_the_swatch_changes_only_the_colour(app, monkeypatch):
+    """Picking a colour is not selecting, and not showing.
+
+    The swatch used to sit inside the row's click target, so one press on a
+    colour chip selected the channel AND (by the click rule) showed a hidden
+    one: three answers for a gesture that asked for one. Driven through
+    `QTest.mouseClick` rather than by emitting the row's signal, because the
+    order the press and the release arrive in IS the bug.
+    """
+    from PyQt5 import QtGui
+
+    w = _window(app, names=("DAPI", "CD3", "CD8"))
+    try:
+        state, fusion = w._display.state, w._display.fusion
+        w._set_step_active(1)
+        dock = w._channel_dock
+        dock.resize(420, 220)
+        dock.show()
+        QtWidgets.QApplication.processEvents()
+        # ONE row on screen, the one under test: see `_click_row`.
+        dock.search.setText("CD3")
+        QtWidgets.QApplication.processEvents()
+        row = dock.row("CD3")
+        state.set_display_visible("CD3", False, origin="test")
+        state.set_selected_channel("CD8", origin="test")
+        fusion.edit_channel_weight("CD3", 0.3, origin="test")
+        fusion.set_fusion_enabled("CD3", False, origin="test")
+        before = (state.selected_channel(), state.display_visible("CD3"),
+                  fusion.channel_weight("CD3"), fusion.fusion_enabled("CD3"),
+                  fusion.draft_revision())
+        monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                            staticmethod(lambda *a, **k: QtGui.QColor("#123456")))
+
+        _click_row(dock, "CD3", row.swatch)
+
+        assert state.color("CD3").lower() == "#123456"
+        assert (state.selected_channel(), state.display_visible("CD3"),
+                fusion.channel_weight("CD3"), fusion.fusion_enabled("CD3"),
+                fusion.draft_revision()) == before
+    finally:
+        dock.hide()
+        _close(w)
+
+
+def test_a_press_delivered_to_the_row_over_the_swatch_still_selects_nothing(
+        app, monkeypatch):
+    """The second line of the same rule.
+
+    The swatch consumes its own clicks, so the row's swatch check only comes
+    up when the press reaches the ROW over the swatch's rectangle -- a drag
+    that began elsewhere, or an event delivered to the row directly. It must
+    answer the same way: a colour, and no selection.
+    """
+    from PyQt5 import QtGui
+    from PyQt5.QtTest import QTest
+
+    w = _window(app, names=("DAPI", "CD3", "CD8"))
+    try:
+        state = w._display.state
+        w._set_step_active(1)
+        dock = w._channel_dock
+        dock.resize(420, 220)
+        dock.show()
+        dock.search.setText("CD3")
+        QtWidgets.QApplication.processEvents()
+        row = dock.row("CD3")
+        row.layout().activate()
+        state.set_display_visible("CD3", False, origin="test")
+        state.set_selected_channel("CD8", origin="test")
+        monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                            staticmethod(lambda *a, **k: QtGui.QColor("#654321")))
+
+        QTest.mouseClick(row, Qt.LeftButton, Qt.NoModifier,
+                         row.swatch.geometry().center())
+        QtWidgets.QApplication.processEvents()
+
+        assert state.color("CD3").lower() == "#654321"
+        assert state.selected_channel() == "CD8"
+        assert state.display_visible("CD3") is False
+    finally:
+        dock.hide()
+        _close(w)
+
+
+def test_a_real_click_on_the_name_still_selects_and_shows(app):
+    """...and the rest of the row is unchanged: a click there selects, and
+    shows a hidden marker, because selecting something invisible is a dead
+    end."""
+    w = _window(app, names=("DAPI", "CD3", "CD8"))
+    try:
+        state = w._display.state
+        w._set_step_active(1)
+        dock = w._channel_dock
+        dock.resize(420, 220)
+        dock.show()
+        QtWidgets.QApplication.processEvents()
+        dock.search.setText("CD3")
+        QtWidgets.QApplication.processEvents()
+        state.set_display_visible("CD3", False, origin="test")
+        state.set_selected_channel("CD8", origin="test")
+
+        _click_row(dock, "CD3")
+
+        assert state.selected_channel() == "CD3"
+        assert state.display_visible("CD3") is True
+    finally:
+        dock.hide()
+        _close(w)
+
+
+def test_the_mixed_marker_is_shown_only_where_the_weight_is(app):
+    """`CD3 *` describes the WEIGHT, so it belongs to the step that shows the
+    weight. Step0 draws correction, Step2 and Step3 draw a plain name."""
+    w = _window(app)
+    try:
+        fusion = w._display.fusion
+        fusion.add_group("g2", {"CD3": 0.7})
+        fusion.add_group("markers", {"CD3": 0.2, "CD8": 0.0})
+        dock = w._channel_dock
+        row = dock.row("CD3")
+        assert fusion.representative_weight("CD3").mixed
+
+        for step in STEP_WALK:
+            w._set_step_active(step)
+            if step == 1:
+                assert row.name_label.text() == "CD3 *", step
+                assert "several groups" in row.toolTip(), step
+            else:
+                assert row.name_label.text() == "CD3", step
+                assert row.toolTip() == "", step
+        # ...and the groups were never flattened by drawing them
+        assert set(fusion.representative_weight("CD3").values) == {0.2, 0.7}
+    finally:
+        _close(w)

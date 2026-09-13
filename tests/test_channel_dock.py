@@ -190,8 +190,12 @@ def test_step0_adapter_legacy_registry(app):
         _channel_colors = {"CD3": (255, 0, 0)}
         calls = []
 
-        def _on_channel_checkbox_toggled(self, name, state):
-            self.calls.append(("cb", name, state))
+        def _on_channel_visibility_toggled(self, name, visible):
+            self.calls.append(("cb", name, visible))
+
+        def _channel_row_method(self, ch):
+            """THE page's final decision, as the real page answers it."""
+            return self._channel_decisions.get(ch) or "original"
 
         def _on_channel_method_changed(self, name, txt):
             self.calls.append(("method", name, txt))
@@ -222,8 +226,10 @@ def test_step0_adapter_legacy_registry(app):
     # selection skipped nucleus
     assert page.current_channel == "CD3"
     # method change reaches the legacy slot
-    page._channel_rows["CD20"]["method_cb"].setCurrentText("Original")
-    assert ("method", "CD20", "Original") in page.calls
+    # ...to a DIFFERENT final choice: an unassigned row already shows
+    # Original, and setting a combo to what it already says emits nothing.
+    page._channel_rows["CD20"]["method_cb"].setCurrentText("TopHat")
+    assert ("method", "CD20", "TopHat") in page.calls
     # saved decision reflected
     assert page._channel_rows["CD3"]["method_cb"].currentText() == "TopHat"
 
@@ -253,11 +259,14 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     assert page._channel_decisions == {}
     assert page._prior_channel_decisions == {
         "CD3": "cucim", "CD20": "cucim", "CD8": "tophat"}
-    # unassigned rows mirror the global Method box (default Both); the
-    # checkbox says nothing about correction -- it is display visibility. A
-    # fresh slide shows DAPI and its FIRST marker, and hides the others.
+    # An unassigned row shows ORIGINAL -- the answer the page actually holds
+    # and the one Save writes for it. It used to show the global Method box's
+    # value (`Both`), a choice Save could not write. The checkbox says nothing
+    # about correction: it is display visibility, and a fresh slide shows DAPI
+    # and its FIRST marker while hiding the others.
     for ch in ("CD3", "CD20", "CD8"):
-        assert page._channel_rows[ch]["method_cb"].currentText() == "Both"
+        assert page._channel_rows[ch]["method_cb"].currentText() == "Original"
+        assert page._channel_row_method(ch) == "original"
     assert page._channel_rows["CD3"]["checkbox"].isChecked()
     for ch in ("CD20", "CD8"):
         assert not page._channel_rows[ch]["checkbox"].isChecked(), ch

@@ -216,7 +216,11 @@ class Step0Page(QWidget):
     channel_color_changed = pyqtSignal(str, str)
 
     # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
-    _METHOD_IDX = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
+    #: Where each FINAL decision sits in the Method combos. Three answers,
+    #: because those are the three a channel may finally have; `both` is a
+    #: computation, not a decision, and is deliberately absent -- a row that
+    #: showed it was showing something Save could not write.
+    _METHOD_IDX = {"original": 0, "tophat": 1, "cucim": 2}
 
     def __init__(self, parent=None, display_services=None):
         super().__init__(parent)
@@ -780,8 +784,14 @@ class Step0Page(QWidget):
             "choose, change or discard a background-correction method.")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
         self._method_all = QtWidgets.QComboBox()
-        self._method_all.addItems(["TopHat", "cucim", "Both"])
-        self._method_all.setCurrentIndex(2)  # default Both
+        # THE BULK FINAL CHOICE. `Both` is gone from it: this box assigns
+        # what Save will write for every correction-eligible channel, and
+        # "both" is a computation rather than an answer Save can write. The
+        # only thing that ever consumed it was `_on_method_all_changed`,
+        # which writes decisions -- it starts no run (the Process button is
+        # gone; TopHat/cuCIM Enter are the compute entries).
+        self._method_all.addItems(["Original", "TopHat", "cucim"])
+        self._method_all.setCurrentIndex(0)  # default: no correction
         self._method_all.setStyleSheet(
             "QComboBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
             "border-radius:3px;padding:1px 4px;font-size:10px;}"
@@ -789,9 +799,9 @@ class Step0Page(QWidget):
         )
         self._method_all.setFixedWidth(64)
         self._method_all.setToolTip(
-            "Assign this background-correction method to every "
-            "correction-eligible channel. Correction only: it does not show "
-            "or hide anything.")
+            "Set the FINAL background-correction choice for every "
+            "correction-eligible channel — what Save writes. Correction "
+            "only: it shows nothing, hides nothing and starts no run.")
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
         # One compact button opens the floating "Intensity" window -- the
         # internal remap workbench's inspector (histogram, Min/Max, Gamma,
@@ -6305,8 +6315,12 @@ class Step0Page(QWidget):
         # no longer pre-seed this session's assignments. Until the user assigns
         # a method (checkbox / combo / decision panel), rows display the global
         # Method box value (default Both) via _refresh_channel_row.
+        # THE READ BOUNDARY for old projects: `both` (and anything else
+        # unreadable) becomes `original`, because that is what those Saves
+        # actually published.
         self._prior_channel_decisions = {
-            k: ("original" if v == "both" else v) for k, v in raw_decisions.items()}
+            k: step0_handoff.migrate_correction_decision(v)
+            for k, v in raw_decisions.items()}
         self._channel_decisions = {}
         params = (self._loaded_config or {}).get("method_params") or {}
         self._tophat_slider.blockSignals(True)
@@ -6401,8 +6415,8 @@ class Step0Page(QWidget):
                 "QComboBox::drop-down{border:none;}"
                 "QComboBox:disabled{color:#555;}"
             )
-            saved = self._channel_decisions.get(ch) or self._channel_methods.get(ch, "both")
-            method_cb.setCurrentIndex(self._METHOD_IDX.get(saved, 2))  # default Both
+            saved = self._channel_row_method(ch)
+            method_cb.setCurrentIndex(self._METHOD_IDX.get(saved, 0))
             method_cb.currentTextChanged.connect(
                 lambda txt, name=ch: self._on_channel_method_changed(name, txt))
             lay.addWidget(method_cb)
@@ -8432,9 +8446,7 @@ class Step0Page(QWidget):
                 self._decision_status.setText("The locked nucleus channel is always excluded from correction.")
                 self._dec_orig.setChecked(True)
                 return
-            decision = self._channel_decisions.get(ch, "original")
-            if decision == "both":
-                decision = "original"
+            decision = self._channel_row_method(ch)
             if decision == "tophat":
                 self._dec_top.setChecked(True)
             elif decision == "cucim":
@@ -8473,19 +8485,16 @@ class Step0Page(QWidget):
             row["status_lbl"].setText("★")
             row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
         else:
-            decision = self._channel_decisions.get(ch)
-            # The Method combo IS the assigned-method display now (folds in the old
-            # decision badge). Unassigned channels (no decision THIS session)
-            # mirror the global Method box (default Both) instead of a stale
-            # previous-run decision.
+            # THE COMBO IS THE DECISION, DRAWN. A channel nobody has
+            # assigned is `original` -- which is what Save writes for it and
+            # what `_channel_row_method` answers -- so that is what the row
+            # shows. It used to show the global Method box's value instead,
+            # so a fresh row said `Both` while the program meant, and saved,
+            # Original.
+            decision = self._channel_row_method(ch)
             if method_cb is not None:
-                if decision:
-                    idx = self._METHOD_IDX.get(decision, 3)
-                else:
-                    idx = self._METHOD_IDX.get(
-                        self._method_all.currentText().lower(), 2)
                 method_cb.blockSignals(True)
-                method_cb.setCurrentIndex(idx)
+                method_cb.setCurrentIndex(self._METHOD_IDX.get(decision, 0))
                 method_cb.blockSignals(False)
             if row["status_lbl"].text() != "⟳":   # don't clobber a running spinner
                 row["status_lbl"].setText("")
@@ -8630,9 +8639,18 @@ class Step0Page(QWidget):
         channel assigned Original stays on screen, and hiding a channel does
         not throw its method away.
         """
-        method = str(method or "original").lower()
-        if method not in {"tophat", "cucim", "both", "original"}:
-            method = "original"
+        method = str(method or "original").strip().lower()
+        if not step0_handoff.is_final_correction_decision(method):
+            # FAIL CLOSED, LOUDLY. Quietly turning an illegal value into one
+            # of the three would make this function the place a decision the
+            # user never made comes from -- which is exactly what the silent
+            # `both -> original` in Save used to do. Old DATA is migrated at
+            # the read boundary (`migrate_correction_decision`); a COMMAND
+            # carrying an illegal value is a bug and says so.
+            raise ValueError(
+                f"{method!r} is not a final correction decision for {ch!r}; "
+                f"expected one of {step0_handoff.FINAL_CORRECTION_DECISIONS}. "
+                "`both` computes two candidates; it is not a choice.")
         self._channel_decisions[ch] = method
         if method == "original":
             self._channel_methods.pop(ch, None)
@@ -9593,8 +9611,18 @@ class Step0Page(QWidget):
         for ch in self._channel_order:
             if ch == self.nucleus_channel:
                 continue
-            d = self._channel_decisions.get(ch, "original")
-            decisions[ch] = "original" if d == "both" else d
+            # ALREADY LEGAL BY CONSTRUCTION: `_set_channel_decision` is the
+            # only writer and it refuses anything else, so Save no longer
+            # turns `both` into `original` behind the user's back -- a
+            # correction that made the file disagree with the row. Legacy
+            # data is migrated where it is READ.
+            d = self._channel_row_method(ch)
+            if not step0_handoff.is_final_correction_decision(d):
+                raise ValueError(
+                    f"{ch!r} holds {d!r}, which is not a final correction "
+                    "decision; refusing to write a config that means "
+                    "something else than the page shows.")
+            decisions[ch] = d
         # Per-parameter overrides only. Missing keys inherit method_params now
         # and after reload; an equal value is not serialized as a fake override.
         channel_params = {}

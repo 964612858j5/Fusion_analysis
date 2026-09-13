@@ -171,11 +171,12 @@ class Step0ChannelDockAdapter(QObject):
         states = []
         for ch in order_names:
             is_nucleus = (ch == page.nucleus_channel)
-            saved = (page._channel_decisions.get(ch)
-                     or page._channel_methods.get(ch)
-                     or getattr(page, "_method_all", None)
-                     and page._method_all.currentText().lower()
-                     or "both")
+            # THE FINAL DECISION the row will show: the page's one answer,
+            # which is `original` for a channel nobody has assigned. It used
+            # to fall back to the bulk box's method, so a fresh row came up
+            # claiming a correction the page did not intend and Save did not
+            # write.
+            saved = page._channel_row_method(ch)
             states.append(ChannelState(
                 channel_id=ch,
                 name=f"{ch} ★" if is_nucleus else ch,

@@ -31,6 +31,12 @@ import shutil
 import zarr
 
 from .bg_correction import (
+    # The correction domain owns what a FINAL decision may be; the handoff
+    # re-exports the three names because it is the boundary that publishes
+    # them, and every writer already reaches for them through here.
+    FINAL_CORRECTION_DECISIONS,
+    is_final_correction_decision,
+    migrate_correction_decision,
     corrected_zarr_report,
     stamp_corrected_zarr_provenance,
     CORRECTED_ZARR_OUTPUT_KIND,
@@ -650,12 +656,9 @@ def clean_correction_config(config):
     params = dict(cfg.get("method_params") or {})
     decisions = {}
     for ch, method in (cfg.get("channel_decisions") or {}).items():
-        m = str(method).strip().lower()
-        if m == "both":
-            m = "original"
-        if m not in {"tophat", "cucim", "original"}:
-            m = "original"
-        decisions[str(ch)] = m
+        # A READ BOUNDARY: this function also cleans configs that came off
+        # disk, so legacy `both` (and anything unreadable) is migrated here.
+        decisions[str(ch)] = migrate_correction_decision(method)
     channel_params = {}
     for ch, cp in (cfg.get("channel_params") or {}).items():
         cp = cp or {}

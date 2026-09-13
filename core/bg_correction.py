@@ -138,6 +138,37 @@ except Exception as _cucim_exc:
 
 
 
+#: THE legal final background-correction choices. A channel is corrected one
+#: way, the other way, or not at all -- there is no fourth answer, and in
+#: particular "both" is NOT one: it names a COMPUTATION ("work out both
+#: candidates so they can be compared"), not a decision about what Save
+#: writes. Keeping the two apart is what stopped a row that showed `Both`
+#: from being published as `original` behind the user's back.
+FINAL_CORRECTION_DECISIONS = ("original", "tophat", "cucim")
+
+
+def is_final_correction_decision(value):
+    """Is `value` one of the three answers a channel may finally have."""
+    return str(value).strip().lower() in FINAL_CORRECTION_DECISIONS
+
+
+def migrate_correction_decision(value):
+    """A decision read from OLD data, as one of the three legal answers.
+
+    THE READ BOUNDARY, and the only place `both` is still understood. A
+    project saved before this split recorded `both` for "compute both
+    candidates", and what those Saves actually published was the UNCORRECTED
+    channel -- `clean_correction_config` has always written `original` for it.
+    So `both` migrates to `original`: choosing TopHat or cuCIM here would
+    invent a decision the user never made and change what the file means.
+
+    Anything else unrecognised migrates the same way, for the same reason: an
+    unreadable answer is not a licence to correct somebody's pixels.
+    """
+    m = str(value or "").strip().lower()
+    return m if m in FINAL_CORRECTION_DECISIONS else "original"
+
+
 def _normalize_correction_config(cfg):
     if not cfg:
         return None
@@ -158,10 +189,15 @@ def _normalize_correction_config(cfg):
             "tophat_radius": int(method_params.get("tophat_radius", TOPHAT_RADIUS_DEFAULT)),
             "cucim_sigma": int(method_params.get("cucim_sigma", CUCIM_SIGMA_DEFAULT)),
         },
+        # A READ BOUNDARY, and it MIGRATES rather than drops: a project
+        # written before candidate computation was told apart from the final
+        # choice recorded `both`, and what those Saves published was the
+        # uncorrected channel. Silently dropping the key said the same thing
+        # by accident; saying it on purpose is what makes the answer legible
+        # -- and `migrate_correction_decision` is the one place that decides.
         "channel_decisions": {
-            str(k): str(v).strip().lower()
+            str(k): migrate_correction_decision(v)
             for k, v in channel_decisions.items()
-            if str(v).strip().lower() in {"tophat", "cucim", "original"}
         },
         "channel_params": channel_params,
         "channel_param_overrides_schema": str(

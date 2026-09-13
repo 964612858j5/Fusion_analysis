@@ -967,3 +967,248 @@ def test_an_unassigned_channel_is_original_everywhere(app, tmp_path):
         assert saved[ch] == "original", (ch, saved)
         assert ch in page._raw_save_channels(), ch
     page.close()
+
+
+# ── B4-A follow-up: candidate computation vs the FINAL choice ────────────
+
+def _decision_page(app, tmp_path):
+    """A real page with no decision made yet."""
+    page = _correction_page(app, tmp_path)
+    page._channel_decisions.clear()
+    page._channel_methods.clear()
+    page._refresh_channel_row("CD3")
+    return page
+
+
+def test_a_fresh_row_says_original_and_saves_original(app, tmp_path):
+    """A: the row, the authority and the file agree on a fresh slide.
+
+    The combo used to show the global Method box's value (`Both`) while the
+    page's answer -- and what Save wrote -- was Original. The user was shown
+    a choice the program did not hold and the file could not express.
+    """
+    page = _decision_page(app, tmp_path)
+
+    assert page._channel_rows["CD3"]["method_cb"].currentText() == "Original"
+    assert page._channel_row_method("CD3") == "original"
+    assert page._build_config()["channel_decisions"]["CD3"] == "original"
+    assert "CD3" in page._raw_save_channels()
+    page.close()
+
+
+def test_each_visible_final_choice_means_the_same_thing_everywhere(app,
+                                                                   tmp_path):
+    """B: Original, TopHat and cuCIM, through the real combo, one at a time."""
+    from block01.core import step0_handoff
+
+    page = _decision_page(app, tmp_path)
+    state = page.display.state
+    state.set_display_visible("CD3", True, origin="test")
+    combo = page._channel_rows["CD3"]["method_cb"]
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "Original", "TopHat", "cucim"]
+
+    for shown, decision in (("TopHat", "tophat"), ("cucim", "cucim"),
+                            ("Original", "original")):
+        combo.setCurrentText(shown)
+
+        assert combo.currentText() == shown
+        assert page._channel_decisions["CD3"] == decision
+        assert page._channel_row_method("CD3") == decision
+        assert page._build_config()["channel_decisions"]["CD3"] == decision
+        assert step0_handoff.clean_correction_config(
+            page._build_config())["channel_decisions"]["CD3"] == decision
+        assert page._channel_signature("CD3", page._channel_row_method(
+            "CD3"))[0] == decision
+        # Not computed for this choice yet, so Save would write it raw.
+        assert "CD3" in page._raw_save_channels()
+        # ...and choosing how to correct a channel never shows or hides it.
+        assert state.display_visible("CD3") is True
+
+    # With real completion evidence for the assigned method, it is no longer
+    # a raw channel -- and that is the only thing that changes.
+    combo.setCurrentText("TopHat")
+    page._computed_channels.add("CD3")
+    page._computed_signatures["CD3"] = page._channel_signature("CD3", "tophat")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+    assert page._channel_compute_state("CD3") == "computed"
+    assert "CD3" not in page._raw_save_channels()
+    page.close()
+
+
+def test_both_is_not_a_choice_anywhere_a_user_can_make_one(app, tmp_path):
+    """C: it is gone from both combos, refused by the writer, and cannot
+    come out of Save."""
+    import pytest as _pytest
+    from block01.core import step0_handoff
+
+    page = _decision_page(app, tmp_path)
+    row_combo = page._channel_rows["CD3"]["method_cb"]
+    assert "Both" not in [row_combo.itemText(i)
+                          for i in range(row_combo.count())]
+    assert "Both" not in [page._method_all.itemText(i)
+                          for i in range(page._method_all.count())]
+
+    with _pytest.raises(ValueError):
+        page._set_channel_decision("CD3", "both")
+    assert page._channel_decisions.get("CD3") in (None, "")
+
+    page._method_all.setCurrentText("TopHat")
+    row_combo.setCurrentText("cucim")
+    saved = page._build_config()["channel_decisions"]
+    assert "both" not in saved.values()
+    assert set(saved.values()) <= set(step0_handoff.FINAL_CORRECTION_DECISIONS)
+
+    # ...and if something DID put an illegal value in memory -- a bug, not a
+    # user -- Save says so rather than quietly writing a different answer
+    # than the page is showing. That silent `both -> original` is what made
+    # the row and the file disagree in the first place.
+    page._channel_decisions["CD3"] = "both"
+    with _pytest.raises(ValueError):
+        page._build_config()
+    page.close()
+
+
+def test_computed_evidence_for_both_leaves_the_final_choice_alone(app,
+                                                                  tmp_path):
+    """D: two candidates computed, one final answer.
+
+    `_process_current_channel("both")` is the compatibility entry that works
+    out both candidates so they can be compared. Evidence is not a decision:
+    the channel keeps the choice the user made, and that is what Save writes.
+    """
+    page = _decision_page(app, tmp_path)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+
+    # Both candidates computed, as the merged signature records it.
+    page._computed_signatures["CD3"] = page._merge_channel_signatures(
+        page._channel_signature("CD3", "tophat"),
+        page._channel_signature("CD3", "cucim"))
+    page._computed_channels.add("CD3")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+
+    assert page._computed_signatures["CD3"][0] == "both"
+    assert page._channel_decisions["CD3"] == "tophat"
+    assert page._channel_row_method("CD3") == "tophat"
+    assert page._build_config()["channel_decisions"]["CD3"] == "tophat"
+    # The evidence still counts FOR the chosen method: it was computed.
+    assert page._channel_compute_state("CD3") == "computed"
+    # ...and switching the final choice to the other candidate keeps the
+    # cuCIM evidence rather than throwing it away.
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    assert page._computed_signatures["CD3"][0] == "both"
+    assert page._build_config()["channel_decisions"]["CD3"] == "cucim"
+    page.close()
+
+
+def test_a_legacy_both_config_comes_back_as_original(app, tmp_path):
+    """E: a real project written before the split, read and re-written."""
+    import json
+
+    from block01.core import step0_handoff
+
+    legacy = {"channel_decisions": {"CD3": "both", "CD20": "tophat"},
+              "method_params": {"tophat_radius": 30, "cucim_sigma": 50}}
+    (tmp_path / "correction_config.json").write_text(json.dumps(legacy),
+                                                     encoding="utf-8")
+    page = _correction_page(app, tmp_path)
+    page.output_dir = str(tmp_path)
+    page._load_existing_config()
+    page._rebuild_channel_list()
+
+    # THE READ BOUNDARY ITSELF: the config loader migrates the legacy value,
+    # so everything downstream of it sees one of the three legal answers
+    # rather than having to know what `both` used to mean.
+    from block01.core.bg_correction import _load_correction_config
+    loaded = _load_correction_config(str(tmp_path / "correction_config.json"))
+    assert loaded["channel_decisions"]["CD3"] == "original"
+    assert loaded["channel_decisions"]["CD20"] == "tophat"
+
+    assert page._prior_channel_decisions["CD3"] == "original"
+    assert page._prior_channel_decisions["CD20"] == "tophat"
+    assert page._channel_row_method("CD3") == "original"
+    assert page._channel_rows["CD3"]["method_cb"].currentText() == "Original"
+    # ...and the new writer cannot put `both` back into the file.
+    written = page._build_config()["channel_decisions"]
+    assert "both" not in written.values()
+    assert step0_handoff.clean_correction_config(
+        legacy)["channel_decisions"]["CD3"] == "original"
+    page.close()
+
+
+def test_the_bulk_box_is_a_bulk_final_choice(app, tmp_path, monkeypatch):
+    """F: Original / TopHat / cuCIM over every eligible channel, no run."""
+    import block01.ui.step0.step0_page as sp
+
+    page = _decision_page(app, tmp_path)
+    state = page.display.state
+    visible_before = dict(state.display_visibility())
+    fusion_before = page.display.fusion.draft_snapshot()
+
+    def _boom(*a, **k):
+        raise AssertionError("a bulk FINAL choice started a correction run")
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+
+    for shown, decision in (("TopHat", "tophat"), ("cucim", "cucim"),
+                            ("Original", "original")):
+        page._method_all.setCurrentText(shown)
+        saved = page._build_config()["channel_decisions"]
+        for ch in page._channel_order:
+            if ch == page.nucleus_channel:
+                continue
+            assert page._channel_decisions[ch] == decision, (ch, shown)
+            assert saved[ch] == decision, (ch, shown)
+            assert page._channel_rows[ch]["method_cb"].currentText() == shown
+        assert page.nucleus_channel not in page._channel_decisions
+        assert dict(state.display_visibility()) == visible_before
+        assert page.display.fusion.draft_snapshot() == fusion_before
+    page.close()
+
+
+def test_a_final_choice_starts_no_run_and_no_process_button_came_back(
+        app, tmp_path, monkeypatch):
+    """G: the compute entries are the two parameter boxes, and only them."""
+    import block01.ui.step0.step0_page as sp
+
+    page = _decision_page(app, tmp_path)
+
+    def _boom(*a, **k):
+        raise AssertionError("a final choice started a correction run")
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+    # ON the channel whose choice is about to change: a run is only ever
+    # started for the current channel, so a test that left the page on
+    # another one could not see a choice that started one.
+    page._on_channel_selected_by_id("CD3")
+    page._on_channel_row_clicked("CD3")
+    assert page.current_channel == "CD3"
+    # WHAT WOULD RUN, recorded at the one entry every run goes through --
+    # rather than waiting for a worker to be constructed, which several
+    # guards inside that entry can prevent for reasons of their own.
+    started = []
+    monkeypatch.setattr(type(page), "_process_current_channel",
+                        lambda self, method="both": started.append(method))
+
+    # The bulk box first, then this channel's own choice on top of it.
+    page._method_all.setCurrentText("TopHat")
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+
+    assert started == [], f"a final choice started a run: {started}"
+    for gone in ("_btn_process", "_process_btn", "_btn_process_all"):
+        assert not hasattr(page, gone), gone
+
+    # ...and the two boxes are the entries that DO compute, one method each.
+    page._on_dec_param_entered("tophat")
+    page._on_dec_param_entered("cucim")
+    assert started == ["tophat", "cucim"]
+    # The compatibility programmatic entry is the only one that asks for both
+    # candidates, and it is not a final choice.
+    page._on_dec_param_entered()
+    assert started == ["tophat", "cucim", "both"]
+    assert page._channel_decisions["CD3"] == "cucim", "a run changed the choice"
+    page.close()

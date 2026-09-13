@@ -366,13 +366,16 @@ def test_the_preview_ignores_the_checkbox_and_the_method_combo(app,
     row = page._channel_rows["CD3"]
     row["checkbox"].setChecked(False)
     row["method_cb"].setCurrentText("Original")
-    assert page._channel_decisions["CD3"] == "original"
+    # A fresh channel IS Original -- setting the combo to what it already
+    # shows emits nothing, so the answer is asked of the page, not of a key
+    # that only exists once somebody has changed something.
+    assert page._channel_row_method("CD3") == "original"
 
     page._full_method_buttons["tophat"].click()
 
     assert tab.calls[-1][1] == "tophat"
     # ...and the preview changed no decision of its own.
-    assert page._channel_decisions["CD3"] == "original"
+    assert page._channel_row_method("CD3") == "original"
     assert not row["checkbox"].isChecked()
 
 

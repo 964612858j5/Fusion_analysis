@@ -115,7 +115,11 @@ class Step0ChannelRow(ChannelRowBase):
 
     method_changed = pyqtSignal(str, str)      # (channel_id, method text)
 
-    METHODS = ["TopHat", "cucim", "Both", "Original"]
+    #: The three FINAL answers, in the order the page's `_METHOD_IDX` uses.
+    #: `Both` was in this list and is not an answer: it names computing two
+    #: candidates to compare, which is what the TopHat/cuCIM parameter boxes
+    #: do, while Save can only write one of these three.
+    METHODS = ["Original", "TopHat", "cucim"]
 
     # state -> (glyph, stylesheet, tooltip). The three states the Background
     # Correction page derives from its signature bookkeeping, plus the two
@@ -183,8 +187,14 @@ class Step0ChannelRow(ChannelRowBase):
 
     @classmethod
     def _method_index(cls, method: str) -> int:
-        lut = {"tophat": 0, "cucim": 1, "both": 2, "original": 3}
-        return lut.get(str(method).lower(), -1)
+        """Where a FINAL decision sits in `METHODS`, or -1 if it is none.
+
+        `both` is deliberately not in the table: it is a computation, and a
+        row asked to show it would be claiming a choice Save cannot write.
+        A host handing one in gets -1 and the combo is left where it is.
+        """
+        lut = {name.lower(): i for i, name in enumerate(cls.METHODS)}
+        return lut.get(str(method).strip().lower(), -1)
 
     def _on_model_final(self, cid, method):
         if cid != self._cid:

@@ -102,8 +102,17 @@ def _payload():
 
 
 def _tick(page, *channels):
+    """Show the channels. DISPLAY only, since B4-A."""
     for ch in channels:
         page._channel_rows[ch]["checkbox"].setChecked(True)
+
+
+def _assign(page, method, *channels):
+    """Give the channels a FINAL correction decision, through the combo the
+    user uses. A channel with no decision is `original`, and Original has no
+    parameters to go stale against."""
+    for ch in channels:
+        page._channel_rows[ch]["method_cb"].setCurrentText(method)
 
 
 def _finish(page, *channels):
@@ -153,6 +162,7 @@ def test_a_finished_run_leaves_its_channel_up_to_date(page):
 
 def test_a_sigma_change_makes_only_that_channel_stale(page):
     _tick(page, "CD3", "CD20")
+    _assign(page, "cucim", "CD3", "CD20")   # sigma is cuCIM's parameter
     _recompute(page, "CD3")
     _finish(page, "CD3")
     _recompute(page, "CD20")

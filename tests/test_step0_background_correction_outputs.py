@@ -893,3 +893,77 @@ def test_a_finished_correction_does_not_show_the_channel(app, tmp_path):
     assert page._channel_rows["CD3"]["checkbox"].isEnabled() is True
     assert page._channel_compute_state("CD3") == "computed"
     page.close()
+
+
+def test_the_bulk_method_box_assigns_every_eligible_channel(app, tmp_path):
+    """A fresh channel gets a DECISION, not a combo that shows one.
+
+    The box used to write a decision only for channels that already had one,
+    so on a slide nobody had assigned anything the row displayed TopHat, the
+    signature and the compute state were worked out for TopHat, and
+    `_build_config` -- what Save writes and what the handoff carries --
+    said Original for the same channel.
+    """
+    page = _correction_page(app, tmp_path)
+    page._channel_decisions.clear()
+    page._channel_methods.clear()
+
+    page._method_all.setCurrentText("TopHat")
+
+    saved = page._build_config()["channel_decisions"]
+    for ch in page._channel_order:
+        if ch == page.nucleus_channel:
+            continue
+        assert page._channel_decisions[ch] == "tophat", ch
+        assert page._channel_row_method(ch) == "tophat", ch
+        assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
+        assert saved[ch] == "tophat", (ch, saved)
+    # The nucleus is not correction-eligible and is not assigned.
+    assert page.nucleus_channel not in page._channel_decisions
+    assert page.nucleus_channel not in saved
+    page.close()
+
+
+def test_a_combo_driven_out_of_step_decides_nothing(app, tmp_path):
+    """The row's Method combo is a PROJECTION of the decision.
+
+    It was read first by `_channel_row_method`, so a combo that had drifted
+    -- a blocked write, a rebuild racing a change -- answered for the
+    signature, the compute state and the raw-save list while Save wrote the
+    recorded decision. One answer now, and it is the recorded one.
+    """
+    page = _correction_page(app, tmp_path)
+    assert page._channel_decisions["CD3"] == "tophat"
+    signature_before = page._channel_signature("CD3", "tophat")
+    saved_before = page._build_config()
+    raw_before = page._raw_save_channels()
+
+    combo = page._channel_rows["CD3"]["method_cb"]
+    combo.blockSignals(True)
+    combo.setCurrentText("cucim")             # the mirror now disagrees
+    combo.blockSignals(False)
+
+    assert page._channel_row_method("CD3") == "tophat"
+    assert page._channel_signature(
+        "CD3", page._channel_row_method("CD3")) == signature_before
+    assert page._build_config() == saved_before
+    assert page._raw_save_channels() == raw_before
+    page.close()
+
+
+def test_an_unassigned_channel_is_original_everywhere(app, tmp_path):
+    """No decision means no correction -- in the signature, in the compute
+    state, in the raw-save list and in what Save writes. The runtime answer
+    used to be "both" (the combo's default) while Save wrote Original."""
+    page = _correction_page(app, tmp_path)
+    page._channel_decisions.clear()
+    page._channel_methods.clear()
+
+    saved = page._build_config()["channel_decisions"]
+    for ch in page._channel_order:
+        if ch == page.nucleus_channel:
+            continue
+        assert page._channel_row_method(ch) == "original", ch
+        assert saved[ch] == "original", (ch, saved)
+        assert ch in page._raw_save_channels(), ch
+    page.close()

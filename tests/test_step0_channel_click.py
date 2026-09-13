@@ -164,15 +164,16 @@ def test_a_click_on_a_hidden_row_shows_that_channel(app):
     """
     page = _page(app)
     state = page.display.state
-    assert state.display_visible("CD3") is False
+    # CD20 is not the marker a fresh slide shows, so it starts hidden.
+    assert state.display_visible("CD20") is False
 
-    _click_row(page, "CD3")
+    _click_row(page, "CD20")
 
-    assert page.current_channel == "CD3"
-    assert state.display_visible("CD3") is True
-    assert page._channel_rows["CD3"]["checkbox"].isChecked() is True
+    assert page.current_channel == "CD20"
+    assert state.display_visible("CD20") is True
+    assert page._channel_rows["CD20"]["checkbox"].isChecked() is True
     # A click is not a correction decision.
-    assert page._channel_decisions.get("CD3") in (None, "")
+    assert page._channel_decisions.get("CD20") in (None, "")
 
 
 def test_a_programmatic_selection_does_not_show_a_hidden_channel(app):
@@ -284,3 +285,69 @@ def test_the_bulk_method_box_moves_correction_only(app):
     assert page._channel_decisions["CD3"] == "tophat"
     assert dict(state.display_visibility()) == visible_before
     assert "DAPI" not in page._channel_decisions
+
+
+# ── B4-A follow-up: the capabilities DRIVE the row's controls ────────────
+
+def test_the_rows_controls_follow_the_capabilities_not_a_locked_flag(app):
+    """`locked` used to stand for four decisions at once, so a channel that
+    is never background-corrected also could not be shown and was skipped by
+    a bulk sweep. Each control asks its own permission now."""
+    page = _page(app)
+    model = page._dock_adapter.model
+
+    dapi = model.get("DAPI")
+    assert dapi.display_toggleable is True
+    assert dapi.correction_eligible is False
+    assert dapi.bulk_toggleable is False
+    dapi_row = page._channel_rows["DAPI"]["row_widget"]
+    assert dapi_row.checkbox.isEnabled() is True      # shown and hidden
+    assert dapi_row.method_cb.isEnabled() is False    # never corrected
+
+    marker = model.get("CD3")
+    assert marker.display_toggleable is True
+    assert marker.correction_eligible is True
+    assert marker.bulk_toggleable is True
+    marker_row = page._channel_rows["CD3"]["row_widget"]
+    assert marker_row.checkbox.isEnabled() is True
+    assert marker_row.method_cb.isEnabled() is True
+
+    # ...and a bulk sweep in the MODEL follows `bulk_toggleable` too.
+    model.set_visible("DAPI", True)
+    model.set_all_visible(False)
+    assert model.get("DAPI").visible is True, "the DAPI layer was swept"
+    assert model.get("CD3").visible is False
+
+
+def test_a_fresh_slide_shows_its_first_marker_and_hides_the_rest(app):
+    """The ruled default: a picture to land on, without handing Step1 a
+    slide with every channel stacked. DAPI keeps its own product default."""
+    page = _page(app)
+    visibility = page.display.state.display_visibility()
+
+    markers = [ch for ch in page._channel_order if ch != page.nucleus_channel]
+    assert visibility[markers[0]] is True, visibility
+    for ch in markers[1:]:
+        assert visibility[ch] is False, (ch, visibility)
+    assert visibility["DAPI"] is True
+    # ...and the whole thing arrived as ONE install: order, capabilities,
+    # visibility and selection together.
+    assert page.display.state.channel_order() == tuple(page._channel_order)
+    assert page.display.state.selected_channel() == page.current_channel
+
+
+def test_answers_someone_else_recorded_survive_a_rebuild(app):
+    """A session or a walk back to this slide keeps every display answer;
+    the defaults are only for a channel nobody has answered for."""
+    page = _page(app)
+    state = page.display.state
+    state.set_display_visible("CD3", False, origin="step1")
+    state.set_display_visible("CD20", True, origin="step1")
+    state.set_display_visible("DAPI", False, origin="step1")
+
+    page._rebuild_channel_list()
+
+    visibility = state.display_visibility()
+    assert visibility["CD3"] is False, visibility
+    assert visibility["CD20"] is True, visibility
+    assert visibility["DAPI"] is False, visibility

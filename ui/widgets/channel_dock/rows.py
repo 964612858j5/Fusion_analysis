@@ -48,7 +48,8 @@ class ChannelRowBase(QtWidgets.QWidget):
         core = template.build_row_core(
             self, name=(st.name if st else cid),
             show_visibility=show_visibility,
-            checkable=not (st and st.locked))
+            # MAY THIS CHANNEL BE SHOWN AND HIDDEN -- not "is it special".
+            checkable=(st.display_toggleable if st else True))
         self.checkbox = core.checkbox
         self.state_slot = core.state_slot
         self.swatch = core.swatch
@@ -154,7 +155,10 @@ class Step0ChannelRow(ChannelRowBase):
         self.method_cb = QtWidgets.QComboBox()
         self.method_cb.addItems(self.METHODS)
         self.method_cb.setFixedWidth(64)
-        self.method_cb.setEnabled(not (st and st.locked))
+        # MAY THIS CHANNEL BE BACKGROUND-CORRECTED. The nucleus cannot, and
+        # that is the reason its combo is off -- not that it is "locked",
+        # which also meant it could not be shown.
+        self.method_cb.setEnabled(st.correction_eligible if st else True)
         self.method_cb.setStyleSheet(template.ACCESSORY_COMBO_QSS)
         if st and st.bg_final_method:
             idx = self._method_index(st.bg_final_method)

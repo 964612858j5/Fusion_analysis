@@ -122,12 +122,10 @@ class Step0ChannelDockAdapter(QObject):
         handler = getattr(page, "_on_channel_row_clicked", None)
         if clicked is not None and handler is not None:
             clicked.connect(handler)
-        row.checkbox.setEnabled(True)
-        if is_nucleus:
-            # DAPI is never background-corrected: the method combo is off
-            # because `correction_eligible` is false, NOT because the row is
-            # "locked" -- it is shown, hidden and weighted like any other.
-            row.method_cb.setEnabled(False)
+        # The checkbox and the method combo are enabled by the row itself,
+        # from `display_toggleable` and `correction_eligible`. This adapter
+        # used to overrule both by hand from `is_nucleus`, which is how the
+        # capabilities stayed a comment rather than a dependency.
         return row
 
     # -- rebuild (mirrors legacy _rebuild_channel_list) ------------------------
@@ -150,20 +148,25 @@ class Step0ChannelDockAdapter(QObject):
         # FROM THE LOADER'S ORDER, not `page._channel_order`: that list is
         # emptied at the top of this method, so asking the page for its
         # landing channel here answers None.
-        landing = (page.nucleus_channel
-                   if page.nucleus_channel in order_names
-                   else next((ch for ch in order_names
-                              if ch != page.nucleus_channel), None))
+        #
+        # THE ONE MARKER A NEW SLIDE SHOWS. The page LANDS on DAPI -- that is
+        # the viewing rule -- but DAPI is the nucleus and has its own default;
+        # the marker that is current (or, on a slide nobody has chosen one
+        # for, the first) is the one whose display answer starts as shown, so
+        # selecting it is a picture rather than an empty frame. Every other
+        # marker starts hidden: a slide handed to Step1 with all of them
+        # stacked is not what the user asked for.
+        visible_marker = current if (current and current in order_names
+                                     and current != page.nucleus_channel) \
+            else next((ch for ch in order_names
+                       if ch != page.nucleus_channel), None)
 
         def _default_visible(ch):
             if ch in known:
                 return bool(known[ch])
             if ch == page.nucleus_channel:
                 return _dapi_visible(page)
-            # A NEW slide shows the one marker it lands on. Showing all of
-            # them would hand Step1 a slide with every channel stacked;
-            # showing none would open Step0 on an empty picture.
-            return ch == landing
+            return ch == visible_marker
 
         states = []
         for ch in order_names:
@@ -179,6 +182,12 @@ class Step0ChannelDockAdapter(QObject):
                 visible=_default_visible(ch),
                 color=_swatch_hex(page, ch),
                 locked=is_nucleus,
+                # THE SAME THREE FACTS the shared state is given below, so
+                # the row's permissions and Block01's capabilities cannot
+                # drift apart: one is a copy of the other, made here.
+                display_toggleable=True,
+                correction_eligible=not is_nucleus,
+                bulk_toggleable=not is_nucleus,
                 bg_final_method=saved,
                 bg_preview_method=page._channel_methods.get(ch),
                 # The compute state is DERIVED from the page's signature
@@ -232,7 +241,13 @@ class Step0ChannelDockAdapter(QObject):
                 "visibility": {st.channel_id: bool(st.visible)
                                for st in states},
             }
-            selection = current if current in set(order) else landing
+            # The page's landing rule decides what a slide with nothing
+            # chosen opens on (DAPI); the row loop below puts the list on the
+            # same channel, so the selection installed here is that answer.
+            selection = (current if current in set(order)
+                         else (page.nucleus_channel
+                               if page.nucleus_channel in set(order)
+                               else visible_marker))
             if selection:
                 payload["selection"] = selection
             display.state.install(payload)

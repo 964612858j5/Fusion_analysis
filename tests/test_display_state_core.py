@@ -619,22 +619,24 @@ def test_correction_membership_never_becomes_display_visibility(app):
     display visibility."""
     page = _step0_page(app)
     try:
-        page._channel_decisions = {"CD3": "tophat"}
-        page._channel_methods = {"CD3": "tophat"}
+        # The CORRECTION method goes to the marker that is NOT the one a
+        # fresh slide shows, so "has a method" and "is shown" point at
+        # different channels: whichever way the visibility comes out, it
+        # cannot have been derived from the correction.
+        page._channel_decisions = {"CD8": "tophat"}
+        page._channel_methods = {"CD8": "tophat"}
         page._rebuild_channel_list()
         st = page.display.state
 
         visibility = st.display_visibility()
-        # BOTH have a display answer now, and it is the SAME answer: a slide
-        # nobody has given display answers for lands on DAPI with its markers
-        # hidden. What must not happen is the one with a correction method
-        # coming up shown BECAUSE it has one.
-        assert visibility["CD3"] is False, visibility
+        # A slide nobody has given display answers for shows its FIRST
+        # marker (so selecting it is a picture) and hides the rest; DAPI
+        # keeps its own product default.
+        assert visibility["CD3"] is True, visibility
         assert visibility["CD8"] is False, visibility
-        assert visibility["CD3"] == visibility["CD8"]
         assert visibility["DAPI"] is True
         # ...and the correction decision is untouched by any of it.
-        assert page._channel_decisions["CD3"] == "tophat"
+        assert page._channel_decisions["CD8"] == "tophat"
     finally:
         page.close()
 

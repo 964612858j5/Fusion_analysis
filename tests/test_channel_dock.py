@@ -254,26 +254,32 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     assert page._prior_channel_decisions == {
         "CD3": "cucim", "CD20": "cucim", "CD8": "tophat"}
     # unassigned rows mirror the global Method box (default Both); the
-    # checkbox says nothing about correction -- it is display visibility, and
-    # a fresh slide lands on DAPI with its markers hidden.
+    # checkbox says nothing about correction -- it is display visibility. A
+    # fresh slide shows DAPI and its FIRST marker, and hides the others.
     for ch in ("CD3", "CD20", "CD8"):
-        row = page._channel_rows[ch]
-        assert row["method_cb"].currentText() == "Both"
-        assert not row["checkbox"].isChecked()
+        assert page._channel_rows[ch]["method_cb"].currentText() == "Both"
+    assert page._channel_rows["CD3"]["checkbox"].isChecked()
+    for ch in ("CD20", "CD8"):
+        assert not page._channel_rows[ch]["checkbox"].isChecked(), ch
     assert page._channel_rows["DAPI"]["checkbox"].isChecked()
-    # global method change mirrors into unassigned rows without assigning
+    # The global Method box COMMANDS: it assigns to every correction-eligible
+    # channel, including the ones nobody had assigned. It used to move only
+    # their combos, so a row said TopHat, the compute state was worked out
+    # for TopHat, and Save wrote Original for the same channel.
     page._method_all.setCurrentText("TopHat")
     for ch in ("CD3", "CD20", "CD8"):
         assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
-    assert page._channel_decisions == {}
+        assert page._channel_decisions[ch] == "tophat"
+        assert page._channel_row_method(ch) == "tophat"
+    assert "DAPI" not in page._channel_decisions
     # explicit assignment still sticks -- and does NOT show the channel.
     # Assigning a correction method used to tick the row, which is how
     # "corrected" and "on screen" became one answer.
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
-    assert page._channel_decisions["CD3"] == "cucim"
-    assert page._channel_methods["CD3"] == "cucim"
-    assert not page._channel_rows["CD3"]["checkbox"].isChecked()
-    assert page.display.state.display_visibility().get("CD3") is False
+    page._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")
+    assert page._channel_decisions["CD20"] == "cucim"
+    assert page._channel_methods["CD20"] == "cucim"
+    assert not page._channel_rows["CD20"]["checkbox"].isChecked()
+    assert page.display.state.display_visibility().get("CD20") is False
     # every Step0 BG row carries its own display-colour swatch (the colour
     # buttons that used to sit in the Patch Preview header are gone)
     assert page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(
@@ -322,3 +328,26 @@ def test_step0_row_name_position_stable_after_done(app):
     for r in rows.values():
         assert (r.checkbox.width(), r.checkbox.height()) == (22, 18)
     dock.hide()
+
+
+def test_a_bulk_sweep_asks_bulk_toggleable_not_locked():
+    """`locked` used to stand for four decisions at once, so the model's
+    bulk sweep skipped a channel because it was "special" rather than
+    because a sweep may not move it. The two are separate facts now, and
+    this test is only meaningful while they can disagree."""
+    from block01.ui.widgets.channel_dock import ChannelSetModel, ChannelState
+
+    model = ChannelSetModel()
+    model.set_channels([
+        # swept: a bulk sweep may move it, whatever else it is
+        ChannelState(channel_id="A", visible=False, locked=True,
+                     bulk_toggleable=True),
+        # not swept: it is shown and hidden deliberately
+        ChannelState(channel_id="B", visible=False, locked=False,
+                     bulk_toggleable=False),
+    ])
+
+    model.set_all_visible(True)
+
+    assert model.get("A").visible is True, "a sweepable channel was skipped"
+    assert model.get("B").visible is False, "a deliberate channel was swept"

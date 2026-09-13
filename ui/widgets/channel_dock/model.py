@@ -26,7 +26,15 @@ class ChannelState:
     name: str = ""
     visible: bool = True
     color: str = "#888888"
-    locked: bool = False              # e.g. nucleus channel: not toggleable
+    locked: bool = False              # DEPRECATED: see the capabilities below
+    # WHAT MAY BE DONE TO THIS CHANNEL, as separate facts -- the same three
+    # `core.display_identity.ChannelCapabilities` names, carried here so the
+    # ROW can ask the permission it actually needs. `locked` used to stand
+    # for all of them at once, so a row that wanted "never background-
+    # corrected" also got "cannot be shown" and "skipped by a bulk sweep".
+    display_toggleable: bool = True
+    correction_eligible: bool = True
+    bulk_toggleable: bool = True
     display_min: Optional[float] = None
     display_max: Optional[float] = None
     display_gamma: float = 1.0
@@ -110,7 +118,10 @@ class ChannelSetModel(QObject):
     def set_all_visible(self, visible: bool):
         for cid in self._order:
             ch = self._channels[cid]
-            if not ch.locked:
+            # BULK, which is its own permission: a channel may be shown and
+            # hidden deliberately (the nucleus layer is) while a sweep over
+            # every channel leaves it alone.
+            if ch.bulk_toggleable:
                 self.set_visible(cid, visible)
 
     def set_color(self, cid: str, color: str):

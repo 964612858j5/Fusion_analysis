@@ -568,7 +568,11 @@ def test_a_parameter_change_only_marks_the_channel_stale(app, monkeypatch):
     started = _no_workers(monkeypatch)
     page = _page(app)
     page._explore_tab = _RecordingExploreTab()
-    _finish_run(page, ["CD3"])
+    # A channel is computed FOR a method, and the method is the decision the
+    # combo records: an unassigned channel is Original, and Original has no
+    # parameters to go stale against.
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    _finish_run(page, ["CD3"], method="cucim")
     assert page._channel_compute_state("CD3") == "computed"
 
     page.current_channel = "CD3"
@@ -607,7 +611,8 @@ def test_the_glyph_follows_a_run_and_then_a_parameter_change(app, monkeypatch):
     page._explore_tab = _RecordingExploreTab()
     row = page._channel_rows["CD3"]["row_widget"]
 
-    _finish_run(page, ["CD3"])
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    _finish_run(page, ["CD3"], method="tophat")
     assert page._channel_compute_state("CD3") == "computed"
     assert row.state_lbl.text() == "✓"
 

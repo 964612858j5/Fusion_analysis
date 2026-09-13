@@ -1053,13 +1053,14 @@ class Step0Page(QWidget):
 
         self._btn_show_nucleus.toggled.connect(
             lambda _: self._on_compare_nucleus_toggled())
-        # A MIRROR of the selected channel's display answer, like
-        # `_btn_show_nucleus` is for DAPI. Written by
-        # `_sync_marker_layer_views`; a click on the full image's toolbar
-        # button is what carries a user's intent, and that one writes the
-        # answer itself.
+        # A VIEW of the selected channel's display answer, like
+        # `_btn_show_nucleus` is for DAPI -- and, like it, a switch a user
+        # (or a test) can throw: doing so writes the answer, and the panels,
+        # the full image and the row all follow from there.
+        # `_sync_marker_layer_views` moves it with its signal blocked, so a
+        # write coming back the other way stops here.
         self._btn_show_marker.toggled.connect(
-            lambda _checked: self._refresh_preview_display(keep_zoom=True))
+            self._on_marker_visibility_toggled)
         pvl.addLayout(ctrl_row)
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
@@ -8241,16 +8242,19 @@ class Step0Page(QWidget):
     def _channel_row_method(self, ch):
         """The method a Process run would use for `ch` right now.
 
-        The row's Method combo first (it is the assigned-method control),
-        then the recorded decision, then "both".
+        THE DECISION, and only the decision. This used to read the row's
+        Method COMBO first and fall back to the decision, which made the
+        widget a second authority: the combo and `_channel_decisions` could
+        disagree, and then the signature, the compute state and the raw-save
+        list answered one method while `_build_config` -- what Save writes and
+        what the handoff carries -- answered another. The combo is a
+        projection of this answer (`_refresh_channel_row` writes it); it is
+        never asked for it.
+
+        A channel nobody has assigned a method to is `original`: no
+        correction, which is exactly what `_build_config` writes for it.
         """
-        row = self._channel_rows.get(ch)
-        combo = (row or {}).get("method_cb")
-        if combo is not None:
-            method = combo.currentText().lower()
-            if method in {"tophat", "cucim", "both", "original"}:
-                return method
-        return self._channel_decisions.get(ch) or "both"
+        return str(self._channel_decisions.get(ch) or "original")
 
     def _channel_compute_state(self, ch):
         """`nucleus` / `computing` / `not-computed` / `computed` / `stale`.
@@ -8598,14 +8602,13 @@ class Step0Page(QWidget):
         for ch in self._channel_order:
             if not caps(ch).correction_eligible:
                 continue
-            # A channel that has been ASSIGNED a method keeps its own answer
-            # until this box re-assigns it; a channel nobody has assigned
-            # simply shows the box's method as the default it would inherit.
-            # Which of the two it is used to be read off the row's tick --
-            # the same tick that is display visibility now, so the question
-            # is asked of the decision itself.
-            if self._channel_decisions.get(ch):
-                self._set_channel_decision(ch, method)
+            # EVERY eligible channel, assigned or not. Moving this box used
+            # to leave an unassigned channel with no decision at all and only
+            # change what its combo SHOWED -- so the row said TopHat, the
+            # compute state was worked out for TopHat, and Save wrote
+            # Original. A bulk control that does not command is a display of
+            # an answer nobody gave.
+            self._set_channel_decision(ch, method)
             row = self._channel_rows.get(ch)
             if row and row.get("method_cb") is not None:
                 combo = row["method_cb"]

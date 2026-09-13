@@ -1753,9 +1753,35 @@ class Block01DisplayServices(QObject):
         self._read_worker = None
         self._weight_editor = None
         self._weight_editor_panel = None
+        # THE one public channel dock (B4-B). Built here, outside the stacked
+        # pages, because a per-step list is what let Step0, Step1 and Step3
+        # disagree about the same channel and lose the user's place on every
+        # transition. Lazily: a headless service that never shows a channel
+        # list must not need a QWidget.
+        self._channel_dock = None
         self._intensity_locked = False
         self._closing = False
         self._finalized = False
+
+    # ── the one public channel dock ───────────────────────────────────
+    def channel_dock(self):
+        """The public channel dock, or None while nothing has asked for it."""
+        return self._channel_dock
+
+    def ensure_channel_dock(self):
+        """Build the ONE public channel dock, once.
+
+        A projection of this object's two owners and of nothing else, so it
+        answers for every step -- including the steps that only consume
+        display state -- and survives every step transition. A finalized
+        session builds nothing: the dock is retired with the windows.
+        """
+        if self._finalized:
+            return None
+        if self._channel_dock is None:
+            from .widgets.channel_dock.global_dock import GlobalChannelDock
+            self._channel_dock = GlobalChannelDock(self.state, self.fusion)
+        return self._channel_dock
 
     # ── ports ─────────────────────────────────────────────────────────
     def set_navigator_content(self, port):
@@ -2505,6 +2531,17 @@ class Block01DisplayServices(QObject):
         self._navigator = None
         self._weight_editor = None
         self._weight_editor_panel = None
+        # The public dock goes with them, and only here: `begin_close` may be
+        # refused, and a dock destroyed on a refused close would leave the
+        # session without the list every step edits in.
+        dock = self._channel_dock
+        self._channel_dock = None
+        if dock is not None:
+            try:
+                dock.setParent(None)
+                dock.deleteLater()
+            except RuntimeError:
+                pass
 
     def shutdown(self, reason="close"):
         """Both phases, for a caller that knows the close cannot be refused."""

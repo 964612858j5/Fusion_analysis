@@ -370,6 +370,17 @@ Step1Restore = collections.namedtuple(
 
 class MainWindow(QMainWindow):
 
+    #: The public channel dock's geometry contract. A floor, because a row
+    #: that cannot show its name and its weight box is not a channel list;
+    #: a ceiling, because the central viewer is what the window is for.
+    #: Wide enough for the whole public row -- checkbox, state, swatch, name,
+    #: the weight slider and its number box, plus the widest step accessory --
+    #: because a row that has to compress one of them is a row whose columns
+    #: move between steps.
+    CHANNEL_DOCK_MIN_WIDTH = 360
+    CHANNEL_DOCK_MAX_WIDTH = 520
+    CENTRAL_MIN_WIDTH = 520
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CODEX Pipeline  |  Fusion + Segmentation")
@@ -644,7 +655,37 @@ class MainWindow(QMainWindow):
         outer_lay.addLayout(step_bar)
 
         self._stack = QtWidgets.QStackedWidget()
-        outer_lay.addWidget(self._stack, stretch=1)
+
+        # ── THE one public channel dock, outside the stacked pages ────────
+        #
+        # Step0, Step1, Step2 and Step3 edit channels HERE. It is built by
+        # `Block01DisplayServices` and mounted here, beside the stack rather
+        # than inside a page, so a step change switches the accessory and
+        # nothing else: the dock, its rows, the selection, the search text
+        # and the scroll position are the same objects before and after.
+        # A per-step list is what let two steps disagree about the same
+        # channel and lose the user's place on every transition.
+        self._channel_dock = self._display.ensure_channel_dock()
+        self._channel_dock.color_edit_requested.connect(
+            self._on_dock_color_requested)
+        dock_split = QSplitter(Qt.Horizontal)
+        dock_split.setObjectName("Block01DockSplit")
+        # COLLAPSIBLE, with a floor. The dock needs a row's width to be
+        # readable (checkbox, swatch, name, weight box) and the central
+        # viewer must keep the rest: on a small screen the user drags this
+        # splitter shut rather than having the picture squeezed out.
+        self._channel_dock.setMinimumWidth(self.CHANNEL_DOCK_MIN_WIDTH)
+        self._channel_dock.setMaximumWidth(self.CHANNEL_DOCK_MAX_WIDTH)
+        self._stack.setMinimumWidth(self.CENTRAL_MIN_WIDTH)
+        dock_split.addWidget(self._channel_dock)
+        dock_split.addWidget(self._stack)
+        dock_split.setCollapsible(0, True)
+        dock_split.setCollapsible(1, False)
+        dock_split.setStretchFactor(0, 0)
+        dock_split.setStretchFactor(1, 1)
+        dock_split.setSizes([self.CHANNEL_DOCK_MIN_WIDTH, 1200])
+        self._channel_dock_split = dock_split
+        outer_lay.addWidget(dock_split, stretch=1)
 
         self._step0 = Step0Page(display_services=self._display)
         self._step0.step0_complete.connect(self._on_step0_complete)
@@ -749,7 +790,13 @@ class MainWindow(QMainWindow):
         self.config.setMinimumHeight(220)
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
-        self.config.visibility_changed.connect(self._on_channel_visibility_changed)
+        # THE DISPLAY TICK, from its one owner. It used to come from the
+        # Step1 panel's signal, which is a widget saying what a widget did:
+        # a tick in Step0's list, in Step3's overlay or in the public dock
+        # while another step was on screen never reached this window. The
+        # shared state announces every one of them, once, whoever ticked.
+        self._display.state.visibility_changed.connect(
+            self._on_channel_visibility_changed)
         # ONE refresh owner for the science, wherever the command came from:
         # a row here, the shared Weights window in Step3, a restore. The
         # per-field signals are for the ROWS to follow; this window follows
@@ -1053,6 +1100,11 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._step2)
 
         self._step3 = Step3Page()
+        # Step3 CONSUMES the public display answers -- which markers are
+        # drawn, and in what colour -- and edits them in the one public
+        # channel dock like every other step. Its own overlay controls
+        # (result, opacity, Auto, DAPI/Fusion layers) stay on the page.
+        self._step3.set_display_services(self._display)
         self._step3.go_back.connect(self._go_to_step2)
         self._step3.go_step4.connect(self._go_to_step4)
         self._stack.addWidget(self._step3)
@@ -1419,6 +1471,9 @@ class MainWindow(QMainWindow):
         self._display.state.color_changed.connect(
             self._on_shared_channel_color_changed)
         self.config.set_display_state(self._display.state)
+        # ...and the ONE public channel dock. From here Step1 edits the same
+        # rows Step0, Step2 and Step3 do; its private list is not built.
+        self.config.set_channel_dock(self._channel_dock)
 
 
     def _on_shared_channel_color_changed(self, channel, _hexc):
@@ -3521,8 +3576,39 @@ class MainWindow(QMainWindow):
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
                       3: _CTX_STEP3}
 
+    def _on_dock_color_requested(self, channel):
+        """A swatch in the public dock was clicked.
+
+        Step0 owns what picking a colour MEANS -- the nucleus drives the DAPI
+        overlay, every other channel drives the compare panels and the full
+        image's tint -- and it writes the shared state, which is what every
+        other view (this dock included) follows. A window without that page
+        falls back to the plain shared write.
+        """
+        if not channel:
+            return
+        page = getattr(self, "_step0", None)
+        pick = getattr(page, "_on_channel_swatch_clicked", None)
+        if pick is not None:
+            pick(channel)
+            return
+        current = QtGui.QColor(self._display.state.color(channel)
+                               or "#888888")
+        picked = QtWidgets.QColorDialog.getColor(
+            current, self, f"Colour for {channel}")
+        if picked.isValid():
+            self._display.state.set_color(channel, picked.name(),
+                                          origin="dock-swatch")
+
     def _set_step_active(self, active):
         self._current_step = active
+        # THE ONE public channel dock follows the step by switching its
+        # ACCESSORY -- Step0's correction combo, Step1's participation box --
+        # and by nothing else. No rebuild, no reparent, no row factory swap:
+        # the dock and every row are the same objects in every step.
+        dock = getattr(self, "_channel_dock", None)
+        if dock is not None:
+            dock.set_step(active)
         # The ONE place the shared navigator's edit policy is decided.  Every
         # navigation path goes through here, so an already-open popup follows
         # the step immediately: no reopen, no extra click.

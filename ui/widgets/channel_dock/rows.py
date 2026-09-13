@@ -106,10 +106,10 @@ class Step0ChannelRow(ChannelRowBase):
     in the row.
 
     Next to the CHECKBOX -- not at the right edge with the legacy badge --
-    sits the compute-state glyph (`state_lbl`). The checkbox is what selects
-    a channel for the Process run, so "is this one already computed, and is
-    that result still current?" belongs beside it, where the eye already is
-    when ticking boxes. It is fed the same `status_changed` signal as the
+    sits the compute-state glyph (`state_lbl`). The checkbox is DISPLAY
+    VISIBILITY (there is no Process run to select channels for, and no
+    Process button), and "is this one already computed, and is that result
+    still current?" belongs beside it, where the eye already is. It is fed the same `status_changed` signal as the
     legacy badge; the host decides the vocabulary (see `STATE_GLYPHS`).
     """
 
@@ -128,7 +128,8 @@ class Step0ChannelRow(ChannelRowBase):
         "": ("", "", ""),
         "not-computed": (
             "○", "color:#6d8196;font-size:11px;",
-            "not computed — tick this channel and press Process"),
+            "not computed — edit the TopHat radius or the cuCIM "
+            "sigma and press Enter to compute it"),
         "computed": (
             "✓", "color:#56d990;font-size:11px;font-weight:bold;",
             "computed — the cached result matches the current "
@@ -136,7 +137,7 @@ class Step0ChannelRow(ChannelRowBase):
         "stale": (
             "!", "color:#f4c45e;font-size:12px;font-weight:bold;",
             "stale — the method or parameters changed since this channel "
-            "was computed; Process recomputes it"),
+            "was computed; press Enter in that parameter to recompute"),
         "computing": (
             "⟳", "color:#f4c45e;font-size:12px;", "computing…"),
         "nucleus": (

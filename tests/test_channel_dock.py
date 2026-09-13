@@ -173,47 +173,26 @@ def test_weight_slider_spin_two_way_sync(app):
 # ── Step0 adapter: legacy registry compatibility ─────────────────────────────
 
 def test_step0_adapter_legacy_registry(app):
-    from block01.ui.step0.step0_dock_adapter import Step0ChannelDockAdapter
+    """Step0 binds to the ONE public dock and still fills its row registry.
+
+    The adapter used to CONSTRUCT a dock of its own; since B4-B it asks
+    `Block01DisplayServices` for the public one, so this test drives a real
+    page rather than a hand-assembled adapter -- there is no second dock to
+    assemble any more.
+    """
+    from block01.ui.step0.step0_page import Step0Page
 
     class _Loader:
         def channel_names(self):
             return ["DAPI", "CD3", "CD20"]
 
-    class _Page:
-        loader = _Loader()
-        nucleus_channel = "DAPI"
-        current_channel = None
-        _channel_rows = {}
-        _channel_order = []
-        _channel_decisions = {"CD3": "tophat"}
-        _channel_methods = {"CD3": "tophat"}
-        _channel_colors = {"CD3": (255, 0, 0)}
-        calls = []
+    page = Step0Page()
+    page.loader = _Loader()
+    page.nucleus_channel = "DAPI"
+    page._channel_decisions["CD3"] = "tophat"
+    page._rebuild_channel_list()
 
-        def _on_channel_visibility_toggled(self, name, visible):
-            self.calls.append(("cb", name, visible))
-
-        def _channel_row_method(self, ch):
-            """THE page's final decision, as the real page answers it."""
-            return self._channel_decisions.get(ch) or "original"
-
-        def _on_channel_method_changed(self, name, txt):
-            self.calls.append(("method", name, txt))
-
-        def _refresh_channel_row(self, ch):
-            pass
-
-    page = _Page()
-    ad = Step0ChannelDockAdapter.__new__(Step0ChannelDockAdapter)
-    from PyQt5.QtCore import QObject
-    QObject.__init__(ad)
-    ad._page = page
-    from block01.ui.widgets.channel_dock import ChannelSetModel, ChannelDock
-    ad.model = ChannelSetModel(ad)
-    ad.dock = ChannelDock(ad.model, row_factory=ad._make_row,
-                          title="", show_bulk_buttons=False)
-    ad.rebuild()
-
+    assert page._dock_adapter.dock is page.display.channel_dock()
     assert page._channel_order == ["DAPI", "CD3", "CD20"]
     for key in ("checkbox", "label", "badge", "item",
                 "method_cb", "status_lbl", "row_widget"):
@@ -223,15 +202,11 @@ def test_step0_adapter_legacy_registry(app):
     # switch -- so it stays enabled.
     assert page._channel_rows["DAPI"]["checkbox"].isEnabled()
     assert not page._channel_rows["DAPI"]["method_cb"].isEnabled()
-    # selection skipped nucleus
-    assert page.current_channel == "CD3"
-    # method change reaches the legacy slot
-    # ...to a DIFFERENT final choice: an unassigned row already shows
-    # Original, and setting a combo to what it already says emits nothing.
-    page._channel_rows["CD20"]["method_cb"].setCurrentText("TopHat")
-    assert ("method", "CD20", "TopHat") in page.calls
-    # saved decision reflected
+    # saved decision reflected, and a change reaches the page's correction
+    # domain through the dock's Step0 accessory
     assert page._channel_rows["CD3"]["method_cb"].currentText() == "TopHat"
+    page._channel_rows["CD20"]["method_cb"].setCurrentText("TopHat")
+    assert page._channel_decisions["CD20"] == "tophat"
 
 
 # ── Step0 fresh session: prior decisions don't seed combos; no dead swatch ───
@@ -322,9 +297,17 @@ def test_step0_row_name_position_stable_after_done(app):
     # all names share one fixed left position
     assert len(set(before.values())) == 1
     # combos aligned and directly after the (uniform-width) name column
+    # The PUBLIC core is `checkbox | state | swatch | name | weight`, and the
+    # step accessory comes after it: Step0's method combo therefore starts
+    # where the weight box ends, at the same x in every row.
     for r in rows.values():
-        assert r.method_cb.x() == r.name_label.x() + r.name_label.width() + 5
-    assert len({r.method_cb.x() for r in rows.values()}) == 1
+        # weight editor first (it is core), then the step accessory
+        assert r.slider.x() == r.name_label.x() + r.name_label.width() + 5
+        assert r.spin.x() > r.slider.x()
+        assert r.method_cb.x() > r.spin.x()
+    # ...and each of them at the SAME x in every row of the list
+    for control in ("slider", "spin", "method_cb"):
+        assert len({getattr(r, control).x() for r in rows.values()}) == 1
 
     page._set_channel_computing("CD3")
     page._set_channel_done("CD3")

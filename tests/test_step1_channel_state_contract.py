@@ -156,7 +156,7 @@ def test_re_ticking_brings_back_the_weight_unchanged(app):
 def test_ticking_another_channel_does_not_move_the_selection(app):
     w = _window(app)
     try:
-        w.config._rows["CD3"].selected.emit("CD3")
+        w.config._rows["CD3"].row_clicked.emit("CD3")
         assert w.config.current_channel() == "CD3"
 
         w.config._rows["CD8"].checkbox.setChecked(True)
@@ -241,7 +241,7 @@ def test_nothing_ticked_says_so_rather_than_looking_broken(app):
 def test_a_mode_switch_keeps_every_piece_of_state(app):
     w = _window(app)
     try:
-        w.config._rows["CD3"].selected.emit("CD3")
+        w.config._rows["CD3"].row_clicked.emit("CD3")
         w.config._rows["CD3"].spin.setValue(0.6)
         w.config.set_channel_color("CD3", "#123456")
         before = (w.config.current_channel(), list(w.config.visible_channels()),

@@ -875,8 +875,12 @@ def test_the_row_order_is_checkbox_swatch_name_combo(app):
         widgets = [w for w in widgets if w is not None]
         # The compute-state glyph sits between the checkbox and the swatch:
         # it is a claim about the channel the checkbox selects.
-        assert widgets[:5] == [row.checkbox, row.state_lbl, row.swatch,
-                               row.name_label, row.method_cb], (ch, widgets)
+        # The PUBLIC core is checkbox | state | swatch | name | weight, and
+        # Step0's correction combo is the accessory after it.
+        assert widgets[:6] == [row.checkbox, row.state_lbl, row.swatch,
+                               row.name_label, row.slider, row.spin], \
+            (ch, widgets)
+        assert row.method_cb in widgets
         assert row.swatch.isVisibleTo(row), f"{ch}: the swatch is hidden"
 
 
@@ -886,8 +890,8 @@ def test_the_swatch_starts_at_the_pages_colour(app):
     page._nuc_color = (0.0, 0.0, 1.0)
     page._rebuild_channel_list()
 
-    assert page._dock_adapter.model.get("CD3").color.lower() == "#ff0000"
-    assert page._dock_adapter.model.get("DAPI").color.lower() == "#0000ff"
+    assert page.display.state.color("CD3").lower() == "#ff0000"
+    assert page.display.state.color("DAPI").lower() == "#0000ff"
 
 
 def test_the_default_swatches_are_the_channel_remap_palette(app):
@@ -903,7 +907,7 @@ def test_the_default_swatches_are_the_channel_remap_palette(app):
         "the marker swatches are not distinct"
     for ch in page._channel_order:
         assert page._channel_swatch_hex(ch).lower() == wb._colors[ch].lower(), ch
-        assert page._dock_adapter.model.get(ch).color.lower() == \
+        assert page.display.state.color(ch).lower() == \
             wb._colors[ch].lower(), ch
     # ...and that is the palette rule, by channel index.
     palette_order = page._palette_channel_order()
@@ -941,7 +945,7 @@ def test_a_channel_remap_pick_moves_the_background_correction_swatch(app,
     assert page._channel_colors["CD3"] == pytest.approx(
         (0xab / 255, 0xcd / 255, 0xef / 255), abs=1 / 255)
     assert page._channel_swatch_hex("CD3").lower() == "#abcdef"
-    assert page._dock_adapter.model.get("CD3").color.lower() == "#abcdef"
+    assert page.display.state.color("CD3").lower() == "#abcdef"
 
 
 def test_clicking_a_marker_swatch_recolours_every_view(app, monkeypatch):
@@ -955,7 +959,7 @@ def test_clicking_a_marker_swatch_recolours_every_view(app, monkeypatch):
 
     assert page._channel_colors["CD3"] == pytest.approx(
         (1.0, 0x88 / 255.0, 0.0), abs=1 / 255)
-    assert page._dock_adapter.model.get("CD3").color.lower() == "#ff8800"
+    assert page.display.state.color("CD3").lower() == "#ff8800"
     assert page._full_image_tint("CD3") == page._channel_colors["CD3"]
     assert stack.controller.tints[-1] == page._channel_colors["CD3"]
 
@@ -970,7 +974,7 @@ def test_clicking_the_nucleus_swatch_recolours_the_dapi_overlay(app, monkeypatch
 
     assert page._nuc_color == pytest.approx(
         (0.0, 0xcc / 255.0, 1.0), abs=1 / 255)
-    assert page._dock_adapter.model.get("DAPI").color.lower() == "#00ccff"
+    assert page.display.state.color("DAPI").lower() == "#00ccff"
     assert stack.overlay.tints[-1] == page._nuc_color
 
 
@@ -991,13 +995,13 @@ def test_the_histogram_is_filled_with_the_active_channels_colour(app):
     page = _page(app)
     wb = page._cond_workbench
     page.show_intensity_window()
-    model = page._dock_adapter.model
+    state = page.display.state
 
     wb.set_active_channel("CD3")
     assert _hist_hex(wb) == page._channel_swatch_hex("CD3").lower()
 
     # live: the swatch colour changes while CD3 is the active channel
-    model.set_color("CD3", "#00ffcc")
+    state.set_color("CD3", "#00ffcc", origin="test")
     assert _hist_hex(wb) == "#00ffcc"
     assert page._channel_swatch_hex("CD3").lower() == "#00ffcc"
 
@@ -1013,7 +1017,7 @@ def test_the_histogram_follows_the_dapi_colour_too(app):
     page.show_intensity_window()
     wb.set_active_channel("DAPI")
 
-    page._dock_adapter.model.set_color("DAPI", "#8844ff")
+    page.display.state.set_color("DAPI", "#8844ff", origin="test")
 
     assert _hist_hex(wb) == "#8844ff"
     assert page._nuc_color == pytest.approx(
@@ -1027,7 +1031,7 @@ def test_a_colour_change_on_an_inactive_channel_leaves_the_curve_alone(app):
     wb.set_active_channel("CD3")
     before = _hist_hex(wb)
 
-    page._dock_adapter.model.set_color("CD20", "#ff0000")
+    page.display.state.set_color("CD20", "#ff0000", origin="test")
 
     assert _hist_hex(wb) == before
 

@@ -1671,8 +1671,8 @@ def test_a_restored_colour_reaches_the_real_views_not_just_the_store(app):
         state = w._display.state
         assert state.color("CD3") == "#00ccff"
         # ...and the REAL views, not the getter that reads the state:
-        assert page._dock_adapter.model.get("CD3").color == "#00ccff", \
-            "the Step0 channel model never heard about the restore"
+        assert page._dock_adapter.dock.row("CD3").color() == "#00ccff", \
+            "the public row never heard about the restore"
         swatch = page._dock_adapter.dock.row("CD3").swatch.styleSheet()
         assert "#00ccff" in swatch, f"the Step0 swatch still reads {swatch}"
         assert workbench._colors["CD3"].lower() == "#00ccff", \

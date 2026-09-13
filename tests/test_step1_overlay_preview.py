@@ -200,7 +200,7 @@ def test_selecting_a_hidden_channel_shows_it_and_makes_it_current(app):
     try:
         seen = []
         w.config.current_channel_changed.connect(seen.append)
-        w.config._rows["CD3"].selected.emit("CD3")   # what a click emits
+        w.config._rows["CD3"].row_clicked.emit("CD3")   # what a click emits
 
         assert w.config.current_channel() == "CD3"
         assert "CD3" in w.config.visible_channels()
@@ -468,7 +468,7 @@ def test_the_channels_to_hold_are_the_ticked_ones_and_the_current_one(app):
         assert set(w._needed_channels()) == {"DAPI", "CD8"}
 
         # Selecting also ticks, so the set grows by the selected channel.
-        w.config._rows["CD3"].selected.emit("CD3")
+        w.config._rows["CD3"].row_clicked.emit("CD3")
         assert set(w._needed_channels()) == {"DAPI", "CD8", "CD3"}
 
         # A weight has no say in what is held.
@@ -508,7 +508,7 @@ def test_the_display_state_survives_a_session_round_trip(app):
         w.config.set_channel_visible("CD3", True)
         w.config.set_channel_visible("DAPI", False)
         w.config.set_channel_color("CD3", "#123456")
-        w.config._rows["CD8"].selected.emit("CD8")
+        w.config._rows["CD8"].row_clicked.emit("CD8")
         w.set_preview_mode("fusion")
 
         w.step0_output = {"output_dir": "/tmp", "step1_dir": "/tmp"}
@@ -598,7 +598,7 @@ def test_selecting_a_channel_points_the_intensity_window_at_it(app):
         asked = []
         w._step0.focus_intensity_on = lambda ch, color=None: (
             asked.append((ch, color)) or True)
-        w.config._rows["CD3"].selected.emit("CD3")
+        w.config._rows["CD3"].row_clicked.emit("CD3")
         # The colour goes with it: Step1 owns the overlay colours and the
         # Intensity histogram must not come up in another palette.
         assert [ch for ch, _c in asked] == ["CD3"]
@@ -622,7 +622,7 @@ def test_the_intensity_button_opens_the_shared_window_on_the_current_channel(app
         focused = []
         w._step0.focus_intensity_channel = lambda ch, color=None: (
             focused.append(ch) or True)
-        w.config._rows["CD8"].selected.emit("CD8")
+        w.config._rows["CD8"].row_clicked.emit("CD8")
         w._btn_step1_intensity.click()
 
         assert w._display.intensity_window() is not None
@@ -769,7 +769,7 @@ def test_restoring_a_session_does_not_tick_the_current_channel(app):
 def test_a_click_still_ticks_the_channel_it_selects(app):
     w = _window(app)
     try:
-        w.config._rows["CD3"].selected.emit("CD3")
+        w.config._rows["CD3"].row_clicked.emit("CD3")
         assert "CD3" in w.config.visible_channels()
     finally:
         w.close()

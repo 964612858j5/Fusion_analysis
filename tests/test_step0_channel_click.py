@@ -101,8 +101,11 @@ def test_a_programmatic_selection_still_reaches_the_page_exactly_once(app):
     real = page._on_channel_row_changed
     page._on_channel_row_changed = lambda row: (calls.append(row), real(row))[1]
     # Route through the same connection the page made at construction.
-    page._dock_adapter.model.selection_changed.disconnect(page._on_channel_selected_by_id)
-    page._dock_adapter.model.selection_changed.connect(page._on_channel_selected_by_id)
+    # Route through the same connection the page made at construction: the
+    # SHARED state's selection, which is what the public dock projects.
+    state = page.display.state
+    state.selection_changed.disconnect(page._on_channel_selected_by_id)
+    state.selection_changed.connect(page._on_channel_selected_by_id)
 
     page._channel_list.setCurrentRow(page._channel_order.index("CD20"))
     QtTest.QTest.qWait(30)
@@ -119,8 +122,11 @@ def test_clicking_the_current_row_again_does_not_rerun_the_handler(app):
     calls = []
     real = page._on_channel_row_changed
     page._on_channel_row_changed = lambda row: (calls.append(row), real(row))[1]
-    page._dock_adapter.model.selection_changed.disconnect(page._on_channel_selected_by_id)
-    page._dock_adapter.model.selection_changed.connect(page._on_channel_selected_by_id)
+    # Route through the same connection the page made at construction: the
+    # SHARED state's selection, which is what the public dock projects.
+    state = page.display.state
+    state.selection_changed.disconnect(page._on_channel_selected_by_id)
+    state.selection_changed.connect(page._on_channel_selected_by_id)
 
     _click_row(page, "CD20")
 
@@ -136,7 +142,7 @@ def test_clicking_the_nucleus_row_keeps_the_displayed_channel(app):
 
     _click_row(page, "DAPI")
 
-    assert page._dock_adapter.model.selected() == "DAPI"
+    assert page.display.state.selected_channel() == "DAPI"
     assert page.current_channel == "CD20"
     assert page._inspector_channel == "DAPI"
 
@@ -147,7 +153,7 @@ def test_the_page_no_longer_depends_on_current_row_changed(app):
     page = _page(app)
     page._channel_list.blockSignals(True)
     try:
-        page._dock_adapter.model.select("CD20")
+        page.display.state.set_selected_channel("CD20", origin="test")
     finally:
         page._channel_list.blockSignals(False)
     assert page.current_channel == "CD20"
@@ -294,9 +300,12 @@ def test_the_rows_controls_follow_the_capabilities_not_a_locked_flag(app):
     is never background-corrected also could not be shown and was skipped by
     a bulk sweep. Each control asks its own permission now."""
     page = _page(app)
-    model = page._dock_adapter.model
+    # The capabilities live on the SHARED state since B4-B; the public row
+    # asks them directly, so there is no second copy on a dock model.
+    state = page.display.state
+    dock = page._dock_adapter.dock
 
-    dapi = model.get("DAPI")
+    dapi = state.capabilities("DAPI")
     assert dapi.display_toggleable is True
     assert dapi.correction_eligible is False
     assert dapi.bulk_toggleable is False
@@ -304,7 +313,7 @@ def test_the_rows_controls_follow_the_capabilities_not_a_locked_flag(app):
     assert dapi_row.checkbox.isEnabled() is True      # shown and hidden
     assert dapi_row.method_cb.isEnabled() is False    # never corrected
 
-    marker = model.get("CD3")
+    marker = state.capabilities("CD3")
     assert marker.display_toggleable is True
     assert marker.correction_eligible is True
     assert marker.bulk_toggleable is True
@@ -312,11 +321,11 @@ def test_the_rows_controls_follow_the_capabilities_not_a_locked_flag(app):
     assert marker_row.checkbox.isEnabled() is True
     assert marker_row.method_cb.isEnabled() is True
 
-    # ...and a bulk sweep in the MODEL follows `bulk_toggleable` too.
-    model.set_visible("DAPI", True)
-    model.set_all_visible(False)
-    assert model.get("DAPI").visible is True, "the DAPI layer was swept"
-    assert model.get("CD3").visible is False
+    # ...and a bulk sweep follows `bulk_toggleable` too.
+    state.set_display_visible("DAPI", True, origin="test")
+    dock.set_all_visible(False)
+    assert state.display_visible("DAPI") is True, "the DAPI layer was swept"
+    assert state.display_visible("CD3") is False
 
 
 def test_a_fresh_slide_shows_its_first_marker_and_hides_the_rest(app):

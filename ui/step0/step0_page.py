@@ -830,9 +830,13 @@ class Step0Page(QWidget):
         sep.setStyleSheet("color:#333;")
         chl.addWidget(sep)
 
-        # v15: shared ChannelDock mounted through an adapter. The dock's inner
-        # QListWidget is exposed as self._channel_list so every legacy code
-        # path (setCurrentItem / currentRowChanged / item registry) is intact.
+        # v15/B4-B: the ONE public channel dock, owned by
+        # `Block01DisplayServices` and mounted by the main window OUTSIDE the
+        # stacked pages. This page BINDS to it through the adapter and builds
+        # no list of its own -- Step0's own dock is what made a second public
+        # editor of the same channels. The dock's inner QListWidget is still
+        # exposed as self._channel_list so every legacy code path
+        # (setCurrentItem / currentRowChanged / item registry) is intact.
         from .step0_dock_adapter import Step0ChannelDockAdapter
         self._dock_adapter = Step0ChannelDockAdapter(self)
         self._channel_list = self._dock_adapter.dock.list_widget
@@ -846,13 +850,16 @@ class Step0Page(QWidget):
         # the model too (`ChannelDock._on_current_item`), so this one
         # connection covers both paths, and the model's own de-duplication
         # means the handler runs once per actual change.
-        self._dock_adapter.model.selection_changed.connect(
+        #
+        # From the SHARED STATE, which is the one owner of the selection
+        # since B2 -- the dock is a projection of it, not a second answer.
+        self.display.state.selection_changed.connect(
             self._on_channel_selected_by_id)
         # The model is the third writer of a channel's colour (after this page
         # and the internal remap colour store). Listening here makes the
         # Intensity window's histogram follow a swatch change live, whichever
         # of the three did the writing.
-        self._dock_adapter.model.color_changed.connect(
+        self.display.state.color_changed.connect(
             self._on_model_color_changed)
         # One display mapping per channel (core/display_mapping.py). Its
         # SOURCE is the internal remap workbench's params (see
@@ -862,8 +869,11 @@ class Step0Page(QWidget):
         # to `display_changed` -- one source, one signal.
         self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
         self._display_seeded = set()     # channels whose slide-wide seed was applied
-        chl.addWidget(self._dock_adapter.dock, stretch=1)
-        cll.addWidget(ch_box, stretch=2)
+        # The public dock is NOT added to this page: it lives beside the
+        # stacked pages, so it survives every step transition. What stays
+        # here is the page's own correction chrome (the All row above, the
+        # method parameters and Compare below).
+        cll.addWidget(ch_box, stretch=0)
 
         # ── Method Parameters ─────────────────────────────────────────
         # Compact: one numeric INPUT box per method (no sliders, no separate
@@ -7754,8 +7764,17 @@ class Step0Page(QWidget):
     # ── display mapping: one per channel, shared by every view ─────────
 
     def _display_model(self):
-        adapter = getattr(self, "_dock_adapter", None)
-        return getattr(adapter, "model", None)
+        """The channel-set MIRROR, which no longer exists.
+
+        Step0's own dock carried a `ChannelSetModel` -- a second, writable
+        copy of colour, visibility and the display window -- and the mirror
+        writes below wrote into it. The public dock projects
+        `ChannelDisplayState` directly, so there is nothing to mirror into
+        and every one of those writes is a no-op. The call sites are left
+        standing for B5 to remove; answering None here is what makes the
+        second copy gone rather than merely unused.
+        """
+        return None
 
     def _workbench_params(self, ch):
         """The Channel Remap workbench's params dict for `ch`, or None when
@@ -8296,12 +8315,10 @@ class Step0Page(QWidget):
     def _refresh_channel_state(self, ch):
         """Push `ch`'s derived compute state onto its row."""
         state = self._channel_compute_state(ch)
-        adapter = getattr(self, "_dock_adapter", None)
-        if adapter is not None and ch in adapter.model:
-            adapter.model.set_status(ch, state)
-        # Directly too: `set_status` is a no-op when the value is unchanged,
-        # which is exactly the case on a fresh rebuild (the state was seeded
-        # into the model before the row existed).
+        # STRAIGHT ONTO THE ROW. The compute state is DERIVED from this
+        # page's signature bookkeeping and stored nowhere else; the row is
+        # told, and the dock re-asks (`set_state_provider`) whenever it
+        # redraws.
         row = self._channel_rows.get(ch)
         setter = getattr((row or {}).get("row_widget"), "set_state", None)
         if setter is not None:
@@ -8762,9 +8779,6 @@ class Step0Page(QWidget):
         """
         if getattr(self, "_closing", False):
             return
-        adapter = getattr(self, "_dock_adapter", None)
-        if adapter is not None and ch in adapter.model:
-            adapter.model.set_visible(ch, bool(visible))
         row = (getattr(self, "_channel_rows", None) or {}).get(ch)
         cb = row.get("checkbox") if row else None
         if cb is not None:

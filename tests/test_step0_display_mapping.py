@@ -160,8 +160,9 @@ def test_the_mapping_lives_in_the_workbench_params(app):
     assert (p["min"], p["max"], p["gamma"]) == (3.0, 30.0, 1.1)
     assert (p["brightness"], p["contrast"]) == (0.0, 1.0)
     assert page._display_mapping_for("CD3") == (3.0, 30.0, 1.1)
-    state = page._dock_adapter.model.get("CD3")
-    assert (state.display_min, state.display_max, state.display_gamma) == (3.0, 30.0, 1.1)
+    # ...and the SHARED state carries the same window. The dock's own
+    # `ChannelSetModel` mirror of it is gone with Step0's private dock.
+    assert page.display.state.mapping("CD3") == (3.0, 30.0, 1.1)
 
 
 def test_moving_the_inspector_reaches_the_full_image(app):

@@ -472,6 +472,10 @@ class Step3Page(QWidget):
         self._background_mode = "Layers"
         self._available_channels = []
         self._channel_settings = {}
+        # Block01's display services, registered by the host
+        # (`set_display_services`). While there is none -- a standalone page
+        # and its tests -- the page falls back to its own overlay config.
+        self._display = None
         self._channel_rows = {}
         self._channel_search_text = ""
         self._patch_channel_cache = {}
@@ -1417,6 +1421,56 @@ class Step3Page(QWidget):
             return "#00ffff"
         return "#ffffff"
 
+    # ── the public answers: read from their owner, never stored here ──
+    def set_display_services(self, services):
+        """Register Block01's display services -- the owner of the public
+        display answers this page CONSUMES.
+
+        Step3 draws marker channels; it does not decide whether they are
+        drawn or in what colour. Those answers are `ChannelDisplayState`'s
+        and are edited in the one public channel dock, so this page follows
+        them and redraws.
+        """
+        self._display = services
+        state = getattr(services, "state", None)
+        if state is None:
+            return
+        state.visibility_changed.connect(self._on_shared_display_changed)
+        state.color_changed.connect(self._on_shared_display_colour_changed)
+
+    def _display_state(self):
+        return getattr(getattr(self, "_display", None), "state", None)
+
+    def _marker_visible(self, ch):
+        """Is this marker drawn -- the SHARED answer when there is one."""
+        state = self._display_state()
+        if state is not None and ch in state.channel_order():
+            return bool(state.display_visible(ch))
+        return bool(self._channel_settings.get(ch, {}).get("visible", False))
+
+    def _marker_color(self, ch):
+        """This marker's colour -- the SHARED answer when there is one."""
+        state = self._display_state()
+        if state is not None and ch in state.channel_order():
+            hexc = state.color(ch)
+            if hexc:
+                return hexc
+        return self._channel_settings.get(ch, {}).get("color", "#ffffff")
+
+    def _on_shared_display_changed(self, channel, visible):
+        """A public visibility tick, from whichever step made it."""
+        if channel in ("__layer_dapi__", "__layer_fusion__"):
+            return
+        if channel not in self._marker_channels():
+            return
+        if visible and channel not in self._patch_channel_cache:
+            self._load_patch_channel(channel)
+        self._render_roi(reset_view=False)
+
+    def _on_shared_display_colour_changed(self, channel, _hexc):
+        if channel in self._marker_channels():
+            self._render_roi(reset_view=False)
+
     def _default_channel_visible(self, ch):
         if str(ch) in ("__layer_dapi__", "__layer_fusion__"):
             return True
@@ -1686,13 +1740,25 @@ class Step3Page(QWidget):
                         sub.widget().deleteLater()
         self._channel_rows.clear()
 
-        def _add_row(key, label, source):
+        def _add_row(key, label, source, public_controls=True):
+            """One overlay row.
+
+            `public_controls=False` is a MARKER CHANNEL since B4-B: whether it
+            is drawn and what colour it is drawn in are public answers, edited
+            in Block01's one channel dock and owned by `ChannelDisplayState`.
+            This page keeps only what is its own -- the layer's opacity and
+            its Auto contrast -- so there is no second, writable copy of a
+            public field on this page.
+            """
             st = self._channel_settings.setdefault(key, self._default_channel_settings(key))
             row = QHBoxLayout()
-            cb = QCheckBox()
-            cb.setChecked(bool(st.get("visible", False)))
-            cb.stateChanged.connect(lambda _v, name=key: self._on_channel_visibility_changed(name))
-            row.addWidget(cb)
+            entry = {"label": label, "source": source}
+            if public_controls:
+                cb = QCheckBox()
+                cb.setChecked(bool(st.get("visible", False)))
+                cb.stateChanged.connect(lambda _v, name=key: self._on_channel_visibility_changed(name))
+                row.addWidget(cb)
+                entry["checkbox"] = cb
             name_lbl = QLabel(label)
             name_lbl.setMinimumWidth(80)
             row.addWidget(name_lbl)
@@ -1700,11 +1766,13 @@ class Step3Page(QWidget):
             src_lbl.setFixedWidth(90)
             src_lbl.setStyleSheet("color:#888;font-size:9px;")
             row.addWidget(src_lbl)
-            color_btn = QPushButton()
-            color_btn.setFixedSize(24, 18)
-            color_btn.setStyleSheet(f"background:{st.get('color', '#ffffff')};border:1px solid #777;")
-            color_btn.clicked.connect(lambda _=False, name=key: self._choose_channel_color(name))
-            row.addWidget(color_btn)
+            if public_controls:
+                color_btn = QPushButton()
+                color_btn.setFixedSize(24, 18)
+                color_btn.setStyleSheet(f"background:{st.get('color', '#ffffff')};border:1px solid #777;")
+                color_btn.clicked.connect(lambda _=False, name=key: self._choose_channel_color(name))
+                row.addWidget(color_btn)
+                entry["color_btn"] = color_btn
             op = QSlider(Qt.Horizontal)
             op.setRange(0, 200)
             op.setValue(int(float(st.get("opacity", 1.0)) * 100))
@@ -1716,13 +1784,8 @@ class Step3Page(QWidget):
             auto_btn.clicked.connect(lambda _=False, name=key: self._auto_channel_contrast(name))
             row.addWidget(auto_btn)
             self._channel_lay.addLayout(row)
-            self._channel_rows[key] = {
-                "checkbox": cb,
-                "color_btn": color_btn,
-                "opacity": op,
-                "label": label,
-                "source": source,
-            }
+            entry["opacity"] = op
+            self._channel_rows[key] = entry
 
         self._sync_unified_layer_state()
         dapi_lbl = QLabel("DAPI Overlay")
@@ -1766,7 +1829,10 @@ class Step3Page(QWidget):
             self._log_overlay_rows(marker_channels, visible_count=0)
             return
         for ch in filtered_channels:
-            _add_row(ch, ch, self._channel_sources.get(ch, "raw"))
+            # PUBLIC FIELDS ARE NOT EDITED HERE. Visibility and colour for a
+            # marker channel are edited in Block01's one channel dock.
+            _add_row(ch, ch, self._channel_sources.get(ch, "raw"),
+                     public_controls=False)
         self._channel_lay.addStretch()
         self._log_overlay_rows(marker_channels, visible_count=len(filtered_channels))
 
@@ -2834,7 +2900,7 @@ class Step3Page(QWidget):
         visible = []
         for ch in self._marker_channels():
             st = self._channel_settings.get(ch, {})
-            if not st.get("visible", False):
+            if not self._marker_visible(ch):
                 continue
             arr = self._patch_channel_cache.get(ch)
             if arr is None:
@@ -2842,7 +2908,7 @@ class Step3Page(QWidget):
             if arr.shape[:2] != target:
                 arr = self._match_channel_shape(ch, arr, self._channel_sources.get(ch, "raw"))
             norm = self._normalize_channel_for_display(ch, arr)
-            color = self._hex_to_rgb(st.get("color", "#ffffff"))
+            color = self._hex_to_rgb(self._marker_color(ch))
             opacity = float(np.clip(st.get("opacity", 1.0), 0.0, 2.0))
             canvas += norm[:, :, None] * color[None, None, :] * opacity
             visible.append(ch)
@@ -2874,10 +2940,8 @@ class Step3Page(QWidget):
     def _load_visible_patch_channels(self):
         if self._last_patch_bbox is None:
             return
-        visible = [
-            ch for ch in self._marker_channels()
-            if self._channel_settings.get(ch, {}).get("visible", False)
-        ]
+        visible = [ch for ch in self._marker_channels()
+                   if self._marker_visible(ch)]
         print(f"[Step3] available_channels={self._available_channels}")
         print(f"[Step3] visible_channels={visible}")
         for ch in visible:

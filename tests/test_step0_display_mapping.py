@@ -161,7 +161,7 @@ def test_the_mapping_lives_in_the_workbench_params(app):
     assert (p["brightness"], p["contrast"]) == (0.0, 1.0)
     assert page._display_mapping_for("CD3") == (3.0, 30.0, 1.1)
     # ...and the SHARED state carries the same window. The dock's own
-    # `ChannelSetModel` mirror of it is gone with Step0's private dock.
+    # writable mirror of it is gone with Step0's private dock.
     assert page.display.state.mapping("CD3") == (3.0, 30.0, 1.1)
 
 

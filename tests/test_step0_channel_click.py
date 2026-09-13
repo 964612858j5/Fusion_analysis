@@ -3,8 +3,8 @@
 Reported from manual testing: after a multi-channel Process only the first
 channel could be viewed. Measured: a mouse click moved the list's current
 row, but the page's `current_channel` did not follow. The click goes
-`ChannelRowBase.mousePressEvent` -> `model.select` ->
-`ChannelDock._on_model_selection`, which sets the list's current item with
+`GlobalChannelRow.mousePressEvent` -> the dock's row-click rule ->
+`ChannelDisplayState.set_selected_channel`, which sets the list's current item with
 signals BLOCKED, so the page's `currentRowChanged` slot never ran. The page
 now listens to the model's `selection_changed`, which both a click and a
 programmatic `setCurrentRow` reach.

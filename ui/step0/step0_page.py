@@ -6377,92 +6377,14 @@ class Step0Page(QWidget):
         self._refresh_slider_labels()
 
     def _rebuild_channel_list(self):
-        # v15: rebuilt through the shared-dock adapter; the legacy row
-        # construction below is retained only as the pre-adapter fallback.
-        if getattr(self, "_dock_adapter", None) is not None:
-            self._dock_adapter.rebuild()
-            return
-        current = self.current_channel
-        self._channel_rows.clear()
-        self._channel_order = []
-        self._channel_list.clear()
-        if not self.loader:
-            return
+        """Rebuild the public rows for this slide, through the dock adapter.
 
-        for ch in self.loader.channel_names():
-            item = QtWidgets.QListWidgetItem(self._channel_list)
-            item.setSizeHint(QtCore.QSize(300, 29))   # 4/5 of the old 36
-            row = QWidget()
-            lay = QHBoxLayout(row)
-            lay.setContentsMargins(4, 1, 4, 1)
-            lay.setSpacing(4)
-
-            is_nucleus = (ch == self.nucleus_channel)
-
-            # 勾选框
-            cb = QtWidgets.QCheckBox()
-            cb.setChecked(False)
-            cb.setEnabled(not is_nucleus)
-            cb.stateChanged.connect(lambda state, name=ch: self._on_channel_checkbox_toggled(name, state))
-            lay.addWidget(cb)
-
-            # 通道名 — no stretch, so the Method dropdown sits right next to it.
-            label = QLabel(ch if not is_nucleus else f"{ch} ★")
-            label.setStyleSheet("color:#ddd;font-size:11px;")
-            label.setMinimumWidth(48)
-            lay.addWidget(label)
-
-            # 方法下拉（nucleus锁定）— immediately after the channel name. Also the
-            # single source of truth for the ASSIGNED method: "Original" folds in the
-            # old separate decision badge (tophat/cucim/original), so no extra widget.
-            method_cb = QtWidgets.QComboBox()
-            method_cb.addItems(["TopHat", "cucim", "Both", "Original"])
-            method_cb.setEnabled(not is_nucleus)
-            method_cb.setFixedWidth(64)
-            method_cb.setStyleSheet(
-                "QComboBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-                "border-radius:3px;padding:1px 2px;font-size:10px;}"
-                "QComboBox::drop-down{border:none;}"
-                "QComboBox:disabled{color:#555;}"
-            )
-            saved = self._channel_row_method(ch)
-            method_cb.setCurrentIndex(self._METHOD_IDX.get(saved, 0))
-            method_cb.currentTextChanged.connect(
-                lambda txt, name=ch: self._on_channel_method_changed(name, txt))
-            lay.addWidget(method_cb)
-
-            lay.addStretch(1)   # push the status icon to the right edge
-
-            # 状态图标（空/转圈/绿勾）
-            status_lbl = QLabel("—")
-            status_lbl.setAlignment(Qt.AlignCenter)
-            status_lbl.setFixedWidth(20)
-            status_lbl.setStyleSheet("color:#666;font-size:12px;")
-            lay.addWidget(status_lbl)
-
-            self._channel_list.setItemWidget(item, row)
-            self._channel_rows[ch] = {
-                "checkbox": cb, "label": label, "badge": status_lbl,
-                "item": item,
-                "method_cb": method_cb, "status_lbl": status_lbl,
-                "row_widget": row,
-            }
-            self._channel_order.append(ch)
-            self._refresh_channel_row(ch)
-
-        if current in self._channel_rows:
-            self.current_channel = current
-            self._channel_list.blockSignals(True)
-            self._channel_list.setCurrentItem(self._channel_rows[current]["item"])
-            self._channel_list.blockSignals(False)
-        else:
-            landing = self._landing_channel()
-            self.current_channel = landing
-            if landing:
-                self._channel_list.blockSignals(True)
-                self._channel_list.setCurrentItem(
-                    self._channel_rows[landing]["item"])
-                self._channel_list.blockSignals(False)
+        The hand-built list that used to stand here was the pre-adapter
+        fallback; there is one public list in the process now and it is the
+        dock's, so a second construction path is a second list waiting to be
+        reached.
+        """
+        self._dock_adapter.rebuild()
 
     # NOTE: `_refresh_channel_row` used to be defined TWICE in this class.
     # Python keeps the LAST definition, so the one that stood here -- the one
@@ -6478,8 +6400,6 @@ class Step0Page(QWidget):
         row = self._channel_rows.get(ch)
         if not row:
             return
-        row["status_lbl"].setText("⟳")
-        row["status_lbl"].setStyleSheet("color:#e5c07b;font-size:13px;")
         row["row_widget"].setStyleSheet("background:#2a2a1a;border-radius:3px;")
         self._refresh_channel_state(ch)
 
@@ -6497,7 +6417,6 @@ class Step0Page(QWidget):
         row = self._channel_rows.get(ch)
         if not row:
             return
-        row["status_lbl"].setText("")
         row["row_widget"].setStyleSheet("background:#1a2e1a;border-radius:3px;")
         self._refresh_channel_state(ch)
         self._refresh_channel_state(ch)
@@ -6663,9 +6582,6 @@ class Step0Page(QWidget):
         rgb = self._channel_color(ch)
         if push_workbench:
             self._push_color_to_workbench(ch, rgb)
-        model = self._display_model()
-        if model is not None and model.get(ch) is not None:
-            model.set_color(ch, self._channel_color_hex(ch))
         # Invalidate this channel's cached composites, then redraw.
         for k in [k for k in self._preview_cache if k[0] == ch]:
             del self._preview_cache[k]
@@ -6748,9 +6664,6 @@ class Step0Page(QWidget):
             self._channel_colors[nuc] = self._nuc_color
             if push_workbench:
                 self._push_color_to_workbench(nuc, self._nuc_color)
-            model = self._display_model()
-            if model is not None and model.get(nuc) is not None:
-                model.set_color(nuc, self._channel_color_hex(nuc))
         if self._last_payload is not None and self.current_channel:
             self._rebuild_payload_rgb(self.current_channel)
             self._refresh_preview_display(keep_zoom=True)
@@ -7776,19 +7689,6 @@ class Step0Page(QWidget):
 
     # ── display mapping: one per channel, shared by every view ─────────
 
-    def _display_model(self):
-        """The channel-set MIRROR, which no longer exists.
-
-        Step0's own dock carried a `ChannelSetModel` -- a second, writable
-        copy of colour, visibility and the display window -- and the mirror
-        writes below wrote into it. The public dock projects
-        `ChannelDisplayState` directly, so there is nothing to mirror into
-        and every one of those writes is a no-op. The call sites are left
-        standing for B5 to remove; answering None here is what makes the
-        second copy gone rather than merely unused.
-        """
-        return None
-
     def _workbench_params(self, ch):
         """The Channel Remap workbench's params dict for `ch`, or None when
         the workbench does not (yet) know that channel."""
@@ -7968,7 +7868,6 @@ class Step0Page(QWidget):
                 # read, which is what `_on_channel_overview_ready` triggers
                 # the moment the record lands.
                 self._display_fallback[ch] = entry
-                self._set_display_silently(ch, *entry)
         return entry
 
     def _seed_display_mapping(self, ch, payload=None, nucleus=False,
@@ -8020,21 +7919,6 @@ class Step0Page(QWidget):
             arr = payload.get(f"{key}_disp")
         return None if arr is None else np.asarray(arr)
 
-    def _set_display_silently(self, ch, lo, hi, gamma):
-        """Mirror a mapping into the channel model without the model
-        re-broadcasting it. The model's display fields are a MIRROR only --
-        nothing reads them back as the mapping (see `_display_mapping_for`);
-        they are kept so the shared dock/model stays a faithful description
-        of the channel set."""
-        model = self._display_model()
-        if model is None or model.get(ch) is None:
-            return
-        model.blockSignals(True)
-        try:
-            model.set_display(ch, lo, hi, gamma)
-        finally:
-            model.blockSignals(False)
-
     def set_display_mapping(self, ch, lo, hi, gamma=None):
         """Public: set a channel's display mapping. Every view follows.
 
@@ -8067,7 +7951,6 @@ class Step0Page(QWidget):
         """
         if not ch:
             return
-        self._set_display_silently(ch, lo, hi, gamma)     # model mirror
         wb = getattr(self, "_cond_workbench", None)
         if self._workbench_params(ch) is not None:
             p = dict(wb._params[ch])
@@ -8512,8 +8395,10 @@ class Step0Page(QWidget):
         # background-correction method.
         cb.setChecked(self._channel_display_visible(ch))
         if ch == self.nucleus_channel:
-            row["status_lbl"].setText("★")
-            row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
+            # The nucleus marker is in the row's NAME (`★`), drawn by the
+            # dock; the right-edge badge it used to be painted into was
+            # hidden and is gone.
+            pass
         else:
             # THE COMBO IS THE DECISION, DRAWN. A channel nobody has
             # assigned is `original` -- which is what Save writes for it and
@@ -8526,8 +8411,6 @@ class Step0Page(QWidget):
                 method_cb.blockSignals(True)
                 method_cb.setCurrentIndex(self._METHOD_IDX.get(decision, 0))
                 method_cb.blockSignals(False)
-            if row["status_lbl"].text() != "⟳":   # don't clobber a running spinner
-                row["status_lbl"].setText("")
         cb.blockSignals(False)
         self._refresh_channel_state(ch)
 
@@ -9055,9 +8938,9 @@ class Step0Page(QWidget):
         stalled = list(self._pending_signatures)
         self._pending_signatures.clear()
         for ch in stalled:
-            row = self._channel_rows.get(ch)
-            if row and row["status_lbl"].text() == "⟳":
-                row["status_lbl"].setText("")
+            # The row's glyph is DERIVED from this bookkeeping (see
+            # `_channel_compute_state`), so clearing the pending entry is
+            # what stops the spinner; there is no second place to wipe.
             self._refresh_channel_state(ch)
 
     # ══ on-demand computing: REMOVED ═════════════════════════════════

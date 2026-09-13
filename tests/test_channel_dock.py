@@ -1,9 +1,16 @@
-"""v15 Phase 1A: shared ChannelDock shell, per-page rows/editors, adapters.
+"""Step0's channel rows, in the ONE public dock.
 
-Covers the v15 acceptance list (plan §11–12, test requirements 1–12):
-same shell for all steps, Step0 bg-method semantics, Step1 weight-only rows,
-Step3 display-only rows/inspector, search + show/hide all, weight two-way
-sync, and cross-page channel state consistency.
+WHAT THIS MODULE USED TO BE. The v15 Phase-1A acceptance list for a reusable
+`ChannelDock` shell with a per-page row factory over a `ChannelSetModel`:
+"the same shell for all steps", "Step1 weight-only rows", "Step3
+display-only rows", "state transfers between docks". Those parts are gone
+with B5 -- there is one dock, one row class and no second model to transfer
+state between -- and what survives here is what they were really about,
+written against the real page: Step0's correction row, the shared search and
+bulk sweep, the weight editor's two-way sync, and the row geometry.
+
+The per-step field table, the row identity through a step walk and the
+command gating live in `test_global_channel_dock.py`.
 
 Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 """
@@ -19,73 +26,49 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def _states(n=4, **kw):
-    from block01.ui.widgets.channel_dock import ChannelState
-    return [ChannelState(channel_id=f"CH{i}", color="#336699", **kw)
-            for i in range(n)]
+class _Loader:
+    def __init__(self, names=("DAPI", "CD3", "CD20")):
+        self._names = list(names)
+
+    def channel_names(self):
+        return list(self._names)
 
 
-def _mk(app, row_cls, states=None):
-    from block01.ui.widgets.channel_dock import ChannelDock, ChannelSetModel
-    m = ChannelSetModel()
-    m.set_channels(states if states is not None else _states())
-    d = ChannelDock(m, row_factory=row_cls)
-    return m, d
+def _page(app, names=("DAPI", "CD3", "CD20")):
+    """A real Step0 page bound to the public dock."""
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page()
+    page.loader = _Loader(names)
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    return page
 
 
-# ── 1. Same shared shell for all three steps ────────────────────────────────
-
-def test_all_steps_use_same_shell_class(app):
-    from block01.ui.widgets.channel_dock import (
-        ChannelDock, Step0ChannelRow, WeightChannelRow, DisplayChannelRow)
-    docks = [_mk(app, cls)[1]
-             for cls in (Step0ChannelRow, WeightChannelRow, DisplayChannelRow)]
-    assert all(type(d) is ChannelDock for d in docks)
-    # shell affordances present on every page
-    for d in docks:
-        assert d.search is not None and d.list_widget is not None
-        assert d.btn_show_all is not None and d.btn_hide_all is not None
-
-
-# ── 2. Step0 rows: bg method + final decision status ────────────────────────
+# ── Step0's row: the correction decision and its compute state ──────────────
 
 def test_step0_row_shows_method_and_final_state(app):
-    from block01.ui.widgets.channel_dock import ChannelState, Step0ChannelRow
-    sts = [ChannelState("CH0", bg_final_method="tophat", status="done"),
-           ChannelState("CH1", bg_final_method="original")]
-    m, d = _mk(app, Step0ChannelRow, sts)
-    r0, r1 = d.row("CH0"), d.row("CH1")
-    assert r0.method_cb.currentText() == "TopHat"
-    assert r1.method_cb.currentText() == "Original"
-    m.set_status("CH0", "done")
-    m.set_status("CH0", "computing")
-    assert r0.status_lbl.text() == "⟳"
-    m.set_bg_final("CH1", "cucim")
-    assert r1.method_cb.currentText() == "cucim"
+    page = _page(app)
+    dock = page._dock_adapter.dock
+    dock.set_step(0)
+    page._channel_decisions["CD3"] = "tophat"
+    page._rebuild_channel_list()
+
+    assert dock.row("CD3").method_cb.currentText() == "TopHat"
+    assert dock.row("CD20").method_cb.currentText() == "Original"
+
+    # The compute state is DERIVED from the page's signature bookkeeping --
+    # the row holds none of its own -- so a run in flight is what makes the
+    # glyph a spinner.
+    page._pending_signatures["CD3"] = "sig"
+    page._set_channel_computing("CD3")
+    assert dock.row("CD3").state_slot.text() == "⟳"
+    page._channel_decisions["CD20"] = "cucim"
+    page._refresh_channel_row("CD20")
+    assert dock.row("CD20").method_cb.currentText() == "cucim"
 
 
-# ── 3. Step1 rows: weights only, no bg method ────────────────────────────────
-
-def test_step1_row_weight_only(app):
-    from block01.ui.widgets.channel_dock import WeightChannelRow
-    m, d = _mk(app, WeightChannelRow, _states(weight=0.5))
-    r = d.row("CH0")
-    assert hasattr(r, "slider") and hasattr(r, "spin")
-    assert not hasattr(r, "method_cb")          # no background method on Step1
-
-
-# ── 4. Step3 rows: visibility/color/name only ────────────────────────────────
-
-def test_step3_row_is_minimal(app):
-    from block01.ui.widgets.channel_dock import DisplayChannelRow
-    m, d = _mk(app, DisplayChannelRow)
-    r = d.row("CH0")
-    assert not hasattr(r, "method_cb")
-    assert not hasattr(r, "slider")             # no weight either
-    assert r.checkbox is not None and r.swatch is not None
-
-
-# ── 5. Step0/Step3 Min/Max/Gamma tool areas ────────────────────────────────────
+# ── the selected-channel tool areas (Min/Max/Gamma) ─────────────────────────
 
 def test_min_max_gamma_editors_exist(app):
     from block01.ui.widgets.channel_dock import Step0Inspector, Step3Inspector
@@ -99,75 +82,52 @@ def test_min_max_gamma_editors_exist(app):
     assert hasattr(s0, "tophat_radius") and hasattr(s0, "cucim_sigma")
 
 
-# ── 6. Step3 adapter never writes processing keys ────────────────────────────
-
-def test_step3_adapter_writes_display_only(app):
-    from block01.ui.step3_dock_adapter import Step3DisplayDockAdapter, DISPLAY_KEYS
-    settings = {"CD3": {"visible": True, "color": "#ff0000",
-                        "opacity": 100, "contrast": [1.0, 99.5]}}
-    ad = Step3DisplayDockAdapter(settings)
-    ad.model.select("CD3")
-    ad.inspector.remap.min_spin.setValue(10.0)
-    ad.model.set_visible("CD3", False)
-    ad.model.set_color("CD3", "#00ff00")
-    assert set(settings["CD3"].keys()) <= DISPLAY_KEYS
-    assert settings["CD3"]["visible"] is False
-    assert settings["CD3"]["color"] == "#00ff00"
-    assert settings["CD3"]["display_min"] == 10.0
-    for forbidden in ("method", "bg_final_method", "weight",
-                      "tophat_radius", "cucim_sigma"):
-        assert forbidden not in settings["CD3"]
-
-
-# ── 7. Channel order / color / visibility / selection consistency ───────────
-
-def test_state_transfers_between_docks(app):
-    from block01.ui.widgets.channel_dock import (
-        ChannelDock, ChannelSetModel, Step0ChannelRow, DisplayChannelRow)
-    m = ChannelSetModel()
-    m.set_channels(_states())
-    m.set_color("CH2", "#aabbcc")
-    m.set_visible("CH1", False)
-    m.select("CH2")
-    d0 = ChannelDock(m, row_factory=Step0ChannelRow)
-    d3 = ChannelDock(m, row_factory=DisplayChannelRow)
-    for d in (d0, d3):
-        assert list(d.rows().keys()) == ["CH0", "CH1", "CH2", "CH3"]
-        assert not d.row("CH1").checkbox.isChecked()
-        assert d.list_widget.currentItem() is d.item("CH2")
-    assert m.get("CH2").color == "#aabbcc"
-
-
-# ── 8. Search / Show all / Hide all ─────────────────────────────────────────
+# ── search, and a bulk sweep that asks the capability ───────────────────────
 
 def test_search_and_bulk_visibility(app):
-    from block01.ui.widgets.channel_dock import DisplayChannelRow, ChannelState
-    sts = [ChannelState("DAPI"), ChannelState("CD3"), ChannelState("CD20")]
-    m, d = _mk(app, DisplayChannelRow, sts)
-    d.search.setText("cd")
-    assert d.visible_row_ids() == ["CD3", "CD20"]
-    d.search.setText("")
-    assert len(d.visible_row_ids()) == 3
-    d.btn_hide_all.click()
-    assert all(not m.get(c).visible for c in m.order())
-    d.btn_show_all.click()
-    assert all(m.get(c).visible for c in m.order())
+    page = _page(app)
+    dock = page._dock_adapter.dock
+    state = page.display.state
+
+    dock.search.setText("cd")
+    assert dock.visible_row_ids() == ["CD3", "CD20"]
+    dock.search.setText("")
+    assert len(dock.visible_row_ids()) == 3
+
+    state.set_display_visible("DAPI", True, origin="test")
+    dock.set_all_visible(False)
+    # A SWEEP IS ITS OWN PERMISSION: the DAPI layer is shown and hidden
+    # deliberately, so Hide all leaves it alone while the markers go.
+    assert state.display_visible("DAPI") is True
+    assert state.display_visible("CD3") is False
+    assert state.display_visible("CD20") is False
+    dock.set_all_visible(True)
+    assert state.display_visible("CD3") is True
 
 
-# ── 9. Weight slider ↔ numeric input two-way sync ─────────────────────────────
+# ── the weight editor: slider and number, one answer ────────────────────────
 
 def test_weight_slider_spin_two_way_sync(app):
-    from block01.ui.widgets.channel_dock import WeightChannelRow
-    m, d = _mk(app, WeightChannelRow, _states(weight=0.5))
-    r = d.row("CH0")
+    from block01.core.fusion_domain import FusionDomainModel
+    from block01.ui.widgets.channel_dock.global_dock import (
+        GlobalChannelDock, STEP1)
+
+    fusion = FusionDomainModel()
+    fusion.add_group("markers", {"CD3": 0.5})
+    dock = GlobalChannelDock(None, fusion)
+    dock.set_channels(["CD3"])
+    dock.set_step(STEP1)
+    r = dock.row("CD3")
+
     r.slider.setValue(80)
     assert abs(r.spin.value() - 0.8) < 1e-9
-    assert abs(m.get("CH0").weight - 0.8) < 1e-9
+    assert abs(fusion.channel_weight("CD3") - 0.8) < 1e-9
     r.spin.setValue(0.25)
     assert r.slider.value() == 25
-    assert abs(m.get("CH0").weight - 0.25) < 1e-9
-    m.set_weight("CH0", 0.6)
+    assert abs(fusion.channel_weight("CD3") - 0.25) < 1e-9
+    fusion.edit_channel_weight("CD3", 0.6, origin="test")
     assert r.slider.value() == 60 and abs(r.spin.value() - 0.6) < 1e-9
+    dock.deleteLater()
 
 
 # ── Step0 adapter: legacy registry compatibility ─────────────────────────────
@@ -194,9 +154,10 @@ def test_step0_adapter_legacy_registry(app):
 
     assert page._dock_adapter.dock is page.display.channel_dock()
     assert page._channel_order == ["DAPI", "CD3", "CD20"]
-    for key in ("checkbox", "label", "badge", "item",
-                "method_cb", "status_lbl", "row_widget"):
-        assert key in page._channel_rows["CD3"]
+    # The registry's keys, after B5 took the empty right-edge badge out:
+    # `badge` and `status_lbl` named a label that was never shown.
+    assert set(page._channel_rows["CD3"]) == {
+        "checkbox", "label", "item", "method_cb", "row_widget"}
     # nucleus locked FOR CORRECTION: its method combo is dead. Its checkbox
     # is not a processing checkbox at all -- it is the DAPI layer's show/hide
     # switch -- so it stays enabled.
@@ -319,24 +280,39 @@ def test_step0_row_name_position_stable_after_done(app):
     dock.hide()
 
 
-def test_a_bulk_sweep_asks_bulk_toggleable_not_locked():
-    """`locked` used to stand for four decisions at once, so the model's
-    bulk sweep skipped a channel because it was "special" rather than
-    because a sweep may not move it. The two are separate facts now, and
-    this test is only meaningful while they can disagree."""
-    from block01.ui.widgets.channel_dock import ChannelSetModel, ChannelState
+def test_a_bulk_sweep_asks_bulk_toggleable_not_locked(app):
+    """`locked` used to stand for four decisions at once, so a bulk sweep
+    skipped a channel because it was "special" rather than because a sweep
+    may not move it. The two are separate facts, and this test is only
+    meaningful while they can disagree.
 
-    model = ChannelSetModel()
-    model.set_channels([
-        # swept: a bulk sweep may move it, whatever else it is
-        ChannelState(channel_id="A", visible=False, locked=True,
-                     bulk_toggleable=True),
-        # not swept: it is shown and hidden deliberately
-        ChannelState(channel_id="B", visible=False, locked=False,
-                     bulk_toggleable=False),
-    ])
+    Written against the capabilities on `ChannelDisplayState` and the public
+    dock's sweep -- the `ChannelSetModel` it used to drive is gone.
+    """
+    from block01.core.display_identity import ChannelCapabilities
+    from block01.ui.block01_display import Block01DisplayServices
+    from block01.ui.widgets.channel_dock.global_dock import GlobalChannelDock
+    from block01.core import display_identity
 
-    model.set_all_visible(True)
+    services = Block01DisplayServices()
+    state = services.state
+    state.bind(display_identity.DatasetIdentity("/tmp/bulk.ome.tiff", "1:1"))
+    state.install({
+        "order": ("A", "B"),
+        "capabilities": {
+            # swept: a bulk sweep may move it, whatever else it is
+            "A": ChannelCapabilities(bulk_toggleable=True),
+            # not swept: it is shown and hidden deliberately
+            "B": ChannelCapabilities(is_nucleus=True, bulk_toggleable=False),
+        },
+        "visibility": {"A": False, "B": False},
+    })
+    dock = GlobalChannelDock(state, services.fusion)
+    dock.set_channels(["A", "B"])
 
-    assert model.get("A").visible is True, "a sweepable channel was skipped"
-    assert model.get("B").visible is False, "a deliberate channel was swept"
+    dock.set_all_visible(True)
+
+    assert state.display_visible("A") is True, "a sweepable channel was skipped"
+    assert state.display_visible("B") is False, "a deliberate channel was swept"
+    services.shutdown("test")
+    dock.deleteLater()

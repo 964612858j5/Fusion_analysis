@@ -40,7 +40,7 @@ class _ChannelRow(QtWidgets.QWidget):
         # list's hover/selected highlight paints through, and the shared
         # checkmark indicator. Remap involves no computation, so rows here
         # always use the checkmark (never a filled box).
-        from .channel_dock.rows import CHECKBOX_INDICATOR_QSS
+        from .channel_dock.template import CHECKBOX_INDICATOR_QSS
         self.setStyleSheet("*{background:transparent;}" + CHECKBOX_INDICATOR_QSS)
 
         self._chk = QtWidgets.QCheckBox()

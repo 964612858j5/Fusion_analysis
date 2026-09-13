@@ -10,8 +10,9 @@ pages, and it keeps doing the two things that are Step0's:
   compute-state glyph -- out of the page's correction domain.
 
 The legacy row registry (``page._channel_rows[ch]`` with keys ``checkbox``,
-``label``, ``badge``, ``item``, ``method_cb``, ``status_lbl``,
-``row_widget``) is still populated, now pointing at the PUBLIC row's widgets,
+``label``, ``item``, ``method_cb``, ``row_widget``) is still populated, now
+pointing at the PUBLIC row's widgets -- the ``badge``/``status_lbl`` entries
+went with the empty label they named,
 and ``page._channel_list`` still points at a QListWidget (the public dock's),
 so the page's existing slots keep working against one list instead of two.
 
@@ -260,10 +261,8 @@ class Step0ChannelDockAdapter(QObject):
             page._channel_rows[ch] = {
                 "checkbox": row.checkbox,
                 "label": row.name_label,
-                "badge": row.status_lbl,
                 "item": self.dock.item(ch),
                 "method_cb": row.method_cb,
-                "status_lbl": row.status_lbl,
                 "row_widget": row,
             }
             page._channel_order.append(ch)

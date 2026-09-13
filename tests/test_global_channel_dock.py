@@ -128,25 +128,52 @@ def _is_descendant(widget, ancestor):
 def test_exactly_one_public_channel_list_in_the_real_window(app):
     from block01.ui.widgets.channel_dock.global_dock import (
         GlobalChannelDock, GlobalChannelRow)
-    from block01.ui.widgets.channel_dock import ChannelDock
-    from block01.ui.step0.config_panel import ChannelRow as Step1PrivateRow
 
     w = _window(app)
     try:
         docks = w.findChildren(GlobalChannelDock) + [w._channel_dock]
         assert len({id(d) for d in docks}) == 1
-        # Step0's own ChannelDock and Step1's private rows are not built
-        assert w.findChildren(ChannelDock) == []
-        assert w.findChildren(Step1PrivateRow) == []
         assert w._step0._dock_adapter.dock is w._channel_dock
         assert w._step0._channel_list is w._channel_dock.list_widget
         # ...and one set of public rows, the dock's
         rows = w._channel_dock.findChildren(GlobalChannelRow)
         assert len(rows) == len(w._channel_dock.channel_order())
         assert w.config._rows == w._channel_dock.rows()
-        assert w.config._private_rows == {}
     finally:
         _close(w)
+
+
+def test_the_retired_per_step_channel_lists_are_gone(app):
+    """B5: the old stack is not importable, from anywhere.
+
+    A test that only counted instances would pass against a module that is
+    still there waiting to be constructed again; what is pinned here is that
+    the code no longer exists.
+    """
+    import importlib
+
+    for name in ("block01.ui.widgets.channel_dock.dock",
+                 "block01.ui.widgets.channel_dock.model",
+                 "block01.ui.widgets.channel_dock.rows",
+                 "block01.ui.step3_dock_adapter"):
+        with pytest.raises(ImportError):
+            importlib.import_module(name)
+
+    package = importlib.import_module("block01.ui.widgets.channel_dock")
+    for symbol in ("ChannelDock", "ChannelSetModel", "ChannelState",
+                   "ChannelRowBase", "Step0ChannelRow", "WeightChannelRow",
+                   "DisplayChannelRow", "Step3DisplayDockAdapter"):
+        assert not hasattr(package, symbol), symbol
+        assert symbol not in package.__all__, symbol
+
+    # ...and Step1's private row class went with them
+    config_panel = importlib.import_module("block01.ui.step0.config_panel")
+    assert not hasattr(config_panel, "ChannelRow")
+
+    # the SPECIALISED layer editors are not the old public dock and stay
+    from block01.ui.widgets.channel_layer_list import ChannelLayerList
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+    assert ChannelLayerList is not None and ChannelWorkbench is not None
 
 
 def test_step3_marker_rows_carry_no_public_controls(app):
@@ -588,7 +615,7 @@ def test_a_weight_edited_in_step1_survives_the_walk(app):
     window is the other one, and it writes the same model), so what is pinned
     here is that the ANSWER travels, not the control.
     """
-    from block01.ui.step0.config_panel import ChannelRow as Step1PrivateRow
+    from PyQt5.QtWidgets import QListWidget
 
     w = _window(app)
     try:
@@ -598,7 +625,7 @@ def test_a_weight_edited_in_step1_survives_the_walk(app):
         assert fusion.channel_weight("CD8") == pytest.approx(0.35)
         assert fusion.weight_provenance("CD8") == "explicit"
         assert w.config.channel_weight("CD8") == pytest.approx(0.35)
-        assert w.findChildren(Step1PrivateRow) == []
+        assert w.config.findChildren(QListWidget) == []
 
         for step in STEP_WALK:
             w._set_step_active(step)
@@ -915,23 +942,31 @@ def test_the_detach_of_a_stale_adapter_leaves_the_current_one(app):
 
 def test_the_production_window_builds_no_legacy_channel_list(app):
     from PyQt5.QtWidgets import QListWidget
-    from block01.ui.widgets.channel_dock import ChannelDock
     from block01.ui.widgets.channel_dock.global_dock import (
         GlobalChannelDock, GlobalChannelRow)
-    from block01.ui.step0.config_panel import ChannelRow as Step1PrivateRow
 
     w = _window(app)
     try:
-        assert w.config._list is None, "the private list was constructed"
+        # The panel has no list of its own -- not a hidden one, not an empty
+        # one: it does not build channel rows at all.
         assert w.config.findChildren(QListWidget) == []
-        assert w.findChildren(Step1PrivateRow) == []
-        assert w.findChildren(ChannelDock) == []
+        assert not hasattr(w.config, "_list")
+        assert w.config._rows == w._channel_dock.rows()
         docks = w.findChildren(GlobalChannelDock)
         assert len(docks) == 1 and docks[0] is w._channel_dock
+        lists = [lw for lw in w.findChildren(QListWidget)
+                 if lw is w._channel_dock.list_widget]
+        assert len(lists) == 1
         rows = w._channel_dock.findChildren(GlobalChannelRow)
         assert len(rows) == len(w._channel_dock.channel_order())
         # the panel keeps Step1's own tools
         assert w.config._nuc_value.text().startswith("DAPI")
+        # ...and Step0's row registry no longer carries the empty badge
+        w._step0._rebuild_channel_list()
+        entry = w._step0._channel_rows["CD3"]
+        assert set(entry) == {"checkbox", "label", "item", "method_cb",
+                              "row_widget"}
+        assert not hasattr(w._channel_dock.row("CD3"), "status_lbl")
     finally:
         _close(w)
 
@@ -958,7 +993,6 @@ def _click_row(dock, cid, control=None):
     # coordinates and the viewport's coincide.
     assert dock.list_widget.visualItemRect(dock.item(cid)).top() == 0, \
         "bring the row to the top of the list before clicking it"
-
     target = control if control is not None else row
     pos = (target.rect().center() if control is not None
            else row.name_label.geometry().center())
@@ -1099,4 +1133,78 @@ def test_the_mixed_marker_is_shown_only_where_the_weight_is(app):
         # ...and the groups were never flattened by drawing them
         assert set(fusion.representative_weight("CD3").values) == {0.2, 0.7}
     finally:
+        _close(w)
+
+
+# ── B5: what the cleanup must keep true ─────────────────────────────────────
+
+def test_the_specialised_layer_editors_still_build(app):
+    """The Step1.5/Step3 remap tools are NOT the retired public dock.
+
+    They carry their own per-channel state -- min/max/gamma, brightness,
+    contrast, a preview colour in the remap config -- and never touch
+    `ChannelDisplayState` or `FusionDomainModel`. A cleanup that deleted them
+    for having a similar class name would take the remap workflow with it.
+    """
+    from block01.ui.widgets.channel_layer_list import ChannelLayerList
+    from block01.ui.widgets.channel_workbench import ChannelWorkbench
+
+    layers = ChannelLayerList()
+    layers.set_channels([{"name": "CD3", "color": "#00ff00", "visible": True}])
+    bench = ChannelWorkbench()
+    try:
+        assert layers.rows() if hasattr(layers, "rows") else True
+        assert bench._layer_list is not None
+        assert bench._inspector is not None
+    finally:
+        layers.deleteLater()
+        bench.deleteLater()
+
+
+def test_the_public_row_carries_no_second_status_badge(app):
+    """Step0's compute state is the state slot beside the checkbox. The
+    right-edge badge the row used to carry was always empty; B5 removed it
+    and the writes into it."""
+    w = _window(app)
+    try:
+        row = w._channel_dock.row("CD3")
+        assert not hasattr(row, "status_lbl")
+        w._set_step_active(0)
+        w._step0._pending_signatures["CD3"] = "sig"
+        w._step0._set_channel_computing("CD3")
+        assert row.state_slot.text() == "⟳"
+        assert "process" not in row.state_slot.toolTip().lower()
+    finally:
+        _close(w)
+
+
+def test_removing_the_empty_badge_left_the_public_columns_where_they_were(app):
+    """B1's geometry, re-measured after the deletion: the core columns are
+    the template's and the same in every step."""
+    from block01.ui.widgets.channel_dock import template
+
+    w = _window(app)
+    try:
+        dock = w._channel_dock
+        dock.resize(460, 240)
+        dock.show()
+        QtWidgets.QApplication.processEvents()
+        rows = [dock.row(c) for c in dock.channel_order()]
+        seen = []
+        for step in STEP_WALK:
+            w._set_step_active(step)
+            QtWidgets.QApplication.processEvents()
+            for r in rows:
+                r.layout().activate()
+            assert len({r.name_label.x() for r in rows}) == 1
+            seen.append([(r.checkbox.x(), r.state_slot.x(), r.swatch.x(),
+                          r.name_label.x(), r.name_label.width())
+                         for r in rows])
+        assert len({tuple(v) for v in seen}) == 1, seen
+        for r in rows:
+            assert (r.checkbox.width(), r.checkbox.height()) == \
+                template.CHECKBOX_SIZE
+            assert r.state_slot.width() == template.STATE_SLOT_WIDTH
+    finally:
+        dock.hide()
         _close(w)

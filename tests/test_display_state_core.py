@@ -11,7 +11,7 @@ only be judged by a value that had already moved.
 What this module pins:
 
 * selection, display visibility, colour and display mapping have ONE writable
-  owner, and no QWidget or `ChannelSetModel` is a fallback for it;
+  owner, and no QWidget is a fallback for it;
 * a whole state installs atomically -- observers see the finished thing, and a
   restore is not a run of user actions;
 * A -> B -> A restores A's namespace, while work from A's FIRST binding is
@@ -74,20 +74,26 @@ def test_the_shared_state_answers_selection_visibility_colour_and_mapping(app):
     assert st.mapping("CD3") == (5.0, 50.0, 1.2)
 
 
-def test_a_channel_set_model_is_not_a_fallback_for_the_public_answer(app):
-    """`ChannelSetModel` is a view's model. If the shared state fell back to
-    it, two lists could disagree and the "one answer" would be whichever was
-    asked."""
-    from block01.ui.widgets.channel_dock import ChannelSetModel, ChannelState
+def test_a_widget_is_not_a_fallback_for_the_public_answer(app):
+    """A ROW is a view. If the shared state fell back to one, two views could
+    disagree and the "one answer" would be whichever was asked.
+
+    B5 removed the `ChannelSetModel` this used to be written against -- the
+    second, writable copy of exactly these fields -- so it is written against
+    the public row that replaced it.
+    """
+    from block01.ui.widgets.channel_dock.global_dock import GlobalChannelRow
 
     st = _state(app)
     st.bind(_identity("A"))
-    model = ChannelSetModel()
-    model.set_channels([ChannelState(channel_id="CD3", visible=True)])
-    model.select("CD3")
+    row = GlobalChannelRow("CD3")
+    row.set_visible_state(True)
+    row.set_color("#123456")
 
-    assert st.selected_channel() == "", "the model answered for the state"
+    assert st.selected_channel() == "", "a widget answered for the state"
     assert st.display_visible("CD3") is False
+    assert st.color("CD3") != "#123456" or not st.has_color("CD3")
+    row.deleteLater()
 
 
 def test_writing_the_same_value_twice_announces_once(app):
@@ -666,8 +672,7 @@ def test_the_real_step1_restore_registers_display_state_once(app):
 
     services = Block01DisplayServices()
     services.state.bind(_identity("A"))
-    panel = ConfigPanel(["DAPI", "CD3", "CD8"], fusion=FusionDomainModel(),
-                        private_list=True)
+    panel = ConfigPanel(["DAPI", "CD3", "CD8"], fusion=FusionDomainModel())
     panel.set_display_state(services.state)
     try:
         installs, panel_signals = [], []
@@ -712,8 +717,7 @@ def test_a_restore_of_what_is_already_there_announces_nothing(app):
 
     services = Block01DisplayServices()
     services.state.bind(_identity("A"))
-    panel = ConfigPanel(["DAPI", "CD3"], fusion=FusionDomainModel(),
-                        private_list=True)
+    panel = ConfigPanel(["DAPI", "CD3"], fusion=FusionDomainModel())
     panel.set_display_state(services.state)
     try:
         payload = dict(colors={"CD3": "#123456"},

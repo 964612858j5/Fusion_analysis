@@ -51,7 +51,7 @@ import json
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QMessageBox, QFileDialog, QCheckBox, QSlider,
-    QDoubleSpinBox, QListWidget, QListWidgetItem, QColorDialog,
+    QDoubleSpinBox, QColorDialog,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor
@@ -72,180 +72,6 @@ _PALETTE = template.CHANNEL_PALETTE
 ROW_HEIGHT = template.ROW_HEIGHT
 
 
-class ChannelRow(QWidget):
-    """One channel: select / show / fuse / weight.
-
-    No hover text on the controls that are read at a glance -- the display
-    tick box, the colour swatch, the 0..1 slider. A popup over every one of
-    them in a list this long is in the way of the work rather than an
-    explanation of it, and the rules they would recite live in this module's
-    docstring, where they are read once.
-
-    The hover text that is left is on the things a widget cannot show by
-    itself: the read-only nucleus line, the warning on a row whose channel is
-    in several groups at different weights, and the `\u0192` box -- the only
-    control here whose meaning is not the obvious reading of its position,
-    because it sits next to a tick box that means something else.
-    """
-
-    selected = pyqtSignal(str)
-    visibility_toggled = pyqtSignal(str, bool)
-    fusion_toggled = pyqtSignal(str, bool)
-    weight_edited = pyqtSignal(str)
-    color_clicked = pyqtSignal(str)
-
-    def __init__(self, channel, weight=0.0, visible=False, color="#888888",
-                 fusion=False, parent=None):
-        super().__init__(parent)
-        self.channel = channel
-        self._busy = False
-
-        # The common columns come from the shared template -- checkbox, the
-        # always-present state slot, swatch and name -- so this row and the
-        # dock's `ChannelRowBase` cannot drift apart in geometry or style.
-        # Everything below is this row's ACCESSORY: the weight controls.
-        # `tooltips=False`: this panel's rows carry no hover text on their
-        # controls, by the product decision recorded in the class docstring.
-        core = template.build_row_core(self, name=channel, tooltips=False)
-        lay = core.layout
-        self.checkbox = core.checkbox
-        self.state_slot = core.state_slot
-        self.swatch = core.swatch
-        self.name_label = core.name_label
-
-        self.checkbox.setChecked(bool(visible))
-        self.checkbox.toggled.connect(self._on_toggled)
-
-        # FUSION PARTICIPATION -- the scientific tick, and the one control
-        # in this row that carries hover text, because it is the one whose
-        # meaning is not the obvious reading of the box next to the name.
-        # The left checkbox says whether you can SEE the channel; this says
-        # whether it takes part in the fusion at all. They were one tick
-        # until B3 and are two facts.
-        self.fusion_box = QCheckBox("\u0192")
-        self.fusion_box.setChecked(bool(fusion))
-        self.fusion_box.setToolTip(
-            "Take part in the FUSION. Unticking keeps this channel's groups "
-            "and weights; it simply stops contributing. The box on the left "
-            "only controls whether it is drawn.")
-        self.fusion_box.setStyleSheet(template.CHECKBOX_INDICATOR_QSS)
-        self.fusion_box.toggled.connect(self._on_fusion_toggled)
-        template.add_accessory(lay, template.fit_accessory(self.fusion_box))
-
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 100)
-        self.slider.setValue(int(round(float(weight) * 100)))
-        self.slider.setFixedHeight(16)
-        self.slider.setMinimumWidth(60)
-        template.add_accessory(lay, self.slider, stretch=2)
-
-        self.spin = QDoubleSpinBox()
-        self.spin.setRange(0.0, 1.0)
-        self.spin.setSingleStep(0.05)
-        self.spin.setDecimals(2)
-        self.spin.setValue(float(weight))
-        self.spin.setFixedWidth(56)
-        self.spin.setAlignment(Qt.AlignRight)
-        self.spin.setStyleSheet(template.ACCESSORY_SPINBOX_QSS)
-        template.add_accessory(lay, template.fit_accessory(self.spin))
-
-        self.slider.valueChanged.connect(self._on_slider)
-        self.spin.valueChanged.connect(self._on_spin)
-        self.set_color(color)
-
-    # -- weight (the spinbox is the authority; the slider follows it) -------
-    def weight(self):
-        return float(self.spin.value())
-
-    def set_weight(self, value):
-        if abs(self.weight() - float(value)) < 1e-9:
-            return
-        self._busy = True
-        try:
-            self.spin.setValue(float(value))
-            self.slider.setValue(int(round(float(value) * 100)))
-        finally:
-            self._busy = False
-
-    def _on_slider(self, v):
-        if self._busy:
-            return
-        self._busy = True
-        try:
-            self.spin.setValue(v / 100.0)
-        finally:
-            self._busy = False
-        self.weight_edited.emit(self.channel)
-
-    def _on_spin(self, v):
-        if self._busy:
-            return
-        self._busy = True
-        try:
-            self.slider.setValue(int(round(float(v) * 100)))
-        finally:
-            self._busy = False
-        self.weight_edited.emit(self.channel)
-
-    # -- visibility ---------------------------------------------------------
-    def is_visible(self):
-        return self.checkbox.isChecked()
-
-    def set_weight_editable(self, editable):
-        """A read-only row still shows its weight; it just cannot be moved.
-
-        A disabled slider and a read-only box say that by themselves; the
-        row's controls carry no hover text -- see the class docstring.
-        """
-        self.slider.setEnabled(bool(editable))
-        self.spin.setReadOnly(not editable)
-        self.spin.setButtonSymbols(
-            QDoubleSpinBox.UpDownArrows if editable else QDoubleSpinBox.NoButtons)
-
-    def set_visible(self, visible):
-        if self.checkbox.isChecked() == bool(visible):
-            return
-        self.checkbox.blockSignals(True)
-        self.checkbox.setChecked(bool(visible))
-        self.checkbox.blockSignals(False)
-
-    def _on_toggled(self, checked):
-        self.visibility_toggled.emit(self.channel, bool(checked))
-
-    # -- fusion participation -----------------------------------------------
-    def is_fusion_enabled(self):
-        return self.fusion_box.isChecked()
-
-    def set_fusion_enabled(self, enabled):
-        """Show the scientific answer. Silent: a row FOLLOWS the model."""
-        if self.fusion_box.isChecked() == bool(enabled):
-            return
-        self.fusion_box.blockSignals(True)
-        self.fusion_box.setChecked(bool(enabled))
-        self.fusion_box.blockSignals(False)
-
-    def _on_fusion_toggled(self, checked):
-        self.fusion_toggled.emit(self.channel, bool(checked))
-
-    # -- colour -------------------------------------------------------------
-    def set_color(self, color):
-        self._color = color
-        template.apply_swatch_color(self.swatch, color)
-
-    def color(self):
-        return self._color
-
-    # -- selection ----------------------------------------------------------
-    def mousePressEvent(self, ev):
-        self.selected.emit(self.channel)
-        super().mousePressEvent(ev)
-
-    def mouseReleaseEvent(self, ev):
-        if self.swatch.geometry().contains(ev.pos()):
-            self.color_clicked.emit(self.channel)
-        super().mouseReleaseEvent(ev)
-
-
 class ConfigPanel(QWidget):
     """Step1's channel editor: a view over two owners, and neither is here.
 
@@ -258,21 +84,16 @@ class ConfigPanel(QWidget):
     current_channel_changed = pyqtSignal(str)     # what Intensity should edit
     color_changed = pyqtSignal(str, str)          # overlay colour changed
 
-    def __init__(self, all_channels, fusion=None, channel_dock=None,
-                 private_list=False):
+    def __init__(self, all_channels, fusion=None, channel_dock=None):
         """`channel_dock` is Block01's ONE public channel dock.
 
-        Given one, this panel builds NO list and no rows: the public dock is
-        where every public field is edited, and this panel keeps only Step1's
-        own tools (the read-only nucleus line, Reset weights, Load weights).
-        It used to build its private `QListWidget` unconditionally and have
-        the host clear and hide it afterwards -- hiding a second public list
-        is not the same as not building one, and the hidden one was still a
-        widget the rows could have been put back into.
-
-        `private_list=True` is the explicit opt-in for a STANDALONE panel
-        (its own tests, a host with no dock) that really does need the legacy
-        rows. Nothing asks for it implicitly.
+        THIS PANEL BUILDS NO CHANNEL LIST. Every public field -- visibility,
+        colour, participation, weight -- is edited in the dock, which writes
+        the two owners; what is left here is Step1's own strip: the read-only
+        nucleus line, Reset weights, Load weights, and the session/config
+        API. A panel with no dock simply has no rows (`_rows` is empty); it
+        does not invent a second list, which is what B4-B removed and B5
+        deleted.
         """
         super().__init__()
         # INJECTED, never invented. A panel that made its own model when none
@@ -296,17 +117,10 @@ class ConfigPanel(QWidget):
         self._fusion.participation_changed.connect(
             self._on_model_participation_changed)
         self._fusion.draft_restored.connect(self._on_model_draft_restored)
-        # THE PUBLIC ROWS ARE NOT THIS PANEL'S ANY MORE (B4-B). When a host
-        # attaches Block01's one public channel dock, this panel builds no
-        # rows at all and `_rows` projects the dock's -- so Step1 edits the
-        # same row objects Step0/2/3 do, and there is no second public list
-        # to disagree with. `_private_rows` is what a STANDALONE panel (its
-        # own tests, a host with no dock) still builds for itself.
+        # THE PUBLIC ROWS ARE NOT THIS PANEL'S. `_rows` projects the dock's,
+        # so Step1 edits the same row objects Step0/2/3 do and there is no
+        # second public list to disagree with.
         self._dock = channel_dock
-        self._private_list_enabled = bool(private_list) and channel_dock is None
-        self._list = None
-        self._private_rows = {}    # channel -> ChannelRow
-        self._private_items = {}   # channel -> QListWidgetItem
         self._colors = {}          # channel -> "#rrggbb" -- A MIRROR, see below
         # Block01's shared display state, once a host registers it. While it
         # is set, IT is the answer to "what colour is this channel" and
@@ -317,37 +131,28 @@ class ConfigPanel(QWidget):
         # picked in Step0 did not survive the walk into Step1.
         self._display_state = None
         self._current = ""
-        self._selecting = False
         self._setup_ui()
         self._rebuild_rows()
 
     # ── the rows: the public dock's when there is one ─────────────────
     @property
     def _rows(self):
-        """The rows this panel edits: the PUBLIC dock's, when attached.
+        """The rows this panel edits: the PUBLIC dock's.
 
         A projection, never a copy. The dock rebuilds its rows when the
         dataset's channel universe changes, so asking it every time is what
-        keeps this panel from holding a row that no longer exists.
+        keeps this panel from holding a row that no longer exists. With no
+        dock attached there are no rows at all -- this panel does not build
+        channel rows any more.
         """
-        if self._dock is not None:
-            return self._dock.rows()
-        return self._private_rows
-
-    @_rows.setter
-    def _rows(self, value):
-        self._private_rows = value
+        return self._dock.rows() if self._dock is not None else {}
 
     @property
     def _items(self):
-        if self._dock is not None:
-            return {ch: self._dock.item(ch)
-                    for ch in self._dock.channel_order()}
-        return self._private_items
-
-    @_items.setter
-    def _items(self, value):
-        self._private_items = value
+        if self._dock is None:
+            return {}
+        return {ch: self._dock.item(ch)
+                for ch in self._dock.channel_order()}
 
     def channel_dock(self):
         return self._dock
@@ -355,25 +160,13 @@ class ConfigPanel(QWidget):
     def set_channel_dock(self, dock):
         """Edit in Block01's ONE public channel dock from now on.
 
-        The panel stops building rows of its own and retires the ones it
-        has: from here its list widget is empty and hidden, and every public
-        field -- visibility, colour, participation, weight -- is edited in
-        the dock, which writes the two owners directly. What stays here is
-        Step1's own chrome: the read-only nucleus line and the weight
-        file/reset buttons.
+        Production hands the dock in at construction; this stays for a host
+        that builds the panel first. There is nothing to retire when it
+        arrives: the panel has never had rows of its own.
         """
         self._dock = dock
         if dock is None:
             return
-        self._private_list_enabled = False
-        self._private_rows.clear()
-        self._private_items.clear()
-        if self._list is not None:
-            # Only a panel that was explicitly given the legacy list has one
-            # to retire; the production panel never built it.
-            self._list.clear()
-            self._list.setVisible(False)
-            self._list.setMaximumHeight(0)
         self._rebuild_rows()
 
     # ── the scientific model ──────────────────────────────────────────
@@ -451,17 +244,9 @@ class ConfigPanel(QWidget):
         nuc_row.addWidget(self._nuc_value, stretch=1)
         lay.addLayout(nuc_row)
 
-        if self._private_list_enabled:
-            # THE LEGACY PRIVATE LIST, and only on explicit request. In the
-            # real window this branch is not taken at all: there is one
-            # public list in the process and it is the dock's.
-            self._list = QListWidget()
-            template.apply_list_style(self._list)
-            self._list.setSelectionMode(QListWidget.SingleSelection)
-            self._list.currentItemChanged.connect(self._on_current_item)
-            lay.addWidget(self._list, stretch=1)
-        else:
-            lay.addStretch(1)
+        # NO CHANNEL LIST HERE. The one public list is the dock's; this
+        # panel is Step1's tool strip around it.
+        lay.addStretch(1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
@@ -567,100 +352,22 @@ class ConfigPanel(QWidget):
         return template.palette_color(i)
 
     def _rebuild_rows(self):
-        """Rebuild the visible list from `all_channels`, keeping state.
+        """Tell the public dock which channels this panel is about.
 
-        Scroll position and keyboard focus belong to the LIST, not to the
-        data: rebuilding is the same channels drawn again, and landing the
-        user back at the top of a long panel is not part of that. Same rule
-        as `ChannelDock.rebuild`.
+        It is told the channel UNIVERSE and nothing else: visibility, colour,
+        participation and weight come from the two owners the dock already
+        projects, so a rebuild here cannot install a second opinion about any
+        of them. This panel builds no rows.
         """
         if self._dock is not None:
-            # THE PUBLIC DOCK draws this panel's rows. It is told the channel
-            # universe and nothing else: visibility, colour, participation
-            # and weight come from the two owners it already projects, so a
-            # rebuild here cannot install a second opinion about any of them.
             self._dock.set_channels(list(self.all_channels))
-            self._refresh_nucleus_display()
-            if self._current not in self._dock.rows():
-                self._current = ""
-            return
-        # WHICH CHANNELS ARE SHOWN is the shared state's answer, not the old
-        # widgets': a rebuild that took it from the rows it is replacing kept
-        # a tick the state no longer holds, and a restore that hid a channel
-        # saw it come back.
-        visible = {ch: row.is_visible() for ch, row in self._rows.items()}
-        if self._display_state is not None:
-            visible.update(self._display_state.display_visibility())
-        current = self._current
-        if self._list is None:
-            # No dock and no legacy list: this panel is Step1's tool strip
-            # and nothing else. There are no rows to rebuild.
-            self._private_rows.clear()
-            self._private_items.clear()
-            self._refresh_nucleus_display()
-            return
-        keep_scroll = self._list.verticalScrollBar().value()
-        keep_focus = self._list.hasFocus()
-
-        self._list.clear()
-        self._rows.clear()
-        self._items.clear()
-
-        for ch in self.all_channels:
-            # `_default_color` asks the shared state first, so a rebuild takes
-            # the canonical colour rather than re-dealing this panel's palette.
-            color = self._colors.get(ch) or self._default_color(ch)
-            # The weight and the fusion tick come from the MODEL, not from
-            # the row that is being replaced: a rebuild is the same channels
-            # drawn again, and the row was only ever showing what the model
-            # says.
-            row = ChannelRow(ch,
-                             weight=self._fusion.channel_weight(ch),
-                             visible=visible.get(ch, False),
-                             fusion=self._fusion.fusion_enabled(ch),
-                             color=color)
-            row.selected.connect(self._on_row_selected)
-            row.visibility_toggled.connect(self._on_row_visibility)
-            row.fusion_toggled.connect(self._on_row_fusion_toggled)
-            row.weight_edited.connect(self._on_row_weight_edited)
-            row.color_clicked.connect(self._pick_color)
-            item = QListWidgetItem(self._list)
-            item.setSizeHint(template.item_size_hint(row, width=200))
-            self._list.setItemWidget(item, row)
-            self._rows[ch] = row
-            self._items[ch] = item
-
-        # ONE name column for the list -- the longest name -- computed by the
-        # same template helper the dock uses, so the two lists put the
-        # accessory at the same x for the same channel names.
-        template.uniform_name_width(list(self._rows.values()))
-        self._list.verticalScrollBar().setValue(keep_scroll)
-        if keep_focus:
-            self._list.setFocus(Qt.OtherFocusReason)
-
-        for ch in self._rows:
-            self._refresh_ambiguity(ch)
         self._refresh_nucleus_display()
-        if current in self._rows:
-            # NOT a click: rebuilding the list is not the user choosing
-            # something, so it must not show a channel that is deliberately
-            # hidden -- which is how a rebuild used to write display
-            # visibility nobody asked for.
-            self.set_current_channel(current, auto_show=False)
-        else:
+        if self._current not in (self.all_channels or []):
             self._current = ""
 
     # ── selection / visibility / colour ───────────────────────────────
     def _on_row_selected(self, channel):
         self.set_current_channel(channel)
-
-    def _on_current_item(self, item, _prev):
-        if item is None or self._selecting:
-            return
-        for ch, it in self._items.items():
-            if it is item:
-                self.set_current_channel(ch)
-                return
 
     def current_channel(self):
         return self._current
@@ -674,11 +381,11 @@ class ConfigPanel(QWidget):
         hidden comes back hidden. Ticking some OTHER channel never moves the
         selection either way.
         """
-        if channel not in self._rows:
+        if channel not in self._rows and channel not in (self.all_channels or []):
             return
-        row = self._rows[channel]
+        row = self._rows.get(channel)
         newly_visible = auto_show and not self._channel_visible(channel)
-        if newly_visible:
+        if newly_visible and row is not None:
             # A click SHOWS a hidden channel, because selecting something you
             # cannot see is a dead end. It does not put the channel into the
             # fusion: that is the row's own scientific tick, and clicking a
@@ -686,13 +393,8 @@ class ConfigPanel(QWidget):
             row.set_visible(True)
         changed = (channel != self._current)
         self._current = channel
-        self._selecting = True
-        try:
-            item = self._items.get(channel)
-            if item is not None and self._dock is None and self._list is not None:
-                self._list.setCurrentItem(item)
-        finally:
-            self._selecting = False
+        # The LIST is the dock's, and it follows the shared selection written
+        # below; there is nothing for this panel to move.
         if newly_visible:
             self._record_display_visible(channel, True)
             self.visibility_changed.emit(channel, True)
@@ -755,8 +457,10 @@ class ConfigPanel(QWidget):
         return bool(row is not None and row.is_visible())
 
     def visible_channels(self):
-        return [ch for ch in self.all_channels
-                if ch in self._rows and self._channel_visible(ch)]
+        """Which channels are DRAWN -- the shared answer, over this panel's
+        channel universe. It used to be gated on this panel having a row for
+        the channel, which made a widget the boundary of a display fact."""
+        return [ch for ch in self.all_channels if self._channel_visible(ch)]
 
     def set_channel_visible(self, channel, visible):
         """Show or hide `channel` — the same act as clicking its box.
@@ -795,7 +499,8 @@ class ConfigPanel(QWidget):
         return self._colors.get(channel) or self._default_color(channel)
 
     def channel_colors(self):
-        return {ch: self.channel_color(ch) for ch in self._rows}
+        return {ch: self.channel_color(ch)
+                for ch in (self.all_channels or list(self._rows))}
 
     def set_channel_color(self, channel, color):
         """Set `channel`'s colour. ONE write, wherever it came from.
@@ -1028,25 +733,17 @@ class ConfigPanel(QWidget):
         # panel about the same channel.
         state = self._display_state
         if state is not None:
-            for ch in self._rows:
+            for ch in (self.all_channels or list(self._rows)):
                 state.set_display_visible(ch, ch == nuc,
                                           origin="step1-load-panel")
         else:
             for ch, row in self._rows.items():
                 row.set_visible(ch == nuc)
         self._refresh_nucleus_display()
-        if nuc and nuc in self._rows:
+        if nuc and nuc in (self.all_channels or list(self._rows)):
             self._current = nuc
             if state is not None:
                 state.set_selected_channel(nuc, origin="step1-load-panel")
-            self._selecting = True
-            try:
-                item = self._items.get(nuc)
-                if (item is not None and self._dock is None
-                        and self._list is not None):
-                    self._list.setCurrentItem(item)
-            finally:
-                self._selecting = False
         else:
             self._current = ""
         self.config_changed.emit()
@@ -1228,7 +925,8 @@ class ConfigPanel(QWidget):
                                for ch, v in visibility.items()
                                if str(ch) in known})
                 payload["visibility"] = merged
-            if current_channel and current_channel in self._rows:
+            if current_channel and (current_channel in self._rows
+                                    or current_channel in (self.all_channels or [])):
                 payload["selection"] = str(current_channel)
             if payload and not state.install(payload):
                 # NO BINDING TO INSTALL INTO -- a window whose slide identity
@@ -1262,7 +960,8 @@ class ConfigPanel(QWidget):
                     if row is not None:
                         row.set_visible(bool(visibility[ch]))
 
-        if current_channel and current_channel in self._rows:
+        if current_channel and (current_channel in self._rows
+                                or current_channel in (self.all_channels or [])):
             self.set_current_channel(current_channel, auto_show=False)
 
     def _load_weights_from_file(self):

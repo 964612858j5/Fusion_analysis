@@ -63,8 +63,7 @@ def make_panel(channels, fusion, state):
     # the thing under test now, so the application is ensured here rather
     # than left to each caller to remember.
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    panel = ConfigPanel(list(channels or []), fusion=fusion,
-                        private_list=True)
+    panel = ConfigPanel(list(channels or []), fusion=fusion)
     panel.set_display_state(state)
     panel.loaded_panels = []
     panel.restored_display = None

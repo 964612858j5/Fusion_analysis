@@ -176,13 +176,11 @@ class GlobalChannelRow(QtWidgets.QWidget):
             "The FINAL background-correction answer for this channel — what "
             "Save writes. Correction only: it shows and hides nothing.")
         self.method_cb.currentTextChanged.connect(self._on_method_text)
-        self.status_lbl = QtWidgets.QLabel("")
-        self.status_lbl.setAlignment(Qt.AlignCenter)
-        self.status_lbl.setFixedWidth(20)
-        self.status_lbl.setStyleSheet(f"color:{template.COLOR_MUTED};"
-                                      "font-size:12px;")
+        # NO SECOND STATUS BADGE. Step0's compute state is the state slot
+        # beside the checkbox; the right-edge label this row used to carry
+        # was always empty, and B5 removed it along with the writes into it.
         self._acc_step0 = self._accessory(
-            [template.fit_accessory(self.method_cb), self.status_lbl])
+            [template.fit_accessory(self.method_cb)])
         # The state slot is Step0's too: the compute-state glyph is a claim
         # about a correction result, and a step that does not correct must
         # not show one. The SLOT stays (its 12 px is what keeps the swatch

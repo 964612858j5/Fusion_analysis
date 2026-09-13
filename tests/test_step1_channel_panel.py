@@ -74,16 +74,20 @@ def _window(app):
 
 
 def test_step1_holds_exactly_one_channel_panel(app):
+    from PyQt5.QtWidgets import QListWidget
     from block01.ui.step0.config_panel import ConfigPanel
-    from block01.ui.widgets.channel_dock import ChannelDock
+    from block01.ui.widgets.channel_dock.global_dock import GlobalChannelDock
 
     w = _window(app)
     try:
         panels = w._step1_page_widget.findChildren(ConfigPanel)
         assert len(panels) == 1
         assert panels[0] is w.config
-        # No second channel view, and no second channel state model.
-        assert w._step1_page_widget.findChildren(ChannelDock) == []
+        # No second channel view: the page holds no dock and no list of its
+        # own, and the panel's rows ARE the public dock's.
+        assert w._step1_page_widget.findChildren(GlobalChannelDock) == []
+        assert w.config.findChildren(QListWidget) == []
+        assert w.config._rows == w._channel_dock.rows()
         assert not hasattr(w, "_step1_dock_adapter")
     finally:
         w.close()

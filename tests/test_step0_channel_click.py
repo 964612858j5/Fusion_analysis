@@ -151,3 +151,136 @@ def test_the_page_no_longer_depends_on_current_row_changed(app):
     finally:
         page._channel_list.blockSignals(False)
     assert page.current_channel == "CD20"
+
+
+# ── B4-A: a click shows, a programmatic selection does not ───────────────
+
+def test_a_click_on_a_hidden_row_shows_that_channel(app):
+    """Selecting something you cannot see is a dead end, so a CLICK shows it.
+
+    The checkbox is display visibility since B4-A, and a fresh slide lands on
+    DAPI with its markers hidden -- so the gesture that chooses a marker is
+    also the gesture that puts it on screen.
+    """
+    page = _page(app)
+    state = page.display.state
+    assert state.display_visible("CD3") is False
+
+    _click_row(page, "CD3")
+
+    assert page.current_channel == "CD3"
+    assert state.display_visible("CD3") is True
+    assert page._channel_rows["CD3"]["checkbox"].isChecked() is True
+    # A click is not a correction decision.
+    assert page._channel_decisions.get("CD3") in (None, "")
+
+
+def test_a_programmatic_selection_does_not_show_a_hidden_channel(app):
+    """A restore, a dataset switch or the landing rule selects without
+    showing: a channel the user deliberately hid must not come back because
+    something moved the cursor onto it."""
+    page = _page(app)
+    state = page.display.state
+    state.set_display_visible("CD3", False, origin="test")
+
+    page._on_channel_selected_by_id("CD3")
+
+    assert page.current_channel == "CD3"
+    assert state.display_visible("CD3") is False
+    assert page._channel_rows["CD3"]["checkbox"].isChecked() is False
+
+
+def test_a_click_on_a_visible_row_changes_nothing_but_the_selection(app):
+    page = _page(app)
+    state = page.display.state
+    state.set_display_visible("CD3", True, origin="test")
+    seen = []
+    state.visibility_changed.connect(lambda *a: seen.append(a))
+
+    _click_row(page, "CD3")
+
+    assert page.current_channel == "CD3"
+    assert seen == [], f"a click on a shown row wrote visibility: {seen}"
+
+
+def test_the_row_checkbox_only_moves_display_visibility(app):
+    """Ticking a row used to assign a background-correction method and
+    unticking it wrote `original` over the user's decision."""
+    page = _page(app)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    decisions = dict(page._channel_decisions)
+    methods = dict(page._channel_methods)
+    fusion_before = page.display.fusion.draft_snapshot()
+
+    cb = page._channel_rows["CD3"]["checkbox"]
+    cb.setChecked(True)
+    cb.setChecked(False)
+
+    assert page._channel_decisions == decisions
+    assert page._channel_methods == methods
+    assert page.display.fusion.draft_snapshot() == fusion_before
+    assert page.display.state.display_visible("CD3") is False
+
+
+def test_the_dapi_row_is_a_visibility_row_and_stays_uncorrectable(app):
+    page = _page(app)
+    caps = page.display.state.capabilities("DAPI")
+    assert caps.is_nucleus is True
+    assert caps.display_toggleable is True
+    assert caps.correction_eligible is False
+    assert caps.bulk_toggleable is False
+
+    cb = page._channel_rows["DAPI"]["checkbox"]
+    cb.setChecked(False)
+
+    assert page.display.state.display_visible("DAPI") is False
+    assert page._nucleus_layer_visible() is False
+    assert "DAPI" not in page._channel_decisions
+    assert "DAPI" not in page._channel_methods
+    assert page._channel_rows["DAPI"]["method_cb"].isEnabled() is False
+
+
+def test_show_all_and_hide_all_move_display_only(app):
+    """The bulk control is Show all / Hide all: it sweeps the channels whose
+    capabilities allow it, and it is not the bulk CORRECTION control."""
+    page = _page(app)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    decisions = dict(page._channel_decisions)
+    fusion_before = page.display.fusion.draft_snapshot()
+    state = page.display.state
+
+    page._cb_all.setChecked(True)
+
+    for ch in page._channel_order:
+        if ch == page.nucleus_channel:
+            continue
+        assert state.display_visible(ch) is True, ch
+    # The nucleus is not swept: its layer is shown and hidden deliberately.
+    assert state.display_visible("DAPI") is True
+    assert page._channel_decisions == decisions
+    assert page.display.fusion.draft_snapshot() == fusion_before
+
+    page._cb_all.setChecked(False)
+
+    for ch in page._channel_order:
+        if ch == page.nucleus_channel:
+            continue
+        assert state.display_visible(ch) is False, ch
+    assert state.display_visible("DAPI") is True, "the DAPI layer was swept"
+    assert page._channel_decisions == decisions
+
+
+def test_the_bulk_method_box_moves_correction_only(app):
+    """...and the other bulk control is the mirror image of it."""
+    page = _page(app)
+    state = page.display.state
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    state.set_display_visible("CD3", True, origin="test")
+    state.set_display_visible("CD8", False, origin="test")
+    visible_before = dict(state.display_visibility())
+
+    page._method_all.setCurrentText("TopHat")
+
+    assert page._channel_decisions["CD3"] == "tophat"
+    assert dict(state.display_visibility()) == visible_before
+    assert "DAPI" not in page._channel_decisions

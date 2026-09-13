@@ -225,3 +225,58 @@ def test_zoom_lock_does_not_change_any_of_this(page_strip):
             assert controller.channel == "CD20"
         page._apply_channel_color("CD20", (0.2, 0.4, 0.6))
         assert all(t[-1] == (0.2, 0.4, 0.6) for t in _tints(strip))
+
+
+# ── B4-A: the panels follow the SHARED display answer ────────────────────
+
+def test_hiding_the_marker_takes_it_off_the_compare_panels(page_strip):
+    """The panels used to read a page-level button. The answer is the
+    selected channel's display visibility now, so a channel hidden anywhere
+    -- this page's row, Step1's panel, a restored session -- is off here
+    too."""
+    page, strip = page_strip
+    _select(page, "CD3")
+    page.display.state.set_display_visible("CD3", True, origin="test")
+    page._refresh_preview_display()
+    assert all(c.marker_visible for c in strip.controllers)
+
+    page.display.state.set_display_visible("CD3", False, origin="test")
+
+    assert [c.marker_visible for c in strip.controllers] == [False] * 3
+    assert page._btn_show_marker.isChecked() is False
+    assert page._channel_rows["CD3"]["checkbox"].isChecked() is False
+    # ...and nothing about the correction moved.
+    assert page._channel_decisions.get("CD3") in (None, "", "original")
+
+
+def test_the_panels_take_the_state_over_a_stale_switch(page_strip):
+    """The layer buttons are MIRRORS of the channel's display answer. A
+    mirror driven out of step -- a blocked write, a switch left behind by a
+    channel change -- must not decide what the panels draw."""
+    page, strip = page_strip
+    _select(page, "CD3")
+    page.display.state.set_display_visible("CD3", True, origin="test")
+
+    btn = page._btn_show_marker
+    btn.blockSignals(True)
+    btn.setChecked(False)              # the mirror now disagrees
+    btn.blockSignals(False)
+    page._refresh_preview_display()
+
+    assert [c.marker_visible for c in strip.controllers] == [True] * 3
+    assert page._marker_layer_visible() is True
+
+
+def test_hiding_dapi_takes_the_reference_layer_off_the_panels(page_strip):
+    page, strip = page_strip
+    _select(page, "CD3")
+    page.display.state.set_display_visible("DAPI", True, origin="test")
+    page._on_compare_nucleus_toggled()
+    overlays = [o for o in strip.overlays if o is not None]
+    assert overlays, "the panels have no reference-layer overlay"
+    assert all(o.enabled for o in overlays)
+
+    page.display.state.set_display_visible("DAPI", False, origin="test")
+
+    assert [o.enabled for o in overlays] == [False] * len(overlays)
+    assert page._nucleus_layer_visible() is False

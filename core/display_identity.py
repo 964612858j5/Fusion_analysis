@@ -182,3 +182,11 @@ class ChannelCapabilities:
     display_toggleable: bool = True
     weight_editable: bool = True
     correction_eligible: bool = True
+    #: May a bulk Show all / Hide all include this channel. Separate from
+    #: `display_toggleable`, because "the user may show this one" and "a
+    #: sweep over every channel may move it" are different permissions: the
+    #: nucleus layer is shown and hidden deliberately and is not swept.
+    bulk_toggleable: bool = True
+    #: May this channel be put into or taken out of the fusion. The nucleus
+    #: is always in it; a marker is the user's choice.
+    fusion_toggleable: bool = True

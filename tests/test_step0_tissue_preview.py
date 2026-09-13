@@ -100,6 +100,11 @@ def _page(app, channel="CD3"):
     page._rebuild_channel_list()
     if channel is not None:
         page.current_channel = channel
+        # ...AS A USER WOULD: clicking a marker row is what selects it and,
+        # since B4-A, what shows it. A fresh slide lands on DAPI with its
+        # markers hidden, so a test that only assigned `current_channel`
+        # would be looking at a channel nobody asked to see.
+        page._on_channel_row_clicked(channel)
     page._explore_tab = _Tab()
     # The Tissue Preview is drawn on the page's own overview panel; give it
     # the slide it is a preview OF.
@@ -239,7 +244,12 @@ def test_switching_channel_switches_the_picture(app):
     _settle(page)
     before = np.array(_thumb(page), copy=True)
 
+    # A ROW CLICK, which is both halves: the model's selection and the
+    # "show me this one" a click means. Selection alone no longer shows a
+    # hidden channel -- that is the B4-A rule, and the DAPI test below is
+    # the other side of it.
     page._on_channel_selected_by_id("CD20")
+    page._on_channel_row_clicked("CD20")
     _settle(page)
 
     after = _thumb(page)
@@ -398,6 +408,7 @@ def test_the_mapping_reaches_it_before_the_workbench_is_engaged_too(app):
     page.nucleus_channel = "DAPI"
     page._rebuild_channel_list()
     page.current_channel = "CD3"
+    page._on_channel_row_clicked("CD3")     # as a user selects a marker
     page._explore_tab = _Tab()
     page.overview.loader = page.loader
     page.overview.full_h, page.overview.full_w = SLIDE_H, SLIDE_W
@@ -528,3 +539,189 @@ def test_the_landing_thumbnail_never_composites_dapi_onto_itself(app):
     _settle(page)
 
     assert np.array_equal(_thumb(page), off)
+
+
+# ── 6. the marker's DISPLAY answer and its SCIENTIFIC weight ─────────────
+#
+# Two different facts, and B4-A is where Step0 started obeying both. A hidden
+# channel contributes nothing because nobody is looking at it; a channel
+# weighted `0.0` contributes nothing because somebody said it counts for
+# nothing. The single-channel MAIN viewer deliberately applies neither the
+# weight nor anything else -- it is the channel as it is, which is what makes
+# it the reference the correction decisions are made against.
+
+def _weights(page):
+    return page.display.fusion
+
+
+def test_a_hidden_marker_contributes_nothing_to_the_thumbnail(app):
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)      # the marker alone
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    page._update_tissue_preview()
+    _settle(page)
+    assert _mean_rgb(_thumb(page))[0] > 40.0
+
+    page.display.state.set_display_visible("CD3", False, origin="test")
+    _settle(page)
+
+    assert _mean_rgb(_thumb(page)) == (0.0, 0.0, 0.0), "the marker was drawn"
+    # ...and hiding it says nothing about the science.
+    assert _weights(page).representative_weight("CD3").absent is True
+
+
+def test_a_hidden_dapi_contributes_nothing_to_the_thumbnail(app):
+    page = _page(app)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    page._apply_channel_color("DAPI", (0.0, 0.0, 1.0))
+    page._update_tissue_preview()
+    _settle(page)
+    assert _mean_rgb(_thumb(page))[2] > 0.0, "DAPI was not composited in"
+
+    page.display.state.set_display_visible("DAPI", False, origin="test")
+    _settle(page)
+
+    r, g, b = _mean_rgb(_thumb(page))
+    assert b == 0.0, (r, g, b)
+    assert r > 40.0, (r, g, b)
+
+
+def test_the_thumbnail_applies_the_markers_representative_weight(app):
+    """1.0 -> a middle value -> 0.0, and the picture follows each of them."""
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    model = _weights(page)
+    model.edit_channel_weight("CD3", 1.0, origin="test")
+    page._update_tissue_preview()
+    _settle(page)
+    full = _mean_rgb(_thumb(page))[0]
+    assert full > 40.0
+
+    model.edit_channel_weight("CD3", 0.4, origin="test")
+    page._queue_tissue_preview(kind="weight")
+    _settle(page)
+    middle = _mean_rgb(_thumb(page))[0]
+
+    model.edit_channel_weight("CD3", 0.0, origin="test")
+    page._queue_tissue_preview(kind="weight")
+    _settle(page)
+    zero = _mean_rgb(_thumb(page))[0]
+
+    assert 0.0 < middle < full, (zero, middle, full)
+    assert zero == 0.0, (zero, middle, full)
+    # An EXPLICIT zero is an answer, not an absence: the provisional
+    # full-strength default may not bring the channel back.
+    assert model.weight_provenance("CD3") == "explicit"
+    # ...and nothing was written back into the model by drawing it.
+    assert model.representative_weight("CD3").value == 0.0
+
+
+def test_a_channel_in_two_groups_shows_its_representative_weight(app):
+    """0.2 in one group and 0.7 in another: the preview draws the
+    representative value and does not flatten the project by drawing it."""
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    model = _weights(page)
+    model.install_draft({
+        "groups": {"A": {"group_weight": 1.0, "channels": {"CD3": 0.2}},
+                   "B": {"group_weight": 1.0, "channels": {"CD3": 0.7}}},
+        "nucleus": {"channel": "DAPI", "weight": 1.0},
+        "enabled": ["CD3", "DAPI"],
+        "provenance": {"CD3": "authoritative", "DAPI": "authoritative"},
+    })
+    page._update_tissue_preview()
+    _settle(page)
+
+    rep = model.representative_weight("CD3")
+    assert rep.mixed is True and rep.value == pytest.approx(0.7)
+    drawn = _mean_rgb(_thumb(page))[0]
+    assert 0.0 < drawn
+    # The groups still disagree afterwards -- looking at the preview did not
+    # unify them.
+    groups = model.groups()
+    assert groups["A"]["CD3"] == pytest.approx(0.2)
+    assert groups["B"]["CD3"] == pytest.approx(0.7)
+
+
+def test_a_channel_nobody_has_weighted_is_drawn_at_full_strength(app):
+    """`absent` draws provisionally, and stays absent in the model."""
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    model = _weights(page)
+    assert model.representative_weight("CD3").absent is True
+
+    page._update_tissue_preview()
+    _settle(page)
+
+    assert _mean_rgb(_thumb(page))[0] > 40.0
+    assert model.representative_weight("CD3").absent is True, \
+        "the preview's provisional default was written into the model"
+    assert model.weight_provenance("CD3") == "absent"
+
+
+def test_the_single_channel_main_viewer_does_not_apply_the_weight(app):
+    """THE EXCEPTION, deliberately: Step0's main viewer shows the channel as
+    it is. The compare panels are the reference a correction decision is made
+    against, so a scientific weight must not dim them; the Tissue Preview is
+    the shared picture and does apply it."""
+    page = _page(app)
+    model = _weights(page)
+    model.edit_channel_weight("CD3", 0.25, origin="test")
+
+    snapshot = page.tissue_render_snapshot(computed_only=False)
+    assert snapshot["marker_weight"] == pytest.approx(0.25)
+
+    # The panels are given the channel's own colour and its display window
+    # -- never a weight, and never a colour dimmed by one.
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    strip = _ReceivingStrip()
+    page._compare_strip_widget = strip
+    page._refresh_preview_display()
+    assert strip.marker_visible is True
+    assert strip.tint == (page._channel_color("CD3"), "CD3"), strip.tint
+    assert strip.tint[0] == page._channel_color("CD3")
+    assert "weight" not in strip.__dict__
+
+
+class _ReceivingStrip:
+    """What the compare panels are told, recorded."""
+
+    built = True
+
+    def __init__(self):
+        self.marker_visible = None
+        self.tint = None
+        self.mapping = None
+
+    def set_tint(self, color, channel=None):
+        self.tint = (color, channel)
+
+    def set_display_mapping(self, lo, hi, gamma, channel=None):
+        self.mapping = (lo, hi, gamma, channel)
+
+    def set_marker_visible(self, visible):
+        self.marker_visible = bool(visible)
+
+    def set_nucleus_enabled(self, enabled):
+        self.nucleus_enabled = bool(enabled)
+
+    def set_nucleus_suppressed(self, suppressed):
+        self.nucleus_suppressed = bool(suppressed)
+
+    def set_nucleus_display_mapping(self, lo, hi, gamma):
+        self.nucleus_mapping = (lo, hi, gamma)
+
+    def set_nucleus_tint(self, color):
+        self.nucleus_tint = color
+
+    def __getattr__(self, name):
+        # Anything else the page tells the panels is recorded by name, so a
+        # WEIGHT reaching them would show up as an attribute rather than as
+        # an AttributeError this test had to keep chasing.
+        if name.startswith("set_"):
+            return lambda *a, **k: self.__dict__.setdefault(
+                name[4:], (a, k))
+        raise AttributeError(name)

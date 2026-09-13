@@ -792,20 +792,32 @@ def test_landing_on_dapi_suppresses_the_copy_without_unchecking_it(app):
 
 
 def test_the_row_checkbox_is_the_one_state(app):
-    """`_nucleus_layer_visible` answers from the ROW, not from a mirror.
+    """`_nucleus_layer_visible` answers from the SHARED STATE, not a widget.
 
-    That is what makes the checkbox the source of truth rather than merely
-    the thing that is usually right: a mirror driven out of step is then a
-    display bug, and the behaviour still follows the checkbox.
+    B4-A moved the answer: the DAPI layer's visibility is one channel's
+    display answer in `ChannelDisplayState`, and the row checkbox, the hidden
+    holder and the full image's toolbar button are three views of it. A
+    widget driven with its signal blocked is therefore a stale view, and the
+    behaviour follows the state -- which is what lets Step1 and a restored
+    session move it too.
     """
     page = _page(app)
     cb = page._channel_rows["DAPI"]["checkbox"]
+    state = page.display.state
 
     cb.blockSignals(True)
     cb.setChecked(False)
     cb.blockSignals(False)
-    assert page._btn_show_nucleus.isChecked() is True     # mirror left stale
-    assert page._nucleus_layer_visible() is False          # the row wins
+    assert page._btn_show_nucleus.isChecked() is True      # mirror left alone
+    assert page._nucleus_layer_visible() is True           # the state wins
+    assert state.display_visibility()["DAPI"] is True
+
+    # ...and a write to the OWNER moves every view, the stale one included.
+    state.set_display_visible("DAPI", False, origin="test")
+    assert page._nucleus_layer_visible() is False
+    assert cb.isChecked() is False
+    assert page._btn_show_nucleus.isChecked() is False
+    assert page._btn_full_nucleus.isChecked() is False
 
 
 def test_the_dapi_checkbox_drives_both_views(app):

@@ -65,7 +65,8 @@ def lowres_tinted(arr, mapping, color):
     return lut[idx.astype(np.uint8)]
 
 
-def step0_rgb_u8(channel, arrays, mappings, colors, nucleus=""):
+def step0_rgb_u8(channel, arrays, mappings, colors, nucleus="",
+                 marker_visible=True, marker_weight=1.0):
     """The single-channel thumbnail, with DAPI composited additively.
 
     `nucleus` is the nucleus channel's name when its layer is ON and it is a
@@ -73,17 +74,35 @@ def step0_rgb_u8(channel, arrays, mappings, colors, nucleus=""):
     `CompositionMode_Plus` in numpy -- the same switch the full image and the
     compare panels obey, so the same setting gives the same picture in all
     three.
+
+    `marker_visible` is the marker's DISPLAY answer and `marker_weight` its
+    SCIENTIFIC one, and they are two different facts: a hidden channel
+    contributes nothing because nobody is looking at it, a channel weighted
+    `0.0` contributes nothing because somebody said it counts for nothing.
+    The weight is the fusion model's representative value; Step0's
+    single-channel MAIN viewer deliberately does not apply it (see
+    `Step0Page.tissue_render_snapshot`).
     """
     arr = arrays.get(channel)
+    nuc_arr = arrays.get(nucleus) if nucleus else None
     if arr is None:
         return None
-    rgb = lowres_tinted(arr, mappings[channel], colors[channel])
-    nuc_arr = arrays.get(nucleus) if nucleus else None
+    weight = 0.0 if not marker_visible else max(0.0, float(marker_weight))
+    if weight >= 1.0:
+        rgb = lowres_tinted(arr, mappings[channel], colors[channel])
+    elif weight <= 0.0:
+        rgb = np.zeros(arr.shape[:2] + (3,), dtype=np.uint8)
+    else:
+        rgb = (lowres_tinted(arr, mappings[channel], colors[channel])
+               .astype(np.float32) * weight).astype(np.uint8)
     if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
         rgb = np.clip(
             rgb.astype(np.uint16)
             + lowres_tinted(nuc_arr, mappings[nucleus], colors[nucleus]),
             0, 255).astype(np.uint8)
+    # A hidden or zero-weighted marker with no DAPI layer leaves an empty
+    # picture, and an empty picture is still this slide's answer -- not the
+    # previous channel's, which is what returning None here would leave up.
     return rgb
 
 
@@ -147,8 +166,11 @@ def compose(request, cache, span=None):
     mappings = request.get("mappings") or {}
     colors = request.get("colors") or {}
     if mode == MODE_STEP0:
-        return step0_rgb_u8(request.get("channel"), arrays, mappings, colors,
-                            nucleus=request.get("nucleus_layer") or "")
+        return step0_rgb_u8(
+            request.get("channel"), arrays, mappings, colors,
+            nucleus=request.get("nucleus_layer") or "",
+            marker_visible=bool(request.get("marker_visible", True)),
+            marker_weight=float(request.get("marker_weight", 1.0)))
     if mode == MODE_OVERLAY:
         return overlay_rgb_u8(arrays, mappings, colors,
                               request.get("weights") or {}, cache, span=span)

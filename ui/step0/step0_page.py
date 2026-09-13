@@ -773,9 +773,11 @@ class Step0Page(QWidget):
 
         # All选项行
         all_row = QHBoxLayout()
-        self._cb_all = QtWidgets.QCheckBox("All")
+        self._cb_all = QtWidgets.QCheckBox("Show all")
         self._cb_all.setStyleSheet("color:#ddd;font-size:11px;")
-        self._cb_all.setToolTip("Select all non-nucleus channels")
+        self._cb_all.setToolTip(
+            "Show or hide every marker channel. Display only: it does not "
+            "choose, change or discard a background-correction method.")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
         self._method_all = QtWidgets.QComboBox()
         self._method_all.addItems(["TopHat", "cucim", "Both"])
@@ -786,6 +788,10 @@ class Step0Page(QWidget):
             "QComboBox::drop-down{border:none;}"
         )
         self._method_all.setFixedWidth(64)
+        self._method_all.setToolTip(
+            "Assign this background-correction method to every "
+            "correction-eligible channel. Correction only: it does not show "
+            "or hide anything.")
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
         # One compact button opens the floating "Intensity" window -- the
         # internal remap workbench's inspector (histogram, Min/Max, Gamma,
@@ -1047,8 +1053,13 @@ class Step0Page(QWidget):
 
         self._btn_show_nucleus.toggled.connect(
             lambda _: self._on_compare_nucleus_toggled())
+        # A MIRROR of the selected channel's display answer, like
+        # `_btn_show_nucleus` is for DAPI. Written by
+        # `_sync_marker_layer_views`; a click on the full image's toolbar
+        # button is what carries a user's intent, and that one writes the
+        # answer itself.
         self._btn_show_marker.toggled.connect(
-            lambda _: self._refresh_preview_display(keep_zoom=True))
+            lambda _checked: self._refresh_preview_display(keep_zoom=True))
         pvl.addLayout(ctrl_row)
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
@@ -1680,12 +1691,13 @@ class Step0Page(QWidget):
         the button state is simply remembered for the next build.
         """
         self._set_layer_toggle_text(self._btn_full_marker, "Marker", checked)
+        # ...and the ANSWER, for every other view of it. A click here is the
+        # selected channel's display visibility, the same fact the row's
+        # checkbox carries -- and the live stack is told by
+        # `_sync_marker_layer_views`, once, from that answer. Telling it here
+        # as well drew the same switch twice for one click.
+        self._on_marker_visibility_toggled(checked)
         self._update_full_source_label()
-        explore_tab = getattr(self, "_explore_tab", None)
-        stack = explore_tab.stack if explore_tab is not None else None
-        if stack is None:
-            return
-        stack.controller.set_marker_visible(bool(checked))
 
     def _apply_full_image_display(self, stack):
         """Give a stack the current channel's and the nucleus channel's
@@ -1789,7 +1801,10 @@ class Step0Page(QWidget):
         """
         self._set_layer_toggle_text(self._btn_full_nucleus, "DAPI", checked)
         self._update_full_source_label()
-        self._sync_nucleus_row_checkbox(checked)
+        # THE ANSWER, not the widgets: the row's checkbox and the compare
+        # panels' holder are moved by `_on_shared_visibility_changed`, from
+        # the one place the answer lives.
+        self._on_nucleus_visibility_toggled(checked)
         overlay = self._full_image_overlay()
         if overlay is None:
             return
@@ -2898,8 +2913,7 @@ class Step0Page(QWidget):
         # be told about it -- a build always comes up visible.
         stack = explore_tab.stack if accepted else None
         if stack is not None and hasattr(self, "_btn_full_marker"):
-            stack.controller.set_marker_visible(
-                self._btn_full_marker.isChecked())
+            stack.controller.set_marker_visible(self._marker_layer_visible())
         overlay = getattr(stack, "overlay", None) if stack is not None else None
         if overlay is not None:
             # The user's SWITCH, not the effective visibility. "DAPI is
@@ -6425,43 +6439,14 @@ class Step0Page(QWidget):
                     self._channel_rows[landing]["item"])
                 self._channel_list.blockSignals(False)
 
-    def _refresh_channel_row(self, ch):
-        row = self._channel_rows.get(ch)
-        if not row:
-            return
-        cb = row["checkbox"]
-        status_lbl = row["status_lbl"]
-        row_widget  = row["row_widget"]
-        cb.blockSignals(True)
-
-        if ch == self.nucleus_channel:
-            cb.setChecked(False)
-            cb.setEnabled(False)
-            cb.setStyleSheet("")
-            status_lbl.setText("★")
-            status_lbl.setStyleSheet("color:#56b6c2;font-size:12px;")
-            row_widget.setStyleSheet("")
-        elif ch in self._computed_channels:
-            # 计算完成：checkbox变绿锁定，不可取消
-            cb.setChecked(True)
-            cb.setEnabled(False)
-            cb.setStyleSheet(
-                "QCheckBox::indicator{border:1px solid #6bffa0;border-radius:2px;"
-                "background:#6bffa0;}"
-                "QCheckBox::indicator:checked{background:#6bffa0;border:1px solid #6bffa0;}"
-            )
-            status_lbl.setText("")   # 不再显示独立绿勾
-            row_widget.setStyleSheet("background:#1a2e1a;border-radius:3px;")
-        else:
-            cb.setEnabled(True)
-            cb.setStyleSheet("")
-            checked = ch in self._channel_methods
-            cb.setChecked(checked)
-            status_lbl.setText("—")
-            status_lbl.setStyleSheet("color:#666;font-size:12px;")
-            row_widget.setStyleSheet("")
-
-        cb.blockSignals(False)
+    # NOTE: `_refresh_channel_row` used to be defined TWICE in this class.
+    # Python keeps the LAST definition, so the one that stood here -- the one
+    # that locked a computed channel's checkbox and read `_channel_methods`
+    # for its checked state -- could never run. It is gone rather than
+    # merged: its two behaviours (lock on computed, checked == has a
+    # correction method) are both things B4-A takes OUT of the checkbox,
+    # which is now display visibility and nothing else. The live definition
+    # is beside `_on_channel_visibility_toggled`.
 
     def _set_channel_computing(self, ch):
         """将通道状态设为计算中。"""
@@ -6474,30 +6459,22 @@ class Step0Page(QWidget):
         self._refresh_channel_state(ch)
 
     def _set_channel_done(self, ch):
-        """A channel's result landed: green tick, row highlighted.
+        """A channel's correction result landed: a STATUS, and only that.
 
-        The checkbox stays ENABLED. It used to be locked ("computed" was
-        treated as final), but the checkbox is now the ONE selector Save
-        reads: locked, a computed channel could never be turned back
-        into a raw one, and `_raw_save_channels` would have a set the user
-        cannot leave. Green says "computed", not "frozen".
+        It used to tick the row's checkbox and paint the indicator green,
+        because the checkbox meant "this channel is corrected". The checkbox
+        is display visibility now, so a finished correction must not show a
+        channel the user hid -- and "computed" is said where the other
+        compute states are said: the row's state glyph (`_refresh_channel_state`
+        derives `computed`/`stale`/`computing` from the signature bookkeeping).
         """
         self._computed_channels.add(ch)
         row = self._channel_rows.get(ch)
         if not row:
             return
-        cb = row["checkbox"]
-        cb.blockSignals(True)
-        cb.setChecked(True)
-        cb.setEnabled(True)
-        cb.setStyleSheet(
-            "QCheckBox::indicator{border:1px solid #6bffa0;border-radius:2px;"
-            "background:#6bffa0;}"
-            "QCheckBox::indicator:checked{background:#6bffa0;border:1px solid #6bffa0;}"
-        )
-        cb.blockSignals(False)
         row["status_lbl"].setText("")
         row["row_widget"].setStyleSheet("background:#1a2e1a;border-radius:3px;")
+        self._refresh_channel_state(ch)
         self._refresh_channel_state(ch)
 
     # ── per-channel display colour: ONE store, shared with Channel Remap ──
@@ -6807,16 +6784,8 @@ class Step0Page(QWidget):
         half-built page, and the tests that drive one -- and the constant
         answers before even that.
         """
-        row = (getattr(self, "_channel_rows", None) or {}).get(
+        return self._channel_display_visible(
             getattr(self, "nucleus_channel", None))
-        cb = row.get("checkbox") if row else None
-        if cb is not None:
-            try:
-                return bool(cb.isChecked())
-            except RuntimeError:
-                pass
-        btn = getattr(self, "_btn_show_nucleus", None)
-        return DAPI_LAYER_DEFAULT_ON if btn is None else bool(btn.isChecked())
 
     def _reset_nucleus_layer_default(self):
         """Put the DAPI layer back to its default (on) in BOTH views.
@@ -6860,36 +6829,23 @@ class Step0Page(QWidget):
         """
         if getattr(self, "_nucleus_vis_syncing", False):
             return
+        on = bool(on)
+        nucleus = getattr(self, "nucleus_channel", None)
+        if not nucleus:
+            return
         self._nucleus_vis_syncing = True
         try:
-            on = bool(on)
-            row = (getattr(self, "_channel_rows", None) or {}).get(
-                getattr(self, "nucleus_channel", None))
-            cb = row.get("checkbox") if row else None
-            if cb is not None:
-                try:
-                    if cb.isChecked() != on:
-                        cb.blockSignals(True)
-                        cb.setChecked(on)
-                        cb.blockSignals(False)
-                except RuntimeError:
-                    pass
-            for btn in (getattr(self, "_btn_show_nucleus", None),
-                        getattr(self, "_btn_full_nucleus", None)):
-                if btn is not None and btn.isChecked() != on:
-                    btn.setChecked(on)          # each has its own view handler
-            print(f"[step0] DAPI layer {'shown' if on else 'hidden'}", flush=True)
+            print(f"[step0] DAPI layer {'shown' if on else 'hidden'}",
+                  flush=True)
+            # THE ANSWER GOES TO ITS OWNER, and the mirrors follow from
+            # there: `_on_shared_visibility_changed` moves the row, the two
+            # buttons and the picture. Writing the widgets here as well made
+            # this method the second place the answer lived, and a write
+            # that changes nothing would still have redrawn.
+            self.display.state.set_display_visible(nucleus, on,
+                                                   origin="step0-dapi")
         finally:
             self._nucleus_vis_syncing = False
-        # The DAPI layer switch IS a display-visibility answer -- the one
-        # per-channel display toggle Step0 has today -- so it is recorded in
-        # the shared state. Nothing about correction changes here.
-        if self.nucleus_channel:
-            self.display.state.set_display_visible(
-                self.nucleus_channel, on, origin="step0-dapi")
-        # One switch, every view: the thumbnail's DAPI composite appears and
-        # disappears with the full image's overlay and the panels'.
-        self._queue_tissue_preview(kind="dapi_layer")
 
     def _rebuild_payload_rgb_from(self, payload, ch, nucleus_rgb, marker_rgb):
         """Record `marker_rgb` as the channel's colour.
@@ -7012,7 +6968,10 @@ class Step0Page(QWidget):
         # The marker switch is an opacity gate on every layer the controller
         # owns, not a lookup table of zeros: black pixels would still
         # occlude the nucleus added on top of them.
-        strip.set_marker_visible(self._btn_show_marker.isChecked())
+        # THE CHANNEL'S display answer, not a button's: the switch is a view
+        # of it, and a page that read the button drew a channel Step1 had
+        # hidden (and hid one it had shown).
+        strip.set_marker_visible(self._marker_layer_visible())
         nucleus = self.nucleus_channel
         if nucleus:
             # Asked for first, so a channel whose pixels have arrived is
@@ -7597,6 +7556,14 @@ class Step0Page(QWidget):
         # and is not what a frame is stamped with.
         token = self._dataset_token()
         nuc = self.nucleus_channel
+        # TWO DIFFERENT FACTS about the marker. `marker_visible` is the
+        # display answer -- the row's checkbox, the layer switch, whatever
+        # Step1 recorded -- and the weight is the SCIENTIFIC one, read from
+        # the fusion model. A channel nobody has weighted yet draws at the
+        # provisional full strength; that default is a VIEW's, and is never
+        # written back into the model.
+        marker_visible = self._channel_display_visible(ch)
+        marker_weight = self._marker_render_weight(ch)
         wanted = [ch]
         if nuc and nuc != ch and self._nucleus_layer_visible():
             wanted.append(nuc)
@@ -7650,12 +7617,37 @@ class Step0Page(QWidget):
             "mode": tissue_compose.MODE_STEP0,
             "token": token,
             "channel": ch,
+            "marker_visible": marker_visible,
+            "marker_weight": marker_weight,
             "nucleus_layer": nucleus_layer,
             "arrays": arrays,
             "mappings": mappings,
             "colors": {name: self._channel_color(name) for name in arrays},
             "loading": tuple(sorted(set(loading))),
         }
+
+    def _marker_render_weight(self, ch):
+        """How much `ch` contributes to the Tissue Preview, scientifically.
+
+        THE FUSION MODEL'S representative value -- the same number Step1's
+        row shows and the shared Weights window edits -- so a weight set
+        anywhere is visible here without this page keeping a copy of it. A
+        channel in several groups at different weights shows the
+        representative value; nothing is written back, so looking at the
+        preview cannot flatten a project.
+
+        `absent` means nobody has weighted this channel yet. The preview then
+        draws it at full strength, which is a VIEW's provisional default and
+        deliberately not an answer: the model is not told, and the first
+        enable still answers 1.0 for itself.
+        """
+        fusion = getattr(getattr(self, "display", None), "fusion", None)
+        if fusion is None or not ch:
+            return 1.0
+        rep = fusion.representative_weight(ch)
+        if rep.absent and not rep.values:
+            return 1.0
+        return max(0.0, float(rep.value))
 
     def _register_block01_display(self):
         """Hand Block01's display layer the four things this page provides.
@@ -7685,6 +7677,11 @@ class Step0Page(QWidget):
         # page's own swatch -- is this page's colour too. Mirrored silently:
         # the shared state has already decided, so re-emitting from here
         # would be a second opinion, not a confirmation.
+        # ONE ANSWER, EVERY VIEW: a channel shown or hidden anywhere -- this
+        # page's row, the layer switches, Step1's panel, a restored session --
+        # moves the rows, the switches, the panels and the thumbnail here.
+        display.state.visibility_changed.connect(
+            self._on_shared_visibility_changed)
         display.state.color_changed.connect(self._on_shared_color_changed)
         # ...and the same for the display windows: a Min/Max/Gamma settled
         # anywhere -- this page, the Intensity window, a step downstream --
@@ -8297,8 +8294,8 @@ class Step0Page(QWidget):
             self._refresh_channel_state(ch)
 
     def _raw_save_channels(self):
-        """Marker channels Save would write as RAW: unticked, assigned
-        Original, or ticked but with no current computed result.
+        """Marker channels Save would write as RAW: assigned Original, or
+        with no current computed result for the method they are assigned.
 
         Order follows the channel list, so the confirmation reads in the
         same order as the rows the user just looked at.
@@ -8307,9 +8304,11 @@ class Step0Page(QWidget):
         for ch in self._channel_order:
             if ch == self.nucleus_channel:
                 continue
-            row = self._channel_rows.get(ch)
-            checked = bool(row and row["checkbox"].isChecked())
-            if not checked or self._channel_row_method(ch) == "original":
+            # THE CORRECTION DECISION, never the checkbox. Reading the row's
+            # tick made "what Save writes" depend on what the user could see:
+            # hiding a channel put it in this list, and showing one took it
+            # out, neither of which is a correction decision.
+            if self._channel_row_method(ch) == "original":
                 raw.append(ch)
             elif self._channel_compute_state(ch) != "computed":
                 raw.append(ch)
@@ -8460,16 +8459,17 @@ class Step0Page(QWidget):
         cb = row["checkbox"]
         method_cb = row.get("method_cb")
         cb.blockSignals(True)
+        # THE CHECKBOX IS A PROJECTION OF THE SHARED DISPLAY STATE, for every
+        # channel. It used to show a correction decision for markers and the
+        # DAPI layer's switch for the nucleus -- two different answers in one
+        # column, which is why ticking a channel to look at it assigned it a
+        # background-correction method.
+        cb.setChecked(self._channel_display_visible(ch))
         if ch == self.nucleus_channel:
-            # The nucleus checkbox is the DAPI show/hide switch, not a
-            # processing checkbox -- it follows the layer's state, not a
-            # correction decision (there is none for DAPI).
-            cb.setChecked(self._nucleus_layer_visible())
             row["status_lbl"].setText("★")
             row["status_lbl"].setStyleSheet("color:#56b6c2;font-size:12px;")
         else:
             decision = self._channel_decisions.get(ch)
-            cb.setChecked(bool(decision) and decision != "original")
             # The Method combo IS the assigned-method display now (folds in the old
             # decision badge). Unassigned channels (no decision THIS session)
             # mirror the global Method box (default Both) instead of a stale
@@ -8488,19 +8488,12 @@ class Step0Page(QWidget):
         cb.blockSignals(False)
         self._refresh_channel_state(ch)
 
-    def _on_channel_checkbox_toggled(self, ch, state):
-        if ch == self.nucleus_channel:
-            return
-        if state == Qt.Checked and self._channel_decisions.get(ch, "original") == "original":
-            if self._dec_cu.isChecked():
-                self._channel_decisions[ch] = "cucim"
-            else:
-                self._channel_decisions[ch] = "tophat"
-        elif state != Qt.Checked:
-            self._channel_decisions[ch] = "original"
-        self._refresh_channel_row(ch)
-        if ch == self.current_channel:
-            self._update_decision_ui()
+    # NOTE: `_on_channel_checkbox_toggled` was also defined twice. The one
+    # that stood here picked tophat/cucim from the global decision radio and
+    # wrote only `_channel_decisions`; it was shadowed by the definition
+    # further down and never ran. Both are gone in B4-A: the checkbox is a
+    # display switch now, and a correction decision is made in the row's
+    # method combo or the selected-channel inspector.
 
     def _all_patch_rows(self):
         """The Background Correction Preview Patch row."""
@@ -8574,48 +8567,75 @@ class Step0Page(QWidget):
     # ══ 通道/方法 选择事件 ═══════════════════════════════════════════
 
     def _on_select_all_changed(self, state):
-        """All channels checkbox change. Uses each channel's own method_cb value."""
-        checked = (state == Qt.Checked)
+        """Show all / Hide all. DISPLAY ONLY.
+
+        It used to be Select all: it ticked every row and, through the
+        checkbox's old second meaning, assigned every channel a correction
+        method (or wrote `original` over every decision the user had made).
+        It now moves one field -- display visibility -- and only for the
+        channels whose capabilities allow a sweep, which is why the nucleus
+        is not in it: the DAPI layer is shown and hidden deliberately.
+        """
+        visible = (state == Qt.Checked)
+        state_owner = self.display.state
         for ch in self._channel_order:
-            if ch == self.nucleus_channel:
+            if not state_owner.capabilities(ch).bulk_toggleable:
                 continue
-            row = self._channel_rows.get(ch)
-            if row:
-                row["checkbox"].blockSignals(True)
-                row["checkbox"].setChecked(checked)
-                row["checkbox"].blockSignals(False)
-                if checked:
-                    method_txt = row["method_cb"].currentText().lower()
-                    if method_txt not in {"tophat", "cucim", "both"}:
-                        method_txt = "both"
-                    self._channel_methods[ch] = method_txt
-                    self._channel_decisions[ch] = method_txt
-                else:
-                    self._channel_methods.pop(ch, None)
-                    self._channel_decisions[ch] = "original"
-        self._refresh_all_channel_states()
+            state_owner.set_display_visible(ch, visible, origin="step0-bulk")
 
     def _on_method_all_changed(self, txt):
-        """All channels 方法下拉变化，同步到所有勾选通道。"""
-        method = txt.lower()
+        """Assign this correction method to every correction-eligible channel.
+
+        THE bulk CORRECTION control, and it is deliberately not the same
+        control as Show all / Hide all: one says how channels are corrected,
+        the other says which are on screen. It used to reach only the TICKED
+        rows, because a tick meant "this one is corrected"; with the checkbox
+        carrying display visibility that rule would have made a bulk method
+        depend on what the user happens to be looking at.
+        """
+        method = str(txt or "").lower()
+        caps = self.display.state.capabilities
         for ch in self._channel_order:
-            if ch == self.nucleus_channel:
+            if not caps(ch).correction_eligible:
                 continue
+            # A channel that has been ASSIGNED a method keeps its own answer
+            # until this box re-assigns it; a channel nobody has assigned
+            # simply shows the box's method as the default it would inherit.
+            # Which of the two it is used to be read off the row's tick --
+            # the same tick that is display visibility now, so the question
+            # is asked of the decision itself.
+            if self._channel_decisions.get(ch):
+                self._set_channel_decision(ch, method)
             row = self._channel_rows.get(ch)
-            if not row:
-                continue
-            if row["checkbox"].isChecked():
-                self._channel_methods[ch] = method
-                self._channel_decisions[ch] = method
-            elif ch in self._channel_decisions:
-                # explicitly assigned (e.g. Original) — leave it alone
-                continue
-            # checked rows adopt the method; unassigned rows just mirror the
-            # global box in their display (no decision is written for them)
-            row["method_cb"].blockSignals(True)
-            row["method_cb"].setCurrentIndex(self._METHOD_IDX.get(method, 0))
-            row["method_cb"].blockSignals(False)
+            if row and row.get("method_cb") is not None:
+                combo = row["method_cb"]
+                combo.blockSignals(True)
+                combo.setCurrentIndex(self._METHOD_IDX.get(method, 0))
+                combo.blockSignals(False)
         self._refresh_all_channel_states()
+
+    def _set_channel_decision(self, ch, method):
+        """THE one writer of a channel's correction decision.
+
+        `_channel_decisions` is the answer -- it is what `_build_config`
+        writes and what the handoff carries -- and `_channel_methods` is its
+        projection: the same answer without the channels that are assigned
+        `original` (no correction). Keeping them in step in ONE place is what
+        stops the two from disagreeing about what Process would run.
+
+        Display visibility is not touched here, in either direction: a
+        channel assigned Original stays on screen, and hiding a channel does
+        not throw its method away.
+        """
+        method = str(method or "original").lower()
+        if method not in {"tophat", "cucim", "both", "original"}:
+            method = "original"
+        self._channel_decisions[ch] = method
+        if method == "original":
+            self._channel_methods.pop(ch, None)
+        else:
+            self._channel_methods[ch] = method
+        return method
 
     def _on_channel_method_changed(self, ch, txt):
         """Single channel method dropdown change. The combo now also carries the
@@ -8626,18 +8646,11 @@ class Step0Page(QWidget):
         do, so a channel already computed with the other method simply
         becomes `stale`.
         """
-        m = txt.lower()
-        self._channel_decisions[ch] = m
-        if m == "original":
-            self._channel_methods.pop(ch, None)
-        else:
-            self._channel_methods[ch] = m
-        row = self._channel_rows.get(ch)
-        if row:
-            cb = row["checkbox"]
-            cb.blockSignals(True)
-            cb.setChecked(m != "original")   # original = raw = not corrected
-            cb.blockSignals(False)
+        m = self._set_channel_decision(ch, txt)
+        # THE CHECKBOX IS NOT TOUCHED. It used to be driven from here --
+        # "Original" unticked the row, a method ticked it -- which is the
+        # same conflation from the other side: choosing how to correct a
+        # channel hid it or showed it.
         self._refresh_channel_state(ch)
         # A method change moves which of the three panels the row is arguing
         # for, and it moves what the caches can be reused from; while the
@@ -8646,17 +8659,149 @@ class Step0Page(QWidget):
         if ch == self.current_channel:
             self._sync_compare_params()
 
-    def _on_channel_checkbox_toggled(self, ch, state):
-        if ch == self.nucleus_channel:
+    def _on_channel_visibility_toggled(self, ch, visible):
+        """A channel row's checkbox moved: SHOW or HIDE, and nothing else.
+
+        This used to be `_on_channel_checkbox_toggled`, and it wrote a
+        background-correction decision: ticking a channel assigned it the
+        row's method, unticking it wrote `original`. So a user who ticked a
+        channel to look at it changed what Save would write, and a user who
+        hid one threw a correction decision away. The decision is the method
+        combo's and the selected-channel inspector's now; this box is the
+        display answer, recorded where every step reads it.
+        """
+        if not ch:
             return
-        if state == Qt.Checked:
-            method_txt = self._channel_rows[ch]["method_cb"].currentText().lower()
-            self._channel_methods[ch] = method_txt
-            self._channel_decisions[ch] = method_txt
+        self.display.state.set_display_visible(ch, bool(visible),
+                                               origin="step0-row")
+
+    def _on_channel_row_clicked(self, ch):
+        """A REAL click on a row: select it, and show it if it was hidden.
+
+        Only a click. A programmatic selection -- a session restore, a
+        dataset switch, the landing rule -- selects without showing, because
+        a channel the user deliberately hid must not come back because
+        something moved the cursor onto it.
+        """
+        if not ch or ch not in self._channel_rows:
+            return
+        if not self._channel_display_visible(ch):
+            self.display.state.set_display_visible(ch, True,
+                                                   origin="step0-row-click")
+
+    def _channel_display_visible(self, ch):
+        """Is `ch` shown -- the SHARED answer, not a widget's.
+
+        Falls back to the page's own defaults only while there is no display
+        binding to hold an answer: a half-built page, and the tests that
+        drive one.
+        """
+        if not ch:
+            return False
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is not None:
+            answers = state.display_visibility()
+            if ch in answers:
+                return bool(answers[ch])
+        if ch == getattr(self, "nucleus_channel", None):
+            btn = getattr(self, "_btn_show_nucleus", None)
+            return DAPI_LAYER_DEFAULT_ON if btn is None else bool(
+                btn.isChecked())
+        return ch == getattr(self, "current_channel", None)
+
+    def _on_marker_visibility_toggled(self, on):
+        """A marker layer switch moved: it is the SELECTED channel's answer.
+
+        The two buttons (the hidden holder and the full image's toolbar) are
+        views of one per-channel fact, exactly as the DAPI pair is. Writing
+        the answer here is what makes the row's checkbox, the compare panels,
+        the full image and the Tissue Preview agree without any of them
+        holding a second copy.
+        """
+        ch = getattr(self, "current_channel", None)
+        if not ch or ch == getattr(self, "nucleus_channel", None):
+            return
+        self.display.state.set_display_visible(ch, bool(on),
+                                               origin="step0-marker-switch")
+
+    def _marker_layer_visible(self):
+        """Whether the marker layer -- the selected channel -- is shown."""
+        ch = getattr(self, "current_channel", None)
+        if not ch or ch == getattr(self, "nucleus_channel", None):
+            return False
+        return self._channel_display_visible(ch)
+
+    def _on_shared_visibility_changed(self, ch, visible):
+        """A display answer moved, wherever it was made: follow it.
+
+        The rows, the two layer buttons, the compare panels, the full image
+        and the Tissue Preview are all VIEWS of this one answer, so one
+        handler moves all of them -- and a write that changed nothing never
+        reaches here, because the state swallows it.
+        """
+        if getattr(self, "_closing", False):
+            return
+        adapter = getattr(self, "_dock_adapter", None)
+        if adapter is not None and ch in adapter.model:
+            adapter.model.set_visible(ch, bool(visible))
+        row = (getattr(self, "_channel_rows", None) or {}).get(ch)
+        cb = row.get("checkbox") if row else None
+        if cb is not None:
+            try:
+                if cb.isChecked() != bool(visible):
+                    cb.blockSignals(True)
+                    cb.setChecked(bool(visible))
+                    cb.blockSignals(False)
+            except RuntimeError:
+                pass
+        if ch == getattr(self, "nucleus_channel", None):
+            self._sync_nucleus_layer_views(bool(visible))
+        elif ch == getattr(self, "current_channel", None):
+            self._sync_marker_layer_views(bool(visible))
         else:
-            self._channel_methods.pop(ch, None)
-            self._channel_decisions[ch] = "original"
-        self._refresh_channel_state(ch)
+            # Another marker: nothing on screen draws it today, so there is
+            # no picture to redraw. The answer is recorded for Step1 and for
+            # the next time this channel is the selected one.
+            return
+        self._queue_tissue_preview(kind="visibility")
+
+    def _sync_marker_layer_views(self, visible):
+        """Put the marker layer switch at `visible` in every view.
+
+        The two buttons are MIRRORS of the channel's display answer, like
+        `_btn_show_nucleus` is for DAPI. Their own `toggled` handlers do the
+        view work (the compare strip's opacity gate, the full image's
+        controller), so they are set WITHOUT blocking -- and the panels are
+        told directly as well, for the case where the buttons were already
+        where they needed to be.
+        """
+        visible = bool(visible)
+        for btn in (getattr(self, "_btn_show_marker", None),
+                    getattr(self, "_btn_full_marker", None)):
+            if btn is not None and btn.isChecked() != visible:
+                btn.blockSignals(True)
+                btn.setChecked(visible)
+                btn.blockSignals(False)
+                self._set_layer_toggle_text(btn, "Marker", visible)
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None and getattr(strip, "built", False):
+            strip.set_marker_visible(visible)
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        if stack is not None:
+            stack.controller.set_marker_visible(visible)
+
+    def _sync_nucleus_layer_views(self, visible):
+        """Put the DAPI layer switch at `visible` in every view.
+
+        Same rule as the marker's: the hidden holder and the full image's
+        toolbar button are mirrors, and each has its own view handler.
+        """
+        visible = bool(visible)
+        for btn in (getattr(self, "_btn_show_nucleus", None),
+                    getattr(self, "_btn_full_nucleus", None)):
+            if btn is not None and btn.isChecked() != visible:
+                btn.setChecked(visible)
 
     def _on_channel_selected_by_id(self, cid):
         """The shared dock's selection, as a channel id, routed to the
@@ -8699,6 +8844,11 @@ class Step0Page(QWidget):
             return
         self._inspector_channel = None
         self.current_channel = ch
+        # THE LAYER SWITCHES FOLLOW THE CHANNEL. They are mirrors of ONE
+        # channel's display answer, so moving to another channel re-points
+        # them; left alone they would go on arguing for the channel that was
+        # just left, and a view that read them would draw the wrong answer.
+        self._sync_marker_layer_views(self._channel_display_visible(ch))
         self._update_decision_ui()
         # The floating Intensity window edits the channel the user is looking
         # at: point the workbench's inspector at it (the nucleus included).
@@ -9345,8 +9495,7 @@ class Step0Page(QWidget):
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
             return
-        decision = self._current_dec_method()
-        self._channel_decisions[ch] = decision
+        decision = self._set_channel_decision(ch, self._current_dec_method())
         # Parameter edits are already recorded per key by
         # `_on_dec_param_changed`. Applying a METHOD must not freeze the other,
         # inherited parameter as a local override.
@@ -9753,8 +9902,8 @@ class Step0Page(QWidget):
             self, "Channels saved as raw",
             f"{len(raw)} channel{'s' if len(raw) != 1 else ''} will be saved "
             f"WITHOUT background correction:\n\n{shown}\n\n"
-            "A channel is saved raw when it is unticked, assigned Original, "
-            "or ticked but not computed. Continue?",
+            "A channel is saved raw when it is assigned Original or has no "
+            "current computed result. Continue?",
             QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Ok)
         return answer == QMessageBox.Ok
 

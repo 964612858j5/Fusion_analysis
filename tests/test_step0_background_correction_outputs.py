@@ -777,3 +777,119 @@ def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):
     assert p.loader.store == ("/x/corrected_channels.zarr", {"CD11b": "tophat"})
     # in-memory cache hot-swapped to the new (tophat) pixels
     assert float(sched.resident(bbox, "CD11b").mean()) == 9.0
+
+
+# ── B4-A: correction identity is not a function of what is on screen ─────
+
+def _correction_page(app, tmp_path):
+    """A real Step0 page with a real loader, a patch and a decision."""
+    from block01.ui.step0.step0_page import Step0Page
+    from test_step0_background_correction_tab import _GpuPathLoader
+
+    page = Step0Page()
+    page.loader = _GpuPathLoader()
+    page.output_dir = str(tmp_path)
+    page.ome_path = "/t.ome.tif"
+    page.patches = [(0, 32, 0, 32)]
+    page.current_patch_idx = 0
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    return page
+
+
+def _correction_identity(page):
+    """Everything that decides what Save writes and what a cache may reuse."""
+    return {
+        "config": page._build_config(),
+        "decisions": dict(page._channel_decisions),
+        "methods": dict(page._channel_methods),
+        "signatures": {ch: page._channel_signature(
+            ch, page._channel_row_method(ch))
+            for ch in page._channel_order if ch != page.nucleus_channel},
+        "states": {ch: page._channel_compute_state(ch)
+                   for ch in page._channel_order},
+        "raw": list(page._raw_save_channels()),
+    }
+
+
+def test_showing_and_hiding_channels_changes_no_correction_identity(app,
+                                                                    tmp_path,
+                                                                    monkeypatch):
+    """Visibility-only edits: the decision, the signature, the compute state,
+    the Save payload and the raw-channel set are all unmoved -- and no run,
+    no read and no write is started."""
+    import block01.ui.step0.step0_page as sp
+
+    page = _correction_page(app, tmp_path)
+    before = _correction_identity(page)
+
+    def _boom(*a, **k):
+        raise AssertionError("a correction run was started by a display edit")
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+
+    state = page.display.state
+    for ch in ("CD3", "CD20", "DAPI"):
+        state.set_display_visible(ch, True, origin="test")
+    page._cb_all.setChecked(False)
+    state.set_display_visible("CD3", True, origin="test")
+
+    assert _correction_identity(page) == before
+    page.close()
+
+
+def test_a_correction_edit_leaves_the_display_and_the_science_alone(app,
+                                                                    tmp_path):
+    """The mirror image: a method change makes the result stale and moves
+    nothing that is on screen and nothing scientific."""
+    page = _correction_page(app, tmp_path)
+    state = page.display.state
+    state.set_display_visible("CD3", True, origin="test")
+    visible_before = dict(state.display_visibility())
+    selection_before = state.selected_channel()
+    fusion = page.display.fusion
+    fusion.edit_channel_weight("CD3", 0.25, origin="test")
+    draft_before = fusion.draft_snapshot()
+    committed_before = fusion.committed_snapshot()
+
+    # ...a computed result exists for the method it had: the recorded
+    # signature, the done mark AND a payload for every current patch, which
+    # is the evidence `_channel_is_up_to_date` asks for.
+    page._computed_channels.add("CD3")
+    page._computed_signatures["CD3"] = page._channel_signature("CD3", "tophat")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+    assert page._channel_compute_state("CD3") == "computed"
+
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+
+    assert page._channel_decisions["CD3"] == "cucim"
+    assert page._channel_compute_state("CD3") == "stale"
+    assert dict(state.display_visibility()) == visible_before
+    assert state.selected_channel() == selection_before
+    assert fusion.draft_snapshot() == draft_before
+    assert fusion.committed_snapshot() == committed_before
+    page.close()
+
+
+def test_a_finished_correction_does_not_show_the_channel(app, tmp_path):
+    """`computed` is a STATUS. It used to tick the row and paint it green,
+    which showed a channel the user had hidden."""
+    page = _correction_page(app, tmp_path)
+    state = page.display.state
+    state.set_display_visible("CD3", False, origin="test")
+
+    page._set_channel_computing("CD3")
+    assert state.display_visible("CD3") is False
+    page._computed_signatures["CD3"] = page._channel_signature("CD3", "tophat")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+    page._set_channel_done("CD3")
+
+    assert state.display_visible("CD3") is False
+    assert page._channel_rows["CD3"]["checkbox"].isChecked() is False
+    assert page._channel_rows["CD3"]["checkbox"].isEnabled() is True
+    assert page._channel_compute_state("CD3") == "computed"
+    page.close()

@@ -594,14 +594,21 @@ def test_the_real_step0_rebuild_installs_the_loaders_order(app):
         assert dapi.weight_editable is False
         assert dapi.correction_eligible is False
 
+        # ...and the nucleus is not swept by a bulk Show all / Hide all, nor
+        # taken out of the fusion: SEPARATE facts, none derived from another.
+        assert dapi.bulk_toggleable is False
+        assert dapi.fusion_toggleable is False
+
         for marker in ("CD3", "CD8"):
             caps = st.capabilities(marker)
             assert caps.is_nucleus is False, marker
-            # Step0 has no per-marker DISPLAY toggle yet; its row checkbox is
-            # a correction decision. B4-A is where that is split.
-            assert caps.display_toggleable is False, marker
+            # Since B4-A every channel's row checkbox is a DISPLAY toggle;
+            # the correction decision is the method combo's.
+            assert caps.display_toggleable is True, marker
             assert caps.weight_editable is True, marker
             assert caps.correction_eligible is True, marker
+            assert caps.bulk_toggleable is True, marker
+            assert caps.fusion_toggleable is True, marker
     finally:
         page.close()
 
@@ -612,15 +619,22 @@ def test_correction_membership_never_becomes_display_visibility(app):
     display visibility."""
     page = _step0_page(app)
     try:
+        page._channel_decisions = {"CD3": "tophat"}
         page._channel_methods = {"CD3": "tophat"}
         page._rebuild_channel_list()
         st = page.display.state
 
         visibility = st.display_visibility()
-        assert "CD3" not in visibility, visibility
-        assert "CD8" not in visibility, visibility
-        # DAPI's layer switch IS a display answer, so it is recorded.
-        assert "DAPI" in visibility
+        # BOTH have a display answer now, and it is the SAME answer: a slide
+        # nobody has given display answers for lands on DAPI with its markers
+        # hidden. What must not happen is the one with a correction method
+        # coming up shown BECAUSE it has one.
+        assert visibility["CD3"] is False, visibility
+        assert visibility["CD8"] is False, visibility
+        assert visibility["CD3"] == visibility["CD8"]
+        assert visibility["DAPI"] is True
+        # ...and the correction decision is untouched by any of it.
+        assert page._channel_decisions["CD3"] == "tophat"
     finally:
         page.close()
 

@@ -253,20 +253,27 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     assert page._channel_decisions == {}
     assert page._prior_channel_decisions == {
         "CD3": "cucim", "CD20": "cucim", "CD8": "tophat"}
-    # unassigned rows mirror the global Method box (default Both), unchecked
+    # unassigned rows mirror the global Method box (default Both); the
+    # checkbox says nothing about correction -- it is display visibility, and
+    # a fresh slide lands on DAPI with its markers hidden.
     for ch in ("CD3", "CD20", "CD8"):
         row = page._channel_rows[ch]
         assert row["method_cb"].currentText() == "Both"
         assert not row["checkbox"].isChecked()
+    assert page._channel_rows["DAPI"]["checkbox"].isChecked()
     # global method change mirrors into unassigned rows without assigning
     page._method_all.setCurrentText("TopHat")
     for ch in ("CD3", "CD20", "CD8"):
         assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
     assert page._channel_decisions == {}
-    # explicit assignment still sticks
+    # explicit assignment still sticks -- and does NOT show the channel.
+    # Assigning a correction method used to tick the row, which is how
+    # "corrected" and "on screen" became one answer.
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
     assert page._channel_decisions["CD3"] == "cucim"
-    assert page._channel_rows["CD3"]["checkbox"].isChecked()
+    assert page._channel_methods["CD3"] == "cucim"
+    assert not page._channel_rows["CD3"]["checkbox"].isChecked()
+    assert page.display.state.display_visibility().get("CD3") is False
     # every Step0 BG row carries its own display-colour swatch (the colour
     # buttons that used to sit in the Patch Preview header are gone)
     assert page._channel_rows["CD3"]["row_widget"].swatch.isVisibleTo(

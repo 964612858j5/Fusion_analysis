@@ -33,6 +33,10 @@ class ChannelRowBase(QtWidgets.QWidget):
     """
 
     color_clicked = pyqtSignal(str)
+    #: A REAL mouse click on this row. `ChannelSetModel.selection_changed`
+    #: cannot say who moved the selection -- a restore and a dataset switch
+    #: move it too -- and "show me this one" is a thing only a click means.
+    row_clicked = pyqtSignal(str)
 
     def __init__(self, model: ChannelSetModel, cid: str, parent=None,
                  show_visibility=True):
@@ -83,6 +87,7 @@ class ChannelRowBase(QtWidgets.QWidget):
 
     def mousePressEvent(self, ev):
         self._model.select(self._cid)
+        self.row_clicked.emit(self._cid)
         super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):

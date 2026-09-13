@@ -664,18 +664,38 @@ def test_a_dataset_switch_resets_every_glyph(app, monkeypatch):
     assert page._channel_rows["CD3"]["row_widget"].state_lbl.text() == "○"
 
 
-def test_a_computed_channel_can_still_be_unticked(app, monkeypatch):
-    """It has to be: unticking is how a computed channel is saved raw."""
+def test_a_computed_channel_can_be_hidden_without_losing_its_correction(
+        app, monkeypatch):
+    """Hiding a computed channel is a DISPLAY act, and only that.
+
+    Unticking a row used to write `original` -- so a user who hid a channel
+    threw away the correction it had just been computed with, and Save wrote
+    it raw. Since B4-A the checkbox says what is on screen; Save writes raw
+    for a channel ASSIGNED Original, which is the method combo's answer.
+    """
     _no_workers(monkeypatch)
     page = _page(app)
     page._explore_tab = _RecordingExploreTab()
-    _finish_run(page, ["CD3"])
+    # The method combo is where a correction is chosen now, so that is how
+    # this channel gets one before it is computed.
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    _finish_run(page, ["CD3"], method="tophat")
     cb = page._channel_rows["CD3"]["checkbox"]
+    decision_before = page._channel_decisions.get("CD3")
+    assert decision_before == "tophat"
 
     assert cb.isEnabled()
     cb.setChecked(False)
 
+    assert page._channel_decisions["CD3"] == decision_before
+    assert page.display.state.display_visible("CD3") is False
+    assert "CD3" not in page._raw_save_channels(), (
+        "hiding a computed channel made Save write it raw")
+
+    # ...and assigning Original IS how it is saved raw.
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("Original")
     assert page._channel_decisions["CD3"] == "original"
+    assert "CD3" in page._raw_save_channels()
 
 
 # ── 5. Save names the channels it writes raw ─────────────────────────────

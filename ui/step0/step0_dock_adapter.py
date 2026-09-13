@@ -101,25 +101,33 @@ class Step0ChannelDockAdapter(QObject):
         # still writes text into it harmlessly.
         row.status_lbl.setVisible(False)
         is_nucleus = (cid == page.nucleus_channel)
-        # Forward user interaction to the unchanged page slots. The page's
-        # legacy lambda signature uses Qt CheckState ints.
+        # THE CHECKBOX IS DISPLAY VISIBILITY, for every channel including the
+        # nucleus. It used to carry two answers at once: the row's own
+        # `_on_visibility_toggled` wrote the dock model's `visible` while the
+        # page's slot wrote a CORRECTION decision, so ticking a marker
+        # assigned it a background-correction method and unticking it wrote
+        # `original`. A correction decision is made in the method combo or
+        # the selected-channel inspector; this box shows and hides.
         row.checkbox.stateChanged.connect(
-            lambda state, name=cid: page._on_channel_checkbox_toggled(name, state))
+            lambda state, name=cid: page._on_channel_visibility_toggled(
+                name, state == Qt.Checked))
+        row.checkbox.setToolTip(
+            "Show / hide the DAPI layer" if is_nucleus
+            else "Show / hide this channel")
         row.method_changed.connect(page._on_channel_method_changed)
+        # A REAL CLICK on the row, told apart from a programmatic selection:
+        # clicking a hidden channel's name means "show me this one", while a
+        # session restore or a dataset switch selecting it does not.
+        clicked = getattr(row, "row_clicked", None)
+        handler = getattr(page, "_on_channel_row_clicked", None)
+        if clicked is not None and handler is not None:
+            clicked.connect(handler)
+        row.checkbox.setEnabled(True)
         if is_nucleus:
-            # The nucleus row's checkbox is NOT a processing checkbox: it is
-            # the DAPI layer's show/hide switch (compare panels + full
-            # image). It therefore stays enabled while the method combo does
-            # not -- DAPI is never background-corrected, never enters
-            # Process/Apply/on-demand/Save. `_on_channel_checkbox_toggled`
-            # returns early for it, so no method is ever recorded.
-            row.checkbox.setEnabled(True)
-            row.checkbox.setToolTip("Show / hide the DAPI layer")
+            # DAPI is never background-corrected: the method combo is off
+            # because `correction_eligible` is false, NOT because the row is
+            # "locked" -- it is shown, hidden and weighted like any other.
             row.method_cb.setEnabled(False)
-            _dapi = getattr(page, "_on_nucleus_visibility_toggled", None)
-            if _dapi is not None:
-                row.checkbox.stateChanged.connect(
-                    lambda state: _dapi(state == Qt.Checked))
         return row
 
     # -- rebuild (mirrors legacy _rebuild_channel_list) ------------------------
@@ -132,8 +140,33 @@ class Step0ChannelDockAdapter(QObject):
             self.model.set_channels([])
             return
 
+        # WHAT IS SHOWN, and who already answered it. A dataset whose
+        # display answers are resident -- a session restore, or A -> B -> A --
+        # keeps every one of them; only a channel nobody has answered for
+        # takes the default below.
+        display = getattr(page, "display", None)
+        known = dict(display.state.display_visibility()) if display else {}
+        order_names = list(page.loader.channel_names())
+        # FROM THE LOADER'S ORDER, not `page._channel_order`: that list is
+        # emptied at the top of this method, so asking the page for its
+        # landing channel here answers None.
+        landing = (page.nucleus_channel
+                   if page.nucleus_channel in order_names
+                   else next((ch for ch in order_names
+                              if ch != page.nucleus_channel), None))
+
+        def _default_visible(ch):
+            if ch in known:
+                return bool(known[ch])
+            if ch == page.nucleus_channel:
+                return _dapi_visible(page)
+            # A NEW slide shows the one marker it lands on. Showing all of
+            # them would hand Step1 a slide with every channel stacked;
+            # showing none would open Step0 on an empty picture.
+            return ch == landing
+
         states = []
-        for ch in page.loader.channel_names():
+        for ch in order_names:
             is_nucleus = (ch == page.nucleus_channel)
             saved = (page._channel_decisions.get(ch)
                      or page._channel_methods.get(ch)
@@ -143,8 +176,7 @@ class Step0ChannelDockAdapter(QObject):
             states.append(ChannelState(
                 channel_id=ch,
                 name=f"{ch} ★" if is_nucleus else ch,
-                visible=(_dapi_visible(page) if is_nucleus
-                         else (ch in page._channel_methods)),
+                visible=_default_visible(ch),
                 color=_swatch_hex(page, ch),
                 locked=is_nucleus,
                 bg_final_method=saved,
@@ -167,7 +199,6 @@ class Step0ChannelDockAdapter(QObject):
         # the top of this method and refilled further down, in the legacy
         # registry loop, so reading it here installed an empty order, empty
         # capabilities and an empty visibility map.
-        display = getattr(page, "display", None)
         # A page that has never been through a dataset commit still has a
         # path, and an install needs a namespace to go into. Binding lazily
         # here is what makes "the order is always installed" true for the
@@ -179,30 +210,32 @@ class Step0ChannelDockAdapter(QObject):
                 is_nucleus = (ch == page.nucleus_channel)
                 caps[ch] = ChannelCapabilities(
                     is_nucleus=is_nucleus,
-                    # The nucleus row's checkbox IS its display toggle today;
-                    # a marker row's checkbox is a CORRECTION decision, so
-                    # Step0 has no marker display toggle to report yet. B4-A
-                    # is where that is split.
-                    display_toggleable=is_nucleus,
+                    # SEPARATE FACTS, none of them derived from another. The
+                    # nucleus is shown and hidden like any other channel; what
+                    # it is NOT is background-correctable, sweepable by a bulk
+                    # Show all / Hide all, or removable from the fusion.
+                    display_toggleable=True,
                     weight_editable=not is_nucleus,
                     correction_eligible=not is_nucleus,
+                    bulk_toggleable=not is_nucleus,
+                    fusion_toggleable=not is_nucleus,
                 )
-            # MERGED, NOT REPLACED, and only for the nucleus. Deriving a
-            # marker's display visibility from `_channel_methods` would be
-            # publishing correction participation under another name -- the
-            # two are different facts and Step0 only has the correction one.
-            # A marker whose display answer nobody has given stays ABSENT
-            # until B3/B4 supplies the real initialisation; one that Step1
-            # has already recorded is left exactly as it is.
-            visibility = dict(display.state.display_visibility())
-            nucleus = page.nucleus_channel
-            if nucleus and nucleus in order:
-                visibility[nucleus] = _dapi_visible(page)
-            display.state.install({
+            # ONE INSTALL: the order, the capabilities, the display
+            # visibility this rebuild resolved AND the selection, so nothing
+            # observes a slide whose channels are known but whose answers are
+            # not. Every channel now has a display answer -- an answer
+            # already given is kept, and only a channel nobody has answered
+            # for takes the landing default.
+            payload = {
                 "order": order,
                 "capabilities": caps,
-                "visibility": visibility,
-            })
+                "visibility": {st.channel_id: bool(st.visible)
+                               for st in states},
+            }
+            selection = current if current in set(order) else landing
+            if selection:
+                payload["selection"] = selection
+            display.state.install(payload)
 
         # The uniform name-column width is the DOCK's now
         # (`template.uniform_name_width`, applied in `ChannelDock.rebuild`),

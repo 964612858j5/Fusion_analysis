@@ -863,3 +863,43 @@ def _preload_recorder(timeline):
             pass
 
     return _Preload
+
+
+# ── B4-A: the compute state is a STATUS, never a lock on the checkbox ────
+
+def test_the_compute_state_never_locks_or_rewrites_the_checkbox(app):
+    """`computing`, `computed` and `stale` are said in the row's state
+    glyph. An earlier, shadowed implementation of `_refresh_channel_row`
+    ticked and DISABLED a computed channel's checkbox -- which, now that the
+    checkbox is display visibility, would show a hidden channel and refuse to
+    let the user hide it again."""
+    from block01.ui.step0.step0_page import Step0Page
+
+    page = Step0Page()
+    page.loader = _GpuPathLoader()
+    page.patches = [(0, 32, 0, 32)]
+    page.current_patch_idx = 0
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    state = page.display.state
+    state.set_display_visible("CD3", False, origin="test")
+    cb = page._channel_rows["CD3"]["checkbox"]
+
+    for step in ("computing", "done"):
+        if step == "computing":
+            page._set_channel_computing("CD3")
+        else:
+            page._computed_signatures["CD3"] = page._channel_signature(
+                "CD3", "tophat")
+            for p_idx in range(len(page.patches)):
+                page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+            page._set_channel_done("CD3")
+        assert cb.isEnabled() is True, step
+        assert cb.isChecked() is False, step
+        assert state.display_visible("CD3") is False, step
+
+    assert page._channel_compute_state("CD3") == "computed"
+    # ...and the row says so in its own state slot.
+    assert page._channel_rows["CD3"]["row_widget"].state_lbl.text() == "✓"
+    page.close()

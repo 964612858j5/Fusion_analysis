@@ -1,10 +1,11 @@
 """THE channel-row visual template: one source for every channel list.
 
-WHY THIS MODULE EXISTS. Block01 draws channel rows in more than one place, and
-before this they were built more than once: the shared dock's
-`ChannelRowBase` and Step1's private `ConfigPanel.ChannelRow` each created
-their own checkbox, swatch and name label, each with their own stylesheet, and
-Step1 carried a second list stylesheet and a second colour palette on top. The
+WHY THIS MODULE EXISTS. Block01 drew channel rows in more than one place, and
+before this it BUILT them more than once: the shared dock's row and Step1's
+private `ConfigPanel.ChannelRow` each created their own checkbox, swatch and
+name label, each with their own stylesheet, and Step1 carried a second list
+stylesheet and a second colour palette on top. Both are gone with B5; the one
+row left is `global_dock.GlobalChannelRow`, and it is built here. The
 result was measurable rather than theoretical -- on a real window at 1500x950,
 the same channel showed a 22x18 themed checkbox in Step0 and a 14x15 platform
 one in Step1, its swatch at x=50 against x=25, its name at x=68 against x=43,
@@ -17,8 +18,8 @@ So the ROW CORE is built here and only here:
 A host page supplies the accessory -- Step0's correction-method combo, Step1's
 weight slider and number -- and nothing else. It does not build the core, does
 not restyle it, and does not move its columns. `build_row_core` stamps the
-widget with `CORE_TOKEN`, and `ChannelDock` refuses a row that is not stamped;
-that is what makes "one template" a rule rather than a convention.
+widget with `CORE_TOKEN`, and `require_template_row` refuses one that is not
+stamped; that is what makes "one template" a rule rather than a convention.
 
 THE STATE SLOT IS ALWAYS THERE. Step0 draws a compute-state glyph in it;
 Step1 draws nothing. It keeps its 12 px either way, because if it collapsed

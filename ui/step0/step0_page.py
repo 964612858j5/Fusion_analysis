@@ -835,24 +835,20 @@ class Step0Page(QWidget):
         # stacked pages. This page BINDS to it through the adapter and builds
         # no list of its own -- Step0's own dock is what made a second public
         # editor of the same channels. The dock's inner QListWidget is still
-        # exposed as self._channel_list so every legacy code path
-        # (setCurrentItem / currentRowChanged / item registry) is intact.
+        # exposed as self._channel_list so this page's remaining code paths
+        # (setCurrentItem / item registry) are unchanged.
         from .step0_dock_adapter import Step0ChannelDockAdapter
         self._dock_adapter = Step0ChannelDockAdapter(self)
         self._channel_list = self._dock_adapter.dock.list_widget
-        # The MODEL's selection, not the list's `currentRowChanged`. A click
-        # on a row goes `ChannelRowBase.mousePressEvent` -> `model.select`
-        # -> `ChannelDock._on_model_selection`, which moves the list's
-        # current item with its signals BLOCKED -- so `currentRowChanged`
-        # never fired for a mouse click, and the page kept showing the
-        # channel it had (measured: the list's current row moved, the page's
-        # `current_channel` did not). A programmatic `setCurrentRow` reaches
-        # the model too (`ChannelDock._on_current_item`), so this one
-        # connection covers both paths, and the model's own de-duplication
-        # means the handler runs once per actual change.
-        #
-        # From the SHARED STATE, which is the one owner of the selection
-        # since B2 -- the dock is a projection of it, not a second answer.
+        # THE SHARED STATE'S selection, not the list's `currentRowChanged`.
+        # A click on a row goes `GlobalChannelRow.mousePressEvent` -> the
+        # dock's row-click rule -> `ChannelDisplayState.set_selected_channel`,
+        # and the dock moves the list's current item from there with its
+        # signals BLOCKED -- so `currentRowChanged` never fires for a mouse
+        # click. A programmatic `setCurrentRow` reaches the state too (the
+        # dock's `_on_current_item`), so this one connection covers both
+        # paths, and the state's own de-duplication means the handler runs
+        # once per actual change.
         self.display.state.selection_changed.connect(
             self._on_channel_selected_by_id)
         # The model is the third writer of a channel's colour (after this page

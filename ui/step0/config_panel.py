@@ -157,18 +157,6 @@ class ConfigPanel(QWidget):
     def channel_dock(self):
         return self._dock
 
-    def set_channel_dock(self, dock):
-        """Edit in Block01's ONE public channel dock from now on.
-
-        Production hands the dock in at construction; this stays for a host
-        that builds the panel first. There is nothing to retire when it
-        arrives: the panel has never had rows of its own.
-        """
-        self._dock = dock
-        if dock is None:
-            return
-        self._rebuild_rows()
-
     # ── the scientific model ──────────────────────────────────────────
     def fusion_model(self):
         """The one owner of this panel's scientific answers."""
@@ -179,7 +167,6 @@ class ConfigPanel(QWidget):
         window, Step0 or a restore. The row FOLLOWS it; it does not re-write
         it, so an edit cannot start a second lap."""
         self._sync_row_weight(channel, self._fusion.channel_weight(channel))
-        self._refresh_ambiguity(channel)
 
     def _on_model_participation_changed(self, channel, enabled):
         row = self._rows.get(channel)
@@ -194,31 +181,7 @@ class ConfigPanel(QWidget):
         for ch, row in self._rows.items():
             row.set_weight(self._fusion.channel_weight(ch))
             row.set_fusion_enabled(self._fusion.fusion_enabled(ch))
-            self._refresh_ambiguity(ch)
         self._refresh_nucleus_display()
-
-    def _refresh_ambiguity(self, channel):
-        """Name a channel whose groups disagree; one row cannot show two
-        numbers, and quietly showing the largest without saying so is how an
-        old project gets flattened by being looked at."""
-        if self._dock is not None:
-            # The PUBLIC row draws its own name and its own mixed-weight
-            # marker from the model (`GlobalChannelDock.refresh_row`). A
-            # second writer of the same label is a second answer.
-            return
-        row = self._rows.get(channel)
-        if row is None:
-            return
-        rep = self._fusion.representative_weight(channel)
-        if rep.mixed:
-            row.name_label.setText(f"{channel} *")
-            row.setToolTip(
-                f"{channel} is in several groups at different weights "
-                f"({', '.join(str(v) for v in rep.values)}). The row shows the "
-                "largest; editing it applies that weight to every group.")
-        else:
-            row.name_label.setText(str(channel))
-            row.setToolTip("")
 
     # ── construction ──────────────────────────────────────────────────
     def _setup_ui(self):
@@ -278,10 +241,10 @@ class ConfigPanel(QWidget):
         step" -- and records the display answers for SELECTION and
         VISIBILITY.
 
-        Recording, not delegating: in B2 this panel's checkbox still drives
-        both display visibility and fusion participation, and its spinbox is
-        still the weight. Splitting those is B3's, and nothing here reads the
-        shared state back to decide behaviour.
+        Recording, not delegating: the public row's tick is DISPLAY
+        visibility, its `f` box is fusion participation and its spinbox is
+        the scientific weight -- three commands to two owners, since B3/B4 --
+        and this panel neither holds nor arbitrates any of them.
         """
         self._display_state = state
         if state is None:
@@ -366,9 +329,6 @@ class ConfigPanel(QWidget):
             self._current = ""
 
     # ── selection / visibility / colour ───────────────────────────────
-    def _on_row_selected(self, channel):
-        self.set_current_channel(channel)
-
     def current_channel(self):
         return self._current
 
@@ -408,28 +368,6 @@ class ConfigPanel(QWidget):
             if state is not None:
                 state.set_selected_channel(channel, origin="step1-panel")
             self.current_channel_changed.emit(channel)
-
-    def _on_row_visibility(self, channel, visible):
-        """The user ticked or unticked the DISPLAY box.
-
-        Display only, since B3. This tick used to do two jobs at once: it
-        decided whether the channel was drawn AND whether it was part of the
-        fusion, so hiding a channel silently shrank the configuration a Save
-        would freeze. Whether a channel takes part is now the row's own
-        `\u0192` box, which is a scientific command; this one is about the
-        screen and nothing else.
-        """
-        self._record_display_visible(channel, visible)
-        self.visibility_changed.emit(channel, bool(visible))
-
-    def _on_row_fusion_toggled(self, channel, enabled):
-        """The user ticked or unticked FUSION PARTICIPATION.
-
-        A scientific command, straight to the model: it keeps the channel's
-        groups and every per-group weight, and the first enable of a channel
-        nobody has weighted answers 1.0 there -- once, and not as an edit.
-        """
-        self._fusion.set_fusion_enabled(channel, bool(enabled), origin="step1-row")
 
     def fusion_enabled(self, channel):
         return self._fusion.fusion_enabled(channel)
@@ -584,31 +522,9 @@ class ConfigPanel(QWidget):
         nuc, nuc_w = self._fusion.nucleus()
         self._nuc_value.setText(
             f"{nuc}  (weight {nuc_w:.2f})" if nuc else "\u2014")
-        if self._dock is not None:
-            # WHO MAY EDIT A WEIGHT is a capability on the shared state, which
-            # the public row already applies (`weight_editable`). Reaching
-            # into the rows from here would be this panel deciding a
-            # permission for every step.
-            return
-        for ch, row in self._rows.items():
-            is_nuc = bool(nuc) and ch == nuc
-            row.set_weight_editable(not is_nuc)
-            if is_nuc:
-                row.set_weight(nuc_w)
-
-    def _on_row_weight_edited(self, channel):
-        """The user moved a weight: the scientific edit, straight to the model.
-
-        An edited weight applies to EVERY group the channel belongs to -- the
-        model's rule, stated there -- and it is an answer from then on, 0.00
-        included. The ticks are not touched: how much a channel contributes is
-        not whether it contributes.
-        """
-        # No `config_changed` from here: the MODEL announces the weight, and
-        # the host follows that one signal. Announcing both drew the same
-        # state twice -- once for the row and once for the number.
-        self._fusion.edit_channel_weight(channel, self._rows[channel].weight(),
-                                         origin="step1-row")
+        # WHO MAY EDIT A WEIGHT is not decided here: it is a capability on
+        # the shared state, applied by the public row (`weight_editable`).
+        # This panel draws the read-only nucleus line and nothing else.
 
     def effective_config(self):
         """What is actually fused and what a Save freezes.

@@ -364,7 +364,8 @@ class _SharedSpecTissueContext:
 #: implies, and WHETHER either owner actually moved. The second half is what
 #: tells "restore this session" from "this session is already loaded" for
 #: everything that follows the transaction.
-Step1Restore = collections.namedtuple("Step1Restore", "visibility changed")
+Step1Restore = collections.namedtuple(
+    "Step1Restore", "visibility changed mode_moved")
 
 
 class MainWindow(QMainWindow):
@@ -2622,6 +2623,18 @@ class MainWindow(QMainWindow):
         identity = self._source_identity(
             str(source_path or "")
             or str(getattr(self.loader, "filepath", "") or ""))
+        # WHICH PICTURE, before anything asks for one. The preview mode is a
+        # display answer this session carries, and every frame requested by
+        # the transaction below is composed from the mode that is current
+        # when it is composed -- so setting the mode afterwards would put the
+        # PREVIOUS mode's picture on the shared Tissue Preview and need a
+        # second frame to correct it. Set silently (`reconcile=False`): the
+        # one reconcile this restore gets happens when everything is final.
+        mode = str(sess.get("preview_mode") or "")
+        mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
+                      and mode != self._step1_preview_mode)
+        if mode_moved:
+            self.set_preview_mode(mode, force=True, reconcile=False)
         # No pruning: the install below replaces the whole draft, and pruning
         # first would announce an intermediate nobody meant.
         self.config.set_channels(names, prune=False)
@@ -2665,7 +2678,8 @@ class MainWindow(QMainWindow):
         # follows this -- the mode, the Fusion Settings reload, the channel
         # cache and the patch preview -- is part of the same restore and must
         # not run for a session that put nothing back.
-        return Step1Restore(visibility=visibility, changed=bool(changed))
+        return Step1Restore(visibility=visibility, changed=bool(changed),
+                            mode_moved=bool(mode_moved))
 
     def _apply_step1_fusion_config(self, cfg):
         """Restore the fusion config into the one channel panel.
@@ -2700,7 +2714,7 @@ class MainWindow(QMainWindow):
 
     def _apply_step1_display_state(self, sess, visibility=None,
                                    display_installed=False,
-                                   restore_changed=True):
+                                   restore_changed=True, mode_moved=None):
         """Restore Step1's own display state: ticks, colours, current channel,
         preview mode.
 
@@ -2723,11 +2737,15 @@ class MainWindow(QMainWindow):
         # SETTING THE MODE IT IS ALREADY IN IS NOT A RESTORE. It used to be
         # written unconditionally, which made every reload of an unchanged
         # session look like a change to everything downstream of it.
-        mode = str(sess.get("preview_mode") or "")
-        mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
-                      and mode != self._step1_preview_mode)
-        if mode_moved:
-            self.set_preview_mode(mode, force=True, reconcile=False)
+        if mode_moved is None:
+            # The COMPATIBILITY path (a caller handing this method a session
+            # on its own) still owns the mode; the session transaction has
+            # already set it, before anything could ask for a frame.
+            mode = str(sess.get("preview_mode") or "")
+            mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
+                          and mode != self._step1_preview_mode)
+            if mode_moved:
+                self.set_preview_mode(mode, force=True, reconcile=False)
 
         # The weight history is the MODEL's now, restored with the rest of
         # the scientific state; this path only carries it for sessions
@@ -2750,7 +2768,16 @@ class MainWindow(QMainWindow):
                 # session still cost work.
                 print("[Step1] session already loaded; nothing to restore")
                 return
-            self._on_display_state_restored(schedule_save=False)
+            # THE MODE IS A GLOBAL FACT. Step1's viewer is not the only
+            # picture of this slide: the shared Tissue Preview draws the same
+            # mode, and a restore that switched to Fusion while the popup
+            # went on showing the Overlay is the disagreement `kind="mode"`
+            # removes. One request, and only when the transaction did not
+            # already ask for one -- both of them compose the mode that is
+            # current now, which is the restored one.
+            self._on_display_state_restored(
+                schedule_save=False,
+                request_frame=bool(mode_moved) and not restore_changed)
             return
         colors = sess.get("channel_colors")
         if visibility is None:
@@ -2770,7 +2797,8 @@ class MainWindow(QMainWindow):
         else:
             self._on_display_state_restored()
 
-    def _on_display_state_restored(self, schedule_save=True):
+    def _on_display_state_restored(self, schedule_save=True,
+                                   request_frame=False):
         """One load and one redraw after a bulk restore.
 
         `schedule_save=False` is for the session transaction, whose single
@@ -2780,6 +2808,8 @@ class MainWindow(QMainWindow):
         self._restore_fusion_settings()
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
+        if request_frame:
+            self._display.coordinator.request_frame(kind="mode")
         if schedule_save:
             self._schedule_step1_session_save()
 
@@ -2799,7 +2829,8 @@ class MainWindow(QMainWindow):
             sess, source_path=raw_ome)
         self._apply_step1_display_state(sess, restored.visibility,
                                         display_installed=True,
-                                        restore_changed=restored.changed)
+                                        restore_changed=restored.changed,
+                                        mode_moved=restored.mode_moved)
 
         self._p2_params = sess.get("p2_params")
         if self._p2_params and hasattr(getattr(self, "search", None), "apply_seg_config_to_ui"):

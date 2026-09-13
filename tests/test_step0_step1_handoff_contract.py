@@ -1377,7 +1377,22 @@ def _wire_window(w, watchers=None):
         w._step1_preview_mode = mode
 
     w.set_preview_mode = set_preview_mode
-    w._display.coordinator.request_frame = count("frame")
+    # WHAT EACH FRAME REQUEST WOULD DRAW. A request is composed from the
+    # state that is current when it is made, so the mode (and the answers)
+    # recorded here are the evidence that no frame was ever asked for with
+    # the previous mode and corrected by a second one.
+    frames = []
+
+    def request_frame(*_a, **kwargs):
+        count("frame")()
+        frames.append({"kind": str(kwargs.get("kind", "")),
+                       "mode": w._step1_preview_mode,
+                       "visibility": dict(state.display_visibility()),
+                       "groups": model.groups(),
+                       "restoring": phase["restoring"]})
+
+    w._display.coordinator.request_frame = request_frame
+    w._frames_seen = frames
     if watchers:
         for signal, name in watchers:
             signal.connect(watch(name))
@@ -1770,6 +1785,7 @@ def test_a_session_that_only_changes_the_preview_mode_refreshes_once(
     gen = w._display.state.generation()
     rev = w._display.fusion.draft_revision()
     counts.clear()
+    del w._frames_seen[:]
 
     other_mode = _atomic_session(run, name="atomic-session-fusion.json",
                                  preview_mode="fusion")
@@ -1783,7 +1799,11 @@ def test_a_session_that_only_changes_the_preview_mode_refreshes_once(
     assert counts["restore_settings"] == 1, counts
     assert counts["patch_preview"] == 1, counts
     assert counts["cache"] == 1, counts
-    assert counts["frame"] == 0, counts
+    # ...and the SHARED picture follows the mode too. Step1's viewer is not
+    # the only picture of this slide: without this the Tissue Preview went on
+    # drawing the Overlay while Step1 showed the Fusion.
+    assert counts["frame"] == 1, counts
+    assert [f["mode"] for f in w._frames_seen] == ["fusion"], w._frames_seen
     assert counts["display.state_installed"] == 0, counts
     assert counts["fusion.draft_changed"] == 0, counts
     assert w._display.state.generation() == gen
@@ -1795,4 +1815,62 @@ def test_a_session_that_only_changes_the_preview_mode_refreshes_once(
         auto=True, path=str(other_mode)) is True
     for name in ("preview_mode", "restore_settings", "patch_preview", "cache",
                  "frame", "preview"):
+        assert counts[name] == 0, (name, counts)
+
+
+def test_a_restore_that_moves_the_mode_and_the_owners_draws_one_new_frame(
+        tmp_path, monkeypatch, app):
+    """Mode AND answers moved: still ONE frame, and it is the new mode's.
+
+    The mode used to be set after the transaction, so the frame the
+    transaction asked for was composed from the PREVIOUS mode and a second
+    one had to correct it. The mode is part of the fact now and is written
+    before anything can ask for a picture.
+    """
+    run = make_run(tmp_path, remap=True)
+    w = _restore_window(run, monkeypatch)
+    first = _atomic_session(run)
+    counts, _shots = _wire_window(w)
+    _prebind(w, run.raw)
+    assert w._load_previous_step1_session(auto=True, path=str(first)) is True
+    assert w._step1_preview_mode == "overlay"
+    counts.clear()
+    del w._frames_seen[:]
+
+    both = _atomic_session(
+        run, name="atomic-session-both.json", preview_mode="fusion",
+        display_visibility={"DAPI": True, "CD68": True},
+        fusion_draft={
+            "groups": {"A": {"weight": 1.0, "members": ["CD68"]},
+                       "B": {"weight": 1.0, "members": ["CD68"]}},
+            "group_weights": {"A": {"CD68": 0.4}, "B": {"CD68": 0.9}},
+            "nucleus": {"channel": "DAPI", "weight": 0.6},
+            "enabled": ["CD68", "DAPI"],
+            "provenance": {"CD68": "authoritative", "DAPI": "authoritative"},
+            "channel_weight": {},
+        })
+    assert w._load_previous_step1_session(auto=True, path=str(both)) is True
+
+    assert w._step1_preview_mode == "fusion"
+    assert w._display.fusion.groups()["A"]["CD68"] == pytest.approx(0.4)
+    assert w._display.state.display_visibility() == {"DAPI": True,
+                                                     "CD68": True}
+    assert counts["frame"] == 1, (counts, w._frames_seen)
+    shot = w._frames_seen[0]
+    assert shot["mode"] == "fusion", shot
+    # ...and the frame would have been composed from the RESTORED answers,
+    # not from the ones it is replacing.
+    assert shot["visibility"] == {"DAPI": True, "CD68": True}, shot
+    assert shot["groups"]["A"]["CD68"] == pytest.approx(0.4), shot
+    assert shot["groups"]["B"]["CD68"] == pytest.approx(0.9), shot
+    assert counts["preview_mode"] == 1, counts
+    assert counts["restore_settings"] == 1, counts
+
+    # The same session once more: no mode write, no frame, no refresh.
+    counts.clear()
+    del w._frames_seen[:]
+    assert w._load_previous_step1_session(auto=True, path=str(both)) is True
+    for name in ("preview_mode", "frame", "preview", "cache", "patch_preview",
+                 "restore_settings", "display.state_installed",
+                 "fusion.draft_changed", "config_changed"):
         assert counts[name] == 0, (name, counts)

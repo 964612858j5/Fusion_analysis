@@ -72,6 +72,10 @@ def _window(app):
     # Production composes frames on a worker thread; these tests run the same
     # compose code inline, delivered when the test says. See `_InlineFrames`.
     w._inline_frames = _InlineFrames(w)
+    # STEP1's live controls: the public row shows the weight editor and the
+    # participation box in Step1 and nowhere else, so these tests drive the
+    # step they are about.
+    w._set_step_active(1)
     return w
 
 

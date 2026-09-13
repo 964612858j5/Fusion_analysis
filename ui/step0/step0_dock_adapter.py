@@ -18,6 +18,8 @@ so the page's existing slots keep working against one list instead of two.
 No correction/remap math, worker behaviour or config semantics change here.
 """
 
+import weakref
+
 from PyQt5.QtCore import QObject
 
 from ...core.display_identity import ChannelCapabilities
@@ -70,7 +72,13 @@ class Step0ChannelDockAdapter(QObject):
 
     def __init__(self, page):
         super().__init__(page)
-        self._page = page
+        # WEAK, both ways. The dock belongs to Block01's lifetime and this
+        # adapter answers its Step0 questions, so a strong page reference
+        # here (reached through the providers the dock holds) would keep a
+        # destroyed Step0 alive and let it answer for a slide it no longer
+        # has. The adapter is parented to the page, so it dies with it; what
+        # it hands the dock resolves the page weakly and fails closed.
+        self._page_ref = weakref.ref(page)
         # THE public dock, from the object that owns Block01's lifetime. This
         # adapter used to construct a `ChannelDock` of its own here, which is
         # how Step0 and Step1 came to hold two public lists over the same
@@ -79,33 +87,64 @@ class Step0ChannelDockAdapter(QObject):
         # WHAT STEP0 ANSWERS FOR, asked of the page rather than stored twice:
         # the correction decision is `_channel_decisions` (its one authority
         # since B4-A) and the compute state is derived from the page's
-        # signature bookkeeping.
-        self.dock.set_method_provider(
-            lambda ch: self._ask(lambda: page._channel_row_method(ch), ""))
-        self.dock.set_state_provider(
-            lambda ch: self._ask(lambda: _compute_state(page, ch), ""))
-        self.dock.set_name_provider(
-            lambda ch: self._ask(lambda: self._row_name(ch), str(ch)))
+        # signature bookkeeping. Installed as ONE controller, which the dock
+        # holds weakly and this adapter detaches when the page is released.
+        self.dock.attach_step0_correction_controller(
+            self,
+            method=lambda ch: self._ask(lambda p: p._channel_row_method(ch),
+                                        ""),
+            state=lambda ch: self._ask(lambda p: _compute_state(p, ch), ""),
+            name=lambda ch: self._ask(self._row_name_of(ch), str(ch)))
         self.dock.correction_method_changed.connect(
             self._on_correction_method_changed)
 
+    # -- the page, while there still is one --------------------------------
+    @property
+    def _page(self):
+        return self._page_ref()
+
+    def detach(self):
+        """Give the dock back its Step0 slot. Idempotent.
+
+        Called from `Step0Page.release_block01_display`. After it, the dock
+        holds no provider of this adapter's, no correction signal of this
+        adapter's, and no row shows a correction answer -- while every public
+        field (visibility, colour, selection, weight, participation) goes on
+        working, because none of them was ever Step0's.
+        """
+        dock = self.dock
+        if dock is None:
+            return
+        try:
+            dock.correction_method_changed.disconnect(
+                self._on_correction_method_changed)
+        except (TypeError, RuntimeError):
+            pass
+        dock.detach_step0_correction_controller(self)
+
     # -- the Step0 accessory ------------------------------------------------
-    @staticmethod
-    def _ask(fn, fallback):
+    def _ask(self, fn, fallback):
         """Ask the page, and answer nothing once the page is gone.
 
-        The public dock outlives Step0. A provider that reached through a
-        destroyed page would raise inside a repaint; a Step0 answer that no
-        longer has an owner is simply absent.
+        The public dock outlives Step0, so every provider resolves the page
+        first: a destroyed one raises inside a repaint, and a collected one
+        is simply absent. Either way a Step0 answer with no owner is no
+        answer, not a stale one.
         """
+        page = self._page_ref()
+        if page is None:
+            return fallback
         try:
-            return fn()
-        except RuntimeError:
+            return fn(page)
+        except RuntimeError:                                # C++ side gone
             return fallback
 
+    def _row_name_of(self, ch):
+        return lambda page: (f"{ch} ★"
+                             if ch == page.nucleus_channel else str(ch))
+
     def _row_name(self, ch):
-        page = self._page
-        return f"{ch} ★" if ch == page.nucleus_channel else str(ch)
+        return self._ask(self._row_name_of(ch), str(ch))
 
     def _on_correction_method_changed(self, ch, text):
         """The dock's Step0 accessory moved: the page's correction domain is
@@ -116,7 +155,9 @@ class Step0ChannelDockAdapter(QObject):
         after the page was destroyed has nowhere authoritative to land, and
         writing it through a dangling pointer would be a decision nobody owns.
         """
-        page = self._page
+        page = self._page_ref()
+        if page is None:
+            return
         try:
             handler = page._on_channel_method_changed
         except RuntimeError:                                # page destroyed
@@ -125,7 +166,9 @@ class Step0ChannelDockAdapter(QObject):
 
     # -- rebuild (mirrors legacy _rebuild_channel_list) ------------------------
     def rebuild(self):
-        page = self._page
+        page = self._page_ref()
+        if page is None:
+            return
         current = page.current_channel
         page._channel_rows.clear()
         page._channel_order = []

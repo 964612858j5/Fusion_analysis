@@ -108,6 +108,9 @@ def _window(app, tmp_path):
     w._patch_channel_cache[0] = {
         ch: rng.random((32, 32), np.float32) + 0.1 for ch in ("DAPI", "CD3", "CD8")}
     w._patch_load_ready.add(0)
+    # The public row shows Step1's fields (weight, participation) only in
+    # Step1, so a Step1 test drives the step it is about.
+    w._set_step_active(1)
     return w
 
 

@@ -258,7 +258,22 @@ class ConfigPanel(QWidget):
     current_channel_changed = pyqtSignal(str)     # what Intensity should edit
     color_changed = pyqtSignal(str, str)          # overlay colour changed
 
-    def __init__(self, all_channels, fusion=None):
+    def __init__(self, all_channels, fusion=None, channel_dock=None,
+                 private_list=False):
+        """`channel_dock` is Block01's ONE public channel dock.
+
+        Given one, this panel builds NO list and no rows: the public dock is
+        where every public field is edited, and this panel keeps only Step1's
+        own tools (the read-only nucleus line, Reset weights, Load weights).
+        It used to build its private `QListWidget` unconditionally and have
+        the host clear and hide it afterwards -- hiding a second public list
+        is not the same as not building one, and the hidden one was still a
+        widget the rows could have been put back into.
+
+        `private_list=True` is the explicit opt-in for a STANDALONE panel
+        (its own tests, a host with no dock) that really does need the legacy
+        rows. Nothing asks for it implicitly.
+        """
         super().__init__()
         # INJECTED, never invented. A panel that made its own model when none
         # was passed would hide a missing wire: production would still be
@@ -287,7 +302,9 @@ class ConfigPanel(QWidget):
         # same row objects Step0/2/3 do, and there is no second public list
         # to disagree with. `_private_rows` is what a STANDALONE panel (its
         # own tests, a host with no dock) still builds for itself.
-        self._dock = None
+        self._dock = channel_dock
+        self._private_list_enabled = bool(private_list) and channel_dock is None
+        self._list = None
         self._private_rows = {}    # channel -> ChannelRow
         self._private_items = {}   # channel -> QListWidgetItem
         self._colors = {}          # channel -> "#rrggbb" -- A MIRROR, see below
@@ -348,11 +365,15 @@ class ConfigPanel(QWidget):
         self._dock = dock
         if dock is None:
             return
-        self._list.clear()
+        self._private_list_enabled = False
         self._private_rows.clear()
         self._private_items.clear()
-        self._list.setVisible(False)
-        self._list.setMaximumHeight(0)
+        if self._list is not None:
+            # Only a panel that was explicitly given the legacy list has one
+            # to retire; the production panel never built it.
+            self._list.clear()
+            self._list.setVisible(False)
+            self._list.setMaximumHeight(0)
         self._rebuild_rows()
 
     # ── the scientific model ──────────────────────────────────────────
@@ -430,11 +451,17 @@ class ConfigPanel(QWidget):
         nuc_row.addWidget(self._nuc_value, stretch=1)
         lay.addLayout(nuc_row)
 
-        self._list = QListWidget()
-        template.apply_list_style(self._list)
-        self._list.setSelectionMode(QListWidget.SingleSelection)
-        self._list.currentItemChanged.connect(self._on_current_item)
-        lay.addWidget(self._list, stretch=1)
+        if self._private_list_enabled:
+            # THE LEGACY PRIVATE LIST, and only on explicit request. In the
+            # real window this branch is not taken at all: there is one
+            # public list in the process and it is the dock's.
+            self._list = QListWidget()
+            template.apply_list_style(self._list)
+            self._list.setSelectionMode(QListWidget.SingleSelection)
+            self._list.currentItemChanged.connect(self._on_current_item)
+            lay.addWidget(self._list, stretch=1)
+        else:
+            lay.addStretch(1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
@@ -565,6 +592,13 @@ class ConfigPanel(QWidget):
         if self._display_state is not None:
             visible.update(self._display_state.display_visibility())
         current = self._current
+        if self._list is None:
+            # No dock and no legacy list: this panel is Step1's tool strip
+            # and nothing else. There are no rows to rebuild.
+            self._private_rows.clear()
+            self._private_items.clear()
+            self._refresh_nucleus_display()
+            return
         keep_scroll = self._list.verticalScrollBar().value()
         keep_focus = self._list.hasFocus()
 
@@ -655,7 +689,7 @@ class ConfigPanel(QWidget):
         self._selecting = True
         try:
             item = self._items.get(channel)
-            if item is not None and self._dock is None:
+            if item is not None and self._dock is None and self._list is not None:
                 self._list.setCurrentItem(item)
         finally:
             self._selecting = False
@@ -1008,7 +1042,8 @@ class ConfigPanel(QWidget):
             self._selecting = True
             try:
                 item = self._items.get(nuc)
-                if item is not None and self._dock is None:
+                if (item is not None and self._dock is None
+                        and self._list is not None):
                     self._list.setCurrentItem(item)
             finally:
                 self._selecting = False

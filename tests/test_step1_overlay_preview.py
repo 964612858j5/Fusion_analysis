@@ -179,6 +179,9 @@ def _window(app, cached=("DAPI", "CD3", "CD8")):
     # the same compose code inline so the pixels are real and the delivery is
     # deterministic. See `_InlineFrames`.
     w._inline_frames = _InlineFrames(w)
+    # Weights and participation are entered in STEP1's public row; a test
+    # that drives those widgets is in Step1 when it does, and then walks.
+    w._set_step_active(1)
     return w
 
 

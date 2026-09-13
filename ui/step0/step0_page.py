@@ -7737,6 +7737,19 @@ class Step0Page(QWidget):
         except (TypeError, RuntimeError):
             pass
         display.coordinator.unregister_context(_CTX_STEP0)
+        # THE PUBLIC DOCK IS NOT THIS PAGE'S, but its Step0 accessory was:
+        # the correction providers and the correction signal go back now, so
+        # nothing asks a page that is going away what a channel's correction
+        # answer is, and nothing keeps it alive to be asked.
+        adapter = getattr(self, "_dock_adapter", None)
+        if adapter is not None:
+            adapter.detach()
+        try:
+            display.state.selection_changed.disconnect(
+                self._on_channel_selected_by_id)
+            display.state.color_changed.disconnect(self._on_model_color_changed)
+        except (TypeError, RuntimeError):
+            pass
         display.release_ports(self)
 
     def _on_shared_color_changed(self, channel, hexc):

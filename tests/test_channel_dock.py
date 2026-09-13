@@ -297,17 +297,14 @@ def test_step0_row_name_position_stable_after_done(app):
     # all names share one fixed left position
     assert len(set(before.values())) == 1
     # combos aligned and directly after the (uniform-width) name column
-    # The PUBLIC core is `checkbox | state | swatch | name | weight`, and the
-    # step accessory comes after it: Step0's method combo therefore starts
-    # where the weight box ends, at the same x in every row.
+    # In STEP0 the row shows `checkbox | state | swatch | name | method`:
+    # the weight editor and the participation box are Step1's fields and are
+    # hidden here, so the correction combo starts where the name column ends.
     for r in rows.values():
-        # weight editor first (it is core), then the step accessory
-        assert r.slider.x() == r.name_label.x() + r.name_label.width() + 5
-        assert r.spin.x() > r.slider.x()
-        assert r.method_cb.x() > r.spin.x()
-    # ...and each of them at the SAME x in every row of the list
-    for control in ("slider", "spin", "method_cb"):
-        assert len({getattr(r, control).x() for r in rows.values()}) == 1
+        assert r.slider.isHidden() and r.spin.isHidden()
+        assert r.fusion_box.isHidden()
+        assert r.method_cb.x() == r.name_label.x() + r.name_label.width() + 5
+    assert len({r.method_cb.x() for r in rows.values()}) == 1
 
     page._set_channel_computing("CD3")
     page._set_channel_done("CD3")

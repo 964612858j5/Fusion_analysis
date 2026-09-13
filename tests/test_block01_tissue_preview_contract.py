@@ -195,6 +195,9 @@ def _window(app, path="/tmp/dataset.ome.tiff"):
     # The patch viewer's own frames stay on the GUI thread here: this module
     # is about the thumbnail, and a second real thread would only add races.
     w._dispatch_frame = lambda snapshot: False
+    # Weights and participation are entered in STEP1's public row; a test
+    # that drives those widgets is in Step1 when it does, and then walks.
+    w._set_step_active(1)
     return w
 
 

@@ -25,7 +25,9 @@ no third copy of a public field here, which is the whole point: the second
 copy is what let two lists disagree.
 """
 
-from PyQt5 import QtWidgets
+import weakref
+
+from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import Qt, QObject, pyqtSignal
 
 from . import template
@@ -96,6 +98,12 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self._cid = str(cid)
         self._busy = False
         self._color = "#888888"
+        #: The step whose fields are on screen, and the permissions the
+        #: owners gave this channel. A control is operable only when BOTH
+        #: agree: the step shows it and the channel allows it.
+        self._step = None
+        self._caps = None
+        self._weight_editable = True
 
         core = template.build_row_core(self, name=(name or cid),
                                        tooltips=False)
@@ -116,7 +124,15 @@ class GlobalChannelRow(QtWidgets.QWidget):
         # and Step0's correction combo and state glyph.
         self.checkbox.toggled.connect(self._on_visibility_toggled)
 
-        # -- the core's weight editor (representative weight) ---------------
+        # -- Step1's accessory: the representative weight editor -----------
+        #
+        # NOT core. The product ruling for B4-B is that a step shows the
+        # fields it works with: Step0 shows the correction answer, Step1 the
+        # scientific weight and participation, Step2 and Step3 the display
+        # answers alone. The editor is built once and hidden in the steps
+        # that do not edit weights -- hidden AND disabled AND unfocusable, so
+        # a stale or programmatic signal cannot reach the fusion model
+        # through a control the user cannot see.
         self.slider = QtWidgets.QSlider(Qt.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setFixedHeight(16)
@@ -142,8 +158,7 @@ class GlobalChannelRow(QtWidgets.QWidget):
             "only controls whether it is drawn.")
         self.fusion_box.setStyleSheet(template.CHECKBOX_INDICATOR_QSS)
         self.fusion_box.toggled.connect(self._on_fusion_toggled)
-        self._acc_step1 = self._accessory([self.fusion_box])
-
+        self._acc_step1 = (self.slider, self.spin, self.fusion_box)
 
         # -- Step0's accessory: the correction decision and its state -------
         self.method_cb = QtWidgets.QComboBox()
@@ -161,7 +176,11 @@ class GlobalChannelRow(QtWidgets.QWidget):
                                       "font-size:12px;")
         self._acc_step0 = self._accessory(
             [template.fit_accessory(self.method_cb), self.status_lbl])
-
+        # The state slot is Step0's too: the compute-state glyph is a claim
+        # about a correction result, and a step that does not correct must
+        # not show one. The SLOT stays (its 12 px is what keeps the swatch
+        # and the name at the same x in every step); what goes is its text
+        # and its hover text.
         self.set_step(None)
         template.apply_swatch_color(self.swatch, self._color)
 
@@ -188,19 +207,48 @@ class GlobalChannelRow(QtWidgets.QWidget):
         return {STEP0: self._acc_step0, STEP1: self._acc_step1}.get(step, ())
 
     def set_step(self, step):
-        """Show this step's accessory. Silent: switching what is on screen
-        is not a user command, so nothing is written and nothing is emitted.
+        """Show this step's fields. Silent, and a rebuild of nothing.
 
-        Step2 and Step3 have no accessory here: they consume the public
-        display and weight answers, and their own controls (segmentation,
-        result, opacity, Auto) stay on their pages. An empty accessory is the
-        honest answer -- a second panel invented so every step has one would
-        be a control with nothing behind it.
+            Step0   checkbox | correction state | swatch | name | method
+            Step1   checkbox |                  | swatch | name | weight | f
+            Step2   checkbox |                  | swatch | name
+            Step3   checkbox |                  | swatch | name
+
+        A control that is not this step's is hidden, disabled AND made
+        unfocusable: hiding alone leaves a widget a signal can still be
+        delivered to, and a Step1 spinbox that can still write a weight from
+        Step3 is the two-lists problem again in one row.
+
+        Nothing here is a command: no owner is written, no signal of this
+        row's is emitted, and no row is rebuilt.
         """
-        for w in self._acc_step0:
-            w.setVisible(step == STEP0)
-        for w in self._acc_step1:
-            w.setVisible(step == STEP1)
+        self._step = step
+        self._retire(self._acc_step0, step == STEP0)
+        self._retire(self._acc_step1, step == STEP1)
+        # ...and the permissions again, because a step showing a control is
+        # not the same as this channel being allowed to use it: the nucleus's
+        # method combo is dead in Step0 too.
+        self._apply_permissions()
+        if step != STEP0:
+            # Step0's compute state is Step0's claim. The slot keeps its
+            # width -- that is B1's geometry -- and loses its content.
+            self.state_slot.setText("")
+            self.state_slot.setToolTip("")
+            self.state_slot.setStyleSheet(template.STATE_SLOT_QSS)
+
+    @staticmethod
+    def _retire(widgets, active):
+        """Show or fully retire one step's controls.
+
+        Visibility and reachability only; whether an active control is
+        ENABLED is `_apply_permissions`'s answer, because that is the
+        channel's capability rather than the step's.
+        """
+        for w in widgets:
+            w.setVisible(bool(active))
+            if not active:
+                w.setEnabled(False)
+            w.setFocusPolicy(Qt.StrongFocus if active else Qt.NoFocus)
 
     # -- capabilities -------------------------------------------------------
     def apply_capabilities(self, caps):
@@ -208,29 +256,42 @@ class GlobalChannelRow(QtWidgets.QWidget):
 
         Never derived from one another and never from `locked`: a channel
         that may not be background-corrected (the nucleus) is still shown and
-        hidden like any other.
+        hidden like any other. Stored, because the step also has a say: a
+        control is operable only when the step shows it AND the channel
+        allows it.
         """
+        self._caps = caps
+        self._weight_editable = bool(getattr(caps, "weight_editable", True))
         self.checkbox.setEnabled(bool(getattr(caps, "display_toggleable",
                                               True)))
-        editable = bool(getattr(caps, "weight_editable", True))
+        self._apply_permissions()
+
+    def _apply_permissions(self):
+        """Enable what this step shows and this channel allows."""
+        caps = self._caps
+        step = self._step
+        editable = self._weight_editable and step == STEP1
         self.slider.setEnabled(editable)
+        # The number box stays live in Step1 even for a channel whose weight
+        # is not editable (the nucleus): it SHOWS the answer, read-only. A
+        # disabled box would grey out the number itself.
+        self.spin.setEnabled(step == STEP1)
         self.spin.setReadOnly(not editable)
         self.spin.setButtonSymbols(
             QtWidgets.QDoubleSpinBox.UpDownArrows if editable
             else QtWidgets.QDoubleSpinBox.NoButtons)
-        self.method_cb.setEnabled(bool(getattr(caps, "correction_eligible",
-                                               True)))
-        self.fusion_box.setEnabled(bool(getattr(caps, "fusion_toggleable",
-                                                True)))
+        self.fusion_box.setEnabled(
+            step == STEP1
+            and bool(getattr(caps, "fusion_toggleable", True)))
+        self.method_cb.setEnabled(
+            step == STEP0
+            and bool(getattr(caps, "correction_eligible", True)))
 
     def set_weight_editable(self, editable):
         """Legacy name kept for the Step1 callers: a read-only row still
         shows its weight, it just cannot be moved."""
-        self.slider.setEnabled(bool(editable))
-        self.spin.setReadOnly(not editable)
-        self.spin.setButtonSymbols(
-            QtWidgets.QDoubleSpinBox.UpDownArrows if editable
-            else QtWidgets.QDoubleSpinBox.NoButtons)
+        self._weight_editable = bool(editable)
+        self._apply_permissions()
 
     # -- owner -> widget (all silent) ---------------------------------------
     def set_visible_state(self, visible):
@@ -383,6 +444,10 @@ class GlobalChannelDock(QtWidgets.QWidget):
         self._state_provider = None
         self._method_provider = None
         self._name_provider = None
+        #: A weakref to the Step0 page that answers the correction fields.
+        #: Weak on purpose: this dock belongs to Block01's lifetime and a
+        #: strong reference here would keep a torn-down page alive.
+        self._correction_owner = None
         self._syncing = False
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -454,23 +519,73 @@ class GlobalChannelDock(QtWidgets.QWidget):
         screen changed.
         """
         step = int(step)
+        was = self._step
         self._step = step
         for row in self._rows.values():
             row.set_step(step)
+        if step == STEP0 and was != STEP0:
+            # Entering Step0 re-asks the correction owner for its answers.
+            # Silently: a row catching up with a decision somebody already
+            # made is not a decision.
+            for cid in list(self._rows):
+                self._refresh_correction(cid)
 
-    # ── providers a host page answers (never a stored copy) ───────────
+    # ── Step0's correction controller: one, attached and detached ─────
+    #
+    # The dock outlives every page. A provider that closed over Step0 would
+    # therefore keep a destroyed page alive and answer through it, so the
+    # controller is held WEAKLY and there is an explicit detach: a page that
+    # is going away says so, and a page that is merely garbage collected
+    # cannot be reached either way.
+    def attach_step0_correction_controller(self, owner, *, method=None,
+                                           state=None, name=None):
+        """Install `owner` as THE Step0 correction controller.
+
+        `method(channel)`, `state(channel)` and `name(channel)` are asked of
+        the owner only while Step0 is the step on screen. Attaching replaces
+        whatever was attached before, so re-entering Step0 cannot accumulate
+        two controllers answering the same question twice.
+        """
+        self._correction_owner = weakref.ref(owner)
+        self._method_provider = method
+        self._state_provider = state
+        self._name_provider = name
+        if self._step == STEP0:
+            for cid in list(self._rows):
+                self._refresh_correction(cid)
+                self._rows[cid].set_name(self._name_of(cid))
+
+    def detach_step0_correction_controller(self, owner):
+        """Remove `owner`'s providers. A no-op for anyone else's.
+
+        The owner check is what makes a torn-down page safe to detach after
+        its successor has already attached: the page that is leaving must not
+        take the current controller's providers with it.
+        """
+        current = self._correction_owner() if self._correction_owner else None
+        if current is not None and current is not owner:
+            return False
+        self._correction_owner = None
+        self._method_provider = None
+        self._state_provider = None
+        self._name_provider = None
+        for cid, row in self._rows.items():
+            row.set_state("")
+            row.set_name(cid)
+        return True
+
+    def correction_controller(self):
+        """The live Step0 controller, or None once it is gone."""
+        return self._correction_owner() if self._correction_owner else None
+
+    # -- the legacy provider setters, in terms of the controller -----------
     def set_state_provider(self, fn):
-        """`fn(channel) -> compute-state key`, asked of Step0's signature
-        bookkeeping. The dock stores no compute state of its own."""
         self._state_provider = fn
 
     def set_method_provider(self, fn):
-        """`fn(channel) -> the FINAL correction answer`, asked of Step0's
-        `_channel_decisions`, which is its one authority."""
         self._method_provider = fn
 
     def set_name_provider(self, fn):
-        """`fn(channel) -> the name to draw` (Step0 marks the nucleus)."""
         self._name_provider = fn
 
     # ── structure ──────────────────────────────────────────────────────
@@ -509,7 +624,7 @@ class GlobalChannelDock(QtWidgets.QWidget):
             row.weight_edited.connect(self._on_row_weight)
             row.fusion_toggled.connect(self._on_row_fusion)
             row.method_changed.connect(self._on_row_method)
-            row.color_clicked.connect(self.color_edit_requested.emit)
+            row.color_clicked.connect(self._on_color_clicked)
             row.row_clicked.connect(self._on_row_clicked)
             item = QtWidgets.QListWidgetItem(self.list_widget)
             item.setSizeHint(template.item_size_hint(row, width=200))
@@ -573,10 +688,15 @@ class GlobalChannelDock(QtWidgets.QWidget):
                 row.set_weight_editable(False)
         row.set_name(self._name_of(cid),
                      mixed_values=(rep.values if (rep and rep.mixed) else ()))
-        if self._state_provider is not None:
-            row.set_state(self._state_provider(cid))
-        if self._method_provider is not None:
-            row.set_method(self._method_provider(cid))
+        # CORRECTION IS STEP0'S FIELD. Asking for it in another step would
+        # draw a claim about a background-correction result in a step that
+        # does not correct -- which is what left `not computed` glowing in
+        # Step1, Step2 and Step3.
+        if self._step == STEP0:
+            if self._state_provider is not None:
+                row.set_state(self._state_provider(cid))
+            if self._method_provider is not None:
+                row.set_method(self._method_provider(cid))
 
     def _name_of(self, cid):
         if self._name_provider is not None:
@@ -585,6 +705,11 @@ class GlobalChannelDock(QtWidgets.QWidget):
             except Exception:
                 pass
         return cid
+
+    def _on_color_clicked(self, cid):
+        """A swatch was clicked: pick the colour here, and tell the hosts."""
+        self._pick_color(cid)
+        self.color_edit_requested.emit(cid)
 
     def _on_state_visibility(self, cid, visible):
         row = self._rows.get(cid)
@@ -645,22 +770,69 @@ class GlobalChannelDock(QtWidgets.QWidget):
                                             origin=f"dock-step{self._step}")
 
     def _on_row_weight(self, cid, value):
-        """The scientific edit, in every step: it applies to every group the
-        channel belongs to, 0.00 included, and it ticks nothing."""
+        """The scientific edit, and only from the step that shows it.
+
+        Step1 is where a weight is edited (the shared Weights window is the
+        other entry, and it writes the same model). Step0, Step2 and Step3 do
+        not show the editor at all, so a value arriving from one of them came
+        from a control the user cannot see.
+        """
+        if self._step != STEP1:
+            return
         if self._fusion is not None:
             self._fusion.edit_channel_weight(cid, value,
                                              origin=f"dock-step{self._step}")
 
     def _on_row_fusion(self, cid, enabled):
+        """Fusion participation: Step1's control, and Step1's alone."""
+        if self._step != STEP1:
+            return
         if self._fusion is not None:
             self._fusion.set_fusion_enabled(cid, bool(enabled),
                                             origin=f"dock-step{self._step}")
 
+    def _refresh_correction(self, cid):
+        """Draw Step0's correction answers on one row. Silent."""
+        row = self._rows.get(cid)
+        if row is None or self._step != STEP0:
+            return
+        if self._state_provider is not None:
+            row.set_state(self._state_provider(cid))
+        if self._method_provider is not None:
+            row.set_method(self._method_provider(cid))
+
     def _on_row_method(self, cid, text):
-        """Step0's correction decision. Only Step0 may act on it, and only
-        while Step0 is the step on screen -- a hidden accessory cannot be
-        clicked, and a programmatic sync is silent."""
+        """Step0's correction decision, and only while Step0 is the step.
+
+        GATED, not merely hidden. A combo that is off screen can still be
+        handed a signal -- by a stale connection, a restore, or a test -- and
+        a correction decided from Step2 is a decision nobody made.
+        """
+        if self._step != STEP0:
+            return
         self.correction_method_changed.emit(cid, text)
+
+    def _pick_color(self, cid):
+        """THE public colour pick: a dialog, and one write to the owner.
+
+        It used to be routed through `Step0Page._on_channel_swatch_clicked`,
+        so the swatch in a step that has nothing to do with Step0 raised
+        `wrapped C/C++ object of type Step0Page has been deleted` once that
+        page was really gone. Colour is a public display answer: the dialog
+        belongs to whoever shows the swatch, and the answer belongs to
+        `ChannelDisplayState`, which every view -- Step0's included --
+        already follows.
+        """
+        if not cid or self._state is None:
+            return
+        current = QtGui.QColor(self._state.color(cid) or "#888888")
+        picked = QtWidgets.QColorDialog.getColor(current, self,
+                                                 f"Colour for {cid}")
+        if not picked.isValid():
+            return
+        # ONE write. A pick of the colour it already has changes nothing, and
+        # the state swallows it: no second notice, no extra frame, no save.
+        self._state.set_color(cid, picked.name(), origin="dock-swatch")
 
     def _on_row_clicked(self, cid):
         """A real click: select, and show a marker the user clicked on.

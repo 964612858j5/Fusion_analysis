@@ -17,7 +17,9 @@ Step0's own domain.
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
 
+import gc
 import os
+import weakref
 
 import numpy as np
 import pytest
@@ -226,32 +228,96 @@ def test_search_scroll_selection_and_focus_survive_the_walk(app):
         _close(w)
 
 
-def test_the_step_change_switches_only_the_accessory(app):
-    from block01.ui.widgets.channel_dock import global_dock as gd
+def test_each_step_shows_the_fields_it_works_with(app):
+    """THE step field table, on one row that is never rebuilt.
+
+        Step0   checkbox | correction state | swatch | name | method
+        Step1   checkbox |                  | swatch | name | weight | f
+        Step2   checkbox |                  | swatch | name
+        Step3   checkbox |                  | swatch | name
+
+    `isHidden` and the focus policy, not `isVisible`: the window is not shown
+    in these tests, so everything answers False to `isVisible` and a control
+    that is still reachable would pass unnoticed.
+    """
+    from PyQt5.QtCore import Qt as _Qt
 
     w = _window(app)
     try:
         dock = w._channel_dock
         row = dock.row("CD3")
-        w._set_step_active(0)
-        assert row.method_cb.isVisibleTo(row)
-        assert not row.fusion_box.isVisibleTo(row)
-        w._set_step_active(1)
-        assert row.fusion_box.isVisibleTo(row)
-        assert not row.method_cb.isVisibleTo(row)
-        for step in (2, 3):
-            w._set_step_active(step)
-            # Step2 and Step3 consume the public answers; they have no
-            # accessory here and no invented second panel.
-            assert dock.row("CD3").accessory(step) == ()
-            assert not row.method_cb.isVisibleTo(row)
-            assert not row.fusion_box.isVisibleTo(row)
-        # the weight editor is CORE: present in every step
+        row_id = id(row)
+        core = (row.checkbox, row.swatch, row.name_label)
+        fields = {
+            0: (row.method_cb,),
+            1: (row.slider, row.spin, row.fusion_box),
+            2: (),
+            3: (),
+        }
         for step in STEP_WALK:
             w._set_step_active(step)
-            assert row.spin.isVisibleTo(row)
-            assert row.checkbox.isVisibleTo(row)
-        assert gd.STEP0 == 0 and gd.STEP1 == 1
+            shown = fields[step]
+            for widget in core:
+                assert not widget.isHidden(), step
+            for widget in (row.method_cb, row.slider, row.spin,
+                           row.fusion_box):
+                if widget in shown:
+                    assert not widget.isHidden(), (step, widget)
+                    assert widget.isEnabled(), (step, widget)
+                else:
+                    # hidden, dead AND unfocusable
+                    assert widget.isHidden(), (step, widget)
+                    assert not widget.isEnabled(), (step, widget)
+                    assert widget.focusPolicy() == _Qt.NoFocus, (step, widget)
+            if step != 0:
+                # the state slot keeps its width (B1 geometry) and loses the
+                # correction claim
+                assert row.state_slot.text() == ""
+                assert row.state_slot.toolTip() == ""
+            assert id(dock.row("CD3")) == row_id, "the row was rebuilt"
+    finally:
+        _close(w)
+
+
+def test_a_hidden_control_cannot_command_its_owner(app):
+    """A signal delivered to a control the step does not show changes nothing.
+
+    Hiding is not enough on its own: a stale connection, a restore or a test
+    can still deliver to a hidden widget, and a weight written from Step3 or
+    a correction decided from Step2 is a decision nobody made.
+    """
+    w = _window(app)
+    try:
+        state, fusion = w._display.state, w._display.fusion
+        page = w._step0
+        row = w._channel_dock.row("CD3")
+        w._set_step_active(1)
+        fusion.edit_channel_weight("CD3", 0.4, origin="test")
+        fusion.set_fusion_enabled("CD3", True, origin="test")
+        page._channel_decisions["CD3"] = "tophat"
+        before = (fusion.channel_weight("CD3"), fusion.fusion_enabled("CD3"),
+                  page._channel_decisions.get("CD3"),
+                  fusion.draft_revision())
+
+        for step in (0, 2, 3):
+            w._set_step_active(step)
+            # straight at the row's own signals, which is the most a stale
+            # connection could ever do
+            row.weight_edited.emit("CD3", 0.99)
+            row.fusion_toggled.emit("CD3", False)
+            row.method_changed.emit("CD3", "cucim")
+            row.spin.setValue(0.05)
+            after = (fusion.channel_weight("CD3"),
+                     fusion.fusion_enabled("CD3"),
+                     page._channel_decisions.get("CD3"),
+                     fusion.draft_revision())
+            if step == 0:
+                # Step0 owns the correction: that one IS its command
+                assert after[2] == "cucim"
+                assert after[:2] == before[:2]
+                page._channel_decisions["CD3"] = "tophat"
+            else:
+                assert after == before, step
     finally:
         _close(w)
 
@@ -358,6 +424,9 @@ def test_the_correction_accessory_only_changes_the_correction(app):
         nuc = w._channel_dock.row("DAPI")
         assert not nuc.method_cb.isEnabled()
         assert nuc.checkbox.isEnabled()
+        # ...and Step0 shows no weight editor and no participation box
+        assert row.slider.isHidden() and row.spin.isHidden()
+        assert row.fusion_box.isHidden()
     finally:
         _close(w)
 
@@ -435,6 +504,7 @@ def test_a_mixed_channel_is_named_not_flattened(app):
         fusion = w._display.fusion
         fusion.add_group("g2", {"CD3": 0.7})
         fusion.add_group("markers", {"CD3": 0.2, "CD8": 0.0})
+        w._set_step_active(1)
         dock = w._channel_dock
         dock.refresh()
         row = dock.row("CD3")
@@ -449,7 +519,9 @@ def test_a_mixed_channel_is_named_not_flattened(app):
         dock.refresh()
         assert set(fusion.representative_weight("CD3").values) == {0.2, 0.7}
 
-        # only an explicit edit unifies them
+        # only an explicit edit unifies them -- made in the step that shows
+        # the editor
+        w._set_step_active(1)
         row.spin.setValue(0.5)
         assert set(fusion.representative_weight("CD3").values) == {0.5}
         assert fusion.groups()["markers"]["CD3"] == pytest.approx(0.5)
@@ -508,23 +580,45 @@ def test_a_tick_reaches_the_window_once(app):
 
 # ── G. an edit made while Step1 is not the step on screen ───────────────────
 
-def test_a_weight_edited_from_step3_reaches_the_model_and_step1(app):
+def test_a_weight_edited_in_step1_survives_the_walk(app):
+    """A weight is edited where the editor is, and it is the model's from
+    then on -- in every other step, and back in Step1.
+
+    The dock is no longer an editing entry outside Step1 (the shared Weights
+    window is the other one, and it writes the same model), so what is pinned
+    here is that the ANSWER travels, not the control.
+    """
     from block01.ui.step0.config_panel import ChannelRow as Step1PrivateRow
 
     w = _window(app)
     try:
-        w._set_step_active(3)
         fusion = w._display.fusion
-        row = w._channel_dock.row("CD8")
-        row.spin.setValue(0.35)
+        w._set_step_active(1)
+        w._channel_dock.row("CD8").spin.setValue(0.35)
         assert fusion.channel_weight("CD8") == pytest.approx(0.35)
         assert fusion.weight_provenance("CD8") == "explicit"
         assert w.config.channel_weight("CD8") == pytest.approx(0.35)
         assert w.findChildren(Step1PrivateRow) == []
 
-        w._set_step_active(1)
+        for step in STEP_WALK:
+            w._set_step_active(step)
+            assert fusion.channel_weight("CD8") == pytest.approx(0.35)
         assert w._channel_dock.row("CD8").weight() == pytest.approx(0.35)
-        assert fusion.channel_weight("CD8") == pytest.approx(0.35)
+    finally:
+        _close(w)
+
+
+def test_the_weights_window_still_edits_from_any_step(app):
+    """The shared Weights window is the entry a step that does not show the
+    editor uses; it writes the same model."""
+    w = _window(app)
+    try:
+        fusion = w._display.fusion
+        w._set_step_active(3)
+        fusion.edit_channel_weight("CD8", 0.6, origin="weights-window")
+        assert fusion.channel_weight("CD8") == pytest.approx(0.6)
+        w._set_step_active(1)
+        assert w._channel_dock.row("CD8").weight() == pytest.approx(0.6)
     finally:
         _close(w)
 
@@ -605,6 +699,7 @@ def test_the_dock_outlives_the_step0_page(app):
         fusion.edit_channel_weight("CD3", 0.4, origin="test")
 
         page = w._step0
+        page.release_block01_display()
         page.setParent(None)
         page.deleteLater()
         QtWidgets.QApplication.processEvents()
@@ -618,6 +713,7 @@ def test_the_dock_outlives_the_step0_page(app):
         # answers and must not reach through the destroyed page
         dock.refresh()
         # the public row still edits the owners
+        w._set_step_active(1)
         dock.row("CD3").spin.setValue(0.6)
         assert fusion.channel_weight("CD3") == pytest.approx(0.6)
     finally:
@@ -669,3 +765,172 @@ def test_a_late_owner_signal_after_finalize_touches_no_dead_row(app):
     QtWidgets.QApplication.processEvents()
     assert w._display.channel_dock() is None
     w.deleteLater()
+
+
+# ── P1: the public dock outlives Step0 for real ─────────────────────────────
+
+def _destroy_step0(w):
+    """Tear Step0 down the way the window does, then delete the C++ object.
+
+    `deleteLater` alone leaves the Python wrapper and the C++ object alive
+    for as long as the test holds a reference, which is exactly the case a
+    dangling provider survives. `sip.delete` is what makes "the page is
+    gone" true.
+    """
+    import sip
+    page = w._step0
+    page.release_block01_display()
+    idx = w._stack.indexOf(page)
+    if idx >= 0:
+        w._stack.removeWidget(page)
+    page.setParent(None)
+    w._step0 = None
+    ref = weakref.ref(page)
+    sip.delete(page)
+    del page
+    # The page's own children reference it back (the preview provider, the
+    # compare strip, its parameter-box connections), so it dies in a CYCLIC
+    # collection rather than by refcount -- more than one pass, with the
+    # event loop turned in between so Qt's deleteLater queue drains too.
+    for _ in range(3):
+        QtWidgets.QApplication.processEvents()
+        gc.collect()
+    return ref
+
+
+def test_the_public_swatch_writes_colour_without_step0(app, monkeypatch,
+                                                      capsys):
+    from PyQt5 import QtGui
+
+    w = _window(app)
+    try:
+        dock = w._channel_dock
+        _destroy_step0(w)
+        monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
+                            staticmethod(lambda *a, **k: QtGui.QColor("#0a7d55")))
+        w._set_step_active(2)
+        capsys.readouterr()
+
+        dock.row("CD3").color_clicked.emit("CD3")
+
+        # PyQt prints a slot's exception instead of raising it out of the
+        # emit, so a swatch that still called into the destroyed page would
+        # otherwise pass here in silence.
+        noise = capsys.readouterr()
+        for text in (noise.out, noise.err):
+            assert "has been deleted" not in text, text
+            assert "Traceback" not in text, text
+        assert w._display.state.color("CD3").lower() == "#0a7d55"
+        assert dock.row("CD3").color().lower() == "#0a7d55"
+        assert w.config.channel_color("CD3").lower() == "#0a7d55"
+    finally:
+        w._display.shutdown("test")
+        w.deleteLater()
+
+
+def test_a_released_step0_is_collected_and_no_longer_answers(app):
+    w = _window(app)
+    try:
+        dock = w._channel_dock
+        page_ref = _destroy_step0(w)
+
+        assert page_ref() is None, "the dock still holds the destroyed Step0"
+        assert dock.correction_controller() is None
+        # the rows carry no Step0 claim any more
+        for cid in dock.channel_order():
+            assert dock.row(cid).state_slot.text() == ""
+            assert dock.row(cid).state_slot.toolTip() == ""
+        # ...and a late correction signal changes nothing and raises nothing
+        w._set_step_active(0)
+        dock.row("CD3").method_cb.setCurrentText("cucim")
+        dock.correction_method_changed.emit("CD3", "TopHat")
+        dock.refresh()
+        # the public fields still work
+        state, fusion = w._display.state, w._display.fusion
+        w._set_step_active(1)
+        dock.row("CD8").checkbox.setChecked(True)
+        dock.row("CD8").spin.setValue(0.7)
+        dock.row("CD8").fusion_box.setChecked(True)
+        assert state.display_visible("CD8") is True
+        assert fusion.channel_weight("CD8") == pytest.approx(0.7)
+        assert fusion.fusion_enabled("CD8") is True
+    finally:
+        w._display.shutdown("test")
+        w.deleteLater()
+
+
+def test_a_new_step0_controller_receives_the_command_once(app):
+    from block01.ui.step0.step0_page import Step0Page
+
+    w = _window(app)
+    try:
+        dock = w._channel_dock
+        _destroy_step0(w)
+        page = Step0Page(display_services=w._display)
+        page.loader = _Loader()
+        page.nucleus_channel = "DAPI"
+        page._rebuild_channel_list()
+        w._step0 = page
+        assert dock.correction_controller() is page._dock_adapter
+
+        w._set_step_active(0)
+        calls = []
+        real = page._on_channel_method_changed
+        page._on_channel_method_changed = \
+            lambda ch, txt: (calls.append((ch, txt)), real(ch, txt))[1]
+        dock.correction_method_changed.emit("CD3", "TopHat")
+
+        assert calls == [("CD3", "TopHat")], calls
+        assert page._channel_decisions["CD3"] == "tophat"
+    finally:
+        w._display.shutdown("test")
+        w.deleteLater()
+
+
+def test_the_detach_of_a_stale_adapter_leaves_the_current_one(app):
+    from block01.ui.step0.step0_page import Step0Page
+
+    w = _window(app)
+    try:
+        dock = w._channel_dock
+        stale = w._step0._dock_adapter
+        page = Step0Page(display_services=w._display)
+        page.loader = _Loader()
+        page.nucleus_channel = "DAPI"
+        page._rebuild_channel_list()
+        assert dock.correction_controller() is page._dock_adapter
+
+        stale.detach()          # the page that is leaving, arriving late
+
+        assert dock.correction_controller() is page._dock_adapter
+        w._set_step_active(0)
+        dock.row("CD3").method_cb.setCurrentText("TopHat")
+        assert page._channel_decisions["CD3"] == "tophat"
+    finally:
+        w._display.shutdown("test")
+        w.deleteLater()
+
+
+# ── P1: the production window never builds the old private list ─────────────
+
+def test_the_production_window_builds_no_legacy_channel_list(app):
+    from PyQt5.QtWidgets import QListWidget
+    from block01.ui.widgets.channel_dock import ChannelDock
+    from block01.ui.widgets.channel_dock.global_dock import (
+        GlobalChannelDock, GlobalChannelRow)
+    from block01.ui.step0.config_panel import ChannelRow as Step1PrivateRow
+
+    w = _window(app)
+    try:
+        assert w.config._list is None, "the private list was constructed"
+        assert w.config.findChildren(QListWidget) == []
+        assert w.findChildren(Step1PrivateRow) == []
+        assert w.findChildren(ChannelDock) == []
+        docks = w.findChildren(GlobalChannelDock)
+        assert len(docks) == 1 and docks[0] is w._channel_dock
+        rows = w._channel_dock.findChildren(GlobalChannelRow)
+        assert len(rows) == len(w._channel_dock.channel_order())
+        # the panel keeps Step1's own tools
+        assert w.config._nuc_value.text().startswith("DAPI")
+    finally:
+        _close(w)

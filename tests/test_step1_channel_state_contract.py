@@ -66,6 +66,9 @@ def _window(app, size=32):
     # Production composes frames on a worker thread; these run the same
     # compose code inline so delivery is deterministic. See `_InlineFrames`.
     w._inline_frames = _InlineFrames(w)
+    # The public row shows Step1's fields (weight, participation) only in
+    # Step1, so a Step1 test drives the step it is about.
+    w._set_step_active(1)
     return w
 
 
@@ -957,6 +960,8 @@ def _handoff_window(app, tmp_path):
     }
     assert w._load_step0_roi_result(auto=True) is True, \
         "the real handoff did not complete; this test proves nothing"
+    # Step1's fields are shown -- and live -- in Step1.
+    w._set_step_active(1)
     return w
 
 

@@ -2032,6 +2032,32 @@ class Block01DisplayServices(QObject):
         if self.state._default_source is not None and (
                 getattr(self.state._default_source, "__self__", None) is owner):
             self.state._default_source = None
+        # ...and the coordinator's two callables into the page. They are
+        # bound methods, so leaving them behind keeps the page ALIVE as well
+        # as callable: a torn-down Step0 that is still reachable is a page
+        # that can still be asked for panels it no longer has.
+        coordinator = self.coordinator
+        for name in ("_panels_source", "_panel_token_source"):
+            held = getattr(coordinator, name, None)
+            if held is owner or getattr(held, "__self__", None) is owner:
+                setattr(coordinator, name, None)
+        # ...and the low-resolution read thread, which was STARTED with a
+        # bound method of this owner. A worker holding it keeps the page
+        # alive and, worse, keeps it readable: the next missing channel would
+        # be read through a page that has been torn down.
+        worker = self._read_worker
+        if worker is not None and getattr(
+                getattr(worker, "_reader", None), "__self__", None) is owner:
+            self._read_worker = None
+            for signal in ("done", "failed"):
+                try:
+                    getattr(worker, signal).disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            try:
+                worker.stop()
+            except Exception:                               # noqa: BLE001
+                pass
 
     def mapping_owner(self):
         """Who answers "what Min/Max/Gamma is this channel drawn with".

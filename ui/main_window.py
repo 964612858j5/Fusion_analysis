@@ -666,8 +666,10 @@ class MainWindow(QMainWindow):
         # A per-step list is what let two steps disagree about the same
         # channel and lose the user's place on every transition.
         self._channel_dock = self._display.ensure_channel_dock()
-        self._channel_dock.color_edit_requested.connect(
-            self._on_dock_color_requested)
+        # The dock picks the colour and writes `ChannelDisplayState`; every
+        # view, Step0's included, follows that one answer. This window used
+        # to route the pick through `Step0Page`, which is how a swatch in
+        # Step2 could raise on a destroyed Step0.
         dock_split = QSplitter(Qt.Horizontal)
         dock_split.setObjectName("Block01DockSplit")
         # COLLAPSIBLE, with a floor. The dock needs a row's width to be
@@ -786,7 +788,12 @@ class MainWindow(QMainWindow):
         # The panel EDITS Block01's fusion model; it does not own it. Handed
         # in at construction, so there is never a moment when a second model
         # exists to be written to.
-        self.config = ConfigPanel([], fusion=self._display.fusion)
+        # THE PUBLIC DOCK IS HANDED IN AT CONSTRUCTION, so this panel never
+        # builds a private channel list at all -- not even one to hide. What
+        # is left of it is Step1's own strip: the read-only nucleus line,
+        # Reset weights and Load weights.
+        self.config = ConfigPanel([], fusion=self._display.fusion,
+                                  channel_dock=self._channel_dock)
         self.config.setMinimumHeight(220)
         self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.config.config_changed.connect(self._on_cfg_changed)
@@ -1471,9 +1478,9 @@ class MainWindow(QMainWindow):
         self._display.state.color_changed.connect(
             self._on_shared_channel_color_changed)
         self.config.set_display_state(self._display.state)
-        # ...and the ONE public channel dock. From here Step1 edits the same
-        # rows Step0, Step2 and Step3 do; its private list is not built.
-        self.config.set_channel_dock(self._channel_dock)
+        # The dock was handed in at construction (`_build_ui`), so there is
+        # nothing to attach here: Step1 has been editing the same rows
+        # Step0, Step2 and Step3 do since the panel existed.
 
 
     def _on_shared_channel_color_changed(self, channel, _hexc):
@@ -3575,30 +3582,6 @@ class MainWindow(QMainWindow):
 
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
                       3: _CTX_STEP3}
-
-    def _on_dock_color_requested(self, channel):
-        """A swatch in the public dock was clicked.
-
-        Step0 owns what picking a colour MEANS -- the nucleus drives the DAPI
-        overlay, every other channel drives the compare panels and the full
-        image's tint -- and it writes the shared state, which is what every
-        other view (this dock included) follows. A window without that page
-        falls back to the plain shared write.
-        """
-        if not channel:
-            return
-        page = getattr(self, "_step0", None)
-        pick = getattr(page, "_on_channel_swatch_clicked", None)
-        if pick is not None:
-            pick(channel)
-            return
-        current = QtGui.QColor(self._display.state.color(channel)
-                               or "#888888")
-        picked = QtWidgets.QColorDialog.getColor(
-            current, self, f"Colour for {channel}")
-        if picked.isValid():
-            self._display.state.set_color(channel, picked.name(),
-                                          origin="dock-swatch")
 
     def _set_step_active(self, active):
         self._current_step = active

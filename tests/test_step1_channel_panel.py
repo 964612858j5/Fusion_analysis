@@ -66,6 +66,10 @@ def _window(app):
     w.config.set_channels(chans)
     w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
     w.config.set_nucleus("DAPI", 1.0)
+    # These are STEP1 tests, and since B4-B the public row shows the weight
+    # editor and the participation box only in Step1 -- a control the step
+    # does not show is dead, on purpose.
+    w._set_step_active(1)
     return w
 
 

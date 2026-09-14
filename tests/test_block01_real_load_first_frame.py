@@ -1192,3 +1192,325 @@ def test_the_announce_record_never_keeps_an_array_alive(app, monkeypatch,
         assert ref() is None, "the announce record is holding the array"
     finally:
         _close(w, timeline)
+
+
+# ── the main view's primary layer carries whatever channel is shown ─────────
+#
+# The real-slide log closed the first-frame question and opened this one:
+# `dataset.bind` lands on DAPI, the Tissue Preview's first frame is published
+# and painted -- and the main view is black. `_marker_layer_visible()` answered
+# False whenever the current channel WAS the nucleus, and the nucleus overlay
+# is suppressed at the same moment (a channel must not be composited onto
+# itself), so on the landing view of every freshly loaded slide both layers
+# were off. Intensity went on editing a mapping nobody could see.
+
+
+class _Stack:
+    """A stand-in for the Explore stack: records what the page tells it."""
+
+    class _Controller:
+        def __init__(self):
+            self.marker_visible = None
+            self.opacity = None
+            self.mappings = []
+            self.selections = []
+
+        def set_marker_visible(self, visible):
+            self.marker_visible = bool(visible)
+            self.opacity = 1.0 if visible else 0.0
+
+        def set_display_mapping(self, lo, hi, gamma, channel=None):
+            self.mappings.append((channel, lo, hi, gamma))
+
+        def set_selection(self, **kw):
+            self.selections.append(kw)
+
+    class _Overlay:
+        def __init__(self):
+            self.enabled = None
+            self.suppressed = None
+            self.mappings = []
+
+        def set_enabled(self, enabled, host=None):
+            self.enabled = bool(enabled)
+
+        def set_suppressed(self, suppressed, host=None):
+            self.suppressed = bool(suppressed)
+
+        def set_display_mapping(self, lo, hi, gamma):
+            self.mappings.append((lo, hi, gamma))
+
+    def __init__(self):
+        self.controller = self._Controller()
+        self.overlay = self._Overlay()
+
+
+class _ExploreTab:
+    """The page's explore tab, with the real suppression rule."""
+
+    def __init__(self, page):
+        self._page = page
+        self.stack = _Stack()
+
+    def show_source(self, channel, method, params=(), *, viewport_l0=None,
+                    tint=None, nucleus=None):
+        self.stack.controller.set_selection(channel=channel, method=method)
+        # the real rule: a channel is never composited onto itself
+        self.stack.overlay.set_suppressed(
+            channel == self._page.nucleus_channel)
+        return True
+
+    def set_dataset(self, *_a, **_k):
+        return None
+
+
+def _with_stack(w):
+    tab = _ExploreTab(w._step0)
+    w._step0._explore_tab = tab
+    w._step0._ensure_explore_tab = lambda: tab
+    return tab
+
+
+def test_a_load_that_lands_on_dapi_shows_the_primary_layer(app, monkeypatch,
+                                                           tmp_path):
+    """A: the landing view of a freshly loaded slide is not black."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandA")
+    try:
+        page = w._step0
+        assert page.current_channel == page.nucleus_channel, \
+            "this test is about the DAPI landing"
+        tab = _with_stack(w)
+        page._show_full_image()
+        _pump(400)
+
+        controller, overlay = tab.stack.controller, tab.stack.overlay
+        assert controller.marker_visible is True, \
+            "the layer carrying DAPI was hidden on the landing view"
+        assert controller.opacity == 1.0
+        # ...while the OVERLAY is suppressed, because DAPI is the picture
+        assert overlay.suppressed is True
+        assert page.patches == [] and not page.rois
+        # and the state really says the channel is shown
+        assert w._display.state.display_visible(page.current_channel) is True
+    finally:
+        _close(w, timeline)
+
+
+def test_the_dapi_mapping_reaches_the_main_view_and_the_preview(
+        app, monkeypatch, tmp_path):
+    """B: Min/Max/Gamma on the landing channel move both pictures."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandB")
+    try:
+        page, display = w._step0, w._display
+        channel = page.current_channel
+        tab = _with_stack(w)
+        page._show_full_image()
+        _pump(600)
+        controller = tab.stack.controller
+        before_main = list(controller.mappings)
+        before_frame = display.coordinator._stats["published"]
+
+        display.show_intensity(channel)
+        _pump(600)
+        wb = page._cond_workbench
+        assert wb._active == channel
+        wb._sp_min.setValue(11.0)
+        wb._sp_max.setValue(222.0)
+        _pump(800)
+
+        assert display.state.mapping(channel)[:2] == (11.0, 222.0)
+        # the MAIN view was given the new window...
+        assert len(controller.mappings) > len(before_main)
+        last = [m for m in controller.mappings if m[0] == channel][-1]
+        assert last[1:3] == (11.0, 222.0), controller.mappings[-3:]
+        # ...and the Tissue Preview drew again
+        assert display.coordinator._stats["published"] > before_frame
+    finally:
+        _close(w, timeline)
+
+
+def test_hiding_the_landing_channel_empties_the_view_and_showing_restores_it(
+        app, monkeypatch, tmp_path):
+    """C: the user may still hide it -- and showing it back reads nothing."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandC")
+    try:
+        page, state = w._step0, w._display.state
+        channel = page.current_channel
+        tab = _with_stack(w)
+        page._show_full_image()
+        _pump(400)
+        controller = tab.stack.controller
+        assert controller.marker_visible is True
+        reads_before = len(slide.lowres_reads)
+
+        state.set_display_visible(channel, False, origin="test")
+        _pump(300)
+        assert controller.marker_visible is False
+        assert controller.opacity == 0.0
+        # ...and a rebuild asks the same question and gets the same answer:
+        # the layer's visibility is the CHANNEL'S, not a constant.
+        page._show_full_image()
+        _pump(200)
+        assert controller.marker_visible is False
+        assert page._marker_layer_visible() is False
+
+        state.set_display_visible(channel, True, origin="test")
+        _pump(300)
+        assert controller.marker_visible is True
+        assert controller.opacity == 1.0
+        # INSTANT: the pixels were never dropped, so nothing was read again
+        assert len(slide.lowres_reads) == reads_before, slide.lowres_reads
+    finally:
+        _close(w, timeline)
+
+
+def test_the_primary_and_the_overlay_stay_independent_across_a_switch(
+        app, monkeypatch, tmp_path):
+    """D: DAPI -> marker. The primary follows the marker's visibility, the
+    overlay follows DAPI's, and neither writes the other."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandD")
+    try:
+        page, state = w._step0, w._display.state
+        nucleus = page.nucleus_channel
+        tab = _with_stack(w)
+        page._show_full_image()
+        _pump(400)
+        controller, overlay = tab.stack.controller, tab.stack.overlay
+
+        marker = "CD3"
+        # what a row click is: the shared selection moves, and the click
+        # shows the channel it landed on
+        state.set_selected_channel(marker, origin="step0")
+        page._on_channel_row_clicked(marker)
+        _pump(600)
+        assert page.current_channel == marker
+        page._show_full_image()
+        _pump(300)
+
+        assert controller.marker_visible == state.display_visible(marker)
+        assert overlay.suppressed is False       # DAPI is an overlay again
+        assert overlay.enabled == state.display_visible(nucleus)
+
+        # hide DAPI: the overlay goes, the marker stays
+        state.set_display_visible(nucleus, False, origin="test")
+        _pump(300)
+        page._show_full_image()
+        _pump(200)
+        assert overlay.enabled is False
+        assert controller.marker_visible == state.display_visible(marker) \
+            is True
+
+        # hide the marker: the primary goes, DAPI's answer is untouched
+        state.set_display_visible(marker, False, origin="test")
+        _pump(300)
+        assert controller.marker_visible is False
+        assert state.display_visible(nucleus) is False
+    finally:
+        _close(w, timeline)
+
+
+def test_the_main_view_log_says_which_layer_carried_the_channel(
+        app, monkeypatch, tmp_path):
+    """The evidence a real slide can hand back."""
+    from block01.utils import tissue_log
+
+    log_path = tmp_path / "main.log"
+    tissue_log.reset_for_test(str(log_path))
+    try:
+        w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandLog")
+        try:
+            _with_stack(w)
+            w._step0._show_full_image()
+            _pump(500)
+        finally:
+            _close(w, timeline)
+        text = log_path.read_text(encoding="utf-8")
+    finally:
+        tissue_log.reset_for_test(None)
+
+    primary = [ln for ln in text.splitlines()
+               if " main.primary_visibility " in ln]
+    assert primary, text[:1500]
+    assert any("visible=True" in ln and "is_nucleus=True" in ln
+               for ln in primary), primary
+    assert [ln for ln in text.splitlines()
+            if " main.overlay_suppressed " in ln and "suppressed=True" in ln]
+
+
+def test_the_full_image_layer_switch_works_on_the_landing_channel(
+        app, monkeypatch, tmp_path):
+    """The toolbar's own switch, while the page is showing DAPI.
+
+    It refused to write whenever the current channel was the nucleus, so on
+    the landing view of every slide the one control over the only layer on
+    screen did nothing.
+    """
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandSw")
+    try:
+        page, state = w._step0, w._display.state
+        channel = page.current_channel
+        assert channel == page.nucleus_channel
+        tab = _with_stack(w)
+        page._show_full_image()
+        _pump(300)
+        assert state.display_visible(channel) is True
+
+        page._on_marker_visibility_toggled(False)
+        _pump(200)
+        assert state.display_visible(channel) is False
+        assert tab.stack.controller.marker_visible is False
+
+        page._on_marker_visibility_toggled(True)
+        _pump(200)
+        assert state.display_visible(channel) is True
+        assert tab.stack.controller.marker_visible is True
+    finally:
+        _close(w, timeline)
+
+
+def test_a_channel_nothing_is_drawing_does_not_redraw_the_preview(
+        app, monkeypatch, tmp_path):
+    """The other half of the rule: a marker that is neither the picture nor
+    the overlay is recorded and nothing else. Redrawing for it would put a
+    frame on the clock for every row a user ticks in a 29-channel panel."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="LandIdle")
+    try:
+        page, display = w._step0, w._display
+        state = display.state
+        _with_stack(w)
+        page._show_full_image()
+        _pump(500)
+        idle = "CD68"
+        assert idle not in (page.current_channel, page.nucleus_channel)
+        queued = []
+        real_queue = page._queue_tissue_preview
+        page._queue_tissue_preview = lambda **kw: (queued.append(kw),
+                                                   real_queue(**kw))[1]
+        try:
+            state.set_display_visible(idle, True, origin="test")
+            _pump(300)
+        finally:
+            page._queue_tissue_preview = real_queue
+
+        # THE PAGE asks for nothing: the channel is neither the picture nor
+        # the overlay. (Block01's own listeners are another matter; what is
+        # pinned here is that this page does not add a redraw per ticked row
+        # in a 29-channel panel.)
+        assert queued == [], queued
+        assert state.display_visible(idle) is True
+        # ...while the channel that IS the picture does ask
+        state.set_display_visible(page.current_channel, False, origin="test")
+        _pump(200)
+        state.set_display_visible(page.current_channel, True, origin="test")
+        _pump(200)
+        page._queue_tissue_preview = lambda **kw: (queued.append(kw),
+                                                   real_queue(**kw))[1]
+        try:
+            state.set_display_visible(page.current_channel, False,
+                                      origin="test")
+            _pump(200)
+        finally:
+            page._queue_tissue_preview = real_queue
+        assert [q for q in queued if q.get("kind") == "visibility"], queued
+    finally:
+        _close(w, timeline)

@@ -2961,8 +2961,13 @@ class Step0Page(QWidget):
         # The marker toggle is page state, so a freshly built stack has to
         # be told about it -- a build always comes up visible.
         stack = explore_tab.stack if accepted else None
+        channel = self.current_channel
         if stack is not None and hasattr(self, "_btn_full_marker"):
-            stack.controller.set_marker_visible(self._marker_layer_visible())
+            primary = self._marker_layer_visible()
+            tissue_log.note("main.primary_visibility", channel=channel,
+                            visible=primary,
+                            is_nucleus=(channel == self.nucleus_channel))
+            stack.controller.set_marker_visible(primary)
         overlay = getattr(stack, "overlay", None) if stack is not None else None
         if overlay is not None:
             # The user's SWITCH, not the effective visibility. "DAPI is
@@ -2972,6 +2977,9 @@ class Step0Page(QWidget):
             # into the layer's `_enabled`, which is the user's state -- so
             # landing on DAPI silently turned the switch off and choosing a
             # marker did not bring it back.
+            tissue_log.note("main.overlay_suppressed",
+                            suppressed=(channel == self.nucleus_channel),
+                            enabled=self._nucleus_layer_visible())
             overlay.set_enabled(self._nucleus_layer_visible(),
                                 host=stack.controller)
         self._apply_full_image_display(stack)
@@ -9036,16 +9044,39 @@ class Step0Page(QWidget):
         the full image and the Tissue Preview agree without any of them
         holding a second copy.
         """
+        # THE CHANNEL BEING SHOWN, whichever it is. Refusing to write while
+        # that channel was the nucleus made the switch dead exactly where it
+        # is the only layer on screen -- the landing view of every freshly
+        # loaded slide.
         ch = getattr(self, "current_channel", None)
-        if not ch or ch == getattr(self, "nucleus_channel", None):
+        if not ch:
             return
         self.display.state.set_display_visible(ch, bool(on),
                                                origin="step0-marker-switch")
 
     def _marker_layer_visible(self):
-        """Whether the marker layer -- the selected channel -- is shown."""
+        """Whether the full image's PRIMARY layer is shown.
+
+        The primary layer carries WHATEVER CHANNEL THE PAGE IS SHOWING, and
+        that includes the nucleus: a freshly loaded slide lands on DAPI, and
+        DAPI is then the picture rather than an overlay on one.
+
+        This used to answer False whenever the current channel was the
+        nucleus, on the reading that "the marker layer" could not be DAPI.
+        The nucleus OVERLAY is suppressed at the same moment, for the good
+        reason that a channel must not be composited on top of itself -- so
+        both layers were off and the main view came up black on every load,
+        while the Intensity window went on editing a mapping nobody could
+        see. The suppression stays; what goes is hiding the layer that IS
+        the picture.
+
+        One rule, one owner: the visibility of the channel being shown, from
+        `ChannelDisplayState`. A user who hides that channel still gets an
+        empty view -- deliberately -- and showing it again brings the same
+        pixels straight back.
+        """
         ch = getattr(self, "current_channel", None)
-        if not ch or ch == getattr(self, "nucleus_channel", None):
+        if not ch:
             return False
         return self._channel_display_visible(ch)
 
@@ -9069,11 +9100,19 @@ class Step0Page(QWidget):
                     cb.blockSignals(False)
             except RuntimeError:
                 pass
-        if ch == getattr(self, "nucleus_channel", None):
+        # BOTH ANSWERS, not one or the other. While the page is SHOWING the
+        # nucleus, that one channel is two things at once: the DAPI layer
+        # switch AND the primary layer that carries the picture. An `elif`
+        # here meant a DAPI visibility change never reached the primary
+        # layer, so hiding and showing DAPI while it was the current channel
+        # moved a switch and nothing else.
+        is_nucleus = ch == getattr(self, "nucleus_channel", None)
+        is_current = ch == getattr(self, "current_channel", None)
+        if is_nucleus:
             self._sync_nucleus_layer_views(bool(visible))
-        elif ch == getattr(self, "current_channel", None):
+        if is_current:
             self._sync_marker_layer_views(bool(visible))
-        else:
+        if not (is_nucleus or is_current):
             # Another marker: nothing on screen draws it today, so there is
             # no picture to redraw. The answer is recorded for Step1 and for
             # the next time this channel is the selected one.
@@ -9081,7 +9120,10 @@ class Step0Page(QWidget):
         self._queue_tissue_preview(kind="visibility")
 
     def _sync_marker_layer_views(self, visible):
-        """Put the marker layer switch at `visible` in every view.
+        """Put the PRIMARY layer switch at `visible` in every view.
+
+        The layer that carries the channel being shown -- the nucleus
+        included, when the page is showing it.
 
         The two buttons are MIRRORS of the channel's display answer, like
         `_btn_show_nucleus` is for DAPI. Their own `toggled` handlers do the
@@ -9159,6 +9201,10 @@ class Step0Page(QWidget):
             return
         self._inspector_channel = None
         self.current_channel = ch
+        tissue_log.note("main.selection", channel=ch,
+                        is_nucleus=(ch == getattr(self, "nucleus_channel",
+                                                  None)),
+                        visible=self._channel_display_visible(ch))
         # THE LAYER SWITCHES FOLLOW THE CHANNEL. They are mirrors of ONE
         # channel's display answer, so moving to another channel re-points
         # them; left alone they would go on arguing for the channel that was

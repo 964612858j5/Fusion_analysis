@@ -176,10 +176,21 @@ def _tops():
 # ── 1. Reset is an edit, and an edit is published ───────────────────────────
 
 def _workbench(w, channel):
-    """The REAL inspector, pointed at `channel` the way a step points it."""
+    """The REAL inspector, pointed at `channel` the way a step points it.
+
+    Waits for the pixels: the inspector's provider is resident-only, so a
+    channel's array arrives from a worker rather than from inside the open.
+    """
     w._display.show_intensity(channel)
-    _pump(400)
-    return w._step0._cond_workbench
+    wb = w._step0._cond_workbench
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end:
+        QtWidgets.QApplication.processEvents()
+        if wb._active == channel and wb._raw.get(channel) is not None:
+            break
+        time.sleep(0.005)
+    _pump(150)
+    return wb
 
 
 def test_reset_publishes_the_window_it_resets_to(app):
@@ -606,41 +617,53 @@ def _frame_spy(display):
 def test_a_frame_dropped_for_want_of_pixels_is_drawn_when_they_arrive(app):
     """A snapshot of None must not end the cycle.
 
-    The first request after a load finds nothing resident and is dropped.
-    What has to survive that is the ARMING: when a second request was
-    coalesced behind it, the arrival of the pixels alone -- with nobody
-    asking again -- still has to produce the picture.
+    One request, nothing resident, and then the array arrives through the
+    REAL reader callback (`_on_lowres_read`) -- the test never asks for a
+    frame itself and never installs an array itself. What has to happen is a
+    drop, then a lowres request, then a seed, then exactly one publish.
     """
     w, loader = _window(app, path="/tmp/b8_lifecycle/rearm.ome.tiff")
     try:
         display, page = w._display, w._step0
-        page.current_channel = "CD8"
-        display.state.set_display_visible("CD8", True, origin="test")
-        display.fusion.edit_channel_weight("CD8", 1.0, origin="test")
-        page._slide_lowres.pop("CD8", None)
-        dropped_before = display.coordinator._stats["dropped"]
+        co = display.coordinator
+        channel = "CD31"                       # nothing has drawn it
+        page.current_channel = channel
+        display.state.set_display_visible(channel, True, origin="test")
+        display.fusion.edit_channel_weight(channel, 1.0, origin="test")
+        # hold every read: this test is about what happens while NOTHING is
+        # resident, and the delivery below is the reader's own callback.
+        loader.hold = True
+        page._slide_lowres.pop(channel, None)
+        _pump(200)
+        page._slide_lowres.pop(channel, None)
+        assert page.tissue_lowres_array(channel) is None
 
-        display.coordinator.request_frame(kind="test", channel="CD8")
-        display.coordinator.request_frame(kind="test", channel="CD8")
+        # a clean clock: nothing pending, nothing in flight, no counts
+        co._timer.stop()
+        co._pending_rev = None
+        co._in_flight = False
+        for key in co._stats:
+            co._stats[key] = 0
+
+        co.request_frame(kind="navigator_shown", channel=channel)
         _pump(400)
-        assert display.coordinator._stats["dropped"] > dropped_before
-        # THE ARMING IS THE POINT. A request coalesced behind the dropped
-        # one must still be drawn: if the drop ends the cycle, that request
-        # sits in `_pending_rev` for ever and the window never fills itself.
-        assert display.coordinator._pending_rev is None, \
-            "a request is still waiting: the clock was not re-armed"
 
-        # the pixels appear WITHOUT anybody asking for a frame again
-        page.install_tissue_lowres("CD8", page._dataset_token(),
-                                   loader._pattern("CD8", LOW_H, LOW_W))
-        _pump(900)
+        assert co._stats["dropped"] >= 1, "the empty page drew something"
+        assert co._stats["published"] == 0
 
-        snap = page.tissue_render_snapshot(computed_only=False)
-        assert snap is not None and snap["arrays"].get("CD8") is not None
-        assert display.coordinator._stats["dispatched"] > 0
-        assert display.coordinator._pending_rev is None, \
-            "a request is still waiting: the clock was never re-armed"
+        # the array arrives the way the reader delivers it
+        display._on_lowres_read(
+            {"channel": channel, "token": display._lowres_token(),
+             "array": loader._pattern(channel, LOW_H, LOW_W)})
+        _pump(1200)
+
+        assert page._slide_lowres.get(channel) is not None
+        assert display.state.mapping(channel) is not None, \
+            "no window was seeded"
+        assert co._stats["published"] >= 1, "the frame never came back"
+        assert co._pending_rev is None
     finally:
+        loader.hold = False
         _close(w)
 
 
@@ -727,13 +750,13 @@ def test_a_row_control_that_lost_its_parent_is_never_shown(app):
 
 
 def test_the_clock_comes_back_to_a_frame_it_could_not_draw(app):
-    """Isolated on the coordinator: one request, a context that has nothing
-    to draw the first time and pixels the second.
+    """A request that arrives WHILE a frame is being drawn must still be
+    drawn when that frame turns out to be undrawable.
 
-    Nothing else asks for a frame in this test, so the only thing that can
-    produce one is the coordinator re-arming itself after the drop. That is
-    what a fresh load depends on: the first request after a slide opens
-    always finds an empty page.
+    This is the real first-frame shape: the draw finds nothing resident, and
+    the array lands from the reader in the middle of it. If the drop simply
+    returns, that queued request stays in `_pending_rev` with no timer behind
+    it -- and, with no further user input, the window stays empty for ever.
     """
     w, loader = _window(app, path="/tmp/b8_lifecycle/clock.ome.tiff")
     try:
@@ -746,35 +769,74 @@ def test_the_clock_comes_back_to_a_frame_it_could_not_draw(app):
             def tissue_render_snapshot(self, computed_only=True):
                 self.calls += 1
                 if self.calls == 1:
-                    # Nothing resident yet -- and, exactly as a real arrival
-                    # does, the pixels land WHILE this draw is in flight, so
-                    # the request they make is queued behind the one that is
-                    # about to be dropped.
-                    co.request_frame(kind="arrival", channel="CD3")
+                    # the arrival, landing inside the draw
+                    co.request_frame(kind="lowres", channel="CD3")
                     return None
-                return {
-                    "mode": "step0", "token": ("t", "p"), "channel": "CD3",
-                    "marker_visible": True, "marker_weight": 1.0,
-                    "nucleus_layer": "", "loading": (),
-                    "arrays": {"CD3": loader._pattern("CD3", LOW_H, LOW_W)},
-                    "mappings": {"CD3": (0.0, 100.0, 1.0)},
-                    "colors": {"CD3": "#ff0000"},
-                }
+                return None
 
         context = _Context()
         co.register_context("probe-step", context)
         previous = co.active_context_id()
         co.set_active_context("probe-step")
         try:
-            co.request_frame(kind="test", channel="CD3")
-            _pump(1200)
+            co._timer.stop()
+            co._pending_rev = None
+            co._in_flight = False
+            co._pending_rev = co._input_rev + 1
 
-            assert context.calls >= 2, \
-                "the frame was dropped and never attempted again"
-            assert co._pending_rev is None, \
-                "the queued request was never drawn: the clock was not re-armed"
+            co._apply_pending_frame()
+
+            assert context.calls >= 1
+            # THE INVARIANT: a queued request is never left without a clock
+            # behind it. Either it has already been drawn, or the timer is
+            # armed to draw it -- what must never happen is a pending
+            # revision and a stopped clock, which is a window that will stay
+            # empty until some unrelated input happens along.
+            stranded = (co._pending_rev is not None
+                        and not co._timer.isActive())
+            assert not stranded, \
+                "a dropped frame left a queued request with no clock behind it"
         finally:
+            co._timer.stop()
+            co._pending_rev = None
             co.set_active_context(previous)
             co.unregister_context("probe-step")
+    finally:
+        _close(w)
+
+
+def test_a_viewers_completion_reaches_the_inspector_too(app):
+    """Both readers end at the same arrival entry.
+
+    A viewer's overview worker used to fill the shared store and redraw the
+    thumbnail while the Intensity inspector -- sitting on that very channel
+    with an empty histogram -- was told nothing, so which of the two readers
+    happened to serve a channel decided whether its histogram filled.
+    """
+    w, loader = _window(app, path="/tmp/b8_lifecycle/viewer.ome.tiff")
+    try:
+        page = w._step0
+        wb = _workbench(w, "CD3")
+        channel = "CD68"
+        page.current_channel = channel
+        w._display.state.set_selected_channel(channel, origin="test")
+        _pump(200)
+        wb._raw[channel] = None
+        page._slide_lowres.pop(channel, None)
+
+        class _Record:
+            arr = loader._pattern(channel, LOW_H, LOW_W)
+            source = "viewer"
+
+        # what a viewer's store holds once ITS worker has finished
+        page._resident_overview_record = lambda ch: (
+            _Record() if ch == channel else None)
+
+        page._on_channel_overview_ready("src", channel, 0, True)
+
+        assert page._slide_lowres.get(channel) is not None, \
+            "the viewer's array never reached the shared store"
+        assert wb._raw.get(channel) is not None, \
+            "the viewer's array never reached the Intensity inspector"
     finally:
         _close(w)

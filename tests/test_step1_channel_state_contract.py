@@ -1195,20 +1195,17 @@ def test_the_pixel_source_can_refuse_to_read(app):
 def test_a_resident_only_pixel_request_never_reads(app):
     """The real branch, with the real `_slide_lowres_array`.
 
-    `resident_only` is a separate word from `blocking` because they are
-    different requests: `blocking=False` means "do not duplicate a read
-    another worker is already doing" and its callers -- the display seed, the
-    compare panels -- expect a read when nobody else is reading;
-    `resident_only=True` means "never read", which is what a GUI render
-    callback needs.
+    Both `resident_only=True` and `blocking=False` mean "do not read on THIS
+    thread", and they are still separate words: `resident_only` answers with
+    what is in hand and asks for nothing, while `blocking=False` also puts
+    the channel in for a background read.
 
-    The first version of this refused only when another worker was already
-    reading the channel -- so with no resident record and nothing pending,
-    which is the ordinary case for a channel nobody has looked at, it fell
-    through to a synchronous whole-slide read: 170-230 ms of the GUI thread,
-    from a caller that had asked not to wait. The earlier test replaced
-    `_slide_lowres_array` wholesale and only checked that the keyword was
-    passed on, which could not see it.
+    `blocking=False` used to mean only "do not duplicate a read another
+    worker is already doing", so with no resident record and nothing pending
+    -- the ordinary case for a channel nobody has looked at -- it fell
+    through to a synchronous whole-slide read: 170-230 ms of the GUI thread
+    from a caller that had asked not to wait, and the last such read left on
+    the load path. Only an explicit `blocking=True` reads here now.
     """
     w = _window(app)
     try:
@@ -1232,14 +1229,14 @@ def test_a_resident_only_pixel_request_never_reads(app):
         assert page._slide_lowres_array("CD3", resident_only=True) is None
         assert reads == [], f"a resident-only request read {reads}"
 
-        # And the reading path -- which is what a background seeder uses --
-        # still reads, including with the older `blocking=False`, whose
-        # meaning is only "do not duplicate a read already in flight".
-        assert page._slide_lowres_array("CD3", blocking=False) is not None
-        assert reads == ["CD3"]
-        page._slide_lowres = {}
+        # `blocking=False` does not read here either -- it asks for the
+        # array in the background and answers "not yet".
+        assert page._slide_lowres_array("CD3", blocking=False) is None
+        assert reads == [], f"a non-blocking request read {reads}"
+
+        # Only an explicit blocking read -- a worker's own call -- decodes.
         assert page._slide_lowres_array("CD3", blocking=True) is not None
-        assert reads == ["CD3", "CD3"]
+        assert reads == ["CD3"]
     finally:
         w.close()
 

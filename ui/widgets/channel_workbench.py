@@ -848,15 +848,23 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 continue
             clean[str(name)] = arr
 
-        if not any(v is not None for v in clean.values()):
-            # No real pixels at all (every channel lazy / skipped): nothing to
-            # display from yet. Clear rather than show a half-built UI.
+        if not clean:
+            # No channels at all: nothing to show.
             self.clear_channel_images()
             if skipped:
                 self._status_lbl.setText(
                     "No usable 2D channel images "
                     f"(skipped: {', '.join(skipped)}).")
             return
+        if not any(v is not None for v in clean.values()):
+            # EVERY CHANNEL LAZY. That is the ordinary state of a freshly
+            # loaded slide now: the pixels are read on a worker and delivered
+            # later, so refusing to build the list here left the inspector
+            # with no channel, no params and no way to be filled when the
+            # arrays arrived. The list is built from the names, each channel
+            # a placeholder with a provisional window, and `deliver_pixels`
+            # fills them.
+            self._status_lbl.setText("Loading channel pixels…")
 
         new_names = list(clean.keys())
         # (#4) First load when there was no image before. Same-name reloads are

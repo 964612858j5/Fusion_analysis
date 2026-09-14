@@ -175,7 +175,13 @@ def test_it_reads_nothing_of_its_own(app):
     already share. A thumbnail that re-read the slide would be the same
     pixels decoded twice."""
     page = _page(app)
-    page._slide_lowres_array("CD3")          # warm the one cache
+    # Warm the one cache for BOTH channels the thumbnail composites -- the
+    # marker and the nucleus reference. A channel that is not resident is
+    # read in the background now, and a read started by the warm-up would be
+    # counted against the redraws below.
+    page._slide_lowres_array("CD3")
+    page._slide_lowres_array(page.nucleus_channel)
+    _settle(page)
     reads = list(page.loader.lowres_reads)
 
     for _ in range(3):

@@ -3563,10 +3563,24 @@ class Step0Page(QWidget):
             # callback needs: falling through to `read_region_lowres` below
             # costs 170-230 ms of the GUI thread per channel, measured.
             return None
-        if not blocking and self._overview_read_pending(ch):
-            # Somebody is already reading it, on a worker. Waiting costs
-            # nothing; reading it a second time here costs 170-230 ms of
-            # the GUI thread, measured, per channel switch.
+        if not blocking:
+            # `blocking=False` means "do not read on THIS thread" -- full
+            # stop. It used to mean only "do not duplicate a read somebody
+            # else is already doing", so a channel nobody happened to be
+            # reading fell through to the decode below, on the GUI thread,
+            # 170-230 ms per channel: the display seed and the synchronous
+            # snapshot both reached it during a load.
+            #
+            # The read is asked for instead, through the same ownership
+            # protocol every other caller uses -- a viewer takes it, or
+            # Block01's own reader does -- and its arrival wakes this page
+            # like any other input.
+            display = getattr(self, "display", None)
+            if display is not None:
+                try:
+                    display.ensure_lowres([ch])
+                except Exception as exc:                    # noqa: BLE001
+                    print(f"[step0] could not request {ch}'s overview: {exc}")
             return None
         arr = None
         loader = getattr(self, "loader", None)
@@ -3649,20 +3663,32 @@ class Step0Page(QWidget):
         if arr is not None:
             return arr
         display = getattr(self, "display", None)
-        loader = getattr(self, "loader", None)
-        if getattr(loader, "read_region_lowres", None) is None:
-            # A SLIDE WITH NO PYRAMID. There is no whole-slide read to wait
-            # for, so the background service can never answer, and the
-            # inspector would stay empty for ever. These slides keep the
-            # behaviour they always had -- the Save-boundary patch source --
-            # which is not a whole-slide decode.
-            return self._workbench_pixels(name)
         if display is not None and name:
             try:
                 display.ensure_lowres([name])
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Step0] could not request {name}'s overview: {exc}")
         return None
+
+    def adopt_tissue_lowres(self, channel):
+        """An array for `channel` exists somewhere: take it and wake its
+        readers. GUI thread only.
+
+        The single arrival entry. Both producers end here -- a viewer's
+        overview worker (`_on_channel_overview_ready`) and Block01's own
+        low-res reader (`_on_lowres_read` -> `install_tissue_lowres`) -- so
+        an array cannot reach one consumer and miss another depending on who
+        read it.
+        """
+        if not channel:
+            return False
+        # Adopting a viewer's record files it in this page's store under the
+        # CURRENT dataset; a record of another slide is refused there.
+        if self._slide_lowres_array(channel, blocking=False,
+                                    resident_only=True) is None:
+            return False
+        self.wake_intensity_pixels(channel)
+        return True
 
     def wake_intensity_pixels(self, channel):
         """A whole-slide array landed: give it to the Intensity workbench.
@@ -3874,11 +3900,16 @@ class Step0Page(QWidget):
         for ch in channels:
             arr = None
             if ch == active:
-                # Eager for the ACTIVE channel only, so the inspector is
-                # never blank on first open; every other channel is a lazy
-                # placeholder the provider fills when it is selected.
+                # The ACTIVE channel is served from what is RESIDENT, and
+                # asked for in the background when it is not. Reading it here
+                # was the last whole-slide decode left on the GUI thread:
+                # engaging the workbench is part of opening the Intensity
+                # window, so every first open paid for a decode -- and on a
+                # slide whose read is slow the window came up frozen rather
+                # than empty-then-filled. The arrival fills it
+                # (`wake_intensity_pixels`), like every other channel.
                 try:
-                    a = self._workbench_pixels(ch)
+                    a = self._workbench_pixels_async(ch)
                     a = np.asarray(a, np.float32) if a is not None else None
                     if a is not None and a.ndim == 2 and a.size:
                         arr = a
@@ -5549,6 +5580,11 @@ class Step0Page(QWidget):
         """
         if not ok or not channel:
             return
+        # THE SAME ARRIVAL ENTRY as Block01's own reader uses. A viewer's
+        # array used to reach the display seed and the frame but never the
+        # Intensity inspector, so which of the two readers happened to serve
+        # a channel decided whether its histogram filled.
+        self.adopt_tissue_lowres(channel)
         if channel not in (self.current_channel, self.nucleus_channel):
             return
         # Drop the provisional window so the seed is taken again.
@@ -7429,38 +7465,66 @@ class Step0Page(QWidget):
         return self._slide_lowres_array(channel, blocking=False,
                                         resident_only=True)
 
-    def ensure_tissue_lowres(self, channels):
-        """Ask the shared overview store for the arrays a frame is missing.
+    #: What this page can say about one channel's whole-slide array.
+    LOWRES_RESIDENT = "resident"        # it is here; use it
+    LOWRES_REQUESTED = "requested"      # a viewer owns the read; wait
+    LOWRES_UNAVAILABLE = "unavailable"  # nobody here will read it
 
-        Returns the channels still missing. The read is the viewers' own --
-        `prepare_overview_async`, single-flight per (source, channel, level)
-        ACROSS every controller -- so a channel three views want is read once
-        and everybody is woken by `_on_channel_overview_ready`. Bounded, and
-        in the order the caller asked: a frame's own channels are wanted
-        before anything speculative, and a 29- or 57-channel panel must never
-        become 57 reads because one weight moved.
+    def tissue_lowres_status(self, channels):
+        """Per channel: `resident`, `requested`, or `unavailable`.
+
+        THE OWNERSHIP ANSWER, and the reason it exists: "the array is still
+        missing when I return" is not the same statement as "nobody is
+        reading it". Reported as one, Block01 started its own fallback read
+        of a channel a viewer had just taken, so the same (dataset, channel)
+        was decoded twice -- two threads, two arrays, two arrivals.
+
+        `requested` means a viewer's overview worker owns this read now: it
+        is single-flight per (source, channel, level) across every
+        controller, and its completion reaches the same arrival entry as
+        Block01's own reader. `unavailable` means no viewer took it, and
+        only then may another reader start.
+
+        Bounded, in the caller's order: a frame's own channels before
+        anything speculative, so a 29- or 57-channel panel never becomes 57
+        reads because one weight moved. Channels past the cap are reported
+        `requested` rather than `unavailable` -- they are queued behind this
+        page's own reads, not abandoned.
         """
-        missing = [ch for ch in (channels or [])
-                   if ch and self.tissue_lowres_array(ch) is None]
-        if not missing:
-            return []
+        status = {}
         started = 0
-        for ch in missing:
-            if started >= self._TISSUE_LOWRES_MAX_IN_FLIGHT:
-                break
+        for ch in (channels or []):
+            if not ch:
+                continue
+            if self.tissue_lowres_array(ch) is not None:
+                status[ch] = self.LOWRES_RESIDENT
+                continue
             if self._overview_read_pending(ch):
-                continue            # somebody is already reading it
+                status[ch] = self.LOWRES_REQUESTED
+                continue
+            if started >= self._TISSUE_LOWRES_MAX_IN_FLIGHT:
+                status[ch] = self.LOWRES_REQUESTED
+                continue
             if self._request_overview_async(ch):
                 started += 1
+                status[ch] = self.LOWRES_REQUESTED
                 continue
-            # NO BACKGROUND READER IN THIS SESSION -- no viewer is open on
-            # this slide, so the shared overview store has no reason to read
-            # it. The channel is simply reported as still missing; Block01's
-            # own read thread picks it up (`_request_lowres_reads`). What this
-            # method must NOT do is read it here: that is the GUI thread, and
-            # the read is 170-230 ms, measured.
-            started += 1
-        return [ch for ch in missing if self.tissue_lowres_array(ch) is None]
+            # No viewer is open on this slide, so the shared overview store
+            # has no reason to read it. It is NOT read here: this is the GUI
+            # thread and the read is 170-230 ms, measured. Block01's own read
+            # thread owns it from here.
+            status[ch] = self.LOWRES_UNAVAILABLE
+        return status
+
+    def ensure_tissue_lowres(self, channels):
+        """The channels NOBODY here will read -- and only those.
+
+        What the caller does with the answer is start a reader, so anything
+        a viewer has taken must not appear in it.
+        """
+        status = self.tissue_lowres_status(channels)
+        return [ch for ch, value in status.items()
+                if value == self.LOWRES_UNAVAILABLE]
 
     def read_tissue_lowres_blocking(self, channel):
         """Read `channel`'s whole-slide array. CALLED ON A WORKER THREAD.
@@ -7473,13 +7537,29 @@ class Step0Page(QWidget):
         loader = getattr(self, "loader", None)
         read = getattr(loader, "read_region_lowres", None)
         shape = getattr(loader, "shape", None)
-        if read is None or not shape or len(shape) < 2 or int(shape[0]) <= 0:
+        if not shape or len(shape) < 2 or int(shape[0]) <= 0:
             return None
+        plain = None
+        if read is None:
+            # A SOURCE WITH NO PYRAMID LEVEL. The whole slide is read at the
+            # overview stride through the ordinary read instead -- STILL ON
+            # THIS WORKER THREAD. The alternative that used to stand here was
+            # a patch read on the GUI thread, which is the freeze this
+            # separation exists to remove; a source that can serve neither
+            # simply reports nothing and the inspector says so.
+            plain = getattr(loader, "read_region", None)
+            if plain is None:
+                return None
         try:
             ds = (loader.overview_downsample()
                   if hasattr(loader, "overview_downsample") else 32)
-            arr = np.asarray(read(channel, 0, int(shape[0]), 0, int(shape[1]),
-                                  ds, normalize=False), dtype=np.float32)
+            if read is not None:
+                out = read(channel, 0, int(shape[0]), 0, int(shape[1]),
+                           ds, normalize=False)
+            else:
+                out = plain(channel, 0, int(shape[0]), 0, int(shape[1]),
+                            downsample=ds, normalize=False)
+            arr = np.asarray(out, dtype=np.float32)
         except Exception as exc:                            # noqa: BLE001
             print(f"[step0] slide low-res read failed for {channel!r}: {exc}",
                   flush=True)
@@ -7603,11 +7683,14 @@ class Step0Page(QWidget):
         for name in wanted:
             arr = self.tissue_lowres_array(name)
             if arr is None and not computed_only:
-                # The synchronous answer: the caller wants the picture before
-                # this returns, so the array is fetched here. The FRAME path
-                # never reaches this -- it is resident-only, and a missing
-                # array goes to the read thread.
-                arr = self._slide_lowres_array(name, blocking=False)
+                # THE EXPLICIT SYNCHRONOUS ANSWER, and the only place a read
+                # may still happen on the calling thread: the caller has said
+                # it wants the picture before this returns
+                # (`_tissue_preview_rgb`, and the tests that ask what the page
+                # would draw). The FRAME path never reaches this -- it is
+                # `computed_only=True`, resident-only, and a missing array
+                # goes to the read thread.
+                arr = self._slide_lowres_array(name, blocking=True)
             if arr is None:
                 loading.append(name)
             else:

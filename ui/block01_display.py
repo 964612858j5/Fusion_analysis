@@ -2406,18 +2406,35 @@ class Block01DisplayServices(QObject):
         wanted = [ch for ch in (channels or []) if ch]
         if source is None or not wanted:
             return list(wanted)
-        try:
-            missing = list(source.ensure_tissue_lowres(wanted) or [])
-        except Exception:                                   # noqa: BLE001
-            missing = list(wanted)
-        if missing:
-            # Nobody is reading them -- no viewer is open on this slide, so
-            # the shared overview store has no reason to. Read them HERE, on
-            # this layer's own thread. The previous fallback took the read on
-            # the GUI thread "only once per channel", and once is 170-230 ms,
-            # measured, landing exactly when a new channel first appears.
-            self._request_lowres_reads(missing)
-        return missing
+        # ONE OWNER PER (DATASET, CHANNEL). The source answers who is reading
+        # what, not merely what is still absent: a channel a viewer has taken
+        # is `requested` and must not be read again here. Reading it anyway
+        # -- which is what "the array is still missing when I return" led to
+        # -- decoded the same whole slide twice, on two threads, with two
+        # arrivals for one channel.
+        status = getattr(source, "tissue_lowres_status", None)
+        if status is not None:
+            try:
+                answer = dict(status(wanted) or {})
+            except Exception:                               # noqa: BLE001
+                answer = {}
+            unavailable = [ch for ch in wanted
+                           if answer.get(ch) == "unavailable"]
+            pending = [ch for ch in wanted if answer.get(ch) != "resident"]
+        else:
+            try:
+                unavailable = list(source.ensure_tissue_lowres(wanted) or [])
+            except Exception:                               # noqa: BLE001
+                unavailable = list(wanted)
+            pending = list(unavailable)
+        if unavailable:
+            # Nobody else will read them -- no viewer is open on this slide,
+            # so the shared overview store has no reason to. Read them HERE,
+            # on this layer's own thread. The read is never taken on the GUI
+            # thread: once is 170-230 ms, measured, landing exactly when a
+            # new channel first appears.
+            self._request_lowres_reads(unavailable)
+        return pending
 
     def _request_lowres_reads(self, channels):
         reader = getattr(self._lowres_source, "read_tissue_lowres_blocking",

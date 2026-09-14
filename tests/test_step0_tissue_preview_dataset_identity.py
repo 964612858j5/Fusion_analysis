@@ -1211,7 +1211,10 @@ def test_a_record_of_the_previous_slide_is_never_adopted_or_drawn(
         page.current_channel = "CD3"
         page._slide_lowres.clear()
 
-        served = page._slide_lowres_array("CD3", blocking=False)
+        # `blocking=True`: this test wants the adoption answered before it
+        # returns. A non-blocking request no longer reads on the calling
+        # thread at all -- it asks for the array in the background.
+        served = page._slide_lowres_array("CD3", blocking=True)
         assert served is not None
         assert float(np.asarray(served).min()) == pytest.approx(99.0), (
             "the page adopted a record belonging to the previous slide")
@@ -1295,7 +1298,7 @@ def test_the_lowres_cache_cannot_serve_another_slide_under_the_same_channel(
     try:
         a_token = page._dataset_token()
         page.current_channel = "CD3"
-        first = page._slide_lowres_array("CD3", blocking=False)
+        first = page._slide_lowres_array("CD3", blocking=True)
         assert first is not None
         assert page._slide_lowres["CD3"][0] == a_token
 
@@ -1304,7 +1307,7 @@ def test_the_lowres_cache_cannot_serve_another_slide_under_the_same_channel(
                      load_overview=False)
         page._slide_lowres["CD3"] = (a_token, first)
 
-        served = page._slide_lowres_array("CD3", blocking=False)
+        served = page._slide_lowres_array("CD3", blocking=True)
         assert served is None or float(np.asarray(served).min()) != \
             pytest.approx(11.0), "the previous slide's array was served"
         assert "CD3" not in page._slide_lowres or \

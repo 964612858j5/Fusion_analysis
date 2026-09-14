@@ -53,6 +53,7 @@ from ..core import display_identity as _identity
 from ..core import tissue_compose
 from ..core.fusion_domain import FusionDomainModel
 from ..utils import perf_trace
+from ..utils import tissue_log
 from ..workers.display_seed_worker import (
     DisplaySeedWorker, LowresReadWorker,
 )
@@ -905,6 +906,7 @@ class ChannelDisplayState(QObject):
             return False
         self._ns.selection = channel
         self._ns.bump("selection")
+        tissue_log.note("channel.selected", channel=channel, origin=origin)
         self.selection_changed.emit(channel)
         return True
 
@@ -931,6 +933,8 @@ class ChannelDisplayState(QObject):
             return False
         self._ns.visibility[channel] = visible
         self._ns.bump("visibility")
+        tissue_log.note("channel.visibility", channel=channel,
+                        visible=bool(visible), origin=origin)
         self.visibility_changed.emit(channel, visible)
         return True
 
@@ -1047,6 +1051,7 @@ class TissuePreviewCoordinator(QObject):
 
     def register_context(self, step_id, context):
         """Register a step's render context. Registering does not activate."""
+        tissue_log.note("context.registered", owner=step_id)
         self._contexts[step_id] = context
 
     def unregister_context(self, step_id):
@@ -1097,6 +1102,9 @@ class TissuePreviewCoordinator(QObject):
         cancelled in the right order, and nothing depends on a signal landing
         before another one.
         """
+        tissue_log.note("context.active", owner=step_id,
+                        generation=self.state.binding_generation()
+                        if hasattr(self.state, "binding_generation") else None)
         if step_id is not None and step_id not in self._contexts:
             # A step with no context registered draws nothing rather than
             # leaving the previous step's picture live under a new policy.
@@ -1206,6 +1214,9 @@ class TissuePreviewCoordinator(QObject):
         self._input_at = self._now()
         perf_trace.mark("tissue.input", owner=self._active, kind=kind,
                         channel=channel, rev=self._input_rev)
+        tissue_log.note("frame.request", kind=kind, channel=channel,
+                        owner=self._active, rev=self._input_rev,
+                        pending=self._pending_rev)
 
         depth = 1 if self._pending_rev is not None else 0
         self._max_pending_depth = max(self._max_pending_depth, depth)
@@ -1260,6 +1271,7 @@ class TissuePreviewCoordinator(QObject):
             return
         context = self.context()
         if context is None:
+            tissue_log.note("snapshot.none", reason="no_context", rev=rev)
             self._pending_rev = None
             return
         coalesced, self._coalesced = self._coalesced, 0
@@ -1280,6 +1292,8 @@ class TissuePreviewCoordinator(QObject):
             self._last_publish = self._now()
             perf_trace.mark("tissue.drop", why="no_snapshot", rev=rev,
                             owner=self._active)
+            tissue_log.note("frame.drop", why="no_snapshot", rev=rev,
+                            owner=self._active)
             self._stats["dropped"] += 1
             self._maybe_arm_next()
             return
@@ -1296,6 +1310,10 @@ class TissuePreviewCoordinator(QObject):
                         channels=len(snapshot["arrays"]),
                         coalesced=coalesced)
         self._stats["dispatched"] += 1
+        tissue_log.note("frame.dispatch", rev=rev, owner=snapshot["owner"],
+                        channel=snapshot.get("channel"),
+                        arrays=len(snapshot.get("arrays") or {}),
+                        loading=",".join(snapshot.get("loading") or ()) or None)
         if self._dispatch(snapshot):
             return              # published when the pixels come back
 
@@ -1515,6 +1533,11 @@ class TissuePreviewCoordinator(QObject):
                     if setter(rgb, token) is not False:
                         drawn += 1
         self._stats["published"] += 1
+        tissue_log.note("frame.publish", owner=result.get("owner"),
+                        channel=result.get("channel"), drawn=drawn,
+                        rev=result.get("rev"),
+                        shape=getattr(rgb, "shape", None),
+                        fingerprint=tissue_log.fingerprint(rgb))
         self._last_publish = self._now()
         self._last_published = {
             "rev": result.get("rev"), "owner": result.get("owner"),
@@ -1751,6 +1774,10 @@ class Block01DisplayServices(QObject):
         self._weight_editor_content = None
         self._seed_worker = None
         self._read_worker = None
+        # What has already been announced as arrived, per channel:
+        # (dataset token, the array object). Two producers finishing the same
+        # read announce one arrival.
+        self._announced_lowres = {}
         self._weight_editor = None
         self._weight_editor_panel = None
         # THE one public channel dock (B4-B). Built here, outside the stacked
@@ -1834,11 +1861,15 @@ class Block01DisplayServices(QObject):
         if array is None:
             # Nothing to measure yet. The read is asked for; its arrival is
             # an input, and the frame after it asks for the seed again.
+            tissue_log.note("seed.request", channel=channel, nucleus=nucleus,
+                            deferred="pixels_missing")
             self.ensure_lowres([channel])
             return False
         worker = self._seed_worker_ready()
         if worker is None:
             return False
+        tissue_log.note("seed.begin", channel=channel, nucleus=nucleus,
+                        shape=getattr(array, "shape", None))
         return bool(worker.submit(binding, channel, array, nucleus=nucleus))
 
     def _ensure_binding(self):
@@ -1920,12 +1951,18 @@ class Block01DisplayServices(QObject):
                                  else "binding"),
                             channel=channel, seed=str(binding),
                             current=str(current))
+            tissue_log.note("seed.rejected", channel=channel,
+                            reason="binding", seed=str(binding),
+                            current=str(current))
             return
         if self.state.mapping_in(identity, channel, nucleus=nucleus) is not None:
             # The precondition is gone: somebody answered while we measured.
             perf_trace.mark("display.seed_refused", why="answered",
                             channel=channel, seed=str(binding))
+            tissue_log.note("seed.rejected", channel=channel, reason="answered")
             return
+        tissue_log.note("seed.accepted", channel=channel, nucleus=nucleus,
+                        window="%s,%s" % (result["min"], result["max"]))
         self.state.set_mapping(channel, result["min"], result["max"],
                                result.get("gamma", 1.0), nucleus=nucleus,
                                origin="seed", token=identity)
@@ -2099,6 +2136,8 @@ class Block01DisplayServices(QObject):
             print(f"[Block01] the Tissue Preview could not be furnished: "
                   f"{exc}")
         self.apply_navigator_policy()
+        tissue_log.note("navigator.created", owner=self.coordinator
+                        .active_context_id())
         self.navigator_created.emit(self._navigator)
         # A popup created while some step is already active owes that step a
         # frame, and only that step is allowed to give it one.
@@ -2147,6 +2186,8 @@ class Block01DisplayServices(QObject):
         if popup is None:
             return None
         _bring_to_front(popup)
+        tissue_log.note("navigator.shown", owner=self.coordinator
+                        .active_context_id(), step=step_id)
         self.coordinator.request_frame(kind="navigator_shown")
         return popup
 
@@ -2490,11 +2531,61 @@ class Block01DisplayServices(QObject):
         except Exception as exc:                            # noqa: BLE001
             print(f"[Block01] could not install {channel}'s array: {exc}")
             return
-        # TWO CONSUMERS OF ONE ARRIVAL, not one. The frame is asked for, and
-        # the Intensity inspector -- which may be sitting on this very
-        # channel with an empty histogram, waiting for exactly this read --
-        # is woken. Installing into the low-res store alone left the window
-        # blank until something else happened to re-activate the channel.
+        tissue_log.note("lowres.end", channel=channel, owner="fallback",
+                        shape=getattr(array, "shape", None))
+        self.notify_lowres_arrived(channel, owner="fallback")
+
+    # ── THE ONE ARRIVAL ENTRY ─────────────────────────────────────────
+    def notify_lowres_arrived(self, channel, owner="", token=None):
+        """A whole-slide array for `channel` is resident. Fan it out. Once.
+
+        Two producers read these arrays: a viewer's overview worker and this
+        layer's own fallback reader. Each used to carry its own fan-out, and
+        they did not do the same things -- the viewer's path woke the
+        Intensity inspector but asked for a frame only when the channel
+        happened to be the one Step0 was showing, so a channel another step
+        was drawing (a Step1 overlay's, a fusion participant's) landed
+        without a frame and simply did not appear until something unrelated
+        moved.
+
+        So: one entry, one fan-out, whoever read it --
+
+        * the dataset is checked (a late array of another slide is refused);
+        * the array must really be resident (a claim is not an arrival);
+        * the Intensity inspector is woken;
+        * the preview is asked for a frame, for ANY channel.
+
+        Idempotent per arrival: the same resident array is announced once, so
+        two producers finishing the same channel do not produce two frames.
+        """
+        if not channel or self._closing:
+            return False
+        source = self._lowres_source
+        if source is None:
+            return False
+        current = self._lowres_token()
+        if token is not None and token != current:
+            tissue_log.note("lowres.rejected", channel=channel, owner=owner,
+                            reason="token", token=token, current=current)
+            perf_trace.mark("tissue.drop", why="dataset", kind="lowres_arrival",
+                            channel=channel)
+            return False
+        resident = getattr(source, "tissue_lowres_array", None)
+        array = resident(channel) if resident is not None else None
+        if array is None:
+            tissue_log.note("lowres.rejected", channel=channel, owner=owner,
+                            reason="not_resident")
+            return False
+        seen = self._announced_lowres.get(channel)
+        if seen is not None and seen[0] == current and seen[1] is array:
+            tissue_log.note("lowres.accepted", channel=channel, owner=owner,
+                            dedup=True)
+            return False
+        self._announced_lowres[channel] = (current, array)
+        tissue_log.note("lowres.accepted", channel=channel, owner=owner,
+                        token=current, shape=getattr(array, "shape", None),
+                        dtype=str(getattr(array, "dtype", "")),
+                        fingerprint=tissue_log.fingerprint(array))
         port = self._intensity_content
         wake = getattr(port, "wake_intensity_pixels", None)
         if wake is not None:
@@ -2503,7 +2594,11 @@ class Block01DisplayServices(QObject):
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Block01] could not wake Intensity for {channel}: "
                       f"{exc}")
+        # FOR ANY CHANNEL, not only the one Step0 is showing: the active
+        # context decides what a frame contains, and it is the one that knows
+        # whether this channel is in the picture.
         self.coordinator.request_frame(kind="lowres", channel=channel)
+        return True
 
     def lowres_read_pending(self, channel=None):
         worker = self._read_worker

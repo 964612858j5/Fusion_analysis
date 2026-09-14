@@ -36,6 +36,7 @@ from ...core.fusion_engine import (
 )
 from ...core.channel_remap import apply_channel_remap
 from ...utils import dataset_trace
+from ...utils import tissue_log
 from ...utils import perf_trace
 
 class TileSelectDialog(QDialog):
@@ -1688,11 +1689,15 @@ class OverviewPanel(QWidget):
                 dataset_trace.note("push.rejected", why="no_token",
                                    panel=dataset_trace.ident(self),
                                    token=self._dataset_token)
+                tissue_log.image_note("panel.rejected", rgb, reason="no_token",
+                                      token=self._dataset_token)
                 return False
         elif token != self._dataset_token:
             dataset_trace.note("push.rejected", why="token",
                                panel=dataset_trace.ident(self),
                                token=self._dataset_token, pushed=token)
+            tissue_log.image_note("panel.rejected", rgb, reason="token",
+                                  token=self._dataset_token, pushed=token)
             return False
         self._channel_rgb = None if rgb is None else np.asarray(rgb)
         self._channel_rgb_token = (None if rgb is None else
@@ -1704,6 +1709,8 @@ class OverviewPanel(QWidget):
                            shape=getattr(self._channel_rgb, "shape", None),
                            fingerprint=dataset_trace.fingerprint(
                                self._channel_rgb))
+        tissue_log.image_note("panel.accepted", self._channel_rgb,
+                              token=self._dataset_token)
         self._apply_thumbnail()
         return True
 
@@ -1760,6 +1767,8 @@ class OverviewPanel(QWidget):
         if rgb is not None:
             self.img_item.setImage(rgb, autoLevels=False)
             self.img_item.setRect(rect)
+            tissue_log.image_note("panel.paint", rgb, store="channel_rgb",
+                                  rect=f"{self.ov_w}x{self.ov_h}")
             dataset_trace.note("paint.drawn", which="channel_rgb",
                                panel=dataset_trace.ident(self),
                                token=self._dataset_token,
@@ -1768,6 +1777,15 @@ class OverviewPanel(QWidget):
         elif overview is not None:
             self.img_item.setImage(overview, autoLevels=True)
             self.img_item.setRect(rect)
+            # THE PLAIN 2-D OVERVIEW, not the composed frame. A user cannot
+            # tell the two apart by looking, and a composed frame that is
+            # later replaced by this looks exactly like a frame that never
+            # arrived -- so the log says which store was painted, every time.
+            tissue_log.image_note("panel.paint", overview,
+                                  store="overview_arr",
+                                  had_channel_rgb=(self._channel_rgb
+                                                   is not None),
+                                  rect=f"{self.ov_w}x{self.ov_h}")
             dataset_trace.note("paint.drawn", which="overview_arr",
                                panel=dataset_trace.ident(self),
                                token=self._dataset_token,

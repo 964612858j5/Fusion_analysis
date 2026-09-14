@@ -520,3 +520,337 @@ def test_the_gui_callback_itself_does_no_reading(app, monkeypatch, tmp_path):
     finally:
         slide.hold = False
         _close(w, timeline)
+
+
+# ── every arrival reaches the preview that is drawing ───────────────────────
+
+def _stats_reset(w):
+    co = w._display.coordinator
+    co._timer.stop()
+    co._pending_rev = None
+    co._in_flight = False
+    for key in co._stats:
+        co._stats[key] = 0
+    return co
+
+
+def test_a_viewer_owned_arrival_asks_for_a_frame_for_any_channel(
+        app, monkeypatch, tmp_path):
+    """The gap this closes.
+
+    A viewer's overview worker finishing a channel used to ask for a frame
+    only when that channel was Step0's current one or the nucleus. A channel
+    another step is drawing -- a Step1 overlay's, a fusion participant's --
+    arrived, woke the Intensity inspector, and then waited for an unrelated
+    input to be drawn.
+    """
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page = w._step0
+        display = w._display
+        _pump(1200)
+        w._set_step_active(1)
+        _pump(300)
+        channel = "CD20"                       # neither current nor nucleus
+        assert page.current_channel != channel
+        assert page.nucleus_channel != channel
+        page._slide_lowres.pop(channel, None)
+        display._announced_lowres.pop(channel, None)
+
+        class _Record:
+            arr = slide._pattern(channel, LOW_H, LOW_W)
+            source = "viewer"
+
+        page._resident_overview_record = lambda ch: (
+            _Record() if ch == channel else None)
+        co = _stats_reset(w)
+        requests = []
+        real_request = co.request_frame
+        co.request_frame = lambda **kw: (requests.append(kw),
+                                         real_request(**kw))[1]
+        try:
+            page._on_channel_overview_ready("src", channel, 0, True)
+            _pump(400)
+        finally:
+            co.request_frame = real_request
+
+        assert page._slide_lowres.get(channel) is not None
+        assert [r for r in requests
+                if r.get("kind") == "lowres" and r.get("channel") == channel], \
+            requests
+    finally:
+        _close(w, timeline)
+
+
+def test_a_fallback_owned_arrival_asks_for_a_frame_too(app, monkeypatch,
+                                                       tmp_path):
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        channel = "Ki67"
+        page._slide_lowres.pop(channel, None)
+        display._announced_lowres.pop(channel, None)
+        co = _stats_reset(w)
+        requests = []
+        real_request = co.request_frame
+        co.request_frame = lambda **kw: (requests.append(kw),
+                                         real_request(**kw))[1]
+        try:
+            display._on_lowres_read(
+                {"channel": channel, "token": display._lowres_token(),
+                 "array": slide._pattern(channel, LOW_H, LOW_W)})
+            _pump(300)
+            arrivals = [r for r in requests
+                        if r.get("kind") == "lowres"
+                        and r.get("channel") == channel]
+            assert arrivals, requests
+            # ONE ARRIVAL IS ANNOUNCED ONCE, however many producers report
+            # it: two readers finishing the same channel must not produce two
+            # frames.
+            assert display.notify_lowres_arrived(channel, owner="view") is False
+            assert display.notify_lowres_arrived(channel, owner="fallback") \
+                is False
+            _pump(100)
+            assert [r for r in requests
+                    if r.get("kind") == "lowres"
+                    and r.get("channel") == channel] == arrivals
+        finally:
+            co.request_frame = real_request
+    finally:
+        _close(w, timeline)
+
+
+def test_a_participating_channel_appears_in_the_frame_when_it_lands(
+        app, monkeypatch, tmp_path):
+    """Step1, six participants, and the one that was still reading.
+
+    Before its array lands the composed picture cannot contain it; after it
+    lands -- with no user input of any kind -- a new frame is published that
+    does, and the Intensity window is left on whatever channel it was
+    showing.
+    """
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page, display = w._step0, w._display
+        state, fusion = display.state, display.fusion
+        _pump(1200)
+        w._set_step_active(1)
+        participants = ["DAPI", "CD3", "CD8", "CD68", "Ki67", "CD20"]
+        for ch in participants:
+            state.set_display_visible(ch, True, origin="test")
+            fusion.set_fusion_enabled(ch, True, origin="test")
+            fusion.edit_channel_weight(ch, 1.0, origin="test")
+        state.set_selected_channel("CD3", origin="test")
+        display.show_intensity("CD3")
+        _pump(1200)
+        wb = page._cond_workbench
+        assert wb._active == "CD3"
+
+        late = "CD20"
+        page._slide_lowres.pop(late, None)
+        display._announced_lowres.pop(late, None)
+        snap = page.tissue_render_snapshot(computed_only=True)
+        assert snap is None or late not in (snap.get("arrays") or {})
+
+        # the viewer's worker finishes it -- and nothing else happens
+        class _Record:
+            arr = slide._pattern(late, LOW_H, LOW_W)
+            source = "viewer"
+
+        page._resident_overview_record = lambda ch: (
+            _Record() if ch == late else None)
+        co = _stats_reset(w)
+        requests = []
+        real_request = co.request_frame
+        co.request_frame = lambda **kw: (requests.append(kw),
+                                         real_request(**kw))[1]
+        try:
+            page._on_channel_overview_ready("src", late, 0, True)
+            _pump(1200)
+        finally:
+            co.request_frame = real_request
+
+        assert page._slide_lowres.get(late) is not None
+        # the arrival asked for a frame FOR THIS CHANNEL, though it is
+        # neither Step0's current channel nor the nucleus...
+        assert [r for r in requests
+                if r.get("kind") == "lowres" and r.get("channel") == late], \
+            requests
+        # ...and the picture can now be composed with it in
+        snap = page.tissue_render_snapshot(computed_only=False)
+        assert snap is not None
+        assert page.tissue_lowres_array(late) is not None
+        # the inspector was not dragged onto the channel that happened to
+        # finish reading
+        assert wb._active == "CD3"
+        assert page.patches == []
+    finally:
+        _close(w, timeline)
+
+
+def test_an_arrival_is_refused_unless_it_is_this_slide_and_really_here(
+        app, monkeypatch, tmp_path):
+    """The two things the one entry checks before it fans anything out."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        co = _stats_reset(w)
+        requests = []
+        real_request = co.request_frame
+        co.request_frame = lambda **kw: (requests.append(kw),
+                                         real_request(**kw))[1]
+        woken = []
+        real_wake = page.wake_intensity_pixels
+        page.wake_intensity_pixels = lambda ch: (woken.append(ch),
+                                                 real_wake(ch))[1]
+        try:
+            resident = page.current_channel
+            assert page.tissue_lowres_array(resident) is not None
+            # forget that it was already announced, so the refusal below is
+            # the thing being measured rather than the de-duplication
+            display._announced_lowres.pop(resident, None)
+            # ANOTHER SLIDE: refused even though the array is right here
+            assert display.notify_lowres_arrived(
+                resident, owner="view",
+                token=("another-slide", "/tmp/z.tiff")) is False
+
+            # NOT RESIDENT: a claim is not an arrival
+            absent = "CD45"
+            page._slide_lowres.pop(absent, None)
+            page._resident_overview_record = lambda ch: None
+            assert page.tissue_lowres_array(absent) is None
+            assert display.notify_lowres_arrived(absent, owner="view") is False
+
+            _pump(150)
+            assert requests == [], requests
+            assert woken == [], woken
+        finally:
+            co.request_frame = real_request
+            page.wake_intensity_pixels = real_wake
+    finally:
+        _close(w, timeline)
+
+
+# ── the cap is a queue, not a claim ─────────────────────────────────────────
+
+def test_the_capped_channels_are_really_queued_and_all_arrive(app, monkeypatch,
+                                                              tmp_path):
+    """Ten missing channels, four at a time, and nothing to push them along
+    but the arrivals themselves."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        page._slide_lowres.clear()
+        display._announced_lowres.clear()
+        cap = page._TISSUE_LOWRES_MAX_IN_FLIGHT
+        assert cap == 4
+
+        reading = set()
+        served = []
+
+        def _take(ch):
+            if len(reading) >= cap:
+                return False
+            reading.add(ch)
+            return True
+
+        page._request_overview_async = _take
+        page._overview_read_pending = lambda ch: ch in reading
+
+        def _finish_one():
+            """One viewer read completes, exactly as the store reports it."""
+            ch = sorted(reading)[0]
+            reading.discard(ch)
+            arr = slide._pattern(ch, LOW_H, LOW_W)
+            page._resident_overview_record = lambda c, _ch=ch, _a=arr: (
+                type("R", (), {"arr": _a, "source": "viewer"})()
+                if c == _ch else None)
+            served.append(ch)
+            page._on_channel_overview_ready("src", ch, 0, True)
+            page._resident_overview_record = lambda c: None
+
+        wanted = list(CHANNELS)
+        status = page.tissue_lowres_status(wanted)
+        assert len(reading) == cap, reading
+        assert all(v == page.LOWRES_REQUESTED for v in status.values()), status
+        assert len(page._lowres_queue) == len(wanted) - cap
+
+        # nothing but arrivals from here: no selection, no weight, no step
+        for _ in range(len(wanted)):
+            if not reading:
+                break
+            _finish_one()
+            _pump(60)
+
+        assert sorted(served) == sorted(wanted), served
+        assert not page._lowres_queue, page._lowres_queue
+        for ch in wanted:
+            assert page._slide_lowres.get(ch) is not None, ch
+            assert slide.lowres_count(ch) <= 1, (ch, slide.lowres_reads)
+    finally:
+        _close(w, timeline)
+
+
+# ── the first-frame log ─────────────────────────────────────────────────────
+
+def test_the_first_frame_log_is_silent_unless_it_is_asked_for(app, monkeypatch,
+                                                              tmp_path):
+    from block01.utils import tissue_log
+
+    tissue_log.reset_for_test(None)
+    try:
+        assert tissue_log.enabled() is False
+        assert tissue_log.path() is None
+        w, slide, timeline = _load(app, monkeypatch, tmp_path)
+        try:
+            _pump(1200)
+        finally:
+            _close(w, timeline)
+        # NOTHING was opened, named or written -- anywhere. A log that is off
+        # must not decide on a path of its own.
+        assert tissue_log.path() is None
+        assert tissue_log._handle is None
+        assert not list(tmp_path.glob("*.log"))
+    finally:
+        tissue_log.reset_for_test(None)
+
+
+def test_the_log_records_the_whole_first_frame_chain(app, monkeypatch,
+                                                     tmp_path):
+    """Switched on, one real Load: every step of the chain is in the file."""
+    from block01.utils import tissue_log
+
+    log_path = tmp_path / "tissue.log"
+    tissue_log.reset_for_test(str(log_path))
+    try:
+        w, slide, timeline = _load(app, monkeypatch, tmp_path, name="logged")
+        try:
+            _pump(2000)
+        finally:
+            _close(w, timeline)
+        text = log_path.read_text(encoding="utf-8")
+    finally:
+        tissue_log.reset_for_test(None)
+
+    for event in ("dataset.bind", "navigator.created", "navigator.shown",
+                  "frame.request", "lowres.accepted", "seed.begin",
+                  "seed.accepted", "frame.dispatch", "frame.publish",
+                  "panel.accepted", "panel.paint"):
+        assert event in text, (event, text[:2000])
+    # THE TWO PICTURE STORES ARE DISTINGUISHABLE, on the paint line itself:
+    # a 2-D plain overview and a 3-D composed frame look the same to a user,
+    # and a frame overwritten by an overview looks like a frame that never
+    # came.
+    paints = [ln for ln in text.splitlines() if " panel.paint " in ln]
+    assert paints, text[:2000]
+    composed = [ln for ln in paints
+                if "store=channel_rgb" in ln and "kind=channel_rgb" in ln]
+    assert composed, paints[:10]
+    for line in paints:
+        assert "ndim=" in line and "shape=" in line, line
+    # ...and no array was scanned into it
+    assert "fingerprint=" in text
+    assert len(text.splitlines()) < 4000

@@ -84,6 +84,7 @@ from ...utils.roi_project import (
 # Step2-runtime import is introduced here.
 from ...utils import dataset_trace
 from ...utils import perf_trace
+from ...utils import tissue_log
 from ..widgets.channel_workbench import (
     ChannelWorkbench,
     _PALETTE as CHANNEL_PALETTE,
@@ -410,6 +411,9 @@ class Step0Page(QWidget):
         # from the other: preview=Both with final=Original is a normal state
         # (compare two candidates, publish the raw channel).
         self._channel_methods: dict = {}
+        # Channels a frame wants whose read the in-flight cap held back.
+        # Drained by every arrival (`adopt_tissue_lowres`).
+        self._lowres_queue = set()
         # What a channel with no preview method of its own previews with --
         # the bulk Method box's current value. `both` at startup.
         self._preview_method_default = "both"
@@ -3687,6 +3691,18 @@ class Step0Page(QWidget):
         if self._slide_lowres_array(channel, blocking=False,
                                     resident_only=True) is None:
             return False
+        # THROUGH BLOCK01'S ONE ARRIVAL ENTRY, not a fan-out of this page's
+        # own. This used to wake the Intensity inspector here and leave the
+        # frame to the caller, which asked for one only when the channel was
+        # the one Step0 was showing -- so a channel another step was drawing
+        # (a Step1 overlay, a fusion participant) arrived and never appeared.
+        # A slot came free: start what the cap held back.
+        self._drain_lowres_queue()
+        display = getattr(self, "display", None)
+        notify = getattr(display, "notify_lowres_arrived", None)
+        if notify is not None:
+            return bool(notify(channel, owner="view",
+                               token=self._dataset_token()))
         self.wake_intensity_pixels(channel)
         return True
 
@@ -6030,6 +6046,11 @@ class Step0Page(QWidget):
         # commit block.  Every pre-commit failure above returned before the
         # generation moved, so a listener that acts on this signal can never be
         # told about a dataset that is not the current one.
+        tissue_log.note("dataset.bind", token=str(self._dataset_token()),
+                        generation=int(self._dataset_gen),
+                        current_channel=self.current_channel,
+                        channels=len(self._channel_order),
+                        patches=len(self.patches or []))
         self.dataset_committed.emit({
             "gen": int(self._dataset_gen),
             "ome_path": os.path.abspath(self.ome_path) if self.ome_path else "",
@@ -7487,34 +7508,88 @@ class Step0Page(QWidget):
 
         Bounded, in the caller's order: a frame's own channels before
         anything speculative, so a 29- or 57-channel panel never becomes 57
-        reads because one weight moved. Channels past the cap are reported
-        `requested` rather than `unavailable` -- they are queued behind this
-        page's own reads, not abandoned.
+        reads because one weight moved.
+
+        A channel past the cap is `requested` only because it is really
+        QUEUED here (`_lowres_queue`) and the queue is drained by every
+        arrival. Reporting a capped channel as owned without a queue behind
+        it would be the same lie the old "still missing" answer told, from
+        the other side: nobody would read it and nobody would say so.
         """
         status = {}
-        started = 0
+        queue = self._lowres_queue
         for ch in (channels or []):
             if not ch:
                 continue
             if self.tissue_lowres_array(ch) is not None:
                 status[ch] = self.LOWRES_RESIDENT
+                queue.discard(ch)
                 continue
             if self._overview_read_pending(ch):
                 status[ch] = self.LOWRES_REQUESTED
                 continue
-            if started >= self._TISSUE_LOWRES_MAX_IN_FLIGHT:
+            if self._in_flight_lowres_reads() >= \
+                    self._TISSUE_LOWRES_MAX_IN_FLIGHT:
+                queue.add(ch)
                 status[ch] = self.LOWRES_REQUESTED
+                tissue_log.note("lowres.request", channel=ch, owner="view",
+                                queued=True,
+                                pending=self._in_flight_lowres_reads())
                 continue
             if self._request_overview_async(ch):
-                started += 1
+                queue.discard(ch)
                 status[ch] = self.LOWRES_REQUESTED
+                tissue_log.note("lowres.request", channel=ch, owner="view",
+                                pending=self._in_flight_lowres_reads())
                 continue
             # No viewer is open on this slide, so the shared overview store
             # has no reason to read it. It is NOT read here: this is the GUI
             # thread and the read is 170-230 ms, measured. Block01's own read
             # thread owns it from here.
+            queue.discard(ch)
             status[ch] = self.LOWRES_UNAVAILABLE
+            tissue_log.note("lowres.request", channel=ch, owner="fallback")
         return status
+
+    def _in_flight_lowres_reads(self):
+        """How many whole-slide reads the viewers are running right now."""
+        count = 0
+        for ch in list(self._channel_order):
+            if self._overview_read_pending(ch):
+                count += 1
+        return count
+
+    def _drain_lowres_queue(self):
+        """Start what the cap held back. Called by every arrival.
+
+        The queue is what makes `requested` true for a capped channel: an
+        arrival frees a slot, and the next channels go in. Without it a
+        ten-channel frame would wait for a selection, a weight edit or a step
+        change to ask again -- inputs the user has no reason to produce.
+        """
+        queue = self._lowres_queue
+        if not queue:
+            return 0
+        started = 0
+        for ch in list(queue):
+            if self.tissue_lowres_array(ch) is not None:
+                queue.discard(ch)
+                continue
+            if self._overview_read_pending(ch):
+                continue
+            if self._in_flight_lowres_reads() >= \
+                    self._TISSUE_LOWRES_MAX_IN_FLIGHT:
+                break
+            queue.discard(ch)
+            if self._request_overview_async(ch):
+                started += 1
+                tissue_log.note("lowres.request", channel=ch, owner="view",
+                                drained=True)
+            else:
+                display = getattr(self, "display", None)
+                if display is not None:
+                    display.ensure_lowres([ch])
+        return started
 
     def ensure_tissue_lowres(self, channels):
         """The channels NOBODY here will read -- and only those.
@@ -7595,7 +7670,7 @@ class Step0Page(QWidget):
         """
         return self._dataset_token()
 
-    def install_tissue_lowres(self, channel, token, array):
+    def install_tissue_lowres(self, channel, token, array):  # noqa: D401
         """Adopt an array read on a worker thread. GUI thread only.
 
         Filed under the dataset it was read for, so the ordinary token check
@@ -7610,6 +7685,8 @@ class Step0Page(QWidget):
         dataset_trace.note("lowres.read", channel=channel, token=token,
                            shape=getattr(array, "shape", None),
                            fingerprint=_array_fingerprint(array))
+        # A slot came free here too: this is the fallback reader's arrival.
+        self._drain_lowres_queue()
         return True
 
     def _request_overview_async(self, ch):
@@ -7661,6 +7738,7 @@ class Step0Page(QWidget):
         """
         ch = self.current_channel
         if not ch:
+            tissue_log.note("snapshot.none", reason="no_current_channel")
             return None
         # The token travels WITH THE PIXELS to the overview panels, which the
         # page bound under this same key. Block01's `DatasetIdentity` is a
@@ -7724,7 +7802,15 @@ class Step0Page(QWidget):
                 mappings[name] = window
         if ch not in arrays:
             # The marker itself is the picture; DAPI alone is not a frame.
+            tissue_log.note(
+                "snapshot.none",
+                reason=("mapping_missing" if self.tissue_lowres_array(ch)
+                        is not None else "pixels_missing"),
+                channel=ch, visible=marker_visible,
+                loading=",".join(sorted(set(loading))) or None)
             return None
+        if not marker_visible:
+            tissue_log.note("snapshot.ready", channel=ch, marker_visible=False)
         nucleus_layer = (nuc if (nuc in arrays and nuc != ch
                                  and arrays[nuc].shape[:2]
                                  == arrays[ch].shape[:2]) else "")

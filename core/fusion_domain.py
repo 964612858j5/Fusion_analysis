@@ -1098,6 +1098,47 @@ def migrate_session(sess, fusion_config=None, channels=None):
         else:
             recorded = sess.get("channel_visibility") or {}
         visibility = {str(ch): bool(v) for ch, v in recorded.items()}
+        # THE SPLIT S4 EVER RECORDED IS RECONCILED, by union.
+        #
+        # For one release Step1 carried two controls -- a tick for the screen
+        # and an `f` box for the fusion -- so a session written then can say
+        # "visible but not fused" or "fused but not shown". The tick means
+        # both things again, and a restored project must not show the user a
+        # state they have no control left to correct.
+        #
+        # UNION, in both directions: either side being true means the user
+        # asked for that channel, in the result or on the screen, so it comes
+        # back visible AND participating. Dropping it from the fusion instead
+        # would silently delete a scientific input, which no reading of a
+        # saved project justifies.
+        #
+        # Weights are NOT touched by the reconciliation except where there is
+        # no answer at all: a channel the union enables whose provenance is
+        # `absent` gets the same 1.0/auto a tick itself would have written.
+        # An explicit 0.0, an authoritative 0.2/0.7, a per-group spread --
+        # all survive verbatim.
+        enabled = {str(ch) for ch in (spec.get("enabled") or [])}
+        visible = {ch for ch, on in visibility.items() if on}
+        union = enabled | visible
+        if union != enabled or union != visible:
+            provenance = dict(spec.get("provenance") or {})
+            weights = dict(spec.get("channel_weight") or {})
+            group_weights = {name: dict(values) for name, values
+                             in (spec.get("group_weights") or {}).items()}
+            for ch in sorted(union - enabled):
+                if provenance.get(ch, ABSENT) != ABSENT:
+                    continue
+                provenance[ch] = AUTO
+                weights[ch] = FIRST_ENABLE_WEIGHT
+                for values in group_weights.values():
+                    if ch in values:
+                        values[ch] = FIRST_ENABLE_WEIGHT
+            spec["enabled"] = sorted(union)
+            spec["provenance"] = provenance
+            spec["channel_weight"] = weights
+            if group_weights:
+                spec["group_weights"] = group_weights
+            visibility.update({ch: True for ch in union})
         return spec, visibility
 
     provenance = {ch: AUTHORITATIVE for ch in members}

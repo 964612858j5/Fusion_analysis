@@ -272,11 +272,12 @@ def test_step0_row_name_position_stable_after_done(app):
     assert len(set(before.values())) == 1
     # combos aligned and directly after the (uniform-width) name column
     # In STEP0 the row shows `checkbox | state | swatch | name | method`:
-    # the weight editor and the participation box are Step1's fields and are
-    # hidden here, so the correction combo starts where the name column ends.
+    # the weight editor is Step1's field and is hidden here, so the
+    # correction combo starts where the name column ends. There is no
+    # participation control in any step.
     for r in rows.values():
         assert r.slider.isHidden() and r.spin.isHidden()
-        assert r.fusion_box.isHidden()
+        assert not hasattr(r, "fusion_box")
         assert r.method_cb.x() == r.name_label.x() + r.name_label.width() + 5
     assert len({r.method_cb.x() for r in rows.values()}) == 1
 

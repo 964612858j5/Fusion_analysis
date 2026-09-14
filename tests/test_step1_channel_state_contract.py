@@ -526,9 +526,10 @@ def test_a_channel_row_has_no_hover_text_on_its_controls(app):
             assert row.swatch.toolTip() == ""
             assert row.slider.toolTip() == ""
             assert row.spin.toolTip() == ""
-            # The one exception, and the reason it is one: the `\u0192` box sits
-            # next to a tick box that means something else entirely.
-            assert "FUSION" in row.fusion_box.toolTip()
+            # NO EXCEPTION ANY MORE. The `\u0192` box that carried the one
+            # hover text in the row is gone with the control: Step1's tick
+            # box is the whole "use this channel" gesture.
+            assert not hasattr(row, "fusion_box")
     finally:
         w.close()
 
@@ -555,12 +556,12 @@ def test_the_nucleus_row_stays_read_only_without_saying_so_on_hover(app):
 # be the test: it would overwrite the decision with the default.
 
 def test_both_fusion_entries_answer_the_same(app):
-    """The row's `\u0192` box and `set_fusion_enabled` are one decision in one
+    """The row's TICK BOX and `set_fusion_enabled` are one decision in one
     place, not two rules that can drift apart."""
     w = _window(app)
     try:
-        # 1. the box itself
-        w.config._rows["CD3"].fusion_box.setChecked(True)
+        # 1. the tick the user clicks
+        w.config._rows["CD3"].checkbox.setChecked(True)
         assert w.config.channel_weight("CD3") == 1.0
 
         # 2. the programmatic command
@@ -978,10 +979,10 @@ def test_the_real_handoff_leaves_markers_unanswered(app, tmp_path):
         w.close()
 
 
-def test_after_the_real_handoff_the_fusion_box_weighs_one(app, tmp_path):
+def test_after_the_real_handoff_the_tick_box_weighs_one(app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
-        w.config._rows["CD3"].fusion_box.setChecked(True)
+        w.config._rows["CD3"].checkbox.setChecked(True)
 
         assert w.config.channel_weight("CD3") == 1.0
         assert w.config.get_groups()["markers"]["CD3"] == 1.0
@@ -1014,7 +1015,7 @@ def test_after_the_real_handoff_an_edited_weight_survives_both_entries(
         w.config._rows["CD3"].spin.setValue(0.35)
 
         w.config.set_fusion_enabled("CD3", False)
-        w.config._rows["CD3"].fusion_box.setChecked(True)
+        w.config._rows["CD3"].checkbox.setChecked(True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.35)
 
         w.config.set_fusion_enabled("CD3", False)

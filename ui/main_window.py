@@ -168,79 +168,6 @@ class _ArtifactKindMismatch(Exception):
     """The zarr on disk was written for the other Step1 output kind."""
 
 
-class _GlobalWeightEditor(QWidget):
-    """The shared weight editor: one view over the one set of weights.
-
-    WHY IT EXISTS. Step1 has the channel panel; Step2 and Step3 have no
-    channel controls at all, so "adjust a legal weight in any step" had no
-    user-reachable entry there -- a service method called from a test is not a
-    product operation. This is that entry, and it is a VIEW, not a second
-    store: every spin box writes through `Block01DisplayServices
-    .set_render_weight`, which goes to the `FusionDomainModel` -- the one
-    owner of the scientific weights -- so what the user changes here is the
-    same number Step1's row shows, a Save freezes and a session restores,
-    and it works with the Step1 page not even built.
-
-    One editor for the process, reachable from the Block01 toolbar in every
-    step -- not four copies of a panel.
-    """
-
-    def __init__(self, services, channels, parent=None):
-        super().__init__(parent)
-        self._services = services
-        self._spins = {}
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(4)
-        hint = QLabel("Weights apply to the fusion and to every preview.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#9bd0ff;font-size:10px;")
-        lay.addWidget(hint)
-        for channel in channels:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            label = QLabel(str(channel))
-            label.setStyleSheet("color:#dce5ef;font-size:11px;")
-            label.setMinimumWidth(90)
-            row.addWidget(label)
-            spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(0.0, 1.0)
-            spin.setSingleStep(0.05)
-            spin.setDecimals(2)
-            spin.setKeyboardTracking(False)
-            spin.valueChanged.connect(
-                lambda value, ch=channel: self._on_spin(ch, value))
-            row.addWidget(spin, stretch=1)
-            self._spins[channel] = spin
-            lay.addLayout(row)
-        lay.addStretch()
-        self._syncing = False
-        self.refresh_from_state()
-
-    def _on_spin(self, channel, value):
-        if self._syncing:
-            return
-        self._services.set_render_weight(channel, float(value))
-
-    def refresh_from_state(self):
-        """Show what the one store says. A view, so it follows rather than
-        argues: the spin boxes are set with signals suppressed."""
-        self._syncing = True
-        try:
-            for channel, spin in self._spins.items():
-                current = self._services.render_weight(channel)
-                if current is None:
-                    continue
-                if abs(float(spin.value()) - float(current)) > 1e-9:
-                    spin.setValue(float(current))
-        finally:
-            self._syncing = False
-
-    def spin_for(self, channel):
-        """The real control, for a caller driving a real drag."""
-        return self._spins.get(channel)
-
-
 class _SharedSpecTissueContext:
     """Step2's and Step3's render context: the ONE shared spec, read live.
 
@@ -559,6 +486,7 @@ class MainWindow(QMainWindow):
         outer_lay.setSpacing(0)
 
         step_bar = QHBoxLayout()
+        step_bar.setObjectName("block01_step_bar")
         step_bar.setContentsMargins(8, 4, 8, 4)
         self._step0_lbl = QLabel("● Step 0: Setup & Preprocessing")
         self._step0_lbl.setStyleSheet(
@@ -610,28 +538,24 @@ class MainWindow(QMainWindow):
         # for the whole session", it is a Step1 window that happens to stay
         # open. These three are always there and resolve to the same
         # instances the page buttons do.
-        self._btn_global_intensity = QPushButton("Intensity…")
-        self._btn_global_intensity.setToolTip(
-            "The shared Intensity window. One set of Min/Max/Gamma for the "
-            "whole session, editable in every step.")
+        # ONE BUTTON, and it is the one that was asked for. `Intensity…` and
+        # `Weights…` stood here too: neither was requested, and the second
+        # opened a whole window -- `Channel Weights` -- that duplicated the
+        # weight editor Step1's own rows already carry. Making a component
+        # global means reusing the instance, the state and the style; it
+        # never licensed new product surface, so both are gone along with
+        # the window behind them.
         self._btn_global_tissue = QPushButton("🗺 Tissue Preview")
         self._btn_global_tissue.setToolTip(
             "The shared Tissue Preview. One window for the whole session; "
             "the picture follows whichever step you are in.")
-        self._btn_global_weights = QPushButton("Weights…")
-        self._btn_global_weights.setToolTip(
-            "The shared channel weights. The same numbers the channel panel "
-            "shows and a Save freezes.")
-        for btn in (self._btn_global_intensity, self._btn_global_tissue,
-                    self._btn_global_weights):
+        for btn in (self._btn_global_tissue,):
             btn.setStyleSheet(
                 "QPushButton{color:#9bd0ff;font-size:10px;background:#182230;"
                 "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
                 "QPushButton:hover{background:#23354a;}")
             step_bar.addWidget(btn)
-        self._btn_global_intensity.clicked.connect(self._open_global_intensity)
         self._btn_global_tissue.clicked.connect(self._open_global_navigator)
-        self._btn_global_weights.clicked.connect(self._open_global_weights)
         # v14.1: top-nav Skip → Step2/3/4 buttons and the Step 1.5 workflow entry
         # were removed. Direct navigation is still available via the step labels
         # above. The Step15BackgroundCorrectionPage widget and its set_context
@@ -1398,43 +1322,9 @@ class MainWindow(QMainWindow):
         self._display.publish_render_spec(spec)
 
     # ── the global entries, from the Block01 chrome ───────────────────
-    def _open_global_intensity(self):
-        """Open the ONE Intensity window, on the channel being edited.
-
-        The same call in every step. Which channel that is comes from the
-        channel panel, which is the one answer for the process; a step with
-        no channel list of its own still opens the window on it.
-        """
-        return self._display.show_intensity(self.config.current_channel())
-
     def _open_global_navigator(self):
         """Open the ONE Tissue Preview, under the active step's policy."""
         return self._display.show_navigator()
-
-    def _open_global_weights(self):
-        """Open the ONE weight editor."""
-        return self._display.show_weight_editor()
-
-    def weight_editor_widget(self):
-        """The weight editor content port: a VIEW over the one weight store.
-
-        The channel LIST comes from the dataset, not from the channel panel:
-        the numbers are the model's, and a window opened in Step3 must not
-        need a built Step1 page to know which channels exist.
-        """
-        channels = [str(ch) for ch in
-                    (self.loader.channel_names() if self.loader else [])]
-        if not channels:
-            channels = [ch for ch in (self.config.all_channels or [])]
-        if not channels:
-            return None
-        return _GlobalWeightEditor(self._display, channels)
-
-    def _refresh_weight_editor(self):
-        panel = self._display.weight_editor_panel()
-        refresh = getattr(panel, "refresh_from_state", None)
-        if refresh is not None:
-            refresh()
 
     def _register_block01_contexts(self):
         """Register every step as a render context for the one Tissue Preview.
@@ -1451,7 +1341,6 @@ class MainWindow(QMainWindow):
         # the fusion config plus the display mapping, canonicalised and
         # digested exactly as old projects are named. It is not a second one.
         self._display.fusion.set_hash_provider(self._fusion_settings_hash)
-        self._display.set_weight_editor_content(self)
         self._downstream_contexts = {
             _CTX_STEP2: _SharedSpecTissueContext(self._display, _CTX_STEP2),
             _CTX_STEP3: _SharedSpecTissueContext(self._display, _CTX_STEP3),
@@ -4601,7 +4490,6 @@ class MainWindow(QMainWindow):
             # and the shared picture would keep the value the user has just
             # changed away from.
             self._refresh_published_render_spec()
-        self._refresh_weight_editor()
         self._update_fusion_settings_state()
         self._schedule_step1_session_save()
 

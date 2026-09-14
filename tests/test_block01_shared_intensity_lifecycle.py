@@ -311,7 +311,7 @@ def test_the_step_walk_opens_no_window_of_its_own(app, capsys):
             # the row controls stay inside their row
             for cid in dock.channel_order():
                 row = dock.row(cid)
-                for name in ("checkbox", "fusion_box", "slider", "spin",
+                for name in ("checkbox", "slider", "spin",
                              "method_cb", "swatch"):
                     widget = getattr(row, name)
                     assert widget.parentWidget() is not None, (step, cid, name)
@@ -340,7 +340,7 @@ def test_every_row_control_is_laid_out_by_the_row(app):
             if item.widget() is not None:
                 laid_out.add(id(item.widget()))
         for name in ("checkbox", "state_slot", "swatch", "name_label",
-                     "slider", "spin", "fusion_box", "method_cb"):
+                     "slider", "spin", "method_cb"):
             widget = getattr(row, name)
             assert id(widget) in laid_out or widget.parentWidget() is not None, \
                 name
@@ -733,7 +733,7 @@ def test_a_row_control_that_lost_its_parent_is_never_shown(app):
     try:
         dock = w._channel_dock
         row = dock.row("CD3")
-        box = row.fusion_box
+        box = row.slider
         w._set_step_active(0)
         _pump(100)
         row._lay.removeWidget(box)

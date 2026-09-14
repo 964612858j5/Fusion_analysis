@@ -286,7 +286,7 @@ def test_each_step_shows_the_fields_it_works_with(app):
         core = (row.checkbox, row.swatch, row.name_label)
         fields = {
             0: (row.method_cb,),
-            1: (row.slider, row.spin, row.fusion_box),
+            1: (row.slider, row.spin),
             2: (),
             3: (),
         }
@@ -295,8 +295,7 @@ def test_each_step_shows_the_fields_it_works_with(app):
             shown = fields[step]
             for widget in core:
                 assert not widget.isHidden(), step
-            for widget in (row.method_cb, row.slider, row.spin,
-                           row.fusion_box):
+            for widget in (row.method_cb, row.slider, row.spin):
                 if widget in shown:
                     assert not widget.isHidden(), (step, widget)
                     assert widget.isEnabled(), (step, widget)
@@ -341,7 +340,6 @@ def test_a_hidden_control_cannot_command_its_owner(app):
             # straight at the row's own signals, which is the most a stale
             # connection could ever do
             row.weight_edited.emit("CD3", 0.99)
-            row.fusion_toggled.emit("CD3", False)
             row.method_changed.emit("CD3", "cucim")
             row.spin.setValue(0.05)
             after = (fusion.channel_weight("CD3"),
@@ -469,9 +467,10 @@ def test_the_correction_accessory_only_changes_the_preview_method(app):
         nuc = w._channel_dock.row("DAPI")
         assert not nuc.method_cb.isEnabled()
         assert nuc.checkbox.isEnabled()
-        # ...and Step0 shows no weight editor and no participation box
+        # ...and Step0 shows no weight editor. There is no participation
+        # control anywhere: Step1's tick box is the whole gesture.
         assert row.slider.isHidden() and row.spin.isHidden()
-        assert row.fusion_box.isHidden()
+        assert not hasattr(row, "fusion_box")
     finally:
         _close(w)
 
@@ -494,51 +493,71 @@ def test_no_state_tooltip_names_a_button_that_is_gone(app):
 
 # ── F. Step1's three commands are three things ──────────────────────────────
 
-def test_the_public_checkbox_is_display_and_only_display(app):
+def test_the_tick_box_is_display_alone_outside_step1(app):
+    """Outside Step1 the tick is a display answer and nothing more.
+
+    In Step1 it is the whole "use this channel" gesture -- display AND
+    participation -- which `test_step1_checkbox_is_the_fusion_command` owns.
+    """
     w = _window(app)
     try:
-        w._set_step_active(1)
         state, fusion = w._display.state, w._display.fusion
         row = w._channel_dock.row("CD3")
         fusion.set_fusion_enabled("CD3", True, origin="test")
-        rev = fusion.draft_revision()
-        enabled = fusion.fusion_enabled("CD3")
-        weight = fusion.channel_weight("CD3")
 
-        row.checkbox.setChecked(True)
-        assert state.display_visible("CD3") is True
-        row.checkbox.setChecked(False)
-        assert state.display_visible("CD3") is False
-        # nothing scientific moved
-        assert fusion.draft_revision() == rev
-        assert fusion.fusion_enabled("CD3") == enabled
-        assert fusion.channel_weight("CD3") == weight
+        for step in (0, 2, 3):
+            w._set_step_active(step)
+            # from a known state, so the change below really is one: the
+            # widget and the owner both start at False.
+            state.set_display_visible("CD3", False, origin="test")
+            QtWidgets.QApplication.processEvents()
+            row.checkbox.blockSignals(True)
+            row.checkbox.setChecked(False)
+            row.checkbox.blockSignals(False)
+            rev = fusion.draft_revision()
+            enabled = fusion.fusion_enabled("CD3")
+            weight = fusion.channel_weight("CD3")
+
+            row.checkbox.setChecked(True)
+            assert state.display_visible("CD3") is True, step
+            row.checkbox.setChecked(False)
+            assert state.display_visible("CD3") is False, step
+            # nothing scientific moved
+            assert fusion.draft_revision() == rev, step
+            assert fusion.fusion_enabled("CD3") == enabled, step
+            assert fusion.channel_weight("CD3") == weight, step
         assert w._step0._channel_decisions.get("CD3") in (None, "original")
     finally:
         _close(w)
 
 
-def test_participation_and_weight_are_separate_commands(app):
+def test_the_weight_editor_is_the_only_other_step1_command(app):
+    """Two controls in a Step1 row, not three: the tick and the weight.
+
+    The tick decides whether the channel is used; the slider/spin says how
+    much. A first use of a channel nobody has weighted answers 1.0 once, and
+    an explicit 0.0 is an answer that survives a re-tick.
+    """
     w = _window(app)
     try:
         w._set_step_active(1)
         state, fusion = w._display.state, w._display.fusion
         row = w._channel_dock.row("CD3")
-        state.set_display_visible("CD3", False, origin="test")
 
-        # a first enable of a channel nobody has weighted answers 1.0, once
-        row.fusion_box.setChecked(True)
+        row.checkbox.setChecked(True)
         assert fusion.fusion_enabled("CD3") is True
         assert fusion.channel_weight("CD3") == pytest.approx(1.0)
-        assert state.display_visible("CD3") is False
+        assert state.display_visible("CD3") is True
 
-        # an explicit 0.0 is an answer and survives a disable/re-enable
         row.spin.setValue(0.0)
         assert fusion.channel_weight("CD3") == pytest.approx(0.0)
-        row.fusion_box.setChecked(False)
-        row.fusion_box.setChecked(True)
-        assert fusion.channel_weight("CD3") == pytest.approx(0.0)
-        assert state.display_visible("CD3") is False
+        assert state.display_visible("CD3") is True, \
+            "editing a weight moved the display answer"
+
+        row.checkbox.setChecked(False)
+        row.checkbox.setChecked(True)
+        assert fusion.channel_weight("CD3") == pytest.approx(0.0), \
+            "a re-tick overwrote an explicit zero"
     finally:
         _close(w)
 
@@ -587,17 +606,18 @@ def test_one_user_action_is_one_domain_command(app):
         fusion.weight_changed.connect(weight.append)
         fusion.participation_changed.connect(lambda c, e: part.append((c, e)))
 
+        # ONE user action, ONE logical command. In Step1 the tick is the
+        # whole "use this channel" gesture, so it moves display AND science
+        # -- once each, and the first use also answers the weight.
         row.checkbox.setChecked(not row.checkbox.isChecked())
-        assert len(vis) == 1 and not col and not weight and not part
+        assert len(vis) == 1 and not col
+        assert len(part) == 1 and len(weight) == 1
 
         row.spin.setValue(0.42)
-        assert len(weight) == 1 and len(vis) == 1
+        assert len(weight) == 2 and len(vis) == 1 and len(part) == 1
 
         state.set_color("CD8", "#00ff88", origin="test")
         assert len(col) == 1
-
-        row.fusion_box.setChecked(not row.fusion_box.isChecked())
-        assert len(part) == 1
     finally:
         _close(w)
 
@@ -893,9 +913,8 @@ def test_a_released_step0_is_collected_and_no_longer_answers(app):
         # the public fields still work
         state, fusion = w._display.state, w._display.fusion
         w._set_step_active(1)
-        dock.row("CD8").checkbox.setChecked(True)
+        dock.row("CD8").checkbox.setChecked(True)     # show AND use it
         dock.row("CD8").spin.setValue(0.7)
-        dock.row("CD8").fusion_box.setChecked(True)
         assert state.display_visible("CD8") is True
         assert fusion.channel_weight("CD8") == pytest.approx(0.7)
         assert fusion.fusion_enabled("CD8") is True

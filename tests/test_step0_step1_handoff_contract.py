@@ -1216,7 +1216,10 @@ def test_a_session_restore_is_one_fact_for_both_owners(
         json.loads(session_path.read_text(encoding="utf-8")),
         source_path=str(run.raw))
     assert model.draft_snapshot() == before
-    assert restored.visibility["CD68"] is False
+    # THE UNION: this session says CD68 is fused, so it comes back on
+    # screen too. A restored project never shows a tick that does not
+    # match what the fusion uses.
+    assert restored.visibility["CD68"] is True
     assert restored.changed is False, "a repeated restore reported a change"
     assert quiet == [], f"a repeated restore announced {len(quiet)} times"
 
@@ -1483,7 +1486,7 @@ def test_every_restore_callback_sees_both_owners_final(tmp_path, monkeypatch,
     for name, shot in restore_shots:
         assert shot["display_identity"] == identity, (name, shot)
         assert shot["fusion_identity"] == identity, (name, shot)
-        assert shot["visibility"] == {"DAPI": True, "CD68": False}, (name, shot)
+        assert shot["visibility"] == {"DAPI": True, "CD68": True}, (name, shot)
         assert shot["selection"] == "CD68", (name, shot)
         assert shot["colors"] == {"CD68": "#ff0000", "DAPI": "#0000ff"}, \
             (name, shot)
@@ -1515,7 +1518,7 @@ def test_a_real_restore_costs_one_refresh_one_frame_and_one_save(
     sess = json.loads(session_path.read_text(encoding="utf-8"))
     restored = w._restore_step1_scientific_state(
         sess, source_path=str(run.raw))
-    assert restored.visibility == {"DAPI": True, "CD68": False}
+    assert restored.visibility == {"DAPI": True, "CD68": True}
     assert restored.changed is True
 
     assert w._display.fusion.draft_revision() == before_rev + 1, \
@@ -1605,7 +1608,7 @@ def test_a_restore_of_another_slide_moves_the_binding_once(tmp_path,
             continue
         assert shot["display_identity"] == identity, (name, shot)
         assert shot["fusion_identity"] == identity, (name, shot)
-        assert shot["visibility"] == {"DAPI": True, "CD68": False}, (name, shot)
+        assert shot["visibility"] == {"DAPI": True, "CD68": True}, (name, shot)
 
 
 def test_the_same_slide_with_other_answers_installs_without_rebinding(

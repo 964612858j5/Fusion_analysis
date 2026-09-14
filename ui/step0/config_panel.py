@@ -169,9 +169,17 @@ class ConfigPanel(QWidget):
         self._sync_row_weight(channel, self._fusion.channel_weight(channel))
 
     def _on_model_participation_changed(self, channel, enabled):
+        """Participation moved in the model: the ROW'S TICK is its view.
+
+        There is no separate participation control any more -- Step1's tick
+        box is the whole gesture -- so what follows the model here is the
+        same box the display answer drives. Silent: `set_visible_state`
+        blocks the widget's signal, so drawing the answer cannot be mistaken
+        for making it again.
+        """
         row = self._rows.get(channel)
         if row is not None:
-            row.set_fusion_enabled(bool(enabled))
+            row.set_visible_state(bool(enabled))
 
     def _on_model_draft_restored(self):
         """A whole draft arrived at once: every row catches up, silently."""
@@ -180,7 +188,6 @@ class ConfigPanel(QWidget):
     def _sync_rows_from_model(self):
         for ch, row in self._rows.items():
             row.set_weight(self._fusion.channel_weight(ch))
-            row.set_fusion_enabled(self._fusion.fusion_enabled(ch))
         self._refresh_nucleus_display()
 
     # ── construction ──────────────────────────────────────────────────

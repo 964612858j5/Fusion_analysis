@@ -1772,7 +1772,6 @@ class Block01DisplayServices(QObject):
         self._intensity_panel = None
         self._navigator_policy = {"roi_policy": "full", "patch_editable": True}
         self._render_spec = None
-        self._weight_editor_content = None
         self._seed_worker = None
         self._read_worker = None
         # What has already been announced as arrived, for THIS slide:
@@ -1786,8 +1785,6 @@ class Block01DisplayServices(QObject):
         # for correctness did nothing about the memory.
         self._announced_lowres = {}
         self._announced_lowres_token = None
-        self._weight_editor = None
-        self._weight_editor_panel = None
         # THE one public channel dock (B4-B). Built here, outside the stacked
         # pages, because a per-step list is what let Step0, Step1 and Step3
         # disagree about the same channel and lose the user's place on every
@@ -1983,63 +1980,6 @@ class Block01DisplayServices(QObject):
         # would mean the channel never drew and so never qualified to draw.
         self.coordinator.request_frame(kind="seed", channel=channel)
 
-    def set_weight_editor_content(self, port):
-        """Register who FURNISHES the shared weight editor.
-
-        `port` answers `weight_editor_widget()`. Same rule as the other two:
-        content, not lifetime. The window is Block01's so it is reachable
-        from Step2 and Step3, where the step page has no channel panel of its
-        own -- and there is one editor, not one per step.
-        """
-        self._weight_editor_content = port
-
-    def weight_editor(self):
-        return self._weight_editor
-
-    def ensure_weight_editor(self):
-        if self._weight_editor is not None or self._closing:
-            return self._weight_editor
-        port = self._weight_editor_content
-        if port is None:
-            return None
-        try:
-            panel = port.weight_editor_widget()
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[Block01] the weight editor is unavailable: {exc}")
-            return None
-        if panel is None:
-            return None
-        win = QWidget(
-            self._widget_parent(),
-            Qt.Window
-            | Qt.WindowMinimizeButtonHint
-            | Qt.WindowCloseButtonHint
-            | Qt.WindowStaysOnTopHint,
-        )
-        win.setWindowTitle("Channel Weights")
-        win.setStyleSheet("background:#1c1c1c;")
-        win.setMinimumWidth(260)
-        win.resize(300, 420)
-        lay = QVBoxLayout(win)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.addWidget(panel)
-        self._weight_editor = win
-        self._weight_editor_panel = panel
-        return win
-
-    def show_weight_editor(self):
-        win = self.ensure_weight_editor()
-        if win is None:
-            return None
-        refresh = getattr(self._weight_editor_panel, "refresh_from_state", None)
-        if refresh is not None:
-            refresh()
-        _bring_to_front(win)
-        return win
-
-    def weight_editor_panel(self):
-        return self._weight_editor_panel
-
     def set_lowres_source(self, source):
         """Register the whole-slide low-resolution data service.
 
@@ -2067,7 +2007,7 @@ class Block01DisplayServices(QObject):
         is a Loading frame, not a call into a deleted object.
         """
         for name in ("_navigator_content", "_intensity_content",
-                     "_lowres_source", "_weight_editor_content"):
+                     "_lowres_source"):
             if getattr(self, name, None) is owner:
                 setattr(self, name, None)
         if self.state._seed_port is owner:
@@ -2693,8 +2633,7 @@ class Block01DisplayServices(QObject):
                 worker.stop()
             except Exception:                               # noqa: BLE001
                 pass
-        for win in (self._intensity_window, self._navigator,
-                    self._weight_editor):
+        for win in (self._intensity_window, self._navigator):
             if win is None:
                 continue
             try:
@@ -2704,8 +2643,6 @@ class Block01DisplayServices(QObject):
         self._intensity_window = None
         self._intensity_panel = None
         self._navigator = None
-        self._weight_editor = None
-        self._weight_editor_panel = None
         # The public dock goes with them, and only here: `begin_close` may be
         # refused, and a dock destroyed on a refused close would leave the
         # session without the list every step edits in.

@@ -473,14 +473,23 @@ def test_an_s3_empty_marker_cannot_erase_a_real_number(app):
         w.close()
 
 
-def test_the_new_schema_says_display_and_fusion_separately(app):
+def test_a_split_session_is_reconciled_by_union_on_restore(app):
+    """A session written while Step1 briefly had two controls.
+
+    That release could record "visible but not fused" and "fused but not
+    shown". The tick means both things again, so a restored project must not
+    put the user in a state they have no control left to correct: either side
+    being true means they asked for that channel, and it comes back visible
+    AND participating. The numbers are untouched -- an explicit 0.0 stays
+    0.0 -- and only a channel with no answer at all is given the 1.0 a tick
+    would have written.
+    """
     w = _window(app)
     try:
-        # Visible but out of the science, and in the science but not drawn.
         w.config.set_channel_visible("CD3", True)
-        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_fusion_enabled("CD3", False)      # visible, not fused
         w.config.set_channel_visible("CD8", False)
-        w.config.set_fusion_enabled("CD8", True)
+        w.config.set_fusion_enabled("CD8", True)       # fused, not shown
         w._display.fusion.edit_channel_weight("CD8", 0.0)
         payload = json.loads(json.dumps(w._step1_session_payload()))
 
@@ -496,11 +505,16 @@ def test_the_new_schema_says_display_and_fusion_separately(app):
         visibility = _visibility_of(w._restore_step1_scientific_state(payload))
         model = w._display.fusion
 
-        assert visibility["CD3"] is True and model.fusion_enabled("CD3") is False
-        assert visibility["CD8"] is False and model.fusion_enabled("CD8") is True
+        # both come back on both sides
+        assert visibility["CD3"] is True and model.fusion_enabled("CD3") is True
+        assert visibility["CD8"] is True and model.fusion_enabled("CD8") is True
+        # ...and the explicit zero is still the explicit zero
         assert model.weight_provenance("CD8") == EXPLICIT
         assert model.channel_weight("CD8") == 0.0, \
             "an explicit zero and an absence are the same number on disk"
+        # the channel the union enabled had no answer, so it got the tick's
+        assert model.weight_provenance("CD3") == AUTO
+        assert model.channel_weight("CD3") == 1.0
     finally:
         w.close()
 
@@ -543,20 +557,25 @@ def test_a_failed_commit_leaves_the_committed_snapshot_alone(app, monkeypatch):
 
 # ── D. edits made from another step, and the consumers ───────────────────
 
-def test_a_weight_edited_in_step3_reaches_the_draft_and_the_picture(app):
+def test_a_weight_edited_in_step1_reaches_the_draft_and_the_picture(app):
+    """STEP1'S OWN ROW is the only weight control there is.
+
+    A `Weights…` window in the top bar was never asked for and is gone; the
+    row's slider/spin is where a weight is edited, and what it writes has to
+    reach the draft, the dirty state, the published spec and a Save.
+    """
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", True)
         w.config.set_fusion_enabled("CD3", True)
         w._display.fusion.install_committed_snapshot(
             {"hash": w._fusion_settings_hash()})
-        w._set_step_active(3)
+        w._set_step_active(1)
         _pump()
-        editor = w.weight_editor_widget()
-        spin = editor.spin_for("CD3")
-        assert spin is not None, "the shared Weights window has no CD3 control"
+        spin = w._channel_dock.row("CD3").spin
+        assert spin.isEnabled(), "Step1's own weight control is not live"
 
-        spin.setValue(0.3)                       # the real control, in Step3
+        spin.setValue(0.3)                       # the real control, in Step1
         _pump()
 
         model = w._display.fusion
@@ -762,19 +781,26 @@ def test_a_heterogeneous_project_survives_the_whole_session_round_trip(app):
         assert model.group_weights()["B"] == pytest.approx(0.5)
         rep = model.representative_weight("CD3")
         assert (rep.value, rep.mixed) == (pytest.approx(0.7), True)
-        # An explicit zero is still not an absence.
+        # AN EXPLICIT ZERO IS STILL NOT AN ABSENCE -- and the union that
+        # reconciles a split session does not touch it: CD8 was visible, so
+        # it comes back participating, at the 0.0 somebody chose.
         assert groups["A"]["CD8"] == 0.0
         assert model.weight_provenance("CD8") == EXPLICIT
-        # Display and science stayed apart.
         assert visibility["CD8"] is True
-        assert model.fusion_enabled("CD8") is False
-        # ...and the whole configuration, and its hash, are what was saved.
+        assert model.fusion_enabled("CD8") is True
+        # ...and every number, and the whole membership, is what was saved.
         assert model.full_config() == before_full
-        assert w._effective_fusion_config() == before_eff
-        assert w._fusion_settings_hash() == before_hash
+        # The EFFECTIVE config legitimately gains the reconciled channel --
+        # at its own weight -- and the hash moves with it, which is what
+        # `Unsaved` is for. Nothing here rewrites the committed snapshot to
+        # hide that.
+        assert w._effective_fusion_config() != before_eff
+        assert w._effective_fusion_config()["groups"]["A"]["channels"]["CD8"] \
+            == 0.0
 
-        # Neither a repaint, nor a first enable, nor another save flattens it.
+        # Neither a repaint, nor a re-enable, nor another save flattens it.
         w.config._rebuild_rows()
+        model.set_fusion_enabled("CD8", False)
         model.set_fusion_enabled("CD8", True)
         json.loads(json.dumps(w._step1_session_payload()))
         groups = model.groups()

@@ -451,7 +451,7 @@ def test_the_weight_row_and_the_buttons_kept_their_look(app):
         row = dock.row("CD3")
         assert abs(row.height() - template.ROW_HEIGHT) <= 1
         assert row.slider.isVisible() and row.spin.isVisible()
-        assert row.fusion_box.isVisible()
+        assert row.slider.isVisible() and row.spin.isVisible()
     finally:
         w.hide()
         w.close()

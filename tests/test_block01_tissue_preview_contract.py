@@ -1351,20 +1351,22 @@ def test_the_global_windows_open_from_a_real_button_in_every_step(app):
             # IN THE BLOCK01 CHROME, not merely constructed: the point is
             # that these outlive the page the user is on, so each must be a
             # descendant of the window and NOT of the stacked widget.
-            for btn in (w._btn_global_intensity, w._btn_global_tissue,
-                        w._btn_global_weights):
-                assert w.isAncestorOf(btn), (step, btn.text())
-                assert not w._stack.isAncestorOf(btn), (step, btn.text())
-            w._btn_global_intensity.click()
-            w._btn_global_tissue.click()
-            w._btn_global_weights.click()
+            # ONE button in the chrome, and it is the one that was asked
+            # for: the Tissue Preview. `Intensity…` and `Weights…` were
+            # added here without a request and are gone; the Intensity
+            # window is opened from the step pages' own entries.
+            btn = w._btn_global_tissue
+            assert w.isAncestorOf(btn), step
+            assert not w._stack.isAncestorOf(btn), step
+            assert not hasattr(w, "_btn_global_intensity")
+            assert not hasattr(w, "_btn_global_weights")
+            btn.click()
+            w._display.show_intensity(w.config.current_channel())
 
             assert w._display.intensity_window() is not None, step
             assert w._display.intensity_window().isVisible(), step
             assert w._display.navigator() is not None, step
             assert w._display.navigator().isVisible(), step
-            assert w._display.weight_editor() is not None, step
-            assert w._display.weight_editor().isVisible(), step
         # One instance each, across the whole walk.
         assert w._display.navigator() is w._step0._tissue_navigator_popup
     finally:
@@ -1386,15 +1388,16 @@ def test_a_real_weight_spinbox_drag_moves_the_picture_in_every_step(app):
         w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
         w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
         _goto(w, 1)
-        w._btn_global_weights.click()
-        editor = w._display.weight_editor_panel()
-        spin = editor.spin_for("CD3")
+        # STEP1'S OWN ROW is the weight control. The shared `Weights…` window
+        # was never asked for and is gone, so the drag happens where a user
+        # actually does it -- and Step2/Step3 draw the published spec, which
+        # is what the frames below are about.
+        spin = w._channel_dock.row("CD3").spin
         assert spin is not None
 
         report = {}
-        for step in (1, 2, 3):
+        for step in (1,):
             _goto(w, step)
-            editor.refresh_from_state()
             frames = _drag_frames(w, [
                 (lambda v=v: spin.setValue(v))
                 for v in (0.8, 0.6, 0.4, 0.2, 0.05)])
@@ -1419,7 +1422,7 @@ def test_a_real_intensity_spinbox_drag_moves_the_picture_in_every_step(app):
         w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(1.0)
         _goto(w, 1)
-        w._btn_global_intensity.click()
+        w._display.show_intensity("CD3")
         wb = w._step0._cond_workbench
         wb.set_active_channel("CD3")
         # `_sp_max` is the inspector's real Max spin box -- the widget the

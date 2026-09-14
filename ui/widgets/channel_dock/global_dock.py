@@ -91,7 +91,6 @@ class GlobalChannelRow(QtWidgets.QWidget):
 
     visibility_toggled = pyqtSignal(str, bool)
     weight_edited = pyqtSignal(str, float)
-    fusion_toggled = pyqtSignal(str, bool)
     method_changed = pyqtSignal(str, str)
     color_clicked = pyqtSignal(str)
     #: A REAL mouse click, told apart from a programmatic selection: a
@@ -163,22 +162,14 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self.slider.valueChanged.connect(self._on_slider)
         self.spin.valueChanged.connect(self._on_spin)
 
-        # -- Step1's accessory: fusion participation ------------------------
-        self.fusion_box = QtWidgets.QCheckBox("ƒ")
-        self.fusion_box.setToolTip(
-            "Take part in the FUSION. Unticking keeps this channel's groups "
-            "and weights; it simply stops contributing. The box on the left "
-            "only controls whether it is drawn.")
-        self.fusion_box.setStyleSheet(template.CHECKBOX_INDICATOR_QSS)
-        self.fusion_box.toggled.connect(self._on_fusion_toggled)
-        # IN THE ROW'S LAYOUT, like the slider and the spin box beside it.
-        # It was built and connected but never added to a layout, so it had
-        # no parent -- and `set_step(STEP1)` showing a parentless QWidget is
-        # Qt's definition of a new TOP-LEVEL WINDOW: entering Step1 opened
-        # one tiny untitled window per channel, each carrying the
-        # application's name.
-        template.add_accessory(self._lay, self.fusion_box)
-        self._acc_step1 = (self.slider, self.spin, self.fusion_box)
+        # NO SEPARATE PARTICIPATION CONTROL. Step1's tick box IS the
+        # scientific act: it shows the channel and puts it into the fusion,
+        # and there is no second control for the second half. The `f` box
+        # added here was never asked for -- making the global dock reusable
+        # licenses reusing the component, not inventing product surface --
+        # and it split one gesture into two, so a user who ticked a channel
+        # got a visible channel that the fusion silently ignored.
+        self._acc_step1 = (self.slider, self.spin)
 
         # -- Step0's accessory: the PREVIEW method and the compute state ----
         self.method_cb = QtWidgets.QComboBox()
@@ -307,9 +298,6 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self.spin.setButtonSymbols(
             QtWidgets.QDoubleSpinBox.UpDownArrows if editable
             else QtWidgets.QDoubleSpinBox.NoButtons)
-        self.fusion_box.setEnabled(
-            step == STEP1
-            and bool(getattr(caps, "fusion_toggleable", True)))
         self.method_cb.setEnabled(
             step == STEP0
             and bool(getattr(caps, "correction_eligible", True)))
@@ -353,16 +341,6 @@ class GlobalChannelRow(QtWidgets.QWidget):
             self.slider.setValue(int(round(float(value) * 100)))
         finally:
             self._busy = False
-
-    def is_fusion_enabled(self):
-        return self.fusion_box.isChecked()
-
-    def set_fusion_enabled(self, enabled):
-        if self.fusion_box.isChecked() == bool(enabled):
-            return
-        self.fusion_box.blockSignals(True)
-        self.fusion_box.setChecked(bool(enabled))
-        self.fusion_box.blockSignals(False)
 
     def set_method(self, method):
         """Show this channel's PREVIEW method, `Both` included. A value that
@@ -422,9 +400,6 @@ class GlobalChannelRow(QtWidgets.QWidget):
         finally:
             self._busy = False
         self.weight_edited.emit(self._cid, float(v))
-
-    def _on_fusion_toggled(self, checked):
-        self.fusion_toggled.emit(self._cid, bool(checked))
 
     def _on_method_text(self, text):
         self.method_changed.emit(self._cid, str(text))
@@ -755,7 +730,6 @@ class GlobalChannelDock(QtWidgets.QWidget):
             row.set_step(self._step)
             row.visibility_toggled.connect(self._on_row_visibility)
             row.weight_edited.connect(self._on_row_weight)
-            row.fusion_toggled.connect(self._on_row_fusion)
             row.method_changed.connect(self._on_row_method)
             row.color_clicked.connect(self._on_color_clicked)
             row.row_clicked.connect(self._on_row_clicked)
@@ -812,7 +786,6 @@ class GlobalChannelDock(QtWidgets.QWidget):
         if fusion is not None:
             rep = fusion.representative_weight(cid)
             row.set_weight(rep.value)
-            row.set_fusion_enabled(fusion.fusion_enabled(cid))
             # THE NUCLEUS'S WEIGHT COMES FROM THE STEP0 HANDOFF and is read
             # only wherever it is shown. Which channel that is belongs to the
             # scientific owner, so it is asked here rather than derived from
@@ -884,9 +857,16 @@ class GlobalChannelDock(QtWidgets.QWidget):
         self._refresh_name(cid)
 
     def _on_fusion_participation(self, cid, enabled):
+        """Participation moved in the model: the row's TICK is its view.
+
+        In Step1 the tick box is both halves of one answer, so the model's
+        notice lands on the same widget the display answer does. Silent --
+        `set_visible_state` blocks the signal -- so drawing an answer is
+        never mistaken for making one.
+        """
         row = self._rows.get(cid)
-        if row is not None:
-            row.set_fusion_enabled(bool(enabled))
+        if row is not None and self._step == STEP1:
+            row.set_visible_state(bool(enabled))
 
     def _refresh_selection(self):
         if self._state is None:
@@ -901,10 +881,36 @@ class GlobalChannelDock(QtWidgets.QWidget):
 
     # ── dock -> owner (the only writes) ───────────────────────────────
     def _on_row_visibility(self, cid, visible):
-        """The display tick, in every step. Display and nothing else: no
-        correction decision, no fusion participation, no weight."""
+        """The tick box. What it means depends on the step -- deliberately.
+
+        Step0, Step2, Step3: DISPLAY, and nothing else. No correction
+        decision, no participation, no weight.
+
+        STEP1: one gesture, one decision -- "use this channel". It shows the
+        channel AND puts it into the fusion, and a channel nobody has
+        weighted enters at 1.0. That is the product's own contract and it
+        predates the dock; splitting it into a tick plus a second `f` control
+        is what left a ticked channel visible while `effective_config()`
+        filtered it out, so a whole slide fused to DAPI alone.
+
+        The weight rule is the model's (`set_fusion_enabled`): a first enable
+        of a channel with no answer writes 1.0 as an automatic answer, and an
+        explicit 0.0 or a per-group 0.2/0.7 is never overwritten. Unticking
+        keeps all of it; ticking again restores it rather than forcing 1.0.
+
+        ONE LOGICAL COMMAND: the model raises its draft revision once and
+        emits weight -> participation -> draft, so nothing observes "shown
+        but not participating" or "participating at 0" in between.
+        """
+        visible = bool(visible)
+        if self._step == STEP1 and self._fusion is not None:
+            caps = (self._state.capabilities(cid)
+                    if self._state is not None else None)
+            if getattr(caps, "fusion_toggleable", True):
+                self._fusion.set_fusion_enabled(
+                    cid, visible, origin=f"dock-step{self._step}")
         if self._state is not None:
-            self._state.set_display_visible(cid, bool(visible),
+            self._state.set_display_visible(cid, visible,
                                             origin=f"dock-step{self._step}")
 
     def _on_row_weight(self, cid, value):
@@ -920,14 +926,6 @@ class GlobalChannelDock(QtWidgets.QWidget):
         if self._fusion is not None:
             self._fusion.edit_channel_weight(cid, value,
                                              origin=f"dock-step{self._step}")
-
-    def _on_row_fusion(self, cid, enabled):
-        """Fusion participation: Step1's control, and Step1's alone."""
-        if self._step != STEP1:
-            return
-        if self._fusion is not None:
-            self._fusion.set_fusion_enabled(cid, bool(enabled),
-                                            origin=f"dock-step{self._step}")
 
     def _refresh_name(self, cid):
         """Draw one row's name, with the mixed marker only where it means

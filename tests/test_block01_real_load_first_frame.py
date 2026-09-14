@@ -969,10 +969,10 @@ def test_a_switch_retires_the_previous_slides_queue(app, monkeypatch,
 
         assert store_b.accepted == started_before, \
             "a late arrival of the previous slide started a read of this one"
-        # the queue belongs to THIS slide now; nothing of A's is owed
+        # the queue belongs to THIS slide now, and nothing of A's is owed.
+        # (B may have queued channels of its own by this point; what must be
+        # gone is the STAMP and the reads A was promised.)
         assert page._lowres_queue_token == page._dataset_token()
-        assert not set(page._lowres_queue) & set(a_wanted[4:]) or \
-            page._lowres_queue_token == page._dataset_token()
         assert store_a.served == [], store_a.served
     finally:
         _close(w, timeline)

@@ -20,6 +20,7 @@ Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 import os
 import threading
 import time
+import weakref
 
 import numpy as np
 import pytest
@@ -854,3 +855,340 @@ def test_the_log_records_the_whole_first_frame_chain(app, monkeypatch,
     # ...and no array was scanned into it
     assert "fingerprint=" in text
     assert len(text.splitlines()) < 4000
+
+
+# ── the queue belongs to a slide, and keeps the caller's order ──────────────
+
+class _ViewerStore:
+    """A stand-in for the shared overview store, with the cap enforced by the
+    test rather than by the page: it accepts reads, reports them pending, and
+    completes them one at a time in the order they were accepted."""
+
+    def __init__(self, page, slide, cap=4, accept=True):
+        self.page, self.slide, self.cap = page, slide, cap
+        self.accept = accept
+        self.running, self.accepted, self.served = [], [], []
+        page._request_overview_async = self.request
+        page._overview_read_pending = lambda ch: ch in self.running
+        page._resident_overview_record = lambda ch: None
+
+    def request(self, ch):
+        if not self.accept or len(self.running) >= self.cap:
+            return False
+        self.running.append(ch)
+        self.accepted.append(ch)
+        return True
+
+    def finish(self, ch=None):
+        """One accepted read completes, the way the viewer reports it."""
+        if ch is None:
+            if not self.running:
+                return None
+            ch = self.running[0]
+        self.running.remove(ch)
+        array = self.slide._pattern(ch, LOW_H, LOW_W)
+        self.page._resident_overview_record = lambda c, _c=ch, _a=array: (
+            type("R", (), {"arr": _a, "source": "viewer"})()
+            if c == _c else None)
+        self.served.append(ch)
+        self.page._on_channel_overview_ready("src", ch, 0, True)
+        self.page._resident_overview_record = lambda c: None
+        return ch
+
+
+def test_the_queue_starts_reads_in_the_order_they_were_asked_for(
+        app, monkeypatch, tmp_path):
+    """Ten channels, four at a time, in the CALLER'S order.
+
+    The queue was a set, so the order a frame's channels were asked for --
+    its own first, anything speculative after -- was lost to whatever the
+    set iterated.
+    """
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page = w._step0
+        _pump(1000)
+        page._slide_lowres.clear()
+        w._display._announced_lowres.clear()
+        store = _ViewerStore(page, slide, cap=4)
+        wanted = ["CD31", "FoxP3", "Ki67", "CD68", "CD20", "CD8", "CD3",
+                  "PanCK", "CD45", "DAPI"]
+
+        page.tissue_lowres_status(wanted)
+
+        assert store.accepted == wanted[:4], store.accepted
+        assert list(page._lowres_queue) == wanted[4:], page._lowres_queue
+
+        for _ in range(len(wanted)):
+            if not store.running:
+                break
+            store.finish()
+            _pump(40)
+
+        assert store.accepted == wanted, store.accepted
+        assert store.served == wanted, store.served
+        assert not page._lowres_queue
+    finally:
+        _close(w, timeline)
+
+
+def test_a_switch_retires_the_previous_slides_queue(app, monkeypatch,
+                                                    tmp_path):
+    """A's queued channels are A's promise. After B is loaded they are not
+    started -- not by B's arrivals, not by anything."""
+    w, slide_a, timeline = _load(app, monkeypatch, tmp_path, name="QA")
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        page._slide_lowres.clear()
+        store_a = _ViewerStore(page, slide_a, cap=4)
+        a_wanted = ["CD31", "FoxP3", "Ki67", "CD68", "CD20", "CD8", "CD3",
+                    "PanCK", "CD45", "DAPI"]
+        page.tissue_lowres_status(a_wanted)
+        assert len(page._lowres_queue) == 6
+        a_token = page._dataset_token()
+
+        # B, through the real entry
+        ome_b = tmp_path / "QB.ome.tif"
+        ome_b.write_bytes(b"synthetic slide B")
+        page._ome_path_edit.setText(str(ome_b))
+        page._out_path_edit.setText(str(tmp_path / "QB_out"))
+        page._btn_load.click()
+        QtWidgets.QApplication.processEvents()
+        slide_b = page.loader
+        assert page._dataset_token() != a_token
+        _pump(600)
+
+        store_b = _ViewerStore(page, slide_b, cap=4)
+        started_before = list(store_b.accepted)
+
+        # A's read completes now -- late, and about the slide that is gone
+        page._resident_overview_record = lambda ch: None
+        page._on_channel_overview_ready("src", "CD31", 0, True)
+        _pump(200)
+
+        assert store_b.accepted == started_before, \
+            "a late arrival of the previous slide started a read of this one"
+        # the queue belongs to THIS slide now; nothing of A's is owed
+        assert page._lowres_queue_token == page._dataset_token()
+        assert not set(page._lowres_queue) & set(a_wanted[4:]) or \
+            page._lowres_queue_token == page._dataset_token()
+        assert store_a.served == [], store_a.served
+    finally:
+        _close(w, timeline)
+
+
+def test_a_switch_drops_the_previous_slides_announced_arrays(app, monkeypatch,
+                                                             tmp_path):
+    """The de-duplication record must not keep a slide alive.
+
+    It held the array itself, so every channel of every slide the session had
+    touched stayed in memory behind a token that only stopped it being
+    misused.
+    """
+    import gc
+
+    w, slide_a, timeline = _load(app, monkeypatch, tmp_path, name="MA")
+    try:
+        page, display = w._step0, w._display
+        _pump(1200)
+        channel = page.current_channel
+        array = slide_a._pattern(channel, LOW_H, LOW_W)
+        page.install_tissue_lowres(channel, page._dataset_token(), array)
+        display._announced_lowres.pop(channel, None)
+        display.notify_lowres_arrived(channel, owner="test")
+        assert channel in display._announced_lowres
+        ref = weakref.ref(array)
+
+        ome_b = tmp_path / "MB.ome.tif"
+        ome_b.write_bytes(b"synthetic slide B")
+        page._ome_path_edit.setText(str(ome_b))
+        page._out_path_edit.setText(str(tmp_path / "MB_out"))
+        page._btn_load.click()
+        QtWidgets.QApplication.processEvents()
+        _pump(600)
+        b_channel = page.current_channel
+        display.notify_lowres_arrived(b_channel, owner="test")
+
+        assert display._announced_lowres_token == display._lowres_token()
+        # NOTHING HERE KEEPS A'S ARRAY ALIVE: the record was emptied at the
+        # switch, and what it holds now is weak anyway.
+        del array
+        page._slide_lowres.pop(channel, None)
+        gc.collect()
+        assert ref() is None, "the announce record still holds A's array"
+    finally:
+        _close(w, timeline)
+
+
+# ── a request is owned only when somebody really took it ────────────────────
+
+def test_a_viewer_that_cannot_take_the_read_hands_it_on(app, monkeypatch,
+                                                        tmp_path):
+    """`prepare_overview_async` returns quietly when a controller cannot
+    serve -- a torn-down view, no source bound. That was read as "taken"."""
+    w, slide, timeline = _load(app, monkeypatch, tmp_path)
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        channel = "CD45"
+        page._slide_lowres.pop(channel, None)
+
+        class _TornDown:
+            asked = []
+
+            def prepare_overview_async(self, ch):
+                self.asked.append(ch)
+                return False                # an explicit refusal
+
+            def overview_read_pending(self, ch):
+                return False
+
+        class _Working:
+            asked = []
+            running = set()
+
+            def prepare_overview_async(self, ch):
+                self.asked.append(ch)
+                self.running.add(ch)
+                return None                 # ...but really takes it
+
+            def overview_read_pending(self, ch):
+                return ch in self.running
+
+        torn, working = _TornDown(), _Working()
+        page._overview_hosts = lambda: [torn, working]
+        page._resident_overview_record = lambda ch: None
+
+        assert page._request_overview_async(channel) is True
+        assert torn.asked == [channel] and working.asked == [channel]
+
+        # ...and when EVERY viewer refuses, the channel is unavailable, so
+        # Block01's own reader takes it.
+        page._overview_hosts = lambda: [torn]
+        page._overview_read_pending = lambda ch: False
+        fallback = []
+        monkeypatch.setattr(display, "_request_lowres_reads",
+                            lambda chs: fallback.extend(chs))
+        status = page.tissue_lowres_status([channel])
+        assert status == {channel: page.LOWRES_UNAVAILABLE}, status
+        display.ensure_lowres([channel])
+        assert fallback == [channel], fallback
+    finally:
+        _close(w, timeline)
+
+
+def test_a_late_arrival_of_the_previous_slide_advances_nothing(app,
+                                                               monkeypatch,
+                                                               tmp_path):
+    """The same rule from the other side: A's completion must not consume a
+    slot B is queueing behind."""
+    w, slide_a, timeline = _load(app, monkeypatch, tmp_path, name="LA")
+    try:
+        page, display = w._step0, w._display
+        _pump(1000)
+        a_token = page._dataset_token()
+
+        ome_b = tmp_path / "LB.ome.tif"
+        ome_b.write_bytes(b"synthetic slide B")
+        page._ome_path_edit.setText(str(ome_b))
+        page._out_path_edit.setText(str(tmp_path / "LB_out"))
+        page._btn_load.click()
+        QtWidgets.QApplication.processEvents()
+        _pump(600)
+        slide_b = page.loader
+        page._slide_lowres.clear()
+        store = _ViewerStore(page, slide_b, cap=4)
+        wanted = ["CD31", "FoxP3", "Ki67", "CD68", "CD20", "CD8"]
+        page.tissue_lowres_status(wanted)
+        queued_before = list(page._lowres_queue)
+        accepted_before = list(store.accepted)
+
+        # A's array, arriving now, through the real reader callback
+        display._on_lowres_read(
+            {"channel": "CD3", "token": a_token,
+             "array": slide_a._pattern("CD3", LOW_H, LOW_W)})
+        _pump(200)
+
+        assert list(page._lowres_queue) == queued_before, page._lowres_queue
+        assert store.accepted == accepted_before, store.accepted
+        assert "CD3" not in page._slide_lowres or \
+            page._slide_lowres["CD3"][0] == page._dataset_token()
+    finally:
+        _close(w, timeline)
+
+
+def test_a_drain_started_by_a_late_arrival_ignores_the_old_queue(
+        app, monkeypatch, tmp_path):
+    """The drain checks the slide ITSELF.
+
+    An arrival is the one thing that starts queued reads, and a late one
+    belongs to the slide the user has left. If the drain trusted whatever was
+    in the queue, that arrival would start reads of a slide nobody is looking
+    at -- against the current loader.
+    """
+    w, slide_a, timeline = _load(app, monkeypatch, tmp_path, name="DA")
+    try:
+        page = w._step0
+        _pump(800)
+        a_token = page._dataset_token()
+
+        ome_b = tmp_path / "DB.ome.tif"
+        ome_b.write_bytes(b"synthetic slide B")
+        page._ome_path_edit.setText(str(ome_b))
+        page._out_path_edit.setText(str(tmp_path / "DB_out"))
+        page._btn_load.click()
+        QtWidgets.QApplication.processEvents()
+        _pump(500)
+        slide_b = page.loader
+        assert page._dataset_token() != a_token
+
+        store = _ViewerStore(page, slide_b, cap=4)
+        # a queue left over from A, exactly as it stood before the switch
+        page._lowres_queue = ["CD31", "FoxP3", "Ki67"]
+        page._lowres_queue_token = a_token
+
+        started = page._drain_lowres_queue()
+
+        assert started == 0, "the old slide's queue was started"
+        assert store.accepted == [], store.accepted
+        assert page._lowres_queue == []
+        assert page._lowres_queue_token == page._dataset_token()
+    finally:
+        _close(w, timeline)
+
+
+def test_the_announce_record_never_keeps_an_array_alive(app, monkeypatch,
+                                                        tmp_path):
+    """Even without a switch: what the de-duplication holds is weak.
+
+    The record exists to say "this exact array has already been announced",
+    which needs identity, not ownership -- and a strong reference here kept a
+    whole-slide overview alive for every channel the session ever drew.
+    """
+    import gc
+
+    w, slide, timeline = _load(app, monkeypatch, tmp_path, name="WK")
+    try:
+        page, display = w._step0, w._display
+        _pump(800)
+        channel = "CD68"
+        array = slide._pattern(channel, LOW_H, LOW_W)
+        page.install_tissue_lowres(channel, page._dataset_token(), array)
+        display._announced_lowres.pop(channel, None)
+        assert display.notify_lowres_arrived(channel, owner="test") is True
+        assert channel in display._announced_lowres
+        ref = weakref.ref(array)
+
+        # every other holder of the array lets go; the record is the only
+        # thing that could still be keeping it
+        del array
+        page._slide_lowres.pop(channel, None)
+        wb = getattr(page, "_cond_workbench", None)
+        if wb is not None:
+            wb._raw.pop(channel, None)
+        gc.collect()
+
+        assert ref() is None, "the announce record is holding the array"
+    finally:
+        _close(w, timeline)

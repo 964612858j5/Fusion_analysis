@@ -411,9 +411,14 @@ class Step0Page(QWidget):
         # from the other: preview=Both with final=Original is a normal state
         # (compare two candidates, publish the raw channel).
         self._channel_methods: dict = {}
-        # Channels a frame wants whose read the in-flight cap held back.
-        # Drained by every arrival (`adopt_tissue_lowres`).
-        self._lowres_queue = set()
+        # Channels a frame wants whose read the in-flight cap held back --
+        # IN THE ORDER THEY WERE ASKED FOR, and stamped with the dataset they
+        # belong to. A bare set was both unordered (so a ten-channel frame
+        # started its reads in whatever order the set iterated, not the
+        # caller's) and slide-blind (so channels queued for A could be
+        # started by an arrival belonging to B).
+        self._lowres_queue = []
+        self._lowres_queue_token = None
         # What a channel with no preview method of its own previews with --
         # the bulk Method box's current value. `both` at startup.
         self._preview_method_default = "both"
@@ -7517,27 +7522,30 @@ class Step0Page(QWidget):
         the other side: nobody would read it and nobody would say so.
         """
         status = {}
+        token = self._dataset_token()
+        self._retire_lowres_queue(token)
         queue = self._lowres_queue
         for ch in (channels or []):
             if not ch:
                 continue
             if self.tissue_lowres_array(ch) is not None:
                 status[ch] = self.LOWRES_RESIDENT
-                queue.discard(ch)
+                self._unqueue_lowres(ch)
                 continue
             if self._overview_read_pending(ch):
                 status[ch] = self.LOWRES_REQUESTED
                 continue
             if self._in_flight_lowres_reads() >= \
                     self._TISSUE_LOWRES_MAX_IN_FLIGHT:
-                queue.add(ch)
+                if ch not in queue:
+                    queue.append(ch)        # IN ORDER, behind what is running
                 status[ch] = self.LOWRES_REQUESTED
                 tissue_log.note("lowres.request", channel=ch, owner="view",
-                                queued=True,
+                                queued=True, position=queue.index(ch),
                                 pending=self._in_flight_lowres_reads())
                 continue
             if self._request_overview_async(ch):
-                queue.discard(ch)
+                self._unqueue_lowres(ch)
                 status[ch] = self.LOWRES_REQUESTED
                 tissue_log.note("lowres.request", channel=ch, owner="view",
                                 pending=self._in_flight_lowres_reads())
@@ -7546,10 +7554,34 @@ class Step0Page(QWidget):
             # has no reason to read it. It is NOT read here: this is the GUI
             # thread and the read is 170-230 ms, measured. Block01's own read
             # thread owns it from here.
-            queue.discard(ch)
+            self._unqueue_lowres(ch)
             status[ch] = self.LOWRES_UNAVAILABLE
             tissue_log.note("lowres.request", channel=ch, owner="fallback")
         return status
+
+    def _unqueue_lowres(self, ch):
+        if ch in self._lowres_queue:
+            self._lowres_queue.remove(ch)
+
+    def _retire_lowres_queue(self, token=None):
+        """Drop everything queued for a slide that is no longer this one.
+
+        A queue entry is a promise that THIS page will read that channel. The
+        promise belongs to the slide it was made for: after a switch, A's
+        queued channels must not be started -- by B's arrivals or by anything
+        else -- and must not be reported as owned.
+        """
+        token = self._dataset_token() if token is None else token
+        if self._lowres_queue_token == token:
+            return False
+        if self._lowres_queue:
+            tissue_log.note("lowres.queue_retired",
+                            channels=",".join(self._lowres_queue),
+                            was=str(self._lowres_queue_token),
+                            now=str(token))
+        self._lowres_queue = []
+        self._lowres_queue_token = token
+        return True
 
     def _in_flight_lowres_reads(self):
         """How many whole-slide reads the viewers are running right now."""
@@ -7567,20 +7599,25 @@ class Step0Page(QWidget):
         ten-channel frame would wait for a selection, a weight edit or a step
         change to ask again -- inputs the user has no reason to produce.
         """
+        # A DRAIN IS ABOUT THIS SLIDE. An arrival belonging to the slide the
+        # user has left must not start anything: the queue is retired first,
+        # so A's late completion finds nothing of A's to advance and cannot
+        # reach into B's.
+        self._retire_lowres_queue()
         queue = self._lowres_queue
         if not queue:
             return 0
         started = 0
-        for ch in list(queue):
+        for ch in list(queue):             # in the order they were asked for
             if self.tissue_lowres_array(ch) is not None:
-                queue.discard(ch)
+                self._unqueue_lowres(ch)
                 continue
             if self._overview_read_pending(ch):
                 continue
             if self._in_flight_lowres_reads() >= \
                     self._TISSUE_LOWRES_MAX_IN_FLIGHT:
                 break
-            queue.discard(ch)
+            self._unqueue_lowres(ch)
             if self._request_overview_async(ch):
                 started += 1
                 tissue_log.note("lowres.request", channel=ch, owner="view",
@@ -7692,22 +7729,49 @@ class Step0Page(QWidget):
     def _request_overview_async(self, ch):
         """Ask a viewer to read `ch`'s whole-slide overview in the background.
 
-        True when somebody took it. Single-flight per (source, channel, level)
-        across every controller sharing the store, so a channel three views
-        want is read once and all of them are woken by
-        `_on_channel_overview_ready`.
+        True only when somebody REALLY took it. `prepare_overview_async`
+        returns quietly when the controller cannot serve the request -- a
+        torn-down view, no source bound, a level it does not have -- so
+        "the call did not raise" was never the same statement as "a read is
+        running", and `requested` was being reported for channels nobody was
+        reading. Every controller is tried, and each answer is verified
+        against the store's own pending flag; a request nobody accepted is
+        reported as such so the fallback reader takes it.
+
+        Single-flight per (source, channel, level) across every controller
+        sharing the store, so a channel three views want is read once and
+        all of them are woken by `_on_channel_overview_ready`.
         """
         for controller in self._overview_hosts():
             request = getattr(controller, "prepare_overview_async", None)
             if request is None:
                 continue
             try:
-                request(ch)
+                answer = request(ch)
             except Exception as exc:                        # noqa: BLE001
                 print(f"[step0] tissue low-res request failed for "
                       f"{ch!r}: {exc}", flush=True)
                 continue
-            return True
+            if answer is False:
+                tissue_log.note("lowres.rejected", channel=ch, owner="view",
+                                reason="declined")
+                continue
+            # VERIFIED, not assumed: either this controller now reports the
+            # read as pending, or the array is already there. Anything else
+            # is a request nobody took.
+            taken = False
+            try:
+                taken = bool(controller.overview_read_pending(ch))
+            except Exception:                               # noqa: BLE001
+                taken = False
+            if not taken and answer is True:
+                taken = True                # an explicit yes is an answer
+            if not taken and self._resident_overview_record(ch) is not None:
+                taken = True
+            if taken:
+                return True
+            tissue_log.note("lowres.rejected", channel=ch, owner="view",
+                            reason="not_pending")
         return False
 
     # At most this many whole-slide reads asked for at once. The arrays are

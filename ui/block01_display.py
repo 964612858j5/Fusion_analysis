@@ -43,6 +43,7 @@ import collections
 import copy
 import math
 import time
+import weakref
 
 import numpy as np
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -1774,10 +1775,17 @@ class Block01DisplayServices(QObject):
         self._weight_editor_content = None
         self._seed_worker = None
         self._read_worker = None
-        # What has already been announced as arrived, per channel:
-        # (dataset token, the array object). Two producers finishing the same
+        # What has already been announced as arrived, for THIS slide:
+        # {channel: weakref to the array}. Two producers finishing the same
         # read announce one arrival.
+        #
+        # WEAK, and emptied at a switch. Holding the array itself kept the
+        # previous slide's whole-slide overviews alive for as long as the
+        # session lasted -- one ~2 MB array per channel of a slide nobody is
+        # looking at any more -- and the token check that made it harmless
+        # for correctness did nothing about the memory.
         self._announced_lowres = {}
+        self._announced_lowres_token = None
         self._weight_editor = None
         self._weight_editor_panel = None
         # THE one public channel dock (B4-B). Built here, outside the stacked
@@ -2576,12 +2584,28 @@ class Block01DisplayServices(QObject):
             tissue_log.note("lowres.rejected", channel=channel, owner=owner,
                             reason="not_resident")
             return False
+        if self._announced_lowres_token != current:
+            # A DIFFERENT SLIDE: the previous one's record goes, with the
+            # references it held.
+            if self._announced_lowres:
+                tissue_log.note("lowres.announced_retired",
+                                channels=",".join(sorted(
+                                    self._announced_lowres)),
+                                was=str(self._announced_lowres_token),
+                                now=str(current))
+            self._announced_lowres = {}
+            self._announced_lowres_token = current
         seen = self._announced_lowres.get(channel)
-        if seen is not None and seen[0] == current and seen[1] is array:
+        if seen is not None and seen() is array:
             tissue_log.note("lowres.accepted", channel=channel, owner=owner,
                             dedup=True)
             return False
-        self._announced_lowres[channel] = (current, array)
+        try:
+            self._announced_lowres[channel] = weakref.ref(array)
+        except TypeError:
+            # Not weak-referenceable (a memoryview, a list a test passed):
+            # announce it and keep nothing.
+            self._announced_lowres.pop(channel, None)
         tissue_log.note("lowres.accepted", channel=channel, owner=owner,
                         token=current, shape=getattr(array, "shape", None),
                         dtype=str(getattr(array, "dtype", "")),

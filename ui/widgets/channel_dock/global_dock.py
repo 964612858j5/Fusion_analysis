@@ -171,6 +171,13 @@ class GlobalChannelRow(QtWidgets.QWidget):
             "only controls whether it is drawn.")
         self.fusion_box.setStyleSheet(template.CHECKBOX_INDICATOR_QSS)
         self.fusion_box.toggled.connect(self._on_fusion_toggled)
+        # IN THE ROW'S LAYOUT, like the slider and the spin box beside it.
+        # It was built and connected but never added to a layout, so it had
+        # no parent -- and `set_step(STEP1)` showing a parentless QWidget is
+        # Qt's definition of a new TOP-LEVEL WINDOW: entering Step1 opened
+        # one tiny untitled window per channel, each carrying the
+        # application's name.
+        template.add_accessory(self._lay, self.fusion_box)
         self._acc_step1 = (self.slider, self.spin, self.fusion_box)
 
         # -- Step0's accessory: the PREVIEW method and the compute state ----
@@ -257,9 +264,15 @@ class GlobalChannelRow(QtWidgets.QWidget):
         Visibility and reachability only; whether an active control is
         ENABLED is `_apply_permissions`'s answer, because that is the
         channel's capability rather than the step's.
+
+        NEVER SHOWS AN ORPHAN. A visible QWidget with no parent is Qt's
+        definition of a top-level window, so a control that has lost its
+        parent is hidden and left alone rather than floated over the
+        application as a tiny nameless window.
         """
         for w in widgets:
-            w.setVisible(bool(active))
+            show = bool(active) and w.parentWidget() is not None
+            w.setVisible(show)
             if not active:
                 w.setEnabled(False)
             w.setFocusPolicy(Qt.StrongFocus if active else Qt.NoFocus)

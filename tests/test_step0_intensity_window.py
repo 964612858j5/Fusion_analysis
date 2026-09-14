@@ -532,6 +532,32 @@ class _OutlierSeedLoader(_GpuPathLoader):
         return arr
 
 
+
+def _await_pixels(page, *channels, ms=3000):
+    """Wait for the Intensity workbench's pixels to ARRIVE.
+
+    The inspector's pixel provider is resident-only since the shared-intensity
+    fix: a channel this page has never drawn is read on a worker and delivered
+    through `wake_intensity_pixels`, because reading a whole slide inside the
+    provider froze the GUI thread for the length of the decode -- and never
+    produced a histogram at all when the read was slow or failed.
+
+    So a test that selects a channel now waits for it, exactly as the user
+    does.
+    """
+    import time as _time
+    from PyQt5 import QtWidgets as _QW
+    wb = page._cond_workbench
+    end = _time.monotonic() + ms / 1000.0
+    while _time.monotonic() < end:
+        _QW.QApplication.processEvents()
+        if all(wb._raw.get(c) is not None for c in channels):
+            return True
+        _time.sleep(0.005)
+    _QW.QApplication.processEvents()
+    return all(wb._raw.get(c) is not None for c in channels)
+
+
 def _landing_page(app, stack=None, loader=None):
     """A freshly loaded slide on its landing view: dataset bound, full
     image showing, NO patch drawn, workbench never engaged."""
@@ -547,6 +573,7 @@ def test_with_no_patch_the_window_opens_on_the_current_channel(app):
     assert not page.patches and not wb.has_channel_data()
 
     page.show_intensity_window()
+    _await_pixels(page, "CD3")
 
     assert wb.has_channel_data(), "no channel data with no patch drawn"
     assert wb.active_channel() == "CD3"
@@ -575,6 +602,7 @@ def test_with_no_patch_selecting_a_row_moves_the_inspector(app):
     page.show_intensity_window()
 
     page._on_channel_selected_by_id("CD20")
+    _await_pixels(page, "CD20")
 
     assert page.current_channel == "CD20"
     assert wb.active_channel() == "CD20"
@@ -604,6 +632,7 @@ def test_the_workbench_pixels_are_the_slide_not_the_patch(app):
     page = _landing_page(app, loader=loader)
     wb = page._cond_workbench
     page.show_intensity_window()
+    _await_pixels(page, "CD3")
 
     slide = page._slide_lowres_array("CD3")
     assert wb._raw["CD3"] is slide, "the workbench read its own pixels"
@@ -618,6 +647,7 @@ def test_a_drawn_patch_does_not_change_the_workbench_pixels(app):
     """One rule on this page: the whole slide, patch or no patch."""
     page = _landing_page(app, loader=_OutlierSeedLoader())
     page.show_intensity_window()
+    _await_pixels(page, "CD3")
     before = page._cond_workbench._params["CD3"]["max"]
 
     page.patches = [(0, 32, 0, 32)]
@@ -1049,6 +1079,7 @@ def test_opening_the_window_engages_the_hidden_remap_owner(app):
     assert "CD3" not in wb._params
 
     page.show_intensity_window()
+    _await_pixels(page, "CD3")
 
     assert wb.has_channel_data()
     assert wb.active_channel() == page.current_channel == "CD3"
@@ -1087,6 +1118,7 @@ def test_selection_still_switches_after_the_window_engaged_it(app):
     page.show_intensity_window()
 
     page._on_channel_selected_by_id("CD20")
+    _await_pixels(page, "CD20")
 
     assert page.current_channel == "CD20"
     assert wb.active_channel() == "CD20"
@@ -1183,6 +1215,7 @@ def test_an_active_change_while_detached_recomposites_once_after_reattach(app, m
 def test_hidden_conditioning_host_never_replays_its_old_canvas(app, monkeypatch):
     page = _page(app)
     page.show_intensity_window()
+    _await_pixels(page, "CD3")
     wb = page._cond_workbench
     calls = _count_composites(monkeypatch)
     wb._sp_max.setValue(float(wb._sp_max.value()) + 50.0)
@@ -1230,6 +1263,9 @@ def test_the_slide_seed_is_computed_once_per_channel(app):
     page.show_intensity_window()
 
     page._on_channel_selected_by_id("CD20")
+    # the whole-slide read is a background one now; the point of the test is
+    # that it happens ONCE, however many consumers ask for the window.
+    _await_pixels(page, "CD20")
     for _ in range(5):
         page._display_mapping_for("CD20")
 

@@ -854,6 +854,9 @@ def test_the_intensity_window_is_editable_in_every_step(app):
     try:
         w._display.show_intensity("CD3")
         panel = w._display.intensity_panel()
+        # the inspector's pixels arrive from a worker now, and the seed is
+        # computed from them
+        _pump(w, 1500)
         lo, hi, _g = w._display.state.mapping_or_seed("CD3")
         w._step0.set_display_mapping("CD3", lo, hi / 3.0)
 

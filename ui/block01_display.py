@@ -2473,6 +2473,19 @@ class Block01DisplayServices(QObject):
         except Exception as exc:                            # noqa: BLE001
             print(f"[Block01] could not install {channel}'s array: {exc}")
             return
+        # TWO CONSUMERS OF ONE ARRIVAL, not one. The frame is asked for, and
+        # the Intensity inspector -- which may be sitting on this very
+        # channel with an empty histogram, waiting for exactly this read --
+        # is woken. Installing into the low-res store alone left the window
+        # blank until something else happened to re-activate the channel.
+        port = self._intensity_content
+        wake = getattr(port, "wake_intensity_pixels", None)
+        if wake is not None:
+            try:
+                wake(channel)
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Block01] could not wake Intensity for {channel}: "
+                      f"{exc}")
         self.coordinator.request_frame(kind="lowres", channel=channel)
 
     def lowres_read_pending(self, channel=None):

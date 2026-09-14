@@ -1187,12 +1187,42 @@ class ChannelWorkbench(QtWidgets.QWidget):
                 self._load_params_into_controls(name)
             self._refresh_preview()
 
-    def _ensure_loaded(self, name):
-        """Lazily fetch a channel's pixels via the provider if not yet loaded.
+    def deliver_pixels(self, name, array):
+        """A channel's pixels arrived from the host, off the GUI thread.
 
-        On first activation of a lazy channel (pixels were None), read its
-        current-patch array once and (re)seed its Min/Max from the real data.
-        A single synchronous read is fast; no async needed.
+        The other half of an asynchronous provider: `_ensure_loaded` asks and
+        may get nothing back, because a whole-slide read of a channel nobody
+        has looked at yet belongs on a worker -- reading it here froze the
+        GUI for as long as the decode took, and a read that was slow or
+        failed left the inspector on the previous channel's histogram with no
+        way forward.
+
+        Installs the array, seeds this channel's window if it has none, and
+        -- only when it is the channel on screen -- refills the controls and
+        the histogram. Late pixels for a channel the user has moved off are
+        filed and drawn nowhere.
+        """
+        if not name or name not in self._params or array is None:
+            return False
+        arr = self._coerce_2d(array)
+        if arr is None:
+            return False
+        if self._raw.get(name) is not None:
+            return False
+        self._install_loaded(name, arr)
+        if name == self._active:
+            self._load_params_into_controls(name)
+            self._refresh_preview()
+        return True
+
+    def _ensure_loaded(self, name):
+        """Ask the provider for a channel's pixels, if they are not loaded.
+
+        The provider may answer NOTHING and start a background read instead;
+        the pixels then arrive through `deliver_pixels`. Until they do, this
+        channel simply has no array -- the histogram is empty and the
+        inspector says so -- which is the honest state and not the previous
+        channel's picture.
         """
         if self._raw.get(name) is not None:
             return                              # cache hit for this patch
@@ -1205,6 +1235,14 @@ class ChannelWorkbench(QtWidgets.QWidget):
             arr = None
         if arr is None:
             return
+        self._install_loaded(name, arr)
+
+    def _install_loaded(self, name, arr):
+        """File `arr` as `name`'s pixels and seed its window if it has none.
+
+        The one place a lazily fetched array lands, whether it came back from
+        the provider immediately or from the host later.
+        """
         self._raw[name] = arr
         self._raw_dmax.pop(name, None)
         if self._user_adjusted.get(name):
@@ -1515,6 +1553,18 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._seeded.add(self._active)
         self._load_params_into_controls(self._active)
         self._layer_list.update_mini(self._active, p["weight"], "w")
+        # RESET IS AN EDIT, and an edit is PUBLISHED. This used to stop at
+        # `_refresh_preview()`, which redraws this widget and nothing else:
+        # the new window never reached `ChannelDisplayState`, so the main
+        # viewer and the Tissue Preview went on drawing the old one and the
+        # button looked dead. Auto worked precisely because it ends here.
+        #
+        # The SAME exit as Auto and as a slider drag -- one publishing path,
+        # so a Reset cannot fan out differently from any other edit. The
+        # controls were just loaded with the reset values, so what is
+        # collected and emitted IS the reset window.
+        self._collect_params_from_controls()
+        self._sync_minmax_sliders()
         self._refresh_preview()
 
     def fit_view(self):

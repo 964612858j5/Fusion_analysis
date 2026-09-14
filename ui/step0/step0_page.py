@@ -1434,7 +1434,8 @@ class Step0Page(QWidget):
 
         from .preview_source_provider import Step0PreviewSourceProvider
         self._preview_provider = Step0PreviewSourceProvider(self)
-        self._cond_workbench.set_pixel_provider(self._workbench_pixels)
+        self._cond_workbench.set_pixel_provider(
+            self._workbench_pixels_async)
         self._cond_workbench.set_display_seed_provider(
             lambda _name, arr: seed_display_range(arr))
         self._preview_provider.stage_invalidated.connect(
@@ -3624,6 +3625,71 @@ class Step0Page(QWidget):
             return None
         from .preview_source_provider import STAGE_CORRECTED
         return provider.get_pixels(name, STAGE_CORRECTED)
+
+    def _workbench_pixels_async(self, name):
+        """The Intensity workbench's pixel provider: RESIDENT ONLY.
+
+        The inspector is Block01's, and a user in any step may select any
+        channel -- including one this page has never drawn. Reading that
+        channel's whole slide here, on the GUI thread, is what the provider
+        used to do: 170-230 ms of frozen interface per channel on a small
+        slide, seconds on a real one, and on a slide whose read is slow or
+        fails the histogram simply never appeared, which is the "most
+        channels have no signal in Step1" report.
+
+        So: answer with what is already there, and otherwise ask Block01's
+        low-res service for a BACKGROUND read (single-flight per channel,
+        capped, checked against the dataset on arrival). The arrival comes
+        back through `wake_intensity_pixels`, which installs it into the
+        workbench and refills the histogram. No ROI and no patch is involved
+        in any of it.
+        """
+        arr = self._slide_lowres_array(name, blocking=False,
+                                       resident_only=True)
+        if arr is not None:
+            return arr
+        display = getattr(self, "display", None)
+        loader = getattr(self, "loader", None)
+        if getattr(loader, "read_region_lowres", None) is None:
+            # A SLIDE WITH NO PYRAMID. There is no whole-slide read to wait
+            # for, so the background service can never answer, and the
+            # inspector would stay empty for ever. These slides keep the
+            # behaviour they always had -- the Save-boundary patch source --
+            # which is not a whole-slide decode.
+            return self._workbench_pixels(name)
+        if display is not None and name:
+            try:
+                display.ensure_lowres([name])
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step0] could not request {name}'s overview: {exc}")
+        return None
+
+    def wake_intensity_pixels(self, channel):
+        """A whole-slide array landed: give it to the Intensity workbench.
+
+        Installing it in the shared low-res store is only half of an
+        arrival. The workbench holds its own copy of the pixels it draws the
+        histogram from, and nothing used to tell it that the array it asked
+        for had come back -- so a channel selected in Step1 stayed blank
+        until something else happened to activate it again.
+
+        Silent for a channel the workbench does not carry, and it draws
+        nothing for a channel the user has moved off: `deliver_pixels` files
+        late arrivals and refills the controls only for the active one.
+        """
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not channel:
+            return False
+        arr = self._slide_lowres_array(channel, blocking=False,
+                                       resident_only=True)
+        if arr is None:
+            return False
+        try:
+            return bool(wb.deliver_pixels(channel, arr))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step0] could not hand {channel}'s pixels to Intensity: "
+                  f"{exc}")
+            return False
 
     def _provide_channel_pixels(self, name):
         """Pixel provider for the workbench: serve from the preload cache (zero

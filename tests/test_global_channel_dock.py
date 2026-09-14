@@ -330,9 +330,10 @@ def test_a_hidden_control_cannot_command_its_owner(app):
         w._set_step_active(1)
         fusion.edit_channel_weight("CD3", 0.4, origin="test")
         fusion.set_fusion_enabled("CD3", True, origin="test")
-        page._channel_decisions["CD3"] = "tophat"
+        page._set_channel_preview_method("CD3", "tophat")
+        decisions_before = dict(page._channel_decisions)
         before = (fusion.channel_weight("CD3"), fusion.fusion_enabled("CD3"),
-                  page._channel_decisions.get("CD3"),
+                  page._channel_preview_method("CD3"),
                   fusion.draft_revision())
 
         for step in (0, 2, 3):
@@ -345,15 +346,17 @@ def test_a_hidden_control_cannot_command_its_owner(app):
             row.spin.setValue(0.05)
             after = (fusion.channel_weight("CD3"),
                      fusion.fusion_enabled("CD3"),
-                     page._channel_decisions.get("CD3"),
+                     page._channel_preview_method("CD3"),
                      fusion.draft_revision())
             if step == 0:
-                # Step0 owns the correction: that one IS its command
+                # Step0 owns the preview method: that one IS its command
                 assert after[2] == "cucim"
                 assert after[:2] == before[:2]
-                page._channel_decisions["CD3"] = "tophat"
+                page._set_channel_preview_method("CD3", "tophat")
             else:
                 assert after == before, step
+            # ...and in NO step does this row decide what Save publishes.
+            assert dict(page._channel_decisions) == decisions_before, step
     finally:
         _close(w)
 
@@ -433,8 +436,8 @@ def test_the_public_row_keeps_the_shared_template_geometry(app):
 
 # ── E. Step0's correction accessory ─────────────────────────────────────────
 
-def test_the_correction_accessory_only_changes_the_correction(app):
-    from block01.ui.widgets.channel_dock.global_dock import CORRECTION_METHODS
+def test_the_correction_accessory_only_changes_the_preview_method(app):
+    from block01.ui.widgets.channel_dock.global_dock import PREVIEW_METHODS
 
     w = _window(app)
     try:
@@ -448,14 +451,20 @@ def test_the_correction_accessory_only_changes_the_correction(app):
 
         row.method_cb.setCurrentText("TopHat")
 
-        assert page._channel_decisions["CD3"] == "tophat"
-        assert page._channel_row_method("CD3") == "tophat"
+        assert page._channel_preview_method("CD3") == "tophat"
+        # ...and NOT what Save publishes: that is the Per-Channel Decision
+        # panel's answer and this combo never writes it.
+        assert page._channel_final_decision("CD3") == "original"
+        assert page._channel_decisions.get("CD3") in (None, "")
         assert (state.display_visible("CD3"), fusion.fusion_enabled("CD3"),
                 fusion.channel_weight("CD3")) == before
-        # `Both` is a computation, never a final answer
-        assert "both" not in [m.lower() for m in CORRECTION_METHODS]
+        # `Both` IS a preview method -- prepare two candidates and compare
+        assert "both" in [m.lower() for m in PREVIEW_METHODS]
         assert [row.method_cb.itemText(i)
-                for i in range(row.method_cb.count())] == CORRECTION_METHODS
+                for i in range(row.method_cb.count())] == PREVIEW_METHODS
+        row.method_cb.setCurrentText("Both")
+        assert page._channel_preview_method("CD3") == "both"
+        assert page._channel_decisions.get("CD3") in (None, "")
         # the nucleus cannot be corrected, and can still be shown
         nuc = w._channel_dock.row("DAPI")
         assert not nuc.method_cb.isEnabled()
@@ -917,7 +926,7 @@ def test_a_new_step0_controller_receives_the_command_once(app):
         dock.correction_method_changed.emit("CD3", "TopHat")
 
         assert calls == [("CD3", "TopHat")], calls
-        assert page._channel_decisions["CD3"] == "tophat"
+        assert page._channel_preview_method("CD3") == "tophat"
     finally:
         w._display.shutdown("test")
         w.deleteLater()
@@ -941,7 +950,7 @@ def test_the_detach_of_a_stale_adapter_leaves_the_current_one(app):
         assert dock.correction_controller() is page._dock_adapter
         w._set_step_active(0)
         dock.row("CD3").method_cb.setCurrentText("TopHat")
-        assert page._channel_decisions["CD3"] == "tophat"
+        assert page._channel_preview_method("CD3") == "tophat"
     finally:
         w._display.shutdown("test")
         w.deleteLater()

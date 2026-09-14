@@ -35,7 +35,9 @@ from .bg_correction import (
     # re-exports the three names because it is the boundary that publishes
     # them, and every writer already reaches for them through here.
     FINAL_CORRECTION_DECISIONS,
+    PREVIEW_METHODS,
     is_final_correction_decision,
+    is_preview_method,
     migrate_correction_decision,
     corrected_zarr_report,
     stamp_corrected_zarr_provenance,

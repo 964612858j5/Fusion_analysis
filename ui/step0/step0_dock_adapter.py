@@ -85,15 +85,18 @@ class Step0ChannelDockAdapter(QObject):
         # how Step0 and Step1 came to hold two public lists over the same
         # channels.
         self.dock = page.display.ensure_channel_dock()
-        # WHAT STEP0 ANSWERS FOR, asked of the page rather than stored twice:
-        # the correction decision is `_channel_decisions` (its one authority
-        # since B4-A) and the compute state is derived from the page's
+        # WHAT STEP0 ANSWERS FOR, asked of the page rather than stored twice.
+        # The combo shows the channel's PREVIEW method (`_channel_methods`,
+        # `Both` included) -- what it is computed and looked at with. What
+        # Save publishes is the FINAL decision (`_channel_decisions`), a
+        # different answer with a different control, and it is deliberately
+        # not drawn in this row. The compute state is derived from the page's
         # signature bookkeeping. Installed as ONE controller, which the dock
         # holds weakly and this adapter detaches when the page is released.
         self.dock.attach_step0_correction_controller(
             self,
-            method=lambda ch: self._ask(lambda p: p._channel_row_method(ch),
-                                        ""),
+            method=lambda ch: self._ask(
+                lambda p: p._channel_preview_method(ch), ""),
             state=lambda ch: self._ask(lambda p: _compute_state(p, ch), ""),
             name=lambda ch: self._ask(self._row_name_of(ch), str(ch)))
         self.dock.correction_method_changed.connect(
@@ -148,13 +151,16 @@ class Step0ChannelDockAdapter(QObject):
         return self._ask(self._row_name_of(ch), str(ch))
 
     def _on_correction_method_changed(self, ch, text):
-        """The dock's Step0 accessory moved: the page's correction domain is
-        the only thing that may act on it.
+        """The dock's Step0 accessory moved: the row's PREVIEW method.
 
-        FAIL CLOSED once that page is gone. The dock outlives Step0 -- that is
-        the point of one public dock -- so a correction decision arriving
-        after the page was destroyed has nowhere authoritative to land, and
-        writing it through a dangling pointer would be a decision nobody owns.
+        The page's correction domain is the only thing that may act on it,
+        and what it records is what the channel is previewed and computed
+        with -- never what Save publishes.
+
+        FAIL CLOSED once that page is gone. The dock outlives Step0 -- that
+        is the point of one public dock -- so a method arriving after the
+        page was destroyed has nowhere authoritative to land, and writing it
+        through a dangling pointer would be a choice nobody owns.
         """
         page = self._page_ref()
         if page is None:

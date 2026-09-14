@@ -215,12 +215,13 @@ class Step0Page(QWidget):
     # follows this rather than keeping a second palette that drifts.
     channel_color_changed = pyqtSignal(str, str)
 
-    # Per-channel BG method / decision -> combo index (TopHat/cucim/Both/Original).
-    #: Where each FINAL decision sits in the Method combos. Three answers,
-    #: because those are the three a channel may finally have; `both` is a
-    #: computation, not a decision, and is deliberately absent -- a row that
-    #: showed it was showing something Save could not write.
-    _METHOD_IDX = {"original": 0, "tophat": 1, "cucim": 2}
+    #: Where each PREVIEW method sits in the Method combos -- the row's and
+    #: the bulk box's. FOUR entries, because a preview may prepare both
+    #: candidates; the order is `PREVIEW_METHODS`.
+    #:
+    #: The FINAL decision is a different question with three answers and its
+    #: own control (the Per-Channel Decision radios); it is never drawn here.
+    _PREVIEW_IDX = {"both": 0, "original": 1, "tophat": 2, "cucim": 3}
 
     def __init__(self, parent=None, display_services=None):
         super().__init__(parent)
@@ -401,8 +402,17 @@ class Step0Page(QWidget):
         # image and the method combo follow -- stays on the last marker.
         # None = the inspector follows `current_channel` like every other row.
         self._inspector_channel = None
-        # 通道方法选择：key=channel_name → "tophat"|"cucim"|"both"
+        # THE PREVIEW-METHOD STORE, and nothing else:
+        #   key=channel_name -> "both"|"original"|"tophat"|"cucim"
+        # It answers "what does this channel PREVIEW / compute with?" and is
+        # written by the row's Method combo and the bulk Method box. It is
+        # NOT a projection of `_channel_decisions` and nothing derives one
+        # from the other: preview=Both with final=Original is a normal state
+        # (compare two candidates, publish the raw channel).
         self._channel_methods: dict = {}
+        # What a channel with no preview method of its own previews with --
+        # the bulk Method box's current value. `both` at startup.
+        self._preview_method_default = "both"
         # Per-channel param overrides: {ch: {"tophat_radius": int, "cucim_sigma": int}}.
         # Absent -> the channel uses the global Method Parameters values. Lets each
         # channel be re-tuned independently (Per-Channel Decision box).
@@ -784,14 +794,19 @@ class Step0Page(QWidget):
             "choose, change or discard a background-correction method.")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
         self._method_all = QtWidgets.QComboBox()
-        # THE BULK FINAL CHOICE. `Both` is gone from it: this box assigns
-        # what Save will write for every correction-eligible channel, and
-        # "both" is a computation rather than an answer Save can write. The
-        # only thing that ever consumed it was `_on_method_all_changed`,
-        # which writes decisions -- it starts no run (the Process button is
-        # gone; TopHat/cuCIM Enter are the compute entries).
-        self._method_all.addItems(["Original", "TopHat", "cucim"])
-        self._method_all.setCurrentIndex(0)  # default: no correction
+        # THE BULK PREVIEW METHOD -- what every correction-eligible channel
+        # is looked at and computed with. `Both` belongs here and is the
+        # default: on opening a slide the page prepares the TopHat and the
+        # cuCIM candidate so the two can be compared, which is the whole
+        # point of the compare panels.
+        #
+        # It is NOT a bulk final decision. What Save publishes is decided one
+        # channel at a time in the Per-Channel Decision panel and committed
+        # with Apply; this box never writes that answer. It also starts no
+        # run by itself (the Process button is gone; TopHat/cuCIM Enter are
+        # the compute entries).
+        self._method_all.addItems(["Both", "Original", "TopHat", "cucim"])
+        self._method_all.setCurrentIndex(0)  # default: prepare both candidates
         self._method_all.setStyleSheet(
             "QComboBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
             "border-radius:3px;padding:1px 4px;font-size:10px;}"
@@ -799,9 +814,11 @@ class Step0Page(QWidget):
         )
         self._method_all.setFixedWidth(64)
         self._method_all.setToolTip(
-            "Set the FINAL background-correction choice for every "
-            "correction-eligible channel — what Save writes. Correction "
-            "only: it shows nothing, hides nothing and starts no run.")
+            "Set the PREVIEW method of every correction-eligible channel: "
+            "Both prepares the TopHat and the cuCIM candidate, Original "
+            "shows the raw channel. It does not decide what Save publishes "
+            "— that is Per-Channel Decision + Apply — and it shows nothing, "
+            "hides nothing and starts no run.")
         self._method_all.currentTextChanged.connect(self._on_method_all_changed)
         # One compact button opens the floating "Intensity" window -- the
         # internal remap workbench's inspector (histogram, Min/Max, Gamma,
@@ -8185,20 +8202,43 @@ class Step0Page(QWidget):
     # drifts -- the reason `_channel_is_up_to_date` takes evidence rather
     # than `_params_dirty` in the first place.
 
-    def _channel_row_method(self, ch):
-        """The method a Process run would use for `ch` right now.
+    # ── the TWO questions, asked separately ─────────────────────────────
+    #
+    # `_channel_row_method` used to answer both at once, and that is the bug
+    # this replaces: one function cannot say what a channel is PREVIEWED with
+    # and what Save PUBLISHES for it, because those are different answers --
+    # a user comparing TopHat against cuCIM has not decided anything yet, and
+    # a user who decided TopHat may still want to look at the raw channel.
+    #
+    # `_channel_methods` and `_channel_decisions` are independent stores: no
+    # sync, no derivation, no fallback from one to the other.
 
-        THE DECISION, and only the decision. This used to read the row's
-        Method COMBO first and fall back to the decision, which made the
-        widget a second authority: the combo and `_channel_decisions` could
-        disagree, and then the signature, the compute state and the raw-save
-        list answered one method while `_build_config` -- what Save writes and
-        what the handoff carries -- answered another. The combo is a
-        projection of this answer (`_refresh_channel_row` writes it); it is
-        never asked for it.
+    def _channel_preview_method(self, ch):
+        """What `ch` is PREVIEWED / computed with right now.
 
-        A channel nobody has assigned a method to is `original`: no
-        correction, which is exactly what `_build_config` writes for it.
+        One of `both` / `original` / `tophat` / `cucim`. A channel the user
+        has not set individually previews with the bulk Method box's current
+        value, which starts at `both`.
+
+        Written by: the row's Method combo, the bulk Method box. Read by: the
+        compute entries, the preview source provider, the compute-state
+        glyph. NEVER read by Save, by `_build_config` or by the handoff.
+        """
+        m = self._channel_methods.get(ch)
+        if m is None:
+            m = self._preview_method_default
+        return str(m or "both").strip().lower()
+
+    def _channel_final_decision(self, ch):
+        """What Save PUBLISHES for `ch`.
+
+        One of `original` / `tophat` / `cucim` -- never `both`, which names a
+        computation rather than an answer. A channel nobody has decided on is
+        `original`: the raw pixels, which is what Save writes for it.
+
+        Written by: the Per-Channel Decision panel's Apply, and nothing else.
+        Read by: `_build_config`, the raw-save list, the correction config
+        writer, the handoff. NEVER moved by a preview method.
         """
         return str(self._channel_decisions.get(ch) or "original")
 
@@ -8216,10 +8256,16 @@ class Step0Page(QWidget):
             return "computing"
         if ch not in self._computed_signatures or ch not in self._computed_channels:
             return "not-computed"
-        method = self._channel_row_method(ch)
+        # THE PREVIEW METHOD, deliberately. This glyph says whether the
+        # CANDIDATES this channel is being previewed with are ready -- not
+        # whether its final decision could be published. A channel decided
+        # `tophat` but previewed `original` has nothing being computed, and
+        # claiming "computed" for it would be a claim about a run nobody
+        # asked for.
+        method = self._channel_preview_method(ch)
         if method == "original":
-            # No correction is assigned, so there is nothing for the cached
-            # result to be current WITH; report what actually exists.
+            # Nothing is being computed for this channel, so there is nothing
+            # for the cached result to be current WITH; report what exists.
             sig = self._computed_signatures[ch]
         else:
             sig = self._channel_signature(ch, method)
@@ -8256,7 +8302,7 @@ class Step0Page(QWidget):
             # tick made "what Save writes" depend on what the user could see:
             # hiding a channel put it in this list, and showing one took it
             # out, neither of which is a correction decision.
-            if self._channel_row_method(ch) == "original":
+            if self._channel_final_decision(ch) == "original":
                 raw.append(ch)
             elif self._channel_compute_state(ch) != "computed":
                 raw.append(ch)
@@ -8376,7 +8422,7 @@ class Step0Page(QWidget):
                 self._decision_status.setText("The locked nucleus channel is always excluded from correction.")
                 self._dec_orig.setChecked(True)
                 return
-            decision = self._channel_row_method(ch)
+            decision = self._channel_final_decision(ch)
             if decision == "tophat":
                 self._dec_top.setChecked(True)
             elif decision == "cucim":
@@ -8417,16 +8463,15 @@ class Step0Page(QWidget):
             # hidden and is gone.
             pass
         else:
-            # THE COMBO IS THE DECISION, DRAWN. A channel nobody has
-            # assigned is `original` -- which is what Save writes for it and
-            # what `_channel_row_method` answers -- so that is what the row
-            # shows. It used to show the global Method box's value instead,
-            # so a fresh row said `Both` while the program meant, and saved,
-            # Original.
-            decision = self._channel_row_method(ch)
+            # THE COMBO IS THE PREVIEW METHOD, DRAWN -- what this channel is
+            # computed and looked at with. It is not the final decision and
+            # must not show one: a row briefly showed `Original` for a
+            # channel the user was previewing as `Both`, which is how the
+            # two questions got welded together in the first place.
+            preview = self._channel_preview_method(ch)
             if method_cb is not None:
                 method_cb.blockSignals(True)
-                method_cb.setCurrentIndex(self._METHOD_IDX.get(decision, 0))
+                method_cb.setCurrentIndex(self._PREVIEW_IDX.get(preview, 0))
                 method_cb.blockSignals(False)
         cb.blockSignals(False)
         self._refresh_channel_state(ch)
@@ -8527,47 +8572,72 @@ class Step0Page(QWidget):
             state_owner.set_display_visible(ch, visible, origin="step0-bulk")
 
     def _on_method_all_changed(self, txt):
-        """Assign this correction method to every correction-eligible channel.
+        """Set the PREVIEW method of every correction-eligible channel.
 
-        THE bulk CORRECTION control, and it is deliberately not the same
-        control as Show all / Hide all: one says how channels are corrected,
-        the other says which are on screen. It used to reach only the TICKED
-        rows, because a tick meant "this one is corrected"; with the checkbox
-        carrying display visibility that rule would have made a bulk method
-        depend on what the user happens to be looking at.
+        THE BULK PREVIEW CONTROL. It answers "what are these channels looked
+        at and computed with?" -- `Both` prepares the two candidates for
+        comparison, `Original` shows the raw channel -- and it answers
+        nothing else. In particular it does NOT touch `_channel_decisions`:
+        what Save publishes is decided per channel in the Per-Channel
+        Decision panel and committed with Apply, and a bulk box that moved
+        that answer would publish decisions the user never made.
+
+        It is also not Show all / Hide all: display visibility is the
+        checkbox's, in the shared display state.
         """
-        method = str(txt or "").lower()
+        method = str(txt or "").strip().lower()
+        if not step0_handoff.is_preview_method(method):
+            raise ValueError(
+                f"{method!r} is not a preview method; expected one of "
+                f"{step0_handoff.PREVIEW_METHODS}.")
+        # The default for channels nobody has set individually follows the
+        # box, so a fresh row shows what the box says -- which is what the
+        # box means.
+        self._preview_method_default = method
         caps = self.display.state.capabilities
         for ch in self._channel_order:
             if not caps(ch).correction_eligible:
                 continue
-            # EVERY eligible channel, assigned or not. Moving this box used
-            # to leave an unassigned channel with no decision at all and only
-            # change what its combo SHOWED -- so the row said TopHat, the
-            # compute state was worked out for TopHat, and Save wrote
-            # Original. A bulk control that does not command is a display of
-            # an answer nobody gave.
-            self._set_channel_decision(ch, method)
+            self._set_channel_preview_method(ch, method)
             row = self._channel_rows.get(ch)
             if row and row.get("method_cb") is not None:
                 combo = row["method_cb"]
                 combo.blockSignals(True)
-                combo.setCurrentIndex(self._METHOD_IDX.get(method, 0))
+                combo.setCurrentIndex(self._PREVIEW_IDX.get(method, 0))
                 combo.blockSignals(False)
+        # The glyph follows the preview method (it is a claim about
+        # candidates), so it is re-derived; no decision moved and no run
+        # started.
         self._refresh_all_channel_states()
 
-    def _set_channel_decision(self, ch, method):
-        """THE one writer of a channel's correction decision.
+    def _set_channel_preview_method(self, ch, method):
+        """THE one writer of a channel's PREVIEW method.
 
-        `_channel_decisions` is the answer -- it is what `_build_config`
-        writes and what the handoff carries -- and `_channel_methods` is its
-        projection: the same answer without the channels that are assigned
-        `original` (no correction). Keeping them in step in ONE place is what
-        stops the two from disagreeing about what Process would run.
+        Writes `_channel_methods` and nothing else -- no decision, no
+        visibility, no participation, no weight, and it starts no run.
+        """
+        method = str(method or "both").strip().lower()
+        if not step0_handoff.is_preview_method(method):
+            raise ValueError(
+                f"{method!r} is not a preview method for {ch!r}; expected "
+                f"one of {step0_handoff.PREVIEW_METHODS}.")
+        self._channel_methods[ch] = method
+        return method
+
+    def _set_channel_decision(self, ch, method):
+        """THE one writer of a channel's FINAL correction decision.
+
+        `_channel_decisions` is what Save publishes and what the handoff
+        carries. It is NOT connected to `_channel_methods`: this used to
+        write the preview store too, "keeping them in step", which is what
+        made choosing a preview change what Save wrote and deciding a
+        channel change what was on screen. A user may compare both
+        candidates and still publish the raw channel; that state has to be
+        expressible.
 
         Display visibility is not touched here, in either direction: a
-        channel assigned Original stays on screen, and hiding a channel does
-        not throw its method away.
+        channel decided Original stays on screen, and hiding a channel does
+        not throw its decision away.
         """
         method = str(method or "original").strip().lower()
         if not step0_handoff.is_final_correction_decision(method):
@@ -8582,22 +8652,20 @@ class Step0Page(QWidget):
                 f"expected one of {step0_handoff.FINAL_CORRECTION_DECISIONS}. "
                 "`both` computes two candidates; it is not a choice.")
         self._channel_decisions[ch] = method
-        if method == "original":
-            self._channel_methods.pop(ch, None)
-        else:
-            self._channel_methods[ch] = method
         return method
 
     def _on_channel_method_changed(self, ch, txt):
-        """Single channel method dropdown change. The combo now also carries the
-        assigned decision: "Original" means no correction (channel unchecked).
+        """One row's Method combo moved: this channel's PREVIEW method.
 
-        Records the choice and re-derives the row's state -- and starts
-        NOTHING. A method change is a change to what the next Process would
-        do, so a channel already computed with the other method simply
-        becomes `stale`.
+        It records what the channel is looked at and computed with, and
+        starts NOTHING. It does not touch the channel's final decision --
+        Save still publishes whatever the Per-Channel Decision panel last
+        applied -- and it does not touch any other channel.
+
+        A channel already computed for another method simply becomes
+        `stale`: the glyph is a claim about the candidates being previewed.
         """
-        m = self._set_channel_decision(ch, txt)
+        m = self._set_channel_preview_method(ch, txt)
         # THE CHECKBOX IS NOT TOUCHED. It used to be driven from here --
         # "Original" unticked the row, a method ticked it -- which is the
         # same conflation from the other side: choosing how to correct a
@@ -9452,7 +9520,7 @@ class Step0Page(QWidget):
             f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
             f"σ={self._dec_sigma.value()})")
 
-    def _process_current_channel(self, method="both"):
+    def _process_current_channel(self, method=None):
         """Recompute one method for one channel across all patches.
 
         The single entry point for "this one channel, again, with the
@@ -9468,15 +9536,30 @@ class Step0Page(QWidget):
         the GPU over from Explore/Compare. Callers do not reimplement any
         of it; they call this.
 
-        Enter passes ``tophat`` for radius or ``cucim`` for sigma. The default
-        ``both`` remains for the legacy programmatic Apply path. A single-method
+        Enter passes ``tophat`` for radius or ``cucim`` for sigma. ``both``
+        stays accepted for the legacy programmatic Apply path. A single-method
         run preserves the other method's cached pixels and completion evidence.
+
+        WITH NO METHOD NAMED, the channel's PREVIEW method decides -- `both`
+        asks for two candidates, `tophat`/`cucim` for one, and `original`
+        starts no correction worker at all, because previewing the raw
+        channel is not a computation. The FINAL decision is never consulted
+        here: what Save publishes does not change what is computed to look
+        at, and no run ever writes a decision back.
         """
-        if method not in {"tophat", "cucim", "both"}:
-            raise ValueError(f"unsupported correction method: {method!r}")
         ch = self.current_channel
         if not ch or ch == self.nucleus_channel:
             return
+        if method is None:
+            method = self._channel_preview_method(ch)
+        if method == "original":
+            # Nothing to compute: the raw channel is what is being previewed.
+            # A worker here would be a run the user did not ask for, and its
+            # result would claim completion evidence for a method nobody
+            # selected.
+            return
+        if method not in {"tophat", "cucim", "both"}:
+            raise ValueError(f"unsupported correction method: {method!r}")
         if not self.patches:
             # The visible tiled viewer was already re-selected by
             # `_on_dec_param_changed`; it computes its current viewport and
@@ -9543,7 +9626,7 @@ class Step0Page(QWidget):
             # turns `both` into `original` behind the user's back -- a
             # correction that made the file disagree with the row. Legacy
             # data is migrated where it is READ.
-            d = self._channel_row_method(ch)
+            d = self._channel_final_decision(ch)
             if not step0_handoff.is_final_correction_decision(d):
                 raise ValueError(
                     f"{ch!r} holds {d!r}, which is not a final correction "

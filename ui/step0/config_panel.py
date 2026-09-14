@@ -208,9 +208,13 @@ class ConfigPanel(QWidget):
         lay.addLayout(nuc_row)
 
         # NO CHANNEL LIST HERE. The one public list is the dock's; this
-        # panel is Step1's tool strip around it.
-        lay.addStretch(1)
-
+        # panel is Step1's tool strip around it -- and a tool strip has
+        # nothing to expand INTO. The `addStretch(1)` that used to stand
+        # here was holding the space the private channel list once filled,
+        # so after the list moved to the dock it opened a tall empty band
+        # between the Nucleus line and the weight buttons. The strip is laid
+        # out tight now (4px spacing, like every other row here) and the
+        # expanding space belongs to the channel list in the dock above.
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
         btn_reset = QPushButton("Reset weights")

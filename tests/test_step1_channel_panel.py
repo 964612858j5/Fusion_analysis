@@ -23,6 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
+from block01.ui.widgets.channel_dock import template  # noqa: E402
 from PyQt5 import QtWidgets  # noqa: E402
 
 
@@ -357,4 +358,114 @@ def test_the_nucleus_never_stays_inside_a_marker_group(app):
         assert w.config.get_groups() == {"a": {"CD3": 0.3}}
         assert w.config.get_nucleus() == ("DAPI", 1.0)
     finally:
+        w.close()
+
+
+# ── the empty band between the Nucleus line and the weight buttons ───────
+
+def _shown_window(app):
+    w = _window(app)
+    w.resize(1500, 950)
+    w.show()
+    w._stack.setCurrentIndex(1)
+    w._set_step_active(1)
+    QtWidgets.QApplication.processEvents()
+    return w
+
+
+def test_the_nucleus_line_is_followed_by_the_weight_buttons(app):
+    """The tool strip is laid out tight.
+
+    While this panel still built the private channel rows it had to expand,
+    and an `addStretch(1)` held the space the list once filled. After the
+    list moved to the public dock that stretch had nothing to hold and simply
+    pushed Reset/Load weights to the bottom of a 327px panel -- a tall empty
+    band under `Nucleus: DAPI (weight 1.00)`.
+    """
+    from PyQt5.QtWidgets import QLayout, QPushButton, QSpacerItem
+
+    w = _shown_window(app)
+    try:
+        cfg = w.config
+        nuc = cfg._nuc_value
+        buttons = {b.text(): b for b in cfg.findChildren(QPushButton)}
+        assert set(buttons) == {"Reset weights", "Load weights"}
+        gap = (min(b.geometry().top() for b in buttons.values())
+               - nuc.geometry().bottom())
+        # ONLY the layout's own spacing (4px, like every other row here),
+        # give or take the 1px a `bottom()` costs.
+        assert 0 <= gap <= 6, gap
+
+        # ...and structurally: no expanding item between the two rows
+        lay = cfg.layout()
+        items = [lay.itemAt(i) for i in range(lay.count())]
+        assert [type(it).__name__ for it in items] == [
+            "QHBoxLayout", "QHBoxLayout"], [type(i).__name__ for i in items]
+        assert not any(isinstance(it, QSpacerItem) for it in items)
+        assert lay.spacing() == 4
+        # the panel hugs its two lines rather than claiming the frame
+        assert cfg.height() < 80, cfg.height()
+    finally:
+        w.hide()
+        w.close()
+
+
+def test_the_channel_list_still_takes_the_expanding_space(app):
+    """The empty band is REMOVED, not moved somewhere else.
+
+    The space the tool strip gave up goes to the dock's list -- which is what
+    grows -- and not to a gap above it.
+    """
+    w = _shown_window(app)
+    try:
+        cfg, dock = w.config, w._channel_dock
+        box = dock.parentWidget()
+        assert cfg.parentWidget() is box
+        # the strip is on top, the list below it, and they touch
+        assert cfg.geometry().bottom() <= dock.geometry().top()
+        assert dock.geometry().top() - cfg.geometry().bottom() <= 8
+        # ...and the list is what fills the frame
+        assert dock.height() > 6 * cfg.height()
+        assert dock.geometry().bottom() >= box.height() - 20
+    finally:
+        w.hide()
+        w.close()
+
+
+def test_the_weight_row_and_the_buttons_kept_their_look(app):
+    """Nothing was restyled to close the gap."""
+    from PyQt5.QtWidgets import QPushButton
+
+    w = _shown_window(app)
+    try:
+        cfg, dock = w.config, w._channel_dock
+        buttons = {b.text(): b for b in cfg.findChildren(QPushButton)}
+        assert buttons["Reset weights"].styleSheet().startswith(
+            "QPushButton{color:#e5c07b;background:#182230;")
+        assert buttons["Load weights"].styleSheet().startswith(
+            "QPushButton{color:#9bd0ff;background:#182230;")
+        assert buttons["Reset weights"].height() == 20
+        assert buttons["Load weights"].height() == 20
+        assert cfg._nuc_value.height() == 14
+        # the public row's Step1 fields are the shared template's, untouched
+        row = dock.row("CD3")
+        assert abs(row.height() - template.ROW_HEIGHT) <= 1
+        assert row.slider.isVisible() and row.spin.isVisible()
+        assert row.fusion_box.isVisible()
+    finally:
+        w.hide()
+        w.close()
+
+
+def test_the_step1_channels_frame_is_still_the_step0_template(app):
+    w = _shown_window(app)
+    try:
+        box = w._channel_dock.parentWidget()
+        assert isinstance(box, QtWidgets.QGroupBox)
+        # Step1 numbers its frame ("② Channels"); the frame itself is the
+        # shared Step0 template.
+        assert box.title().endswith("Channels")
+        assert box.styleSheet() == template.frame_qss()
+    finally:
+        w.hide()
         w.close()

@@ -47,15 +47,20 @@ def _page(app, names=("DAPI", "CD3", "CD20")):
 
 # ── Step0's row: the correction decision and its compute state ──────────────
 
-def test_step0_row_shows_method_and_final_state(app):
+def test_step0_row_shows_the_preview_method_and_the_compute_state(app):
+    """The row's combo is the PREVIEW method -- what the channel is computed
+    and looked at with. What Save publishes is the Per-Channel Decision
+    panel's answer and is deliberately not drawn here."""
     page = _page(app)
     dock = page._dock_adapter.dock
     dock.set_step(0)
-    page._channel_decisions["CD3"] = "tophat"
+    page._set_channel_preview_method("CD3", "tophat")
+    page._channel_decisions["CD3"] = "cucim"      # the OTHER layer
     page._rebuild_channel_list()
 
     assert dock.row("CD3").method_cb.currentText() == "TopHat"
-    assert dock.row("CD20").method_cb.currentText() == "Original"
+    # ...and a channel nobody set previews with the bulk box's default.
+    assert dock.row("CD20").method_cb.currentText() == "Both"
 
     # The compute state is DERIVED from the page's signature bookkeeping --
     # the row holds none of its own -- so a run in flight is what makes the
@@ -63,9 +68,12 @@ def test_step0_row_shows_method_and_final_state(app):
     page._pending_signatures["CD3"] = "sig"
     page._set_channel_computing("CD3")
     assert dock.row("CD3").state_slot.text() == "⟳"
-    page._channel_decisions["CD20"] = "cucim"
+    page._set_channel_preview_method("CD20", "cucim")
     page._refresh_channel_row("CD20")
     assert dock.row("CD20").method_cb.currentText() == "cucim"
+    # the decision the page holds for CD3 never reached its combo
+    assert page._channel_final_decision("CD3") == "cucim"
+    assert dock.row("CD3").method_cb.currentText() == "TopHat"
 
 
 # ── the selected-channel tool areas (Min/Max/Gamma) ─────────────────────────
@@ -149,7 +157,7 @@ def test_step0_adapter_legacy_registry(app):
     page = Step0Page()
     page.loader = _Loader()
     page.nucleus_channel = "DAPI"
-    page._channel_decisions["CD3"] = "tophat"
+    page._set_channel_preview_method("CD3", "tophat")
     page._rebuild_channel_list()
 
     assert page._dock_adapter.dock is page.display.channel_dock()
@@ -163,11 +171,12 @@ def test_step0_adapter_legacy_registry(app):
     # switch -- so it stays enabled.
     assert page._channel_rows["DAPI"]["checkbox"].isEnabled()
     assert not page._channel_rows["DAPI"]["method_cb"].isEnabled()
-    # saved decision reflected, and a change reaches the page's correction
-    # domain through the dock's Step0 accessory
+    # the preview method is reflected, and a change reaches the page's
+    # correction domain through the dock's Step0 accessory
     assert page._channel_rows["CD3"]["method_cb"].currentText() == "TopHat"
     page._channel_rows["CD20"]["method_cb"].setCurrentText("TopHat")
-    assert page._channel_decisions["CD20"] == "tophat"
+    assert page._channel_methods["CD20"] == "tophat"
+    assert page._channel_final_decision("CD20") == "original"
 
 
 # ── Step0 fresh session: prior decisions don't seed combos; no dead swatch ───
@@ -195,34 +204,38 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     assert page._channel_decisions == {}
     assert page._prior_channel_decisions == {
         "CD3": "cucim", "CD20": "cucim", "CD8": "tophat"}
-    # An unassigned row shows ORIGINAL -- the answer the page actually holds
-    # and the one Save writes for it. It used to show the global Method box's
-    # value (`Both`), a choice Save could not write. The checkbox says nothing
-    # about correction: it is display visibility, and a fresh slide shows DAPI
-    # and its FIRST marker while hiding the others.
+    # A row nobody has set shows the bulk box's PREVIEW default (`Both`:
+    # prepare both candidates so they can be compared) while the page
+    # publishes `original` for it, because no decision has been made. Two
+    # questions, two answers. The checkbox says nothing about either: it is
+    # display visibility, and a fresh slide shows DAPI and its FIRST marker
+    # while hiding the others.
     for ch in ("CD3", "CD20", "CD8"):
-        assert page._channel_rows[ch]["method_cb"].currentText() == "Original"
-        assert page._channel_row_method(ch) == "original"
+        assert page._channel_rows[ch]["method_cb"].currentText() == "Both"
+        assert page._channel_preview_method(ch) == "both"
+        assert page._channel_final_decision(ch) == "original"
     assert page._channel_rows["CD3"]["checkbox"].isChecked()
     for ch in ("CD20", "CD8"):
         assert not page._channel_rows[ch]["checkbox"].isChecked(), ch
     assert page._channel_rows["DAPI"]["checkbox"].isChecked()
-    # The global Method box COMMANDS: it assigns to every correction-eligible
-    # channel, including the ones nobody had assigned. It used to move only
-    # their combos, so a row said TopHat, the compute state was worked out
-    # for TopHat, and Save wrote Original for the same channel.
+    # The global Method box COMMANDS the PREVIEW layer: every
+    # correction-eligible channel, including the ones nobody had touched. It
+    # used to move only their combos, so a row said TopHat while the page
+    # computed something else.
     page._method_all.setCurrentText("TopHat")
     for ch in ("CD3", "CD20", "CD8"):
         assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
-        assert page._channel_decisions[ch] == "tophat"
-        assert page._channel_row_method(ch) == "tophat"
+        assert page._channel_preview_method(ch) == "tophat"
+        # ...and it published nothing: Save still writes the raw channel.
+        assert page._channel_final_decision(ch) == "original"
+    assert "DAPI" not in page._channel_methods
     assert "DAPI" not in page._channel_decisions
     # explicit assignment still sticks -- and does NOT show the channel.
     # Assigning a correction method used to tick the row, which is how
     # "corrected" and "on screen" became one answer.
     page._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")
-    assert page._channel_decisions["CD20"] == "cucim"
     assert page._channel_methods["CD20"] == "cucim"
+    assert page._channel_final_decision("CD20") == "original"
     assert not page._channel_rows["CD20"]["checkbox"].isChecked()
     assert page.display.state.display_visibility().get("CD20") is False
     # every Step0 BG row carries its own display-colour swatch (the colour

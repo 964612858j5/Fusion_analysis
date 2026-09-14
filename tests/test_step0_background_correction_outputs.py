@@ -794,8 +794,25 @@ def _correction_page(app, tmp_path):
     page.current_patch_idx = 0
     page.nucleus_channel = "DAPI"
     page._rebuild_channel_list()
+    # The row's combo is the PREVIEW method: this page previews CD3 with
+    # TopHat. It has decided nothing yet -- deciding is Per-Channel Decision
+    # + Apply, which `_decide` below drives.
     page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
     return page
+
+
+def _decide(page, channel, decision):
+    """Make `decision` final for `channel` THROUGH THE REAL UI.
+
+    The Per-Channel Decision radios plus Apply -- the only user entry to the
+    answer Save publishes. Nothing here touches the preview method.
+    """
+    page.current_channel = channel
+    page._update_decision_ui()
+    {"original": page._dec_orig, "tophat": page._dec_top,
+     "cucim": page._dec_cu}[decision].setChecked(True)
+    page._apply_current_channel_decision()
+    return decision
 
 
 def _correction_identity(page):
@@ -805,7 +822,7 @@ def _correction_identity(page):
         "decisions": dict(page._channel_decisions),
         "methods": dict(page._channel_methods),
         "signatures": {ch: page._channel_signature(
-            ch, page._channel_row_method(ch))
+            ch, page._channel_preview_method(ch))
             for ch in page._channel_order if ch != page.nucleus_channel},
         "states": {ch: page._channel_compute_state(ch)
                    for ch in page._channel_order},
@@ -865,7 +882,10 @@ def test_a_correction_edit_leaves_the_display_and_the_science_alone(app,
 
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
 
-    assert page._channel_decisions["CD3"] == "cucim"
+    assert page._channel_preview_method("CD3") == "cucim"
+    # ...and the preview method it moved is not the final decision: nobody
+    # applied one, so Save still publishes the raw channel.
+    assert page._channel_final_decision("CD3") == "original"
     assert page._channel_compute_state("CD3") == "stale"
     assert dict(state.display_visibility()) == visible_before
     assert state.selected_channel() == selection_before
@@ -898,15 +918,19 @@ def test_a_finished_correction_does_not_show_the_channel(app, tmp_path):
 def test_the_bulk_method_box_assigns_every_eligible_channel(app, tmp_path):
     """A fresh channel gets a DECISION, not a combo that shows one.
 
-    The box used to write a decision only for channels that already had one,
-    so on a slide nobody had assigned anything the row displayed TopHat, the
-    signature and the compute state were worked out for TopHat, and
-    `_build_config` -- what Save writes and what the handoff carries --
-    said Original for the same channel.
+    EVERY eligible channel, assigned or not -- the box used to reach only
+    channels that already had a value, so a slide nobody had touched kept a
+    row showing one method while the page computed another.
+
+    And it moves the PREVIEW method only. What Save publishes is decided per
+    channel in Per-Channel Decision; a bulk box that wrote that answer would
+    publish decisions the user never made.
     """
     page = _correction_page(app, tmp_path)
     page._channel_decisions.clear()
     page._channel_methods.clear()
+    decided = _decide(page, "CD3", "cucim")
+    saved_before = page._build_config()
 
     page._method_all.setCurrentText("TopHat")
 
@@ -914,26 +938,34 @@ def test_the_bulk_method_box_assigns_every_eligible_channel(app, tmp_path):
     for ch in page._channel_order:
         if ch == page.nucleus_channel:
             continue
-        assert page._channel_decisions[ch] == "tophat", ch
-        assert page._channel_row_method(ch) == "tophat", ch
+        assert page._channel_preview_method(ch) == "tophat", ch
         assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
-        assert saved[ch] == "tophat", (ch, saved)
-    # The nucleus is not correction-eligible and is not assigned.
+    # ...and not one final decision moved: CD3 still publishes what it was
+    # decided to, everything else still publishes the raw channel.
+    assert page._channel_final_decision("CD3") == decided
+    assert saved["CD3"] == decided
+    assert page._build_config() == saved_before
+    for ch in page._channel_order:
+        if ch in (page.nucleus_channel, "CD3"):
+            continue
+        assert page._channel_final_decision(ch) == "original", ch
+    # The nucleus is not correction-eligible: no preview method, no decision.
+    assert page.nucleus_channel not in page._channel_methods
     assert page.nucleus_channel not in page._channel_decisions
     assert page.nucleus_channel not in saved
     page.close()
 
 
-def test_a_combo_driven_out_of_step_decides_nothing(app, tmp_path):
-    """The row's Method combo is a PROJECTION of the decision.
+def test_a_combo_driven_out_of_step_commands_nothing(app, tmp_path):
+    """A combo moved with its signals blocked is a widget, not a command.
 
-    It was read first by `_channel_row_method`, so a combo that had drifted
-    -- a blocked write, a rebuild racing a change -- answered for the
-    signature, the compute state and the raw-save list while Save wrote the
-    recorded decision. One answer now, and it is the recorded one.
+    The store is what answers -- for the preview method AND, separately, for
+    what Save publishes. A drifted combo (a blocked write, a rebuild racing
+    a change) changes neither.
     """
     page = _correction_page(app, tmp_path)
-    assert page._channel_decisions["CD3"] == "tophat"
+    _decide(page, "CD3", "tophat")
+    assert page._channel_preview_method("CD3") == "tophat"
     signature_before = page._channel_signature("CD3", "tophat")
     saved_before = page._build_config()
     raw_before = page._raw_save_channels()
@@ -943,18 +975,24 @@ def test_a_combo_driven_out_of_step_decides_nothing(app, tmp_path):
     combo.setCurrentText("cucim")             # the mirror now disagrees
     combo.blockSignals(False)
 
-    assert page._channel_row_method("CD3") == "tophat"
+    assert page._channel_preview_method("CD3") == "tophat"
+    assert page._channel_final_decision("CD3") == "tophat"
     assert page._channel_signature(
-        "CD3", page._channel_row_method("CD3")) == signature_before
+        "CD3", page._channel_preview_method("CD3")) == signature_before
     assert page._build_config() == saved_before
     assert page._raw_save_channels() == raw_before
     page.close()
 
 
-def test_an_unassigned_channel_is_original_everywhere(app, tmp_path):
-    """No decision means no correction -- in the signature, in the compute
-    state, in the raw-save list and in what Save writes. The runtime answer
-    used to be "both" (the combo's default) while Save wrote Original."""
+def test_an_undecided_channel_publishes_original_and_previews_both(app,
+                                                                   tmp_path):
+    """The two defaults, which are deliberately different answers.
+
+    Nobody has decided anything, so Save publishes the raw channel for every
+    marker -- while the page still PREVIEWS both candidates, because that is
+    what the compare panels are for. Reading one default off the other is
+    the conflation this split removes.
+    """
     page = _correction_page(app, tmp_path)
     page._channel_decisions.clear()
     page._channel_methods.clear()
@@ -963,7 +1001,8 @@ def test_an_unassigned_channel_is_original_everywhere(app, tmp_path):
     for ch in page._channel_order:
         if ch == page.nucleus_channel:
             continue
-        assert page._channel_row_method(ch) == "original", ch
+        assert page._channel_final_decision(ch) == "original", ch
+        assert page._channel_preview_method(ch) == "both", ch
         assert saved[ch] == "original", (ch, saved)
         assert ch in page._raw_save_channels(), ch
     page.close()
@@ -980,25 +1019,35 @@ def _decision_page(app, tmp_path):
     return page
 
 
-def test_a_fresh_row_says_original_and_saves_original(app, tmp_path):
-    """A: the row, the authority and the file agree on a fresh slide.
+def test_a_fresh_row_previews_both_and_saves_original(app, tmp_path):
+    """A: a fresh slide, and the two questions have different answers.
 
-    The combo used to show the global Method box's value (`Both`) while the
-    page's answer -- and what Save wrote -- was Original. The user was shown
-    a choice the program did not hold and the file could not express.
+    The row's combo shows `Both` -- the page prepares the TopHat and the
+    cuCIM candidate so they can be compared -- and Save publishes `original`,
+    because the user has decided nothing yet. Both statements are true at the
+    same time; a single `method` per channel could not say that.
     """
     page = _decision_page(app, tmp_path)
 
-    assert page._channel_rows["CD3"]["method_cb"].currentText() == "Original"
-    assert page._channel_row_method("CD3") == "original"
+    assert page._channel_rows["CD3"]["method_cb"].currentText() == "Both"
+    assert page._channel_preview_method("CD3") == "both"
+    assert page._method_all.currentText() == "Both"
+    assert page._channel_final_decision("CD3") == "original"
     assert page._build_config()["channel_decisions"]["CD3"] == "original"
     assert "CD3" in page._raw_save_channels()
+    # ...and the decision panel shows the decision, not the preview.
+    page.current_channel = "CD3"
+    page._update_decision_ui()
+    assert page._dec_orig.isChecked()
     page.close()
 
 
-def test_each_visible_final_choice_means_the_same_thing_everywhere(app,
-                                                                   tmp_path):
-    """B: Original, TopHat and cuCIM, through the real combo, one at a time."""
+def test_each_final_choice_means_the_same_thing_everywhere(app, tmp_path):
+    """B: Original, TopHat and cuCIM through the REAL decision panel.
+
+    The radios plus Apply are the one user entry to what Save publishes, and
+    the row's preview combo does not move with them.
+    """
     from block01.core import step0_handoff
 
     page = _decision_page(app, tmp_path)
@@ -1006,27 +1055,28 @@ def test_each_visible_final_choice_means_the_same_thing_everywhere(app,
     state.set_display_visible("CD3", True, origin="test")
     combo = page._channel_rows["CD3"]["method_cb"]
     assert [combo.itemText(i) for i in range(combo.count())] == [
-        "Original", "TopHat", "cucim"]
+        "Both", "Original", "TopHat", "cucim"]
+    combo.setCurrentText("Both")
 
-    for shown, decision in (("TopHat", "tophat"), ("cucim", "cucim"),
-                            ("Original", "original")):
-        combo.setCurrentText(shown)
+    for decision in ("tophat", "cucim", "original"):
+        _decide(page, "CD3", decision)
 
-        assert combo.currentText() == shown
-        assert page._channel_decisions["CD3"] == decision
-        assert page._channel_row_method("CD3") == decision
+        # THE PREVIEW DID NOT MOVE. Deciding what to publish is not choosing
+        # what to look at.
+        assert combo.currentText() == "Both"
+        assert page._channel_preview_method("CD3") == "both"
+        assert page._channel_final_decision("CD3") == decision
         assert page._build_config()["channel_decisions"]["CD3"] == decision
         assert step0_handoff.clean_correction_config(
             page._build_config())["channel_decisions"]["CD3"] == decision
-        assert page._channel_signature("CD3", page._channel_row_method(
-            "CD3"))[0] == decision
-        # Not computed for this choice yet, so Save would write it raw.
+        # Not computed yet, so Save would write it raw.
         assert "CD3" in page._raw_save_channels()
-        # ...and choosing how to correct a channel never shows or hides it.
+        # ...and deciding how to correct a channel never shows or hides it.
         assert state.display_visible("CD3") is True
 
-    # With real completion evidence for the assigned method, it is no longer
-    # a raw channel -- and that is the only thing that changes.
+    # With real completion evidence for what is being previewed, it is no
+    # longer a raw channel -- and that is the only thing that changes.
+    _decide(page, "CD3", "tophat")
     combo.setCurrentText("TopHat")
     page._computed_channels.add("CD3")
     page._computed_signatures["CD3"] = page._channel_signature("CD3", "tophat")
@@ -1037,25 +1087,36 @@ def test_each_visible_final_choice_means_the_same_thing_everywhere(app,
     page.close()
 
 
-def test_both_is_not_a_choice_anywhere_a_user_can_make_one(app, tmp_path):
-    """C: it is gone from both combos, refused by the writer, and cannot
-    come out of Save."""
+def test_both_is_a_preview_method_and_never_a_final_decision(app, tmp_path):
+    """C: `Both` is offered where it means something and refused where it
+    does not.
+
+    It IS a preview method -- prepare two candidates and compare them -- so
+    it is in the row's combo and in the bulk box. It is NOT an answer Save
+    can publish, so the decision panel does not offer it, the decision writer
+    refuses it, and it cannot come out of Save.
+    """
     import pytest as _pytest
     from block01.core import step0_handoff
 
     page = _decision_page(app, tmp_path)
     row_combo = page._channel_rows["CD3"]["method_cb"]
-    assert "Both" not in [row_combo.itemText(i)
-                          for i in range(row_combo.count())]
-    assert "Both" not in [page._method_all.itemText(i)
-                          for i in range(page._method_all.count())]
+    assert "Both" in [row_combo.itemText(i)
+                      for i in range(row_combo.count())]
+    assert "Both" in [page._method_all.itemText(i)
+                      for i in range(page._method_all.count())]
+    # ...and the decision panel offers exactly three answers, none of them Both.
+    assert [b.text() for b in (page._dec_orig, page._dec_top, page._dec_cu)] \
+        == ["Original", "TopHat", "cucim"]
 
     with _pytest.raises(ValueError):
         page._set_channel_decision("CD3", "both")
     assert page._channel_decisions.get("CD3") in (None, "")
 
-    page._method_all.setCurrentText("TopHat")
-    row_combo.setCurrentText("cucim")
+    page._method_all.setCurrentText("Both")
+    row_combo.setCurrentText("Both")
+    assert page._channel_preview_method("CD3") == "both"
+    _decide(page, "CD3", "tophat")
     saved = page._build_config()["channel_decisions"]
     assert "both" not in saved.values()
     assert set(saved.values()) <= set(step0_handoff.FINAL_CORRECTION_DECISIONS)
@@ -1079,7 +1140,8 @@ def test_computed_evidence_for_both_leaves_the_final_choice_alone(app,
     the channel keeps the choice the user made, and that is what Save writes.
     """
     page = _decision_page(app, tmp_path)
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("Both")
+    _decide(page, "CD3", "tophat")
 
     # Both candidates computed, as the merged signature records it.
     page._computed_signatures["CD3"] = page._merge_channel_signatures(
@@ -1090,16 +1152,21 @@ def test_computed_evidence_for_both_leaves_the_final_choice_alone(app,
         page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
 
     assert page._computed_signatures["CD3"][0] == "both"
-    assert page._channel_decisions["CD3"] == "tophat"
-    assert page._channel_row_method("CD3") == "tophat"
+    # preview = both, final = tophat. Both true at once, and Save takes the
+    # final answer.
+    assert page._channel_preview_method("CD3") == "both"
+    assert page._channel_final_decision("CD3") == "tophat"
     assert page._build_config()["channel_decisions"]["CD3"] == "tophat"
-    # The evidence still counts FOR the chosen method: it was computed.
+    # The `both` evidence counts FOR the decided method: TopHat was computed.
     assert page._channel_compute_state("CD3") == "computed"
-    # ...and switching the final choice to the other candidate keeps the
-    # cuCIM evidence rather than throwing it away.
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    # ...and moving the final choice to the other candidate keeps the cached
+    # candidates rather than throwing them away.
+    _decide(page, "CD3", "cucim")
     assert page._computed_signatures["CD3"][0] == "both"
+    assert page._channel_preview_method("CD3") == "both"
     assert page._build_config()["channel_decisions"]["CD3"] == "cucim"
+    assert page._channel_compute_state("CD3") == "computed"
+    assert set(page._preview_cache) == {("CD3", 0)}
     page.close()
 
 
@@ -1128,8 +1195,13 @@ def test_a_legacy_both_config_comes_back_as_original(app, tmp_path):
 
     assert page._prior_channel_decisions["CD3"] == "original"
     assert page._prior_channel_decisions["CD20"] == "tophat"
-    assert page._channel_row_method("CD3") == "original"
-    assert page._channel_rows["CD3"]["method_cb"].currentText() == "Original"
+    assert page._channel_final_decision("CD3") == "original"
+    # The migration is a FINAL-DECISION read boundary and nothing else: the
+    # row's combo still shows the preview method this page is set to (the
+    # helper previews CD3 with TopHat), and reading a legacy `both` decision
+    # did not reach into it.
+    assert page._channel_rows["CD3"]["method_cb"].currentText() == "TopHat"
+    assert page._channel_preview_method("CD3") == "tophat"
     # ...and the new writer cannot put `both` back into the file.
     written = page._build_config()["channel_decisions"]
     assert "both" not in written.values()
@@ -1138,8 +1210,9 @@ def test_a_legacy_both_config_comes_back_as_original(app, tmp_path):
     page.close()
 
 
-def test_the_bulk_box_is_a_bulk_final_choice(app, tmp_path, monkeypatch):
-    """F: Original / TopHat / cuCIM over every eligible channel, no run."""
+def test_the_bulk_box_is_a_bulk_preview_method(app, tmp_path, monkeypatch):
+    """F: Both / Original / TopHat / cuCIM over every eligible channel --
+    the preview method, no decision moved and no run started."""
     import block01.ui.step0.step0_page as sp
 
     page = _decision_page(app, tmp_path)
@@ -1148,21 +1221,26 @@ def test_the_bulk_box_is_a_bulk_final_choice(app, tmp_path, monkeypatch):
     fusion_before = page.display.fusion.draft_snapshot()
 
     def _boom(*a, **k):
-        raise AssertionError("a bulk FINAL choice started a correction run")
+        raise AssertionError("a bulk PREVIEW method started a correction run")
 
     monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
     monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+    decided = _decide(page, "CD3", "tophat")
+    saved_before = page._build_config()
 
-    for shown, decision in (("TopHat", "tophat"), ("cucim", "cucim"),
-                            ("Original", "original")):
+    for shown, preview in (("TopHat", "tophat"), ("cucim", "cucim"),
+                           ("Original", "original"), ("Both", "both")):
         page._method_all.setCurrentText(shown)
         saved = page._build_config()["channel_decisions"]
         for ch in page._channel_order:
             if ch == page.nucleus_channel:
                 continue
-            assert page._channel_decisions[ch] == decision, (ch, shown)
-            assert saved[ch] == decision, (ch, shown)
+            assert page._channel_preview_method(ch) == preview, (ch, shown)
             assert page._channel_rows[ch]["method_cb"].currentText() == shown
+        # NOT ONE DECISION MOVED, for any of the four.
+        assert page._channel_final_decision("CD3") == decided, shown
+        assert saved == saved_before["channel_decisions"], shown
+        assert page.nucleus_channel not in page._channel_methods
         assert page.nucleus_channel not in page._channel_decisions
         assert dict(state.display_visibility()) == visible_before
         assert page.display.fusion.draft_snapshot() == fusion_before
@@ -1171,13 +1249,14 @@ def test_the_bulk_box_is_a_bulk_final_choice(app, tmp_path, monkeypatch):
 
 def test_a_final_choice_starts_no_run_and_no_process_button_came_back(
         app, tmp_path, monkeypatch):
-    """G: the compute entries are the two parameter boxes, and only them."""
+    """G: the compute entries are the two parameter boxes, and only them --
+    and neither a preview method nor a final decision starts a run."""
     import block01.ui.step0.step0_page as sp
 
     page = _decision_page(app, tmp_path)
 
     def _boom(*a, **k):
-        raise AssertionError("a final choice started a correction run")
+        raise AssertionError("a method or a decision started a correction run")
 
     monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
     monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
@@ -1192,13 +1271,15 @@ def test_a_final_choice_starts_no_run_and_no_process_button_came_back(
     # guards inside that entry can prevent for reasons of their own.
     started = []
     monkeypatch.setattr(type(page), "_process_current_channel",
-                        lambda self, method="both": started.append(method))
+                        lambda self, method=None: started.append(method))
 
-    # The bulk box first, then this channel's own choice on top of it.
+    # The bulk PREVIEW box first, then this channel's own preview on top of
+    # it, then the final decision through the real decision panel.
     page._method_all.setCurrentText("TopHat")
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    _decide(page, "CD3", "tophat")
 
-    assert started == [], f"a final choice started a run: {started}"
+    assert started == [], f"a method or a decision started a run: {started}"
     for gone in ("_btn_process", "_process_btn", "_btn_process_all"):
         assert not hasattr(page, gone), gone
 
@@ -1210,5 +1291,249 @@ def test_a_final_choice_starts_no_run_and_no_process_button_came_back(
     # candidates, and it is not a final choice.
     page._on_dec_param_entered()
     assert started == ["tophat", "cucim", "both"]
-    assert page._channel_decisions["CD3"] == "cucim", "a run changed the choice"
+    # ...and nothing a run did moved either answer.
+    assert page._channel_preview_method("CD3") == "cucim"
+    assert page._channel_final_decision("CD3") == "tophat", \
+        "a run changed the final decision"
+    page.close()
+
+
+# ── the two-layer contract: preview method vs final decision ─────────────
+#
+# Step0 asks two questions about the same channel and they have different
+# answers:
+#
+#     preview method  -- what is computed / prepared to LOOK at
+#                        (Both / Original / TopHat / cucim)
+#     final decision  -- what Save publishes
+#                        (original / tophat / cucim; never `both`)
+#
+# They were welded into one value, so choosing to compare two candidates
+# changed what Save wrote and deciding what to publish changed what was on
+# screen. What follows drives the REAL controls -- the bulk Method box, each
+# row's Method combo, the Per-Channel Decision radios and Apply -- and pins
+# that the two answers move independently.
+
+
+def _fresh_page(app, tmp_path):
+    """A real page, nothing chosen and nothing decided."""
+    page = _correction_page(app, tmp_path)
+    page._channel_decisions.clear()
+    page._channel_methods.clear()
+    page._preview_method_default = "both"
+    page._method_all.setCurrentText("Both")
+    for ch in page._channel_order:
+        page._refresh_channel_row(ch)
+    return page
+
+
+def _markers(page):
+    return [c for c in page._channel_order if c != page.nucleus_channel]
+
+
+def test_a_fresh_page_previews_both_and_publishes_original(app, tmp_path):
+    """A1: the starting point of both layers."""
+    page = _fresh_page(app, tmp_path)
+
+    assert page._method_all.currentText() == "Both"
+    saved = page._build_config()["channel_decisions"]
+    for ch in _markers(page):
+        assert page._channel_rows[ch]["method_cb"].currentText() == "Both", ch
+        assert page._channel_preview_method(ch) == "both", ch
+        assert page._channel_final_decision(ch) == "original", ch
+        assert saved[ch] == "original", ch
+    page.close()
+
+
+def test_the_bulk_preview_box_moves_one_layer_only(app, tmp_path):
+    """A2: each of the four values, through the real box."""
+    page = _fresh_page(app, tmp_path)
+    state = page.display.state
+    decided = _decide(page, "CD3", "cucim")
+    saved_before = page._build_config()
+    visible_before = dict(state.display_visibility())
+
+    for shown, preview in (("Both", "both"), ("Original", "original"),
+                           ("TopHat", "tophat"), ("cucim", "cucim")):
+        page._method_all.setCurrentText(shown)
+
+        for ch in _markers(page):
+            assert page._channel_rows[ch]["method_cb"].currentText() == shown
+            assert page._channel_preview_method(ch) == preview, (ch, shown)
+        # the other layer, untouched -- the decision, what Save writes, and
+        # what is on screen
+        assert page._channel_final_decision("CD3") == decided, shown
+        assert page._build_config() == saved_before, shown
+        assert dict(state.display_visibility()) == visible_before, shown
+    page.close()
+
+
+def test_one_rows_preview_combo_moves_that_row_only(app, tmp_path):
+    """A3: per channel, and no leak sideways or downwards."""
+    page = _fresh_page(app, tmp_path)
+    decided = _decide(page, "CD3", "tophat")
+    others = [c for c in _markers(page) if c != "CD3"]
+    saved_before = page._build_config()
+
+    for shown, preview in (("TopHat", "tophat"), ("cucim", "cucim"),
+                           ("Original", "original"), ("Both", "both")):
+        page._channel_rows["CD3"]["method_cb"].setCurrentText(shown)
+
+        assert page._channel_preview_method("CD3") == preview
+        for ch in others:
+            assert page._channel_preview_method(ch) == "both", (ch, shown)
+            assert page._channel_final_decision(ch) == "original", (ch, shown)
+        assert page._channel_final_decision("CD3") == decided, shown
+        assert page._build_config() == saved_before, shown
+    page.close()
+
+
+def test_the_decision_panel_moves_the_other_layer_only(app, tmp_path):
+    """A4: Original -> TopHat -> cucim through the radios and Apply."""
+    from block01.core import step0_handoff
+
+    page = _fresh_page(app, tmp_path)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
+    preview_before = page._channel_preview_method("CD3")
+
+    for decision in ("original", "tophat", "cucim"):
+        _decide(page, "CD3", decision)
+
+        assert page._channel_final_decision("CD3") == decision
+        assert page._build_config()["channel_decisions"]["CD3"] == decision
+        assert step0_handoff.clean_correction_config(
+            page._build_config())["channel_decisions"]["CD3"] == decision
+        # the preview combo did not move, in the widget or in the store
+        assert page._channel_rows["CD3"]["method_cb"].currentText() == "cucim"
+        assert page._channel_preview_method("CD3") == preview_before == "cucim"
+    page.close()
+
+
+def _recorded_runs(page, monkeypatch):
+    """What the real compute entry is asked for, per call."""
+    asked = []
+    real = type(page)._process_current_channel
+
+    def _spy(self, method=None):
+        resolved = method
+        if resolved is None:
+            resolved = self._channel_preview_method(self.current_channel)
+        asked.append(resolved)
+        return real(self, method)
+
+    monkeypatch.setattr(type(page), "_process_current_channel", _spy)
+    return asked
+
+
+def test_the_compute_entry_asks_for_what_the_preview_method_says(
+        app, tmp_path, monkeypatch):
+    """B: the REAL entry, and the REAL worker constructor.
+
+    Not a dictionary read: what is pinned is the method the run is dispatched
+    with, and that `Original` dispatches no run at all.
+    """
+    from PyQt5 import QtCore
+
+    import block01.ui.step0.step0_page as sp
+
+    page = _fresh_page(app, tmp_path)
+    page.current_channel = "CD3"
+    built = []
+
+    class _Worker(QtCore.QThread):
+        """A real QThread that records the dispatch and computes nothing."""
+        channel_patch_done = QtCore.pyqtSignal(object, object, object)
+        channel_done = QtCore.pyqtSignal(object)
+        all_done = QtCore.pyqtSignal()
+        progress = QtCore.pyqtSignal(int)
+        error_signal = QtCore.pyqtSignal(object)
+        canceled = QtCore.pyqtSignal()
+
+        def __init__(self, loader, patches, methods, *a, **k):
+            super().__init__()
+            built.append(dict(methods))
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(sp, "BatchProcessWorker", _Worker)
+    asked = _recorded_runs(page, monkeypatch)
+
+    for shown, expected in (("Both", "both"), ("TopHat", "tophat"),
+                            ("cucim", "cucim")):
+        built.clear()
+        page._channel_rows["CD3"]["method_cb"].setCurrentText(shown)
+        page._process_current_channel()
+        assert asked[-1] == expected, shown
+        assert built and built[-1]["CD3"] == expected, shown
+        # the recorded run is over: the next dispatch is not refused by the
+        # production busy gate
+        page._batch_worker.wait()
+        page._batch_worker = None
+        page._pending_signatures.pop("CD3", None)
+
+    # Original: the raw channel is what is being previewed, so NO worker.
+    built.clear()
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("Original")
+    page._process_current_channel()
+    assert asked[-1] == "original"
+    assert built == [], "previewing the raw channel started a correction run"
+    # ...and the legacy programmatic entry still asks for both candidates.
+    page._process_current_channel("both")
+    assert built and built[-1]["CD3"] == "both"
+    page.close()
+
+
+def test_both_candidates_survive_a_change_of_final_decision(app, tmp_path):
+    """C: computed evidence is evidence, not a decision."""
+    page = _fresh_page(app, tmp_path)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("Both")
+    page._computed_signatures["CD3"] = page._merge_channel_signatures(
+        page._channel_signature("CD3", "tophat"),
+        page._channel_signature("CD3", "cucim"))
+    page._computed_channels.add("CD3")
+    for p_idx in range(len(page.patches)):
+        page._preview_cache[("CD3", p_idx)] = {"original_disp": None}
+    cache_before = dict(page._preview_cache)
+    _decide(page, "CD3", "tophat")
+
+    assert page._computed_signatures["CD3"][0] == "both"
+    assert page._channel_preview_method("CD3") == "both"
+    assert page._channel_final_decision("CD3") == "tophat"
+    assert page._build_config()["channel_decisions"]["CD3"] == "tophat"
+
+    _decide(page, "CD3", "cucim")
+
+    assert page._build_config()["channel_decisions"]["CD3"] == "cucim"
+    # the candidates are still there: the user may go back and forth
+    assert page._computed_signatures["CD3"][0] == "both"
+    assert dict(page._preview_cache) == cache_before
+    assert page._channel_compute_state("CD3") == "computed"
+    page.close()
+
+
+def test_the_four_cross_combinations_mean_what_they_say(app, tmp_path):
+    """The product ruling's own examples, measured one by one."""
+    page = _fresh_page(app, tmp_path)
+    cases = [("Both", "original"), ("Both", "tophat"),
+             ("cucim", "tophat"), ("Original", "cucim")]
+    for shown, decision in cases:
+        page._channel_rows["CD3"]["method_cb"].setCurrentText(shown)
+        _decide(page, "CD3", decision)
+
+        assert page._channel_preview_method("CD3") == shown.lower()
+        assert page._channel_final_decision("CD3") == decision
+        assert page._build_config()["channel_decisions"]["CD3"] == decision
+    page.close()
+
+
+def test_the_preview_source_provider_reports_both_layers_apart(app, tmp_path):
+    """The one read-model every preview consumer goes through."""
+    page = _fresh_page(app, tmp_path)
+    page._channel_rows["CD3"]["method_cb"].setCurrentText("Both")
+    _decide(page, "CD3", "tophat")
+
+    info = page._preview_provider.describe("CD3")["correction"]
+    assert info["preview_method"] == "both"
+    assert info["assigned_method"] == "tophat"
     page.close()

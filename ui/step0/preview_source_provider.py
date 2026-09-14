@@ -132,8 +132,11 @@ class Step0PreviewSourceProvider(QObject):
         that rule lives there and is not repeated here -- a second copy would
         be a second answer to the same question.
 
-        ``assigned_method`` and ``preview_method`` are passed through
-        verbatim, "both" included; interpreting them is the caller's job.
+        ``assigned_method`` is the channel's FINAL decision -- what Save
+        publishes, one of original/tophat/cucim -- and ``preview_method`` is
+        what it is previewed and computed with, "both" included. Two
+        questions, two answers, neither derived from the other; interpreting
+        them is the caller's job.
         """
         page = self._page
         saved = self.is_saved_corrected(channel)
@@ -146,8 +149,14 @@ class Step0PreviewSourceProvider(QObject):
         return {
             "channel": channel,
             "correction": {
-                "assigned_method": page._channel_decisions.get(channel),
-                "preview_method": page._channel_methods.get(channel),
+                # THE TWO LAYERS, kept apart and both resolved rather than
+                # read raw: `assigned_method` is what Save publishes, and
+                # `preview_method` is what the channel is computed and looked
+                # at with (`both` included). A consumer that needs one must
+                # not be handed the other, and neither may be None just
+                # because the user has not touched that control yet.
+                "assigned_method": page._channel_final_decision(channel),
+                "preview_method": page._channel_preview_method(channel),
                 "saved_method": self.saved_method(channel),
                 "params": {"tophat_radius": tr, "cucim_sigma": cs},
                 "effective_tophat_radius": eff_tr,

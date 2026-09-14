@@ -773,8 +773,14 @@ class MainWindow(QMainWindow):
         self._step1_channels_host = channels_box_lay
         self.config = ConfigPanel([], fusion=self._display.fusion,
                                   channel_dock=self._channel_dock)
-        self.config.setMinimumHeight(220)
-        self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # A TOOL STRIP, NOT A LIST. While this panel still built the private
+        # channel rows it had to be tall and to expand; since the rows moved
+        # to the one public dock it has two lines in it, and an Expanding
+        # policy with a 220px floor simply stretched those two lines apart --
+        # the empty band between `Nucleus:` and Reset/Load weights. It hugs
+        # its content now and the expanding space in the `Channels` frame
+        # goes to the dock's list, which is what grows.
+        self.config.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.config.config_changed.connect(self._on_cfg_changed)
         # THE DISPLAY TICK, from its one owner. It used to come from the
         # Step1 panel's signal, which is a widget saying what a widget did:

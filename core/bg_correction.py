@@ -152,6 +152,24 @@ def is_final_correction_decision(value):
     return str(value).strip().lower() in FINAL_CORRECTION_DECISIONS
 
 
+#: THE legal PREVIEW / automatic-compute methods -- a DIFFERENT question from
+#: the one above, asked of the same channel:
+#:
+#:     preview method  -- what do we compute or prepare to LOOK at?
+#:     final decision  -- what does Save publish?
+#:
+#: `both` is legal here and only here: preparing the TopHat and the cuCIM
+#: candidate so they can be compared is a computation, and a user comparing
+#: two candidates has not thereby decided anything. `original` here means
+#: "show the raw channel", which starts no correction worker at all.
+PREVIEW_METHODS = ("both", "original", "tophat", "cucim")
+
+
+def is_preview_method(value):
+    """Is `value` one of the four things a preview may be asked for."""
+    return str(value).strip().lower() in PREVIEW_METHODS
+
+
 def migrate_correction_decision(value):
     """A decision read from OLD data, as one of the three legal answers.
 

@@ -277,19 +277,27 @@ def test_show_all_and_hide_all_move_display_only(app):
     assert page._channel_decisions == decisions
 
 
-def test_the_bulk_method_box_moves_correction_only(app):
-    """...and the other bulk control is the mirror image of it."""
+def test_the_bulk_method_box_moves_the_preview_method_only(app):
+    """...and the other bulk control is the mirror image of it.
+
+    Show all / Hide all moves visibility and no method; the Method box moves
+    the PREVIEW method and no visibility -- and no final decision either,
+    which is the Per-Channel Decision panel's answer.
+    """
     page = _page(app)
     state = page.display.state
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
     state.set_display_visible("CD3", True, origin="test")
     state.set_display_visible("CD8", False, origin="test")
     visible_before = dict(state.display_visibility())
+    decisions_before = dict(page._channel_decisions)
 
     page._method_all.setCurrentText("TopHat")
 
-    assert page._channel_decisions["CD3"] == "tophat"
+    assert page._channel_preview_method("CD3") == "tophat"
     assert dict(state.display_visibility()) == visible_before
+    assert dict(page._channel_decisions) == decisions_before
+    assert "DAPI" not in page._channel_methods
     assert "DAPI" not in page._channel_decisions
 
 

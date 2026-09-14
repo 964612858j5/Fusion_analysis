@@ -711,7 +711,15 @@ def _build_gpu_path_page(app, tmp_path):
     row = page._channel_rows.get("CD3")
     if row is not None:
         row["checkbox"].setChecked(True)
+        # The row's combo is the PREVIEW method: it says what CD3 is computed
+        # and looked at with. Save publishes the FINAL decision, so a page
+        # that is about to Save a corrected channel has to have DECIDED one
+        # -- through the Per-Channel Decision panel, as a user does.
         row["method_cb"].setCurrentText("TopHat")
+    page.current_channel = "CD3"
+    page._update_decision_ui()
+    page._dec_top.setChecked(True)
+    page._apply_current_channel_decision()
     return page
 
 

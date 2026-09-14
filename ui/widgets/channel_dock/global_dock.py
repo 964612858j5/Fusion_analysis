@@ -35,10 +35,16 @@ from . import template
 #: The steps whose public channel editing happens in this dock.
 STEP0, STEP1, STEP2, STEP3 = 0, 1, 2, 3
 
-#: The final background-correction answers, in the order Step0 stores them.
-#: `both` is deliberately absent: it names computing two candidates to
-#: compare, and Save can only write one of these three.
-CORRECTION_METHODS = ["Original", "TopHat", "cucim"]
+#: What this row's combo offers: the channel's PREVIEW / automatic-compute
+#: method -- what Step0 computes or prepares to LOOK at. `Both` belongs here
+#: and means "prepare the TopHat and the cuCIM candidate so they can be
+#: compared"; `Original` means "show the raw channel" and starts no run.
+#:
+#: This is NOT the final correction decision. That question -- what Save
+#: publishes -- has three answers (original / tophat / cucim, never `both`)
+#: and one user entry, Step0's `Per-Channel Decision` panel with its Apply.
+#: The two never derive from one another.
+PREVIEW_METHODS = ["Both", "Original", "TopHat", "cucim"]
 
 #: The compute-state glyph beside the checkbox (Step0's vocabulary).
 STATE_GLYPHS = {
@@ -61,8 +67,8 @@ STATE_GLYPHS = {
 
 
 def _method_index(method):
-    """Where a FINAL decision sits in `CORRECTION_METHODS`, or -1."""
-    lut = {name.lower(): i for i, name in enumerate(CORRECTION_METHODS)}
+    """Where a PREVIEW method sits in `PREVIEW_METHODS`, or -1."""
+    lut = {name.lower(): i for i, name in enumerate(PREVIEW_METHODS)}
     return lut.get(str(method or "").strip().lower(), -1)
 
 
@@ -167,14 +173,17 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self.fusion_box.toggled.connect(self._on_fusion_toggled)
         self._acc_step1 = (self.slider, self.spin, self.fusion_box)
 
-        # -- Step0's accessory: the correction decision and its state -------
+        # -- Step0's accessory: the PREVIEW method and the compute state ----
         self.method_cb = QtWidgets.QComboBox()
-        self.method_cb.addItems(CORRECTION_METHODS)
+        self.method_cb.addItems(PREVIEW_METHODS)
         self.method_cb.setFixedWidth(64)
         self.method_cb.setStyleSheet(template.ACCESSORY_COMBO_QSS)
         self.method_cb.setToolTip(
-            "The FINAL background-correction answer for this channel — what "
-            "Save writes. Correction only: it shows and hides nothing.")
+            "What this channel is PREVIEWED / computed with: Both prepares "
+            "the TopHat and the cuCIM candidate, Original shows the raw "
+            "channel and starts no run. It does not decide what Save "
+            "publishes — that is the Per-Channel Decision panel's Apply — "
+            "and it shows and hides nothing.")
         self.method_cb.currentTextChanged.connect(self._on_method_text)
         # NO SECOND STATUS BADGE. Step0's compute state is the state slot
         # beside the checkbox; the right-edge label this row used to carry
@@ -343,8 +352,8 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self.fusion_box.blockSignals(False)
 
     def set_method(self, method):
-        """Show the FINAL correction answer. A `both` -- a computation, not
-        an answer -- leaves the combo where it is."""
+        """Show this channel's PREVIEW method, `Both` included. A value that
+        is not one of the four leaves the combo where it is."""
         idx = _method_index(method)
         if idx < 0 or idx == self.method_cb.currentIndex():
             return

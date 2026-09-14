@@ -865,11 +865,16 @@ class Step0Page(QWidget):
         # to `display_changed` -- one source, one signal.
         self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
         self._display_seeded = set()     # channels whose slide-wide seed was applied
-        # The public dock is NOT added to this page: it lives beside the
-        # stacked pages, so it survives every step transition. What stays
-        # here is the page's own correction chrome (the All row above, the
-        # method parameters and Compare below).
-        cll.addWidget(ch_box, stretch=0)
+        # THE PUBLIC DOCK MOUNTS HERE, in Step0's own `Channels` box, under
+        # the All row and the separator -- where this page's channel list has
+        # always been. The host owns the frame, the title and the geometry;
+        # the dock is the list inside it. It is the SAME widget in every
+        # step: the window moves it into each step's host (see
+        # `MainWindow._mount_channels_dock`), which is what keeps one panel,
+        # one set of rows and one place to look.
+        self._channels_box = ch_box
+        self._channels_host = chl
+        cll.addWidget(ch_box, stretch=2)
 
         # ── Method Parameters ─────────────────────────────────────────
         # Compact: one numeric INPUT box per method (no sliders, no separate
@@ -5074,6 +5079,16 @@ class Step0Page(QWidget):
         return self.display.ensure_intensity()
 
     # ── the Intensity content port ────────────────────────────────────────
+    def channels_host(self):
+        """Where the ONE public channel panel goes in this page.
+
+        The layout of Step0's `Channels` group box, under the All row and the
+        separator. Step0's panel is the visual master: the border, the title,
+        the width and the controls above the list are this page's, and every
+        other step reuses the same component inside its own host.
+        """
+        return getattr(self, "_channels_host", None)
+
     def intensity_panel_widget(self):
         """The Channel Remap inspector, detached, for the shared window.
 
@@ -7653,6 +7668,12 @@ class Step0Page(QWidget):
         adapter = getattr(self, "_dock_adapter", None)
         if adapter is not None:
             adapter.detach()
+        # The one public dock is mounted INSIDE this page's Channels box, so
+        # it has to leave before the page does or Qt would delete the shared
+        # panel along with its host.
+        dock = getattr(display, "channel_dock", lambda: None)()
+        if dock is not None and self.isAncestorOf(dock):
+            dock.unmount()
         try:
             display.state.selection_changed.disconnect(
                 self._on_channel_selected_by_id)

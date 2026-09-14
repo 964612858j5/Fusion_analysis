@@ -1875,6 +1875,10 @@ class Step3Page(QWidget):
                     f"intensity={float(st.get('opacity', 1.0))}"
                 )
 
+    def channels_host(self):
+        """Where the ONE public channel panel goes in this page."""
+        return getattr(self, "_channels_host", None)
+
     def _make_channel_overlay_panel(self):
         ch_box = QGroupBox('Channel Overlay')
         ch_box.setStyleSheet(
@@ -2201,6 +2205,18 @@ class Step3Page(QWidget):
         self._sub_spin.setRange(1, 16)
         self._sub_spin.setValue(2)
 
+        # ── THE public Channels panel's host ──────────────────────────
+        # Step3 draws marker channels; whether one is drawn and in what
+        # colour are public answers, edited in the same component every step
+        # uses. What stays below is this page's own overlay chrome: the DAPI
+        # and Fusion layers, opacity and Auto.
+        from .widgets.channel_dock import template as _channel_template
+        self._channels_box = QGroupBox('Channels')
+        self._channels_box.setStyleSheet(_channel_template.frame_qss())
+        self._channels_host = QVBoxLayout(self._channels_box)
+        self._channels_host.setContentsMargins(4, 4, 4, 4)
+        self._channels_host.setSpacing(4)
+        controls_lay.addWidget(self._channels_box, stretch=1)
         controls_lay.addWidget(self._make_channel_overlay_panel(), stretch=1)
         controls_lay.addStretch()
 

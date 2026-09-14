@@ -200,6 +200,19 @@ class Step2Page(QWidget):
         self._cells_lbl.setStyleSheet('color:#aaa;font-size:11px;')
         ll.addWidget(self._cells_lbl)
 
+        # ── THE public Channels panel's host ──────────────────────────
+        # The same frame Step0 draws, holding the same component: Step2
+        # CONSUMES the display answers (which channels are drawn, in what
+        # colour) and edits them where every other step does. Its own
+        # segmentation controls stay on the right.
+        from .widgets.channel_dock import template as _channel_template
+        self._channels_box = QGroupBox('Channels')
+        self._channels_box.setStyleSheet(_channel_template.frame_qss())
+        self._channels_host = QVBoxLayout(self._channels_box)
+        self._channels_host.setContentsMargins(4, 4, 4, 4)
+        self._channels_host.setSpacing(4)
+        ll.addWidget(self._channels_box, stretch=1)
+
         split.addWidget(left)
 
         # ── RIGHT: all controls ───────────────────────────────────────
@@ -972,6 +985,10 @@ class Step2Page(QWidget):
         root.addLayout(nav)
 
     # ── utilities ─────────────────────────────────────────────────────
+
+    def channels_host(self):
+        """Where the ONE public channel panel goes in this page."""
+        return getattr(self, "_channels_host", None)
 
     @staticmethod
     def _lbl(text, bold=False):

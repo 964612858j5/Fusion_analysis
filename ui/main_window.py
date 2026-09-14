@@ -370,16 +370,11 @@ Step1Restore = collections.namedtuple(
 
 class MainWindow(QMainWindow):
 
-    #: The public channel dock's geometry contract. A floor, because a row
-    #: that cannot show its name and its weight box is not a channel list;
-    #: a ceiling, because the central viewer is what the window is for.
-    #: Wide enough for the whole public row -- checkbox, state, swatch, name,
-    #: the weight slider and its number box, plus the widest step accessory --
-    #: because a row that has to compress one of them is a row whose columns
-    #: move between steps.
-    CHANNEL_DOCK_MIN_WIDTH = 360
-    CHANNEL_DOCK_MAX_WIDTH = 520
-    CENTRAL_MIN_WIDTH = 520
+    #: The one public channel panel takes its width from the STEP's own
+    #: Channels panel -- Step0's is the master -- so the window fixes no
+    #: width of its own for it any more. It used to pin one, because the
+    #: dock sat in a splitter beside the stacked pages and squeezed the
+    #: central viewer.
 
     def __init__(self):
         super().__init__()
@@ -656,38 +651,18 @@ class MainWindow(QMainWindow):
 
         self._stack = QtWidgets.QStackedWidget()
 
-        # ── THE one public channel dock, outside the stacked pages ────────
+        # ── THE one public channel panel ──────────────────────────────────
         #
-        # Step0, Step1, Step2 and Step3 edit channels HERE. It is built by
-        # `Block01DisplayServices` and mounted here, beside the stack rather
-        # than inside a page, so a step change switches the accessory and
-        # nothing else: the dock, its rows, the selection, the search text
-        # and the scroll position are the same objects before and after.
-        # A per-step list is what let two steps disagree about the same
-        # channel and lose the user's place on every transition.
+        # Step0, Step1, Step2 and Step3 edit channels in ONE component, and
+        # that component is mounted in each step's own `Channels` panel --
+        # Step0's is the visual master and the others reuse it. It used to
+        # be parked in a splitter beside the stacked pages, which left Step0
+        # with two panels (its own frame, emptied, and the dock's) and took a
+        # column of the window away from the viewer. The dock is built here
+        # because Block01 owns its lifetime; where it is SHOWN follows the
+        # step (`_mount_channels_dock`).
         self._channel_dock = self._display.ensure_channel_dock()
-        # The dock picks the colour and writes `ChannelDisplayState`; every
-        # view, Step0's included, follows that one answer. This window used
-        # to route the pick through `Step0Page`, which is how a swatch in
-        # Step2 could raise on a destroyed Step0.
-        dock_split = QSplitter(Qt.Horizontal)
-        dock_split.setObjectName("Block01DockSplit")
-        # COLLAPSIBLE, with a floor. The dock needs a row's width to be
-        # readable (checkbox, swatch, name, weight box) and the central
-        # viewer must keep the rest: on a small screen the user drags this
-        # splitter shut rather than having the picture squeezed out.
-        self._channel_dock.setMinimumWidth(self.CHANNEL_DOCK_MIN_WIDTH)
-        self._channel_dock.setMaximumWidth(self.CHANNEL_DOCK_MAX_WIDTH)
-        self._stack.setMinimumWidth(self.CENTRAL_MIN_WIDTH)
-        dock_split.addWidget(self._channel_dock)
-        dock_split.addWidget(self._stack)
-        dock_split.setCollapsible(0, True)
-        dock_split.setCollapsible(1, False)
-        dock_split.setStretchFactor(0, 0)
-        dock_split.setStretchFactor(1, 1)
-        dock_split.setSizes([self.CHANNEL_DOCK_MIN_WIDTH, 1200])
-        self._channel_dock_split = dock_split
-        outer_lay.addWidget(dock_split, stretch=1)
+        outer_lay.addWidget(self._stack, stretch=1)
 
         self._step0 = Step0Page(display_services=self._display)
         self._step0.step0_complete.connect(self._on_step0_complete)
@@ -792,6 +767,10 @@ class MainWindow(QMainWindow):
         # builds a private channel list at all -- not even one to hide. What
         # is left of it is Step1's own strip: the read-only nucleus line,
         # Reset weights and Load weights.
+        # STEP1'S HOST for the one public panel: the same `Channels` frame,
+        # with the dock's list above Step1's own tools (the read-only nucleus
+        # line, Reset weights, Load weights).
+        self._step1_channels_host = channels_box_lay
         self.config = ConfigPanel([], fusion=self._display.fusion,
                                   channel_dock=self._channel_dock)
         self.config.setMinimumHeight(220)
@@ -3583,6 +3562,42 @@ class MainWindow(QMainWindow):
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
                       3: _CTX_STEP3}
 
+    def _channels_host_for(self, step):
+        """The layout of the step's own `Channels` panel, or None."""
+        # A page that has been released or is not built yet is not a host:
+        # the dock then simply hides, and is never re-parented into a widget
+        # that is on its way out.
+        if step == 0:
+            return getattr(self._step0, "channels_host", lambda: None)()
+        if step == 1:
+            return getattr(self, "_step1_channels_host", None)
+        if step == 2:
+            page = self._step2
+        elif step == 3:
+            page = self._step3
+        else:
+            return None
+        return getattr(page, "channels_host", lambda: None)()
+
+    def _mount_channels_dock(self, step):
+        """Show the ONE public channel panel in the step being entered.
+
+        The same widget is moved, never rebuilt: the dock, its list, its
+        search box and every row keep their identity across the whole
+        Step0 -> Step1 -> Step2 -> Step3 -> Step0 walk, and so do the search
+        text, the scroll position and the selection. A step with no host
+        (Step1.5, Step4) simply does not show it; nothing is destroyed.
+        """
+        dock = getattr(self, "_channel_dock", None)
+        if dock is None:
+            return
+        host = self._channels_host_for(step)
+        if host is None:
+            dock.setVisible(False)
+            return
+        dock.mount_into(host)
+        dock.setVisible(True)
+
     def _set_step_active(self, active):
         self._current_step = active
         # THE ONE public channel dock follows the step by switching its
@@ -3592,6 +3607,7 @@ class MainWindow(QMainWindow):
         dock = getattr(self, "_channel_dock", None)
         if dock is not None:
             dock.set_step(active)
+            self._mount_channels_dock(active)
         # The ONE place the shared navigator's edit policy is decided.  Every
         # navigation path goes through here, so an already-open popup follows
         # the step immediately: no reopen, no extra click.

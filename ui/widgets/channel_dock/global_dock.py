@@ -471,7 +471,8 @@ class GlobalChannelDock(QtWidgets.QWidget):
     #: the only thing that may act on it.
     correction_method_changed = pyqtSignal(str, str)
 
-    def __init__(self, state, fusion, parent=None, title="Channels"):
+    def __init__(self, state, fusion, parent=None, title="",
+                 show_search=True, show_bulk_buttons=False):
         super().__init__(parent)
         self.setObjectName("ChannelDockRoot")
         self.setStyleSheet(template.DOCK_QSS)
@@ -495,6 +496,11 @@ class GlobalChannelDock(QtWidgets.QWidget):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(4)
 
+        # NO TITLE OF ITS OWN by default. THE PANEL is the host's: Step0's
+        # blue `Channels` group box, which every other step reuses. A title
+        # here drew a second heading inside that box -- two `Channels`
+        # captions, one frame inside another -- which is what made the dock
+        # look like a different panel instead of the one Step0 always had.
         if title:
             hdr = QtWidgets.QLabel(title)
             hdr.setStyleSheet("color:#9bd0ff;font-size:11px;font-weight:bold;")
@@ -504,6 +510,7 @@ class GlobalChannelDock(QtWidgets.QWidget):
         self.search.setPlaceholderText("Search channels…")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.filter_rows)
+        self.search.setVisible(bool(show_search))
         lay.addWidget(self.search)
 
         tools = QtWidgets.QHBoxLayout()
@@ -519,6 +526,13 @@ class GlobalChannelDock(QtWidgets.QWidget):
         tools.addLayout(self.header_extra)
         self.btn_show_all.clicked.connect(lambda: self.set_all_visible(True))
         self.btn_hide_all.clicked.connect(lambda: self.set_all_visible(False))
+        # HIDDEN BY DEFAULT: Step0's panel has its own `Show all` tick in the
+        # row above the list, and a second bulk control inside the list was
+        # never part of that panel. `set_all_visible` is still the one sweep
+        # both of them call.
+        self.btn_show_all.setVisible(bool(show_bulk_buttons))
+        self.btn_hide_all.setVisible(bool(show_bulk_buttons))
+        self._tools_row = tools
         lay.addLayout(tools)
 
         self.list_widget = QtWidgets.QListWidget()
@@ -541,6 +555,56 @@ class GlobalChannelDock(QtWidgets.QWidget):
             fusion.weight_changed.connect(self._on_fusion_weight)
             fusion.participation_changed.connect(self._on_fusion_participation)
             fusion.draft_restored.connect(self.refresh)
+
+    # ── where the one panel is mounted ────────────────────────────────
+    def mount_into(self, layout, index=None, stretch=1):
+        """Move THIS widget into a step's Channels panel.
+
+        One instance, moved -- not one per step. A reparent keeps the object
+        identity of the dock, the list, the search box and every row, but Qt
+        resets the scroll bar and drops focus when a widget is re-inserted,
+        so both are carried across by hand. Nothing here is a command: no
+        owner is written and no row is rebuilt.
+        """
+        if layout is None or self.parent() is layout.parentWidget():
+            return False
+        bar = self.list_widget.verticalScrollBar()
+        keep_scroll = bar.value()
+        keep_focus = self.hasFocus() or self.search.hasFocus() \
+            or self.list_widget.hasFocus()
+        keep_search_focus = self.search.hasFocus()
+        old_layout = self.parentWidget().layout() if self.parentWidget() else None
+        if old_layout is not None:
+            old_layout.removeWidget(self)
+        if index is None:
+            layout.addWidget(self, stretch)
+        else:
+            layout.insertWidget(index, self, stretch)
+        self.setVisible(True)
+        bar.setValue(keep_scroll)
+        if keep_focus:
+            (self.search if keep_search_focus else self.list_widget).setFocus(
+                Qt.OtherFocusReason)
+        return True
+
+    def unmount(self):
+        """Leave the host that is going away, alive.
+
+        The dock is a CHILD of whichever step's Channels box it is mounted
+        in, so that host's destruction would take the one public panel --
+        and every row, the search box and the list -- down with it. A page
+        being released calls this first: the dock loses its parent, keeps
+        its identity and its contents, and the next `mount_into` puts it
+        back. Nothing is written to an owner and no row is rebuilt.
+        """
+        if self.parentWidget() is None:
+            return False
+        old_layout = self.parentWidget().layout()
+        if old_layout is not None:
+            old_layout.removeWidget(self)
+        self.setParent(None)
+        self.setVisible(False)
+        return True
 
     # ── the owners ────────────────────────────────────────────────────
     def display_state(self):

@@ -100,16 +100,25 @@ def test_one_dock_and_stable_row_identity_through_the_walk(app):
         _close(w)
 
 
-def test_the_dock_lives_outside_the_stacked_pages(app):
+def test_the_dock_is_owned_by_services_and_hosted_by_the_step(app):
+    """Ownership is not parentage.
+
+    The one dock belongs to Block01DisplayServices for its whole life; the
+    step page it is mounted in is only its host, and a page that goes away
+    gives it back instead of taking it along.
+    """
     w = _window(app)
     try:
         dock = w._channel_dock
         assert w._display.channel_dock() is dock
-        # not inside any page of the stack
-        for i in range(w._stack.count()):
-            page = w._stack.widget(i)
-            assert dock not in page.findChildren(type(dock))
-            assert not _is_descendant(dock, page)
+        w._set_step_active(0)
+        assert _is_descendant(dock, w._step0)
+        dock.unmount()
+        assert dock.parentWidget() is None
+        assert w._display.channel_dock() is dock
+        assert dock.rows() and dock.channel_order()
+        w._set_step_active(0)
+        assert _is_descendant(dock, w._step0._channels_box)
     finally:
         _close(w)
 
@@ -1207,4 +1216,185 @@ def test_removing_the_empty_badge_left_the_public_columns_where_they_were(app):
             assert r.state_slot.width() == template.STATE_SLOT_WIDTH
     finally:
         dock.hide()
+        _close(w)
+
+
+# ── the panel is Step0's, and there is only one of it ───────────────────────
+
+def _channels_boxes(widget):
+    """Every VISIBLE `Channels` group box in this window."""
+    return [b for b in widget.findChildren(QtWidgets.QGroupBox)
+            if (b.title() or "") == "Channels" and b.isVisible()]
+
+
+def test_step0_shows_exactly_one_channels_panel(app):
+    """THE regression this guards: the dock was parked in a splitter beside
+    the stacked pages, so Step0 had two panels -- its own frame, emptied, and
+    the dock's, with a second `Channels` caption and a column of the window
+    taken from the viewer."""
+    w = _window(app)
+    w.resize(1500, 950)
+    w.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        w._set_step_active(0)
+        QtWidgets.QApplication.processEvents()
+        dock = w._channel_dock
+
+        boxes = _channels_boxes(w)
+        assert len(boxes) == 1, [b.title() for b in boxes]
+        assert boxes[0] is w._step0._channels_box
+        # the one panel IS the host's frame; the dock draws no second caption
+        assert [lbl for lbl in dock.findChildren(QtWidgets.QLabel)
+                if lbl.text() == "Channels"] == []
+        assert dock.btn_show_all.isHidden() and dock.btn_hide_all.isHidden()
+        # ...and the dock is INSIDE Step0's box, not beside the stack
+        assert _is_descendant(dock, boxes[0])
+        assert _is_descendant(dock, w._stack)
+        # the stacked pages own the full width again
+        assert w._stack.x() == 0
+        assert w._stack.width() == w.width()
+    finally:
+        w.hide()
+        _close(w)
+
+
+def test_the_one_panel_moves_between_the_steps_hosts(app):
+    """One component, moved -- not one per step, and never two at once."""
+    w = _window(app)
+    w.resize(1500, 950)
+    w.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        dock = w._channel_dock
+        hosts = {}
+        for step in (0, 1, 2, 3):
+            w._set_step_active(step)
+            QtWidgets.QApplication.processEvents()
+            host = w._channels_host_for(step)
+            assert host is not None, step
+            assert dock.parentWidget() is host.parentWidget(), step
+            hosts[step] = host.parentWidget()
+            assert len(_channels_boxes(w)) <= 1, step
+        # four different hosts, one dock
+        assert len({id(h) for h in hosts.values()}) == 4
+        assert w._display.channel_dock() is dock
+    finally:
+        w.hide()
+        _close(w)
+
+
+def test_the_step_walk_keeps_the_panel_and_the_users_place(app):
+    """Moving the widget is not rebuilding it: identity, search text, scroll
+    position and selection survive the whole walk, and Step0's geometry is
+    what it was on the first visit."""
+    # enough channels that the list REALLY scrolls: with three rows the bar
+    # has no range and a dropped scroll position is indistinguishable from a
+    # kept one.
+    names = ("DAPI",) + tuple("CD%d" % i for i in range(1, 40))
+    w = _window(app, names=names)
+    w.resize(1500, 950)
+    w.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        dock = w._channel_dock
+        w._set_step_active(0)
+        QtWidgets.QApplication.processEvents()
+        first_geo = (w._step0._channels_box.geometry(), dock.geometry())
+        ids = (id(dock), id(dock.list_widget), id(dock.search),
+               tuple(id(dock.row(c)) for c in dock.channel_order()))
+        dock.search.setText("CD")
+        w._display.state.set_selected_channel("CD20", origin="test")
+        bar = dock.list_widget.verticalScrollBar()
+        QtWidgets.QApplication.processEvents()
+        assert bar.maximum() > 0, "the list does not scroll: nothing is pinned"
+        bar.setValue(bar.maximum() // 2)
+        assert bar.value() > 0
+        keep = (dock.search.text(), bar.value(),
+                w._display.state.selected_channel())
+
+        for step in STEP_WALK:
+            w._set_step_active(step)
+            QtWidgets.QApplication.processEvents()
+
+        assert ids == (id(dock), id(dock.list_widget), id(dock.search),
+                       tuple(id(dock.row(c)) for c in dock.channel_order()))
+        assert (dock.search.text(), bar.value(),
+                w._display.state.selected_channel()) == keep
+        assert len(_channels_boxes(w)) == 1
+        assert (w._step0._channels_box.geometry(), dock.geometry()) == first_geo
+    finally:
+        w.hide()
+        _close(w)
+
+
+def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
+    """The Channels panel sits where it always did in Step0's left column,
+    above Method Parameters, and the central viewer is not squeezed by a
+    fifth column."""
+    w = _window(app)
+    w.resize(1500, 950)
+    w.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        w._set_step_active(0)
+        QtWidgets.QApplication.processEvents()
+        page = w._step0
+        box = page._channels_box
+        column = box.parentWidget()
+        method_box = next(
+            b for b in column.findChildren(QtWidgets.QGroupBox)
+            if (b.title() or "").startswith("Method Parameters"))
+        assert box.y() < method_box.y(), "Channels is no longer the top panel"
+        assert box.width() == method_box.width()
+        # the page fills the window: no outer dock column
+        assert page.width() == w.width()
+    finally:
+        w.hide()
+        _close(w)
+
+
+# the numbers measured on the reviewed baseline e78530b (a temp worktree,
+# same window size, same offscreen platform) -- the appearance of the Step0
+# panel is the contract this fix restores, so it is pinned as numbers rather
+# than as a screenshot that drifts with the helper that took it.
+STEP0_PANEL_BASELINE = {
+    "container": (0, 0, 308, 615),
+    "dock": (10, 63, 288, 542),
+    "list": (4, 30, 280, 508),
+}
+
+
+def test_the_step0_panel_looks_like_the_baseline_panel(app):
+    from block01.ui.widgets.channel_dock import template
+
+    w = _window(app)
+    w.resize(1500, 950)
+    w.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        w._set_step_active(0)
+        QtWidgets.QApplication.processEvents()
+        box = w._step0._channels_box
+        dock = w._channel_dock
+        geo = {
+            "container": (0, 0, box.width(), box.height()),
+            "dock": (dock.x(), dock.y(), dock.width(), dock.height()),
+            "list": (dock.list_widget.x(), dock.list_widget.y(),
+                     dock.list_widget.width(), dock.list_widget.height()),
+        }
+        assert geo == STEP0_PANEL_BASELINE
+        # the frame is the page's, drawn with the shared template
+        assert box.title() == "Channels"
+        assert box.styleSheet() == template.frame_qss()
+        # the dock adds no chrome of its own on top of it
+        assert dock.search.isVisible()
+        assert dock.btn_show_all.isHidden() and dock.btn_hide_all.isHidden()
+        assert not dock.findChildren(QtWidgets.QGroupBox)
+        # ...and the pixels are actually painted into the page's frame
+        shot = box.grab()
+        assert (shot.width(), shot.height()) == (box.width(), box.height())
+        assert not shot.isNull()
+    finally:
+        w.hide()
         _close(w)

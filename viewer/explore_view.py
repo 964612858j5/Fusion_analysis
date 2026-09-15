@@ -762,6 +762,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 `dir_prefetch_direction_changes`.
 """
 
+import collections
 import functools
 import logging
 import threading
@@ -2307,6 +2308,18 @@ class ExploreController(QtCore.QObject):
         self._floor_ctx = None
         self._floor_gen = 0
         self._floor_job_running = False
+        # FLOORS ALREADY COMPUTED, by the same identity a ready floor is
+        # judged against (`_current_floor_ctx`). The tiles have had a cache
+        # since the beginning; the floor never did, so flipping the full
+        # image between Original / TopHat / cuCIM recomputed a whole level
+        # of corrected pixels every time -- with nothing changed but which
+        # of the three the user wanted to look at.
+        #
+        # Small on purpose: a floor is ONE array per (channel, method,
+        # params, level), and only a handful of selections are ever flipped
+        # between. Cleared wherever the pixels underneath it change.
+        self._floor_cache = collections.OrderedDict()
+        self._floor_cache_limit = 8
         self._floor_pending = False
         self._floor_threads = []
 
@@ -3682,10 +3695,74 @@ class ExploreController(QtCore.QObject):
             # pending.
             return
 
+        if self._restore_cached_floor(gen):
+            return
         if self._floor_job_running:
             self._floor_pending = True
             return
         self._start_floor_job(gen)
+
+    def _floor_cache_key(self):
+        """The identity a cached floor is filed under: the selection's own
+        context plus the level and stride it was computed at."""
+        floor_level, stride = self._pick_floor_level_and_stride()
+        ctx = self._current_floor_ctx(floor_level, stride)
+        if ctx is None:
+            return None, floor_level, stride
+        return (ctx, int(floor_level), int(stride)), floor_level, stride
+
+    def _remember_floor(self, ctx, floor_level, stride, gray, gains):
+        key = (ctx, int(floor_level), int(stride))
+        cache = self._floor_cache
+        if key in cache:
+            del cache[key]
+        cache[key] = (gray, dict(gains or {}))
+        while len(cache) > self._floor_cache_limit:
+            cache.popitem(last=False)
+
+    def _restore_cached_floor(self, gen: int):
+        """Put back a floor this selection already has. GUI thread, no job.
+
+        Same guards as a computed one: it is installed only if it is still
+        what the live selection asks for, and it carries its own gain table,
+        so a restored floor is quantised exactly as the computed one was.
+        """
+        key, floor_level, stride = self._floor_cache_key()
+        if key is None or self._suspended:
+            return False
+        found = self._floor_cache.get(key)
+        if found is None:
+            return False
+        gray, gains = found
+        if gen != self._floor_gen:
+            return False
+        self._floor_cache.move_to_end(key)
+        ctx = key[0]
+        self._floor_level = floor_level
+        self._floor_stride = stride
+        self.stats["floor_level"] = floor_level
+        self.stats["floor_stride"] = stride
+        self.stats["floor_cache_hits"] = self.stats.get("floor_cache_hits",
+                                                        0) + 1
+        self._level_gain = dict(gains)
+        self._gain_ctx = ctx if gains else None
+        ds_y, ds_x = self._downsample_yx(floor_level)
+        ds_y, ds_x = ds_y * stride, ds_x * stride
+        h, w = gray.shape
+        self.view.corrected_floor_item.setImage(
+            gray, autoLevels=False, levels=self._corrected_levels(floor_level))
+        self.view.corrected_floor_item.setLookupTable(
+            None if (self._tint is None and self._gamma == 1.0)
+            else build_display_lut(self._tint, self._gamma))
+        self.view.corrected_floor_item.setRect(
+            ExploreView.world_rect(0, 0, h, w, ds_y, ds_x))
+        self._floor_ready = True
+        self._floor_ctx = ctx
+        self._precise_pool.set_levels_for_level(self._corrected_levels_fn())
+        self.floor_ready_changed.emit(True)
+        self.floor_preparing_changed.emit(False)
+        self._update_layer_visibility()
+        return True
 
     def _start_floor_job(self, gen: int):
         """Read the floor array (GUI thread; reuses `_overview_arr` when
@@ -3827,6 +3904,7 @@ class ExploreController(QtCore.QObject):
                 self.view.corrected_floor_item.setRect(rect)
                 self._floor_ready = True
                 self._floor_ctx = ctx
+                self._remember_floor(ctx, floor_level, stride, gray, gains)
                 accepted = True
         self.stats["level_display_gain"] = dict(self._level_gain)
         self.stats["gain_calibrated"] = bool(self._level_gain)
@@ -4998,6 +5076,9 @@ class ExploreController(QtCore.QObject):
         if self._torn_down:
             return
         self._torn_down = True
+        # The cached floors go with the view: they are whole levels of
+        # corrected pixels and nothing will ask for them again.
+        self._floor_cache.clear()
 
         # The overlay goes FIRST and it releases only what it owns -- its
         # generation, its signals, its pool. It never shuts the scheduler or

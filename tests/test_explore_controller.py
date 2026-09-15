@@ -4473,3 +4473,128 @@ def test_a_forgotten_waiter_is_still_not_woken_when_another_fails(app):
     assert bad.calls == 1
     assert len(good.woken) == 1
     store.shutdown()
+
+
+# ── the corrected floor is cached, like the tiles have always been ────────
+#
+# Flipping the full image between Original / TopHat / cuCIM changes nothing
+# but which of the three the user wants to look at: same channel, same
+# parameters, same camera. The corrected TILES have had an LRU cache since
+# the beginning, but the corrected FLOOR -- a whole level of corrected pixels
+# under them -- had none, so every flip recomputed one. That is what the user
+# reported as "it seems to recompute every time".
+
+
+def _floor_jobs(ctrl):
+    """Count `_start_floor_job` calls without changing what it does."""
+    calls = []
+    real = ctrl._start_floor_job
+
+    def counting(gen):
+        calls.append(gen)
+        return real(gen)
+
+    ctrl._start_floor_job = counting
+    return calls
+
+
+def _finish_floor(ctrl, scheduler=None):
+    """Complete whatever floor job is in flight, the way the worker does."""
+    import numpy as np
+    floor_level, stride = ctrl._pick_floor_level_and_stride()
+    ctx = ctrl._current_floor_ctx(floor_level, stride)
+    arr = np.full((8, 8), 7.0, dtype=np.float32)
+    ctrl._handle_floor_result((ctrl._floor_gen, ctx, floor_level, stride,
+                               arr, None, {}, None))
+    _pump(5)
+
+
+def test_a_method_already_computed_reuses_its_floor(app):
+    """Original -> TopHat -> Original -> TopHat, nothing else touched."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    _finish_floor(ctrl)
+    assert ctrl._floor_ready is True
+
+    jobs = _floor_jobs(ctrl)
+    ctrl.set_selection(method=None, params=())        # Original
+    ctrl.set_selection(method="tophat", params=(10,))  # back again
+
+    assert jobs == [], f"the floor was recomputed: {jobs}"
+    assert ctrl._floor_ready is True, "the cached floor was not put back"
+    assert ctrl.stats.get("floor_cache_hits", 0) >= 1
+
+
+def test_each_method_keeps_its_own_floor(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    _finish_floor(ctrl)
+    ctrl.set_selection(method="cucim", params=(50,))
+    _finish_floor(ctrl)
+
+    jobs = _floor_jobs(ctrl)
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl.set_selection(method="cucim", params=(50,))
+
+    assert jobs == [], f"a computed method's floor was recomputed: {jobs}"
+    assert ctrl.stats.get("floor_cache_hits", 0) >= 2
+
+
+def test_a_changed_parameter_is_not_a_cache_hit(app):
+    """The cache is keyed by what the floor IS, so a new radius recomputes."""
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    _finish_floor(ctrl)
+
+    jobs = _floor_jobs(ctrl)
+    ctrl.set_selection(method="tophat", params=(11,))
+
+    assert len(jobs) == 1, f"a new parameter reused an old floor: {jobs}"
+    assert ctrl._floor_ready is False
+
+
+def test_a_changed_channel_is_not_a_cache_hit(app):
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    _finish_floor(ctrl)
+
+    hits = ctrl.stats.get("floor_cache_hits", 0)
+    ctrl.set_selection(channel="OTHER")
+
+    # No HIT: the cache is keyed by the channel among other things, so the
+    # floor computed for the previous one can never be handed to this one.
+    # (Whether a job starts at all is the cold-switch rule's business: a
+    # channel whose overview has not landed withholds every request until
+    # its display range is known.)
+    assert ctrl.stats.get("floor_cache_hits", 0) == hits
+    key, _level, _stride = ctrl._floor_cache_key()
+    assert key not in ctrl._floor_cache, \
+        "another channel's floor was filed under this one"
+
+
+def test_the_floor_cache_does_not_grow_without_bound(app):
+    """A floor is a whole level of pixels: the cache keeps a few, not all.
+
+    Driven at `_remember_floor` rather than through `set_selection`, because
+    a radius is scaled to the floor's level (`effective_param`) and a dozen
+    different radii collapse to three distinct floors -- which would never
+    reach the limit however many the test asked for.
+    """
+    import numpy as np
+
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    limit = ctrl._floor_cache_limit
+    for i in range(limit + 4):
+        ctx = ("src", f"CH{i}", "tophat", (3,))
+        ctrl._remember_floor(ctx, 0, 1, np.zeros((4, 4), np.float32), {})
+
+    assert len(ctrl._floor_cache) == limit
+    # the OLDEST went, the newest stayed
+    kept = [key[0][1] for key in ctrl._floor_cache]
+    assert "CH0" not in kept
+    assert f"CH{limit + 3}" in kept

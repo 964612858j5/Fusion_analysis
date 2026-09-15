@@ -9868,23 +9868,31 @@ class Step0Page(QWidget):
                    "cucim": ("cucim",)}.get(previewed, ())
         changed = tuple(m for m in changed if m in allowed)
         if ch and ch != self.nucleus_channel:
+            # TWO DIFFERENT QUESTIONS, and they were one.
+            #
+            # INHERITING the global number into the Per-Channel Decision
+            # boxes is for channels that have no override of their own: a
+            # local radius is the user's and is never overwritten.
+            #
+            # REDRAWING is not about inheritance at all. A channel with an
+            # override still has to be redrawn when the method it is
+            # previewed with changes -- with its own effective parameter,
+            # which the views read for themselves. Folding the redraw into
+            # the inheritance branch meant a channel with a local radius was
+            # never redrawn: the method moved and the panels kept the old
+            # picture.
             overrides = self._channel_params.get(ch) or {}
-            inherited = []
             previous_loading = getattr(self, "_loading_decision", False)
             self._loading_decision = True
             try:
                 if "tophat" in changed and "tophat_radius" not in overrides:
                     self._dec_radius.setValue(self._tophat_slider.value())
-                    inherited.append("tophat")
                 if "cucim" in changed and "cucim_sigma" not in overrides:
                     self._dec_sigma.setValue(self._cucim_slider.value())
-                    inherited.append("cucim")
             finally:
                 self._loading_decision = previous_loading
 
-            # The displayed current channel follows an inherited global change
-            # immediately. Local overrides are deliberately untouched.
-            for method in inherited:
+            for method in changed:
                 if self._compare_mode():
                     self._sync_compare_params(method=method)
                 else:

@@ -1641,36 +1641,119 @@ def test_opening_the_popup_shows_what_is_in_force(app, tmp_path):
         page._method_tophat_btn.setChecked(True)
         page._method_cucim_btn.setChecked(True)
 
+        # ...and a number the user typed and walked away from
+        panel = page._method_all.menu().actions()[0].defaultWidget()
+        from PyQt5 import QtWidgets as _QW
+        spins = panel.findChildren(_QW.QSpinBox)
+        in_force = (page._tophat_slider.value(), page._cucim_slider.value())
+        spins[0].setValue(in_force[0] + 13)
+        spins[1].setValue(in_force[1] + 13)
+
         page._method_all.menu().aboutToShow.emit()     # re-opening it
 
         assert page._method_tophat_btn.isChecked() is False
         assert page._method_cucim_btn.isChecked() is True
+        # the abandoned numbers are gone too: the popup shows what is in force
+        assert (spins[0].value(), spins[1].value()) == in_force
     finally:
         page.close()
 
 
-def test_the_parameters_in_the_popup_are_the_global_ones(app, tmp_path):
-    """They are not a copy: the popup edits the numbers themselves."""
+def test_the_popup_parameters_are_a_draft_until_save(app, tmp_path):
+    """Typing a number in the popup changes NOTHING until Save.
+
+    The boxes used to be the global parameters themselves, so a half-typed
+    radius went straight into the signature and the compare panels and the
+    full image recomputed while the user was still deciding.
+    """
     from PyQt5 import QtWidgets as _QW
 
     page = _fresh_page(app, tmp_path)
     try:
+        _set_bulk_method(page, "both")
+        before = page._build_config()["method_params"]
+
         # the boxes the USER sees, found in the popup rather than by name
         panel = page._method_all.menu().actions()[0].defaultWidget()
         spins = panel.findChildren(_QW.QSpinBox)
         assert len(spins) == 2, spins
-        assert spins[0] is page._tophat_slider, \
-            "the popup shows a copy instead of the global radius"
-        assert spins[1] is page._cucim_slider, \
-            "the popup shows a copy instead of the global sigma"
+        assert spins[0] is not page._tophat_slider, \
+            "the popup edits the global radius directly"
+        assert spins[1] is not page._cucim_slider, \
+            "the popup edits the global sigma directly"
+
         spins[0].setValue(42)
         spins[1].setValue(77)
+
+        # nothing in force has moved
+        assert page._build_config()["method_params"] == before
+        assert page._resolve_channel_params("CD3") == (
+            before["tophat_radius"], before["cucim_sigma"])
+
+        page._on_method_menu_saved()
 
         cfg = page._build_config()["method_params"]
         assert cfg["tophat_radius"] == 42
         assert cfg["cucim_sigma"] == 77
-        # ...and a channel with no override of its own inherits them
         assert page._resolve_channel_params("CD3") == (42, 77)
+    finally:
+        page.close()
+
+
+def test_a_method_nobody_lit_gets_no_parameter_and_no_computation(app,
+                                                                  tmp_path):
+    """The second half of the same rule.
+
+    With only cuCIM lit, a radius typed beside the dark TopHat button is not
+    applied -- and nothing recomputes a TopHat candidate for it.
+    """
+    page = _fresh_page(app, tmp_path)
+    try:
+        _set_bulk_method(page, "cucim")
+        radius_before = page._tophat_slider.value()
+        panel = page._method_all.menu().actions()[0].defaultWidget()
+        from PyQt5 import QtWidgets as _QW
+        spins = panel.findChildren(_QW.QSpinBox)
+
+        spins[0].setValue(radius_before + 20)      # TopHat, unlit
+        spins[1].setValue(88)                      # cuCIM, lit
+        page._on_method_menu_saved()
+
+        assert page._tophat_slider.value() == radius_before, \
+            "an unlit method's parameter was applied"
+        assert page._cucim_slider.value() == 88
+        assert page._preview_method_default == "cucim"
+    finally:
+        page.close()
+
+
+def test_a_parameter_change_only_reaches_the_methods_in_use(app, tmp_path):
+    """The programmatic path, at the level the views see.
+
+    A global parameter moving is what makes a view recompute. While a channel
+    is previewed `cucim`, a radius change must reach nothing: a TopHat
+    candidate for it is work nobody asked for.
+    """
+    page = _fresh_page(app, tmp_path)
+    try:
+        page.current_channel = "CD3"
+        page._set_channel_preview_method("CD3", "cucim")
+        synced = []
+        page._sync_full_image_param = lambda method=None: synced.append(method)
+        page._sync_compare_params = lambda method=None: synced.append(method)
+
+        page._tophat_slider.setValue(int(page._tophat_slider.value()) + 7)
+        assert synced == [], synced
+
+        page._cucim_slider.setValue(int(page._cucim_slider.value()) + 7)
+        assert synced == ["cucim"], synced
+
+        # ...and with both previewed, both reach the views
+        synced.clear()
+        page._set_channel_preview_method("CD3", "both")
+        page._tophat_slider.setValue(int(page._tophat_slider.value()) + 1)
+        page._cucim_slider.setValue(int(page._cucim_slider.value()) + 1)
+        assert synced == ["tophat", "cucim"], synced
     finally:
         page.close()
 

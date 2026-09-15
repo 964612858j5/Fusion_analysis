@@ -56,6 +56,9 @@ row, and the duplicate Tissue Preview button in the step bar.
   beside each (radius, sigma), and a `Save` that applies the pair to every
   correction-eligible channel. Both lit = both, neither = original. There is
   no separate `Method Parameters` box: those two numbers live here.
+  EVERYTHING IN THE POPUP IS A DRAFT -- the toggles AND the numbers. Nothing
+  recomputes until Save, and Save applies a parameter only for a method that
+  is lit.
 * **Step0's Full Image toolbar** -- no `Compare current center` (a right-click
   opens the comparison and Esc / a right-click leave it), no `Reopen full
   image`, and no `downsampled ×N preview` banner over the picture.

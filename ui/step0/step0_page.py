@@ -8794,10 +8794,18 @@ class Step0Page(QWidget):
             "Save. It decides nothing about what Save publishes — that is "
             "Per-Channel Decision — and starts no run.")
 
-        # THE GLOBAL PARAMETERS, created here because this is where they are
-        # edited now. They keep their names and their identity: their value
-        # IS `method_params` for the signature, the per-channel inheritance,
-        # `_build_config` and the workers, so Save has nothing to copy.
+        # TWO SETS OF BOXES, on purpose.
+        #
+        # `_tophat_slider` / `_cucim_slider` are the GLOBAL parameters -- what
+        # the signature, the per-channel inheritance, `_build_config` and the
+        # workers read. They are not shown any more; they hold the answer
+        # that is in force.
+        #
+        # The boxes IN THE POPUP are a DRAFT. Typing in them used to be the
+        # same act as changing the global parameter, because they were the
+        # same object: the compare panels and the full image recomputed while
+        # the user was still deciding, without Save being pressed at all.
+        # Save is what copies a draft into force.
         def _param_input(rng, default, tip):
             sb = QtWidgets.QSpinBox()
             sb.setRange(int(rng[0]), int(rng[1]))
@@ -8814,11 +8822,21 @@ class Step0Page(QWidget):
         self._tophat_slider = _param_input(
             TOPHAT_RADIUS_RANGE, TOPHAT_RADIUS_DEFAULT,
             "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
+        self._tophat_slider.setVisible(False)
         self._tophat_slider.valueChanged.connect(self._on_slider_changed)
         self._cucim_slider = _param_input(
             CUCIM_SIGMA_RANGE, CUCIM_SIGMA_DEFAULT,
             "cucim Gaussian sigma (px) — larger sigma estimates broader background")
+        self._cucim_slider.setVisible(False)
         self._cucim_slider.valueChanged.connect(self._on_slider_changed)
+
+        # the draft pair, which is what the popup shows
+        self._method_tophat_param = _param_input(
+            TOPHAT_RADIUS_RANGE, self._tophat_slider.value(),
+            "TopHat disk radius (px) — applied when you press Save")
+        self._method_cucim_param = _param_input(
+            CUCIM_SIGMA_RANGE, self._cucim_slider.value(),
+            "cucim Gaussian sigma (px) — applied when you press Save")
 
         menu = QtWidgets.QMenu(button)
         menu.setStyleSheet(
@@ -8848,8 +8866,10 @@ class Step0Page(QWidget):
         self._method_cucim_btn = _toggle(
             "cuCIM", "Prepare the cuCIM candidate. Lit means it is "
                      "computed; its sigma is the box beside it.")
-        for btn, param in ((self._method_tophat_btn, self._tophat_slider),
-                           (self._method_cucim_btn, self._cucim_slider)):
+        for btn, param in ((self._method_tophat_btn,
+                            self._method_tophat_param),
+                           (self._method_cucim_btn,
+                            self._method_cucim_param)):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
@@ -8894,6 +8914,9 @@ class Step0Page(QWidget):
         method = str(getattr(self, "_preview_method_default", "both") or "both")
         self._method_tophat_btn.setChecked(method in ("both", "tophat"))
         self._method_cucim_btn.setChecked(method in ("both", "cucim"))
+        # ...and the numbers, so an abandoned draft leaves nothing behind
+        self._method_tophat_param.setValue(int(self._tophat_slider.value()))
+        self._method_cucim_param.setValue(int(self._cucim_slider.value()))
 
     def _method_menu_selection(self):
         """What the two toggles currently say."""
@@ -8916,6 +8939,14 @@ class Step0Page(QWidget):
         menu = getattr(self, "_method_menu", None)
         if menu is not None:
             menu.close()
+        # THE PARAMETERS FIRST, and only the ones this method uses: writing a
+        # global parameter is what makes a view recompute, so a number for a
+        # method nobody lit would compute a candidate the user did not ask
+        # for. An unlit method's draft is simply not applied.
+        if method in ("both", "tophat"):
+            self._tophat_slider.setValue(int(self._method_tophat_param.value()))
+        if method in ("both", "cucim"):
+            self._cucim_slider.setValue(int(self._method_cucim_param.value()))
         self._on_method_all_changed(method)
 
     def _on_method_all_changed(self, txt):
@@ -9790,6 +9821,16 @@ class Step0Page(QWidget):
             changed = ("tophat", "cucim")
 
         ch = self.current_channel
+        # ONLY THE METHODS THIS CHANNEL IS PREVIEWED WITH. A parameter is a
+        # number for a method, and a method nobody lit is a method nobody
+        # asked to see: pushing its number into the views computed a TopHat
+        # candidate for a channel previewed `cucim` (and the other way
+        # round), which is work the user did not ask for and a picture they
+        # did not choose.
+        previewed = self._channel_preview_method(ch) if ch else "original"
+        allowed = {"both": ("tophat", "cucim"), "tophat": ("tophat",),
+                   "cucim": ("cucim",)}.get(previewed, ())
+        changed = tuple(m for m in changed if m in allowed)
         if ch and ch != self.nucleus_channel:
             overrides = self._channel_params.get(ch) or {}
             inherited = []

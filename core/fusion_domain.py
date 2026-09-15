@@ -42,6 +42,7 @@ that sits in several groups at different weights. Only `edit_channel_weight`
 does that.
 """
 
+import contextlib
 import copy
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -151,6 +152,9 @@ class FusionDomainModel(QObject):
         self._committed = None
         self._hash_provider = None
         self._installing = False
+        #: While a caller holds `deferred_notices()`, what this model has to
+        #: announce once both owners are final.
+        self._deferred = None
         # WHICH DATASET this draft is about. A scientific weight is not a
         # process preference keyed by channel NAME: `CD3` on another slide is
         # another measurement, and a draft that followed the name across a
@@ -512,6 +516,11 @@ class FusionDomainModel(QObject):
             self._enabled.add(channel)
         else:
             self._enabled.discard(channel)
+        if self._deferred is not None:
+            # Held until the caller's whole command is done -- see
+            # `deferred_notices`.
+            self._deferred.append((channel, enabled, weighted))
+            return True
         if self._installing:
             return True
         # ONE logical command, whatever it had to write: a first enable moves
@@ -523,6 +532,38 @@ class FusionDomainModel(QObject):
         self.participation_changed.emit(channel, enabled)
         self.draft_changed.emit()
         return True
+
+    @contextlib.contextmanager
+    def deferred_notices(self):
+        """Hold this model's notices until the caller's command is complete.
+
+        Step1's tick is ONE decision that lands in TWO owners: participation
+        and the weight here, display visibility in `ChannelDisplayState`.
+        Whichever owner announces first, an observer that reads the other one
+        inside that notice sees a half-finished command -- "fused but still
+        hidden" if this model goes first, "shown but not fused" if the state
+        does.
+
+        So the caller writes this model, writes the display answer, and lets
+        go: everything this model has to say is said afterwards, when both
+        owners are final. Re-entrant callers share the outermost block.
+        """
+        if self._deferred is not None:
+            yield                       # an outer block already owns this
+            return
+        self._deferred = []
+        try:
+            yield
+        finally:
+            pending, self._deferred = self._deferred, None
+        if not pending:
+            return
+        self._draft_rev += 1
+        for channel, enabled, weighted in pending:
+            if weighted:
+                self.weight_changed.emit(channel)
+            self.participation_changed.emit(channel, enabled)
+        self.draft_changed.emit()
 
     # ── weights ───────────────────────────────────────────────────────
     def weight_provenance(self, channel):
@@ -1119,13 +1160,23 @@ def migrate_session(sess, fusion_config=None, channels=None):
         # all survive verbatim.
         enabled = {str(ch) for ch in (spec.get("enabled") or [])}
         visible = {ch for ch, on in visibility.items() if on}
-        union = enabled | visible
-        if union != enabled or union != visible:
+        # MARKERS ONLY. The nucleus is not a marker and its tick never meant
+        # "use this channel": it is the reference layer, shown and hidden on
+        # its own switch and weighted by the Step0 handoff. Folding it into
+        # the union would enable a nucleus a project had deliberately left
+        # out of the fusion, or show one the user had turned off, neither of
+        # which the split ever recorded by accident.
+        nucleus = str((spec.get("nucleus") or {}).get("channel") or "")
+        markers_enabled = enabled - {nucleus}
+        markers_visible = visible - {nucleus}
+        union = (markers_enabled | markers_visible) | (enabled & {nucleus})
+        if (markers_enabled | markers_visible) != markers_enabled or \
+                (markers_enabled | markers_visible) != markers_visible:
             provenance = dict(spec.get("provenance") or {})
             weights = dict(spec.get("channel_weight") or {})
             group_weights = {name: dict(values) for name, values
                              in (spec.get("group_weights") or {}).items()}
-            for ch in sorted(union - enabled):
+            for ch in sorted((markers_enabled | markers_visible) - enabled):
                 if provenance.get(ch, ABSENT) != ABSENT:
                     continue
                 provenance[ch] = AUTO
@@ -1138,7 +1189,9 @@ def migrate_session(sess, fusion_config=None, channels=None):
             spec["channel_weight"] = weights
             if group_weights:
                 spec["group_weights"] = group_weights
-            visibility.update({ch: True for ch in union})
+            # the nucleus keeps the visibility the session recorded for it
+            visibility.update({ch: True for ch in
+                               (markers_enabled | markers_visible)})
         return spec, visibility
 
     provenance = {ch: AUTHORITATIVE for ch in members}

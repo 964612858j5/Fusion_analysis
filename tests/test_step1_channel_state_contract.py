@@ -571,18 +571,27 @@ def test_both_fusion_entries_answer_the_same(app):
         w.close()
 
 
-def test_clicking_a_hidden_row_shows_it_without_enlisting_it(app):
-    """Selecting something you cannot see is a dead end, so a click shows the
-    channel. Clicking a name is not a scientific act, so it does not put the
-    channel in the fusion or give it a weight."""
+def test_clicking_a_hidden_row_uses_it_like_the_tick(app):
+    """Selecting something you cannot see is a dead end, so a click turns the
+    channel on -- and in Step1 turning a channel on IS the scientific act.
+
+    This used to show the channel and stop there, which left a visible marker
+    the fusion ignored: the same "only DAPI is fused" report the tick box
+    produced, reached by the other gesture. A RESTORE is still not a click
+    (`auto_show=False`).
+    """
     w = _window(app)
     try:
         w.config.set_current_channel("CD3", auto_show=True)
 
         assert w.config.current_channel() == "CD3"
         assert "CD3" in w.config.visible_channels()
-        assert w.config.fusion_enabled("CD3") is False
-        assert w.config.channel_weight("CD3") == 0.0
+        assert w.config.fusion_enabled("CD3") is True
+        assert w.config.channel_weight("CD3") == pytest.approx(1.0)
+
+        w.config.set_current_channel("CD8", auto_show=False)
+        assert w.config.fusion_enabled("CD8") is False
+        assert w.config.channel_weight("CD8") == 0.0
     finally:
         w.close()
 
@@ -992,17 +1001,18 @@ def test_after_the_real_handoff_the_tick_box_weighs_one(app, tmp_path):
         w.close()
 
 
-def test_after_the_real_handoff_clicking_a_row_only_shows_it(app, tmp_path):
+def test_after_the_real_handoff_clicking_a_row_uses_it(app, tmp_path):
     w = _handoff_window(app, tmp_path)
     try:
         w.config.set_current_channel("CD8", auto_show=True)
 
         assert w.config.current_channel() == "CD8"
         assert "CD8" in w.config.visible_channels()
-        # Looking at a channel does not enlist it in the science.
-        assert w.config.fusion_enabled("CD8") is False
-        assert w.config.channel_weight("CD8") == 0.0
-        assert w.config.get_groups()["markers"]["CD8"] == 0.0
+        # Turning a channel on in Step1 puts it into the science, at 1.0
+        # when nobody has weighted it -- through the handoff's own groups.
+        assert w.config.fusion_enabled("CD8") is True
+        assert w.config.channel_weight("CD8") == pytest.approx(1.0)
+        assert w.config.get_groups()["markers"]["CD8"] == pytest.approx(1.0)
     finally:
         w.close()
 

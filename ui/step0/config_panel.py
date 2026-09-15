@@ -346,22 +346,28 @@ class ConfigPanel(QWidget):
     def set_current_channel(self, channel, auto_show=True):
         """Make `channel` current.
 
-        A user CLICK also ticks a hidden channel, because selecting something
-        you cannot see is a dead end. Restoring a saved session is not a click:
-        it passes `auto_show=False` so a channel the user deliberately left
-        hidden comes back hidden. Ticking some OTHER channel never moves the
-        selection either way.
+        A user CLICK also turns a hidden channel ON -- selecting something
+        you cannot see is a dead end -- and in Step1 turning a channel on IS
+        the scientific act: it shows the channel and puts it into the fusion,
+        at 1.0 if nobody has weighted it. Restoring a saved session is not a
+        click: it passes `auto_show=False`, so a channel the user
+        deliberately left hidden comes back hidden and out of the fusion.
+        Ticking some OTHER channel never moves the selection either way.
         """
         if channel not in self._rows and channel not in (self.all_channels or []):
             return
         row = self._rows.get(channel)
         newly_visible = auto_show and not self._channel_visible(channel)
         if newly_visible and row is not None:
-            # A click SHOWS a hidden channel, because selecting something you
-            # cannot see is a dead end. It does not put the channel into the
-            # fusion: that is the row's own scientific tick, and clicking a
-            # name is not a scientific act.
-            row.set_visible(True)
+            # THROUGH THE ONE COMMAND, so a click on a name means exactly
+            # what the tick means. This used to set the widget alone, which
+            # left a visible marker the fusion ignored.
+            dock = getattr(self, "_dock", None)
+            used = getattr(dock, "use_channel", None)
+            if used is not None:
+                used(channel, True, origin="step1-name-click")
+            else:
+                row.set_visible(True)
         changed = (channel != self._current)
         self._current = channel
         # The LIST is the dock's, and it follows the shared selection written

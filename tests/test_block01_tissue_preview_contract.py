@@ -33,6 +33,7 @@ from PyQt5 import QtWidgets  # noqa: E402
 
 from block01.core import tissue_compose  # noqa: E402
 from block01.ui import block01_display as bd  # noqa: E402
+from block01.ui.main_window import STEP1_PREVIEW_FUSION  # noqa: E402
 
 
 SLIDE_H, SLIDE_W = 512, 256
@@ -1801,5 +1802,89 @@ def test_repeating_a_restore_announces_nothing(app):
         w.config.restore_display_state(**payload)
 
         assert seen == [], seen
+    finally:
+        w.close()
+
+
+# ── the fusion picture actually carries the ticked markers ──────────────────
+
+def test_a_ticked_marker_reaches_the_fusion_picture_not_just_the_config(app):
+    """PIXELS, not only `effective_config()`.
+
+    The report was "the fusion is only DAPI". What closes it is a picture
+    that changes when a marker is ticked and changes back when it is
+    unticked -- in the shared Tissue Preview, through the real tick box.
+    """
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        w.set_preview_mode(STEP1_PREVIEW_FUSION, force=True)
+        state = w._display.state
+        # DAPI alone, in blue: the picture the user reported
+        w._step0._apply_nucleus_color((0.0, 0.0, 1.0))
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        for ch in ("CD3", "CD8"):
+            state.set_display_visible(ch, False, origin="test")
+            w._display.fusion.set_fusion_enabled(ch, False, origin="test")
+        _pump(w, 400)
+        dapi_only = np.array(_thumb(w), copy=True)
+        assert dapi_only is not None
+
+        # THE REAL TICK, on a marker
+        frames = _drag_frames(w, [
+            lambda: w._channel_dock.row("CD3").checkbox.setChecked(True)],
+            settle=400)
+
+        assert w._display.fusion.fusion_enabled("CD3") is True
+        assert w._display.fusion.channel_weight("CD3") == pytest.approx(1.0)
+        with_marker = np.array(_thumb(w), copy=True)
+        assert with_marker.shape == dapi_only.shape
+        assert not np.array_equal(with_marker, dapi_only), \
+            "ticking a marker did not change the fused picture"
+        # the marker's own colour is in the picture now
+        assert float(with_marker[..., 0].mean()) > \
+            float(dapi_only[..., 0].mean()), \
+            "the marker's red never reached the fusion"
+        assert frames, "no frame was published for the tick"
+
+        # ...and unticking takes it back out
+        w._channel_dock.row("CD3").checkbox.setChecked(False)
+        _pump(w, 400)
+        back = np.array(_thumb(w), copy=True)
+        assert float(back[..., 0].mean()) < float(with_marker[..., 0].mean())
+    finally:
+        w.close()
+
+
+def test_two_ticked_markers_both_reach_the_fusion_picture(app):
+    w = _window(app)
+    try:
+        _goto(w, 1)
+        w.set_preview_mode(STEP1_PREVIEW_FUSION, force=True)
+        w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+        w._step0._apply_channel_color("CD8", (0.0, 1.0, 0.0))
+        for ch in ("CD3", "CD8"):
+            w._display.state.set_display_visible(ch, False, origin="test")
+            w._display.fusion.set_fusion_enabled(ch, False, origin="test")
+        _pump(w, 300)
+
+        w._channel_dock.row("CD3").checkbox.setChecked(True)
+        _pump(w, 300)
+        one = np.array(_thumb(w), copy=True)
+        w._channel_dock.row("CD8").checkbox.setChecked(True)
+        _pump(w, 400)
+        two = np.array(_thumb(w), copy=True)
+
+        # The SECOND marker changes the picture again -- one ticked channel
+        # is not the whole fusion. (Which colour channel moves is the
+        # palette's business; that the picture moves at all is this test's.)
+        assert not np.array_equal(one, two), \
+            "the second marker never reached the fused picture"
+        assert float(np.abs(two.astype(int) - one.astype(int)).mean()) > 0.0
+        used = set()
+        for data in (w._display.fusion.effective_config().get("groups")
+                     or {}).values():
+            used.update((data.get("channels") or {}).keys())
+        assert {"CD3", "CD8"} <= used
     finally:
         w.close()

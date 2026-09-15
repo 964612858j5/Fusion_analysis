@@ -300,3 +300,197 @@ def test_the_overlay_still_behaves_when_a_channel_is_ticked(app):
         assert w._display.fusion.fusion_enabled("CD8") is False
     finally:
         _close(w)
+
+
+# ── every real Step1 gesture resolves to the same command ───────────────────
+
+def _click_name(w, channel):
+    """A REAL click on a row's channel name."""
+    row = w._channel_dock.row(channel)
+    label = row.name_label
+    QtTest.QTest.mouseClick(label, QtCore.Qt.LeftButton,
+                            pos=label.rect().center())
+    _pump()
+
+
+def test_clicking_a_hidden_channels_name_uses_it_like_the_tick(app):
+    """The second real entry, and it used to mean something else.
+
+    Clicking the name of a hidden channel shows it -- selecting something you
+    cannot see is a dead end -- and in Step1 showing a channel IS the
+    scientific act. Writing visibility alone left a marker on screen that the
+    fusion ignored: the same "only DAPI is fused" report, reached by the
+    other gesture.
+    """
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        assert state.display_visible("CD8") is False
+        assert model.fusion_enabled("CD8") is False
+
+        _click_name(w, "CD8")
+
+        assert state.display_visible("CD8") is True
+        assert model.fusion_enabled("CD8") is True
+        assert model.channel_weight("CD8") == pytest.approx(1.0)
+        assert model.weight_provenance("CD8") == AUTO
+        assert "CD8" in _fused(w)
+        assert state.selected_channel() == "CD8"
+    finally:
+        _close(w)
+
+
+def test_clicking_a_visible_channels_name_only_selects_it(app):
+    """A click on a channel that is already on changes nothing but the
+    selection -- it is not a second enable and not a re-weighting."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        _tick(w, "CD3", True)
+        w._channel_dock.row("CD3").spin.setValue(0.25)
+        _pump()
+        rev = model.draft_revision()
+
+        _click_name(w, "CD3")
+
+        assert model.channel_weight("CD3") == pytest.approx(0.25)
+        assert model.draft_revision() == rev
+        assert w._display.state.selected_channel() == "CD3"
+    finally:
+        _close(w)
+
+
+def test_the_panels_auto_show_path_is_the_same_command(app):
+    """`ConfigPanel.set_current_channel(auto_show=True)` is the click's own
+    route into the panel; `auto_show=False` is a restore and stays silent."""
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+
+        w.config.set_current_channel("CD20", auto_show=True)
+        _pump()
+        assert state.display_visible("CD20") is True
+        assert model.fusion_enabled("CD20") is True
+        assert model.channel_weight("CD20") == pytest.approx(1.0)
+
+        # ...and a restore is not a click
+        state.set_display_visible("CD8", False, origin="test")
+        w.config.set_current_channel("CD8", auto_show=False)
+        _pump()
+        assert state.display_visible("CD8") is False
+        assert model.fusion_enabled("CD8") is False
+        assert model.weight_provenance("CD8") == ABSENT
+    finally:
+        _close(w)
+
+
+def test_outside_step1_the_same_gestures_are_display_only(app):
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        for step in (0, 2, 3):
+            w._set_step_active(step)
+            state.set_display_visible("CD20", False, origin="test")
+            rev = model.draft_revision()
+
+            _click_name(w, "CD20")
+            _tick(w, "CD20", True)
+
+            assert state.display_visible("CD20") is True, step
+            assert model.fusion_enabled("CD20") is False, step
+            assert model.draft_revision() == rev, step
+    finally:
+        _close(w)
+
+
+def test_no_notice_of_either_owner_shows_a_half_finished_command(app):
+    """Both directions, not one.
+
+    An observer woken by EITHER owner must find the other one already final:
+    never "shown but not fused", and never "fused but still hidden".
+    """
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        seen = []
+
+        def record(*_a):
+            seen.append((state.display_visible("CD3"),
+                         model.fusion_enabled("CD3"),
+                         model.channel_weight("CD3")))
+
+        model.weight_changed.connect(record)
+        model.participation_changed.connect(record)
+        model.draft_changed.connect(record)
+        state.visibility_changed.connect(record)
+
+        _tick(w, "CD3", True)
+
+        assert seen, "nothing was announced"
+        for visible, enabled, weight in seen:
+            assert visible is True, ("fused but still hidden", seen)
+            assert enabled is True, ("shown but not fused", seen)
+            assert weight == pytest.approx(1.0), seen
+    finally:
+        _close(w)
+
+
+def test_the_nucleus_is_not_dragged_into_the_union_by_a_restore(app):
+    """The S4 reconciliation is about MARKERS.
+
+    DAPI is the reference layer: its switch never meant "use this channel",
+    so a project that recorded it out of the fusion must not come back with
+    it in, and one that recorded it hidden must not come back showing it.
+    """
+    from block01.core import fusion_domain
+
+    sess = {
+        "version": fusion_domain.SESSION_SCHEMA_VERSION,
+        "fusion_config": {},
+        "fusion_draft": {
+            "groups": {"markers": {"group_weight": 1.0,
+                                   "channels": {"CD3": 0.5}}},
+            "group_weights": {"markers": {"CD3": 0.5}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3"],                 # DAPI deliberately OUT
+            "provenance": {"CD3": AUTHORITATIVE},
+            "channel_weight": {"CD3": 0.5},
+        },
+        "display_visibility": {"DAPI": True, "CD3": False, "CD8": True},
+    }
+    spec, visibility = fusion_domain.migrate_session(
+        sess, channels=["DAPI", "CD3", "CD8"])
+
+    # the markers are reconciled...
+    assert set(spec["enabled"]) == {"CD3", "CD8"}
+    assert visibility["CD3"] is True and visibility["CD8"] is True
+    assert spec["channel_weight"]["CD3"] == pytest.approx(0.5)
+    assert spec["channel_weight"]["CD8"] == pytest.approx(1.0)
+    # ...and the nucleus is left exactly as the session recorded it
+    assert "DAPI" not in spec["enabled"]
+    assert visibility["DAPI"] is True
+
+
+def test_a_nucleus_recorded_in_the_fusion_stays_in_it(app):
+    from block01.core import fusion_domain
+
+    sess = {
+        "version": fusion_domain.SESSION_SCHEMA_VERSION,
+        "fusion_config": {},
+        "fusion_draft": {
+            "groups": {"markers": {"group_weight": 1.0,
+                                   "channels": {"CD3": 0.5}}},
+            "group_weights": {"markers": {"CD3": 0.5}},
+            "nucleus": {"channel": "DAPI", "weight": 1.0},
+            "enabled": ["CD3", "DAPI"],
+            "provenance": {"CD3": AUTHORITATIVE, "DAPI": AUTHORITATIVE},
+            "channel_weight": {"CD3": 0.5, "DAPI": 1.0},
+        },
+        "display_visibility": {"DAPI": False, "CD3": True},
+    }
+    spec, visibility = fusion_domain.migrate_session(
+        sess, channels=["DAPI", "CD3"])
+
+    assert "DAPI" in spec["enabled"]
+    assert visibility["DAPI"] is False, \
+        "the nucleus layer switch is not a participation answer"

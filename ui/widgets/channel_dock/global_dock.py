@@ -902,16 +902,35 @@ class GlobalChannelDock(QtWidgets.QWidget):
         emits weight -> participation -> draft, so nothing observes "shown
         but not participating" or "participating at 0" in between.
         """
-        visible = bool(visible)
-        if self._step == STEP1 and self._fusion is not None:
-            caps = (self._state.capabilities(cid)
-                    if self._state is not None else None)
-            if getattr(caps, "fusion_toggleable", True):
-                self._fusion.set_fusion_enabled(
-                    cid, visible, origin=f"dock-step{self._step}")
-        if self._state is not None:
-            self._state.set_display_visible(cid, visible,
-                                            origin=f"dock-step{self._step}")
+        self.use_channel(cid, visible, origin=f"dock-step{self._step}")
+
+    def use_channel(self, cid, used, origin="dock"):
+        """THE Step1 command, wherever the user makes it.
+
+        Every real Step1 gesture that turns a channel on resolves here -- the
+        tick box, a click on a hidden channel's name -- so none of them can
+        drift into meaning something else. Outside Step1 it is a display
+        answer and nothing more.
+
+        BOTH OWNERS ARE FINAL BEFORE EITHER IS ANNOUNCED. The model's notices
+        are held (`deferred_notices`) until the display answer is written, so
+        no observer sees "fused but still hidden" and none sees "shown but
+        not fused".
+        """
+        used = bool(used)
+        state, fusion = self._state, self._fusion
+        scientific = (self._step == STEP1 and fusion is not None
+                      and getattr(
+                          state.capabilities(cid) if state is not None
+                          else None, "fusion_toggleable", True))
+        if not scientific:
+            if state is not None:
+                state.set_display_visible(cid, used, origin=origin)
+            return
+        with fusion.deferred_notices():
+            fusion.set_fusion_enabled(cid, used, origin=origin)
+            if state is not None:
+                state.set_display_visible(cid, used, origin=origin)
 
     def _on_row_weight(self, cid, value):
         """The scientific edit, and only from the step that shows it.
@@ -994,8 +1013,13 @@ class GlobalChannelDock(QtWidgets.QWidget):
             caps = self._state.capabilities(cid)
             if (not self._state.display_visible(cid)
                     and getattr(caps, "display_toggleable", True)):
-                self._state.set_display_visible(cid, True,
-                                                origin="dock-row-click")
+                # THE SAME COMMAND THE TICK MAKES. Clicking the name of a
+                # hidden channel in Step1 is a user turning that channel on,
+                # so it means what the tick means -- show it and use it. It
+                # used to write visibility alone, which left a marker on
+                # screen that the fusion ignored: the same "only DAPI is
+                # fused" report, reached by the other gesture.
+                self.use_channel(cid, True, origin="dock-row-click")
             self._state.set_selected_channel(cid, origin="dock-row-click")
         self.row_clicked.emit(cid)
 

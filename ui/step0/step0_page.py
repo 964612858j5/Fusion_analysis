@@ -8939,15 +8939,32 @@ class Step0Page(QWidget):
         menu = getattr(self, "_method_menu", None)
         if menu is not None:
             menu.close()
-        # THE PARAMETERS FIRST, and only the ones this method uses: writing a
-        # global parameter is what makes a view recompute, so a number for a
-        # method nobody lit would compute a candidate the user did not ask
-        # for. An unlit method's draft is simply not applied.
-        if method in ("both", "tophat"):
-            self._tophat_slider.setValue(int(self._method_tophat_param.value()))
-        if method in ("both", "cucim"):
-            self._cucim_slider.setValue(int(self._method_cucim_param.value()))
+        # THE METHOD FIRST. A parameter reaches the views only for the
+        # methods in use, so applying the numbers before the method judged
+        # them against the OLD one: choosing cuCIM and typing a sigma in the
+        # same visit changed nothing until the next Save, which is what the
+        # user saw.
         self._on_method_all_changed(method)
+        # BOTH NUMBERS ARE SAVED, lit or not. A parameter is a setting, not a
+        # command: a sigma typed beside a dark cuCIM button is remembered for
+        # the moment it is lit. What an unlit method does NOT get is a
+        # computation -- `_push_params_to_views` is what decides that.
+        # Written SILENTLY, then announced once: letting each box emit would
+        # push the same change twice -- once from its own signal and once
+        # from the explicit call below -- and a view redrawn twice for one
+        # Save is the "it took two Saves" bug's own shape, from the other end.
+        for box, draft in ((self._tophat_slider, self._method_tophat_param),
+                           (self._cucim_slider, self._method_cucim_param)):
+            box.blockSignals(True)
+            try:
+                box.setValue(int(draft.value()))
+            finally:
+                box.blockSignals(False)
+        self._refresh_slider_labels()
+        # ...and the views are told explicitly, because a number that did not
+        # change emits nothing while the method that uses it just did.
+        self._push_params_to_views(("tophat", "cucim"))
+        self._refresh_all_channel_states()
 
     def _on_method_all_changed(self, txt):
         """Set the PREVIEW method of every correction-eligible channel.
@@ -9820,13 +9837,32 @@ class Step0Page(QWidget):
             # Stable programmatic entry used by older callers/tests.
             changed = ("tophat", "cucim")
 
+        self._push_params_to_views(changed)
+        self._refresh_all_channel_states()
+        # A parameter change after a completed run means the stored result for
+        # this channel is stale. The row glyph says so; there is no button to
+        # relabel, and pressing Enter recomputes it.
+        if not (self._process_completed and self.loader and self.patches):
+            return
+        self._params_dirty = True
+        self._refresh_all_channel_states()
+
+    def _push_params_to_views(self, changed):
+        """Give the views the global parameters for `changed`, if they use them.
+
+        ONLY THE METHODS THIS CHANNEL IS PREVIEWED WITH. A parameter is a
+        number for a method, and a method nobody lit is a method nobody asked
+        to see: pushing its number into the views computed a TopHat candidate
+        for a channel previewed `cucim` (and the other way round), which is
+        work the user did not ask for and a picture they did not choose.
+
+        Called by the spin boxes' own signal AND by the Method popup's Save,
+        which needs it explicitly: Save applies the METHOD first, so a number
+        that did not change still has to reach the views the new method
+        brought into use. Without that, choosing cuCIM and typing a sigma in
+        the same visit did nothing until the next Save.
+        """
         ch = self.current_channel
-        # ONLY THE METHODS THIS CHANNEL IS PREVIEWED WITH. A parameter is a
-        # number for a method, and a method nobody lit is a method nobody
-        # asked to see: pushing its number into the views computed a TopHat
-        # candidate for a channel previewed `cucim` (and the other way
-        # round), which is work the user did not ask for and a picture they
-        # did not choose.
         previewed = self._channel_preview_method(ch) if ch else "original"
         allowed = {"both": ("tophat", "cucim"), "tophat": ("tophat",),
                    "cucim": ("cucim",)}.get(previewed, ())
@@ -9853,13 +9889,6 @@ class Step0Page(QWidget):
                     self._sync_compare_params(method=method)
                 else:
                     self._sync_full_image_param(method=method)
-        self._refresh_all_channel_states()
-        # A parameter change after a completed run means the stored result for
-        # this channel is stale. The row glyph says so; there is no button to
-        # relabel, and pressing Enter recomputes it.
-        if not (self._process_completed and self.loader and self.patches):
-            return
-        self._params_dirty = True
 
     def _refresh_slider_labels(self):
         # No-op: the QSpinBox input boxes display their own value now (the old

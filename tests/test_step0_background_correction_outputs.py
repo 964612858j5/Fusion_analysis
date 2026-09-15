@@ -1700,29 +1700,99 @@ def test_the_popup_parameters_are_a_draft_until_save(app, tmp_path):
         page.close()
 
 
-def test_a_method_nobody_lit_gets_no_parameter_and_no_computation(app,
-                                                                  tmp_path):
-    """The second half of the same rule.
+def test_an_unlit_methods_parameter_is_saved_but_not_computed(app, tmp_path):
+    """A parameter is a SETTING, not a command.
 
-    With only cuCIM lit, a radius typed beside the dark TopHat button is not
-    applied -- and nothing recomputes a TopHat candidate for it.
+    A radius typed beside a dark TopHat button is remembered -- it is there
+    waiting for the moment TopHat is lit -- but nothing computes a TopHat
+    candidate because of it.
     """
+    from PyQt5 import QtWidgets as _QW
+
     page = _fresh_page(app, tmp_path)
     try:
+        page.current_channel = "CD3"
         _set_bulk_method(page, "cucim")
-        radius_before = page._tophat_slider.value()
         panel = page._method_all.menu().actions()[0].defaultWidget()
-        from PyQt5 import QtWidgets as _QW
         spins = panel.findChildren(_QW.QSpinBox)
+        synced = []
+        page._sync_full_image_param = lambda method=None: synced.append(method)
+        page._sync_compare_params = lambda method=None: synced.append(method)
 
-        spins[0].setValue(radius_before + 20)      # TopHat, unlit
+        spins[0].setValue(41)                      # TopHat, unlit
         spins[1].setValue(88)                      # cuCIM, lit
         page._on_method_menu_saved()
 
-        assert page._tophat_slider.value() == radius_before, \
-            "an unlit method's parameter was applied"
+        # SAVED, both of them
+        assert page._tophat_slider.value() == 41
         assert page._cucim_slider.value() == 88
+        assert page._build_config()["method_params"] == {
+            "tophat_radius": 41, "cucim_sigma": 88}
+        # ...but only the lit one reached the views
+        assert synced == ["cucim"], synced
         assert page._preview_method_default == "cucim"
+
+        # and when TopHat is lit later, the number is already there
+        synced.clear()
+        _set_bulk_method(page, "both")
+        assert page._tophat_slider.value() == 41
+    finally:
+        page.close()
+
+
+def test_changing_the_method_and_its_parameter_in_one_visit_takes_effect(
+        app, tmp_path):
+    """The reported bug: it took two Saves.
+
+    Switching from TopHat to cuCIM and typing a sigma in the same visit did
+    nothing, because Save applied the numbers BEFORE the method and the
+    sigma was judged against TopHat. The second Save then worked, since by
+    then the method had moved.
+    """
+    from PyQt5 import QtWidgets as _QW
+
+    page = _fresh_page(app, tmp_path)
+    try:
+        page.current_channel = "CD3"
+        _set_bulk_method(page, "tophat")
+        panel = page._method_all.menu().actions()[0].defaultWidget()
+        spins = panel.findChildren(_QW.QSpinBox)
+        synced = []
+        page._sync_full_image_param = lambda method=None: synced.append(method)
+        page._sync_compare_params = lambda method=None: synced.append(method)
+
+        # ONE visit: light cuCIM only, and change its sigma
+        page._method_tophat_btn.setChecked(False)
+        page._method_cucim_btn.setChecked(True)
+        spins[1].setValue(5)
+        page._on_method_menu_saved()
+
+        assert page._preview_method_default == "cucim"
+        assert page._cucim_slider.value() == 5
+        assert synced == ["cucim"], \
+            f"the first Save reached nothing: {synced}"
+    finally:
+        page.close()
+
+
+def test_choosing_a_method_without_touching_a_number_still_reaches_the_views(
+        app, tmp_path):
+    """The same fault with no number typed at all: a method that comes into
+    use has to be drawn with the parameter it already has."""
+    page = _fresh_page(app, tmp_path)
+    try:
+        page.current_channel = "CD3"
+        _set_bulk_method(page, "tophat")
+        synced = []
+        page._sync_full_image_param = lambda method=None: synced.append(method)
+        page._sync_compare_params = lambda method=None: synced.append(method)
+
+        page._method_tophat_btn.setChecked(False)
+        page._method_cucim_btn.setChecked(True)
+        page._on_method_menu_saved()               # no number touched
+
+        assert page._preview_method_default == "cucim"
+        assert synced == ["cucim"], synced
     finally:
         page.close()
 

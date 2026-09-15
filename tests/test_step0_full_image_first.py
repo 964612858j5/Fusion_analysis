@@ -33,7 +33,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtCore, QtTest  # noqa: E402
+from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0.step0_page import (  # noqa: E402
@@ -366,16 +366,17 @@ def test_the_preview_ignores_the_checkbox_and_the_method_combo(app,
     row = page._channel_rows["CD3"]
     row["checkbox"].setChecked(False)
     row["method_cb"].setCurrentText("Original")
-    # A fresh channel IS Original -- setting the combo to what it already
-    # shows emits nothing, so the answer is asked of the page, not of a key
-    # that only exists once somebody has changed something.
-    assert page._channel_row_method("CD3") == "original"
+    # The row's combo is the PREVIEW method; what Save publishes is the
+    # FINAL decision, and a fresh channel has none -- so it publishes
+    # `original`.
+    assert page._channel_preview_method("CD3") == "original"
+    assert page._channel_final_decision("CD3") == "original"
 
     page._full_method_buttons["tophat"].click()
 
     assert tab.calls[-1][1] == "tophat"
     # ...and the preview changed no decision of its own.
-    assert page._channel_row_method("CD3") == "original"
+    assert page._channel_final_decision("CD3") == "original"
     assert not row["checkbox"].isChecked()
 
 
@@ -424,60 +425,44 @@ def test_selecting_the_dapi_row_only_moves_the_intensity_window(app,
     assert page._inspector_channel == "DAPI"
 
 
-# ── the coarse-level hint ────────────────────────────────────────────────
+def _decide(page, channel, decision):
+    """Make `decision` final for `channel` through the REAL decision panel.
 
-@pytest.mark.parametrize("level", [0, 1])
-def test_no_coarse_hint_at_a_fine_level(app, monkeypatch, level):
+    Since the preview/decision split the row's Method combo says only what a
+    channel is PREVIEWED with; what Save publishes is decided here.
+    """
+    page.current_channel = channel
+    page._update_decision_ui()
+    {"original": page._dec_orig, "tophat": page._dec_top,
+     "cucim": page._dec_cu}[decision].setChecked(True)
+    page._apply_current_channel_decision()
+
+
+# ── the coarse-level hint is GONE ────────────────────────────────────────
+
+def test_the_full_image_carries_no_coarse_level_banner(app, monkeypatch):
+    """The `⚠ downsampled ×N preview — zoom in for full-resolution
+    correction` line over the picture was removed by user ruling
+    (2026-09-15).
+
+    The LEVEL itself still decides what is computed and what Save writes --
+    that is `_full_image_level` and the correction path, both untouched --
+    what is gone is the banner about it.
+    """
     _no_workers(monkeypatch)
     page = _page(app)
-    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(level))
-    page._full_image_source = "tophat"
+    assert not hasattr(page, "_full_level_hint")
 
-    page._update_full_level_hint()
-
-    # `isHidden`, not `isVisible`: the hint is inside the full-image page of
-    # a stack that is not on screen in a headless test, so `isVisible` is
-    # False for every label here and would prove nothing.
-    assert page._full_level_hint.isHidden()
-
-
-def test_a_coarse_level_says_the_preview_is_downsampled(app, monkeypatch):
-    _no_workers(monkeypatch)
-    page = _page(app)
-    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(3))
-    page._full_image_source = "cucim"
-
-    page._update_full_level_hint()
-
-    text = page._full_level_hint.text()
-    assert "×8" in text, text                       # 4096 -> 512 at level 3
-    assert "zoom in" in text
-    assert not page._full_level_hint.isHidden()
-
-
-def test_the_hint_is_about_the_correction_not_the_zoom(app, monkeypatch):
-    """Original at a coarse level is just a smaller picture of the same
-    pixels; there is nothing to warn about."""
-    _no_workers(monkeypatch)
-    page = _page(app)
-    page._explore_tab = _RecordingExploreTab(stack=_FakeStack(4))
-    page._full_image_source = "original"
-
-    page._update_full_level_hint()
-
-    assert page._full_level_hint.isHidden()
-
-
-def test_the_hint_threshold_is_the_documented_one(app, monkeypatch):
-    _no_workers(monkeypatch)
-    page = _page(app)
-    page._explore_tab = _RecordingExploreTab(
-        stack=_FakeStack(FULL_IMAGE_COARSE_LEVEL))
-    page._full_image_source = "tophat"
-
-    page._update_full_level_hint()
-
-    assert not page._full_level_hint.isHidden()
+    for level, source in ((0, "tophat"), (1, "tophat"), (3, "cucim"),
+                          (4, "original"),
+                          (FULL_IMAGE_COARSE_LEVEL, "tophat")):
+        page._explore_tab = _RecordingExploreTab(stack=_FakeStack(level))
+        page._full_image_source = source
+        # the refresh points still call it, and it reports nothing
+        assert page._update_full_level_hint() is None
+        labels = [lbl for lbl in page.findChildren(QtWidgets.QLabel)
+                  if "downsampled" in (lbl.text() or "")]
+        assert labels == [], (level, source, [l.text() for l in labels])
 
 
 # ── 3. only the checkbox + Process compute ───────────────────────────────
@@ -684,9 +669,10 @@ def test_a_computed_channel_can_be_hidden_without_losing_its_correction(
     _no_workers(monkeypatch)
     page = _page(app)
     page._explore_tab = _RecordingExploreTab()
-    # The method combo is where a correction is chosen now, so that is how
-    # this channel gets one before it is computed.
+    # The FINAL decision is the Per-Channel Decision panel's answer, and it
+    # is what Save publishes; the row's combo only says what is previewed.
     page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    _decide(page, "CD3", "tophat")
     _finish_run(page, ["CD3"], method="tophat")
     cb = page._channel_rows["CD3"]["checkbox"]
     decision_before = page._channel_decisions.get("CD3")
@@ -700,8 +686,8 @@ def test_a_computed_channel_can_be_hidden_without_losing_its_correction(
     assert "CD3" not in page._raw_save_channels(), (
         "hiding a computed channel made Save write it raw")
 
-    # ...and assigning Original IS how it is saved raw.
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("Original")
+    # ...and DECIDING Original is how it is saved raw.
+    _decide(page, "CD3", "original")
     assert page._channel_decisions["CD3"] == "original"
     assert "CD3" in page._raw_save_channels()
 
@@ -737,10 +723,12 @@ def test_save_lists_the_raw_channels_once(app, monkeypatch):
     page._explore_tab = _RecordingExploreTab()
     _finish_run(page, ["CD3"], method="tophat")
     page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    _decide(page, "CD3", "tophat")
     page._channel_rows["CD3"]["checkbox"].setChecked(True)
     _finish_run(page, ["CD3"], method="tophat")
-    # CD20 is ticked but was never computed -> raw. CD3 is computed -> not.
+    # CD20 is DECIDED but was never computed -> raw. CD3 is computed -> not.
     page._channel_rows["CD20"]["method_cb"].setCurrentText("cucim")
+    _decide(page, "CD20", "cucim")
     page._channel_rows["CD20"]["checkbox"].setChecked(True)
     asked, _ = _confirm_recorder(monkeypatch)
 
@@ -781,6 +769,7 @@ def test_no_confirmation_when_everything_is_corrected(app, monkeypatch):
     page._explore_tab = _RecordingExploreTab()
     for ch in ("CD3", "CD20"):
         page._channel_rows[ch]["method_cb"].setCurrentText("TopHat")
+        _decide(page, ch, "tophat")
         page._channel_rows[ch]["checkbox"].setChecked(True)
     _finish_run(page, ["CD3", "CD20"], method="tophat")
     asked, _ = _confirm_recorder(monkeypatch)

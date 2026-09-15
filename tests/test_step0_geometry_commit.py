@@ -279,3 +279,32 @@ def test_nothing_is_published_before_the_first_save(app, tmp_path):
         assert seen == []
     finally:
         page.deleteLater()
+
+
+def test_the_load_row_goes_back_to_the_project_after_a_save(app, tmp_path):
+    """The Load row belongs to the PROJECT, not to a passing save.
+
+    A patch save borrows it for `Saving patch geometry…` while it runs. The
+    success line that used to replace that was removed by user ruling
+    (2026-09-15); removing it alone left the row saying "Saving…" for ever,
+    with the work long finished.
+    """
+    page, step0_dir, zarr_path = _page(app, tmp_path)
+    try:
+        project_line = page._project_status_text()
+        assert "Loaded:" in project_line and "channels" in project_line
+        page._load_status.setText(project_line)
+
+        page.overview._patches = [{"roi_idx": 0, "coords": (0, 32, 0, 32)}]
+        assert page._persist_geometry_edit() is True
+        # while it runs, the row says so
+        assert "Saving patch geometry" in page._load_status.text()
+
+        assert _settle(page) == "published"
+
+        text = page._load_status.text()
+        assert "Saving patch geometry" not in text, text
+        assert "Patch geometry saved" not in text, text
+        assert text == project_line, text
+    finally:
+        page.deleteLater()

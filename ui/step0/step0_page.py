@@ -1075,8 +1075,8 @@ class Step0Page(QWidget):
         # coarse tiles are refined in place, and the full image's header
         # already states the level for the mode that has one frame.
         self._compare_where_lbl = QLabel(
-            "Right-click the full image to compare that spot, or use "
-                "\u201cCompare current center\u201d for the middle of the view.")
+            "Right-click the full image to compare that spot. "
+            "Right-click again, or press Esc, to come back.")
         self._compare_where_lbl.setStyleSheet("color:#888;font-size:10px;")
         ctrl_row.addWidget(self._compare_where_lbl)
         ctrl_row.addStretch()
@@ -4910,6 +4910,30 @@ class Step0Page(QWidget):
         worker = getattr(self, "_geometry_persist_worker", None)
         return dict(worker.stats()) if worker is not None else {}
 
+    def _project_status_text(self):
+        """What the Load row says when nothing else is happening.
+
+        The row belongs to the PROJECT: which slide is open, how big, how
+        many channels. A transient line borrowed it for the length of a
+        patch save, so it has to be given back afterwards.
+        """
+        loader = getattr(self, "loader", None)
+        shape = getattr(loader, "shape", None)
+        ch_map = getattr(loader, "ch_map", None)
+        if loader is None or not shape or len(shape) < 2:
+            return "No project loaded."
+        return (f"Loaded: {int(shape[0]):,}x{int(shape[1]):,} px  |  "
+                f"{len(ch_map or {})} channels")
+
+    def _clear_geometry_status(self):
+        """Give the Load row back to the project.
+
+        A save writes `Saving patch geometry…` there while it runs. Deleting
+        the success line without this left that sentence on screen for ever
+        -- the work had finished and the window still said it was saving.
+        """
+        self._set_geometry_status(self._project_status_text())
+
     def _set_geometry_status(self, text):
         if hasattr(self, "_load_status"):
             self._load_status.setText(text)
@@ -4975,9 +4999,11 @@ class Step0Page(QWidget):
         # the revision on disk was ahead of this page's counter (a restart).
         self._geometry_revision = max(int(self._geometry_revision),
                                       int(outcome.get("revision") or 0))
-        # NO STATUS LINE for a successful save (user ruling, 2026-09-15):
-        # the Load row's label is about the project that is loaded, and a
-        # patch edit that worked needs no announcement there.
+        # NO ANNOUNCEMENT for a successful save (user ruling, 2026-09-15) --
+        # and the row goes back to the project it belongs to, rather than
+        # keeping the `Saving patch geometry…` line the start of this save
+        # put there.
+        self._clear_geometry_status()
         self.geometry_committed.emit({
             "step0_manifest_path": outcome.get("step0_manifest_path", ""),
             "geometry_revision": outcome.get("revision", 0),
@@ -5969,9 +5995,7 @@ class Step0Page(QWidget):
                 f"{len(unbound)} tissue preview(s) could not be emptied.")
             print("[Step0] WARNING: a tissue preview could not be emptied")
         else:
-            self._load_status.setText(
-                f"Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px  |  {len(self.loader.ch_map)} channels"
-            )
+            self._load_status.setText(self._project_status_text())
 
         # The workspace is full-image-first: a loaded slide LANDS on the whole
         # slide, not on three empty compare panels.
@@ -10180,8 +10204,8 @@ class Step0Page(QWidget):
         if hasattr(self, "_btn_snapshot_patch"):
             self._btn_snapshot_patch.setEnabled(False)
             self._compare_where_lbl.setText(
-                "Right-click the full image to compare that spot, or use "
-                "\u201cCompare current center\u201d for the middle of the view.")
+                "Right-click the full image to compare that spot. "
+                "Right-click again, or press Esc, to come back.")
         if getattr(self, "_view_area", None) is not None:
             self._set_compare_mode(False)
 

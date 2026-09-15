@@ -357,7 +357,15 @@ class ConfigPanel(QWidget):
         if channel not in self._rows and channel not in (self.all_channels or []):
             return
         row = self._rows.get(channel)
-        newly_visible = auto_show and not self._channel_visible(channel)
+        # THE FULL INTENT, not just the screen. In Step1 "use this channel"
+        # is shown AND fused, so a click on a channel that is visible but
+        # outside the fusion -- the state a project saved by the two-control
+        # release comes back in -- still completes it.
+        dock = getattr(self, "_dock", None)
+        in_use = getattr(dock, "channel_in_use", None)
+        already = (bool(in_use(channel)) if in_use is not None
+                   else self._channel_visible(channel))
+        newly_visible = auto_show and not already
         if newly_visible and row is not None:
             # THROUGH THE ONE COMMAND, so a click on a name means exactly
             # what the tick means. This used to set the widget alone, which

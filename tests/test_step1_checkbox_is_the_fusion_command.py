@@ -494,3 +494,135 @@ def test_a_nucleus_recorded_in_the_fusion_stays_in_it(app):
     assert "DAPI" in spec["enabled"]
     assert visibility["DAPI"] is False, \
         "the nucleus layer switch is not a participation answer"
+
+
+# ── the remaining ways in ───────────────────────────────────────────────────
+
+def test_a_sweep_uses_the_channels_it_sweeps_in(app):
+    """Show all / Hide all is the same decision, made for many channels.
+
+    The method wrote display visibility directly, so a sweep in Step1 left
+    every marker it turned on visible and outside the fusion -- the same
+    "only DAPI is fused" state, reached by a third gesture. (The button is
+    hidden today; the method and its connection are not.)
+    """
+    w = _window(app)
+    try:
+        state, model, dock = w._display.state, w._display.fusion, w._channel_dock
+        markers = [c for c in dock.channel_order() if c != "DAPI"]
+        for ch in markers:
+            assert model.fusion_enabled(ch) is False
+
+        dock.set_all_visible(True)
+        _pump()
+
+        used = _fused(w)
+        for ch in markers:
+            assert state.display_visible(ch) is True, ch
+            assert model.fusion_enabled(ch) is True, ch
+            assert model.channel_weight(ch) == pytest.approx(1.0), ch
+            assert ch in used, (ch, used)
+
+        dock.set_all_visible(False)
+        _pump()
+        for ch in markers:
+            assert state.display_visible(ch) is False, ch
+            assert model.fusion_enabled(ch) is False, ch
+            # ...and the numbers are still there
+            assert model.channel_weight(ch) == pytest.approx(1.0), ch
+    finally:
+        _close(w)
+
+
+def test_a_sweep_outside_step1_is_display_only(app):
+    w = _window(app)
+    try:
+        state, model, dock = w._display.state, w._display.fusion, w._channel_dock
+        w._set_step_active(2)
+        rev = model.draft_revision()
+
+        dock.set_all_visible(True)
+        _pump()
+
+        assert state.display_visible("CD3") is True
+        assert model.fusion_enabled("CD3") is False
+        assert model.draft_revision() == rev
+    finally:
+        _close(w)
+
+
+def test_a_click_completes_a_channel_that_is_shown_but_not_fused(app):
+    """The state a project saved by the two-control release comes back in.
+
+    Judging the gesture by visibility alone left it unfixable: the channel
+    was already visible, so the click did nothing, and the fusion went on
+    without it. The question is whether the channel is IN USE.
+    """
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        # shown, but outside the science -- exactly the half state
+        state.set_display_visible("CD8", True, origin="restore")
+        assert model.fusion_enabled("CD8") is False
+
+        _click_name(w, "CD8")
+
+        assert model.fusion_enabled("CD8") is True
+        assert model.channel_weight("CD8") == pytest.approx(1.0)
+        assert state.display_visible("CD8") is True
+        assert "CD8" in _fused(w)
+    finally:
+        _close(w)
+
+
+def test_the_panel_completes_a_shown_but_unfused_channel_too(app):
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        state.set_display_visible("CD20", True, origin="restore")
+        assert model.fusion_enabled("CD20") is False
+
+        w.config.set_current_channel("CD20", auto_show=True)
+        _pump()
+
+        assert model.fusion_enabled("CD20") is True
+        assert model.channel_weight("CD20") == pytest.approx(1.0)
+        # ...and a restore still completes nothing
+        state.set_display_visible("CD8", True, origin="restore")
+        w.config.set_current_channel("CD8", auto_show=False)
+        _pump()
+        assert model.fusion_enabled("CD8") is False
+    finally:
+        _close(w)
+
+
+def test_a_command_that_fails_half_way_still_announces_what_it_wrote(app):
+    """No silent half-transaction.
+
+    If the second owner raises, this model has already been changed. Holding
+    the notices back would leave the values moved and every view drawing the
+    old answer with no way to learn otherwise, so what was written is
+    published and the failure propagates.
+    """
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        seen = []
+        model.participation_changed.connect(lambda c, e: seen.append((c, e)))
+        rev = model.draft_revision()
+
+        class _Boom(RuntimeError):
+            pass
+
+        with pytest.raises(_Boom):
+            with model.deferred_notices():
+                model.set_fusion_enabled("CD3", True, origin="test")
+                raise _Boom("the display owner refused")
+
+        # the model really did change...
+        assert model.fusion_enabled("CD3") is True
+        # ...and it said so, exactly once, with the revision moved
+        assert seen == [("CD3", True)], seen
+        assert model.draft_revision() > rev
+    finally:
+        _close(w)

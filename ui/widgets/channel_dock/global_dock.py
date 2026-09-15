@@ -904,6 +904,24 @@ class GlobalChannelDock(QtWidgets.QWidget):
         """
         self.use_channel(cid, visible, origin=f"dock-step{self._step}")
 
+    def channel_in_use(self, cid):
+        """Is this channel fully on, by the step's own definition?
+
+        Step1: shown AND in the fusion -- the two halves of one answer.
+        Elsewhere: shown. This is what a user gesture that means "use this
+        channel" is measured against, so a half-on channel is something a
+        click can still complete.
+        """
+        state, fusion = self._state, self._fusion
+        if state is None:
+            return False
+        visible = bool(state.display_visible(cid))
+        if self._step != STEP1 or fusion is None:
+            return visible
+        if not getattr(state.capabilities(cid), "fusion_toggleable", True):
+            return visible
+        return visible and bool(fusion.fusion_enabled(cid))
+
     def use_channel(self, cid, used, origin="dock"):
         """THE Step1 command, wherever the user makes it.
 
@@ -1011,29 +1029,35 @@ class GlobalChannelDock(QtWidgets.QWidget):
         """
         if self._state is not None:
             caps = self._state.capabilities(cid)
-            if (not self._state.display_visible(cid)
-                    and getattr(caps, "display_toggleable", True)):
-                # THE SAME COMMAND THE TICK MAKES. Clicking the name of a
-                # hidden channel in Step1 is a user turning that channel on,
-                # so it means what the tick means -- show it and use it. It
-                # used to write visibility alone, which left a marker on
-                # screen that the fusion ignored: the same "only DAPI is
-                # fused" report, reached by the other gesture.
+            if (getattr(caps, "display_toggleable", True)
+                    and not self.channel_in_use(cid)):
+                # THE SAME COMMAND THE TICK MAKES, and judged by the same
+                # question: is this channel IN USE? Asking only "is it
+                # hidden?" left the case a saved project can be in -- shown
+                # but not in the fusion -- unfixable by the gesture a user
+                # would reach for, so the slide went on fusing DAPI alone.
                 self.use_channel(cid, True, origin="dock-row-click")
             self._state.set_selected_channel(cid, origin="dock-row-click")
         self.row_clicked.emit(cid)
 
     def set_all_visible(self, visible):
-        """Show all / Hide all: a SWEEP, which is its own permission. A
-        channel that is shown and hidden deliberately (the nucleus layer) is
-        left alone by it."""
+        """Show all / Hide all: a SWEEP, which is its own permission.
+
+        THROUGH THE SAME COMMAND, one channel at a time. A sweep in Step1 is
+        the user turning those channels on or off, so it has to mean what a
+        tick means -- writing visibility alone here left every swept-in
+        marker visible and outside the fusion, which is the same "only DAPI
+        is fused" state the tick used to produce.
+
+        A channel that is shown and hidden deliberately (the nucleus layer)
+        is left alone by a sweep, as before.
+        """
         if self._state is None:
             return
         for cid in self._order:
             caps = self._state.capabilities(cid)
             if getattr(caps, "bulk_toggleable", True):
-                self._state.set_display_visible(cid, bool(visible),
-                                                origin="dock-bulk")
+                self.use_channel(cid, bool(visible), origin="dock-bulk")
 
     def _on_current_item(self, current, _prev):
         if current is None or self._state is None:

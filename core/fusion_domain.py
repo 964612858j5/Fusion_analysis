@@ -555,15 +555,22 @@ class FusionDomainModel(QObject):
         try:
             yield
         finally:
+            # ANNOUNCED EVEN WHEN THE BLOCK FAILS. If the second owner raises
+            # -- a destroyed widget, a refused write -- this model has
+            # already been changed, and swallowing the notices would leave
+            # the values moved with the revision and the signals unmoved:
+            # a silent half-transaction that every view would go on drawing
+            # the old answer for. So whatever WAS written is published, and
+            # the exception is left to propagate: the caller learns its
+            # command failed, and the model is at least explicable.
             pending, self._deferred = self._deferred, None
-        if not pending:
-            return
-        self._draft_rev += 1
-        for channel, enabled, weighted in pending:
-            if weighted:
-                self.weight_changed.emit(channel)
-            self.participation_changed.emit(channel, enabled)
-        self.draft_changed.emit()
+            if pending:
+                self._draft_rev += 1
+                for channel, enabled, weighted in pending:
+                    if weighted:
+                        self.weight_changed.emit(channel)
+                    self.participation_changed.emit(channel, enabled)
+                self.draft_changed.emit()
 
     # ── weights ───────────────────────────────────────────────────────
     def weight_provenance(self, channel):

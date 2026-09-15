@@ -7,9 +7,23 @@ the real synchroniser filters by method, the real strip filters again by
 panel, and the branch that pushes them was reached only for channels with no
 per-channel parameter override.
 
-So nothing here is stubbed. The page is real, the compare strip is real, and
-what is asserted is the `set_selection` each panel controller actually
-received -- the call that re-issues that panel's tiles.
+No synchroniser is stubbed here: the page is real, the strip is real, and the
+path under test runs end to end -- `_on_method_menu_saved` ->
+`_push_params_to_views` -> `_sync_compare_params` -> `CompareStrip.set_params`
+-> the panel's `set_selection`.
+
+WHAT THIS PROVES, EXACTLY: that the re-selection command reaches the right
+panel, with the right method and the right parameter -- a channel's own 33
+rather than the global number -- and that no command reaches a panel whose
+method is unlit.
+
+WHAT IT DOES NOT PROVE: that pixels were recomputed. The panel controllers
+come from `_fake_compare_factory`, whose `set_selection` records the call and
+dispatches no tiles (`test_step0_compare_tiles.py`, `_PanelController`). The
+last step -- the tile scheduler actually redrawing under the new selection --
+is covered by the compare-tile suite for its own cases and, for this one, by
+manual acceptance on a real slide: set a local radius/sigma on a channel,
+then switch the Method popup and watch the panels change.
 
 Own module: page-heavy Step0 suites crash pyqtgraph offscreen when combined.
 """

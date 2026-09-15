@@ -802,33 +802,26 @@ class Step0Page(QWidget):
             "Show or hide every marker channel. Display only: it does not "
             "choose, change or discard a background-correction method.")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
-        self._method_all = QtWidgets.QComboBox()
-        # THE BULK PREVIEW METHOD -- what every correction-eligible channel
-        # is looked at and computed with. `Both` belongs here and is the
-        # default: on opening a slide the page prepares the TopHat and the
-        # cuCIM candidate so the two can be compared, which is the whole
-        # point of the compare panels.
+        # THE BULK PREVIEW METHOD, and the parameters it runs with, in ONE
+        # control (user ruling, 2026-09-15).
         #
-        # It is NOT a bulk final decision. What Save publishes is decided one
-        # channel at a time in the Per-Channel Decision panel and committed
-        # with Apply; this box never writes that answer. It also starts no
-        # run by itself (the Process button is gone; TopHat/cuCIM Enter are
-        # the compute entries).
-        self._method_all.addItems(["Both", "Original", "TopHat", "cucim"])
-        self._method_all.setCurrentIndex(0)  # default: prepare both candidates
-        self._method_all.setStyleSheet(
-            "QComboBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-            "border-radius:3px;padding:1px 4px;font-size:10px;}"
-            "QComboBox::drop-down{border:none;}"
-        )
-        self._method_all.setFixedWidth(64)
-        self._method_all.setToolTip(
-            "Set the PREVIEW method of every correction-eligible channel: "
-            "Both prepares the TopHat and the cuCIM candidate, Original "
-            "shows the raw channel. It does not decide what Save publishes "
-            "— that is Per-Channel Decision + Apply — and it shows nothing, "
-            "hides nothing and starts no run.")
-        self._method_all.currentTextChanged.connect(self._on_method_all_changed)
+        # A four-item combo said `Both / Original / TopHat / cucim` while the
+        # numbers those methods need sat in a separate `Method Parameters`
+        # box further down the column. They are one decision -- "compute
+        # these candidates, with these numbers" -- so they are one button
+        # now: `Method ▾` opens a small panel with TopHat and cuCIM as
+        # LIT-OR-NOT toggles, each with its own parameter beside it, and a
+        # Save that applies the pair.
+        #
+        #   both lit      -> both        (prepare the two candidates)
+        #   one lit       -> that method
+        #   neither lit   -> original    (show the raw channel, run nothing)
+        #
+        # It is still NOT a bulk final decision: what Save PUBLISHES is
+        # decided one channel at a time in Per-Channel Decision, whose own
+        # radius/sigma are a per-channel override of the numbers set here.
+        # And it still starts no run of its own.
+        self._method_all = self._build_method_menu_button()
         # One compact button opens the floating "Intensity" window -- the
         # internal remap workbench's inspector (histogram, Min/Max, Gamma,
         # Auto, Reset), re-parented. It belongs next to the channel list,
@@ -902,55 +895,12 @@ class Step0Page(QWidget):
         self._channels_host = chl
         cll.addWidget(ch_box, stretch=2)
 
-        # ── Method Parameters ─────────────────────────────────────────
-        # Compact: one numeric INPUT box per method (no sliders, no separate
-        # value/hint labels) — hints live in tooltips. Halves the vertical space.
-        method_box = QGroupBox("Method Parameters")
-        method_box.setStyleSheet(self._box_style("#e5c07b"))
-        ml = QVBoxLayout(method_box)
-        ml.setContentsMargins(6, 4, 6, 4)
-        ml.setSpacing(3)
-
-        def _param_input(rng, default, tip):
-            sb = QtWidgets.QSpinBox()
-            sb.setRange(int(rng[0]), int(rng[1]))
-            sb.setValue(int(default))
-            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)  # pure input box
-            sb.setAlignment(Qt.AlignRight)
-            sb.setFixedWidth(72)
-            sb.setToolTip(tip)
-            sb.setStyleSheet(
-                "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-                "border-radius:3px;padding:1px 5px;font-size:11px;}"
-            )
-            return sb
-
-        def _param_row(text, widget, tip):
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(text)
-            lbl.setToolTip(tip)
-            lbl.setStyleSheet("color:#ddd;font-size:11px;")
-            row.addWidget(lbl)
-            row.addStretch()
-            row.addWidget(widget)
-            ml.addLayout(row)
-
-        # Names kept as *_slider for API/back-compat (QSpinBox is a drop-in:
-        # value()/setValue()/valueChanged/blockSignals all match QSlider).
-        self._tophat_slider = _param_input(
-            TOPHAT_RADIUS_RANGE, TOPHAT_RADIUS_DEFAULT,
-            "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
-        self._tophat_slider.valueChanged.connect(self._on_slider_changed)
-        self._cucim_slider = _param_input(
-            CUCIM_SIGMA_RANGE, CUCIM_SIGMA_DEFAULT,
-            "cucim Gaussian sigma (px) — larger sigma estimates broader background")
-        self._cucim_slider.valueChanged.connect(self._on_slider_changed)
-        _param_row("TopHat radius:", self._tophat_slider,
-                   "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
-        _param_row("cucim sigma:", self._cucim_slider,
-                   "cucim Gaussian sigma (px) — larger sigma estimates broader background")
-
+        # ── what the removed `Method Parameters` box also held ────────
+        #
+        # The two parameters moved into the Method popup, beside the methods
+        # they configure. These are the rest of that box: the cuCIM warning
+        # (a machine without cuCIM says so), the run status line, and two
+        # objects the run path writes to but that are no longer on screen.
         self._cucim_warn = QLabel(
             "cucim not available — CPU fallback."
             + (f" ({CUCIM_IMPORT_ERROR})" if CUCIM_IMPORT_ERROR else "")
@@ -961,49 +911,33 @@ class Step0Page(QWidget):
             "color:#ffb86c;font-size:10px;background:#2a1f14;"
             "border:1px solid #704b1f;border-radius:3px;padding:4px;"
         )
-        ml.addWidget(self._cucim_warn)
 
-        # Run controls folded INTO Method Parameters (the params ARE the run's
-        # inputs). There is no run button any more: a parameter change
-        # recomputes the channel it belongs to, Compare and HOT fetch what they
-        # need, and Save writes the corrected zarr. Asking the user to press a
-        # button as well only made those three easy to mistake for previews.
-        _sep = QFrame()
-        _sep.setFrameShape(QFrame.HLine)
-        _sep.setStyleSheet("color:#333;")
-        ml.addWidget(_sep)
-
-        proc_btn_row = QHBoxLayout()
-        self._btn_stop_process = QPushButton("⏹ Stop")
-        self._btn_stop_process.setEnabled(False)
-        self._btn_stop_process.setStyleSheet(
-            "QPushButton{background:#722;color:white;border-radius:4px;padding:6px 10px;}"
-            "QPushButton:hover{background:#944;}"
-            "QPushButton:disabled{background:#333;color:#555;}"
-        )
-        self._btn_stop_process.clicked.connect(self._on_stop_process)
-
-        proc_btn_row.addStretch(1)
-        proc_btn_row.addWidget(self._btn_stop_process)
-        ml.addLayout(proc_btn_row)
-
+        # NO PROGRESS BAR (user ruling): the status line below says what is
+        # happening in words. `_proc_pbar` is kept as a headless object so
+        # the run callbacks that report percentages need no guard of their
+        # own; it is never added to a layout and never shown.
         self._proc_pbar = QProgressBar()
         self._proc_pbar.setRange(0, 100)
         self._proc_pbar.setValue(0)
         self._proc_pbar.setVisible(False)
-        self._proc_pbar.setFixedHeight(14)
-        self._proc_pbar.setStyleSheet(
-            "QProgressBar{border:1px solid #4a9;border-radius:3px;background:#111;}"
-            "QProgressBar::chunk{background:#4a9;border-radius:2px;}"
-        )
-        ml.addWidget(self._proc_pbar)
+
+        # STOP STAYS, THE BUTTON DOES NOT (user ruling): the object and its
+        # handler are intact so a stop can be issued programmatically and the
+        # run path's enable/disable calls keep working, but it is not put on
+        # screen.
+        self._btn_stop_process = QPushButton("⏹ Stop")
+        self._btn_stop_process.setEnabled(False)
+        self._btn_stop_process.setVisible(False)
+        self._btn_stop_process.clicked.connect(self._on_stop_process)
 
         self._proc_status = QLabel("Ready.")
         self._proc_status.setWordWrap(True)
         self._proc_status.setStyleSheet("color:#aaa;font-size:10px;")
-        ml.addWidget(self._proc_status)
-
-        cll.addWidget(method_box)
+        # The two that stay on screen go under the channel list: the warning
+        # only appears on a machine without cuCIM, and the status line is the
+        # only run feedback left.
+        chl.addWidget(self._cucim_warn)
+        chl.addWidget(self._proc_status)
 
         # ── Preview Patch 选择 ────────────────────────────────────────
         patch_box = QGroupBox("Preview Patch")
@@ -8829,6 +8763,161 @@ class Step0Page(QWidget):
                 continue
             state_owner.set_display_visible(ch, visible, origin="step0-bulk")
 
+    #: How the two toggles read as a preview method.
+    _METHOD_TOGGLES = {(True, True): "both", (True, False): "tophat",
+                       (False, True): "cucim", (False, False): "original"}
+
+    def _build_method_menu_button(self):
+        """The Channels panel's `Method` button and the panel behind it.
+
+        The panel is a menu, so it closes the way every menu does -- Save,
+        Esc, or a click outside -- and it needs no window of its own.
+
+        Nothing in it commands anything while it is open: the toggles and
+        the two spin boxes are a DRAFT of one decision, and `Save` is what
+        applies it. That is why the parameter boxes here are the page's real
+        `_tophat_slider` / `_cucim_slider` objects: their value IS the global
+        parameter every consumer reads, so Save has nothing to copy.
+        """
+        button = QtWidgets.QToolButton()
+        button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        button.setStyleSheet(
+            "QToolButton{background:#1a1a1a;color:#ddd;border:1px solid #444;"
+            "border-radius:3px;padding:1px 6px;font-size:10px;}"
+            "QToolButton::menu-indicator{image:none;}"
+            "QToolButton:hover{background:#23354a;}")
+        button.setToolTip(
+            "What every correction-eligible channel is PREVIEWED and "
+            "computed with, and the numbers it uses. Light up TopHat, cuCIM, "
+            "both or neither, set the parameters beside them, and press "
+            "Save. It decides nothing about what Save publishes — that is "
+            "Per-Channel Decision — and starts no run.")
+
+        # THE GLOBAL PARAMETERS, created here because this is where they are
+        # edited now. They keep their names and their identity: their value
+        # IS `method_params` for the signature, the per-channel inheritance,
+        # `_build_config` and the workers, so Save has nothing to copy.
+        def _param_input(rng, default, tip):
+            sb = QtWidgets.QSpinBox()
+            sb.setRange(int(rng[0]), int(rng[1]))
+            sb.setValue(int(default))
+            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            sb.setAlignment(Qt.AlignRight)
+            sb.setFixedWidth(64)
+            sb.setToolTip(tip)
+            sb.setStyleSheet(
+                "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
+                "border-radius:3px;padding:1px 5px;font-size:11px;}")
+            return sb
+
+        self._tophat_slider = _param_input(
+            TOPHAT_RADIUS_RANGE, TOPHAT_RADIUS_DEFAULT,
+            "TopHat disk radius (px) — roughly 0.5–1.5× cell diameter")
+        self._tophat_slider.valueChanged.connect(self._on_slider_changed)
+        self._cucim_slider = _param_input(
+            CUCIM_SIGMA_RANGE, CUCIM_SIGMA_DEFAULT,
+            "cucim Gaussian sigma (px) — larger sigma estimates broader background")
+        self._cucim_slider.valueChanged.connect(self._on_slider_changed)
+
+        menu = QtWidgets.QMenu(button)
+        menu.setStyleSheet(
+            "QMenu{background:#1c1c1c;border:1px solid #444;padding:6px;}")
+        panel = QtWidgets.QWidget()
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(4)
+
+        def _toggle(text, tip):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setFixedWidth(72)
+            btn.setStyleSheet(
+                "QPushButton{color:#888;background:#161616;"
+                "border:1px solid #3a3a3a;border-radius:3px;"
+                "padding:2px 6px;font-size:11px;}"
+                "QPushButton:hover{background:#23354a;}"
+                "QPushButton:checked{color:#0b0b0b;background:#e5c07b;"
+                "border:1px solid #e5c07b;font-weight:bold;}")
+            return btn
+
+        self._method_tophat_btn = _toggle(
+            "TopHat", "Prepare the TopHat candidate. Lit means it is "
+                      "computed; its disk radius is the box beside it.")
+        self._method_cucim_btn = _toggle(
+            "cuCIM", "Prepare the cuCIM candidate. Lit means it is "
+                     "computed; its sigma is the box beside it.")
+        for btn, param in ((self._method_tophat_btn, self._tophat_slider),
+                           (self._method_cucim_btn, self._cucim_slider)):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(btn)
+            row.addWidget(param)
+            lay.addLayout(row)
+
+        hint = QLabel("Both lit = both · neither = original")
+        hint.setStyleSheet("color:#777;font-size:9px;")
+        lay.addWidget(hint)
+
+        save = QPushButton("Save")
+        save.setToolTip(
+            "Apply this method and these parameters to every "
+            "correction-eligible channel. Nothing is written to disk and no "
+            "run is started.")
+        save.setStyleSheet(
+            "QPushButton{color:#9bd0ff;background:#182230;"
+            "border:1px solid #354a63;border-radius:3px;"
+            "padding:2px 10px;font-size:11px;}"
+            "QPushButton:hover{background:#23354a;}")
+        save.clicked.connect(self._on_method_menu_saved)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
+        row.addWidget(save)
+        lay.addLayout(row)
+
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        button.setMenu(menu)
+        self._method_menu = menu
+        # Opening it shows what is in force, so a menu that is closed without
+        # Save leaves no trace of having been opened.
+        menu.aboutToShow.connect(self._load_method_menu_from_state)
+        button.setText("Method: Both ▾")    # the default this page opens on
+        return button
+
+    def _load_method_menu_from_state(self):
+        """Draw the menu from the answer that is in force. Silent."""
+        method = str(getattr(self, "_preview_method_default", "both") or "both")
+        self._method_tophat_btn.setChecked(method in ("both", "tophat"))
+        self._method_cucim_btn.setChecked(method in ("both", "cucim"))
+
+    def _method_menu_selection(self):
+        """What the two toggles currently say."""
+        return self._METHOD_TOGGLES[(self._method_tophat_btn.isChecked(),
+                                     self._method_cucim_btn.isChecked())]
+
+    def _sync_method_button_text(self, method):
+        label = {"both": "Both", "tophat": "TopHat", "cucim": "cuCIM",
+                 "original": "Original"}.get(method, "Both")
+        self._method_all.setText(f"Method: {label} ▾")
+
+    def _on_method_menu_saved(self):
+        """The menu's Save: apply the method AND the parameters, once.
+
+        The parameters are already where every consumer reads them -- the
+        boxes in this menu ARE the page's global ones -- so what is left is
+        the method, and telling the button what it now says.
+        """
+        method = self._method_menu_selection()
+        menu = getattr(self, "_method_menu", None)
+        if menu is not None:
+            menu.close()
+        self._on_method_all_changed(method)
+
     def _on_method_all_changed(self, txt):
         """Set the PREVIEW method of every correction-eligible channel.
 
@@ -8852,6 +8941,7 @@ class Step0Page(QWidget):
         # box, so a fresh row shows what the box says -- which is what the
         # box means.
         self._preview_method_default = method
+        self._sync_method_button_text(method)
         caps = self.display.state.capabilities
         for ch in self._channel_order:
             if not caps(ch).correction_eligible:

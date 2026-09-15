@@ -47,6 +47,19 @@ def _page(app, names=("DAPI", "CD3", "CD20")):
 
 # ── Step0's row: the correction decision and its compute state ──────────────
 
+
+def _set_bulk_method(page, method):
+    """Set the bulk PREVIEW method through the real Method popup.
+
+    The four-item combo is gone: the control is a `Method` button whose menu
+    carries TopHat and cuCIM as lit-or-not toggles with their parameters, and
+    a Save that applies the pair. Both lit is `both`, neither is `original`.
+    """
+    method = str(method).lower()
+    page._method_tophat_btn.setChecked(method in ("both", "tophat"))
+    page._method_cucim_btn.setChecked(method in ("both", "cucim"))
+    page._on_method_menu_saved()
+
 def test_step0_row_shows_the_preview_method_and_the_compute_state(app):
     """The row's combo is the PREVIEW method -- what the channel is computed
     and looked at with. What Save publishes is the Per-Channel Decision
@@ -222,7 +235,7 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     # correction-eligible channel, including the ones nobody had touched. It
     # used to move only their combos, so a row said TopHat while the page
     # computed something else.
-    page._method_all.setCurrentText("TopHat")
+    _set_bulk_method(page, "tophat")
     for ch in ("CD3", "CD20", "CD8"):
         assert page._channel_rows[ch]["method_cb"].currentText() == "TopHat"
         assert page._channel_preview_method(ch) == "tophat"

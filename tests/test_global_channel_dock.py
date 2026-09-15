@@ -1357,8 +1357,9 @@ def test_the_step_walk_keeps_the_panel_and_the_users_place(app):
 
 
 def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
-    """The Channels panel sits where it always did in Step0's left column,
-    above Method Parameters, and the central viewer is not squeezed by a
+    """The Channels panel is the TOP of Step0's left column, and since the
+    `Method Parameters` box was folded into its own Method button it is also
+    the only thing in that column. The central viewer is not squeezed by a
     fifth column."""
     w = _window(app)
     w.resize(1500, 950)
@@ -1370,11 +1371,12 @@ def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
         page = w._step0
         box = page._channels_box
         column = box.parentWidget()
-        method_box = next(
-            b for b in column.findChildren(QtWidgets.QGroupBox)
-            if (b.title() or "").startswith("Method Parameters"))
-        assert box.y() < method_box.y(), "Channels is no longer the top panel"
-        assert box.width() == method_box.width()
+        others = [b for b in column.findChildren(QtWidgets.QGroupBox)
+                  if b is not box and b.parentWidget() is column]
+        assert others == [], [b.title() for b in others]
+        assert not [b for b in column.findChildren(QtWidgets.QGroupBox)
+                    if (b.title() or "").startswith("Method Parameters")]
+        assert box.y() <= 8, box.y()
         # the page fills the window: no outer dock column
         assert page.width() == w.width()
     finally:
@@ -1386,10 +1388,15 @@ def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
 # same window size, same offscreen platform) -- the appearance of the Step0
 # panel is the contract this fix restores, so it is pinned as numbers rather
 # than as a screenshot that drifts with the helper that took it.
+# `Method Parameters` was folded into the Channels panel's own Method button
+# (user ruling, 2026-09-15) and the space it held went to the channel list, so
+# the panel is taller and wider than the e78530b baseline by exactly what that
+# box occupied. The numbers are re-measured; what they pin is unchanged --
+# that the panel's geometry is a fact, not something that drifts per run.
 STEP0_PANEL_BASELINE = {
-    "container": (0, 0, 308, 615),
-    "dock": (10, 63, 288, 542),
-    "list": (4, 30, 280, 508),
+    "container": (0, 0, 349, 760),
+    "dock": (10, 83, 329, 667),
+    "list": (4, 30, 321, 633),
 }
 
 

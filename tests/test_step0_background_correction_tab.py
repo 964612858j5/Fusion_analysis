@@ -284,16 +284,18 @@ def test_preview_patch_relocated_to_c_right(app):
     g = _gb(s)
     pp, met, dec = g["Preview Patch"], g["Quantitative Metrics"], g["Per-Channel Decision"]
     # The former standalone "Process" box is gone entirely, and so is the run
-    # button: what is left of the run controls (Stop, progress, status) lives
-    # under "Method Parameters".
-    ch, mp = g["Channels"], g["Method Parameters"]
+    # button. `Method Parameters` went with them (user ruling, 2026-09-15):
+    # the two numbers live in the Channels panel's own Method popup, and the
+    # status line under the channel list is what is left of the run report.
+    ch = g["Channels"]
     assert "Process" not in g                      # no separate Process box anymore
+    assert "Method Parameters" not in g            # folded into the Method popup
     assert not hasattr(s, "_btn_process")          # and no run button at all
-    assert _under(mp, s._btn_stop_process)
+    assert s._btn_stop_process.isVisible() is False
+    assert _under(ch, s._proc_status)
     # Preview Patch now shares the bottom_row container with Metrics + Decision...
     assert pp.parentWidget() is met.parentWidget() is dec.parentWidget()
-    # ...and is NO LONGER in c_left with Channels/Method Parameters
-    assert ch.parentWidget() is mp.parentWidget()
+    # ...and is NOT in c_left with Channels
     assert pp.parentWidget() is not ch.parentWidget()
     # P-button row + info still wired (relocation kept the widgets)
     assert hasattr(s, "_patch_buttons_row") and hasattr(s, "_patch_info")

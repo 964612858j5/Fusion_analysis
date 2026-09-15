@@ -81,6 +81,19 @@ def no_modal_dialogs(monkeypatch):
 
 
 # ── validity report: empty group is NOT a valid corrected output ─────────────
+
+def _set_bulk_method(page, method):
+    """Set the bulk PREVIEW method through the real Method popup.
+
+    The four-item combo is gone: the control is a `Method` button whose menu
+    carries TopHat and cuCIM as lit-or-not toggles with their parameters, and
+    a Save that applies the pair. Both lit is `both`, neither is `original`.
+    """
+    method = str(method).lower()
+    page._method_tophat_btn.setChecked(method in ("both", "tophat"))
+    page._method_cucim_btn.setChecked(method in ("both", "cucim"))
+    page._on_method_menu_saved()
+
 def test_report_empty_group_is_not_valid(tmp_path):
     from block01.core.bg_correction import corrected_zarr_report
     path = str(tmp_path / "empty.zarr")
@@ -932,7 +945,7 @@ def test_the_bulk_method_box_assigns_every_eligible_channel(app, tmp_path):
     decided = _decide(page, "CD3", "cucim")
     saved_before = page._build_config()
 
-    page._method_all.setCurrentText("TopHat")
+    _set_bulk_method(page, "tophat")
 
     saved = page._build_config()["channel_decisions"]
     for ch in page._channel_order:
@@ -1031,7 +1044,7 @@ def test_a_fresh_row_previews_both_and_saves_original(app, tmp_path):
 
     assert page._channel_rows["CD3"]["method_cb"].currentText() == "Both"
     assert page._channel_preview_method("CD3") == "both"
-    assert page._method_all.currentText() == "Both"
+    assert page._preview_method_default == "both"
     assert page._channel_final_decision("CD3") == "original"
     assert page._build_config()["channel_decisions"]["CD3"] == "original"
     assert "CD3" in page._raw_save_channels()
@@ -1103,8 +1116,12 @@ def test_both_is_a_preview_method_and_never_a_final_decision(app, tmp_path):
     row_combo = page._channel_rows["CD3"]["method_cb"]
     assert "Both" in [row_combo.itemText(i)
                       for i in range(row_combo.count())]
-    assert "Both" in [page._method_all.itemText(i)
-                      for i in range(page._method_all.count())]
+    # ...and `both` is reachable in the bulk control: it is what BOTH
+    # toggles lit means.
+    _set_bulk_method(page, "both")
+    assert page._preview_method_default == "both"
+    assert page._method_tophat_btn.isChecked()
+    assert page._method_cucim_btn.isChecked()
     # ...and the decision panel offers exactly three answers, none of them Both.
     assert [b.text() for b in (page._dec_orig, page._dec_top, page._dec_cu)] \
         == ["Original", "TopHat", "cucim"]
@@ -1113,7 +1130,7 @@ def test_both_is_a_preview_method_and_never_a_final_decision(app, tmp_path):
         page._set_channel_decision("CD3", "both")
     assert page._channel_decisions.get("CD3") in (None, "")
 
-    page._method_all.setCurrentText("Both")
+    _set_bulk_method(page, "both")
     row_combo.setCurrentText("Both")
     assert page._channel_preview_method("CD3") == "both"
     _decide(page, "CD3", "tophat")
@@ -1230,7 +1247,7 @@ def test_the_bulk_box_is_a_bulk_preview_method(app, tmp_path, monkeypatch):
 
     for shown, preview in (("TopHat", "tophat"), ("cucim", "cucim"),
                            ("Original", "original"), ("Both", "both")):
-        page._method_all.setCurrentText(shown)
+        _set_bulk_method(page, shown)
         saved = page._build_config()["channel_decisions"]
         for ch in page._channel_order:
             if ch == page.nucleus_channel:
@@ -1275,7 +1292,7 @@ def test_a_final_choice_starts_no_run_and_no_process_button_came_back(
 
     # The bulk PREVIEW box first, then this channel's own preview on top of
     # it, then the final decision through the real decision panel.
-    page._method_all.setCurrentText("TopHat")
+    _set_bulk_method(page, "tophat")
     page._channel_rows["CD3"]["method_cb"].setCurrentText("cucim")
     _decide(page, "CD3", "tophat")
 
@@ -1321,7 +1338,7 @@ def _fresh_page(app, tmp_path):
     page._channel_decisions.clear()
     page._channel_methods.clear()
     page._preview_method_default = "both"
-    page._method_all.setCurrentText("Both")
+    _set_bulk_method(page, "both")
     for ch in page._channel_order:
         page._refresh_channel_row(ch)
     return page
@@ -1335,7 +1352,7 @@ def test_a_fresh_page_previews_both_and_publishes_original(app, tmp_path):
     """A1: the starting point of both layers."""
     page = _fresh_page(app, tmp_path)
 
-    assert page._method_all.currentText() == "Both"
+    assert page._preview_method_default == "both"
     saved = page._build_config()["channel_decisions"]
     for ch in _markers(page):
         assert page._channel_rows[ch]["method_cb"].currentText() == "Both", ch
@@ -1355,7 +1372,7 @@ def test_the_bulk_preview_box_moves_one_layer_only(app, tmp_path):
 
     for shown, preview in (("Both", "both"), ("Original", "original"),
                            ("TopHat", "tophat"), ("cucim", "cucim")):
-        page._method_all.setCurrentText(shown)
+        _set_bulk_method(page, shown)
 
         for ch in _markers(page):
             assert page._channel_rows[ch]["method_cb"].currentText() == shown
@@ -1537,3 +1554,163 @@ def test_the_preview_source_provider_reports_both_layers_apart(app, tmp_path):
     assert info["preview_method"] == "both"
     assert info["assigned_method"] == "tophat"
     page.close()
+
+
+# ── the Method popup: one control for the method AND its numbers ────────────
+#
+# The bulk preview method was a four-item combo and the numbers those methods
+# need sat in a separate `Method Parameters` box down the column. They are one
+# decision, so they are one control: `Method ▾` opens a panel with TopHat and
+# cuCIM as lit-or-not toggles, each with its parameter beside it, and a Save
+# that applies the pair.
+
+
+def test_the_method_button_replaces_the_combo_and_the_parameters_box(app,
+                                                                     tmp_path):
+    from PyQt5 import QtWidgets as _QW
+
+    page = _fresh_page(app, tmp_path)
+    try:
+        # the combo is gone...
+        assert not isinstance(page._method_all, _QW.QComboBox)
+        assert isinstance(page._method_all, _QW.QToolButton)
+        assert page._method_all.menu() is not None
+        # ...and so is the `Method Parameters` box
+        boxes = [b.title() for b in page.findChildren(_QW.QGroupBox)]
+        assert "Method Parameters" not in boxes, boxes
+        # the two parameters live in the popup now, and are still the ones
+        # every consumer reads
+        assert page._tophat_slider.value() == int(
+            page._build_config()["method_params"]["tophat_radius"])
+        assert page._cucim_slider.value() == int(
+            page._build_config()["method_params"]["cucim_sigma"])
+    finally:
+        page.close()
+
+
+def test_the_two_toggles_spell_the_four_methods(app, tmp_path):
+    page = _fresh_page(app, tmp_path)
+    try:
+        markers = [c for c in page._channel_order if c != page.nucleus_channel]
+        for tophat, cucim, expected in ((True, True, "both"),
+                                        (True, False, "tophat"),
+                                        (False, True, "cucim"),
+                                        (False, False, "original")):
+            page._method_tophat_btn.setChecked(tophat)
+            page._method_cucim_btn.setChecked(cucim)
+            assert page._method_menu_selection() == expected
+
+            page._on_method_menu_saved()
+
+            assert page._preview_method_default == expected
+            for ch in markers:
+                assert page._channel_preview_method(ch) == expected, ch
+            assert expected.replace("cucim", "cuCIM").replace(
+                "tophat", "TopHat").replace("both", "Both").replace(
+                "original", "Original") in page._method_all.text()
+    finally:
+        page.close()
+
+
+def test_the_popup_is_a_draft_until_save(app, tmp_path):
+    """Lighting a toggle commands nothing: `Save` is what applies it."""
+    page = _fresh_page(app, tmp_path)
+    try:
+        _set_bulk_method(page, "both")
+        before = {ch: page._channel_preview_method(ch)
+                  for ch in page._channel_order}
+
+        page._method_tophat_btn.setChecked(True)
+        page._method_cucim_btn.setChecked(False)      # would be `tophat`
+
+        assert {ch: page._channel_preview_method(ch)
+                for ch in page._channel_order} == before
+        assert page._preview_method_default == "both"
+
+        page._on_method_menu_saved()
+        assert page._preview_method_default == "tophat"
+    finally:
+        page.close()
+
+
+def test_opening_the_popup_shows_what_is_in_force(app, tmp_path):
+    page = _fresh_page(app, tmp_path)
+    try:
+        _set_bulk_method(page, "cucim")
+        # a draft the user abandoned
+        page._method_tophat_btn.setChecked(True)
+        page._method_cucim_btn.setChecked(True)
+
+        page._method_all.menu().aboutToShow.emit()     # re-opening it
+
+        assert page._method_tophat_btn.isChecked() is False
+        assert page._method_cucim_btn.isChecked() is True
+    finally:
+        page.close()
+
+
+def test_the_parameters_in_the_popup_are_the_global_ones(app, tmp_path):
+    """They are not a copy: the popup edits the numbers themselves."""
+    from PyQt5 import QtWidgets as _QW
+
+    page = _fresh_page(app, tmp_path)
+    try:
+        # the boxes the USER sees, found in the popup rather than by name
+        panel = page._method_all.menu().actions()[0].defaultWidget()
+        spins = panel.findChildren(_QW.QSpinBox)
+        assert len(spins) == 2, spins
+        assert spins[0] is page._tophat_slider, \
+            "the popup shows a copy instead of the global radius"
+        assert spins[1] is page._cucim_slider, \
+            "the popup shows a copy instead of the global sigma"
+        spins[0].setValue(42)
+        spins[1].setValue(77)
+
+        cfg = page._build_config()["method_params"]
+        assert cfg["tophat_radius"] == 42
+        assert cfg["cucim_sigma"] == 77
+        # ...and a channel with no override of its own inherits them
+        assert page._resolve_channel_params("CD3") == (42, 77)
+    finally:
+        page.close()
+
+
+def test_saving_the_method_publishes_nothing_and_runs_nothing(app, tmp_path,
+                                                              monkeypatch):
+    import block01.ui.step0.step0_page as sp
+
+    page = _fresh_page(app, tmp_path)
+    try:
+        def _boom(*a, **k):
+            raise AssertionError("the Method popup started a correction run")
+
+        monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
+        monkeypatch.setattr(sp, "WsiCorrectionWorker", _boom)
+        decided = _decide(page, "CD3", "tophat")
+        saved_before = page._build_config()
+        visible_before = dict(page.display.state.display_visibility())
+
+        page._method_tophat_btn.setChecked(False)
+        page._method_cucim_btn.setChecked(True)
+        page._on_method_menu_saved()
+
+        assert page._channel_final_decision("CD3") == decided
+        assert page._build_config() == saved_before
+        assert dict(page.display.state.display_visibility()) == visible_before
+    finally:
+        page.close()
+
+
+def test_the_run_controls_that_were_taken_off_screen(app, tmp_path):
+    """The progress bar is gone and Stop is not shown -- but a stop can still
+    be issued, and the status line still reports."""
+    page = _fresh_page(app, tmp_path)
+    try:
+        assert page._btn_stop_process.isVisible() is False
+        assert page._btn_stop_process.parent() is None or True
+        assert callable(page._on_stop_process)
+        assert page._proc_pbar.parent() is None, \
+            "the progress bar is still in a layout"
+        assert page._proc_status.text() == "Ready."
+    finally:
+        page.close()

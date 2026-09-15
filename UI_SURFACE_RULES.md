@@ -51,6 +51,11 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Top step bar** -- NO buttons. Three were added there and none was asked
   for; the last of them was a second `🗺 Tissue Preview` beside the one Step0
   already has next to Load.
+* **Step0's Channels panel** -- a `Method ▾` button at the top. Its popup
+  carries TopHat and cuCIM as lit-or-not toggles with their own parameter
+  beside each (radius, sigma), and a `Save` that applies the pair to every
+  correction-eligible channel. Both lit = both, neither = original. There is
+  no separate `Method Parameters` box: those two numbers live here.
 * **Step0's Full Image toolbar** -- no `Compare current center` (a right-click
   opens the comparison and Esc / a right-click leave it), no `Reopen full
   image`, and no `downsampled ×N preview` banner over the picture.

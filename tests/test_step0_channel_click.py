@@ -64,6 +64,19 @@ def _finish_run(page, channels):
     page._on_batch_all_done()
 
 
+
+def _set_bulk_method(page, method):
+    """Set the bulk PREVIEW method through the real Method popup.
+
+    The four-item combo is gone: the control is a `Method` button whose menu
+    carries TopHat and cuCIM as lit-or-not toggles with their parameters, and
+    a Save that applies the pair. Both lit is `both`, neither is `original`.
+    """
+    method = str(method).lower()
+    page._method_tophat_btn.setChecked(method in ("both", "tophat"))
+    page._method_cucim_btn.setChecked(method in ("both", "cucim"))
+    page._on_method_menu_saved()
+
 def test_a_mouse_click_on_a_row_switches_the_channel(app):
     page = _page(app)
     assert page.current_channel == "DAPI"           # the landing channel
@@ -292,7 +305,7 @@ def test_the_bulk_method_box_moves_the_preview_method_only(app):
     visible_before = dict(state.display_visibility())
     decisions_before = dict(page._channel_decisions)
 
-    page._method_all.setCurrentText("TopHat")
+    _set_bulk_method(page, "tophat")
 
     assert page._channel_preview_method("CD3") == "tophat"
     assert dict(state.display_visibility()) == visible_before

@@ -552,25 +552,50 @@ class FusionDomainModel(QObject):
             yield                       # an outer block already owns this
             return
         self._deferred = []
+        # WHAT TO GO BACK TO if the block fails. Cheap: a draft is a handful
+        # of small dicts and a set of channel names, and this is taken once
+        # per user command, not per frame.
+        undo = self._draft_state()
+        failed = False
         try:
             yield
+        except BaseException:
+            # THE COMMAND DID NOT HAPPEN. The block is one decision landing
+            # in two owners; if the second refuses, this model must not keep
+            # the half it took. Publishing the half instead -- which is what
+            # this used to do -- left the project in a state the user never
+            # asked for and could not see the reason for. Rolled back, no
+            # notice is owed: nothing changed, so nothing is announced, and
+            # the exception goes on to tell the caller its command failed.
+            self._restore_draft_state(undo)
+            failed = True
+            raise
         finally:
-            # ANNOUNCED EVEN WHEN THE BLOCK FAILS. If the second owner raises
-            # -- a destroyed widget, a refused write -- this model has
-            # already been changed, and swallowing the notices would leave
-            # the values moved with the revision and the signals unmoved:
-            # a silent half-transaction that every view would go on drawing
-            # the old answer for. So whatever WAS written is published, and
-            # the exception is left to propagate: the caller learns its
-            # command failed, and the model is at least explicable.
             pending, self._deferred = self._deferred, None
-            if pending:
+            if pending and not failed:
                 self._draft_rev += 1
                 for channel, enabled, weighted in pending:
                     if weighted:
                         self.weight_changed.emit(channel)
                     self.participation_changed.emit(channel, enabled)
                 self.draft_changed.emit()
+
+    def _draft_state(self):
+        """Everything a deferred command can move, as values to go back to."""
+        return (set(self._enabled), dict(self._provenance),
+                dict(self._channel_weight),
+                {name: dict(values)
+                 for name, values in self._group_weights.items()},
+                float(self._nucleus_weight))
+
+    def _restore_draft_state(self, state):
+        enabled, provenance, weights, group_weights, nucleus = state
+        self._enabled = set(enabled)
+        self._provenance = dict(provenance)
+        self._channel_weight = dict(weights)
+        self._group_weights = {name: dict(values)
+                               for name, values in group_weights.items()}
+        self._nucleus_weight = float(nucleus)
 
     # ── weights ───────────────────────────────────────────────────────
     def weight_provenance(self, channel):

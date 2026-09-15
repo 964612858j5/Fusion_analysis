@@ -596,20 +596,24 @@ def test_the_panel_completes_a_shown_but_unfused_channel_too(app):
         _close(w)
 
 
-def test_a_command_that_fails_half_way_still_announces_what_it_wrote(app):
-    """No silent half-transaction.
+def test_a_command_that_fails_half_way_leaves_nothing_behind(app):
+    """The block is ONE decision landing in two owners.
 
-    If the second owner raises, this model has already been changed. Holding
-    the notices back would leave the values moved and every view drawing the
-    old answer with no way to learn otherwise, so what was written is
-    published and the failure propagates.
+    If the second refuses, this model must not keep the half it took. It
+    used to publish that half instead, which left the project in a state the
+    user never asked for and could not see a reason for. Rolled back, no
+    notice is owed -- nothing changed -- and the exception still tells the
+    caller its command failed.
     """
     w = _window(app)
     try:
         model = w._display.fusion
         seen = []
         model.participation_changed.connect(lambda c, e: seen.append((c, e)))
+        model.weight_changed.connect(lambda c: seen.append(("weight", c)))
+        model.draft_changed.connect(lambda: seen.append(("draft", None)))
         rev = model.draft_revision()
+        before = model.draft_snapshot()
 
         class _Boom(RuntimeError):
             pass
@@ -619,10 +623,63 @@ def test_a_command_that_fails_half_way_still_announces_what_it_wrote(app):
                 model.set_fusion_enabled("CD3", True, origin="test")
                 raise _Boom("the display owner refused")
 
-        # the model really did change...
-        assert model.fusion_enabled("CD3") is True
-        # ...and it said so, exactly once, with the revision moved
-        assert seen == [("CD3", True)], seen
-        assert model.draft_revision() > rev
+        # NOTHING happened: not the participation, not the first-enable
+        # weight, not the revision, not a single notice.
+        assert model.fusion_enabled("CD3") is False
+        assert model.weight_provenance("CD3") == ABSENT
+        assert model.draft_revision() == rev
+        assert model.draft_snapshot() == before
+        assert seen == [], seen
+    finally:
+        _close(w)
+
+
+def test_a_rollback_keeps_the_work_of_earlier_commands(app):
+    """Only the failed command is undone."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        _tick(w, "CD3", True)
+        w._channel_dock.row("CD3").spin.setValue(0.4)
+        _pump()
+        settled = model.draft_snapshot()
+
+        class _Boom(RuntimeError):
+            pass
+
+        with pytest.raises(_Boom):
+            with model.deferred_notices():
+                model.set_fusion_enabled("CD8", True, origin="test")
+                model.edit_channel_weight("CD3", 0.9, origin="test")
+                raise _Boom("refused")
+
+        assert model.draft_snapshot() == settled
+        assert model.channel_weight("CD3") == pytest.approx(0.4)
+        assert model.fusion_enabled("CD8") is False
+    finally:
+        _close(w)
+
+
+def test_a_failed_display_write_undoes_the_science_too(app):
+    """Through the real command, with the display owner refusing."""
+    w = _window(app)
+    try:
+        model, state = w._display.fusion, w._display.state
+        before = model.draft_snapshot()
+
+        def _refuse(*_a, **_k):
+            raise RuntimeError("the display state refused")
+
+        real = state.set_display_visible
+        state.set_display_visible = _refuse
+        try:
+            with pytest.raises(RuntimeError):
+                w._channel_dock.use_channel("CD3", True, origin="test")
+        finally:
+            state.set_display_visible = real
+
+        assert model.draft_snapshot() == before
+        assert model.fusion_enabled("CD3") is False
+        assert state.display_visible("CD3") is False
     finally:
         _close(w)

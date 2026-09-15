@@ -3737,6 +3737,14 @@ class ExploreController(QtCore.QObject):
         if gen != self._floor_gen:
             return False
         self._floor_cache.move_to_end(key)
+        # NOTHING IS OWED ANY MORE. A request that arrived while an older job
+        # was running left `_floor_pending` set, and `_handle_floor_result`
+        # starts a job for whatever is CURRENT when the old one lands -- so a
+        # fast Original/TopHat/cuCIM round trip could hand back a cached
+        # floor and then recompute that very selection a moment later. The
+        # selection now HAS its floor; there is nothing left to compute for
+        # it.
+        self._floor_pending = False
         ctx = key[0]
         self._floor_level = floor_level
         self._floor_stride = stride

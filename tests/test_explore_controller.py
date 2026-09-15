@@ -4598,3 +4598,77 @@ def test_the_floor_cache_does_not_grow_without_bound(app):
     kept = [key[0][1] for key in ctrl._floor_cache]
     assert "CH0" not in kept
     assert f"CH{limit + 3}" in kept
+
+
+def test_a_cached_floor_cancels_the_work_that_was_owed(app):
+    """The interleaving: an older job is still running when the user comes
+    back to a method that is already computed.
+
+    A request made while a job runs is coalesced into `_floor_pending`, and
+    `_handle_floor_result` starts a job for whatever is current when the old
+    result lands. Restoring a cached floor without clearing that flag meant
+    the selection the cache had just served was recomputed a moment later --
+    exactly the case a fast round trip between the three buttons produces.
+    """
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    # TopHat is computed and cached.
+    ctrl.set_selection(method="tophat", params=(10,))
+    _finish_floor(ctrl)
+    assert ctrl.stats.get("floor_cache_hits", 0) == 0
+
+    # cuCIM starts a job -- and this one is held, as a real one would be.
+    ctrl.set_selection(method="cucim", params=(50,))
+    assert ctrl._floor_job_running is True
+    in_flight_gen = ctrl._floor_gen
+    in_flight_level, in_flight_stride = ctrl._floor_level, ctrl._floor_stride
+    in_flight_ctx = ctrl._current_floor_ctx(in_flight_level, in_flight_stride)
+
+    # While it runs: back to cuCIM's own parameters once (coalesced into
+    # pending), then back to TopHat, which the cache can serve.
+    ctrl.set_selection(method="cucim", params=(51,))
+    assert ctrl._floor_pending is True
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert ctrl.stats.get("floor_cache_hits", 0) == 1
+    assert ctrl._floor_ready is True
+    assert ctrl._floor_pending is False, \
+        "a cached floor left work owed for the selection it just served"
+
+    # The held job lands. It is stale, and it must start nothing.
+    jobs = _floor_jobs(ctrl)
+    import numpy as np
+    ctrl._handle_floor_result((in_flight_gen, in_flight_ctx, in_flight_level,
+                               in_flight_stride,
+                               np.zeros((8, 8), np.float32), None, {}, None))
+    _pump(5)
+
+    assert jobs == [], f"the stale job started another one: {jobs}"
+    assert ctrl._floor_ready is True, "the cached floor was dropped"
+    assert ctrl._floor_ctx == ctrl._current_floor_ctx(
+        ctrl._floor_level, ctrl._floor_stride)
+
+
+def test_work_owed_for_a_selection_with_no_floor_is_still_done(app):
+    """The other half: clearing the flag must not lose a real request.
+
+    A selection the cache CANNOT serve still has to be computed when the
+    older job lands.
+    """
+    ctrl, provider, scheduler, view = make_controller(app)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    assert ctrl._floor_job_running is True
+    in_flight_gen = ctrl._floor_gen
+    level, stride = ctrl._floor_level, ctrl._floor_stride
+    ctx = ctrl._current_floor_ctx(level, stride)
+
+    ctrl.set_selection(method="cucim", params=(50,))     # nothing cached
+    assert ctrl._floor_pending is True
+
+    jobs = _floor_jobs(ctrl)
+    import numpy as np
+    ctrl._handle_floor_result((in_flight_gen, ctx, level, stride,
+                               np.zeros((8, 8), np.float32), None, {}, None))
+    _pump(5)
+
+    assert len(jobs) == 1, f"the owed floor was never computed: {jobs}"

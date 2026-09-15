@@ -538,24 +538,12 @@ class MainWindow(QMainWindow):
         # for the whole session", it is a Step1 window that happens to stay
         # open. These three are always there and resolve to the same
         # instances the page buttons do.
-        # ONE BUTTON, and it is the one that was asked for. `Intensity…` and
-        # `Weights…` stood here too: neither was requested, and the second
-        # opened a whole window -- `Channel Weights` -- that duplicated the
-        # weight editor Step1's own rows already carry. Making a component
-        # global means reusing the instance, the state and the style; it
-        # never licensed new product surface, so both are gone along with
-        # the window behind them.
-        self._btn_global_tissue = QPushButton("🗺 Tissue Preview")
-        self._btn_global_tissue.setToolTip(
-            "The shared Tissue Preview. One window for the whole session; "
-            "the picture follows whichever step you are in.")
-        for btn in (self._btn_global_tissue,):
-            btn.setStyleSheet(
-                "QPushButton{color:#9bd0ff;font-size:10px;background:#182230;"
-                "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
-                "QPushButton:hover{background:#23354a;}")
-            step_bar.addWidget(btn)
-        self._btn_global_tissue.clicked.connect(self._open_global_navigator)
+        # NO BUTTONS IN THE STEP BAR (user ruling, 2026-09-15). Three stood
+        # here and none was asked for: `Intensity…`, `Weights…` -- which
+        # opened a whole window duplicating Step1's own row editors -- and a
+        # second `🗺 Tissue Preview` beside the one Step0 already has next to
+        # Load. Two buttons for one window is one too many; the entries that
+        # were always there are the pages' own.
         # v14.1: top-nav Skip → Step2/3/4 buttons and the Step 1.5 workflow entry
         # were removed. Direct navigation is still available via the step labels
         # above. The Step15BackgroundCorrectionPage widget and its set_context
@@ -1322,10 +1310,6 @@ class MainWindow(QMainWindow):
         self._display.publish_render_spec(spec)
 
     # ── the global entries, from the Block01 chrome ───────────────────
-    def _open_global_navigator(self):
-        """Open the ONE Tissue Preview, under the active step's policy."""
-        return self._display.show_navigator()
-
     def _register_block01_contexts(self):
         """Register every step as a render context for the one Tissue Preview.
 

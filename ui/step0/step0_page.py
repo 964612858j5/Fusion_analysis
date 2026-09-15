@@ -1563,10 +1563,6 @@ class Step0Page(QWidget):
         # level, so the background it removes is a different background. The
         # preview is still worth looking at; it just must not be mistaken
         # for the result Save would write.
-        self._full_level_hint = QLabel("")
-        self._full_level_hint.setStyleSheet("color:#e5c07b;font-size:10px;")
-        self._full_level_hint.setVisible(False)
-        bar.addWidget(self._full_level_hint)
 
         # ── the DRIFT-FREE mode switch ──────────────────────────────────
         #
@@ -1586,20 +1582,6 @@ class Step0Page(QWidget):
         # -- it calls the same `_enter_compare_mode` / `_exit_compare_mode`
         # the right-click and Esc call, with no point, and entering with no
         # point already means "the middle of the view".
-        self._btn_compare_toggle = QPushButton(self._COMPARE_TOGGLE_TO_COMPARE)
-        self._btn_compare_toggle.setStyleSheet(btn_style)
-        self._btn_compare_toggle.clicked.connect(self._on_compare_toggle_clicked)
-        bar.addWidget(self._btn_compare_toggle)
-        self._update_compare_toggle_button()
-
-        self._btn_full_reopen = QPushButton("Reopen full image")
-        self._btn_full_reopen.setToolTip(
-            "Rebuild the full image for the current channel and the current "
-            "parameters. Needed after a correction run released it.")
-        self._btn_full_reopen.setStyleSheet(btn_style)
-        self._btn_full_reopen.clicked.connect(self._reopen_full_image)
-        bar.addWidget(self._btn_full_reopen)
-
         self._btn_full_fit = QPushButton("⤢ Fit whole slide")
         self._btn_full_fit.setToolTip(
             "Reset THIS view to the whole slide. Separate from going back "
@@ -1930,49 +1912,9 @@ class Step0Page(QWidget):
         # ...and the one mode button is named after where it goes, so it
         # is renamed by the page change itself -- here, the ONE place the
         # page changes -- rather than by each of the callers that cause it.
-        self._update_compare_toggle_button()
         # And the thumbnail's viewport rectangle changes subject with the
         # mode, in both directions.
         self._update_full_image_view_rect()
-
-    # The two faces of the one toolbar button, by the page that is up.
-    _COMPARE_TOGGLE_TO_COMPARE = "Compare current center"
-    _COMPARE_TOGGLE_TO_FULL = "Back to full image"
-
-    def _on_compare_toggle_clicked(self):
-        """The toolbar button: swap pages using the CURRENT CAMERA.
-
-        No mouse position is read on either side. Going in,
-        `_enter_compare_mode()` with no point centres the panels on the
-        full image's own centre at the full image's own scale; coming out,
-        `_exit_compare_mode()` is the very same call Esc and the compare
-        right-click make. Because the entry point IS the centre, the round
-        trip is the identity: press it ten times without touching anything
-        else and neither centre nor scale moves.
-        """
-        if self._compare_mode():
-            self._exit_compare_mode()
-        else:
-            self._enter_compare_mode()
-
-    def _update_compare_toggle_button(self):
-        """Name the button after where it GOES, not where you are."""
-        btn = getattr(self, "_btn_compare_toggle", None)
-        if btn is None:
-            return
-        if self._compare_mode():
-            btn.setText(self._COMPARE_TOGGLE_TO_FULL)
-            btn.setToolTip(
-                "Return to the full image, centred where the compare "
-                "panels are now, at their magnification. The same way back "
-                "as a right-click or Esc.")
-        else:
-            btn.setText(self._COMPARE_TOGGLE_TO_COMPARE)
-            btn.setToolTip(
-                "Open the compare panels on the CENTRE of the full image, "
-                "at its current magnification. Unlike a right-click -- "
-                "which compares the point under the cursor -- this reads no "
-                "mouse position, so switching back and forth moves nothing.")
 
     def _exit_compare_mode(self):
         """Back to the full image, AT THE PANELS' CAMERA.
@@ -3229,30 +3171,14 @@ class Step0Page(QWidget):
         return 2 ** int(level)
 
     def _update_full_level_hint(self):
-        """Show the coarse-level warning exactly while it is true.
+        """The coarse-level banner is GONE (user ruling, 2026-09-15).
 
-        Only for a CORRECTED preview: Original at level 3 is simply a
-        downsampled image of the same pixels, which needs no warning.
+        It said `downsampled xN preview - zoom in for full-resolution
+        correction` over the full image. Kept as a no-op because the callers
+        are the view's own refresh points and there is nothing for them to
+        report any more.
         """
-        hint = getattr(self, "_full_level_hint", None)
-        if hint is None:
-            return
-        level = self._full_image_level()
-        corrected = (self._full_image_source != "original"
-                     and not self._full_image_preview_blocked())
-        if not corrected or level is None or level < FULL_IMAGE_COARSE_LEVEL:
-            hint.setVisible(False)
-            hint.setText("")
-            return
-        n = self._full_image_level_downsample(level)
-        hint.setText(f"⚠ downsampled ×{n} preview — zoom in for "
-                     f"full-resolution correction")
-        hint.setToolTip(
-            f"At pyramid level {level} the correction runs on pixels "
-            f"box-downsampled ×{n}, with the radius/sigma scaled to match. "
-            "That is a different background from the level-0 correction "
-            "Save writes; zoom in to compare like with like.")
-        hint.setVisible(True)
+        return
 
     def production_correction_busy(self):
         """Name of the production correction task now running, else None.
@@ -5049,8 +4975,9 @@ class Step0Page(QWidget):
         # the revision on disk was ahead of this page's counter (a restart).
         self._geometry_revision = max(int(self._geometry_revision),
                                       int(outcome.get("revision") or 0))
-        self._set_geometry_status(
-            "Patch geometry saved to the Step0 handoff.")
+        # NO STATUS LINE for a successful save (user ruling, 2026-09-15):
+        # the Load row's label is about the project that is loaded, and a
+        # patch edit that worked needs no announcement there.
         self.geometry_committed.emit({
             "step0_manifest_path": outcome.get("step0_manifest_path", ""),
             "geometry_revision": outcome.get("revision", 0),

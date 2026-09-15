@@ -339,31 +339,44 @@ def test_the_numeric_diagnosis_of_one_round_trip(app):
         full_immediate_after_exit, rel=1e-9, abs=1e-6)
 
 
+
+def _toggle(page):
+    """What the removed toolbar button did: swap pages on the CURRENT camera.
+
+    The `Compare current center` button is gone (user ruling, 2026-09-15) --
+    a right-click is enough -- but the symmetry it was built to prove is the
+    page's, not the widget's: entering on the view's own centre and leaving
+    on the panels' own centre must be the identity. That is what these tests
+    still pin, through the same two calls the button made.
+    """
+    if page._compare_mode():
+        page._exit_compare_mode()
+    else:
+        page._enter_compare_mode()
+
+
 # ── B. the toolbar button, which reads no mouse ──────────────────────────
 
-def test_the_button_is_named_after_where_it_goes(app):
+def test_the_compare_toggle_button_is_gone(app):
+    """The button was removed: a right-click already opens the comparison,
+    and Esc / a right-click already leave it."""
     page = _real_page(app)
-    btn = page._btn_compare_toggle
-    assert btn.text() == page._COMPARE_TOGGLE_TO_COMPARE
-    btn.click()
-    _settle(page)
-    assert page._compare_mode() is True
-    assert btn.text() == page._COMPARE_TOGGLE_TO_FULL
-    btn.click()
-    _settle(page)
-    assert page._compare_mode() is False
-    assert btn.text() == page._COMPARE_TOGGLE_TO_COMPARE
+    assert not hasattr(page, "_btn_compare_toggle")
+    assert not hasattr(page, "_on_compare_toggle_clicked")
+    assert not hasattr(page, "_COMPARE_TOGGLE_TO_COMPARE")
+    # ...and the two moves it made are still the page's own
+    assert callable(page._enter_compare_mode)
+    assert callable(page._exit_compare_mode)
 
 
 def test_ten_button_round_trips_drift_nowhere(app):
     """The whole point of the button. Ten there-and-backs with nothing else
     touched: no centre drift, no scale drift, and no per-round creep."""
     page = _real_page(app)
-    btn = page._btn_compare_toggle
     first_full = page._full_image_camera()
     first_compare = None
     for _ in range(10):
-        btn.click()
+        _toggle(page)
         _settle(page)
         assert page._compare_mode() is True
         compare = page._compare_camera()
@@ -372,7 +385,7 @@ def test_ten_button_round_trips_drift_nowhere(app):
         assert compare[0] == pytest.approx(first_compare[0], abs=1.0)
         assert compare[1] == pytest.approx(first_compare[1], abs=1.0)
         assert compare[2] == pytest.approx(first_compare[2], rel=1e-6)
-        btn.click()
+        _toggle(page)
         _settle(page)
         assert page._compare_mode() is False
         full = page._full_image_camera()
@@ -386,14 +399,13 @@ def test_ten_button_round_trips_drift_nowhere(app):
 
 def test_ten_button_round_trips_build_the_backend_once(app):
     page = _real_page(app)
-    btn = page._btn_compare_toggle
     controllers = None
     for _ in range(10):
-        btn.click()
+        _toggle(page)
         _settle(page)
         if controllers is None:
             controllers = list(page._compare_strip_widget.controllers)
-        btn.click()
+        _toggle(page)
         _settle(page)
     assert len(page._compare_builds) == 1
     assert list(page._compare_strip_widget.controllers) == controllers
@@ -401,17 +413,16 @@ def test_ten_button_round_trips_build_the_backend_once(app):
 
 def test_ten_button_round_trips_make_no_extra_channel_selections(app):
     page = _real_page(app)
-    btn = page._btn_compare_toggle
-    btn.click()
+    _toggle(page)
     _settle(page)
     baseline = [len(c.selections)
                 for c in page._compare_strip_widget.controllers]
-    btn.click()
+    _toggle(page)
     _settle(page)
     for _ in range(9):
-        btn.click()
+        _toggle(page)
         _settle(page)
-        btn.click()
+        _toggle(page)
         _settle(page)
     assert [len(c.selections)
             for c in page._compare_strip_widget.controllers] == baseline
@@ -427,7 +438,7 @@ def test_the_button_never_reads_the_mouse(app):
     off_centre = _level0_under(page, FIXED_PIXEL)
     centre = page._full_image_camera()[:2]
     assert abs(off_centre[0] - centre[0]) > 100.0
-    page._btn_compare_toggle.click()
+    _toggle(page)
     _settle(page)
     compare = page._compare_camera()
     assert compare[0] == pytest.approx(centre[0], abs=1.0)
@@ -439,22 +450,21 @@ def test_move_to_q_then_back_then_compare_again_stays_on_q(app):
     full image is centred on Q -- then Compare current center, and the
     panels are on Q again."""
     page = _real_page(app)
-    btn = page._btn_compare_toggle
-    btn.click()
+    _toggle(page)
     _settle(page)
     scale = page._compare_camera()[2]
     q = (2100.0, 900.0)
     page._compare_strip_widget.set_camera(q[0], q[1], scale)
     QtTest.QTest.qWait(20)
 
-    btn.click()                     # Back to full image
+    _toggle(page)                     # Back to full image
     _settle(page)
     full = page._full_image_camera()
     assert full[0] == pytest.approx(q[0], abs=1.0)
     assert full[1] == pytest.approx(q[1], abs=1.0)
     assert full[2] == pytest.approx(scale, rel=1e-6)
 
-    btn.click()                     # Compare current center
+    _toggle(page)                     # Compare current center
     _settle(page)
     compare = page._compare_camera()
     assert compare[0] == pytest.approx(q[0], abs=1.0)
@@ -467,7 +477,7 @@ def test_the_button_shares_the_right_clicks_way_back(app):
     with Esc, or entering with a right-click and leaving with the button,
     both work and both adopt the panels' camera."""
     page = _real_page(app)
-    page._btn_compare_toggle.click()
+    _toggle(page)
     _settle(page)
     page._on_compare_escape()
     _settle(page)
@@ -476,7 +486,7 @@ def test_the_button_shares_the_right_clicks_way_back(app):
     _send_right_click(page, FIXED_PIXEL)
     _settle(page)
     compare = page._compare_camera()
-    page._btn_compare_toggle.click()
+    _toggle(page)
     _settle(page)
     assert page._compare_mode() is False
     full = page._full_image_camera()
@@ -496,7 +506,7 @@ def test_a_cold_first_press_still_shows_the_preparing_badge(app):
         return real()
 
     page._show_preparing_compare = spy
-    page._btn_compare_toggle.click()
+    _toggle(page)
     _settle(page)
     assert seen == [True]
     assert page._compare_mode() is True

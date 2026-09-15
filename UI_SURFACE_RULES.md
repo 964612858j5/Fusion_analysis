@@ -35,6 +35,11 @@ Three regressions came out of ignoring it:
 
 None of them was asked for. Each cost a review round and a rollback.
 
+A second sweep (2026-09-15) removed five more pieces of Step0 surface the
+user had not asked for either: the coarse-level banner, `Compare current
+center`, `Reopen full image`, the `Patch geometry saved…` line in the Load
+row, and the duplicate Tissue Preview button in the step bar.
+
 ## 4. What the current product surface is
 
 * **Step1 row** -- `tick | swatch | name | weight slider + spin`. The tick is
@@ -43,7 +48,14 @@ None of them was asked for. Each cost a review round and a rollback.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
   combo.
 * **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
-* **Top step bar** -- `🗺 Tissue Preview` only.
+* **Top step bar** -- NO buttons. Three were added there and none was asked
+  for; the last of them was a second `🗺 Tissue Preview` beside the one Step0
+  already has next to Load.
+* **Step0's Full Image toolbar** -- no `Compare current center` (a right-click
+  opens the comparison and Esc / a right-click leave it), no `Reopen full
+  image`, and no `downsampled ×N preview` banner over the picture.
+* **Step0's Load row** -- the project's own status. A patch geometry save that
+  worked announces nothing there.
 * **Weights** -- edited in Step1's rows. There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
   existing entries.

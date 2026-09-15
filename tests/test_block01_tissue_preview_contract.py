@@ -1352,16 +1352,13 @@ def test_the_global_windows_open_from_a_real_button_in_every_step(app):
             # IN THE BLOCK01 CHROME, not merely constructed: the point is
             # that these outlive the page the user is on, so each must be a
             # descendant of the window and NOT of the stacked widget.
-            # ONE button in the chrome, and it is the one that was asked
-            # for: the Tissue Preview. `Intensity…` and `Weights…` were
-            # added here without a request and are gone; the Intensity
-            # window is opened from the step pages' own entries.
-            btn = w._btn_global_tissue
-            assert w.isAncestorOf(btn), step
-            assert not w._stack.isAncestorOf(btn), step
+            # NO buttons in the chrome: all three that stood there were
+            # added without a request. The windows are opened from the
+            # pages' own entries, which is where they always were.
+            assert not hasattr(w, "_btn_global_tissue")
             assert not hasattr(w, "_btn_global_intensity")
             assert not hasattr(w, "_btn_global_weights")
-            btn.click()
+            w._step0.show_tissue_navigator()
             w._display.show_intensity(w.config.current_channel())
 
             assert w._display.intensity_window() is not None, step

@@ -122,8 +122,13 @@ def test_step1_rows_have_no_leftover_gap_where_it_stood(app):
         _close(w)
 
 
-def test_the_step_bar_carries_only_the_tissue_preview_button(app):
-    """`Intensity…` and `Weights…` were never asked for."""
+def test_the_step_bar_carries_no_buttons_at_all(app):
+    """`Intensity…`, `Weights…` and a SECOND `Tissue Preview` were added to
+    the step bar; none was asked for.
+
+    Step0 already has a Tissue Preview button next to Load, and that is the
+    one the user keeps: two buttons for one window is one too many.
+    """
     w = _window(app)
     try:
         assert not hasattr(w, "_btn_global_intensity")
@@ -144,8 +149,10 @@ def test_the_step_bar_carries_only_the_tissue_preview_button(app):
             widget = bar.itemAt(i).widget()
             if isinstance(widget, QtWidgets.QPushButton):
                 labels.append(widget.text())
-        assert labels == ["🗺 Tissue Preview"], labels
-        assert hasattr(w, "_btn_global_tissue")
+        assert labels == [], labels
+        assert not hasattr(w, "_btn_global_tissue")
+        # ...and Step0's own one, beside Load, is still there
+        assert w._step0._btn_tissue_nav.text().endswith("Tissue Navigator")
     finally:
         _close(w)
 

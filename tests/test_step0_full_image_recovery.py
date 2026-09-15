@@ -185,7 +185,8 @@ def test_the_toggles_have_a_checked_rule_in_their_stylesheet(app):
     page = _page(app)
     for btn in (page._btn_full_marker, page._btn_full_nucleus):
         assert "QPushButton:checked" in btn.styleSheet(), btn.text()
-    assert "QPushButton:checked" not in page._btn_full_reopen.styleSheet()
+    # `Reopen full image` is gone (user ruling, 2026-09-15); the plain
+    # buttons left in the bar are checked by the next assertion.
 
 
 def test_the_label_says_which_layers_are_hidden(app):

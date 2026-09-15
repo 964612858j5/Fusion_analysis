@@ -535,7 +535,16 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
     row = page._channel_rows.get("CD3")
     if row is not None:
         row["checkbox"].setChecked(True)
+        # The row's combo is the PREVIEW method. What Save publishes is the
+        # FINAL decision, so a page that is about to Save a corrected channel
+        # has to have DECIDED one -- through the Per-Channel Decision panel,
+        # as a user does. Without it Save has nothing to correct, takes the
+        # all-skipped path, and starts no worker at all.
         row["method_cb"].setCurrentText("TopHat")
+        page.current_channel = "CD3"
+        page._update_decision_ui()
+        page._dec_top.setChecked(True)
+        page._apply_current_channel_decision()
 
     # Wrap the REAL handlers, do not replace them.
     real_wsi_finished = page._on_wsi_finished

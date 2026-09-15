@@ -1817,14 +1817,23 @@ def test_the_window_is_seeded_when_the_record_lands(real_strip):
     assert (lo, hi) == pytest.approx((rec.display_lo, rec.display_hi))
 
 
-def test_a_channel_no_viewer_is_reading_is_still_seeded_at_once(app):
-    """The non-blocking rule is "somebody else is already doing it", not
-    "never read". With no viewer on that channel the page reads it, as it
-    always did."""
+def test_a_channel_no_viewer_is_reading_is_asked_for_not_read_here(app):
+    """`blocking=False` means "do not read on THIS thread" -- full stop.
+
+    It used to mean only "do not duplicate a read somebody else is already
+    doing", so a channel nobody happened to be reading fell through to a
+    synchronous whole-slide decode on the GUI thread: 170-230 ms, and the
+    last such read left on the load path. The array is asked for in the
+    background instead, and the answer until it lands is "not yet".
+    """
     page = _page(app)
     page._slide_lowres.clear()
     assert page._overview_read_pending("CD20") is False
-    assert page._slide_lowres_array("CD20", blocking=False) is not None
+
+    assert page._slide_lowres_array("CD20", blocking=False) is None
+
+    # ...and an explicit blocking read -- a worker's own call -- still reads.
+    assert page._slide_lowres_array("CD20", blocking=True) is not None
 
 
 # ── 17. the dashed rectangle follows the panels' camera ──────────────────

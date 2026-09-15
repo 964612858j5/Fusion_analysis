@@ -41,19 +41,27 @@ TILES_L0_20 = {(tx, ty) for tx in range(5) for ty in range(4)}
 TILES_L0_30 = {(tx, ty) for tx in range(6) for ty in range(5)}
 TILES_L1_4 = {(0, 0), (0, 1), (1, 0), (1, 1)}
 
+# RAW COUNTS INCLUDE THE LEVEL+1 UNDERLAY. `9c4c3a2` made the controller
+# always keep a raw level+1 layer beneath the current one, so a step's raw
+# plan is its visible tiles PLUS the coarser tiles that cover them -- 20 + 2
+# at the first step, measured by level. The golden was not updated with that
+# change and has been red since; the numbers below are re-measured, and what
+# they pin is unchanged: this trajectory's plan is a fact, not something that
+# drifts per run.
+#
 # (name, requested view range, expected state after the step)
 TRAJECTORY = [
     ("initial", (0.0, 0.0, 2048.0, 2048.0), {
         "level": 0, "bbox": (0, 0, 2048, 2399), "tiles": TILES_L0_20,
         "shrinking": False, "zooming": False, "events": ["PAN"],
-        "n_raw": 20, "n_correction": 24, "req_levels": {0, 1},
+        "n_raw": 22, "n_correction": 24, "req_levels": {0, 1},
         "generations": {("raw", 1), ("precise", 1)},
         "cancels": [("raw", 0), ("precise", 0)],
     }),
     ("pan", (256.0, 256.0, 2304.0, 2304.0), {
         "level": 0, "bbox": (256, 0, 2304, 2655), "tiles": TILES_L0_30,
         "shrinking": False, "zooming": False, "events": ["PAN"],
-        "n_raw": 30, "n_correction": 38, "req_levels": {0, 1},
+        "n_raw": 34, "n_correction": 38, "req_levels": {0, 1},
         # A pan also starts directional prefetch, which is why a third
         # generation appears here and nowhere else.
         "generations": {("raw", 2), ("precise", 2), ("dirprefetch", 1)},

@@ -50,7 +50,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   picture. The left column is two tabs, `Channels` and `Method & Parameters`;
   the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
   a TAB beside the picture, never a strip stacked over it. The title line
-  reads `Step 1 -- Channel Fusion + Preliminary Segmentation` and carries the
+  reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the
   step's one `Tissue Preview / ROI Navigator` entry at its right end. There is
   no `① ROI / Patch Overview` heading, no `③ Preview` heading over the picture
   and no `Red=cyto Blue=nucleus` legend -- the two mode buttons say which

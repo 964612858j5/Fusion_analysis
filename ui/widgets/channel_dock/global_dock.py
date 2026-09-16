@@ -909,8 +909,14 @@ class GlobalChannelDock(QtWidgets.QWidget):
         ONE LOGICAL COMMAND: the model raises its draft revision once and
         emits weight -> participation -> draft, so nothing observes "shown
         but not participating" or "participating at 0" in between.
+
+        IN STEP0 A TICK IS A CLICK (user ruling, 2026-09-17): ticking a
+        marker shows THAT marker and takes the one that was showing off, the
+        same as clicking its row. Step0 shows one marker at a time.
         """
         self.use_channel(cid, visible, origin=f"dock-step{self._step}")
+        if visible and self._step == STEP0:
+            self._show_only_this_marker(cid)
 
     def channel_in_use(self, cid):
         """Is this channel fully on, by the step's own definition?
@@ -1062,6 +1068,14 @@ class GlobalChannelDock(QtWidgets.QWidget):
         Selecting something invisible is a dead end. A programmatic
         selection -- a restore, a dataset switch, the landing rule -- reaches
         `set_selected_channel` directly and shows nothing.
+
+        IN STEP0 THE PICTURE FOLLOWS THE CLICK, ONE MARKER AT A TIME (user
+        ruling, 2026-09-17). Step0 has no Process any more: every correction
+        candidate is computed by itself, so the tick there answers one
+        question only -- what is on screen. Clicking a marker shows it and
+        takes the marker that was showing off; DAPI is the reference layer
+        and keeps its own answer. Step1's tick is still the fusion command
+        and is untouched by this.
         """
         if self._state is not None:
             caps = self._state.capabilities(cid)
@@ -1073,8 +1087,57 @@ class GlobalChannelDock(QtWidgets.QWidget):
                 # but not in the fusion -- unfixable by the gesture a user
                 # would reach for, so the slide went on fusing DAPI alone.
                 self.use_channel(cid, True, origin="dock-row-click")
+            if self._step == STEP0:
+                self._show_only_this_marker(cid)
             self._state.set_selected_channel(cid, origin="dock-row-click")
         self.row_clicked.emit(cid)
+
+    def _show_only_this_marker(self, cid):
+        """Step0: the clicked marker is the one on screen.
+
+        Every other marker is hidden. A channel whose display the owners have
+        locked, and the nucleus -- which is a reference layer with a switch
+        of its own -- are left where they are.
+        """
+        state = self._state
+        if state is None:
+            return
+        # WHO THE NUCLEUS IS -- asked of every owner that knows, because no
+        # single one always does. A real session logged
+        # `channel.visibility channel=DAPI visible=False
+        # origin=dock-step0-exclusive`: the capability flag was not set on
+        # that page's rows, so the sweep below took the reference layer off
+        # the screen. A standalone page has no fusion model instead. Either
+        # answer is enough to protect it.
+        fusion = self._fusion
+        nucleus_named = ""
+        if fusion is not None:
+            try:
+                nucleus_named = str(fusion.nucleus()[0] or "")
+            except Exception:
+                nucleus_named = ""
+
+        def _is_nucleus(channel):
+            if nucleus_named and channel == nucleus_named:
+                return True
+            return bool(getattr(state.capabilities(channel), "is_nucleus",
+                                False))
+
+        if _is_nucleus(cid):
+            return
+        for other in list(self.channel_order()):
+            if other == cid or _is_nucleus(other):
+                continue
+            caps = state.capabilities(other)
+            if not getattr(caps, "display_toggleable", True):
+                continue
+            # A sweep's own permission: the nucleus layer is not the only
+            # channel a page may want left alone by a bulk move.
+            if not getattr(caps, "bulk_toggleable", True):
+                continue
+            if state.display_visible(other):
+                state.set_display_visible(other, False,
+                                          origin="dock-step0-exclusive")
 
     def set_all_visible(self, visible):
         """Show all / Hide all: a SWEEP, which is its own permission.

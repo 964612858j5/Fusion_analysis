@@ -210,17 +210,119 @@ def test_a_programmatic_selection_does_not_show_a_hidden_channel(app):
     assert page._channel_rows["CD3"]["checkbox"].isChecked() is False
 
 
-def test_a_click_on_a_visible_row_changes_nothing_but_the_selection(app):
+def test_a_click_on_the_row_that_is_already_showing_writes_nothing(app):
+    """Nothing to show and nothing to hide: the picture is already this one."""
     page = _page(app)
     state = page.display.state
-    state.set_display_visible("CD3", True, origin="test")
+    for ch in page._channel_order:
+        if ch != page.nucleus_channel:
+            state.set_display_visible(ch, ch == "CD3", origin="test")
     seen = []
     state.visibility_changed.connect(lambda *a: seen.append(a))
 
     _click_row(page, "CD3")
 
     assert page.current_channel == "CD3"
-    assert seen == [], f"a click on a shown row wrote visibility: {seen}"
+    assert seen == [], f"a click on the shown row wrote visibility: {seen}"
+
+
+def test_a_click_shows_that_marker_and_takes_the_other_one_off(app):
+    """User ruling, 2026-09-17: in Step0 the picture follows the click.
+
+    Step0 has no Process any more -- every correction candidate computes by
+    itself -- so its tick answers one question, what is on screen, and one
+    marker is on screen at a time.
+    """
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+    assert state.display_visible("CD3") is True
+
+    _click_row(page, "CD20")
+
+    assert state.display_visible("CD20") is True
+    assert state.display_visible("CD3") is False, \
+        "the marker that was showing stayed on"
+    assert page._channel_rows["CD3"]["checkbox"].isChecked() is False
+    assert page._channel_rows["CD20"]["checkbox"].isChecked() is True
+
+
+def test_the_nucleus_keeps_its_own_answer_when_a_marker_is_clicked(app):
+    """DAPI is the reference layer, with a switch of its own."""
+    page = _page(app)
+    state = page.display.state
+    state.set_display_visible("DAPI", True, origin="test")
+
+    _click_row(page, "CD20")
+
+    assert state.display_visible("DAPI") is True
+    assert state.display_visible("CD20") is True
+
+
+def test_ticking_a_marker_shows_only_that_one_too(app):
+    """User ruling, 2026-09-17: in Step0 a tick is the same gesture as a
+    click -- both mean "show this channel"."""
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+    assert state.display_visible("CD3") is True
+
+    page._channel_rows["CD20"]["checkbox"].setChecked(True)
+    QtWidgets.QApplication.processEvents()
+
+    assert state.display_visible("CD20") is True
+    assert state.display_visible("CD3") is False, \
+        "ticking a marker left the previous one on screen"
+    assert state.display_visible("DAPI") is True, \
+        "a tick took the reference layer off"
+
+
+def test_unticking_a_marker_hides_only_that_one(app):
+    """Nothing else moves: hiding is not a request to show something else."""
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+
+    page._channel_rows["CD3"]["checkbox"].setChecked(False)
+    QtWidgets.QApplication.processEvents()
+
+    assert state.display_visible("CD3") is False
+    assert state.display_visible("DAPI") is True
+
+
+def test_the_nucleus_survives_when_the_fusion_model_has_none(app):
+    """The reference layer is not swept, whoever does or does not know why.
+
+    A real session logged `channel.visibility channel=DAPI visible=False
+    origin=dock-step0-exclusive`: the sweep asked the FUSION model who the
+    nucleus was, and a Step0 that has not been through a Step1 handoff has no
+    answer there.
+
+    TWO CAPABILITIES PROTECT IT and either one is enough (measured): the
+    sweep skips a channel the rebuild marked `is_nucleus`, and it skips one
+    marked `bulk_toggleable=False` -- "a bulk move may not touch this one".
+    Removing either alone breaks no test; removing both turns this red.
+    """
+    page = _page(app)
+    state = page.display.state
+    fusion = page.display.fusion
+    assert not fusion.nucleus()[0], (
+        "this test is about a fusion model with no nucleus yet")
+    assert state.capabilities("DAPI").bulk_toggleable is False
+
+    _click_row(page, "CD20")
+
+    assert state.display_visible("DAPI") is True
+
+
+def test_clicking_the_nucleus_row_hides_no_marker(app):
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+
+    _click_row(page, "DAPI")
+
+    assert state.display_visible("CD3") is True
 
 
 def test_the_row_checkbox_only_moves_display_visibility(app):
@@ -349,15 +451,19 @@ def test_the_rows_controls_follow_the_capabilities_not_a_locked_flag(app):
     assert state.display_visible("CD3") is False
 
 
-def test_a_fresh_slide_shows_its_first_marker_and_hides_the_rest(app):
-    """The ruled default: a picture to land on, without handing Step1 a
-    slide with every channel stacked. DAPI keeps its own product default."""
+def test_a_fresh_slide_shows_the_nucleus_and_no_marker(app):
+    """The ruled default (user, 2026-09-17).
+
+    It used to show one marker as well -- the first on the slide -- so a
+    dataset opened with, say, TOX already ticked, which nobody had asked for.
+    A click is what puts a marker on screen now.
+    """
     page = _page(app)
     visibility = page.display.state.display_visibility()
 
-    markers = [ch for ch in page._channel_order if ch != page.nucleus_channel]
-    assert visibility[markers[0]] is True, visibility
-    for ch in markers[1:]:
+    for ch in page._channel_order:
+        if ch == page.nucleus_channel:
+            continue
         assert visibility[ch] is False, (ch, visibility)
     assert visibility["DAPI"] is True
     # ...and the whole thing arrived as ONE install: order, capabilities,

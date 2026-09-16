@@ -483,6 +483,27 @@ def test_a_step1_handoff_does_not_untick_step0(app):
         _close(w)
 
 
+def test_step1_still_shows_as_many_channels_as_the_user_ticks(app):
+    """Step0's one-marker-at-a-time rule is Step0's alone."""
+    w = _window(app)
+    try:
+        state = w._display.state
+        _in(w, 1)
+        # THROUGH THE ROWS, because that is the path Step0's exclusivity
+        # hangs off: driving `use_channel` directly would step over it and
+        # the test would pass however the rule is written.
+        w._channel_dock.row("CD3").checkbox.setChecked(True)
+        QtWidgets.QApplication.processEvents()
+        w._channel_dock.row("CD8").checkbox.setChecked(True)
+        QtWidgets.QApplication.processEvents()
+
+        assert state.display_visible("CD3") is True, \
+            "Step1 hid a channel because another was ticked"
+        assert state.display_visible("CD8") is True
+    finally:
+        _close(w)
+
+
 # ── 4. what stays shared ──────────────────────────────────────────────
 
 def test_colour_and_intensity_are_still_shared(app):

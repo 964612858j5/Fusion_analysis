@@ -635,10 +635,11 @@ def test_correction_membership_never_becomes_display_visibility(app):
         st = page.display.state
 
         visibility = st.display_visibility()
-        # A slide nobody has given display answers for shows its FIRST
-        # marker (so selecting it is a picture) and hides the rest; DAPI
-        # keeps its own product default.
-        assert visibility["CD3"] is True, visibility
+        # A slide nobody has given display answers for shows DAPI and no
+        # marker at all (user ruling, 2026-09-17): in Step0 a click or a tick
+        # is what puts a marker on screen. What matters here is unchanged --
+        # the channel WITH a correction method is not the one shown.
+        assert visibility["CD3"] is False, visibility
         assert visibility["CD8"] is False, visibility
         assert visibility["DAPI"] is True
         # ...and the correction decision is untouched by any of it.

@@ -190,21 +190,19 @@ class Step0ChannelDockAdapter(QObject):
         display = getattr(page, "display", None)
         known = dict(display.state.display_visibility()) if display else {}
         order_names = list(page.loader.channel_names())
-        # THE ONE MARKER A NEW SLIDE SHOWS: the current marker, or the first
-        # one on a slide nobody has chosen for. Every other marker starts
-        # hidden -- a slide handed to Step1 with all of them stacked is not
-        # what the user asked for -- and DAPI keeps its own default.
-        visible_marker = current if (current and current in order_names
-                                     and current != page.nucleus_channel) \
-            else next((ch for ch in order_names
-                       if ch != page.nucleus_channel), None)
-
+        # A NEW SLIDE SHOWS THE NUCLEUS AND NOTHING ELSE (user ruling,
+        # 2026-09-17). It used to show one marker as well -- the current one,
+        # or the first on the slide -- so a dataset opened with, say, TOX
+        # already ticked, which is a decision the user had not made. In Step0
+        # the tick is display alone and a click is what puts a marker on
+        # screen (`GlobalChannelDock._on_row_clicked`), so there is nothing
+        # left for a default marker to buy.
         def _default_visible(ch):
             if ch in known:
                 return bool(known[ch])
             if ch == page.nucleus_channel:
                 return _dapi_visible(page)
-            return ch == visible_marker
+            return False
 
         visibility = {ch: _default_visible(ch) for ch in order_names}
         colors = {ch: _swatch_hex(page, ch) for ch in order_names}

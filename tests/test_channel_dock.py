@@ -221,14 +221,14 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
     # prepare both candidates so they can be compared) while the page
     # publishes `original` for it, because no decision has been made. Two
     # questions, two answers. The checkbox says nothing about either: it is
-    # display visibility, and a fresh slide shows DAPI and its FIRST marker
-    # while hiding the others.
+    # display visibility, and a fresh slide shows DAPI alone (user ruling,
+    # 2026-09-17 -- it used to show the first marker as well, so a dataset
+    # opened with a channel nobody had chosen already ticked).
     for ch in ("CD3", "CD20", "CD8"):
         assert page._channel_rows[ch]["method_cb"].currentText() == "Both"
         assert page._channel_preview_method(ch) == "both"
         assert page._channel_final_decision(ch) == "original"
-    assert page._channel_rows["CD3"]["checkbox"].isChecked()
-    for ch in ("CD20", "CD8"):
+    for ch in ("CD3", "CD20", "CD8"):
         assert not page._channel_rows[ch]["checkbox"].isChecked(), ch
     assert page._channel_rows["DAPI"]["checkbox"].isChecked()
     # The global Method box COMMANDS the PREVIEW layer: every

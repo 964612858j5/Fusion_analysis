@@ -143,11 +143,13 @@ def _settle(w, timeout=2.0):
 
 
 def _show(w, channel, weight=1.0):
-    """Put a channel in the picture: draw it, fuse it AND weigh it.
+    """Put a channel in the picture: drawn, fused, and weighed this much.
 
-    Three independent facts since B3 -- the left box draws it, the row's `\u0192`
-    box puts it in the science, the weight says how much -- so a test that
-    wants to see something says all three, exactly as a user does.
+    ONE product gesture with two entries: ticking the row, or giving the row
+    a weight -- both show the channel AND put it into the fusion (user
+    ruling, 2026-09-16). The separate participation box this helper once
+    spoke for is gone; the two owner calls below are what one tick writes,
+    and the weight is the number the user asked for.
     """
     w.config.set_channel_visible(channel, True)
     w.config.set_fusion_enabled(channel, True)
@@ -155,7 +157,11 @@ def _show(w, channel, weight=1.0):
 
 
 def _hide(w, channel):
-    """Take a channel out of the picture AND out of the science."""
+    """Take a channel out of the picture AND out of the science.
+
+    The tick is the one gesture that does this: a weight, zero included,
+    never takes a channel out.
+    """
     w.config.set_channel_visible(channel, False)
     w.config.set_fusion_enabled(channel, False)
 
@@ -260,14 +266,20 @@ def test_a_weight_of_zero_contributes_nothing_but_keeps_the_tick(app):
         w.close()
 
 
-def test_a_weight_never_ticks_or_unticks_anything(app):
+def test_a_weight_ticks_a_channel_and_never_unticks_one(app):
+    """User ruling, 2026-09-16: giving a channel a weight is using it.
+
+    The first half of this test used to assert the opposite -- a weight on a
+    hidden channel left it hidden, which is how a slider drag could change
+    nothing on screen. The second half is unchanged: no weight, zero
+    included, ever takes a channel out.
+    """
     w = _window(app)
     try:
         w.config.set_channel_visible("CD3", False)
         w.config._rows["CD3"].spin.setValue(0.4)
-        assert "CD3" not in w.config.visible_channels()
+        assert "CD3" in w.config.visible_channels()
 
-        w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
         assert "CD3" in w.config.visible_channels()
     finally:
@@ -797,7 +809,14 @@ def test_entering_fusion_asks_for_the_channels_fusion_needs(app):
 def test_restoring_a_fusion_session_asks_only_for_what_it_shows(app):
     w = _window(app, cached=("DAPI",))
     try:
+        # Weighted and then TAKEN OUT: since the 2026-09-16 ruling a weight
+        # enlists the channel, so "a channel the user had hidden" is now
+        # reached by unticking it, not by weighting it and leaving the tick
+        # alone. What this test measures -- a restore reads only what it
+        # shows -- is unchanged.
         w.config._rows["CD3"].spin.setValue(0.8)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_channel_visible("CD3", False)
         asked = []
         w._start_loader_for = lambda idx, needed=None: asked.append(list(needed or []))
 
@@ -913,9 +932,14 @@ def test_restoring_a_session_loads_once_and_draws_once(app):
     try:
         loads, draws = [], []
         w._start_loader_for = lambda idx, needed=None: loads.append(list(needed or []))
-        # After the stub, so the restore is the only thing that asks.
+        # After the stub, so the restore is the only thing that asks. CD3 is
+        # weighted and then taken out: a weight enlists a channel since the
+        # 2026-09-16 ruling, and this test is about a HIDDEN channel not being
+        # read.
         w.config._rows["CD3"].spin.setValue(0.8)
         w.config._rows["CD8"].spin.setValue(0.5)
+        w.config.set_fusion_enabled("CD3", False)
+        w.config.set_channel_visible("CD3", False)
         loads.clear()
         real_refresh = w._refresh_patch_preview
         w._refresh_patch_preview = lambda reset_view=False: (

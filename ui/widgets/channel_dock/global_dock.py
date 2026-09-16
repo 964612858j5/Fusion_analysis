@@ -10,9 +10,14 @@ shown in one list and hidden in another.
 
 There is now ONE dock, built once by `Block01DisplayServices` and mounted by
 the main window OUTSIDE the stacked pages. A step change switches the
-ACCESSORY -- Step0's correction combo, Step1's `f` participation box -- and
-nothing else: the dock, the rows, the selection, the search text and the
-scroll position are the same objects before and after.
+ACCESSORY -- Step0's correction combo, Step1's weight editor -- and nothing
+else: the dock, the rows, the selection, the search text and the scroll
+position are the same objects before and after.
+
+STEP1'S ROW IS ONE COMMAND WITH TWO ENTRIES. The tick shows a channel and puts
+it into the fusion; so does giving it a weight (user ruling, 2026-09-16).
+There is no separate participation control: one was added once and rolled
+back, and `UI_SURFACE_RULES.md` records why.
 
 WHAT IT OWNS: nothing. The dock is a projection of the two owners:
 
@@ -132,8 +137,8 @@ class GlobalChannelRow(QtWidgets.QWidget):
         # of them in a list this long is in the way of the work; the rules
         # they follow are in this module's docstring, read once. The
         # accessories that DO carry hover text are the two whose meaning is
-        # not the obvious reading of their position: the `f` participation box
-        # and Step0's correction combo and state glyph.
+        # not the obvious reading of its position: Step0's correction combo
+        # and its state glyph.
         self.checkbox.toggled.connect(self._on_visibility_toggled)
 
         # -- Step1's accessory: the representative weight editor -----------
@@ -222,7 +227,7 @@ class GlobalChannelRow(QtWidgets.QWidget):
         """Show this step's fields. Silent, and a rebuild of nothing.
 
             Step0   checkbox | correction state | swatch | name | method
-            Step1   checkbox |                  | swatch | name | weight | f
+            Step1   checkbox |                  | swatch | name | weight
             Step2   checkbox |                  | swatch | name
             Step3   checkbox |                  | swatch | name
 
@@ -957,12 +962,40 @@ class GlobalChannelDock(QtWidgets.QWidget):
         other entry, and it writes the same model). Step0, Step2 and Step3 do
         not show the editor at all, so a value arriving from one of them came
         from a control the user cannot see.
+
+        GIVING A CHANNEL A WEIGHT ENLISTS IT (user ruling, 2026-09-16). Asking
+        for a weight on a channel that is not in the fusion used to write a
+        number nothing computed with and leave the channel hidden -- the user
+        moved a slider and the picture did not change. So the edit carries the
+        same answers the tick does: the weight, participation and visibility,
+        in ONE deferred block, so no observer sees a channel weighted but not
+        fused.
+
+        The weight is written first for reading order, not for correctness:
+        the first enable's automatic 1.0 only lands where no weight has been
+        chosen, and inside one deferred block an observer sees the final pair
+        either way (measured -- swapping the two lines breaks no test).
+
+        A channel already in the fusion is only reweighted. Nothing is ever
+        toggled OFF here: winding a weight back to zero is an explicit zero,
+        and untick is the one gesture that removes a channel.
         """
         if self._step != STEP1:
             return
-        if self._fusion is not None:
-            self._fusion.edit_channel_weight(cid, value,
-                                             origin=f"dock-step{self._step}")
+        fusion = self._fusion
+        if fusion is None:
+            return
+        origin = f"dock-step{self._step}"
+        state = self._state
+        enlist = not fusion.fusion_enabled(cid) and bool(
+            getattr(state.capabilities(cid) if state is not None else None,
+                    "fusion_toggleable", True))
+        with fusion.deferred_notices():
+            fusion.edit_channel_weight(cid, value, origin=origin)
+            if enlist:
+                fusion.set_fusion_enabled(cid, True, origin=origin)
+                if state is not None:
+                    state.set_display_visible(cid, True, origin=origin)
 
     def _refresh_name(self, cid):
         """Draw one row's name, with the mixed marker only where it means

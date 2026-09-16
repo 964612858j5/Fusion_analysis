@@ -249,18 +249,46 @@ def test_the_next_job_is_refused_until_it_is_saved_again(app, tmp_path,
 
 
 def test_an_unticked_channel_never_reaches_a_job(app, tmp_path, monkeypatch):
+    """Untick is what keeps a channel out of a job.
+
+    This test used to weigh CD8 and expect the weight alone to keep it out.
+    Since the 2026-09-16 ruling a weight IS a decision to use the channel, so
+    the state it describes no longer exists: CD8 is weighted, therefore
+    enlisted, and it is UNTICKED here to make it absent -- which is what the
+    job must honour.
+    """
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
-        w.config._rows["CD8"].spin.setValue(0.7)      # weighted, not ticked
+        w.config._rows["CD8"].spin.setValue(0.7)      # a weight enlists it...
+        _enable(w, "CD8", False)                      # ...and this takes it out
         w._commit_fusion_settings()
 
         w._run_p1([None])
 
         channels = {c for d in seen["args"]["groups"].values() for c in d}
         assert channels == {"CD3"}
+    finally:
+        w.close()
+
+
+def test_a_channel_weighted_but_never_ticked_now_reaches_the_job(app, tmp_path,
+                                                                 monkeypatch):
+    """The other side of the same ruling, stated as a job-level fact."""
+    w = _window(app, tmp_path)
+    try:
+        seen = _launched(w, monkeypatch)
+        _enable(w, "CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        w.config._rows["CD8"].spin.setValue(0.7)      # weighted only
+        w._commit_fusion_settings()
+
+        w._run_p1([None])
+
+        channels = {c for d in seen["args"]["groups"].values() for c in d}
+        assert channels == {"CD3", "CD8"}
     finally:
         w.close()
 

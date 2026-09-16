@@ -45,6 +45,11 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Step1 row** -- `tick | swatch | name | weight slider + spin`. The tick is
   ONE command: show the channel **and** put it into the fusion; a channel with
   no weight answer enters at 1.0. There is no second participation control.
+  **Editing the weight is the same command** (user ruling, 2026-09-16): giving
+  a channel a weight shows it and puts it into the fusion, keeping the number
+  the user asked for. Nothing here ever takes a channel OUT -- winding a
+  weight back to zero is an explicit zero, and the tick is the one gesture
+  that removes a channel.
 * **Step1's page** (user ruling, 2026-09-16; `docs/step1_rework_plan.md`
   block A) -- TWO columns, held at Step0's own one-to-two ratio, channels to
   picture. The left column is two tabs, `Channels` and `Method & Parameters`;

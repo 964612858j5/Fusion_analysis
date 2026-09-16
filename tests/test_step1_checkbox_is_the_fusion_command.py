@@ -683,3 +683,138 @@ def test_a_failed_display_write_undoes_the_science_too(app):
         assert state.display_visible("CD3") is False
     finally:
         _close(w)
+
+
+# ── 5. weighting a channel enlists it ───────────────────────────────────────
+
+def test_weighting_an_unticked_channel_shows_it_and_fuses_it(app):
+    """User ruling, 2026-09-16: a weight is a decision to use the channel.
+
+    Moving the slider of a channel nobody ticked used to write a number the
+    fusion ignored and leave the channel hidden -- the picture did not move.
+    """
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        row = w._channel_dock.row("CD8")
+        assert model.fusion_enabled("CD8") is False
+        assert state.display_visible("CD8") is False
+
+        row.spin.setValue(0.4)
+        _pump()
+
+        assert model.channel_weight("CD8") == pytest.approx(0.4)
+        assert model.weight_provenance("CD8") == EXPLICIT
+        assert model.fusion_enabled("CD8") is True
+        assert state.display_visible("CD8") is True
+        assert row.checkbox.isChecked() is True
+        assert "CD8" in _fused(w)
+    finally:
+        _close(w)
+
+
+def test_the_weight_the_user_asked_for_survives_the_enlisting(app):
+    """The first enable's 1.0 may not overwrite the number just given."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        w._channel_dock.row("CD20").spin.setValue(0.25)
+        _pump()
+        assert model.channel_weight("CD20") == pytest.approx(0.25)
+        assert model.fusion_enabled("CD20") is True
+    finally:
+        _close(w)
+
+
+def test_weighting_an_already_used_channel_only_reweighs_it(app):
+    """Nothing is toggled off, and nothing is enlisted twice."""
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        _tick(w, "CD3", True)
+        assert model.fusion_enabled("CD3") is True
+
+        w._channel_dock.row("CD3").spin.setValue(0.6)
+        _pump()
+
+        assert model.channel_weight("CD3") == pytest.approx(0.6)
+        assert model.fusion_enabled("CD3") is True
+        assert state.display_visible("CD3") is True
+    finally:
+        _close(w)
+
+
+def test_winding_a_weight_back_to_zero_does_not_un_enlist_it(app):
+    """`0.0` is a decision, and this command never takes a channel OUT.
+
+    An unweighted row already reads 0.00, so winding it to zero is not an
+    edit at all and nothing happens -- the case that exists is winding a
+    weight BACK to zero, which keeps the channel in the fusion contributing
+    nothing. Untick is the one gesture that removes it.
+    """
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        row = w._channel_dock.row("CD8")
+
+        row.spin.setValue(0.5)
+        _pump()
+        assert model.fusion_enabled("CD8") is True
+
+        row.spin.setValue(0.0)
+        _pump()
+        assert model.weight_provenance("CD8") == EXPLICIT
+        assert model.channel_weight("CD8") == pytest.approx(0.0)
+        assert model.fusion_enabled("CD8") is True
+        assert state.display_visible("CD8") is True
+    finally:
+        _close(w)
+
+
+def test_a_row_that_already_reads_zero_is_not_an_edit(app):
+    """Nothing is enlisted by a value that did not change."""
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        row = w._channel_dock.row("CD8")
+        assert row.spin.value() == pytest.approx(0.0)
+        row.spin.setValue(0.0)
+        _pump()
+        assert model.weight_provenance("CD8") == ABSENT
+        assert model.fusion_enabled("CD8") is False
+        assert state.display_visible("CD8") is False
+    finally:
+        _close(w)
+
+
+def test_enlisting_by_weight_is_one_command_with_no_half_state(app):
+    """Participation and visibility land together, as the tick does."""
+    w = _window(app)
+    try:
+        state, model = w._display.state, w._display.fusion
+        seen = []
+        model.draft_changed.connect(
+            lambda: seen.append((model.fusion_enabled("CD8"),
+                                 state.display_visible("CD8"))))
+        w._channel_dock.row("CD8").spin.setValue(0.3)
+        _pump()
+        assert seen, "the draft never announced the edit"
+        for enabled, visible in seen:
+            assert enabled == visible, (
+                "an observer saw the channel fused but hidden, or the reverse")
+    finally:
+        _close(w)
+
+
+def test_a_weight_from_another_step_still_changes_nothing(app):
+    """The gate that was there before stays: only Step1 edits weights."""
+    w = _window(app)
+    try:
+        model = w._display.fusion
+        w._set_step_active(2)
+        w._channel_dock._on_row_weight("CD8", 0.9)
+        _pump()
+        assert model.fusion_enabled("CD8") is False
+        assert model.weight_provenance("CD8") == ABSENT
+    finally:
+        _close(w)

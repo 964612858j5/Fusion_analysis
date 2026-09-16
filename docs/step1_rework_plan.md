@@ -275,5 +275,6 @@ D（先测后改；最后退役旧路径）
 - **B-2** 校正产物缺失 → 拒绝显示该通道，viewer 内提示原因；其他有效通道照常显示。
 - **B-3** 瓦片路径不做临时校正（不调用 `_apply_configured_correction`），不改 Step0 预览方法与现有执行链。
 - **B-4** Intensity 是图片全局的，不是视口/瓦片/patch 的；手动值优先；自动窗口从来源的完整有效范围求得并复用。
+- **Step1 行的权重编辑＝启用命令**（2026-09-16 裁定）：给一个通道权重＝显示它并把它放进 fusion，保留用户给的数值；权重回到 `0.0` **不**停用该通道（显式 0.0 是一个决定）；取消勾选是唯一把通道移出的手势。同步记于 `UI_SURFACE_RULES.md` §4。
 - 右栏 `Viewer` | `Patch Results` 两 tab 切换显示，不堆叠；左栏 `Channels` | `Method & Parameters` 两 tab；比例沿用 Step0 的 1:2。
 - 标题 `Step 1 — Channel Fusion + Preliminary Segmentation`；Tissue Preview 在标题行最右；Intensity 在 Channels tab 内并对齐 Step0 位置；删 `① ROI / Patch Overview`、预览子标题与红/蓝图例。

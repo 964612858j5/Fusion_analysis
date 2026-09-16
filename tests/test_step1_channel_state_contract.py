@@ -131,13 +131,19 @@ def test_showing_a_channel_is_not_a_scientific_act(app):
         w.close()
 
 
-def test_a_weight_never_moves_a_tick(app):
+def test_a_weight_ticks_the_channel_and_never_unticks_it(app):
+    """User ruling, 2026-09-16: giving a channel a weight is using it.
+
+    This test used to pin the opposite -- a weight that left the tick alone --
+    which meant a slider drag on an unticked row wrote a number the fusion
+    ignored and left the picture unchanged. What survives from that contract
+    is the second half: a weight NEVER takes a channel out, zero included.
+    """
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.5)
-        assert "CD3" not in w.config.visible_channels()
+        assert "CD3" in w.config.visible_channels()
 
-        w.config.set_channel_visible("CD3", True)
         w.config._rows["CD3"].spin.setValue(0.0)
         assert "CD3" in w.config.visible_channels()   # ticked at zero is legal
     finally:
@@ -646,14 +652,21 @@ def test_reset_weights_zeros_are_answers_too(app):
         w.close()
 
 
-def test_a_weight_still_never_moves_a_tick_and_a_tick_never_moves_a_weight(app):
-    """The first tick is a one-off initialisation, not weights and ticks tied
-    back together."""
+def test_a_tick_never_moves_a_weight_the_user_already_chose(app):
+    """The half of the old contract the 2026-09-16 ruling did not touch.
+
+    A weight now ticks the channel (see
+    `test_a_weight_ticks_the_channel_and_never_unticks_it`), but the traffic
+    the other way is unchanged: the first tick's automatic 1.0 only lands
+    where nobody has chosen a number, and an untick keeps every value so a
+    re-tick restores it.
+    """
     w = _window(app)
     try:
         w.config._rows["CD3"].spin.setValue(0.5)
-        assert "CD3" not in w.config.visible_channels()   # weight, no tick
+        assert w.config.channel_weight("CD3") == pytest.approx(0.5)
 
+        w.config.set_channel_visible("CD3", False)
         w.config.set_channel_visible("CD3", True)
         assert w.config.channel_weight("CD3") == pytest.approx(0.5), \
             "an already-weighted channel is not re-initialised by its tick"

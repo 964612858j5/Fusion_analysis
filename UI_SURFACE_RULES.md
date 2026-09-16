@@ -66,6 +66,30 @@ row, and the duplicate Tissue Preview button in the step bar.
   right-aligned, where Step0 keeps it. No outer scroll area wraps the page.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
   combo.
+* **What a step keeps to itself** (user ruling, 2026-09-16) -- the display
+  tick and the current channel are PER STEP, in ALL FOUR: ticking or selecting
+  in one leaves every other step's own answers untouched, and each step gets
+  its own back on return. Step2 and Step3 do not start empty: the first time
+  each is opened, and the first time after Step1 commits again, its ticks are
+  SEEDED from Step1's committed snapshot -- the channels that snapshot
+  enabled, an explicit `0.0` included, and never a channel disabled with a
+  weight still in its history. Never from Step0, and never from an uncommitted
+  draft. Afterwards those ticks are that step's own and write back to nobody -- and that separation reaches the PAGES, not only the
+  store: Step0's consumers act on Step0's scope, Step1's on Step1's, Step3 on
+  the shared pair alone, and a page replays its own answers once when it comes
+  back on screen. A session names the scope it restores, so a Step1 session
+  reloaded from Step0 leaves Step0 untouched. Colour, Min/Max/Gamma, the
+  channel order and names stay shared, and so do the dock instance, its rows
+  (which are therefore the same widgets in both steps), its search text and
+  its scroll position. Fusion participation and weights belong to Step1's
+  scientific draft alone. Entering a step is a redraw, never a command: no
+  tick, no weight, no fusion revision and no session save comes out of it.
+  (Step2 and Step3 still share the old pair; they were not part of this
+  ruling.)
+* **The channel column's width** -- ONE share of the page, with two handles:
+  dragging Step0's or Step1's moves both, and a window resize keeps them
+  together because the share is normalised. Step0 is written through its own
+  left-column mechanism so its hidden peer splitter stays at the same width.
 * **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
 * **Top step bar** -- NO buttons. Three were added there and none was asked
   for; the last of them was a second `🗺 Tissue Preview` beside the one Step0

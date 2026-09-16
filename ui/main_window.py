@@ -726,6 +726,9 @@ class MainWindow(QMainWindow):
         self._step1_channels_host = channels_box_lay
         self.config = ConfigPanel([], fusion=self._display.fusion,
                                   channel_dock=self._channel_dock)
+        # This panel speaks for STEP1, so its restores write Step1's display
+        # answers wherever the user is standing.
+        self.config.display_scope = self._DISPLAY_SCOPES.get(1, "")
         # A TOOL STRIP, NOT A LIST. While this panel still built the private
         # channel rows it had to be tall and to expand; since the rows moved
         # to the one public dock it has two lines in it, and an Expanding
@@ -2821,7 +2824,11 @@ class MainWindow(QMainWindow):
         self._restoring_display_state = True
         try:
             changed = self._display.restore_session_state(
-                identity, spec, display_payload, reason="session restore")
+                identity, spec, display_payload, reason="session restore",
+                # A STEP1 SESSION, wherever the user is standing. Restoring
+                # it from Step0 must put Step1's ticks and current channel
+                # back without touching Step0's.
+                scope=self._DISPLAY_SCOPES.get(1, ""))
         finally:
             self._restoring_display_state = False
         if changed:
@@ -3688,8 +3695,135 @@ class MainWindow(QMainWindow):
         dock.mount_into(host)
         dock.setVisible(True)
 
+    #: Which steps keep their own ticks and current channel (user ruling,
+    #: 2026-09-16). ALL FOUR are separate: a tick is a question about the step
+    #: you are in. Step2 and Step3 do not start empty, though -- see
+    #: `_seed_downstream_scope`.
+    _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step3"}
+
+    #: The steps seeded from Step1's COMMITTED snapshot the first time they
+    #: are opened, and again after Step1 commits something else.
+    _DOWNSTREAM_STEPS = (2, 3)
+
+    def _committed_enabled_channels(self):
+        """The channels Step1 FROZE, from the committed snapshot alone.
+
+        Not the draft: what a downstream step shows must be what a job would
+        run on, and an unsaved edit is not that yet. A channel enabled at an
+        explicit `0.0` is in this set -- the zero is a weight, not a
+        withdrawal -- and one disabled with a weight still in its history is
+        not.
+        """
+        fusion = getattr(self._display, "fusion", None)
+        snapshot = fusion.committed_snapshot() if fusion is not None else None
+        if not snapshot:
+            return None
+        config = snapshot.get("fusion_config") or {}
+        enabled = set()
+        for data in (config.get("groups") or {}).values():
+            enabled.update(str(ch) for ch in (data.get("channels") or {}))
+        nucleus = config.get("nucleus") or {}
+        if nucleus.get("channel") and float(nucleus.get("weight") or 0.0) > 0:
+            enabled.add(str(nucleus["channel"]))
+        return enabled
+
+    def _seed_downstream_scope(self, step):
+        """Open Step2 or Step3 on what Step1 committed, once per commit.
+
+        The user's ruling of 2026-09-16: the four steps keep their own ticks,
+        and the two downstream ones must not make the user tick everything
+        again. They are SEEDED from the committed snapshot -- never from
+        Step0, never from an uncommitted draft -- the first time they are
+        opened, and again the first time they are opened after Step1 commits
+        something else. Their own ticks afterwards are their own: nothing
+        here writes back to Step1 or to the other downstream step.
+        """
+        scope = self._DISPLAY_SCOPES.get(step, "")
+        if step not in self._DOWNSTREAM_STEPS or not scope:
+            return False
+        state = getattr(self._display, "state", None)
+        fusion = getattr(self._display, "fusion", None)
+        if state is None or fusion is None or not hasattr(state, "using_scope"):
+            return False
+        enabled = self._committed_enabled_channels()
+        if enabled is None:
+            # Nothing committed yet: there is no answer to seed FROM, and
+            # inventing one from the draft or from Step0 is what this rule
+            # exists to prevent.
+            return False
+        stamp = fusion.committed_hash()
+        seeded = getattr(self, "_downstream_seed_stamp", None)
+        if seeded is None:
+            seeded = self._downstream_seed_stamp = {}
+        if seeded.get(scope) == stamp:
+            return False
+        channels = list(state.channel_order())
+        if not channels:
+            # A window whose channel universe never reached the shared state
+            # (a page driven on its own): seed what is known instead of
+            # nothing.
+            channels = sorted(set(state.display_visibility()) | set(enabled))
+        with state.using_scope(scope):
+            for channel in channels:
+                state.set_display_visible(channel, channel in enabled,
+                                          origin=f"seed-{scope}")
+        seeded[scope] = stamp
+        print(f"[Step{step}] display seeded from committed {stamp[:12]}")
+        return True
+
+    def _display_scope_is_step1(self):
+        """Step1's answers, or the SHARED pair -- see
+        `Step0Page._display_scope_is_mine` for why "" counts."""
+        state = getattr(self._display, "state", None)
+        scope = getattr(state, "scope", None)
+        if scope is None:
+            return True
+        return scope() in ("", self._DISPLAY_SCOPES.get(1, ""))
+
+    def _resync_step1_display_from_state(self):
+        """Redraw Step1 from ITS OWN display answers, once.
+
+        The mirror image of `Step0Page.resync_display_from_state`: while
+        another step was up, Step1 ignored every tick and selection notice on
+        purpose, so entering it replays its own -- the panel's rows, the
+        channels the picture needs, and one redraw. Reads only.
+        """
+        state = getattr(self._display, "state", None)
+        if state is None or self.loader is None:
+            return
+        panel = getattr(self, "config", None)
+        if panel is not None:
+            adopt = getattr(panel, "_adopt_shared_selection", None)
+            if adopt is not None:
+                adopt(state.selected_channel(), force=True)
+        self._ensure_channels_cached(self._preview_patch_idx)
+        self._refresh_patch_preview(reset_view=False)
+
     def _set_step_active(self, active):
         self._current_step = active
+        # FIRST, so everything below reads this step's own answers. Silent:
+        # it writes no owner field and starts no save -- see
+        # `ChannelDisplayState.set_scope`.
+        state = getattr(self._display, "state", None)
+        scope_moved = False
+        if state is not None and hasattr(state, "set_scope"):
+            scope_moved = state.set_scope(self._DISPLAY_SCOPES.get(active, ""),
+                                          origin=f"step{active}")
+        if scope_moved:
+            # BEFORE the page catches up: a downstream step opening for the
+            # first time after a commit takes its ticks from that commit.
+            self._seed_downstream_scope(active)
+            # THE PAGE CATCHES UP ONCE. Its consumers ignored every notice
+            # made while another step was on screen, so entering it replays
+            # its own answers -- rows, layer switches, current channel and the
+            # channels the picture needs. Reads only: no tick, no weight, no
+            # save comes out of a step change.
+            if active == 0:
+                resync = getattr(self._step0, "resync_display_from_state", None)
+                if resync is not None:
+                    resync()
+            elif active == 1:
+                self._resync_step1_display_from_state()
         # THE ONE public channel dock follows the step by switching its
         # ACCESSORY -- Step0's correction combo, Step1's participation box --
         # and by nothing else. No rebuild, no reparent, no row factory swap:
@@ -4595,6 +4729,13 @@ class MainWindow(QMainWindow):
         this question, so there is nothing here to make stale.
         """
         if self._restoring_display_state:
+            return
+        # STEP1'S OWN TICK ONLY. The tick is per step since the 2026-09-16
+        # ruling, and a Step0 tick announced here would load channels for and
+        # redraw Step1's picture from a decision made in another step.
+        # `_resync_step1_display_from_state` replays Step1's own answers when
+        # it comes back on screen.
+        if not self._display_scope_is_step1():
             return
         if visible:
             # Showing a channel again is the user asking for it, so a previous

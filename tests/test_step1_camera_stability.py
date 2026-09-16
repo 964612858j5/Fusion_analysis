@@ -60,6 +60,9 @@ def _window(app):
     rng = np.random.default_rng(7)
     w._patch_channel_cache[0] = {"DAPI": rng.random((32, 32), np.float32) + 0.1}
     w._patch_load_ready.add(0)
+    # THE STEP THESE TESTS ARE ABOUT. A tick is per step since the 2026-09-16
+    # ruling, so the ones the tests make below have to be made here.
+    w._set_step_active(1)
     w.set_preview_mode("overlay", force=True, reconcile=False)
     w._render_overlay_patch(reset_view=True)
     return w

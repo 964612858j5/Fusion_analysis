@@ -1457,8 +1457,25 @@ class Step3Page(QWidget):
                 return hexc
         return self._channel_settings.get(ch, {}).get("color", "#ffffff")
 
+    def _display_scope_is_shared(self):
+        """Step3 draws the SHARED display answers.
+
+        Step0 and Step1 keep their own since the 2026-09-16 ruling; Step3 was
+        not part of that and must not follow either of them, or a tick made in
+        Step1 would move Step3's overlay.
+        """
+        state = self._display_state()
+        scope = getattr(state, "scope", None)
+        if scope is None:
+            return True
+        # "" is a state nobody has scoped -- this page driven on its own, and
+        # the suites that build it that way.
+        return scope() in ("", "step3")
+
     def _on_shared_display_changed(self, channel, visible):
-        """A public visibility tick, from whichever step made it."""
+        """A public visibility tick from a step whose answers Step3 draws."""
+        if not self._display_scope_is_shared():
+            return
         if channel in ("__layer_dapi__", "__layer_fusion__"):
             return
         if channel not in self._marker_channels():

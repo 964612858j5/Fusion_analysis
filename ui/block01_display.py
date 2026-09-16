@@ -40,6 +40,7 @@ and which results are refused. A step no longer answers any of those.
 """
 
 import collections
+import contextlib
 import copy
 import math
 import time
@@ -120,6 +121,10 @@ class ChannelDisplayState(QObject):
     dataset_changed = pyqtSignal(object)        # DatasetIdentity
     selection_changed = pyqtSignal(str)         # channel, "" = nothing
     visibility_changed = pyqtSignal(str, bool)  # channel, visible
+    # The step being drawn changed which tick and which current channel this
+    # state answers with. NOT a user command and NOT a field write: views
+    # redraw from it, and nothing acts on it. See `set_scope`.
+    scope_changed = pyqtSignal(str)             # scope name, "" = shared
     # ONE completion notice per transaction. An observer that only wants to
     # know "the state is now whole" listens here rather than counting field
     # signals -- which is what made a restore look like a run of user actions.
@@ -138,6 +143,10 @@ class ChannelDisplayState(QObject):
         self._namespaces = collections.OrderedDict()
         self._ns = _identity.DisplayNamespace()   # the current one, always set
         self._colors = {}
+        # WHICH STEP'S display answers are on. "" is the shared pair every
+        # step used to write; Step0 and Step1 have their own (user ruling,
+        # 2026-09-16). See `set_scope`.
+        self._scope = ""
         self._default_source = None
         # Two PORTS, and the difference between them is the whole point.
         # `_seed_port` computes a FIRST window for a channel nobody has set
@@ -267,7 +276,7 @@ class ChannelDisplayState(QObject):
     # install or a close takes a staged restore back rather than leaving it
     # to be announced over whatever arrived in the meantime.
 
-    def prepare_restore(self, identity, payload=None):
+    def prepare_restore(self, identity, payload=None, scope=_UNSET):
         """Stage a whole display state for `identity`. No signals.
 
         IDENTITY SAME, NO REBIND. A restore of the session already loaded is
@@ -301,7 +310,7 @@ class ChannelDisplayState(QObject):
                 colors, mappings, changed = [], [], False
             else:
                 changed, colors, mappings = self._install_into(self._ns,
-                                                               payload)
+                                                               payload, scope)
                 if changed:
                     self._mapping_rev += 1
         except Exception:
@@ -381,7 +390,7 @@ class ChannelDisplayState(QObject):
         self._color_rev = shot["color_rev"]
         self._mapping_rev = shot["mapping_rev"]
 
-    def install(self, payload, *, identity=None):
+    def install(self, payload, *, identity=None, scope=_UNSET):
         """Write a whole display state for the current slide, atomically.
 
         For a restore or a handoff. Same rule as `bind`: everything lands
@@ -394,14 +403,14 @@ class ChannelDisplayState(QObject):
         if self._binding is None:
             return False
         self._drop_pending_restore("an install landed before the commit")
-        changed, colors, mappings = self._install_into(self._ns, payload)
+        changed, colors, mappings = self._install_into(self._ns, payload, scope)
         if not changed:
             return False
         self._mapping_rev += 1
         self._announce_install(colors, mappings)
         return True
 
-    def _install_into(self, ns, payload):
+    def _install_into(self, ns, payload, scope=_UNSET):
         """Write `payload` into `ns`. No signals; the caller announces.
 
         Returns `(changed, colors, mappings)`: whether anything moved, and
@@ -422,17 +431,30 @@ class ChannelDisplayState(QObject):
             ns.capabilities = dict(caps)
             ns.bump("capabilities")
             changed = True
+        # THE SCOPE THE CALLER NAMED, not the page that happens to be on
+        # screen: a Step1 session restore belongs to Step1's ticks and its
+        # current channel whether or not Step1 is open at the time, and must
+        # never reach into Step0's.
+        store = self._scope_store(scope, ns=ns)
         if "selection" in payload:
             sel = str(payload.get("selection") or "")
-            if sel != ns.selection:
-                ns.selection = sel
+            current = ns.selection if store is None else store["selection"]
+            if sel != current:
+                if store is None:
+                    ns.selection = sel
+                else:
+                    store["selection"] = sel
                 ns.bump("selection")
                 changed = True
         visibility = payload.get("visibility")
         if visibility is not None:
             new_vis = {str(ch): bool(v) for ch, v in visibility.items()}
-            if new_vis != ns.visibility:
-                ns.visibility = new_vis
+            current = ns.visibility if store is None else store["visibility"]
+            if new_vis != current:
+                if store is None:
+                    ns.visibility = new_vis
+                else:
+                    store["visibility"] = new_vis
                 ns.bump("visibility")
                 changed = True
         mappings = payload.get("mappings")
@@ -890,9 +912,81 @@ class ChannelDisplayState(QObject):
         return None if ns is None else ns.revision(key)
 
     # ── selection ─────────────────────────────────────────────────────
+    # ── per-step display scope ────────────────────────────────────────
+    def scope(self):
+        """Which step's display answers are current. "" is the shared pair."""
+        return self._scope
+
+    def _scope_store(self, scope=_UNSET, ns=None):
+        """The `{selection, visibility}` pair for a scope, created on demand.
+
+        A scope that has never been entered is materialised from THE
+        DATASET'S SHARED BASELINE -- `ns.selection` and `ns.visibility` --
+        not from whatever another step has since done. So each step opens on
+        the slide's own starting answers and diverges only through its own
+        edits.
+
+        THE BASELINE IS A CHANNEL'S FIRST ANSWER. Once the steps are scoped
+        every write lands in a scope, so a baseline that only bind/install
+        filled would be empty for a window whose opening answers come from
+        the panel -- and a step opening on an empty baseline shows nothing at
+        all, DAPI included (measured). `set_display_visible` therefore writes
+        a channel's FIRST answer through to the baseline as well; every later
+        answer belongs to the step that made it.
+        """
+        ns = self._ns if ns is None else ns
+        scope = self._scope if scope is _UNSET else str(scope or "")
+        if not scope:
+            return None
+        store = ns.scopes.get(scope)
+        if store is None:
+            store = {"selection": ns.selection,
+                     "visibility": dict(ns.visibility)}
+            ns.scopes[scope] = store
+        return store
+
+    @contextlib.contextmanager
+    def using_scope(self, scope):
+        """Read and write ONE step's display answers for this block.
+
+        Silent in both directions: no `scope_changed`, no field notices of
+        its own. It exists for a writer that knows whose answers it is
+        restoring -- Step1's session panel, say -- while the user is standing
+        in another step; the alternative is a scope argument on every setter.
+        """
+        scope = str(scope or "")
+        previous = self._scope
+        if scope == previous:
+            yield
+            return
+        self._scope = scope
+        self._scope_store()
+        try:
+            yield
+        finally:
+            self._scope = previous
+
+    def set_scope(self, scope, origin=""):
+        """Draw this step's display answers. Silent as a COMMAND.
+
+        Switching steps is not a tick, a selection or a save: nothing is
+        written to either owner and no user-facing decision is made. What it
+        does emit is `scope_changed`, which the views redraw from -- a row
+        showing the other step's tick would simply be wrong.
+        """
+        scope = str(scope or "")
+        if scope == self._scope:
+            return False
+        self._scope = scope
+        self._scope_store()          # materialise it from what is on screen
+        tissue_log.note("display.scope", scope=scope or "shared", origin=origin)
+        self.scope_changed.emit(scope)
+        return True
+
     def selected_channel(self):
-        """The channel the steps are editing. Dataset-scoped."""
-        return self._ns.selection
+        """The channel the steps are editing. Dataset- and step-scoped."""
+        store = self._scope_store()
+        return self._ns.selection if store is None else store["selection"]
 
     def set_selected_channel(self, channel, origin=""):
         """THE selection write. True when it changed anything.
@@ -903,9 +997,19 @@ class ChannelDisplayState(QObject):
         selection itself.
         """
         channel = str(channel or "")
-        if channel == self._ns.selection:
+        store = self._scope_store()
+        if store is not None and not self._ns.selection and channel:
+            # The first channel ever selected is the slide's baseline one --
+            # the same rule, and the same "only while a scope is on" reason,
+            # as visibility above.
+            self._ns.selection = channel
+        if channel == (self._ns.selection if store is None
+                       else store["selection"]):
             return False
-        self._ns.selection = channel
+        if store is None:
+            self._ns.selection = channel
+        else:
+            store["selection"] = channel
         self._ns.bump("selection")
         tissue_log.note("channel.selected", channel=channel, origin=origin)
         self.selection_changed.emit(channel)
@@ -919,10 +1023,14 @@ class ChannelDisplayState(QObject):
         this model's (see the plan, 2.1). B2 records the display answer; B3
         and B4 separate the scientific one.
         """
-        return bool(self._ns.visibility.get(str(channel), default))
+        store = self._scope_store()
+        visibility = self._ns.visibility if store is None else store["visibility"]
+        return bool(visibility.get(str(channel), default))
 
     def display_visibility(self):
-        return dict(self._ns.visibility)
+        store = self._scope_store()
+        return dict(self._ns.visibility if store is None
+                    else store["visibility"])
 
     def set_display_visible(self, channel, visible, origin=""):
         """THE display-visibility write. True when it changed anything."""
@@ -930,9 +1038,18 @@ class ChannelDisplayState(QObject):
         if not channel:
             return False
         visible = bool(visible)
-        if self._ns.visibility.get(channel) == visible:
+        store = self._scope_store()
+        visibility = self._ns.visibility if store is None else store["visibility"]
+        if store is not None and channel not in self._ns.visibility:
+            # This channel's FIRST answer is the slide's baseline, which is
+            # what a step that has not been opened yet will start from (see
+            # `_scope_store`). ONLY while a scope is on: with none, the
+            # baseline IS the dictionary being written, and pre-writing it
+            # would make the de-duplication below swallow the notice.
+            self._ns.visibility[channel] = visible
+        if visibility.get(channel) == visible:
             return False
-        self._ns.visibility[channel] = visible
+        visibility[channel] = visible
         self._ns.bump("visibility")
         tissue_log.note("channel.visibility", channel=channel,
                         visible=bool(visible), origin=origin)
@@ -2291,7 +2408,8 @@ class Block01DisplayServices(QObject):
 
     # ── the session restore transaction ───────────────────────────────
     def restore_session_state(self, identity, fusion_spec,
-                              display_payload=None, reason="session restore"):
+                              display_payload=None, reason="session restore",
+                              scope=_UNSET):
         """Put a saved session back into BOTH owners as one fact.
 
         THE ONLY ENTRY for a session restore, and the reason it exists is
@@ -2319,7 +2437,7 @@ class Block01DisplayServices(QObject):
             return False
         try:
             self.fusion.prepare_restore(identity, fusion_spec or {})
-            self.state.prepare_restore(identity, display_payload or {})
+            self.state.prepare_restore(identity, display_payload or {}, scope)
         except Exception:
             self.fusion.cancel_restore("restore failed")
             self.state.cancel_restore("restore failed")

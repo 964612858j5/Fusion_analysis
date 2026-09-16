@@ -45,6 +45,7 @@ change old projects, the HQ workers, Mesmer and the on-disk fusion. New
 projects get a single group at weight 1.0 and never notice.
 """
 
+import contextlib
 import os
 import json
 
@@ -267,18 +268,33 @@ class ConfigPanel(QWidget):
         state.selection_changed.connect(self._adopt_shared_selection)
         self._resync_colors_from_state()
 
-    def _adopt_shared_selection(self, channel):
-        """The selection settled anywhere: this panel's hosts follow it.
+    def _adopt_shared_selection(self, channel, force=False):
+        """The selection settled IN THIS PANEL'S STEP: its hosts follow it.
+
+        `force` is for the one-shot resync when the step comes back on
+        screen, where the scope is this panel's by definition.
 
         A projection, not a command: nothing is shown, nothing is ticked and
         nothing scientific happens. Auto-show on a real click is the dock's
         rule about a click, and it has already run by the time this arrives.
         """
+        if not force and not self._display_scope_is_mine():
+            # Another step's selection. Acting on it would move this panel's
+            # current channel -- and the Intensity window with it -- to a
+            # choice made where this panel is not on screen.
+            return
         channel = str(channel or "")
         if not channel or channel == self._current:
             return
         self._current = channel
         self.current_channel_changed.emit(channel)
+
+    def _display_scope_is_mine(self):
+        state = self._display_state
+        scope = getattr(state, "scope", None)
+        if scope is None:
+            return True
+        return scope() in ("", getattr(self, "display_scope", "") or "")
 
     def _resync_colors_from_state(self):
         """Take every row's colour from the shared state, silently.
@@ -834,6 +850,44 @@ class ConfigPanel(QWidget):
         if selected and selected in self._rows:
             self.set_current_channel(selected, auto_show=False)
 
+    def _restore_display_payload(self, state, colors, visibility,
+                                 current_channel):
+        """The owner writes of `restore_display_state`, inside one scope.
+
+        ONE PUBLIC TRANSACTION for every DISPLAY field this restore resolved
+        -- colours, visibility and the current channel -- so the shared state
+        comes back whole and every view follows one completion notice.
+        """
+        payload = {}
+        if colors:
+            payload["colors"] = {str(ch): str(c)
+                                 for ch, c in colors.items() if ch and c}
+        if visibility:
+            known = set(self.all_channels or []) or set(self._rows)
+            merged = dict(state.display_visibility())
+            merged.update({str(ch): bool(v)
+                           for ch, v in visibility.items()
+                           if str(ch) in known})
+            payload["visibility"] = merged
+        if current_channel and (current_channel in self._rows
+                                or current_channel in (self.all_channels or [])):
+            payload["selection"] = str(current_channel)
+        if not payload:
+            return
+        if not state.install(payload):
+            # NO BINDING TO INSTALL INTO -- a window whose slide identity is
+            # not resolved yet, and the tests that drive one. The answers
+            # still belong in the one owner, so they are written field by
+            # field instead of atomically; the caller is already inside its
+            # restore guard, so this is still one redraw.
+            for ch, hexc in (payload.get("colors") or {}).items():
+                state.set_color(ch, hexc, origin="step1-restore")
+            for ch, vis in (payload.get("visibility") or {}).items():
+                state.set_display_visible(ch, vis, origin="step1-restore")
+            if payload.get("selection"):
+                state.set_selected_channel(payload["selection"],
+                                           origin="step1-restore")
+
     def restore_display_state(self, colors=None, visibility=None,
                               current_channel=""):
         """Put back a saved display state in one go, with no side effects.
@@ -855,34 +909,14 @@ class ConfigPanel(QWidget):
         # B3 migrates the session schema.
         state = self._display_state
         if state is not None:
-            payload = {}
-            if colors:
-                payload["colors"] = {str(ch): str(c)
-                                     for ch, c in colors.items() if ch and c}
-            if visibility:
-                known = set(self.all_channels or []) or set(self._rows)
-                merged = dict(state.display_visibility())
-                merged.update({str(ch): bool(v)
-                               for ch, v in visibility.items()
-                               if str(ch) in known})
-                payload["visibility"] = merged
-            if current_channel and (current_channel in self._rows
-                                    or current_channel in (self.all_channels or [])):
-                payload["selection"] = str(current_channel)
-            if payload and not state.install(payload):
-                # NO BINDING TO INSTALL INTO -- a window whose slide identity
-                # is not resolved yet, and the tests that drive one. The
-                # answers still belong in the one owner, so they are written
-                # field by field instead of atomically; the caller is already
-                # inside its restore guard, so this is still one redraw.
-                for ch, hexc in (payload.get("colors") or {}).items():
-                    state.set_color(ch, hexc, origin="step1-restore")
-                for ch, vis in (payload.get("visibility") or {}).items():
-                    state.set_display_visible(ch, vis,
-                                              origin="step1-restore")
-                if payload.get("selection"):
-                    state.set_selected_channel(payload["selection"],
-                                               origin="step1-restore")
+            # STEP1'S OWN ANSWERS. This panel is Step1's, and a session of its
+            # may be restored while the user is standing in Step0 -- writing
+            # "the current scope" would put Step1's ticks into Step0's column.
+            scope = getattr(self, "display_scope", "") or ""
+            with (state.using_scope(scope) if scope
+                  else contextlib.nullcontext()):
+                self._restore_display_payload(state, colors, visibility,
+                                              current_channel)
         for ch, color in (colors or {}).items():
             ch = str(ch)
             if not color:
@@ -903,7 +937,15 @@ class ConfigPanel(QWidget):
 
         if current_channel and (current_channel in self._rows
                                 or current_channel in (self.all_channels or [])):
-            self.set_current_channel(current_channel, auto_show=False)
+            # STEP1'S CURRENT CHANNEL, in Step1's scope: this runs after the
+            # owner write above and reaches the same owner through the panel,
+            # so without the scope it would leave Step0 standing on Step1's
+            # restored channel.
+            scope = getattr(self, "display_scope", "") or ""
+            state = self._display_state
+            with (state.using_scope(scope) if (scope and state is not None)
+                  else contextlib.nullcontext()):
+                self.set_current_channel(current_channel, auto_show=False)
 
     def _load_weights_from_file(self):
         mw = self.window()

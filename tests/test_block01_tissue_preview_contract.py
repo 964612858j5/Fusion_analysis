@@ -913,6 +913,12 @@ def test_every_step_publishes_intermediate_frames_for_min_max_and_gamma(app):
         report = {}
         for step in (0, 1, 2, 3):
             _goto(w, step)
+            # A TICK IS PER STEP since the 2026-09-16 ruling, so the channel
+            # is shown HERE rather than once at the start; the Min/Max/Gamma
+            # under test stay shared, which is what this test is about.
+            w._display.state.set_display_visible("CD3", True,
+                                                 origin="contract-test")
+            _pump(w)
             lo, hi, gamma = w._display.state.mapping_or_seed("CD3")
             counts = {}
             for name, moves in (

@@ -156,6 +156,15 @@ class DisplayNamespace:
     capabilities: dict = field(default_factory=dict)   # channel -> Capabilities
     selection: str = ""
     visibility: dict = field(default_factory=dict)     # channel -> bool
+    # PER-STEP display answers (user ruling, 2026-09-16). `selection` and
+    # `visibility` above are the SHARED pair, which the steps that were never
+    # separated keep using; a step with its own scope keeps its tick and its
+    # current channel here, so looking at CD3 in Step0 does not tick it in
+    # Step1. Colours, Min/Max/Gamma, the channel order and the dock itself
+    # stay shared -- those are answers about the slide, not about a step.
+    #
+    #   {scope name: {"selection": str, "visibility": {channel: bool}}}
+    scopes: dict = field(default_factory=dict)
     mappings: dict = field(default_factory=dict)       # (channel, nucleus) -> (lo, hi, gamma)
     revisions: dict = field(default_factory=dict)      # field key -> int
 

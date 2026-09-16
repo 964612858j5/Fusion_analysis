@@ -9206,6 +9206,13 @@ class Step0Page(QWidget):
         """
         if getattr(self, "_closing", False):
             return
+        # STEP0'S OWN ANSWER ONLY. Since the 2026-09-16 ruling the tick is per
+        # step: a Step1 tick announces itself here too, and acting on it would
+        # move Step0's rows, layer switches and picture to a decision made in
+        # another step. `resync_display_from_state` replays this page's own
+        # answers when Step0 comes back on screen.
+        if not self._display_scope_is_mine():
+            return
         row = (getattr(self, "_channel_rows", None) or {}).get(ch)
         cb = row.get("checkbox") if row else None
         if cb is not None:
@@ -9276,6 +9283,43 @@ class Step0Page(QWidget):
             if btn is not None and btn.isChecked() != visible:
                 btn.setChecked(visible)
 
+    #: The display scope whose answers this page draws. "" means the shared
+    #: pair, which is what a build without per-step scopes has.
+    DISPLAY_SCOPE = "step0"
+
+    def _display_scope_is_mine(self):
+        """This page's answers, or the SHARED pair.
+
+        "" is what a state nobody has scoped answers with -- this page driven
+        on its own, and every suite that builds it that way. Acting on the
+        shared pair keeps those working; once a window sets the scopes, ""
+        never comes round again.
+        """
+        state = getattr(getattr(self, "display", None), "state", None)
+        scope = getattr(state, "scope", None)
+        if scope is None:
+            return True
+        return scope() in ("", self.DISPLAY_SCOPE)
+
+    def resync_display_from_state(self):
+        """Redraw this page from ITS OWN display answers, once.
+
+        Called when Step0 comes back on screen: while another step was up its
+        ticks and its current channel were being written elsewhere, and this
+        page ignored every one of those notices on purpose. This is how it
+        catches up -- reads only, no owner write and no user command.
+        """
+        if getattr(self, "_closing", False):
+            return
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is None:
+            return
+        for ch in list((getattr(self, "_channel_rows", None) or {})):
+            self._on_shared_visibility_changed(ch, state.display_visible(ch))
+        selected = state.selected_channel()
+        if selected:
+            self._on_channel_selected_by_id(selected)
+
     def _on_channel_selected_by_id(self, cid):
         """The shared dock's selection, as a channel id, routed to the
         legacy row handler. `""` is the model's "nothing selected".
@@ -9286,6 +9330,11 @@ class Step0Page(QWidget):
         selection is this page's rule about a user click, not a property of
         the selection.
         """
+        # A SELECTION MADE IN ANOTHER STEP IS NOT THIS PAGE'S. Writing it
+        # back would make Step1's current channel Step0's, and re-selecting
+        # here would then carry it on to the viewer and the Intensity window.
+        if not self._display_scope_is_mine():
+            return
         self.display.state.set_selected_channel(cid, origin="step0")
         if not cid:
             self._on_channel_row_changed(-1)

@@ -553,6 +553,9 @@ class GlobalChannelDock(QtWidgets.QWidget):
             state.color_changed.connect(self._on_state_color)
             state.selection_changed.connect(self._on_state_selection)
             state.state_installed.connect(self._on_state_installed)
+            # The step's own ticks and current channel came on. A REDRAW, not
+            # a command: `refresh` reads the owners and writes nothing back.
+            state.scope_changed.connect(lambda _scope: self.refresh())
         if fusion is not None:
             fusion.weight_changed.connect(self._on_fusion_weight)
             fusion.participation_changed.connect(self._on_fusion_participation)

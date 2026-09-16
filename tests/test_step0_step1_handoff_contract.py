@@ -114,6 +114,30 @@ class StepPage:
     def set_roi_context(self, **_kwargs): pass
 
 
+def _visibility(state):
+    """Step1's own ticks.
+
+    A Step1 session restore names its scope (user ruling, 2026-09-16), so it
+    writes Step1's partition wherever the window happens to be standing --
+    these stub windows are in none. Reading it back means asking for that
+    scope, not for whatever the shared pair still says.
+    """
+    using = getattr(state, "using_scope", None)
+    if using is None:
+        return dict(state.display_visibility())
+    with using("step1"):
+        return dict(state.display_visibility())
+
+
+def _selection(state):
+    """Step1's own current channel -- see `_visibility`."""
+    using = getattr(state, "using_scope", None)
+    if using is None:
+        return state.selected_channel()
+    with using("step1"):
+        return state.selected_channel()
+
+
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -812,7 +836,7 @@ def test_the_v1_restore_migrates_a_grouped_session_whole(tmp_path, monkeypatch):
     assert model.weight_provenance("CD68") == "authoritative", (
         "a zero-weight group member is a member whose weight somebody wrote; "
         "an empty marker cannot turn it back into an absence")
-    assert w._display.state.display_visibility() == {"CD68": True,
+    assert _visibility(w._display.state) == {"CD68": True,
                                                      "DAPI": True}
 
 
@@ -1308,8 +1332,8 @@ def _full_snapshot(w):
     return {
         "display_identity": None if binding is None else binding.identity,
         "generation": state.generation(),
-        "visibility": dict(state.display_visibility()),
-        "selection": state.selected_channel(),
+        "visibility": _visibility(state),
+        "selection": _selection(state),
         "colors": {ch: state.color(ch) for ch in ("DAPI", "CD68")},
         "fusion_identity": model.scientific_identity(),
         "groups": model.groups(),
@@ -1411,7 +1435,7 @@ def _wire_window(w, watchers=None):
         count("frame")()
         frames.append({"kind": str(kwargs.get("kind", "")),
                        "mode": w._step1_preview_mode,
-                       "visibility": dict(state.display_visibility()),
+                       "visibility": _visibility(state),
                        "groups": model.groups(),
                        "restoring": phase["restoring"]})
 
@@ -1619,7 +1643,7 @@ def test_the_same_slide_with_other_answers_installs_without_rebinding(
     assert w._load_previous_step1_session(auto=True, path=str(changed)) is True
 
     assert w._display.state.generation() == gen, "the slide did not change"
-    assert w._display.state.display_visibility() == {"DAPI": True,
+    assert _visibility(w._display.state) == {"DAPI": True,
                                                      "CD68": True}
     assert w._display.state.selected_channel() == "DAPI"
     assert counts["display.state_installed"] == 1, counts
@@ -1710,8 +1734,8 @@ def test_a_failed_prepare_leaves_neither_owner_moved(tmp_path, monkeypatch,
     before = {
         "identity": state.identity(),
         "generation": state.generation(),
-        "visibility": dict(state.display_visibility()),
-        "selection": state.selected_channel(),
+        "visibility": _visibility(state),
+        "selection": _selection(state),
         "colors": {ch: state.color(ch) for ch in ("DAPI", "CD68")},
         "mapping": state.mapping("DAPI"),
         "mapping_rev": state.mapping_revision(),
@@ -1726,7 +1750,7 @@ def test_a_failed_prepare_leaves_neither_owner_moved(tmp_path, monkeypatch,
 
     boom = ValueError("the payload could not be written")
 
-    def explode(_ns, _payload):
+    def explode(_ns, _payload, _scope=None):
         raise boom
 
     monkeypatch.setattr(state, "_install_into", explode)
@@ -1740,7 +1764,7 @@ def test_a_failed_prepare_leaves_neither_owner_moved(tmp_path, monkeypatch,
     assert state.identity() == before["identity"], "the display kept the slide"
     assert state.generation() == before["generation"], \
         "a failed prepare burned a binding generation"
-    assert dict(state.display_visibility()) == before["visibility"]
+    assert _visibility(state) == before["visibility"]
     assert state.selected_channel() == before["selection"]
     assert {ch: state.color(ch) for ch in ("DAPI", "CD68")} == before["colors"]
     assert state.mapping("DAPI") == before["mapping"]
@@ -1877,7 +1901,7 @@ def test_a_restore_that_moves_the_mode_and_the_owners_draws_one_new_frame(
 
     assert w._step1_preview_mode == "fusion"
     assert w._display.fusion.groups()["A"]["CD68"] == pytest.approx(0.4)
-    assert w._display.state.display_visibility() == {"DAPI": True,
+    assert _visibility(w._display.state) == {"DAPI": True,
                                                      "CD68": True}
     assert counts["frame"] == 1, (counts, w._frames_seen)
     shot = w._frames_seen[0]
@@ -1916,7 +1940,7 @@ def _assert_failed_restore_changed_nothing(w, counts, before, mode_before):
         "a failed restore left the window in the failed session's mode")
     assert w._display.state.identity() == before["display_identity"]
     assert w._display.state.generation() == before["generation"]
-    assert dict(w._display.state.display_visibility()) == before["visibility"]
+    assert dict(_visibility(w._display.state)) == before["visibility"]
     assert w._display.fusion.scientific_identity() == before["fusion_identity"]
     assert w._display.fusion.draft_snapshot() == before["draft"]
     assert w._display.fusion.draft_revision() == before["revision"]
@@ -1945,7 +1969,7 @@ def _failed_restore_fixture(tmp_path, monkeypatch):
     before = {
         "display_identity": state.identity(),
         "generation": state.generation(),
-        "visibility": dict(state.display_visibility()),
+        "visibility": _visibility(state),
         "fusion_identity": model.scientific_identity(),
         "draft": model.draft_snapshot(),
         "revision": model.draft_revision(),
@@ -1979,7 +2003,7 @@ def test_a_failed_transaction_puts_the_preview_mode_back(tmp_path, monkeypatch,
     w, counts, before, mode_before, sess, run = _failed_restore_fixture(
         tmp_path, monkeypatch)
 
-    def explode(_ns, _payload):
+    def explode(_ns, _payload, _scope=None):
         raise ValueError("the display payload could not be written")
 
     monkeypatch.setattr(w._display.state, "_install_into", explode)

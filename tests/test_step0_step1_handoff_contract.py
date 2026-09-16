@@ -106,17 +106,6 @@ class Toggle:
         return self._checked
 
 
-class Label:
-    def __init__(self):
-        self._text = ""
-
-    def setText(self, value):
-        self._text = str(value)
-
-    def text(self):
-        return self._text
-
-
 class StepPage:
     def __init__(self):
         self._out_edit = SimpleNamespace(setText=lambda _v: None)
@@ -235,12 +224,11 @@ def make_window(run, schema=1, loader_path=None, display=None):
     w._fusion_settings_label = None
     w._btn_save_fusion_settings = None
     # The mode's WIDGETS, so the production setter can run for real: the mode
-    # is not one value but three -- the field, the two buttons and the title
-    # -- and a rollback that put back only the field would still leave the
-    # window saying the other thing.
+    # is not one value but three -- the field and the two buttons -- and a
+    # rollback that put back only the field would still leave the window
+    # saying the other thing. (The title line went with Block A.)
     w._btn_mode_overlay = Toggle()
     w._btn_mode_fusion = Toggle()
-    w._preview_title = Label()
     w._step1_preview_mode = "overlay"
     w.prev_img = SimpleNamespace(image=None, clear=lambda: None,
                                  setImage=lambda *a, **k: None)
@@ -1404,8 +1392,8 @@ def _wire_window(w, watchers=None):
     w._schedule_step1_session_save = count("session_save")
     w._refresh_patch_preview = count("patch_preview")
     w._restore_fusion_settings = count("restore_settings")
-    # THE REAL SETTER, counted. It is what writes the mode, both buttons and
-    # the title, so a rollback can be asserted on all three.
+    # THE REAL SETTER, counted. It is what writes the mode and both buttons,
+    # so a rollback can be asserted on all of them.
     real_set_preview_mode = w.set_preview_mode
 
     def set_preview_mode(mode, force=False, reconcile=True):
@@ -1913,11 +1901,14 @@ def test_a_restore_that_moves_the_mode_and_the_owners_draws_one_new_frame(
 
 
 def _mode_view(w):
-    """What the window SAYS the mode is: the field and both widgets."""
+    """What the window SAYS the mode is: the field and both buttons.
+
+    The "③ Preview" title line went with Block A (the tab names the picture),
+    so the mode is two widgets and a field, not three.
+    """
     return {"mode": w._step1_preview_mode,
             "overlay_checked": w._btn_mode_overlay.isChecked(),
-            "fusion_checked": w._btn_mode_fusion.isChecked(),
-            "title": w._preview_title.text()}
+            "fusion_checked": w._btn_mode_fusion.isChecked()}
 
 
 def _assert_failed_restore_changed_nothing(w, counts, before, mode_before):
@@ -1959,14 +1950,14 @@ def _failed_restore_fixture(tmp_path, monkeypatch):
         "draft": model.draft_snapshot(),
         "revision": model.draft_revision(),
     }
-    # The window in a fully WRITTEN Overlay: field, both buttons and the
-    # title, so the rollback is asserted against a real mode rather than
-    # against widgets nothing has touched yet.
+    # The window in a fully WRITTEN Overlay: field and both buttons, so the
+    # rollback is asserted against a real mode rather than against widgets
+    # nothing has touched yet.
     w.set_preview_mode("overlay", force=True, reconcile=False)
     mode_before = _mode_view(w)
+    assert mode_before["mode"] == "overlay"
     assert mode_before["overlay_checked"] is True
     assert mode_before["fusion_checked"] is False
-    assert "Overlay" in mode_before["title"]
     fusion_session = _atomic_session(run, name="atomic-session-failing.json",
                                      preview_mode="fusion",
                                      display_visibility={"DAPI": False,
@@ -1982,9 +1973,8 @@ def test_a_failed_transaction_puts_the_preview_mode_back(tmp_path, monkeypatch,
     """The mode is written before the work that can fail, so it rolls back.
 
     Both owners undo themselves; the mode is not part of either snapshot, and
-    a restore that raised left the window -- the field, both buttons and the
-    title -- in the failed session's mode. That is the same half-state one
-    layer up.
+    a restore that raised left the window -- the field and both buttons -- in
+    the failed session's mode. That is the same half-state one layer up.
     """
     w, counts, before, mode_before, sess, run = _failed_restore_fixture(
         tmp_path, monkeypatch)

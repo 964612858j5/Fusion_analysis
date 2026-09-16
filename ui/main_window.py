@@ -142,6 +142,15 @@ FUSION_SETTINGS_VERSION = 2
 STEP1_PREVIEW_OVERLAY = "overlay"
 STEP1_PREVIEW_FUSION = "fusion"
 
+# One tab look for Step1's two tab widgets -- the left column (Channels /
+# Method & Parameters) and the right one (Viewer / Patch Results) -- so the
+# page reads as one surface rather than two.
+_STEP1_TAB_QSS = (
+    "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
+    "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
+    "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
+)
+
 
 def _round_display_value(value):
     """One display-parameter value, rounded so float noise cannot miss a cache
@@ -607,8 +616,32 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 4, 6, 6)
         root.setSpacing(4)
 
-        title = self._make_label("Step 1 — Channel Fusion + Cellpose Grid Search", bold=True)
-        root.addWidget(title)
+        # The title line IS the step's bar: the name on the left, the entry to
+        # the one shared Tissue Preview on its right. The button is the same
+        # object it has always been -- only where it sits changed.
+        title_row = QHBoxLayout()
+        title = self._make_label(
+            "Step 1 — Channel Fusion + Preliminary Segmentation", bold=True)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        # The ONE Tissue Preview / ROI Navigator belongs to Block01: the
+        # display services construct, hold and close it, and every step's
+        # button -- this one included -- resolves to that one instance. No
+        # step builds a popup, an OverviewPanel over it, or a second ROI/patch
+        # model.
+        self._btn_step1_tissue_nav = QPushButton("🗺 Tissue Preview / ROI Navigator")
+        self._btn_step1_tissue_nav.setToolTip(
+            "Open the shared Tissue Preview. One window for the whole "
+            "session: the same ROI and patches, and the picture follows "
+            "whichever step you are in.")
+        self._btn_step1_tissue_nav.setStyleSheet(
+            "QPushButton{color:#9bd0ff;font-size:10px;"
+            "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
+            "QPushButton:hover{background:#182230;}"
+        )
+        self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
+        title_row.addWidget(self._btn_step1_tissue_nav)
+        root.addLayout(title_row)
 
         main_split = QSplitter(Qt.Horizontal)
         main_split.setChildrenCollapsible(False)
@@ -627,25 +660,8 @@ class MainWindow(QMainWindow):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(4)
-        ll.addWidget(self._make_label("① ROI / Patch Overview", bold=True))
-        # The ONE Tissue Preview / ROI Navigator belongs to Block01: the
-        # display services construct, hold and close it, and every step's
-        # button -- this one included -- resolves to that one instance. No
-        # step builds a popup, an OverviewPanel over it, or a second ROI/patch
-        # model.
-        self._btn_step1_tissue_nav = QPushButton("🗺 Tissue Preview / ROI Navigator")
-        self._btn_step1_tissue_nav.setToolTip(
-            "Open the shared Tissue Preview. One window for the whole "
-            "session: the same ROI and patches, and the picture follows "
-            "whichever step you are in.")
-        self._btn_step1_tissue_nav.setStyleSheet(
-            "QPushButton{color:#9bd0ff;font-size:10px;"
-            "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#182230;}"
-        )
-        self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
-        ll.addWidget(self._btn_step1_tissue_nav)
-
+        # No "① ROI / Patch Overview" heading: this column is the `Channels`
+        # tab now, and the tab already names it.
         self._btn_step1_intensity = QPushButton("Intensity…")
         self._btn_step1_intensity.setToolTip(
             "Open the shared Intensity window on the current channel. "
@@ -657,7 +673,9 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#231a2a;}"
         )
         self._btn_step1_intensity.clicked.connect(self._show_intensity_window)
-        ll.addWidget(self._btn_step1_intensity)
+        # It is laid out INSIDE the `Channels` frame below, where Step0 keeps
+        # it (`Step0Page._build_ui`'s All row): it edits the selected channel,
+        # so it belongs with the channel list in both steps.
 
         # The one channel panel lives here, in the column the removed tissue
         # thumbnail left empty.  It is constructed in its final home rather than
@@ -672,6 +690,13 @@ class MainWindow(QMainWindow):
         channels_box_lay = QVBoxLayout(channels_box)
         channels_box_lay.setContentsMargins(4, 4, 4, 4)
         channels_box_lay.setSpacing(4)
+        # Step0 parity: the `Intensity…` entry sits at the top of the Channels
+        # frame, right-aligned, above the one public dock. Same button, same
+        # shared window -- only its place in the column changed.
+        intensity_row = QHBoxLayout()
+        intensity_row.addStretch()
+        intensity_row.addWidget(self._btn_step1_intensity)
+        channels_box_lay.addLayout(intensity_row)
         # The panel EDITS Block01's fusion model; it does not own it. Handed
         # in at construction, so there is never a moment when a second model
         # exists to be written to.
@@ -749,19 +774,26 @@ class MainWindow(QMainWindow):
         self.roi_status.setWordWrap(True)
         self.roi_status.setStyleSheet("color:#888;font-size:10px;")
         ll.addWidget(self.roi_status)
-        main_split.addWidget(left)
 
-        mid = QSplitter(Qt.Vertical)
-        mid.setChildrenCollapsible(False)
-        self._step1_mid_split = mid
+        # LEFT COLUMN = two tabs. `Channels` is the column above; `Method &
+        # Parameters` is the segmentation settings panel, which used to own a
+        # third column of its own. One column, switched, so the picture on the
+        # right gets the width the third column was taking.
+        left_tabs = QtWidgets.QTabWidget()
+        left_tabs.setStyleSheet(_STEP1_TAB_QSS)
+        left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._step1_left_tabs = left_tabs
+        left_tabs.addTab(left, "Channels")
+        main_split.addWidget(left_tabs)
+
         pw = QWidget()
         pw.setMinimumSize(300, 300)
         pw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
         head_row = QHBoxLayout()
-        self._preview_title = self._make_label("③ Preview", bold=True)
-        head_row.addWidget(self._preview_title)
+        # No "③ Preview" heading and no Fusion colour legend: the tab names
+        # the picture and the two mode buttons say which one is up.
         head_row.addStretch()
         self._btn_mode_overlay = QPushButton("Overlay")
         self._btn_mode_fusion = QPushButton("Fusion")
@@ -860,17 +892,10 @@ class MainWindow(QMainWindow):
         self.prev_img = pg.ImageItem()
         self.prev_vb.addItem(self.prev_img)
         pl.addWidget(self.prev_gv, stretch=1)
-        mid.addWidget(pw)
-
-        mid.setStretchFactor(0, 1)
-        main_split.addWidget(mid)
+        self.viewer_tab = pw
 
         right_tabs = QtWidgets.QTabWidget()
-        right_tabs.setStyleSheet(
-            "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
-            "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
-            "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
-        )
+        right_tabs.setStyleSheet(_STEP1_TAB_QSS)
         right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.right_tabs = right_tabs
         self._step1_right_tabs = right_tabs
@@ -917,22 +942,34 @@ class MainWindow(QMainWindow):
         self.result_grid.param_selected.connect(self._on_param_sel)
         patch_results_lay.addWidget(self.result_grid)
 
-        right_tabs.addTab(method_params_tab, "Method & Parameters")
+        # The segmentation settings live in the LEFT column now; the right
+        # column is the picture and the results of running on it.
+        left_tabs.addTab(method_params_tab, "Method & Parameters")
+        right_tabs.addTab(pw, "Viewer")
         right_tabs.addTab(patch_results_tab, "Patch Results")
         # There is no second channel view here any more.  The mirrored
         # "Channels" tab could not show the nucleus weight or any group weight,
         # so its "1.00" was never the effective weight, and its checkbox and
         # colour swatch wrote state nothing in Step1 read.  ConfigPanel is the
         # one channel state owner.
-        right_tabs.setCurrentWidget(method_params_tab)
+        left_tabs.setCurrentWidget(left)
+        right_tabs.setCurrentWidget(pw)
+        print("[Step1-Tabs] left tabs created")
         print("[Step1-Tabs] right tabs created")
-        print("[Step1-Tabs] default tab=Method & Parameters")
+        print("[Step1-Tabs] default tabs=Channels | Viewer")
         main_split.addWidget(right_tabs)
 
-        main_split.setStretchFactor(0, 2)
-        main_split.setStretchFactor(1, 3)
-        main_split.setStretchFactor(2, 4)
-        main_split.setSizes([320, 450, 450])
+        # STEP0'S RATIO, by the same means: one part of channel column to two
+        # parts of picture (`Step0Page`'s `c_split`). No `setSizes` beside it
+        # -- an absolute triple fought the stretch factors and pinned the
+        # picture to whatever width the third column left over.
+        main_split.setStretchFactor(0, 1)
+        main_split.setStretchFactor(1, 2)
+        # ...and HELD there. A QSplitter hands out its first widths by size
+        # hint and only then honours the stretch factors, so the column that
+        # asks for more keeps it until something drags the handle. Step0 pins
+        # its own ratio the same way (`Step0Page._fix_split_ratio`).
+        self._fix_step1_split_ratio()
         root.addWidget(main_split, stretch=1)
 
         bot = QHBoxLayout()
@@ -986,16 +1023,14 @@ class MainWindow(QMainWindow):
 
         self._fusion_bar_widget.setVisible(False)
         root.addWidget(self._fusion_bar_widget)
-        page1_scroll = QtWidgets.QScrollArea()
-        page1_scroll.setWidgetResizable(True)
-        page1_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        page1_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        page1_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        page1_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        page1_scroll.setWidget(page1_w)
+        # NO outer QScrollArea. It sized the page by its content's size hint,
+        # so the two columns were laid out for the hint and the picture never
+        # got the width the window actually had. The page fills the stack
+        # directly; the panels that need to scroll (Method & Parameters) carry
+        # their own scroll area.
         self._step1_page_widget = page1_w
-        self._step1_scroll = page1_scroll
-        self._stack.addWidget(page1_scroll)
+        self._step1_scroll = None
+        self._stack.addWidget(page1_w)
 
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
@@ -1070,6 +1105,39 @@ class MainWindow(QMainWindow):
             return "none"
         return [tabs.tabText(i) for i in range(tabs.count())]
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fix_step1_split_ratio()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fix_step1_split_ratio()
+
+    def _fix_step1_split_ratio(self):
+        """Step1's two columns stay at Step0's 1:2 -- channels to picture.
+
+        The user's ruling, and the reason the third column went: the picture
+        is what the width is for. A hand-dragged handle is not defended
+        against here, and nothing else in this window writes these sizes.
+        """
+        split = getattr(self, "_step1_main_split", None)
+        if split is None or split.count() != 2:
+            return
+        total = split.width()
+        if total < 10:
+            return
+        left = max(240, (total - split.handleWidth()) // 3)
+        right = max(1, total - split.handleWidth() - left)
+        if split.sizes() != [left, right]:
+            split.setSizes([left, right])
+
+    def _show_step1_viewer_tab(self, reason):
+        tabs = getattr(self, "right_tabs", None)
+        tab = getattr(self, "viewer_tab", None)
+        if tabs is not None and tab is not None:
+            tabs.setCurrentWidget(tab)
+            print(f"[Step1-Tabs] switched to Viewer due to {reason}")
+
     def _show_step1_patch_results_tab(self, reason):
         tabs = getattr(self, "right_tabs", None)
         tab = getattr(self, "patch_results_tab", None)
@@ -1078,9 +1146,11 @@ class MainWindow(QMainWindow):
             print(f"[Step1-Tabs] switched to Patch Results due to {reason}")
 
     def _show_step1_method_params_tab(self, reason):
-        tabs = getattr(self, "right_tabs", None)
+        # It lives in the LEFT column now. Asked for by the tab that owns it,
+        # not by a hard-coded column, so a later move needs no caller change.
         tab = getattr(self, "method_params_tab", None)
-        if tabs is not None and tab is not None:
+        tabs = getattr(self, "_step1_left_tabs", None)
+        if tabs is not None and tab is not None and tabs.indexOf(tab) >= 0:
             tabs.setCurrentWidget(tab)
             print(f"[Step1-Tabs] switched to Method & Parameters due to {reason}")
 
@@ -4221,10 +4291,6 @@ class MainWindow(QMainWindow):
         self._step1_preview_mode = mode
         self._btn_mode_overlay.setChecked(mode == STEP1_PREVIEW_OVERLAY)
         self._btn_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
-        self._preview_title.setText(
-            "③ Overlay  (ticked channels, their colours and Intensity window)"
-            if mode == STEP1_PREVIEW_OVERLAY else
-            "③ Fusion Preview  Red=cyto  Blue=nucleus  (weights apply)")
         if (changed or force) and reconcile:
             # The two modes need different channels.  Arriving in fusion with
             # only the overlay's channels in hand would sit on "Preparing"

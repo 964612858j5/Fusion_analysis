@@ -45,6 +45,17 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Step1 row** -- `tick | swatch | name | weight slider + spin`. The tick is
   ONE command: show the channel **and** put it into the fusion; a channel with
   no weight answer enters at 1.0. There is no second participation control.
+* **Step1's page** (user ruling, 2026-09-16; `docs/step1_rework_plan.md`
+  block A) -- TWO columns, held at Step0's own one-to-two ratio, channels to
+  picture. The left column is two tabs, `Channels` and `Method & Parameters`;
+  the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
+  a TAB beside the picture, never a strip stacked over it. The title line
+  reads `Step 1 -- Channel Fusion + Preliminary Segmentation` and carries the
+  step's one `Tissue Preview / ROI Navigator` entry at its right end. There is
+  no `① ROI / Patch Overview` heading, no `③ Preview` heading over the picture
+  and no `Red=cyto Blue=nucleus` legend -- the two mode buttons say which
+  picture is up. `Intensity…` sits INSIDE the `Channels` frame, at its top,
+  right-aligned, where Step0 keeps it. No outer scroll area wraps the page.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
   combo.
 * **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
@@ -67,7 +78,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   worked announces nothing there.
 * **Weights** -- edited in Step1's rows. There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
-  existing entries.
+  existing entries. In BOTH steps that entry lives inside the `Channels`
+  frame: it edits the selected channel, so it belongs with the channel list.
 
 ## 5. How this rule is enforced
 

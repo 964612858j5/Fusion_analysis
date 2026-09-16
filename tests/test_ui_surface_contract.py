@@ -51,6 +51,11 @@ class _Loader:
 def _window(app):
     from block01.ui.main_window import MainWindow
     w = MainWindow()
+    # A window built here inherits the machine's real project config, and a
+    # draft change would autosave `step1_session.json` INTO that project.
+    # Stubbed before anything edits state.
+    w._schedule_step1_session_save = lambda: None
+    w._save_step1_session = lambda *a, **k: None
     loader = _Loader()
     w.loader = loader
     w.config.set_channels(loader.channel_names())
@@ -229,3 +234,51 @@ def test_the_rules_file_is_present_and_names_the_removed_controls(app):
     for phrase in ("stop and ask first", "Channel Weights", "Weights…",
                    "Intensity…", "participation"):
         assert phrase in text, phrase
+
+
+def test_step1_keeps_its_ruled_layout_and_entries(app):
+    """Block A's surface: two columns of tabs, and where the entries live.
+
+    `UI_SURFACE_RULES.md` §4 records this page. What is pinned here is the
+    part a refactor could move without anyone noticing: the two tab sets, the
+    Tissue Preview entry on the title line, `Intensity…` inside the `Channels`
+    frame, and the headings that are gone.
+    """
+    w = _window(app)
+    try:
+        left = w._step1_left_tabs
+        right = w.right_tabs
+        assert [left.tabText(i) for i in range(left.count())] == [
+            "Channels", "Method & Parameters"]
+        assert [right.tabText(i) for i in range(right.count())] == [
+            "Viewer", "Patch Results"]
+        assert w._step1_main_split.count() == 2
+
+        # The Tissue Preview entry is on the title line, not in the column.
+        nav = w._btn_step1_tissue_nav
+        assert nav.parentWidget() is w._step1_page_widget
+        assert w._step1_left_panel.findChildren(QtWidgets.QPushButton).count(
+            nav) == 0
+
+        # `Intensity…` is INSIDE the Channels frame, as in Step0.
+        intensity = w._btn_step1_intensity
+        assert intensity.parentWidget() is w._step1_channels_box
+
+        # The headings the user removed do not come back.
+        texts = {lbl.text() for lbl in
+                 w._step1_page_widget.findChildren(QtWidgets.QLabel)}
+        assert not any("ROI / Patch Overview" in t for t in texts), texts
+        assert not any("Red=cyto" in t for t in texts), texts
+        # `③ Search Results` inside ResultGridPanel is Step0's own heading
+        # and stays; what went is the heading OVER THE PICTURE.
+        assert not any(t.startswith(("③ Preview", "③ Overlay", "③ Fusion"))
+                       for t in texts), texts
+        assert not hasattr(w, "_preview_title")
+        assert any("Preliminary Segmentation" in t for t in texts), texts
+
+        # No outer scroll area: the page fills the stack itself.
+        assert w._step1_scroll is None
+        assert not isinstance(w._step1_page_widget.parentWidget(),
+                              QtWidgets.QScrollArea)
+    finally:
+        _close(w)

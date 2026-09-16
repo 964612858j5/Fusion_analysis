@@ -101,8 +101,13 @@ def test_the_right_column_no_longer_offers_a_channels_tab(app):
     try:
         titles = [w.right_tabs.tabText(i) for i in range(w.right_tabs.count())]
         assert "Channels" not in titles
-        assert titles == ["Method & Parameters", "Patch Results"]
-        assert w.right_tabs.currentWidget() is w.method_params_tab
+        # Block A: the right column is the picture and its results; the
+        # segmentation settings moved to the left column's second tab.
+        assert titles == ["Viewer", "Patch Results"]
+        assert w.right_tabs.currentWidget() is w.viewer_tab
+        left = w._step1_left_tabs
+        assert [left.tabText(i) for i in range(left.count())] == [
+            "Channels", "Method & Parameters"]
     finally:
         w.close()
 
@@ -188,10 +193,11 @@ def test_the_channel_panel_lives_in_the_left_column(app):
         assert len(panels) == 1
         assert panels[0] is w.config
         assert w._step1_left_panel.findChildren(ConfigPanel) == [w.config]
-        assert w._step1_mid_split.findChildren(ConfigPanel) == []
-        # The middle column keeps the preview and nothing else.
-        assert w._step1_mid_split.count() == 1
+        # Block A: there is no middle column any more -- the picture is the
+        # right column's `Viewer` tab, and it carries no channel panel.
+        assert w.viewer_tab.findChildren(ConfigPanel) == []
         assert w._step1_left_panel.findChildren(type(w.prev_gv)) == []
+        assert w.prev_gv.parentWidget() is w.viewer_tab
     finally:
         w.close()
 

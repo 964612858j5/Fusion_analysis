@@ -3,9 +3,12 @@
 Block A of `docs/step1_rework_plan.md`. What is pinned here is the SURFACE the
 user ruled on:
 
-* one channel column to two of picture -- Step0's `c_split` ratio, measured on
-  the real widths after the layout has settled, not read off the stretch
-  factors;
+* Step1's channel column shows the SAME SHARE of the width as Step0's does --
+  measured on both pages' real widths after the layout has settled, not read
+  off the stretch factors and not compared against a copied number. (Step0's
+  own share is not 1:2: its column starts at `4/3` of its minimum and works
+  out near 0.28 of the work area. A hard 1:2 in Step1 was visibly wider than
+  Step0 and is what the real-machine check rejected.)
 * `Channels | Method & Parameters` on the left, `Viewer | Patch Results` on the
   right, switched rather than stacked;
 * the ONE public channel dock stays mounted while the other left tab is up: a
@@ -88,16 +91,48 @@ def _columns(w):
     return w._step1_left_tabs, w.right_tabs
 
 
+def _left_fraction(sizes):
+    total = sum(sizes)
+    assert total > 0
+    return sizes[0] / float(total)
+
+
+def _step0_left_fraction(app, w):
+    """Step0's own share, measured on Step0 -- the thing Step1 must match."""
+    w._set_step_active(0)
+    w._stack.setCurrentWidget(w._step0)
+    _settle(app)
+    split = w._step0._bg_c_split
+    assert split.count() == 2
+    return _left_fraction(split.sizes())
+
+
 # ── gate 1: Step0's proportion, measured ──────────────────────────────
 
-@pytest.mark.parametrize("width", [1280, 1600, 1920])
-def test_the_picture_gets_two_parts_to_the_channel_column_s_one(app, width):
+@pytest.mark.parametrize("width", [1280, 1600, 1920, 2560])
+def test_step1_shows_step0_s_own_channel_column_share(app, width):
+    """Measured on BOTH pages, at the same window width."""
     w = _window(app, width=width)
     try:
-        left, right = _columns(w)
         assert w._step1_main_split.count() == 2, "two columns, not three"
-        ratio = right.width() / float(left.width())
-        assert 1.8 <= ratio <= 2.2, (width, left.width(), right.width(), ratio)
+        step0 = _step0_left_fraction(app, w)
+
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+        step1 = _left_fraction(w._step1_main_split.sizes())
+
+        assert abs(step1 - step0) <= 0.02, (width, step0, step1)
+    finally:
+        _close(w)
+
+
+def test_the_share_step1_asks_for_is_the_one_step0_reports(app):
+    """The number is READ from Step0, not copied into Step1."""
+    w = _window(app)
+    try:
+        step0 = _step0_left_fraction(app, w)
+        assert abs(w._step0_left_fraction() - step0) <= 0.001
     finally:
         _close(w)
 
@@ -132,9 +167,9 @@ def test_the_ratio_holds_when_step1_is_entered_without_a_resize(app):
         w._stack.setCurrentWidget(w._step1_page_widget)
         _settle(app)
 
-        left, right = _columns(w)
-        ratio = right.width() / float(left.width())
-        assert 1.8 <= ratio <= 2.2, (left.width(), right.width(), ratio)
+        step0 = _left_fraction(w._step0._bg_c_split.sizes())
+        step1 = _left_fraction(w._step1_main_split.sizes())
+        assert abs(step1 - step0) <= 0.02, (step0, step1)
     finally:
         _close(w)
 

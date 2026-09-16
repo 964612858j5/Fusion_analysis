@@ -1,7 +1,7 @@
 # Step1 改造行动计划（审核版）
 
 - 状态（2026-09-16）：计划审核通过。**块 A 已实现并提交 `69ecc75`，自动门与变异闸门全绿，真机验收待用户完成**；块 B/C/D 未开工。执行一块一停；B 开工须遵 B.3 的来源身份收紧条款，C 接管须落实 C.3 门 7 的保护回归；Step1.5 单列。
-- 块 A 的真机验收项（用户执行，尚未通过）：缩放窗口时 Viewer 宽度随窗口增长且左右约 1:2；切到 Patch Results 时 Viewer 完全隐藏、切回恢复；左侧两 tab 来回切换后通道勾选、当前名称、显式 0.0 与其他权重不变；720p 高度下 Method & Parameters 可滚动且 Save/Generate 可达。
+- 块 A 的真机验收项（用户执行）：缩放窗口时 Viewer 宽度随窗口增长，且左右占比与 Step0 一致（实测 Step0 左栏约 0.278，**不是 1:2**）；切到 Patch Results 时 Viewer 完全隐藏、切回恢复；左侧两 tab 来回切换后通道勾选、当前名称、显式 0.0 与其他权重不变；720p 高度下 Method & Parameters 可滚动且 Save/Generate 可达。
 - 基线：HEAD = `309c9db`（`v15-interactive-channel-workspace`）。
   - 基线数字 **18 个测试套件 / 881 passed / 0 failed** 是**执行窗口在 309c9db 上跑出并已确认的结果**，覆盖的是该窗口指定的 Block01 套件集合，**不等于仓库全部测试通过**。其中 `test_controller_trajectory` 1 passed、`test_step0_full_image_recovery` 19 passed、`test_step0_compare_tiles` 190 passed、`test_explore_controller` 134 passed。
   - 本轮不重跑基线。执行时以同一套件集合对比，判据是**无新增回归**。
@@ -17,7 +17,7 @@
 |---|---|
 | Step1 页面在 `main_window.py` 内构建，不是 `step1_5_bg_page.py` | `ui/main_window.py:604-995` |
 | 现为三栏 `setSizes([320,450,450])`、factor 2:3:4，整页包在 `QScrollArea` 内 | `ui/main_window.py:936-939, 988-995` |
-| Step0 的 Channels:viewer 比例为 1:2 | `ui/step0/step0_page.py:1304` |
+| Step0 的 c_split stretch 因子写的是 1:2，但**实测占比为 0.278 / 0.722（≈1:2.6）** —— 左栏初始宽由 `_wire_left_column_sync` 的 `4*(max(minHint,120)+4)//3` 决定，之后按比例伸缩 | `ui/step0/step0_page.py:1304`、`:3187-3212` |
 | Step0 的 Intensity 入口在 Channels 框顶行右侧 | `ui/step0/step0_page.py:829-845` |
 | Step1 现用裸 `pg.ImageItem` 画 patch，无金字塔/相机/调度 | `ui/main_window.py:851-861` |
 | Step0 viewer 栈由 Step0 页自持，含预览方法与 GPU 让渡生命周期 | `ui/step0/step0_explore_tab.py:314-364`, `:586-624` |
@@ -68,7 +68,7 @@
 viewer 内容本块不动：`prev_gv` / `prev_img` 原样搬进右栏 `Viewer` tab。
 
 ### 验收门
-1. **比例**：`show()` 后等布局稳定，在 1280 / 1600 / 1920 实测左右实宽比落在 **1:2 ±10%** 且随宽度单调；不要求与 Step0 像素级相等。
+1. **比例**：`show()` 后等布局稳定，在 1280 / 1600 / 1920 / 2560 **同时量 Step0 与 Step1**，两者左栏占比之差 ≤0.02；占比在运行时从 Step0 读取，不复制常数。tab bar 不得成为列宽下限（标签 elide + 滚动），否则 Qt 把左栏钉在标签宽度上（实测 304px）。
 2. **dock**：切到 `Method & Parameters` 后，dock **未被显式 `setVisible(False)`、未被 unmount**，`parent()` 与通道行数/勾选/权重不变；切回 `Channels` 后 `isVisible()` 恢复为真。非当前 tab 的 `isVisible()` 不作判据。
 3. **矮窗**：720p 高度下 `Method & Parameters` 内控件与底部 Save/Generate 仍可达。
 4. **契约**：Intensity 在 Channels 内；标题行仅一个 Tissue Preview；无预览子标题。
@@ -276,5 +276,5 @@ D（先测后改；最后退役旧路径）
 - **B-3** 瓦片路径不做临时校正（不调用 `_apply_configured_correction`），不改 Step0 预览方法与现有执行链。
 - **B-4** Intensity 是图片全局的，不是视口/瓦片/patch 的；手动值优先；自动窗口从来源的完整有效范围求得并复用。
 - **Step1 行的权重编辑＝启用命令**（2026-09-16 裁定）：给一个通道权重＝显示它并把它放进 fusion，保留用户给的数值；权重回到 `0.0` **不**停用该通道（显式 0.0 是一个决定）；取消勾选是唯一把通道移出的手势。同步记于 `UI_SURFACE_RULES.md` §4。
-- 右栏 `Viewer` | `Patch Results` 两 tab 切换显示，不堆叠；左栏 `Channels` | `Method & Parameters` 两 tab；比例沿用 Step0 的 1:2。
+- 右栏 `Viewer` | `Patch Results` 两 tab 切换显示，不堆叠；左栏 `Channels` | `Method & Parameters` 两 tab；**通道列宽度占比在运行时从 Step0 读取**（`MainWindow._step0_left_fraction` 读 `Step0Page._bg_c_split`），不是复制的常数。实测 Step0 占比约 0.278（非 1:2）；硬写 1:2 在真机上明显比 Step0 宽，已被否决。
 - 标题 `Step 1 — Channel Fusion + Preliminary Segmentation`；Tissue Preview 在标题行最右；Intensity 在 Channels tab 内并对齐 Step0 位置；删 `① ROI / Patch Overview`、预览子标题与红/蓝图例。

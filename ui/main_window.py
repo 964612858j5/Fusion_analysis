@@ -152,6 +152,22 @@ _STEP1_TAB_QSS = (
 )
 
 
+def _free_the_tab_bar(tabs):
+    """Let a tab widget be narrower than its labels.
+
+    A QTabBar reports the width of every label as its minimum, and a column
+    whose floor is its tab bar cannot follow a proportion. Eliding and
+    scrolling keeps both tabs reachable at any width.
+    """
+    bar = tabs.tabBar()
+    bar.setElideMode(Qt.ElideRight)
+    bar.setUsesScrollButtons(True)
+    bar.setExpanding(False)
+    bar.setMinimumWidth(1)
+    tabs.setMinimumWidth(1)
+    tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+
 def _round_display_value(value):
     """One display-parameter value, rounded so float noise cannot miss a cache
     hit while a real edit still misses it."""
@@ -782,6 +798,12 @@ class MainWindow(QMainWindow):
         left_tabs = QtWidgets.QTabWidget()
         left_tabs.setStyleSheet(_STEP1_TAB_QSS)
         left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # THE TAB BAR MAY NOT SET THE COLUMN'S FLOOR. Two full labels measure
+        # ~300px, which is wider than Step0's channel column ever is, so the
+        # splitter clamped there and Step1 could not show Step0's proportion
+        # (measured: Step0 0.205 of the width, Step1 stuck at 0.241). The
+        # labels elide and the bar scrolls instead.
+        _free_the_tab_bar(left_tabs)
         self._step1_left_tabs = left_tabs
         left_tabs.addTab(left, "Channels")
         main_split.addWidget(left_tabs)
@@ -897,6 +919,7 @@ class MainWindow(QMainWindow):
         right_tabs = QtWidgets.QTabWidget()
         right_tabs.setStyleSheet(_STEP1_TAB_QSS)
         right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        _free_the_tab_bar(right_tabs)
         self.right_tabs = right_tabs
         self._step1_right_tabs = right_tabs
         self._step1_right_split = None
@@ -959,10 +982,11 @@ class MainWindow(QMainWindow):
         print("[Step1-Tabs] default tabs=Channels | Viewer")
         main_split.addWidget(right_tabs)
 
-        # STEP0'S RATIO, by the same means: one part of channel column to two
-        # parts of picture (`Step0Page`'s `c_split`). No `setSizes` beside it
-        # -- an absolute triple fought the stretch factors and pinned the
-        # picture to whatever width the third column left over.
+        # STEP0'S PROPORTION, taken from Step0 itself at runtime rather than
+        # copied as a number -- see `_step0_left_fraction`. The stretch
+        # factors are the fallback distribution for the moments before the
+        # first measurement; no `setSizes` triple is set here, because an
+        # absolute one fought them and pinned the picture to leftovers.
         main_split.setStretchFactor(0, 1)
         main_split.setStretchFactor(1, 2)
         # ...and HELD there. A QSplitter hands out its first widths by size
@@ -1120,11 +1144,36 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._fix_step1_split_ratio()
 
+    #: What Step1's channel column falls back to when Step0 has not been laid
+    #: out yet: Step0's own starting rule -- `4 * (minimum + 4) // 3` for the
+    #: column against the rest -- works out at this share of the width
+    #: (measured 0.278 at 1280/1600/1920/2560). It is a fallback only; the
+    #: live measurement below is what normally decides.
+    _STEP1_LEFT_FRACTION_FALLBACK = 0.278
+
+    def _step0_left_fraction(self):
+        """Step0's channel column as a share of its work area, measured NOW.
+
+        Not a copied constant: Step0 sizes that column by its own rule
+        (`Step0Page._wire_left_column_sync`, which starts it at 4/3 of the
+        larger left-pane minimum and lets the splitter scale from there) and
+        the user may drag its handle. Reading it means Step1 shows the same
+        proportion whatever Step0 currently is -- which is what "the same as
+        Step0" has to mean if it is to stay true.
+        """
+        split = getattr(getattr(self, "_step0", None), "_bg_c_split", None)
+        if split is not None and split.count() == 2:
+            sizes = split.sizes()
+            total = sum(sizes)
+            if total > 0 and sizes[0] > 0 and sizes[1] > 0:
+                return sizes[0] / float(total)
+        return self._STEP1_LEFT_FRACTION_FALLBACK
+
     def _fix_step1_split_ratio(self):
-        """Step1's two columns stay at Step0's 1:2 -- channels to picture.
+        """Step1's two columns show STEP0'S proportion -- channels to picture.
 
         The user's ruling, and the reason the third column went: the picture
-        is what the width is for. A hand-dragged handle is not defended
+        is what the width is for. A hand-dragged Step1 handle is not defended
         against here, and nothing else in this window writes these sizes.
 
         Called on resize, on show AND on every stack page change: entering
@@ -1137,8 +1186,9 @@ class MainWindow(QMainWindow):
         total = split.width()
         if total < 10:
             return
-        left = max(240, (total - split.handleWidth()) // 3)
-        right = max(1, total - split.handleWidth() - left)
+        usable = max(1, total - split.handleWidth())
+        left = max(1, int(round(usable * self._step0_left_fraction())))
+        right = max(1, usable - left)
         if split.sizes() != [left, right]:
             split.setSizes([left, right])
 

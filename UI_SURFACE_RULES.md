@@ -51,8 +51,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   weight back to zero is an explicit zero, and the tick is the one gesture
   that removes a channel.
 * **Step1's page** (user ruling, 2026-09-16; `docs/step1_rework_plan.md`
-  block A) -- TWO columns, held at Step0's own one-to-two ratio, channels to
-  picture. The left column is two tabs, `Channels` and `Method & Parameters`;
+  block A) -- TWO columns, holding STEP0'S OWN SHARE of the width for the
+  channel column, measured from Step0 at runtime rather than copied as a
+  number. (Step0's share is not one-to-two: its column starts at 4/3 of its
+  minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
+  than Step0 and was rejected on the real machine.) The left column is two tabs, `Channels` and `Method & Parameters`;
   the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
   a TAB beside the picture, never a strip stacked over it. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the

@@ -688,21 +688,32 @@ class ConfigPanel(QWidget):
         # the widgets instead is what made a QWidget the place a later reader
         # had to look, and it is why the public dock could disagree with this
         # panel about the same channel.
+        # ...INTO STEP1'S OWN SCOPE. This panel speaks for Step1, and a
+        # handoff lands while the user is still standing in Step0: writing
+        # "the current scope" is how a Save in Step0 came back with every
+        # marker unticked and only DAPI left (diagnosed from
+        # `channel.visibility ... origin=step1-load-panel` in a real run).
         state = self._display_state
-        if state is not None:
-            for ch in (self.all_channels or list(self._rows)):
-                state.set_display_visible(ch, ch == nuc,
-                                          origin="step1-load-panel")
-        else:
-            for ch, row in self._rows.items():
-                row.set_visible(ch == nuc)
-        self._refresh_nucleus_display()
-        if nuc and nuc in (self.all_channels or list(self._rows)):
-            self._current = nuc
+        scope = getattr(self, "display_scope", "") or ""
+        with (state.using_scope(scope)
+              if (scope and state is not None
+                  and hasattr(state, "using_scope"))
+              else contextlib.nullcontext()):
             if state is not None:
-                state.set_selected_channel(nuc, origin="step1-load-panel")
-        else:
-            self._current = ""
+                for ch in (self.all_channels or list(self._rows)):
+                    state.set_display_visible(ch, ch == nuc,
+                                              origin="step1-load-panel")
+            else:
+                for ch, row in self._rows.items():
+                    row.set_visible(ch == nuc)
+            self._refresh_nucleus_display()
+            if nuc and nuc in (self.all_channels or list(self._rows)):
+                self._current = nuc
+                if state is not None:
+                    state.set_selected_channel(nuc,
+                                               origin="step1-load-panel")
+            else:
+                self._current = ""
         self.config_changed.emit()
 
     def apply_full_config(self, cfg, adopt_nucleus=False):

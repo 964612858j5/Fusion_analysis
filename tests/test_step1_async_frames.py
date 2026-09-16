@@ -82,6 +82,9 @@ def _window(app, size=32):
         ch: (rng.random((size, size), dtype=np.float32) * 900 + 10)
         for ch in ("DAPI", "CD3", "CD8")}
     w._patch_load_ready.add(0)
+    # THE STEP THESE TESTS ARE ABOUT. A tick is per step since the 2026-09-16
+    # ruling, and Step1's panel writes Step1's answers, so both belong here.
+    w._set_step_active(1)
     w.config.set_channel_visible("CD3", True)
     return w
 

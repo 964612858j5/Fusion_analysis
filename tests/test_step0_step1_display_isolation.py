@@ -452,6 +452,37 @@ def test_step3_does_not_follow_step0_or_step1_ticks(app):
         _close(w)
 
 
+def test_a_step1_handoff_does_not_untick_step0(app):
+    """The bug a real Save produced: everything off but DAPI.
+
+    Saving in Step0 publishes a handoff, Step1's panel loads it, and its
+    `load_panel` writes "show the nucleus and nothing else" -- which landed
+    in whatever scope was current. With the user standing in Step0, that was
+    Step0's own column (diagnosed from
+    `channel.visibility ... origin=step1-load-panel` in a real run).
+    """
+    w = _window(app)
+    try:
+        state = w._display.state
+        _in(w, 0)
+        state.set_display_visible("CD3", True, origin="step0-test")
+        state.set_display_visible("CD8", True, origin="step0-test")
+        before = dict(state.display_visibility())
+
+        # Step1's panel takes a handoff while Step0 is on screen.
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0,
+                                         "CD20": 0.0}}, "DAPI")
+        QtWidgets.QApplication.processEvents()
+
+        assert dict(state.display_visibility()) == before, \
+            "a Step1 handoff rewrote Step0's ticks"
+        _in(w, 1)
+        assert state.display_visible("CD3") is False
+        assert state.display_visible("DAPI") is True
+    finally:
+        _close(w)
+
+
 # ── 4. what stays shared ──────────────────────────────────────────────
 
 def test_colour_and_intensity_are_still_shared(app):

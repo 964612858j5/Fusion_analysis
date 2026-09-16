@@ -3211,6 +3211,33 @@ class Step0Page(QWidget):
         self._apply_left_col_width(a)
         self._apply_left_col_width(b)
 
+    def apply_channel_column_width(self, width):
+        """Set the channel column to `width` px, keeping the hidden peer.
+
+        The one entry a caller outside this page may use. It writes through
+        `_apply_left_col_width`, so `_bg_c_split` and the conditioning
+        workbench's splitter stay at the same width -- setting sizes on one of
+        them directly is what leaves them disagreeing.
+        """
+        width = int(width)
+        if width <= 0:
+            return
+        a = getattr(self, "_left_split_a", None)
+        b = getattr(self, "_left_split_b", None)
+        self._left_col_width = width
+        for split in (a, b):
+            if split is not None:
+                self._apply_left_col_width(split)
+        # The same reconcile a drag does: one of the two may have clamped at
+        # its own minimum, and leaving them apart is exactly what this
+        # mechanism exists to prevent.
+        if a is not None and b is not None:
+            actual = max(a.sizes()[0], b.sizes()[0])
+            if actual != self._left_col_width:
+                self._left_col_width = actual
+                self._apply_left_col_width(a)
+                self._apply_left_col_width(b)
+
     def _on_left_split_dragged(self, src):
         if getattr(self, "_syncing_left_cols", False):
             return

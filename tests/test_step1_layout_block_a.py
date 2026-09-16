@@ -127,12 +127,215 @@ def test_step1_shows_step0_s_own_channel_column_share(app, width):
         _close(w)
 
 
-def test_the_share_step1_asks_for_is_the_one_step0_reports(app):
-    """The number is READ from Step0, not copied into Step1."""
+def _drag(app, split, fraction):
+    """Move a splitter's handle as a user would, and announce it as a drag."""
+    usable = max(1, split.width() - split.handleWidth())
+    left = max(40, int(round(usable * fraction)))
+    split.setSizes([left, max(1, usable - left)])
+    split.splitterMoved.emit(left, 1)
+    _settle(app)
+
+
+def test_dragging_step0_s_handle_moves_step1_s(app):
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)                    # lay Step0 out
+        _drag(app, w._step0._bg_c_split, 0.40)
+        step0 = _left_fraction(w._step0._bg_c_split.sizes())
+
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+        assert abs(_left_fraction(w._step1_main_split.sizes()) - step0) <= 0.02
+    finally:
+        _close(w)
+
+
+def test_dragging_step1_s_handle_moves_step0_s(app):
+    """The direction the first fix left out -- reported from the real machine."""
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+
+        _drag(app, w._step1_main_split, 0.42)
+        step1 = _left_fraction(w._step1_main_split.sizes())
+
+        w._set_step_active(0)
+        w._stack.setCurrentWidget(w._step0)
+        _settle(app)
+        assert abs(_left_fraction(w._step0._bg_c_split.sizes()) - step1) <= 0.02
+    finally:
+        _close(w)
+
+
+def test_a_drag_reaches_step0_s_hidden_peer_too(app):
+    """Step0's work area has a second splitter behind it; both are written.
+
+    They end at the SAME width whenever the width fits both. The peer is a
+    hidden widget and is narrower than the visible work area, so a request
+    wider than the peer's own maximum leaves it at that maximum -- Step0's
+    own mechanism behaves exactly the same way when its handle is dragged,
+    and this test states which case it is rather than asserting an equality
+    that the geometry cannot always give.
+    """
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)
+        peer = getattr(w._step0, "_left_split_b", None)
+        if peer is None or peer.count() != 2:
+            pytest.skip("this build has no hidden conditioning splitter")
+
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+        before = peer.sizes()[0]
+        _drag(app, w._step1_main_split, 0.38)
+
+        w._set_step_active(0)
+        w._stack.setCurrentWidget(w._step0)
+        _settle(app)
+
+        main_left = w._step0._bg_c_split.sizes()[0]
+        peer_left = peer.sizes()[0]
+        assert w._step0._left_col_width == main_left
+        assert peer_left != before, "the hidden peer was not written at all"
+        peer_max = max(1, peer.width() - peer.handleWidth()
+                       - peer.widget(1).minimumSizeHint().width())
+        if main_left <= peer_max:
+            assert peer_left == main_left
+        else:
+            assert peer_left >= peer_max - 2, (peer_left, peer_max)
+    finally:
+        _close(w)
+
+
+def test_a_width_that_fits_both_step0_splitters_lands_on_both(app):
+    """The case the mechanism is actually for: one number, two splitters."""
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)
+        peer = getattr(w._step0, "_left_split_b", None)
+        if peer is None or peer.count() != 2:
+            pytest.skip("this build has no hidden conditioning splitter")
+        w._step0.apply_channel_column_width(300)
+        _settle(app)
+        assert w._step0._bg_c_split.sizes()[0] == peer.sizes()[0] == 300
+    finally:
+        _close(w)
+
+
+@pytest.mark.parametrize("width", [1280, 1920])
+def test_a_resize_does_not_let_the_two_pages_drift(app, width):
+    w = _window(app, width=width)
+    try:
+        _step0_left_fraction(app, w)
+        _drag(app, w._step0._bg_c_split, 0.36)
+
+        for new_width in (1440, 2000, 1280):
+            w.resize(new_width, 900)
+            _settle(app)
+            w._set_step_active(1)
+            w._stack.setCurrentWidget(w._step1_page_widget)
+            _settle(app)
+            step1 = _left_fraction(w._step1_main_split.sizes())
+            w._set_step_active(0)
+            w._stack.setCurrentWidget(w._step0)
+            _settle(app)
+            step0 = _left_fraction(w._step0._bg_c_split.sizes())
+            assert abs(step1 - step0) <= 0.02, (new_width, step0, step1)
+            assert abs(step0 - 0.36) <= 0.03, (new_width, step0)
+    finally:
+        _close(w)
+
+
+def test_a_step1_drag_survives_until_step0_is_laid_out(app):
+    """The share is REMEMBERED, not re-measured from whoever is on screen.
+
+    Step1 can be dragged before Step0 has ever been shown. Reading Step0 at
+    that moment gives its opening width and would silently discard the drag.
+    """
+    w = _window(app)
+    try:
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+        _drag(app, w._step1_main_split, 0.45)
+        asked = w.channel_column_fraction()
+        assert abs(asked - 0.45) <= 0.02, asked
+
+        w._set_step_active(0)
+        w._stack.setCurrentWidget(w._step0)
+        _settle(app)
+        assert abs(_left_fraction(w._step0._bg_c_split.sizes()) - 0.45) <= 0.02
+    finally:
+        _close(w)
+
+
+def test_a_drag_below_step0_s_minimum_still_leaves_the_pages_together(app):
+    """Step0's column has a floor; Step1's answer must be the floor too.
+
+    Dragging Step1 far past it used to leave Step0 clamped at its minimum and
+    Step1 at the width that was asked for -- the two pages apart again.
+    """
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+
+        _drag(app, w._step1_main_split, 0.05)          # well under the floor
+        _settle(app)
+        step1 = _left_fraction(w._step1_main_split.sizes())
+
+        w._set_step_active(0)
+        w._stack.setCurrentWidget(w._step0)
+        _settle(app)
+        step0_split = w._step0._bg_c_split
+        step0 = _left_fraction(step0_split.sizes())
+
+        # Step0 clamped -- that is its own rule -- and Step1 followed it there.
+        assert step0_split.sizes()[0] >= step0_split.widget(0).minimumSizeHint().width()
+        assert abs(step1 - step0) <= 0.02, (step0, step1)
+        assert abs(w.channel_column_fraction() - step0) <= 0.02
+    finally:
+        _close(w)
+
+
+def test_the_two_pages_do_not_answer_each_other_for_ever(app):
+    """A sync writes sizes; a write that read back as a drag would loop."""
+    w = _window(app)
+    try:
+        _step0_left_fraction(app, w)
+        seen = []
+        w._step0._bg_c_split.splitterMoved.connect(
+            lambda *_a: seen.append("step0"))
+        w._step1_main_split.splitterMoved.connect(
+            lambda *_a: seen.append("step1"))
+
+        _drag(app, w._step1_main_split, 0.34)
+        for _ in range(3):
+            w._set_step_active(0)
+            w._stack.setCurrentWidget(w._step0)
+            _settle(app)
+            w._set_step_active(1)
+            w._stack.setCurrentWidget(w._step1_page_widget)
+            _settle(app)
+
+        assert len(seen) <= 2, seen
+    finally:
+        _close(w)
+
+
+def test_the_share_both_pages_use_is_the_one_measured_from_them(app):
+    """The number is READ from a page, not copied into one."""
     w = _window(app)
     try:
         step0 = _step0_left_fraction(app, w)
-        assert abs(w._step0_left_fraction() - step0) <= 0.001
+        assert abs(w.channel_column_fraction() - step0) <= 0.001
     finally:
         _close(w)
 

@@ -1062,6 +1062,9 @@ class MainWindow(QMainWindow):
         # is what a real session saw as a 1:1 split.
         self._stack.currentChanged.connect(
             lambda _i: self._fix_step1_split_ratio())
+        # ONE handle, two places to grab it: a drag on either page writes the
+        # shared share and the other page follows.
+        self._wire_channel_column_sync()
 
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
@@ -1144,53 +1147,130 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._fix_step1_split_ratio()
 
-    #: What Step1's channel column falls back to when Step0 has not been laid
-    #: out yet: Step0's own starting rule -- `4 * (minimum + 4) // 3` for the
-    #: column against the rest -- works out at this share of the width
-    #: (measured 0.278 at 1280/1600/1920/2560). It is a fallback only; the
-    #: live measurement below is what normally decides.
-    _STEP1_LEFT_FRACTION_FALLBACK = 0.278
+    #: Where the channel column starts before either page has been laid out:
+    #: Step0's own opening rule -- `4 * (minimum + 4) // 3` for the column
+    #: against the rest -- works out at this share (measured 0.278 at
+    #: 1280/1600/1920/2560). A fallback only; a real measurement replaces it.
+    _CHANNEL_COLUMN_FRACTION_FALLBACK = 0.278
 
-    def _step0_left_fraction(self):
-        """Step0's channel column as a share of its work area, measured NOW.
+    def _channel_column_splitters(self):
+        """The two handles that mean the same thing, Step0's first."""
+        return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
+                getattr(self, "_step1_main_split", None)]
 
-        Not a copied constant: Step0 sizes that column by its own rule
-        (`Step0Page._wire_left_column_sync`, which starts it at 4/3 of the
-        larger left-pane minimum and lets the splitter scale from there) and
-        the user may drag its handle. Reading it means Step1 shows the same
-        proportion whatever Step0 currently is -- which is what "the same as
-        Step0" has to mean if it is to stay true.
+    @staticmethod
+    def _fraction_of(split):
+        """A splitter's left share, or None when it has not been laid out."""
+        if split is None or split.count() != 2:
+            return None
+        sizes = split.sizes()
+        total = sum(sizes)
+        if total <= 0 or sizes[0] <= 0 or sizes[1] <= 0:
+            return None
+        return sizes[0] / float(total)
+
+    def channel_column_fraction(self):
+        """ONE share of the width for the channel column, in both steps.
+
+        Step0 and Step1 show the same picture side by side, so the handle is
+        one product control with two places to grab it: dragging either page's
+        moves both. The number lives here, normalised, so a window resize
+        cannot make the two drift apart -- pixels would.
+
+        Until a page has been laid out the answer is measured from whichever
+        one has been (Step0 first, because its own rule sets the opening
+        width), and only then does the fallback constant apply.
         """
-        split = getattr(getattr(self, "_step0", None), "_bg_c_split", None)
-        if split is not None and split.count() == 2:
-            sizes = split.sizes()
-            total = sum(sizes)
-            if total > 0 and sizes[0] > 0 and sizes[1] > 0:
-                return sizes[0] / float(total)
-        return self._STEP1_LEFT_FRACTION_FALLBACK
+        remembered = getattr(self, "_channel_column_fraction", None)
+        if remembered is not None:
+            return remembered
+        for split in self._channel_column_splitters():
+            measured = self._fraction_of(split)
+            if measured is not None:
+                return measured
+        return self._CHANNEL_COLUMN_FRACTION_FALLBACK
+
+    def _wire_channel_column_sync(self):
+        """A drag on either page's handle writes the shared share.
+
+        Connected once, at build time. `_syncing_channel_column` guards the
+        write path: Qt's own `setSizes` emits no `splitterMoved`, so this is
+        defensive rather than load-bearing (measured -- removing it breaks no
+        test), and it is what would keep a restore, a style or a future caller
+        that does emit from starting a conversation between the two pages.
+        """
+        self._channel_column_fraction = None
+        self._syncing_channel_column = False
+        for split in self._channel_column_splitters():
+            if split is not None:
+                split.splitterMoved.connect(
+                    lambda _pos, _i, s=split: self._on_channel_column_dragged(s))
+
+    def _on_channel_column_dragged(self, split):
+        if getattr(self, "_syncing_channel_column", False):
+            return
+        measured = self._fraction_of(split)
+        if measured is None:
+            return
+        self._channel_column_fraction = measured
+        self._apply_channel_column_fraction()
+
+    def _apply_channel_column_fraction(self):
+        """Put the shared share on both pages.
+
+        STEP0 IS WRITTEN THROUGH ITS OWN MECHANISM. Its work area's splitter
+        has a hidden peer -- the conditioning workbench's -- that
+        `Step0Page.apply_channel_column_width` keeps in step; setting sizes
+        here directly would leave the two disagreeing, which is the bug that
+        mechanism exists to prevent.
+        """
+        if getattr(self, "_syncing_channel_column", False):
+            return
+        fraction = self.channel_column_fraction()
+        self._syncing_channel_column = True
+        try:
+            # STEP0 FIRST, AND ITS ANSWER WINS. Its column has a minimum of
+            # its own, so a drag past it is clamped there; applying the
+            # ORIGINAL request to Step1 afterwards would put the two pages
+            # back at different widths -- the divergence this sync exists to
+            # remove. What Step0 actually did becomes the remembered share.
+            step0 = getattr(self, "_step0", None)
+            step0_split = getattr(step0, "_bg_c_split", None)
+            if step0_split is not None and step0_split.count() == 2:
+                usable = max(1, step0_split.width() - step0_split.handleWidth())
+                if step0_split.width() > 10:
+                    width = max(1, int(round(usable * fraction)))
+                    apply_width = getattr(step0, "apply_channel_column_width",
+                                          None)
+                    if apply_width is not None:
+                        apply_width(width)
+                    else:
+                        step0_split.setSizes([width, max(1, usable - width)])
+                    settled = self._fraction_of(step0_split)
+                    if settled is not None:
+                        fraction = settled
+                        self._channel_column_fraction = settled
+
+            split = getattr(self, "_step1_main_split", None)
+            if split is not None and split.count() == 2 and split.width() > 10:
+                usable = max(1, split.width() - split.handleWidth())
+                left = max(1, int(round(usable * fraction)))
+                right = max(1, usable - left)
+                if split.sizes() != [left, right]:
+                    split.setSizes([left, right])
+        finally:
+            self._syncing_channel_column = False
 
     def _fix_step1_split_ratio(self):
-        """Step1's two columns show STEP0'S proportion -- channels to picture.
+        """Both pages show the one channel-column share.
 
-        The user's ruling, and the reason the third column went: the picture
-        is what the width is for. A hand-dragged Step1 handle is not defended
-        against here, and nothing else in this window writes these sizes.
-
-        Called on resize, on show AND on every stack page change: entering
-        Step1 from Step0 is not a resize, and without this the columns keep
-        whatever widths the size hints produced.
+        The user's ruling, and the reason Step1's third column went: the
+        picture is what the width is for. Called on resize, on show AND on
+        every stack page change -- entering a page is not a resize, and
+        without this the columns keep whatever widths the size hints gave
+        them.
         """
-        split = getattr(self, "_step1_main_split", None)
-        if split is None or split.count() != 2:
-            return
-        total = split.width()
-        if total < 10:
-            return
-        usable = max(1, total - split.handleWidth())
-        left = max(1, int(round(usable * self._step0_left_fraction())))
-        right = max(1, usable - left)
-        if split.sizes() != [left, right]:
-            split.setSizes([left, right])
+        self._apply_channel_column_fraction()
 
     def _show_step1_viewer_tab(self, reason):
         tabs = getattr(self, "right_tabs", None)

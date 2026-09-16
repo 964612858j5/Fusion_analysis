@@ -79,3 +79,44 @@ def _collect_qt_garbage_between_tests():
     app.processEvents()
     gc.collect()
     app.processEvents()
+
+
+# ── NO TEST MAY WRITE INTO A REAL PROJECT ──────────────────────────────────
+#
+# `block01/config.py` hard-codes `OUTPUT_DIR` at the user's own dataset, and a
+# window built from it autosaves there: on 2026-09-16 a Step1 draft change in a
+# test overwrote `<real project>/step1_session.json` and destroyed it. Thirty
+# suites build a `MainWindow` and only a handful stubbed that autosave.
+#
+# INSTALLED FOR THE WHOLE PROCESS, in `pytest_configure` -- not as a fixture.
+# The first attempt was an autouse fixture, and it leaked: Step1's autosave is
+# a 500 ms QTimer, the fixture's monkeypatch came off at the end of the test,
+# and the Qt-garbage fixture's `processEvents()` then fired the timer with no
+# guard in place. The real file was written a second time. Installing at
+# configure time puts collection, every teardown, every Qt event drain and
+# interpreter shutdown inside the guard.
+#
+# The machinery is `block01/utils/project_write_guard.py`, in the package so
+# that a test and the guard share ONE exception class: a root `conftest.py`
+# inside a package is imported under the package's name, and a test doing
+# `from conftest import ...` would get a second, unrelated copy of it.
+
+import tempfile as _tempfile  # noqa: E402
+
+from block01.utils import project_write_guard as _guard  # noqa: E402
+
+RealProjectWriteRefused = _guard.RealProjectWriteRefused
+
+_SANDBOX = _tempfile.mkdtemp(prefix="block01-test-output-")
+
+
+def pytest_configure(config):
+    """Guard first, before a single test module is imported.
+
+    THERE IS NO `pytest_unconfigure` COUNTERPART. Uninstalling at the end of
+    the session would take the guard off while the interpreter is still
+    running -- atexit handlers, Qt objects being finalised, a QTimer that has
+    not fired yet -- which is the same class of hole the per-test fixture had.
+    The patches are process-wide and stay until the process is gone.
+    """
+    _guard.install(_SANDBOX)

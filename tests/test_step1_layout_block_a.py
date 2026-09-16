@@ -102,6 +102,43 @@ def test_the_picture_gets_two_parts_to_the_channel_column_s_one(app, width):
         _close(w)
 
 
+def test_the_ratio_holds_when_step1_is_entered_without_a_resize(app):
+    """The real path: the window opens on Step0 and walks to Step1.
+
+    No resize happens in between, so a fix that only runs on `resizeEvent`
+    leaves the columns at whatever the size hints produced -- measured as a
+    1:1 split in a real session while this suite, which resized after
+    switching pages, still read 1:2.
+    """
+    from block01.ui.main_window import MainWindow
+
+    w = MainWindow()
+    w._schedule_step1_session_save = lambda: None
+    w._save_step1_session = lambda *a, **k: None
+    w.loader = _Loader()
+    w.config.set_channels(w.loader.channel_names())
+    w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0}}, "DAPI")
+    w.config.set_nucleus("DAPI", 1.0)
+    try:
+        # Sized and shown on Step0 FIRST, exactly as the application starts.
+        w.resize(1600, 900)
+        w._set_step_active(0)
+        w._stack.setCurrentWidget(w._step0)
+        w.show()
+        _settle(app)
+
+        # ...then the walk to Step1, with no resize of any kind.
+        w._set_step_active(1)
+        w._stack.setCurrentWidget(w._step1_page_widget)
+        _settle(app)
+
+        left, right = _columns(w)
+        ratio = right.width() / float(left.width())
+        assert 1.8 <= ratio <= 2.2, (left.width(), right.width(), ratio)
+    finally:
+        _close(w)
+
+
 def test_the_picture_column_grows_with_the_window(app):
     widths = []
     for width in (1280, 1600, 1920):

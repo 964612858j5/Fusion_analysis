@@ -1031,6 +1031,13 @@ class MainWindow(QMainWindow):
         self._step1_page_widget = page1_w
         self._step1_scroll = None
         self._stack.addWidget(page1_w)
+        # ...and the ratio is fixed when this page BECOMES VISIBLE, not only
+        # when the window is resized. The app opens on Step0 and walks to
+        # Step1 later: with no resize in between, `resizeEvent` never fires
+        # and the columns keep the widths Qt handed out by size hint -- which
+        # is what a real session saw as a 1:1 split.
+        self._stack.currentChanged.connect(
+            lambda _i: self._fix_step1_split_ratio())
 
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
@@ -1119,6 +1126,10 @@ class MainWindow(QMainWindow):
         The user's ruling, and the reason the third column went: the picture
         is what the width is for. A hand-dragged handle is not defended
         against here, and nothing else in this window writes these sizes.
+
+        Called on resize, on show AND on every stack page change: entering
+        Step1 from Step0 is not a resize, and without this the columns keep
+        whatever widths the size hints produced.
         """
         split = getattr(self, "_step1_main_split", None)
         if split is None or split.count() != 2:

@@ -971,3 +971,81 @@ def test_the_tile_identity_carries_the_grids_chunk_shape(app):
 
     assert (1, 256, 256) in tile_identity(key)
     assert tile_identity(key) != tile_identity(other)
+
+
+# ── 12. C2.2: the notice goes down without an invalidate ──────────────
+
+def test_an_empty_viewport_clears_the_notice_without_an_invalidate(app):
+    """NO `invalidate()` here. The camera moved off the slide inside the
+    SAME generation, and the notice about a picture that is no longer on
+    screen has to go with it -- merging an empty set into {"CD8"} would
+    leave "CD8" standing."""
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named[-1] == ["CD8"], named
+
+    host.controller._visible_tiles = set()
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    _settle(app, coordinator)
+
+    assert named[-1] == [], named
+
+
+def test_winding_the_weights_to_zero_clears_it_without_an_invalidate(app):
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named[-1] == ["CD8"], named
+
+    coordinator.compose_visible(_spec(weights={"CD3": 0.0, "CD8": 0.0},
+                                      mappings={"CD3": WINDOW}))
+    _settle(app, coordinator)
+
+    assert named[-1] == [], named
+
+
+def test_a_window_that_arrives_stops_the_channel_being_named(app):
+    """The same class of clearing, one step further in: the frame composes,
+    nothing is missing any more, and the notice comes down -- again without
+    an `invalidate()` of the test's own."""
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named[-1] == ["CD8"]
+
+    coordinator.compose_visible(_spec())          # both windows now
+    _settle(app, coordinator)
+
+    assert named[-1] == [], named
+
+
+def test_a_frame_that_is_still_missing_a_window_does_not_flicker(app):
+    """Clearing the set per frame may not announce an empty list the frame
+    is about to contradict."""
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    spec = _spec(mappings={"CD3": WINDOW})
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named == [["CD8"]], named
+
+    coordinator.compose_visible(spec)
+    _settle(app, coordinator)
+
+    assert named == [["CD8"]], f"the notice flickered: {named}"

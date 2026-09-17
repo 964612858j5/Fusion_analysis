@@ -317,8 +317,10 @@ class Step1ComposeCoordinator(QtCore.QObject):
             # NOTHING TO COMPOSE IS STILL AN ANSWER. A frame with no visible
             # tiles, or one whose every weight has been wound to 0, has no
             # missing windows -- and a notice left over from the frame before
-            # it would be a claim about a picture nobody is looking at.
-            self._note_missing(())
+            # it would be a claim about a picture nobody is looking at. This
+            # CLEARS; `_note_missing` merges, and merging nothing into
+            # {"CD8"} leaves {"CD8"} standing.
+            self._clear_missing()
             return 0
 
         # A SEED THE SERVICE COULD NOT START YET is asked for again here --
@@ -334,6 +336,13 @@ class Step1ComposeCoordinator(QtCore.QObject):
         # a tile from being announced once per channel that lands.
         self._issued = generation
         self._emitted.clear()
+        # THE MISSING SET BELONGS TO THE FRAME, not to the last frame that
+        # had one. It is emptied here and filled again as this frame's tiles
+        # publish, so a channel that has since got a window, or left the
+        # draft, stops being named. Emptying it announces nothing by itself:
+        # the announcement follows the first tile, and a set that comes back
+        # the same is not a change.
+        self._missing.clear()
         for request in self._requests(level, tiles, channels, generation):
             stack.scheduler.request(
                 request,
@@ -486,12 +495,30 @@ class Step1ComposeCoordinator(QtCore.QObject):
         return True
 
     def _note_missing(self, channels):
-        """Fold one tile's missing windows into the generation's, ask for the
-        seeds not yet asked for, and announce the set when it changes."""
+        """MERGE one tile's missing windows into the frame's.
+
+        One frame is composed tile by tile, and each tile answers for itself,
+        so this only ever adds. Emptying the set is a different act, with a
+        different method, because merging nothing into `{"CD8"}` leaves
+        `{"CD8"}` -- which is how a notice outlived the frame that made it.
+        """
         before = set(self._missing)
         self._missing.update(str(channel) for channel in channels or ())
         for channel in sorted(self._missing - before):
             self._request_seed(channel)
+        self._announce_missing()
+
+    def _clear_missing(self):
+        """This frame has no missing windows. Say so."""
+        self._missing.clear()
+        self._announce_missing()
+
+    def _announce_missing(self):
+        """Publish the frame's missing set when it is not what was published.
+
+        The empty list is an announcement like any other: it is what takes a
+        stale notice down.
+        """
         current = tuple(sorted(self._missing))
         if current != self._announced_missing:
             self._announced_missing = current

@@ -201,6 +201,19 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 合成键 = 参与的底层键集合 + 模式（overlay/fusion）+ 勾选集合 + 各通道权重 + 组与组权重 + nucleus 权重 + 各通道 Intensity 参数 + 颜色。
 - **世代号**：旧世代的迟到结果一律拒收，不上屏。
 
+**2026-09-17 审核补（C.2 的硬要求）**
+- **合成键含完整底层身份**：dataset_path + fingerprint + stage + corrected_artifact + channel +
+  grid_version + tile_size + level + tx + ty（`tile_identity()`），换数据集/换校正产物/换 ROI 不得命中旧 RGBA。
+- **合成缓存按字节有界**：复用 `viewer/caches.py` 的 `LRUByteCache`，暴露 `cache_stats()`（bytes/items/evictions）；
+  淘汰只动合成缓存，底层瓦片缓存不受影响；被淘汰的合成瓦片可从底层缓存重算且**不增读盘**。
+- **合成不在 GUI 线程**：缓存命中与异步到达统一走 compose worker（默认 `ThreadPoolExecutor`，可注入）；
+  GUI 线程只做规划、查合成缓存、发布 RGBA；worker 结果经 queued signal 回到 GUI 线程**再查一次世代**；
+  `_compose_cache`/`_emitted`/`_inflight`/`_missing` 仅在 GUI 线程改。
+- **缺窗口触发共享求窗**：注入 seed port（`request_mapping_seed`），同一缺失窗口**跨世代只求一次**；
+  窗口到达由宿主调用 `window_arrived(channel)` → 新世代 → 同一 draft 重合成。
+- **missing 绑定世代**：`invalidate()` 清空 missing 与已播报值；每个世代播报自己的 missing，
+  包含**空列表**以清除旧提示；新来源缺同名通道会再次播报。
+
 ### C.3 门
 1. **手动窗口下**：新 viewer 合成结果与 `overlay_rgb_u8` / `fuse_channels` 同输入逐像素一致。覆盖：权重 0.0（丢弃）、权重 1.0、同色两通道叠加、异质组权重、构造使组间 max 与 sum 结果不同的场景、某通道瓦片缺失。
 2. **自动窗口下**：**不设新旧逐像素相等的硬门**。验收 (a) 全局一致性（同层同源跨视口显示值一致；求窗次数符合 B.6 门 4）；(b) 公式符合性（以全局窗为输入，合成结果与现有公式逐像素一致）。
@@ -229,6 +242,11 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 零权通道改为乘零参与映射 → 门 8 的调用测试红
 - 首次勾选给 0.0 而非 1.0 / 重勾选时用默认值覆盖已存权重 / 点击名称顺带改勾选 → 门 7 对应子项红
 - 零权组 / 零权 nucleus 仍被映射 → C.1.1 对应门红
+- 合成键去掉来源身份 → 新来源命中旧 RGBA 的门红
+- 合成缓存改回无界 dict → 有界/淘汰门红
+- 合成改回 GUI 线程内联 → 线程门红
+- 缺窗口每帧重复求窗 → 只求一次门红
+- `invalidate()` 不清 missing → missing 随世代门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

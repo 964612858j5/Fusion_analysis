@@ -27,6 +27,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from ..viewer import step1_source as sources
+from ..viewer.tile_types import SourceIdentity
 
 #: Tile edge, in level-0 pixels. The same value Step0's stack uses.
 TILE_SIZE = 512
@@ -57,9 +58,26 @@ class Step1TileProvider:
 
     # ── the wrapped provider's own answers ────────────────────────────
     def __getattr__(self, name):
-        # Geometry and identity are the slide's, not this wrapper's. Only the
-        # reads below are Step1's business.
+        # Geometry is the slide's, not this wrapper's. Only the identity and
+        # the reads below are Step1's business.
         return getattr(self._raw, name)
+
+    def source_identity(self):
+        """WHAT THESE PIXELS MEAN, which is more than which file they are in.
+
+        The caches key on this. Delegating it to the raw provider would give
+        a channel whose decision has become `tophat`, or one whose product
+        was regenerated, the identity its raw tiles already have -- and the
+        old tile would be served for the new question. The source table's
+        token carries the region, the decisions, each product's own identity
+        and the handoff revision, so any of those moving retires every key.
+        """
+        base = self._raw.source_identity()
+        return SourceIdentity(
+            dataset_path=base.dataset_path,
+            dataset_fingerprint=base.dataset_fingerprint,
+            stage="step1",
+            corrected_artifact=self._table.identity_token())
 
     @property
     def source_table(self):
@@ -70,20 +88,31 @@ class Step1TileProvider:
 
     # ── the reads ─────────────────────────────────────────────────────
     def _level_rect(self, tile):
-        """A tile address as a rectangle in LEVEL-0 pixels, plus its stride."""
-        stride = int(round(self._raw.level_downsample(tile.level)))
-        size = tile.grid.tile_size
-        y0 = tile.ty * size * stride
-        x0 = tile.tx * size * stride
-        h0, w0 = self._raw.level_shape(0)
-        y1 = min(y0 + size * stride, h0)
-        x1 = min(x0 + size * stride, w0)
-        return (y0, y1, x0, x1), max(1, stride)
+        """A tile address as a rectangle in ITS OWN level's pixels.
 
-    def _read_raw_region(self, channel, rect):
-        y0, y1, x0, x1 = rect
-        values, _offset = self._raw.read_region(channel, 0, y0, y1, x0, x1)
-        return np.asarray(values, np.float32)
+        Level-k coordinates, not level-0 ones: a raw channel is then read
+        from the pyramid at that level instead of being averaged down from
+        level 0 (`viewer.step1_source.read_tile`).
+        """
+        stride = max(1, int(round(self._raw.level_downsample(tile.level))))
+        size = tile.grid.tile_size
+        y0 = tile.ty * size
+        x0 = tile.tx * size
+        h, w = self._raw.level_shape(tile.level)
+        y1 = min(y0 + size, h)
+        x1 = min(x0 + size, w)
+        return (y0, y1, x0, x1), stride
+
+    def _raw_reader(self, level):
+        """`read_raw` for one level: the pyramid's own pixels, not level 0."""
+
+        def _read(channel, rect):
+            y0, y1, x0, x1 = rect
+            values, _offset = self._raw.read_region(channel, level,
+                                                    y0, y1, x0, x1)
+            return np.asarray(values, np.float32)
+
+        return _read
 
     def read_tile(self, channel, tile):
         """`(array, io_ms)` -- the provider's contract, Step1's pixels.
@@ -97,7 +126,7 @@ class Step1TileProvider:
         rect, stride = self._level_rect(tile)
         values, valid = sources.read_tile(
             self._table, channel, rect, stride=stride,
-            read_raw=self._read_raw_region)
+            read_raw=self._raw_reader(tile.level))
         io_ms = (time.perf_counter() - start) * 1000.0
         if values is None:
             size = tile.grid.tile_size
@@ -107,12 +136,15 @@ class Step1TileProvider:
         return out, io_ms
 
     def read_region(self, channel, level, y0, y1, x0, x1):
-        """The same rule, for the callers that read a rectangle directly."""
+        """The same rule, for the callers that read a rectangle directly.
+
+        `y0..x1` are LEVEL-k coordinates, as the wrapped provider's own
+        `read_region` takes them.
+        """
         stride = max(1, int(round(self._raw.level_downsample(level))))
-        rect = (y0 * stride, y1 * stride, x0 * stride, x1 * stride)
         values, valid = sources.read_tile(
-            self._table, channel, rect, stride=stride,
-            read_raw=self._read_raw_region)
+            self._table, channel, (y0, y1, x0, x1), stride=stride,
+            read_raw=self._raw_reader(level))
         if values is None:
             return np.full((max(0, y1 - y0), max(0, x1 - x0)), np.nan,
                            np.float32), (y0, x0)
@@ -173,7 +205,7 @@ class Step1ViewerHost(QtWidgets.QWidget):
     # ── build / teardown ──────────────────────────────────────────────
     def open(self, dataset_path, channel, *, decisions=None,
              corrected_zarr_path="", roi_name="", roi_bbox=None,
-             viewport_l0=None):
+             handoff_revision="", viewport_l0=None):
         """Show `channel` of `dataset_path`, building the stack if needed."""
         dataset_path = str(dataset_path or "")
         if not dataset_path:
@@ -183,7 +215,8 @@ class Step1ViewerHost(QtWidgets.QWidget):
         if self._stack is None:
             self._table = sources.Step1SourceTable(
                 decisions=decisions, corrected_zarr_path=corrected_zarr_path,
-                roi_name=roi_name, roi_bbox=roi_bbox)
+                roi_name=roi_name, roi_bbox=roi_bbox,
+                handoff_revision=handoff_revision)
             self._stack = self._stack_factory(dataset_path, channel,
                                               self._table, self)
             self._dataset_path = dataset_path

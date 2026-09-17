@@ -161,8 +161,66 @@ def test_the_provider_answers_the_slide_s_own_geometry():
 
     assert provider.num_levels == 2
     assert provider.level_shape(0) == (SLIDE, SLIDE)
-    assert provider.source_identity() == raw.source_identity()
     assert provider.channel_names == list(_RawPyramid.CHANNELS)
+    # The IDENTITY is not the slide's alone -- see the identity gates below.
+    identity = provider.source_identity()
+    assert identity.dataset_path == raw.source_identity().dataset_path
+    assert identity.stage == "step1"
+
+
+# ── 1b. the cache identity carries Step1's own answers ────────────────
+
+def test_the_identity_moves_when_a_decision_does():
+    """Same slide, same channel, different pixels: different key."""
+    raw = _RawPyramid()
+    plain = Step1TileProvider(raw, _table()).source_identity()
+    corrected = Step1TileProvider(
+        raw, _table({"CD3": "tophat"},
+                    {"CD3": _Corrected("CD3")})).source_identity()
+
+    assert plain != corrected
+    assert plain.corrected_artifact != corrected.corrected_artifact
+
+
+def test_the_identity_moves_when_the_handoff_is_republished():
+    raw = _RawPyramid()
+
+    def _open(_path, channel, _roi):
+        return _Corrected("CD3")
+
+    first = Step1TileProvider(raw, Step1SourceTable(
+        {"CD3": "tophat"}, "/tmp/c.zarr", "ROI_1", _open, roi_bbox=ROI,
+        handoff_revision="rev-1")).source_identity()
+    second = Step1TileProvider(raw, Step1SourceTable(
+        {"CD3": "tophat"}, "/tmp/c.zarr", "ROI_1", _open, roi_bbox=ROI,
+        handoff_revision="rev-2")).source_identity()
+
+    assert first != second
+
+
+def test_a_republished_handoff_cannot_hit_the_old_cache(app):
+    """The key a cached tile was stored under is no longer asked for."""
+    from block01.viewer.caches import LRUByteCache
+    from block01.viewer.tile_types import RawKey
+
+    raw = _RawPyramid()
+    old = Step1TileProvider(raw, _table(roi_bbox=ROI))
+    cache = LRUByteCache(4 * 1024 * 1024)
+    tile = _tile(0, 2, 2)
+    values, _io = old.read_tile("CD3", tile)
+    key = RawKey(source=old.source_identity(), channel="CD3", tile=tile)
+    cache.put(key, values)
+
+    def _open(_path, channel, _roi):
+        return None
+
+    new = Step1TileProvider(raw, Step1SourceTable(
+        {}, "/tmp/c.zarr", "ROI_1", _open, roi_bbox=ROI,
+        handoff_revision="rev-2"))
+    new_key = RawKey(source=new.source_identity(), channel="CD3", tile=tile)
+
+    assert new_key != key
+    assert cache.get(new_key) is None, "the old tile was served for a new handoff"
 
 
 def test_a_tile_outside_the_region_is_absent_not_black():
@@ -382,5 +440,156 @@ def test_a_dataset_switch_tears_the_old_stack_down_first(app):
 
         assert host.stack is not first, "the old stack was kept"
         assert host.dataset_path == "/x/other.ome.tif"
+    finally:
+        _close(host)
+
+
+# ── 3. the pyramid is read at its own level ───────────────────────────
+
+def test_a_coarse_tile_reads_the_pyramid_at_that_level():
+    """Reading level 0 and averaging here would cost stride^2 the I/O."""
+    raw = _RawPyramid()
+    provider = Step1TileProvider(raw, _table(roi_bbox=None))
+
+    provider.read_tile("CD3", _tile(1, 0, 0))
+
+    assert raw.reads, "the tile was not read at all"
+    levels = {level for _ch, level, *_rest in raw.reads}
+    assert levels == {1}, f"a level-1 tile read levels {levels}"
+    for _ch, _level, y0, y1, x0, x1 in raw.reads:
+        assert (y1 - y0) <= 512 and (x1 - x0) <= 512, (
+            "a level-1 tile read a level-0-sized rectangle")
+
+
+def test_a_level_0_tile_still_reads_level_0():
+    raw = _RawPyramid()
+    provider = Step1TileProvider(raw, _table(roi_bbox=None))
+
+    provider.read_tile("CD3", _tile(0, 1, 1))
+
+    assert {level for _ch, level, *_rest in raw.reads} == {0}
+
+
+def test_a_coarse_tile_of_a_corrected_channel_stays_within_its_budget():
+    """The product has no pyramid, so the mean is computed -- in chunks."""
+    class _Huge:
+        LIMIT = 4 * 1024 * 1024
+
+        def __init__(self):
+            self.attrs = {"roi_bbox_fullres": [0, SLIDE, 0, SLIDE]}
+            self.shape = (SLIDE, SLIDE)
+            self.dtype = np.float32
+            self.largest = 0
+
+        def __getitem__(self, key):
+            ys, xs = key
+            size = (ys.stop - ys.start) * (xs.stop - xs.start)
+            self.largest = max(self.largest, size)
+            assert size <= self.LIMIT, f"unbounded read of {size} pixels"
+            return np.full((ys.stop - ys.start, xs.stop - xs.start), 5.0,
+                           np.float32)
+
+    product = _Huge()
+    raw = _RawPyramid()
+    provider = Step1TileProvider(
+        raw, _table({"CD3": "tophat"}, {"CD3": product},
+                    roi_bbox=(0, SLIDE, 0, SLIDE)))
+
+    values, _io = provider.read_tile("CD3", _tile(1, 0, 0))
+
+    assert np.allclose(values[~np.isnan(values)], 5.0)
+    assert product.largest <= _Huge.LIMIT
+
+
+# ── 4. the view: absent is not black ──────────────────────────────────
+
+def _pooled_item(host, tile, values):
+    """Put a tile into the REAL pool and return its `ImageItem`."""
+    controller = host.stack.controller
+    pooled = controller._prepare_raw(values)
+    ds_y, ds_x = controller._downsample_yx(tile.level)
+    from block01.viewer.explore_view import ExploreView
+    from block01.viewer.tile_types import RawKey
+
+    rect = ExploreView.world_rect(
+        tile.ty * tile.grid.tile_size, tile.tx * tile.grid.tile_size,
+        pooled.shape[0], pooled.shape[1], ds_y, ds_x)
+    key = RawKey(source=host.stack.provider.source_identity(),
+                 channel=host.channel, tile=tile)
+    entry = controller._raw_pool.put(tile.level, tile.tx, tile.ty, rect,
+                                     pooled, key)
+    entry.item.render()
+    return entry.item
+
+
+def _rgba(image, row, col):
+    from PyQt5.QtGui import QColor
+    colour = QColor.fromRgba(image.pixel(col, row))
+    return (colour.red(), colour.green(), colour.blue(), colour.alpha())
+
+
+def test_the_region_s_outside_is_transparent_in_the_pooled_item(app):
+    """The REAL pool's own `ImageItem`, not a screenshot.
+
+    A window grab would say (0, 0, 0, 255) for a transparent pixel, because
+    the black ViewBox behind it shows through -- the item's own `qimage` is
+    where absence is visible.
+    """
+    host, raw, _table_ = _host(app, channel="CD3")
+    try:
+        outside, _io = host.stack.provider.read_tile("CD3", _tile(0, 0, 0))
+        assert np.isnan(outside).all()
+        item = _pooled_item(host, _tile(0, 0, 0), outside)
+
+        image = item.qimage
+        assert image is not None, "the pooled item never rendered"
+        assert _rgba(image, 0, 0)[3] == 0, (
+            "the outside of the region was painted opaque")
+        assert _rgba(image, 300, 300)[3] == 0
+    finally:
+        _close(host)
+
+
+def test_the_region_s_inside_is_opaque_in_the_pooled_item(app):
+    host, raw, _table_ = _host(app, channel="CD3")
+    try:
+        inside, _io = host.stack.provider.read_tile("CD3", _tile(0, 2, 2))
+        assert not np.isnan(inside).any()
+        item = _pooled_item(host, _tile(0, 2, 2), inside)
+
+        assert _rgba(item.qimage, 10, 10)[3] == 255, (
+            "the ROI's own pixels were painted transparent")
+    finally:
+        _close(host)
+
+
+def test_a_boundary_tile_shows_the_colour_underneath_it_outside_the_region(app):
+    """Composited for real: magenta underneath, the tile on top.
+
+    Outside the region the magenta must come through; inside, the channel's
+    own pixels must cover it.
+    """
+    from PyQt5 import QtCore, QtGui
+
+    host, raw, _table_ = _host(app, channel="CD3")
+    try:
+        tile = _tile(1, 0, 0)          # the ROI's corner sits inside it
+        values, _io = host.stack.provider.read_tile("CD3", tile)
+        item = _pooled_item(host, tile, values)
+        image = item.qimage
+        assert image is not None
+
+        canvas = QtGui.QImage(image.size(), QtGui.QImage.Format_ARGB32)
+        canvas.fill(QtGui.QColor(255, 0, 255))     # magenta
+        painter = QtGui.QPainter(canvas)
+        painter.drawImage(QtCore.QPoint(0, 0), image)
+        painter.end()
+
+        assert _rgba(canvas, 2, 2) == (255, 0, 255, 255), (
+            "the outside of the region covered the colour beneath it")
+        deep = _rgba(canvas, 200, 200)
+        assert deep != (255, 0, 255, 255), (
+            "the ROI's own pixels did not cover the colour beneath them")
+        assert deep[3] == 255
     finally:
         _close(host)

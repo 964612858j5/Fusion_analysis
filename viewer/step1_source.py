@@ -25,18 +25,35 @@ Step0 happens to be previewing:
 This module is the rule and the reader, with no Qt in it: the tiles it
 returns are `(values, valid)` pairs, and the host turns them into pixels.
 
-COARSE LEVELS are computed from the corrected pixels themselves -- the
-product has no pyramid of its own, and the raw pyramid holds different
-numbers. The mean is taken on a grid anchored at the LEVEL-0 ORIGIN, so a
-tile's blocks do not shift with the tile, and it is normalised by the number
-of VALID samples in the block: an ROI edge must not be darkened by averaging
-in the emptiness outside it.
+COARSE LEVELS, and the two different answers they get:
+
+* a RAW channel reads the OME's own pyramid at that level. Reading level 0
+  and averaging it here would multiply the I/O by the square of the
+  downsample for pixels the file already has -- the opposite of what a
+  whole-slide viewer is for. Only the ROI is converted into level-k
+  coordinates, so the region still decides what may be drawn;
+* a CORRECTED channel has no pyramid -- the product is one ROI-shaped array,
+  and the raw pyramid holds different numbers -- so the mean is computed
+  here, IN BOUNDED CHUNKS. A whole-slide overview covers billions of level-0
+  pixels; materialising that rectangle to average it would be gigabytes, so
+  the reduction walks the region in slabs whose size is fixed
+  (`MAX_REDUCTION_ELEMENTS`) and keeps only the running sums.
+
+Both share the grid rule: blocks are anchored at the LEVEL-0 ORIGIN, so a
+tile's blocks do not shift with the tile, and each block is normalised by its
+number of VALID samples -- an ROI edge must not be darkened by averaging in
+the emptiness outside it.
 """
 
 import numpy as np
 
 #: The two decisions that mean "a corrected product was published".
 CORRECTED_DECISIONS = ("tophat", "cucim")
+
+#: The most level-0 pixels a corrected reduction may hold at once. The
+#: running sums are per OUTPUT block, so the peak is this plus the output --
+#: never the whole viewport.
+MAX_REDUCTION_ELEMENTS = 4 * 1024 * 1024
 
 #: What `source_of` answers.
 SOURCE_CORRECTED = "corrected"
@@ -107,7 +124,7 @@ class Step1SourceTable:
     """
 
     def __init__(self, decisions=None, corrected_zarr_path="", roi_name="",
-                 open_corrected=None, roi_bbox=None):
+                 open_corrected=None, roi_bbox=None, handoff_revision=""):
         # THE ANALYSIS REGION, in its own right. It is not read off a
         # corrected product: a project whose channels are all `original` has
         # an ROI too, and "outside the ROI there are no pixels" is a rule
@@ -115,6 +132,10 @@ class Step1SourceTable:
         # slide -- a full-WSI project, where every tile is inside.
         self._roi_bbox = (tuple(int(v) for v in roi_bbox)
                           if roi_bbox and len(roi_bbox) == 4 else None)
+        #: Whatever the handoff calls this version of itself. It is part of
+        #: the cache identity: republishing a handoff can change the pixels
+        #: without changing a path.
+        self._handoff_revision = str(handoff_revision or "")
         self._decisions = {str(ch): str(m or "").strip().lower()
                            for ch, m in dict(decisions or {}).items()}
         self._path = str(corrected_zarr_path or "")
@@ -126,17 +147,59 @@ class Step1SourceTable:
         self._regions = {}
         self._missing = {}
 
+    # ── identity ──────────────────────────────────────────────────────
+    def identity_token(self):
+        """What makes a Step1 tile's meaning, beyond the slide's own path.
+
+        A cache keyed on the dataset alone would hand a raw tile back for a
+        channel whose decision has since become `tophat`, or an old corrected
+        tile after the product was regenerated -- same path, same channel,
+        different pixels. The token below moves whenever any of that does, so
+        the keys move with it.
+        """
+        parts = [f"roi={self._roi_bbox}", f"handoff={self._handoff_revision}"]
+        for channel in sorted(self._decisions):
+            decision = self._decisions[channel]
+            parts.append(f"{channel}={decision}")
+            if decision in CORRECTED_DECISIONS:
+                parts.append(f"{channel}#{self._product_token(channel)}")
+        return "|".join(parts)
+
+    def _product_token(self, channel):
+        """A corrected product's own identity: shape, dtype and its attrs."""
+        if self.source_of(channel) != SOURCE_CORRECTED:
+            return "absent"
+        array = self._regions[channel].array
+        attrs = dict(getattr(array, "attrs", {}) or {})
+        stamp = attrs.get("source_identity") or attrs.get("written_at") or ""
+        return (f"{tuple(getattr(array, 'shape', ()))}"
+                f":{getattr(array, 'dtype', '')}"
+                f":{attrs.get('correction_method', '')}"
+                f":{attrs.get('roi_name', '')}:{stamp}")
+
     # ── the region ────────────────────────────────────────────────────
     def roi_bbox(self):
         """The analysis region in level-0 pixels, or None for a whole slide."""
         return self._roi_bbox
 
-    def clip_to_roi(self, rect):
-        """`rect` cut down to the ROI, or None when it misses it entirely."""
+    def clip_to_roi(self, rect, stride=1):
+        """`rect` cut down to the ROI, or None when it misses it entirely.
+
+        `stride` is the level's downsample: with it, `rect` is read as
+        LEVEL-k coordinates and the region is converted into them, so a raw
+        channel can be clipped without ever leaving its own pyramid level.
+        The ROI's edges are taken OUTWARD (floor the start, ceil the end) so
+        a pixel that is partly inside the region is kept rather than dropped.
+        """
         y0, y1, x0, x1 = (int(v) for v in rect)
         if self._roi_bbox is None:
             return (y0, y1, x0, x1)
+        stride = max(1, int(stride))
         by0, by1, bx0, bx1 = self._roi_bbox
+        if stride > 1:
+            by0, bx0 = by0 // stride, bx0 // stride
+            by1 = -(-by1 // stride)
+            bx1 = -(-bx1 // stride)
         cy0, cy1 = max(y0, by0), min(y1, by1)
         cx0, cx1 = max(x0, bx0), min(x1, bx1)
         if cy1 <= cy0 or cx1 <= cx0:
@@ -219,44 +282,100 @@ def box_downsample_valid(values, valid, stride, phase=(0, 0)):
     return out, out_valid
 
 
-def read_tile(table, channel, rect, stride=1, read_raw=None):
-    """One tile of `channel`, as `(values, valid)` at `stride`.
+def reduce_corrected(region, rect, stride, max_elements=MAX_REDUCTION_ELEMENTS):
+    """Mean of a corrected product over `rect`, in BOUNDED chunks.
 
-    `rect` is `(y0, y1, x0, x1)` in level-0 pixels. `read_raw(channel, rect)`
-    supplies raw pixels for a channel whose decision is `original`; it is
-    never called for a corrected or a refused one.
+    `rect` is in level-0 pixels and may be the whole slide: the overview asks
+    for exactly that. Materialising it would be gigabytes, so the region's
+    own overlap is walked in slabs of at most `max_elements` level-0 pixels
+    and only the per-output-block sums and counts are kept. The blocks are
+    anchored at the level-0 origin, so the answer does not depend on how the
+    walk was cut.
+
+    Returns `(mean, valid)` at `stride`, shaped like the rectangle's own
+    coarse grid.
+    """
+    y0, y1, x0, x1 = (int(v) for v in rect)
+    stride = max(1, int(stride))
+    py, px = y0 % stride, x0 % stride
+    out_h = -(-(py + max(0, y1 - y0)) // stride)
+    out_w = -(-(px + max(0, x1 - x0)) // stride)
+    sums = np.zeros((out_h, out_w), np.float64)
+    counts = np.zeros((out_h, out_w), np.int64)
+    if region is not None and out_h and out_w:
+        by0, by1, bx0, bx1 = region.bbox
+        oy0, oy1 = max(y0, by0), min(y1, by1)
+        ox0, ox1 = max(x0, bx0), min(x1, bx1)
+        if oy1 > oy0 and ox1 > ox0:
+            budget = max(1, int(max_elements))
+            # WHOLE BLOCKS IN BOTH AXES, and never more than the budget. A
+            # single row of blocks across a whole slide is itself gigabytes
+            # (256 x 40000 at an overview stride), so the walk is a grid of
+            # slabs, not a stack of full-width strips.
+            band = max(stride, int(np.sqrt(budget)) // stride * stride)
+            rows = max(stride, (budget // band) // stride * stride)
+            cursor_y = oy0
+            while cursor_y < oy1:
+                stop_y = min(oy1, cursor_y + rows)
+                cursor_x = ox0
+                while cursor_x < ox1:
+                    stop_x = min(ox1, cursor_x + band)
+                    slab, placed = region.read(cursor_y, stop_y,
+                                               cursor_x, stop_x)
+                    cursor_x = stop_x
+                    if slab is None:
+                        continue
+                    sy0, sy1, sx0, sx1 = placed
+                    block_y = (np.arange(sy0, sy1) - y0 + py) // stride
+                    block_x = (np.arange(sx0, sx1) - x0 + px) // stride
+                    flat = (block_y[:, None] * out_w
+                            + block_x[None, :]).ravel()
+                    np.add.at(sums.ravel(), flat,
+                              slab.ravel().astype(np.float64))
+                    np.add.at(counts.ravel(), flat, 1)
+                cursor_y = stop_y
+    valid = counts > 0
+    mean = np.where(valid, sums / np.maximum(counts, 1), 0.0).astype(np.float32)
+    return mean, valid
+
+
+def read_tile(table, channel, rect, stride=1, read_raw=None,
+              max_elements=MAX_REDUCTION_ELEMENTS):
+    """One tile of `channel`, as `(values, valid)`.
+
+    `rect` is in LEVEL-k coordinates when `stride` is that level's
+    downsample: a RAW channel is read from the pyramid at that very level --
+    `read_raw(channel, rect)` is handed level-k coordinates -- and a
+    CORRECTED one is reduced from its product, which has only level 0.
 
     A corrected channel is drawn INSIDE ITS ROI ONLY: outside, `valid` is
     False and the values are 0 -- which is not the same as black, and the
     host must not paint it.
     """
     y0, y1, x0, x1 = (int(v) for v in rect)
-    height, width = max(0, y1 - y0), max(0, x1 - x0)
+    stride = max(1, int(stride))
     source = table.source_of(channel)
     if source == SOURCE_MISSING:
         return None, None
+
     if source == SOURCE_RAW:
-        # THE SAME REGION RULE AS A CORRECTED CHANNEL. Outside the ROI there
-        # are no pixels, so the raw reader is not called at all; across the
-        # boundary it is called with the CLIPPED rectangle, and what comes
-        # back is placed where it belongs in the tile.
+        # THE PYRAMID'S OWN LEVEL. Reading level 0 and averaging it here
+        # would cost stride^2 times the I/O for pixels the file already
+        # holds. Only the region is converted into this level's
+        # coordinates.
+        height, width = max(0, y1 - y0), max(0, x1 - x0)
         values = np.zeros((height, width), np.float32)
         valid = np.zeros((height, width), bool)
-        clipped = table.clip_to_roi((y0, y1, x0, x1))
+        clipped = table.clip_to_roi((y0, y1, x0, x1), stride=stride)
         if clipped is not None:
             cy0, cy1, cx0, cx1 = clipped
             pixels = np.asarray(read_raw(channel, clipped), np.float32)
             values[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = pixels
             valid[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = True
-        return box_downsample_valid(values, valid, stride, (y0, x0))
+        return values, valid
 
-    values = np.zeros((height, width), np.float32)
-    valid = np.zeros((height, width), bool)
-    region = table.region(channel)
-    if region is not None:
-        pixels, placed = region.read(y0, y1, x0, x1)
-        if pixels is not None:
-            oy0, oy1, ox0, ox1 = placed
-            values[oy0 - y0:oy1 - y0, ox0 - x0:ox1 - x0] = pixels
-            valid[oy0 - y0:oy1 - y0, ox0 - x0:ox1 - x0] = True
-    return box_downsample_valid(values, valid, stride, (y0, x0))
+    # CORRECTED: one ROI-shaped array with no pyramid, reduced in bounded
+    # chunks from the level-0 rectangle this tile covers.
+    level0 = (y0 * stride, y1 * stride, x0 * stride, x1 * stride)
+    return reduce_corrected(table.region(channel), level0, stride,
+                            max_elements=max_elements)

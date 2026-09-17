@@ -212,18 +212,28 @@ def test_a_raw_tile_across_the_boundary_reads_the_clipped_rectangle():
     assert not valid[:, :10].any()
 
 
-def test_a_coarse_raw_tile_across_the_boundary_averages_the_inside_only():
+def test_a_coarse_raw_tile_reads_the_pyramid_at_that_level():
+    """The OME already holds the coarse pixels: read THEM.
+
+    Reading level 0 and averaging here would cost stride^2 the I/O for
+    numbers the file has. What is converted into level-k coordinates is the
+    REGION, so the ROI still decides what may be drawn.
+    """
     pixels = np.full((200, 200), 100.0, np.float32)
-    table = _table({"CD3": "original"}, roi_bbox=(102, 142, 102, 142))
+    table = _table({"CD3": "original"}, roi_bbox=(400, 568, 400, 568))
     raw = _RawReader(pixels)
 
+    # A level-2 tile (stride 4) covering level-2 pixels 96..112.
     values, valid = read_tile(table, "CD3", (96, 112, 96, 112), stride=4,
                               read_raw=raw)
 
-    assert valid[1, 1]
-    assert values[1, 1] == pytest.approx(100.0), (
-        "the ROI edge was averaged with the emptiness outside it")
-    assert not valid[0, 0]
+    assert len(raw.calls) == 1
+    _channel, asked = raw.calls[0]
+    assert asked == (100, 112, 100, 112), (
+        f"the raw pyramid was not asked at this level: {asked}")
+    assert values.shape == (16, 16), "the raw tile was downsampled again"
+    assert not valid[:4, :].any(), "pixels appeared outside the region"
+    assert valid[4:, 4:].all()
 
 
 def test_a_project_with_no_roi_draws_the_whole_slide_raw():
@@ -248,8 +258,10 @@ def test_the_raw_reader_is_never_asked_for_a_corrected_channel():
 # ── 3. coarse levels ──────────────────────────────────────────────────
 
 def test_a_coarse_tile_is_the_mean_of_the_corrected_pixels():
+    """The product has no pyramid, so the mean is computed here."""
     table, pixels = _corrected_table()
-    values, valid = read_tile(table, "CD3", (100, 108, 100, 108), stride=4)
+    # Level-2 coordinates: 25..27 covers level-0 100..108.
+    values, valid = read_tile(table, "CD3", (25, 27, 25, 27), stride=4)
 
     assert values.shape == (2, 2) and valid.all()
     expected = pixels[0:8, 0:8].reshape(2, 4, 2, 4).mean(axis=(1, 3))
@@ -259,8 +271,8 @@ def test_a_coarse_tile_is_the_mean_of_the_corrected_pixels():
 def test_the_coarse_grid_is_anchored_at_the_level_0_origin():
     """A block may not move with the tile it is read in."""
     table, pixels = _corrected_table()
-    whole, _ = read_tile(table, "CD3", (100, 116, 100, 116), stride=4)
-    right, _ = read_tile(table, "CD3", (100, 116, 108, 116), stride=4)
+    whole, _ = read_tile(table, "CD3", (25, 29, 25, 29), stride=4)
+    right, _ = read_tile(table, "CD3", (25, 29, 27, 29), stride=4)
 
     assert np.allclose(right, whole[:, 2:]), "the coarse grid shifted"
 
@@ -277,12 +289,12 @@ def test_a_world_block_reads_the_same_from_any_tile_that_covers_it():
     table = _table({"CD3": "tophat"}, {"CD3": _Array(roi, values)})
 
     # The world block 108..112 x 108..112 is whole inside both tiles.
-    a, _ = read_tile(table, "CD3", (102, 134, 102, 134), stride=4)
-    b, _ = read_tile(table, "CD3", (98, 130, 98, 130), stride=4)
+    # Level-2 tiles whose level-0 origins are 104 and 96 -- both inside the
+    # ROI, and the world block 108..112 is whole in each.
+    a, _ = read_tile(table, "CD3", (26, 34, 26, 34), stride=4)
+    b, _ = read_tile(table, "CD3", (24, 32, 24, 32), stride=4)
 
-    # Where that block sits in each tile's output: blocks start at the
-    # multiple of 4 at or below the tile's own origin.
-    ia = (108 - 100) // 4, (108 - 100) // 4
+    ia = (108 - 104) // 4, (108 - 104) // 4
     ib = (108 - 96) // 4, (108 - 96) // 4
     expected = values[8:12, 8:12].mean()
 
@@ -301,7 +313,8 @@ def test_the_roi_edge_is_not_darkened_by_the_emptiness_outside_it():
     roi = (102, 142, 102, 142)
     table = _table({"CD3": "tophat"}, {"CD3": _Array(roi, pixels)})
 
-    values, valid = read_tile(table, "CD3", (96, 112, 96, 112), stride=4)
+    # Level-2 coordinates 24..28 cover level-0 96..112.
+    values, valid = read_tile(table, "CD3", (24, 28, 24, 28), stride=4)
 
     edge = values[1, 1]          # the block at 100..104, half inside the ROI
     assert valid[1, 1]
@@ -314,3 +327,103 @@ def test_a_block_with_no_valid_sample_is_not_drawn():
     mean, valid = box_downsample_valid(np.zeros((4, 4), np.float32),
                                        np.zeros((4, 4), bool), 4)
     assert mean.shape == (1, 1) and not valid.any()
+
+
+# ── 4. identity: what makes a Step1 tile's meaning ────────────────────
+
+def test_the_token_moves_when_a_decision_does():
+    """`original` -> `tophat` is different pixels under the same path."""
+    array = _Array(ROI)
+    before = _table({"CD3": "original"}, {"CD3": array}).identity_token()
+    after = _table({"CD3": "tophat"}, {"CD3": array}).identity_token()
+    assert before != after
+
+
+def test_the_token_moves_when_the_product_is_regenerated():
+    old = _Array(ROI)
+    old.attrs = dict(old.attrs, written_at="2026-09-16T10:00:00")
+    new = _Array(ROI)
+    new.attrs = dict(new.attrs, written_at="2026-09-17T10:00:00")
+
+    assert (_table({"CD3": "tophat"}, {"CD3": old}).identity_token()
+            != _table({"CD3": "tophat"}, {"CD3": new}).identity_token())
+
+
+def test_the_token_moves_when_the_region_does():
+    array = _Array(ROI)
+    a = _table({"CD3": "tophat"}, {"CD3": array}, roi_bbox=ROI)
+    b = _table({"CD3": "tophat"}, {"CD3": array}, roi_bbox=(0, 300, 0, 300))
+    assert a.identity_token() != b.identity_token()
+
+
+def test_the_token_moves_when_the_handoff_is_republished():
+    array = _Array(ROI)
+
+    def _open(_path, channel, _roi):
+        return array
+
+    a = Step1SourceTable({"CD3": "tophat"}, "/tmp/c.zarr", "ROI_1", _open,
+                         roi_bbox=ROI, handoff_revision="rev-1")
+    b = Step1SourceTable({"CD3": "tophat"}, "/tmp/c.zarr", "ROI_1", _open,
+                         roi_bbox=ROI, handoff_revision="rev-2")
+    assert a.identity_token() != b.identity_token()
+
+
+def test_the_token_stands_still_when_nothing_moved():
+    array = _Array(ROI)
+    a = _table({"CD3": "tophat"}, {"CD3": array})
+    b = _table({"CD3": "tophat"}, {"CD3": array})
+    assert a.identity_token() == b.identity_token()
+
+
+# ── 5. bounded memory ─────────────────────────────────────────────────
+
+class _HugeProduct:
+    """A whole-slide-sized corrected product that REFUSES a large read.
+
+    The overview asks for the whole rectangle; an implementation that
+    materialises it would ask this array for billions of pixels at once.
+    """
+
+    LIMIT = 4 * 1024 * 1024
+
+    def __init__(self, bbox, value=42.0):
+        y0, y1, x0, x1 = bbox
+        self.attrs = {"roi_bbox_fullres": list(bbox)}
+        self.shape = (y1 - y0, x1 - x0)
+        self.dtype = np.float32
+        self._value = value
+        self.largest_read = 0
+
+    def __getitem__(self, key):
+        ys, xs = key
+        height = ys.stop - ys.start
+        width = xs.stop - xs.start
+        size = height * width
+        self.largest_read = max(self.largest_read, size)
+        if size > self.LIMIT:
+            raise AssertionError(
+                f"a single read of {size} pixels: the reduction is not bounded")
+        return np.full((height, width), self._value, np.float32)
+
+
+def test_an_overview_of_a_whole_slide_product_stays_within_its_budget():
+    bbox = (0, 60000, 0, 40000)          # 2.4e9 level-0 pixels
+    table = _table({"CD3": "tophat"}, {"CD3": _HugeProduct(bbox)},
+                   roi_bbox=bbox)
+
+    # One overview tile at stride 256: 234 x 156 output pixels.
+    values, valid = read_tile(table, "CD3", (0, 234, 0, 157), stride=256)
+
+    assert valid.any()
+    assert np.allclose(values[valid], 42.0)
+
+
+def test_the_bound_is_honoured_for_a_coarse_tile_too():
+    bbox = (0, 60000, 0, 40000)
+    product = _HugeProduct(bbox)
+    table = _table({"CD3": "tophat"}, {"CD3": product}, roi_bbox=bbox)
+
+    read_tile(table, "CD3", (0, 512, 0, 512), stride=16)
+
+    assert product.largest_read <= _HugeProduct.LIMIT

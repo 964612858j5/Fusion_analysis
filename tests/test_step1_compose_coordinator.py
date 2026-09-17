@@ -700,9 +700,11 @@ def test_the_arriving_window_starts_a_new_generation_and_recomposes(app):
     before = coordinator.generation
     frames.clear()
 
-    # The service answered: the host hands the window over and says so.
-    coordinator._last_spec["mappings"] = {"CD3": WINDOW, "CD8": WINDOW}
-    coordinator.window_arrived("CD8")
+    # The service answered. The HOST builds the whole draft again -- with
+    # the window in it this time -- and hands it over; nothing edits the
+    # frame the coordinator planned last.
+    coordinator.window_arrived(
+        "CD8", spec=_spec(mappings={"CD3": WINDOW, "CD8": WINDOW}))
     host.scheduler.deliver()
     _settle(app, coordinator)
 
@@ -733,6 +735,33 @@ def test_the_missing_set_belongs_to_the_generation(app):
 
     assert named and named[-1] == ["CD8"], (
         "the new dataset's missing window was never announced")
+
+
+# ── 6b. C3.1: the private frame is the coordinator's alone ────────────
+
+def test_only_the_coordinator_names_its_own_last_frame():
+    """C3 ruled that a window arriving must rebuild a WHOLE spec through the
+    public entry. A test that reaches in and edits the frame the coordinator
+    planned proves nothing about that, and this module used to do exactly
+    that, so the rule is checked over every file that could break it -- the
+    compose tests and the production binding and spec -- rather than over
+    whichever module happens to carry the gate."""
+    import pathlib
+
+    forbidden = "_last" + "_spec"          # built, so this line is not a hit
+    here = pathlib.Path(__file__).resolve().parent
+    root = here.parent
+    files = sorted(here.glob("test_step1_*compose*.py"))
+    files += [here / "test_step1_draft_binding.py",
+              root / "ui" / "step1_compose_binding.py",
+              root / "ui" / "step1_draft_spec.py",
+              root / "ui" / "step1_viewer_binding.py"]
+    assert len(files) >= 3, files
+
+    offenders = [str(path) for path in files
+                 if path.exists() and forbidden in path.read_text("utf-8")]
+    assert offenders == [], (
+        f"these reach into the coordinator's private frame: {offenders}")
 
 
 # ── 7. C2.1: the thread the scheduler calls back on ───────────────────

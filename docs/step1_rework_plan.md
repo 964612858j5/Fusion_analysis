@@ -265,6 +265,13 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 旧 session 走 `prepare_restore`/`commit_restore`，显式 0.0、异质组权重、取消再勾选的历史权重均保留。
 - **本块仍不可见**：不实例化、不挂载，接管归 C4。
 
+### C.3.1 私有帧不外借（2026-09-18 审核补）
+- 窗口到达一律走 `window_arrived(channel, spec=...)`，调用方**重建完整 spec**；
+  任何测试或生产代码都不得读写协调器内部的"最后一帧"。
+- 门覆盖 `tests/test_step1_*compose*.py`、`tests/test_step1_draft_binding.py` 与
+  `ui/step1_compose_binding.py`、`ui/step1_draft_spec.py`、`ui/step1_viewer_binding.py`，
+  而不只是写门的那个文件。
+
 ### C.4 切换门（正常应用内，新 viewer 接管 Overlay/Fusion 之后的真机验收）
 - Step0 → Step1 **只要求坐标与视口位置连续**，不要求像素相同：两步的像素各自遵守本步规则（Step0 一次显示一个 marker、可能在看某预览方法；Step1 遵最终决断并做多通道合成）
 - ROI 边界来回平移，ROI 内亮度不随视口变化
@@ -302,6 +309,7 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 勾选读当前作用域而非 step1 → 作用域门红
 - 无窗口通道猜一个窗口 → 缺窗口门红
 - overlay 权重忽略组权重 → 组权重门红
+- 任一受覆盖文件改回直接改写协调器私有帧 → C.3.1 门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

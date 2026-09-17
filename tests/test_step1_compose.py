@@ -15,7 +15,7 @@ from block01.core.fusion_engine import FusionEngine, fuse_channels
 from block01.core.preview_compose import PreviewCache, overlay_rgb_u8
 from block01.viewer.step1_compose import (
     MODE_FUSION, MODE_OVERLAY, compose, compose_fusion, compose_overlay,
-    composition_key,
+    channel_signal, composition_key, fusion_channels, overlay_channels,
 )
 
 WINDOW = (0.0, 100.0, 1.0)
@@ -210,6 +210,114 @@ def test_a_heterogeneous_group_weight_reaches_the_picture():
 
     assert full[..., 0].max() == 255
     assert quarter[..., 0].max() == int(0.25 * 255)
+
+
+# ── 3b. the fusion's zero weights (C.1.1) ────────────────────────────
+
+def _fusion_spy():
+    """Which arrays `apply_channel_remap` was handed, by identity."""
+    import block01.viewer.step1_compose as step1_compose
+    mapped = []
+    real = step1_compose.apply_channel_remap
+
+    def _spy(image, params=None):
+        mapped.append(id(image))
+        return real(image, params)
+
+    step1_compose.apply_channel_remap = _spy
+    return mapped, (lambda: setattr(step1_compose, "apply_channel_remap", real))
+
+
+def test_the_input_set_names_only_the_channels_that_can_contribute():
+    """C.3 gate 8 for the fusion: three places a zero weight lives."""
+    groups = {"markers": {"CD3": 1.0, "CD8": 0.0},
+              "muted": {"CD20": 1.0}}
+    group_weights = {"markers": 1.0, "muted": 0.0}
+
+    assert fusion_channels(groups, group_weights, ("DAPI", 0.6)) == {
+        "CD3", "DAPI"}
+    assert fusion_channels(groups, group_weights, ("DAPI", 0.0)) == {"CD3"}
+    assert overlay_channels({"CD3": 1.0, "CD8": 0.0}) == {"CD3"}
+
+
+def test_a_zero_weight_fusion_channel_is_never_mapped():
+    tiles = _tiles(CD3=_pixels(21), CD8=_pixels(22), DAPI=_pixels(23))
+    mapped, restore = _fusion_spy()
+    try:
+        compose_fusion(tiles, {"markers": {"CD3": 1.0, "CD8": 0.0}},
+                       {"markers": 1.0}, ("DAPI", 0.5),
+                       {ch: WINDOW for ch in tiles})
+    finally:
+        restore()
+
+    assert id(tiles["CD3"][0]) in mapped
+    assert id(tiles["DAPI"][0]) in mapped
+    assert id(tiles["CD8"][0]) not in mapped, (
+        "a zero-weight fusion channel was mapped")
+
+
+def test_a_zero_weight_group_is_never_mapped():
+    tiles = _tiles(CD3=_pixels(24), CD20=_pixels(25), DAPI=_pixels(26))
+    mapped, restore = _fusion_spy()
+    try:
+        compose_fusion(tiles,
+                       {"markers": {"CD3": 1.0}, "muted": {"CD20": 1.0}},
+                       {"markers": 1.0, "muted": 0.0}, ("DAPI", 0.5),
+                       {ch: WINDOW for ch in tiles})
+    finally:
+        restore()
+
+    assert id(tiles["CD3"][0]) in mapped
+    assert id(tiles["CD20"][0]) not in mapped, (
+        "a channel of a zero-weight group was mapped")
+
+
+def test_a_zero_weight_nucleus_is_never_mapped():
+    tiles = _tiles(CD3=_pixels(27), DAPI=_pixels(28))
+    mapped, restore = _fusion_spy()
+    try:
+        rgba, _valid, _missing = compose_fusion(
+            tiles, {"markers": {"CD3": 1.0}}, {"markers": 1.0}, ("DAPI", 0.0),
+            {ch: WINDOW for ch in tiles})
+    finally:
+        restore()
+
+    assert id(tiles["DAPI"][0]) not in mapped, "a zero-weight nucleus was mapped"
+    assert (rgba[..., 2] == 0).all(), "a zero-weight nucleus reached the blue"
+
+
+def test_dropping_the_zero_weights_changes_no_pixel():
+    """Not reading them is an OPTIMISATION of `fuse_channels`, not a new
+    formula: the engine already refuses `w <= 0`, scales a group by `gw` and
+    a nucleus by `nuc_w`."""
+    tiles = _tiles(CD3=_pixels(29), CD8=_pixels(30), CD20=_pixels(31),
+                   DAPI=_pixels(32))
+    groups = {"markers": {"CD3": 0.8, "CD8": 0.0}, "muted": {"CD20": 1.0}}
+    group_weights = {"markers": 1.0, "muted": 0.0}
+    mappings = {ch: WINDOW for ch in tiles}
+
+    rgba, _valid, _missing = compose_fusion(tiles, groups, group_weights,
+                                            ("DAPI", 0.6), mappings)
+
+    signals = {ch: channel_signal(values, valid, WINDOW)
+               for ch, (values, valid) in tiles.items()}
+    cyto, nuc = fuse_channels(signals, groups, group_weights, "DAPI", 0.6)
+    assert np.array_equal(rgba[..., :3], FusionEngine.to_rgb(cyto, nuc))
+
+
+def test_an_explicit_zero_keeps_its_place_in_the_draft():
+    """The drop is the composition's, not the domain's: the draft it was
+    given still says CD8 takes part at 0.0."""
+    groups = {"markers": {"CD3": 1.0, "CD8": 0.0}}
+    group_weights = {"markers": 1.0}
+    before = ({k: dict(v) for k, v in groups.items()}, dict(group_weights))
+
+    fusion_channels(groups, group_weights, ("DAPI", 0.0))
+    compose_fusion(_tiles(CD3=_pixels(33), CD8=_pixels(34)), groups,
+                   group_weights, ("DAPI", 0.0), {"CD3": WINDOW, "CD8": WINDOW})
+
+    assert ({k: dict(v) for k, v in groups.items()}, dict(group_weights)) == before
+    assert groups["markers"]["CD8"] == 0.0
 
 
 # ── 4. absence survives composition ───────────────────────────────────

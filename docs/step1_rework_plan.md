@@ -187,6 +187,14 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - **Fusion** 复用 `fusion_engine.fuse_channels`：组内 `clip(gw · Σ w·signal)`，**组间取 max**，nucleus 独立；缺席通道跳过而非当 0。优先直接调用该函数，不另写一份。
 - `RawOverlayLayer` 推广到 N 层前，先用像素门证明 Qt 加法绘制与 CPU 合成同输入一致；不一致则改为 CPU 合成后上屏，性能问题留给 D。
 
+### C.1.1 零权输入集合（2026-09-17 审核补）
+- `viewer/step1_compose.py` 给出**唯一**的输入集合答案：`overlay_channels(weights)` 与
+  `fusion_channels(groups, group_weights, nucleus)`。通道权重 <= 0、组权重 <= 0、nucleus 权重 <= 0
+  的通道**不请求、不映射、不进合成输入集合**。
+- 与公式等价，不是新公式：`fuse_channels` 本就拒 `w <= 0`、把组乘 `gw`、把 nucleus 乘 `nuc_w`；
+  组间取 **max** 且信号非负，故丢弃零权组与零权 nucleus 逐像素等价。
+- 显式 0.0 的**参与状态与权重照旧保留**（域模型的答案），只是当下不贡献像素。
+
 ### C.2 Intensity 与缓存
 - 合成输入信号一律来自 **B.3 的全局映射**；**不在合成层**重新调用 `compute_qupath_auto_minmax(当前数组)` 或 `_norm`。
 - 底层瓦片键不含权重、颜色、模式（同 B.3）。
@@ -220,6 +228,7 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 恢复路径直接写 draft → 门 5 红
 - 零权通道改为乘零参与映射 → 门 8 的调用测试红
 - 首次勾选给 0.0 而非 1.0 / 重勾选时用默认值覆盖已存权重 / 点击名称顺带改勾选 → 门 7 对应子项红
+- 零权组 / 零权 nucleus 仍被映射 → C.1.1 对应门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

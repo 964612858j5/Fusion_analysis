@@ -81,6 +81,44 @@ def _rgba(rgb, valid):
     return out
 
 
+def overlay_channels(weights):
+    """Which channels an overlay draft actually composes from.
+
+    The weight <= 0 rule, said once so the planner and the composition agree:
+    a dropped channel is not read, not mapped and not summed.
+    """
+    return {str(ch) for ch, weight in dict(weights or {}).items()
+            if float(weight or 0.0) > 0.0}
+
+
+def fusion_channels(groups, group_weights, nucleus):
+    """Which channels a fusion draft actually composes from.
+
+    THE SAME DROP RULE AS THE OVERLAY, on the three places a fusion weight
+    lives. `fuse_channels` already refuses a channel at `w <= 0`, multiplies a
+    group by `gw` and a nucleus by `nuc_w`, so leaving these channels out is
+    pixel-identical -- a zero group contributes `clip(0 * Sum)` = 0 to a MAX
+    over non-negative groups, and a zero nucleus contributes zeros either way.
+    What changes is that they are no longer READ from disk and no longer put
+    through `apply_channel_remap`, which is the contract C.3 gate 8 states.
+
+    A channel enabled at an explicit 0.0 keeps its participation and its
+    weight -- that is the domain model's answer, not this function's. It
+    simply contributes no pixels while it is at 0.0.
+    """
+    wanted = set()
+    weights = dict(group_weights or {})
+    for name, channel_weights in dict(groups or {}).items():
+        if float(weights.get(name, 1.0) or 0.0) <= 0.0:
+            continue
+        for channel, weight in dict(channel_weights or {}).items():
+            if float(weight or 0.0) > 0.0:
+                wanted.add(str(channel))
+    if nucleus and nucleus[0] and float(nucleus[1] or 0.0) > 0.0:
+        wanted.add(str(nucleus[0]))
+    return wanted
+
+
 def compose_overlay(tiles, weights, colors, mappings):
     """The additive overlay, through the same two calls the patch preview uses.
 
@@ -122,9 +160,7 @@ def compose_fusion(tiles, groups, group_weights, nucleus, mappings,
     `(rgba, valid, missing_windows)`.
     """
     to_rgb = FusionEngine.to_rgb if to_rgb is None else to_rgb
-    wanted = {nucleus[0]} if nucleus and nucleus[0] else set()
-    for channel_weights in (groups or {}).values():
-        wanted.update(channel_weights.keys())
+    wanted = fusion_channels(groups, group_weights, nucleus)
 
     signals, missing = {}, []
     for channel in sorted(wanted):

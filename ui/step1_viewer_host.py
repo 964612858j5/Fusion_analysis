@@ -36,6 +36,15 @@ TILE_SIZE = 512
 RAW_CACHE_BYTES = 512 * 1024 * 1024
 CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 
+#: What the viewer has to say about where the camera is standing. Block B
+#: keeps the TEXT; the information layer that shows it is C's (B.4/B.5), and
+#: no button, window or bus is added for it here.
+STATUS_OK = ""
+STATUS_OUTSIDE_ROI = (
+    "Outside the analysis region: there are no pixels to show here. "
+    "The region is what Step0 published; move back inside it to see the slide."
+)
+
 PLACEHOLDER_NO_DATASET = (
     "No image loaded\n\n"
     "Load an OME-TIFF in Step 0. Step 1 then shows the whole slide, with the "
@@ -184,6 +193,8 @@ class Step1ViewerHost(QtWidgets.QWidget):
         #: keeps the text; block B has no widget for it (B.4 lands with the
         #: visible viewer in C).
         self.missing_notice = []
+        #: Where the camera is, in words. Empty while it is over the region.
+        self._status = STATUS_OK
 
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -201,6 +212,38 @@ class Step1ViewerHost(QtWidgets.QWidget):
     @property
     def dataset_path(self):
         return self._dataset_path
+
+    #: Emitted when the camera moves in or out of the analysis region. A
+    #: LOCAL signal for C's information layer -- not a bus, and nothing in
+    #: block B listens to it.
+    status_changed = QtCore.pyqtSignal(str)
+
+    @property
+    def status(self):
+        """What the viewer would say about the camera's position."""
+        return self._status
+
+    def refresh_status(self):
+        """Recompute the status from the camera and the analysis region.
+
+        Standing outside the region is not an error and not a crash: there
+        are simply no pixels there, and the viewer says so.
+        """
+        text = STATUS_OK
+        table = self._table
+        stack = self._stack
+        roi = None if table is None else table.roi_bbox()
+        if stack is not None and roi is not None:
+            rect = stack.view.view_box.viewRect()
+            ry0, ry1, rx0, rx1 = roi
+            y0, y1 = rect.y(), rect.y() + rect.height()
+            x0, x1 = rect.x(), rect.x() + rect.width()
+            if y1 <= ry0 or y0 >= ry1 or x1 <= rx0 or x0 >= rx1:
+                text = STATUS_OUTSIDE_ROI
+        if text != self._status:
+            self._status = text
+            self.status_changed.emit(text)
+        return text
 
     # ── build / teardown ──────────────────────────────────────────────
     def open(self, dataset_path, channel, *, decisions=None,
@@ -223,6 +266,7 @@ class Step1ViewerHost(QtWidgets.QWidget):
             self._channel = channel
             self.missing_notice = list(self._table.missing())
             self._show(self._stack.view)
+            self.refresh_status()
         elif channel and channel != self._channel:
             self.set_channel(channel)
         if viewport_l0 is not None:
@@ -251,6 +295,7 @@ class Step1ViewerHost(QtWidgets.QWidget):
             return False
         self._stack.controller.jump_to(int(y0), int(x0),
                                        int(width), int(height))
+        self.refresh_status()
         return True
 
     def apply_display_mapping(self, lo, hi, gamma, channel=None):
@@ -278,6 +323,7 @@ class Step1ViewerHost(QtWidgets.QWidget):
         self._channel = ""
         self._table = None
         self.missing_notice = []
+        self._status = STATUS_OK
         if stack is None:
             return False
         try:

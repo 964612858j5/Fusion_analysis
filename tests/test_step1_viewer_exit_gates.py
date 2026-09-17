@@ -345,8 +345,14 @@ def test_a_stored_window_starts_no_pass_at_all(app):
 
 # ── 4. a manual window, held by both steps ────────────────────────────
 
-def test_a_manual_window_is_held_by_step0_and_step1_alike(app):
-    """B.6 gate 5, on the one shared state both viewers read."""
+def test_a_manual_window_survives_the_walk_and_reaches_step1(app):
+    """B.6 gate 5, as far as ONE test can carry it.
+
+    What this proves: the numbers do not change between Step0's scope and
+    Step1's, and Step1's controller holds them. It does NOT build a Step0
+    controller -- that viewer's own following of the shared window is Step0's
+    regression, and the two together are the gate.
+    """
     state = _state()
     window = _Window(state, _Seeder())
     binding, _raws = _make(app, window, channel="CD3")
@@ -480,5 +486,168 @@ def test_two_dataset_switches_leave_nothing_of_the_old_stacks(app):
                                     generation=live.view_generation)))
         assert live.stats.get("mismatched_raw_dropped", 0) == dropped + 1, \
             "a result from a torn-down stack was accepted"
+    finally:
+        _close(binding)
+
+
+# ── 7. B4.1: the gates the first summary claimed too early ────────────
+
+def _wait_for_tiles(controller, wanted, seconds=5.0):
+    """Wait until the CURRENT level's tiles at `wanted` are in the pool."""
+    def _have():
+        return {(e.tx, e.ty) for e in controller._raw_pool.entries.values()
+                if e.level == controller.level}
+
+    deadline = time.monotonic() + seconds
+    while not wanted <= _have() and time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.01)
+    return _have()
+
+
+def test_with_no_patch_the_region_s_own_tiles_reach_the_pool(app):
+    """B.6 gate 7, with pixels: opening on the whole slide is not enough.
+
+    The viewer must actually draw the region when nobody has drawn a patch.
+    """
+    state = _state()
+    window = _Window(state, _Seeder())
+    binding, raws = _make(app, window, channel="CD3")
+    try:
+        controller = binding.host.stack.controller
+        # Inside the ROI, without ever asking for a patch: the camera is put
+        # on the region's own middle the way any navigation would.
+        binding.jump_to_point(1024, 1024, 512)
+        have = _wait_for_tiles(controller, {(2, 2)})
+
+        assert (2, 2) in have, f"the region's own tile never landed: {have}"
+        entry = next(e for e in controller._raw_pool.entries.values()
+                     if (e.tx, e.ty) == (2, 2) and e.level == controller.level)
+        assert isinstance(entry.key, RawKey) and entry.key.channel == "CD3"
+        ds = raws[-1].level_downsample(entry.level)
+        assert entry.rect.x() == pytest.approx(entry.tx * 512 * ds)
+        stored = np.asarray(entry.item.image)
+        expected = raws[-1].pixels("CD3", entry.level,
+                                   entry.ty * 512, entry.ty * 512 + 512,
+                                   entry.tx * 512, entry.tx * 512 + 512)
+        inside = ~np.isnan(stored)
+        assert inside.any()
+        assert np.allclose(stored[inside], expected[inside])
+    finally:
+        _close(binding)
+
+
+def test_a_tissue_preview_click_lands_its_own_tiles(app):
+    """B.6 gate 8 for the OTHER gesture: a point jump, proved by pixels."""
+    state = _state()
+    window = _Window(state, _Seeder())
+    binding, raws = _make(app, window, channel="CD3")
+    try:
+        controller = binding.host.stack.controller
+        binding.jump_to_point(1300, 1300, 256)     # inside the ROI
+        have = _wait_for_tiles(controller, {(2, 2)})
+
+        assert (2, 2) in have, f"the click landed no tiles: {have}"
+        entry = next(e for e in controller._raw_pool.entries.values()
+                     if (e.tx, e.ty) == (2, 2) and e.level == controller.level)
+        stored = np.asarray(entry.item.image)
+        expected = raws[-1].pixels("CD3", entry.level,
+                                   entry.ty * 512, entry.ty * 512 + 512,
+                                   entry.tx * 512, entry.tx * 512 + 512)
+        inside = ~np.isnan(stored)
+        assert inside.any()
+        assert np.allclose(stored[inside], expected[inside])
+    finally:
+        _close(binding)
+
+
+def test_outside_the_region_the_viewer_is_empty_and_says_so(app):
+    """B.6 gate 8's other half: no pixels, no error, and a word about it."""
+    from block01.ui.step1_viewer_host import STATUS_OK, STATUS_OUTSIDE_ROI
+
+    state = _state()
+    window = _Window(state, _Seeder())
+    binding, raws = _make(app, window, channel="CD3")
+    try:
+        host = binding.host
+        said = []
+        host.status_changed.connect(said.append)
+
+        binding.jump_to_point(1024, 1024, 256)      # inside
+        assert host.status == STATUS_OK
+
+        binding.jump_to_point(100, 100, 256)        # outside the ROI
+        _pump(120)
+
+        assert host.status == STATUS_OUTSIDE_ROI, host.status
+        assert said and said[-1] == STATUS_OUTSIDE_ROI
+        assert "no pixels" in host.status
+
+        # ...and what is drawn there carries no pixels at all.
+        values, _io = host.stack.provider.read_tile("CD3", _tile(0, 0, 0))
+        assert np.isnan(values).all()
+        for entry in host.stack.controller._raw_pool.entries.values():
+            if entry.level == host.stack.controller.level and \
+                    (entry.tx, entry.ty) == (0, 0):
+                assert np.isnan(np.asarray(entry.item.image)).all()
+
+        binding.jump_to_point(1024, 1024, 256)      # back inside
+        assert host.status == STATUS_OK
+        assert said[-1] == STATUS_OK
+    finally:
+        _close(binding)
+
+
+def test_gamma_reaches_every_pooled_tile_and_the_ones_that_follow(app):
+    """B.6 gate 3b, the half the first version missed: the LUT.
+
+    A window is more than Min/Max -- gamma is carried by the lookup table,
+    and a tile that lands after the change must be painted the same way as
+    the ones already pooled.
+    """
+    state = _state()
+    window = _Window(state, _Seeder())
+    state.set_mapping("CD3", 5.0, 105.0, 2.2, origin="user")
+    binding, _raws = _make(app, window, channel="CD3")
+    try:
+        controller = binding.host.stack.controller
+        provider = binding.host.stack.provider
+
+        def _pool(level, ty, tx):
+            from block01.viewer.explore_view import ExploreView
+            tile = _tile(level, ty, tx)
+            values, _io = provider.read_tile("CD3", tile)
+            pooled = controller._prepare_raw(values)
+            ds_y, ds_x = controller._downsample_yx(level)
+            rect = ExploreView.world_rect(ty * 512, tx * 512, pooled.shape[0],
+                                          pooled.shape[1], ds_y, ds_x)
+            controller._raw_pool.put(level, tx, ty, rect, pooled,
+                                     RawKey(source=provider.source_identity(),
+                                            channel="CD3", tile=tile))
+
+        _pool(0, 2, 2)
+        _pool(1, 0, 0)
+
+        def _luts():
+            out = []
+            for entry in controller._raw_pool.entries.values():
+                lut = entry.item.lut
+                out.append(None if lut is None else np.asarray(lut).tobytes())
+            return set(out)
+
+        first = _luts()
+        assert len(first) == 1 and None not in first, (
+            "the pooled tiles do not share one lookup table")
+
+        # A different gamma, same Min/Max: the table must move.
+        state.set_mapping("CD3", 5.0, 105.0, 1.0, origin="user")
+        _pump(80)
+        second = _luts()
+        assert len(second) == 1
+        assert second != first, "gamma did not reach the pooled tiles"
+
+        # ...and a tile that lands afterwards inherits it.
+        _pool(0, 2, 1)
+        assert _luts() == second, "a late tile was painted with the old table"
     finally:
         _close(binding)

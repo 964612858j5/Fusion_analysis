@@ -1,6 +1,12 @@
 # Step1 改造行动计划（审核版）
 
-- 状态（2026-09-17）：**块 A 真机验收通过并已收尾**（含四轮返工：分栏双向同步、四步显示状态隔离、Step0 默认只勾细胞核、Step0 点击/勾选＝显示且一次一个 marker、Save 不再覆盖勾选）。**块 B 的起始基线 = `c494cd7`**；块 B/C/D 未开工。执行一块一停；B 开工须遵 B.3 的来源身份收紧条款，C 接管须落实 C.3 门 7 的保护回归；Step1.5 单列。
+- 状态（2026-09-17）：**块 A 真机验收通过并已收尾**；**块 B 实现与退出门完成**（起始基线 `c494cd7`，提交 `3bb9b95` B1 → `67b1df8` B2 → `ecddc82` B2.1 → `e447e57` B3 → `52a691b` B4 → `b04e71f` B4.1）。**块 C/D 未开工**。执行一块一停；C 接管须落实 C.3 门 7 的保护回归；Step1.5 单列。
+- 块 B 的实际产出：**3 个生产文件**（`viewer/step1_source.py`、`ui/step1_viewer_host.py`、`ui/step1_viewer_binding.py`）+ **4 个测试模块**（`tests/test_step1_source_table.py`、`test_step1_viewer_host.py`、`test_step1_viewer_binding.py`、`test_step1_viewer_exit_gates.py`）。
+- 块 B 结束时的回归：**141 文件 / 3066 passed / 16 failed**，失败文件与逐文件计数与 `309c9db` 完全一致（hq_marker_segmentation 2、preview_source_provider 1、step0_channel_conditioning 6、step0_no_process_button 1、step0_process_incremental 5、tissue_navigator_viewport_sync 1）。
+- **块 B 的三条状态说明（勿误读）**：
+  1. 宿主、binding 与导航链**已有生产实现**，但正常界面**未实例化、未 mount**——仅测试可达（B.5 复裁）。
+  2. ROI 外的"此处无可显示像素"目前只是**宿主的局部状态属性与 `status_changed` 信号**；用户可见的信息层随 **C 接管 viewer** 时落地（B.4）。
+  3. 块 B **不做真机可见验收**；全片 viewer 的用户可见验收在 **C 完成 Overlay/Fusion 接管之后**进行。
 - 块 A 相关提交：`69ecc75` / `f2bce5a` / `d6700ed` / `5b24a11` / `70cc81a` / `ee2cb52` / `e388275` / `c494cd7`。回归基线随之更新为 **137 文件 / 2983 passed / 16 failed**，失败文件与 `309c9db` 相同。
 - **Step0 现行显示规则**（块 B 起点的既定事实）：新片子只显示细胞核；点击某 marker 或勾选其复选框都表示"显示它"，并自动取消上一个 marker；细胞核为参考层，不被这两个手势移动。Step1 不受此规则约束（其勾选是融合命令，可同时多选）。
 - 块 A 的真机验收项（已由用户在真机通过）：缩放窗口时 Viewer 宽度随窗口增长，且左右占比与 Step0 一致（实测 Step0 左栏约 0.278，**不是 1:2**）；切到 Patch Results 时 Viewer 完全隐藏、切回恢复；左侧两 tab 来回切换后通道勾选、当前名称、显式 0.0 与其他权重不变；720p 高度下 Method & Parameters 可滚动且 Save/Generate 可达。

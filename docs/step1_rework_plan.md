@@ -250,6 +250,21 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
    c. **点击名称**：保留现有选中行为，**不额外改变**勾选与科学权重。
 8. **零权通道**（两类证据）：配置/调用测试断言零权通道**未进入映射与合成输入集合**（`channel_gray` 未被调用）；像素测试断言其对结果无贡献。
 
+### C.3.1 实现（2026-09-18 授权范围）
+- `ui/step1_draft_spec.py`：唯一的 spec 构建者。Overlay 取"step1 作用域内被勾选的通道 × 科学权重
+  （`max(gw·w)`，nucleus 用自身权重，与 `MainWindow._overlay_weight` 同一规则）"；
+  Fusion 取 `FusionDomainModel.effective_config()` 整份；颜色与窗口取 `ChannelDisplayState`
+  （`mapping()`，**不**调 `mapping_or_seed`，帧路径不做像素工作）；无窗口的通道不进 `mappings`，
+  由合成层点名、协调器向共享服务求窗。
+- `ui/step1_compose_binding.py`：`Step1ComposeBinding` 跟随 `draft_changed`/`draft_restored`/
+  `dataset_bound`/`color_changed`/`mapping_changed`/`visibility_changed`/`state_installed`，
+  每次都**重建完整 spec** 并 `invalidate` + `compose_visible`；`set_mode()`、`source_changed()` 同理；
+  `recompose()` 用于仅相机移动（不推进世代）。窗口到达走 `coordinator.window_arrived(channel, spec=...)`，
+  **不允许**任何代码改协调器私有的最后一帧（测试里有静态门）。
+- committed 一侧不动：Search/Generate 继续读 `committed_snapshot()`，本块不向领域模型写入任何东西。
+- 旧 session 走 `prepare_restore`/`commit_restore`，显式 0.0、异质组权重、取消再勾选的历史权重均保留。
+- **本块仍不可见**：不实例化、不挂载，接管归 C4。
+
 ### C.4 切换门（正常应用内，新 viewer 接管 Overlay/Fusion 之后的真机验收）
 - Step0 → Step1 **只要求坐标与视口位置连续**，不要求像素相同：两步的像素各自遵守本步规则（Step0 一次显示一个 marker、可能在看某预览方法；Step1 遵最终决断并做多通道合成）
 - ROI 边界来回平移，ROI 内亮度不随视口变化
@@ -280,6 +295,13 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 空输入用 `_note_missing(())` 代替 `_clear_missing()` → 清除门红
 - 每帧不清空 missing → 窗口补齐后仍被点名的门红
 - `_clear_missing()` 不播报 → 清除门红
+- viewer 改读 committed 而非 draft → 门 1/2 红
+- binding 不推进世代 → 世代门与"快速连编只剩最后一版"门红
+- 不跟随 `mapping_changed` → 窗口到达门红
+- spec 缓存一次不重建 → 编辑/模式/窗口门红
+- 勾选读当前作用域而非 step1 → 作用域门红
+- 无窗口通道猜一个窗口 → 缺窗口门红
+- overlay 权重忽略组权重 → 组权重门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

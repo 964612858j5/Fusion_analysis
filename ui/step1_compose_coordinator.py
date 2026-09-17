@@ -564,19 +564,24 @@ class Step1ComposeCoordinator(QtCore.QObject):
             self._seed_requested.add(key)
         return outstanding
 
-    def window_arrived(self, channel=None):
+    def window_arrived(self, channel=None, spec=None):
         """A window this frame was waiting for has landed.
 
         The frame drawn without it is void: a new generation starts and the
-        same draft is composed again, now with that channel in it.
+        draft is composed again, now with that channel in it. The CALLER
+        hands over the draft -- C3's binding reads both owners and builds a
+        whole spec, because a spec patched in place is a picture of a state
+        nobody is in. With no spec, the last one planned is composed again,
+        which is all a coordinator on its own can know.
         """
         if channel is not None:
             name = str(channel)
             self._seed_requested = {key for key in self._seed_requested
                                     if key[1] != name}
         self.invalidate("window")
-        if self._last_spec is not None:
-            self.compose_visible(self._last_spec)
+        spec = self._last_spec if spec is None else spec
+        if spec is not None:
+            self.compose_visible(spec)
         return self.generation
 
     # ── the scheduler's callback ──────────────────────────────────────

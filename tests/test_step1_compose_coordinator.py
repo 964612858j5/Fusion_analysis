@@ -178,13 +178,27 @@ class _Host:
 
 
 class _SeedPort:
-    """The shared display service's one question, as this object asks it."""
+    """The shared display service's one question, as this object asks it.
 
-    def __init__(self):
+    The real service answers False when it has NOT started a pass -- the
+    overview pixels are not in yet, and it goes and asks for them
+    (`Block01DisplayServices.request_mapping_seed`). `answers` lets a test
+    play that refusal and then the acceptance that follows it.
+    """
+
+    def __init__(self, answers=None):
         self.asked = []
+        self.answers = list(answers or [])
+        self.pending = False
 
     def request_mapping_seed(self, channel):
         self.asked.append(channel)
+        if self.answers:
+            return self.answers.pop(0)
+        return True
+
+    def mapping_seed_pending(self, channel=None):
+        return self.pending
 
 
 def _spec(mode=compose_core.MODE_OVERLAY, weights=None, colors=None,
@@ -207,9 +221,14 @@ def _coordinator(app, host=None, seed_port=None, **kwargs):
     return coordinator, host
 
 
-def _settle(app, coordinator, rounds=6):
-    """Run the compose workers and let their queued results land."""
+def _settle(app, coordinator, rounds=8):
+    """Let the queued deliveries land and run the compose workers.
+
+    Two queues now: the reads the scheduler hands over (its callback runs on
+    a read worker, so it only emits) and the compositions the workers finish.
+    """
     for _ in range(rounds):
+        app.processEvents()
         ran = coordinator.executor.run()
         app.processEvents()
         if not ran and not coordinator.executor.jobs:
@@ -598,7 +617,8 @@ def test_a_worker_result_is_checked_again_when_it_lands(app):
     coordinator.tile_composed.connect(lambda *a: frames.append(a[:3]))
 
     coordinator.compose_visible(_spec())
-    host.scheduler.deliver()                     # jobs are queued, not run
+    host.scheduler.deliver()                     # the reads land...
+    app.processEvents()                          # ...and are picked up here
     assert coordinator.executor.jobs, "nothing was handed to a worker"
     coordinator.invalidate("the user moved a weight")
 
@@ -713,3 +733,241 @@ def test_the_missing_set_belongs_to_the_generation(app):
 
     assert named and named[-1] == ["CD8"], (
         "the new dataset's missing window was never announced")
+
+
+# ── 7. C2.1: the thread the scheduler calls back on ───────────────────
+
+def test_a_read_delivered_on_a_worker_thread_is_handled_on_this_one(app):
+    """`TileScheduler` delivers from the thread that did the reading
+    (`viewer/scheduler.py`), so the callback may not touch the caches, the
+    in-flight table or the controller. It hands the result over, and the work
+    happens on this object's thread."""
+    coordinator, host = _coordinator(app)
+    threads = []
+    real = coordinator._start_tile
+    coordinator._start_tile = lambda *a, **k: (
+        threads.append(QtCore.QThread.currentThread()), real(*a, **k))[1]
+
+    coordinator.compose_visible(_spec())
+    threads.clear()
+    queued = list(host.scheduler._deferred)
+    host.scheduler._deferred = []
+
+    def _deliver_from_a_worker():
+        for req, callback in queued:
+            values, _io = host.provider.read_tile(req.key.channel,
+                                                  req.key.tile)
+            host.scheduler.reads += 1
+            host.scheduler.cache.put(req.key, values)
+            callback(SimpleNamespace(request=req,
+                                     pixels=SimpleNamespace(handle=values),
+                                     error=None))
+
+    worker = threading.Thread(target=_deliver_from_a_worker)
+    worker.start()
+    worker.join()
+    assert threads == [], "the read worker went straight into the coordinator"
+
+    _settle(app, coordinator)
+    assert threads, "the delivered reads were never picked up"
+    mine = coordinator.thread()
+    assert all(thread is mine for thread in threads), (
+        "the coordinator's state was touched from the read worker")
+
+
+# ── 8. C2.1: an old worker may not retire a new job ───────────────────
+
+def test_an_old_generation_s_result_does_not_retire_the_new_job(app):
+    """The SAME key can be in flight twice: an old generation's worker is
+    still composing it when a new generation submits it again. The old
+    result must retire its own job and nothing else."""
+    coordinator, host = _coordinator(app)
+    spec = _spec()
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    app.processEvents()
+    assert len(coordinator.executor.jobs) == 3
+    old_jobs = coordinator.executor.jobs
+    coordinator.executor.jobs = []
+
+    # A window arrived, say: a new generation, the same draft, the same tiles.
+    coordinator.invalidate("window")
+    coordinator.compose_visible(spec)
+    new_inflight = dict(coordinator._inflight)
+    assert len(new_inflight) == 3, new_inflight
+    assert len(coordinator.executor.jobs) == 3
+
+    # Now the OLD workers finish.
+    coordinator.executor.jobs = old_jobs + coordinator.executor.jobs
+    first = coordinator.executor.jobs[:3]
+    coordinator.executor.jobs = coordinator.executor.jobs[3:]
+    for fn, args, kwargs in first:
+        fn(*args, **kwargs)
+    app.processEvents()
+
+    assert coordinator._inflight == new_inflight, (
+        "an old generation's result retired the new generation's job")
+
+
+def test_a_tile_in_flight_is_not_submitted_twice(app):
+    coordinator, host = _coordinator(app)
+    coordinator.compose_visible(_spec())
+    host.scheduler.deliver()
+    app.processEvents()
+    submitted = len(coordinator.executor.jobs)
+
+    coordinator.compose_visible(_spec())          # the same frame again
+    app.processEvents()
+
+    assert len(coordinator.executor.jobs) == submitted, (
+        "a composition already in flight was submitted again")
+
+
+# ── 9. C2.1: a refused seed is asked for again ────────────────────────
+
+def test_a_refused_seed_is_asked_for_again_when_the_pixels_arrive(app):
+    """The service answers False while the overview pixels are still being
+    read. That is not an answer, and the channel would otherwise never get a
+    window."""
+    port = _SeedPort(answers=[False, True])
+    coordinator, host = _coordinator(app, seed_port=port)
+    spec = _spec(mappings={"CD3": WINDOW})
+
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert port.asked == ["CD8"], port.asked
+
+    coordinator.compose_visible(spec)             # the next frame retries
+    _settle(app, coordinator)
+    assert port.asked == ["CD8", "CD8"], port.asked
+
+    coordinator.compose_visible(spec)             # now it is outstanding
+    _settle(app, coordinator)
+    assert port.asked == ["CD8", "CD8"], "an outstanding seed was asked again"
+
+
+def test_a_seed_already_pending_counts_as_outstanding(app):
+    """A refusal from a service that is already computing it is not a reason
+    to ask a third party for the same number."""
+    port = _SeedPort(answers=[False])
+    port.pending = True
+    coordinator, host = _coordinator(app, seed_port=port)
+    spec = _spec(mappings={"CD3": WINDOW})
+
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    coordinator.compose_visible(spec)
+    _settle(app, coordinator)
+
+    assert port.asked == ["CD8"], port.asked
+
+
+def test_a_new_source_asks_for_the_same_channel_again(app):
+    """Another dataset's CD8 is another array with another window."""
+    port = _SeedPort()
+    coordinator, host = _coordinator(app, seed_port=port)
+    spec = _spec(mappings={"CD3": WINDOW})
+
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert port.asked == ["CD8"]
+
+    host.provider.switch_dataset("/x/other.ome.tif")
+    coordinator.invalidate("dataset")
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+
+    assert port.asked == ["CD8", "CD8"], (
+        "the new dataset reused the old dataset's outstanding seed")
+
+
+# ── 10. C2.1: a frame with nothing in it still owns its notice ────────
+
+def test_winding_every_weight_to_zero_clears_the_missing_notice(app):
+    """A draft that composes nothing has no missing windows -- and the notice
+    from the frame before it is about a picture nobody is looking at."""
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named[-1] == ["CD8"]
+
+    coordinator.invalidate("weights")
+    coordinator.compose_visible(_spec(weights={"CD3": 0.0, "CD8": 0.0},
+                                      mappings={"CD3": WINDOW}))
+    _settle(app, coordinator)
+
+    assert named[-1] == [], "the missing notice outlived the draft that made it"
+
+
+def test_a_frame_with_no_visible_tiles_clears_it_too(app):
+    coordinator, host = _coordinator(app)
+    named = []
+    coordinator.windows_missing.connect(named.append)
+
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    host.scheduler.deliver()
+    _settle(app, coordinator)
+    assert named[-1] == ["CD8"]
+
+    host.controller._visible_tiles = set()
+    coordinator.invalidate("the camera moved off the slide")
+    coordinator.compose_visible(_spec(mappings={"CD3": WINDOW}))
+    _settle(app, coordinator)
+
+    assert named[-1] == []
+
+
+# ── 11. C2.1: the worker's draft is the draft it was planned with ─────
+
+def test_the_worker_holds_its_own_copy_of_the_draft(app):
+    """C3 binds a draft that is edited in place; a job planned a moment ago
+    must not compose with weights the user has since moved."""
+    coordinator, host = _coordinator(app)
+    weights = {"CD3": 1.0, "CD8": 0.5}
+    mappings = {"CD3": WINDOW, "CD8": WINDOW}
+    spec = _spec(weights=weights, mappings=mappings)
+    frames = []
+    coordinator.tile_composed.connect(
+        lambda level, tx, ty, rgba, valid: frames.append(rgba))
+
+    coordinator.compose_visible(spec)
+    host.scheduler.deliver()
+    app.processEvents()
+    weights["CD8"] = 0.0            # the user moves it while a worker waits
+    mappings.pop("CD8")
+    _settle(app, coordinator)
+
+    tiles = {}
+    for channel in ("CD3", "CD8"):
+        values, _io = host.provider.read_tile(
+            channel, TileAddress(grid=GRID, level=0, tx=1, ty=1))
+        tiles[channel] = (values, np.ones(values.shape, bool))
+    expected, _valid, _missing = compose_core.compose(
+        compose_core.MODE_OVERLAY, tiles, weights={"CD3": 1.0, "CD8": 0.5},
+        colors=spec["colors"], mappings={"CD3": WINDOW, "CD8": WINDOW})
+    assert any(np.array_equal(rgba, expected) for rgba in frames), (
+        "the worker composed with a draft that moved under it")
+
+
+def test_the_tile_identity_carries_the_grids_chunk_shape(app):
+    grid = TileGridSpec(tile_size=512, source_chunk_shape=(1, 256, 256),
+                        grid_version="v1")
+    key = RawKey(source=SourceIdentity(dataset_path="/a",
+                                       dataset_fingerprint="f",
+                                       stage="step1",
+                                       corrected_artifact="tok"),
+                 channel="CD3",
+                 tile=TileAddress(grid=grid, level=0, tx=0, ty=0))
+    other = RawKey(source=key.source, channel="CD3",
+                   tile=TileAddress(grid=GRID, level=0, tx=0, ty=0))
+
+    assert (1, 256, 256) in tile_identity(key)
+    assert tile_identity(key) != tile_identity(other)

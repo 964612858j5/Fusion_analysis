@@ -214,6 +214,21 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - **missing 绑定世代**：`invalidate()` 清空 missing 与已播报值；每个世代播报自己的 missing，
   包含**空列表**以清除旧提示；新来源缺同名通道会再次播报。
 
+### C.2.1 线程边界与求窗生命周期（2026-09-17 二次审核补）
+- **调度器回调不在本对象线程**：真实 `TileScheduler` 在读盘 worker 里回调（`viewer/scheduler.py`）。
+  回调只 `emit` 一个 queued 信号；`_start_tile`、缓存访问、`_inflight`/`_emitted`/`_missing` 的修改
+  一律回到协调器所属线程。门：从真实后台线程投递读结果，断言 `_start_tile` 在 `coordinator.thread()` 上跑。
+- **在途任务带令牌**：`_inflight = {cache_key: (generation, job)}`；只有令牌完全一致才摘除登记，
+  防止旧世代 worker 摘掉新世代同 key 的登记导致重复提交/并发重算。门：新旧世代同 key 同时在途。
+- **求窗失败可重试**：`request_mapping_seed` 返回 False（overview 像素未到，服务顺带发起读取）
+  **不得**记为 outstanding；服务已 pending 时可记为 outstanding（权重变化复用同一在途计算）。
+  outstanding 身份为 `(source_identity, channel)`，换数据集/换产物后同名通道重新发起。
+  门：先 False 后 True 的重试；已 pending 不重复问；换来源重新问。
+- **空输入也要播报**：没有可见瓦片、或全部权重为零的帧，仍发 `windows_missing([])` 清除旧提示。
+- **worker 快照不可被原地改写**：交给 worker 的 draft 逐层复制（weights/colors/mappings/groups/
+  group_weights/nucleus），C3 接入可原地编辑的真实 draft 后仍成立。
+- **身份补全**：`tile_identity()` 纳入 `TileGridSpec.source_chunk_shape`。
+
 ### C.3 门
 1. **手动窗口下**：新 viewer 合成结果与 `overlay_rgb_u8` / `fuse_channels` 同输入逐像素一致。覆盖：权重 0.0（丢弃）、权重 1.0、同色两通道叠加、异质组权重、构造使组间 max 与 sum 结果不同的场景、某通道瓦片缺失。
 2. **自动窗口下**：**不设新旧逐像素相等的硬门**。验收 (a) 全局一致性（同层同源跨视口显示值一致；求窗次数符合 B.6 门 4）；(b) 公式符合性（以全局窗为输入，合成结果与现有公式逐像素一致）。
@@ -247,6 +262,13 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 合成改回 GUI 线程内联 → 线程门红
 - 缺窗口每帧重复求窗 → 只求一次门红
 - `invalidate()` 不清 missing → missing 随世代门红
+- 调度器回调直接进 `_start_tile`（不走 queued 信号）→ 线程门红
+- 结果按 key 而非令牌摘除在途登记 → 新旧同 key 门红
+- 求窗返回 False 也记为 outstanding → 重试门红
+- 求窗身份去掉来源 → 换来源重问门红
+- 空输入帧不播报 → 清除提示门红
+- worker 拿到浅拷贝 draft → 快照门红
+- `tile_identity()` 去掉 `source_chunk_shape` → 网格门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

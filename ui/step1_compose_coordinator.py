@@ -16,6 +16,12 @@ picture arrives as early as possible. Asking for every tile of CD3 and then
 every tile of CD8 would finish one channel first and show nothing until the
 last one landed.
 
+ONE THREAD OWNS THIS OBJECT'S STATE. The scheduler delivers a tile from the
+read worker that read it, so the callback it is given does nothing but hand
+the result over a queued signal; the cache lookups, the composition cache,
+the in-flight table and what has been announced are touched on this object's
+own thread, and nowhere else.
+
 NOTHING IS COMPOSED ON THE GUI THREAD. A tile whose channels are in hand is
 handed to a compose worker; the GUI thread only plans, looks the frame up in
 the composition cache, and publishes finished RGBA. This is not a refinement
@@ -37,6 +43,11 @@ another slide's frame at the same coordinates; and panning a whole slide
 cannot grow this cache without limit -- an evicted frame is composed again
 from the tile cache, still without a read.
 
+EVERY COMPOSITION CARRIES A JOB TOKEN. The same tile, same draft and same
+coordinates can be in flight under an old generation while a new one submits
+it again; a result retires only the job registered under its own token, so
+the old worker cannot clear the new one's place and have it composed twice.
+
 GENERATIONS. Composition has its own namespaced token,
 `("step1-compose", source, n)`. It moves -- and the old one is cancelled --
 when the draft changes (weights, colours, mode, ticks), when the dataset
@@ -49,11 +60,21 @@ arrives back on the GUI thread.
 MISSING WINDOWS. A channel with no display window is not composed and not
 guessed at: the channels that do have windows make a partial picture, the
 channel is named, and a seed is asked of the SHARED service through the port
-this object is given -- once per channel while that request is outstanding,
-never a second computation of the same window. When the window arrives the
-caller says so, and a new generation composes the same draft again. The
-missing set belongs to the generation: a new generation announces its own,
-the empty list included, so a stale notice is cleared rather than left up.
+this object is given. OUTSTANDING IS WHAT THE SERVICE SAYS: it answers False
+when it has not started a pass -- usually because the overview pixels are not
+in yet, which it goes and asks for -- and that leaves the question open for
+the next pass, so a refusal is never mistaken for an answer on the way. What
+is outstanding is `(source, channel)`, not a bare name: after a dataset or a
+corrected product changes, the same channel is a different array with a
+different window and has to be asked for again, while a weight drag reuses
+the computation already in flight. When the window arrives the caller says
+so, and a new generation composes the same draft again.
+
+The missing set belongs to the generation: a new generation announces its
+own, the empty list included, so a stale notice is cleared rather than left
+up -- and that includes a frame with nothing to compose at all, because a
+draft whose weights have all been wound to zero has no missing windows
+either.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -107,6 +128,8 @@ def tile_identity(key):
             str(key.channel),
             str(getattr(grid, "grid_version", "")),
             int(getattr(grid, "tile_size", 0) or 0),
+            tuple(int(n) for n in (getattr(grid, "source_chunk_shape", ())
+                                   or ())),
             int(key.tile.level), int(key.tile.tx), int(key.tile.ty))
 
 
@@ -123,9 +146,13 @@ class Step1ComposeCoordinator(QtCore.QObject):
     #: The channels the CURRENT generation cannot compose for want of a
     #: window. Empty when there are none left, which clears the notice.
     windows_missing = QtCore.pyqtSignal(object)
-    #: Private: a worker finished. Queued, so the payload lands on the GUI
-    #: thread and is checked against the live generation there.
+    #: Private: a worker finished. Queued, so the payload lands on this
+    #: object's thread and is checked against the live generation there.
     _frame_ready = QtCore.pyqtSignal(object)
+    #: Private: a read landed. THE SCHEDULER CALLS BACK ON ITS READ WORKER
+    #: (`viewer/scheduler.py`), so the callback does nothing but hand the
+    #: result over this queued signal; everything after it runs here.
+    _tile_landed = QtCore.pyqtSignal(object)
 
     def __init__(self, host, seed_port=None, executor=None,
                  max_bytes=DEFAULT_COMPOSE_CACHE_BYTES, parent=None):
@@ -148,20 +175,31 @@ class Step1ComposeCoordinator(QtCore.QObject):
         #: composable when its last channel lands, and its other channels'
         #: callbacks would otherwise announce it again. GUI thread only.
         self._emitted = set()
-        #: Compositions handed to a worker and not yet back. GUI thread only.
-        self._inflight = set()
+        #: Compositions handed to a worker and not yet back, `{cache_key:
+        #: token}`. A token, not a bare membership: the same key can be
+        #: composed again under a NEW generation while the old worker is
+        #: still running, and the old result must not retire the new job.
+        #: This object's thread only.
+        self._inflight = {}
         #: The missing windows of the LIVE generation, and what was last
         #: announced for it (`None` = nothing announced yet, so the first
         #: answer is always published, the empty list included).
         self._missing = set()
         self._announced_missing = None
-        #: Channels a seed has been asked for and not yet answered.
+        #: Seeds asked for and not yet answered, as `(source, channel)`.
+        #: The SOURCE is part of it: another dataset's CD3 is another
+        #: question, and the answer to the old one cannot stand in for it.
         self._seed_requested = set()
         #: The draft the live frame was planned from, so a window arriving
         #: can compose exactly that frame again.
         self._last_spec = None
         self._frame_ready.connect(self._on_frame_ready,
                                   QtCore.Qt.QueuedConnection)
+        self._tile_landed.connect(self._on_tile_landed,
+                                  QtCore.Qt.QueuedConnection)
+        #: Every submitted composition gets a token, so a result can only
+        #: retire the job that is actually registered under its key.
+        self._job = 0
 
     # ── what the frame is made of ─────────────────────────────────────
     @property
@@ -274,15 +312,27 @@ class Step1ComposeCoordinator(QtCore.QObject):
             return 0
         level, tiles = self.visible_tiles()
         channels = self.channels_for(spec)
+        self._last_spec = self._snapshot(spec)
         if not tiles or not channels:
+            # NOTHING TO COMPOSE IS STILL AN ANSWER. A frame with no visible
+            # tiles, or one whose every weight has been wound to 0, has no
+            # missing windows -- and a notice left over from the frame before
+            # it would be a claim about a picture nobody is looking at.
+            self._note_missing(())
             return 0
+
+        # A SEED THE SERVICE COULD NOT START YET is asked for again here --
+        # once per pass, not once per tile. The usual reason for a refusal is
+        # that the overview pixels are still being read; the frame after they
+        # land is the one that gets the window.
+        for channel in sorted(self._missing):
+            self._request_seed(channel)
 
         generation = self.generation
         # A NEW PASS announces its tiles again -- the same generation asked
         # twice is a repaint, not a duplicate. Within the pass the set stops
         # a tile from being announced once per channel that lands.
         self._issued = generation
-        self._last_spec = dict(spec)
         self._emitted.clear()
         for request in self._requests(level, tiles, channels, generation):
             stack.scheduler.request(
@@ -293,6 +343,31 @@ class Step1ComposeCoordinator(QtCore.QObject):
             if self._start_tile(level, tx, ty, channels, spec, generation):
                 hits += 1
         return hits
+
+    @staticmethod
+    def _snapshot(spec):
+        """A draft a worker can hold while the user goes on editing.
+
+        `dict(spec)` is a shallow copy: the weight, colour, window and group
+        dictionaries inside it stay the LIVE ones, and the draft that C3
+        binds is edited in place. What a worker composes has to be the draft
+        as it was when the frame was planned, so every level is copied.
+        """
+        out = dict(spec or {})
+        for field in ("weights", "colors", "mappings", "group_weights"):
+            value = out.get(field)
+            if isinstance(value, dict):
+                out[field] = dict(value)
+        groups = out.get("groups")
+        if isinstance(groups, dict):
+            out["groups"] = {name: (dict(channels)
+                                    if isinstance(channels, dict)
+                                    else channels)
+                             for name, channels in groups.items()}
+        nucleus = out.get("nucleus")
+        if isinstance(nucleus, (list, tuple)):
+            out["nucleus"] = tuple(nucleus)
+        return out
 
     def _tile_pixels(self, key):
         """A tile from the shared cache, or None when it is not in yet."""
@@ -330,10 +405,13 @@ class Step1ComposeCoordinator(QtCore.QObject):
             # Another channel's callback, or this pass's own sweep, already
             # handed this tile over.
             return False
-        self._inflight.add(cache_key)
+        self._job += 1
+        token = (generation, self._job)
+        self._inflight[cache_key] = token
         self._executor.submit(self._compose_in_worker, {
-            "generation": generation, "level": level, "tx": tx, "ty": ty,
-            "cache_key": cache_key, "spec": dict(spec),
+            "generation": generation, "token": token, "level": level,
+            "tx": tx, "ty": ty, "cache_key": cache_key,
+            "spec": self._snapshot(spec),
             "tiles": {channel: np.asarray(values, np.float32)
                       for channel, values in tiles.items()}})
         return False
@@ -376,13 +454,20 @@ class Step1ComposeCoordinator(QtCore.QObject):
     def _on_frame_ready(self, payload):
         """A worker's result, back on the GUI thread."""
         generation = payload.get("generation")
-        self._inflight.discard(payload.get("cache_key"))
+        cache_key = payload.get("cache_key")
+        # RETIRE ONLY THIS JOB. An old generation's worker can finish after a
+        # new one has submitted the SAME key -- same tiles, same draft, new
+        # generation -- and clearing the key on the strength of the coordinates
+        # alone would let that new job be submitted a second time and composed
+        # twice over.
+        if self._inflight.get(cache_key) == payload.get("token"):
+            del self._inflight[cache_key]
         if payload.get("error") is not None:
             return
         if generation != self.generation:
             return
         composed = payload["composed"]
-        self._compose_cache.put(payload["cache_key"], composed)
+        self._compose_cache.put(cache_key, composed)
         self._publish(generation, payload["level"], payload["tx"],
                       payload["ty"], composed)
 
@@ -412,20 +497,45 @@ class Step1ComposeCoordinator(QtCore.QObject):
             self._announced_missing = current
             self.windows_missing.emit(list(current))
 
+    def _seed_key(self, channel):
+        """What a seed request is FOR: this source, this channel.
+
+        A channel name alone is not the question. After a dataset or a
+        corrected product changes, CD3 is a different array with a different
+        window, and an answer outstanding for the old one must not stand in
+        for it.
+        """
+        stack = self._host.stack
+        source = (stack.provider.source_identity() if stack is not None
+                  else None)
+        return (source, str(channel))
+
     def _request_seed(self, channel):
         """Ask the SHARED service for this channel's window -- once.
 
         A window is computed by the display service (B.3), not here, and a
-        second ask for a request still outstanding would be a second
-        computation of the same answer.
+        second ask while one is outstanding would be a second computation of
+        the same answer. OUTSTANDING IS WHAT THE SERVICE SAYS IT IS: it
+        answers False when it has not started one -- typically because the
+        overview pixels are not in yet, which it goes and asks for -- and a
+        False must leave the question open, or the channel would never get a
+        window at all. A pass that finds it already pending counts as
+        outstanding too, so a weight drag reuses the computation in flight.
         """
-        if channel in self._seed_requested:
-            return
-        request = getattr(self._seed_port, "request_mapping_seed", None)
+        key = self._seed_key(channel)
+        if key in self._seed_requested:
+            return False
+        port = self._seed_port
+        request = getattr(port, "request_mapping_seed", None)
         if request is None:
-            return
-        self._seed_requested.add(channel)
-        request(channel)
+            return False
+        outstanding = bool(request(channel))
+        if not outstanding:
+            pending = getattr(port, "mapping_seed_pending", None)
+            outstanding = bool(pending(channel)) if pending is not None else False
+        if outstanding:
+            self._seed_requested.add(key)
+        return outstanding
 
     def window_arrived(self, channel=None):
         """A window this frame was waiting for has landed.
@@ -434,7 +544,9 @@ class Step1ComposeCoordinator(QtCore.QObject):
         same draft is composed again, now with that channel in it.
         """
         if channel is not None:
-            self._seed_requested.discard(str(channel))
+            name = str(channel)
+            self._seed_requested = {key for key in self._seed_requested
+                                    if key[1] != name}
         self.invalidate("window")
         if self._last_spec is not None:
             self.compose_visible(self._last_spec)
@@ -442,8 +554,26 @@ class Step1ComposeCoordinator(QtCore.QObject):
 
     # ── the scheduler's callback ──────────────────────────────────────
     def _on_tile(self, result, generation, spec):
-        """A read landed. Its pixels are kept whatever generation asked for
-        them; only the COMPOSITION is gated."""
+        """A read landed -- ON THE SCHEDULER'S READ WORKER.
+
+        `TileScheduler` delivers from the thread that did the reading, so
+        this is the one method here that runs off this object's thread, and
+        it does nothing but hand the result over. The cache lookups, the
+        composition cache, `_inflight` and `_emitted` all wait for the
+        queued slot below.
+        """
+        self._tile_landed.emit({"result": result, "generation": generation,
+                                "spec": spec})
+
+    def _on_tile_landed(self, payload):
+        """The read, now on this object's thread.
+
+        Its pixels are kept whatever generation asked for them; only the
+        COMPOSITION is gated.
+        """
+        result = payload["result"]
+        generation = payload["generation"]
+        spec = payload["spec"]
         request = getattr(result, "request", None)
         key = getattr(request, "key", None)
         if key is None or getattr(result, "error", None) is not None:

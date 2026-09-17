@@ -65,7 +65,12 @@ row, and the duplicate Tissue Preview button in the step bar.
   picture is up. `Intensity…` sits INSIDE the `Channels` frame, at its top,
   right-aligned, where Step0 keeps it. No outer scroll area wraps the page.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
-  combo.
+  combo. THE TICK IS THE PICTURE (user ruling, 2026-09-17): a new slide shows
+  the nucleus and no marker, and clicking a row or ticking its box shows THAT
+  marker and takes the one that was showing off -- Step0 draws one marker at
+  a time. The nucleus is a reference layer with a switch of its own and is
+  untouched by either gesture. Step1 is not affected: its tick is the fusion
+  command and it shows as many channels as the user ticks.
 * **What a step keeps to itself** (user ruling, 2026-09-16) -- the display
   tick and the current channel are PER STEP, in ALL FOUR: ticking or selecting
   in one leaves every other step's own answers untouched, and each step gets
@@ -84,8 +89,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   its scroll position. Fusion participation and weights belong to Step1's
   scientific draft alone. Entering a step is a redraw, never a command: no
   tick, no weight, no fusion revision and no session save comes out of it.
-  (Step2 and Step3 still share the old pair; they were not part of this
-  ruling.)
+  ALL FOUR steps are separate (second ruling, 2026-09-16): Step2 and Step3 no
+  longer read a shared pair -- they are seeded from Step1's committed
+  snapshot the first time each is opened and after every later commit, and
+  their ticks are their own from then on.
 * **The channel column's width** -- ONE share of the page, with two handles:
   dragging Step0's or Step1's moves both, and a window resize keeps them
   together because the share is normalised. Step0 is written through its own

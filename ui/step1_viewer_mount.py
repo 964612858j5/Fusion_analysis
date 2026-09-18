@@ -29,6 +29,8 @@ sentences, one badge, no control: the other channels go on drawing and
 navigation is never blocked.
 """
 
+import math
+
 from PyQt5 import QtCore
 
 from .step1_compose_binding import Step1ComposeBinding
@@ -63,6 +65,10 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._active = False
         self._mode = MODE_OVERLAY
         self._missing_windows = ()
+        #: Where this viewer publishes its camera, set by the window. A
+        #: plain callable, not a signal: one writer, one reader.
+        self.camera_sink = None
+        self._rect_connected = False
 
     # ── what the window gives it ──────────────────────────────────────
     @property
@@ -134,6 +140,7 @@ class Step1WholeSlideMount(QtCore.QObject):
                 parent=self)
             self.compose.attach_layer(self.layer)
         self.layer.attach()
+        self._connect_view_rect()
         # THE CAMERA SETTLING is what asks for the tiles that came into
         # view: the controller already decides when a gesture is over
         # (`gesture_quiet`), and a second timer here would be a second
@@ -159,6 +166,10 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._active = True
         self.compose.refresh("step1-entered")
         self._refresh_notice()
+        # THE RECTANGLE FOLLOWS THE STEP: coming back to Step1 takes the
+        # Tissue Preview's current-view rectangle back from Step0.
+        self._connect_view_rect()
+        self.publish_view_rect()
         return True
 
     def deactivate(self):
@@ -202,6 +213,10 @@ class Step1WholeSlideMount(QtCore.QObject):
             self.compose.attach_layer(self.layer)
             if self._active:
                 self.compose.source_changed(reason)
+        # A NEW STACK IS A NEW ViewBox: the rectangle would otherwise go on
+        # following a view nobody is looking at.
+        self._connect_view_rect()
+        self.publish_view_rect()
         return stack
 
     def sync_source(self, reason="source"):
@@ -217,19 +232,157 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         return self.source_changed(reason) is not None
 
+    # ── the shared camera port (C4.5a) ────────────────────────────────
+    def current_camera(self):
+        """`(cx, cy, scale)` of this viewer, or None.
+
+        The SAME measurement Step0 answers with: the centre of what is on
+        screen in level-0 coordinates, and screen pixels per level-0 pixel
+        from the ViewBox's own `viewPixelSize`. Two different widgets can
+        then be put at the same place without either of their aspect locks
+        reshaping a rectangle on the way.
+        """
+        stack = self.host.stack
+        view_box = getattr(getattr(stack, "view", None), "view_box", None)
+        if view_box is None:
+            return None
+        try:
+            (x0, x1), (y0, y1) = view_box.viewRange()
+            per_pixel = float(view_box.viewPixelSize()[0])
+        except Exception:                                   # noqa: BLE001
+            return None
+        width, height = float(x1) - float(x0), float(y1) - float(y0)
+        if not (width > 0 and height > 0 and per_pixel > 0):
+            return None
+        if not all(math.isfinite(v) for v in (x0, x1, y0, y1, per_pixel)):
+            return None
+        return (float(x0) + width / 2.0, float(y0) + height / 2.0,
+                1.0 / per_pixel)
+
+    def apply_camera(self, cx, cy, scale):
+        """Put the shared centre and scale on THIS viewer.
+
+        The rectangle is solved for this widget's own size, so the camera
+        arrives as a centre and a magnification rather than someone else's
+        rectangle, and it goes through the ONE controller's `jump_to` -- the
+        same entry a patch button and the Tissue Preview use -- so the tiles
+        for where it lands are asked for in the same turn.
+        """
+        stack = self.host.stack
+        view_box = getattr(getattr(stack, "view", None), "view_box", None)
+        if view_box is None or not (scale > 0 and math.isfinite(scale)):
+            return False
+        try:
+            w_px, h_px = float(view_box.width()), float(view_box.height())
+        except Exception:                                   # noqa: BLE001
+            return False
+        if not (w_px > 0 and h_px > 0):
+            return False
+        width, height = w_px / float(scale), h_px / float(scale)
+        moved = self.host.jump_to(int(round(cy - height / 2.0)),
+                                  int(round(cx - width / 2.0)),
+                                  max(1, int(round(width))),
+                                  max(1, int(round(height))))
+        self.publish_view_rect()
+        return bool(moved)
+
+    def publish_camera(self, reason=""):
+        """Tell the window where this viewer is looking."""
+        sink = self.camera_sink
+        if sink is None:
+            return False
+        camera = self.current_camera()
+        if camera is None:
+            return False
+        sink(camera, reason)
+        return True
+
+    # ── the Tissue Preview's current-view rectangle ───────────────────
+    def view_rect_l0(self):
+        """What this viewer can see, as level-0 `(y0, y1, x0, x1)`, or None."""
+        stack = self.host.stack
+        view_box = getattr(getattr(stack, "view", None), "view_box", None)
+        if view_box is None:
+            return None
+        try:
+            (x0, x1), (y0, y1) = view_box.viewRange()
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not all(math.isfinite(float(v)) for v in (x0, x1, y0, y1)):
+            return None
+        if float(x1) <= float(x0) or float(y1) <= float(y0):
+            return None
+        return (float(y0), float(y1), float(x0), float(x1))
+
+    def publish_view_rect(self):
+        """Draw THIS viewer's viewport on the shared Tissue Preview.
+
+        The rectangle only: no frame is asked for, no pixels are read, and
+        nothing is added to the popup. It is the same `set_current_view_rect`
+        Step0 draws its own viewport with, and the step on screen owns it.
+        """
+        popup = self._navigator()
+        overview = getattr(popup, "overview", None)
+        if overview is None:
+            return False
+        rect = self.view_rect_l0()
+        if rect is None:
+            clear = getattr(overview, "clear_current_view_rect", None)
+            if clear is not None:
+                clear()
+            return False
+        overview.set_current_view_rect(rect)
+        return True
+
+    def _navigator(self):
+        display = getattr(self._window, "_display", None)
+        getter = getattr(display, "navigator", None)
+        return None if getter is None else getter()
+
+    def _connect_view_rect(self):
+        """Follow the REAL ViewBox, once per stack.
+
+        A rebuilt source means a new ViewBox; the flag lives on the stack so
+        the new one is connected and the old one is not reconnected.
+        """
+        stack = self.host.stack
+        view_box = getattr(getattr(stack, "view", None), "view_box", None)
+        if view_box is None or getattr(stack, "_step1_rect_connected", False):
+            return False
+        try:
+            view_box.sigRangeChanged.connect(self._on_range_changed)
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        try:
+            stack._step1_rect_connected = True
+        except (AttributeError, RuntimeError):
+            pass
+        return True
+
+    def _on_range_changed(self, *_args):
+        """The camera moved -- by hand, by a jump, by a rebuild."""
+        self.publish_view_rect()
+        self.publish_camera("step1")
+
     # ── navigation: the same two gestures, the same camera ────────────
     def show_patch(self, bbox):
         moved = self.viewer.show_patch(bbox)
         self._recompose_for_the_camera()
+        self.publish_view_rect()
+        self.publish_camera("step1-patch")
         return moved
 
     def jump_to_point(self, y, x, size):
         moved = self.viewer.jump_to_point(y, x, size)
         self._recompose_for_the_camera()
+        self.publish_view_rect()
+        self.publish_camera("step1-preview")
         return moved
 
     def _on_gesture_quiet(self, _snapshot):
         self._recompose_for_the_camera()
+        self.publish_view_rect()
+        self.publish_camera("step1-gesture")
 
     def _recompose_for_the_camera(self):
         """The camera moved; the draft did not.

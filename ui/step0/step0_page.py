@@ -2107,6 +2107,50 @@ class Step0Page(QWidget):
         return self._apply_full_image_view_rect(
             (cx - w / 2.0, cy - h / 2.0, w, h))
 
+    # ── the shared camera port (C4.5a) ────────────────────────────────
+    #
+    # Step0 and Step1 are two pictures of one slide, and the user's place on
+    # it is shared. These are THIN wrappers over the camera this page already
+    # computes: no second coordinate algorithm, no second camera state, and
+    # whichever of the two Step0 views is on screen is the one they read and
+    # write.
+    def current_camera_snapshot(self):
+        """`(cx, cy, scale)` of the view that is ON SCREEN, or None.
+
+        The compare panels while they are up -- they are the view then, and
+        the full image behind them is a picture of where the user WAS.
+        """
+        if self._compare_mode() and getattr(self, "_compare_opened", False):
+            return self._compare_camera()
+        return self._full_image_camera()
+
+    def apply_camera_snapshot(self, cx, cy, scale):
+        """Put the shared centre and scale on whichever view is on screen.
+
+        Through the same entries the page's own gestures use, so the tiles
+        for where it is going are asked for in the same turn -- no bare
+        `setRange` behind the controller's back.
+        """
+        if self._compare_mode() and getattr(self, "_compare_opened", False):
+            return bool(self._apply_compare_camera(cx, cy, scale))
+        return bool(self._apply_full_image_camera(cx, cy, scale))
+
+    def publish_camera(self, reason=""):
+        """Tell the window where this page is looking, if anyone is listening.
+
+        A plain callable set by the owner (`camera_sink`), not a signal and
+        not a bus: one writer, one reader, and nothing to unsubscribe from
+        when the page dies.
+        """
+        sink = getattr(self, "camera_sink", None)
+        if sink is None:
+            return False
+        camera = self.current_camera_snapshot()
+        if camera is None:
+            return False
+        sink(camera, reason)
+        return True
+
     def _compare_camera(self):
         """The three panels' shared camera as `(cx, cy, scale)`, or None.
 
@@ -2627,6 +2671,7 @@ class Step0Page(QWidget):
         if not self._compare_mode():
             return
         self._update_compare_view_rect()
+        self.publish_camera("step0-compare")
 
     def _compare_view_rect_l0(self):
         """The panels' shared camera as a level-0 `(x, y, w, h)`, or None.
@@ -5492,6 +5537,7 @@ class Step0Page(QWidget):
     def _on_full_image_camera_moved(self):
         self._update_full_image_view_rect()
         self._update_full_level_hint()
+        self.publish_camera("step0-full")
 
     def _connect_overview_seed(self, controller, owner=None):
         """Once per controller: tell the page when a channel's whole-slide
@@ -5560,6 +5606,11 @@ class Step0Page(QWidget):
         popup = getattr(self, "_tissue_navigator_popup", None)
         if popup is None or not self._compare_mode():
             return
+        if not self._display_scope_is_mine():
+            # ANOTHER STEP IS ON SCREEN. The rectangle says where the user is
+            # looking NOW; a hidden page's late range signal overwriting it
+            # would draw Step0's camera on top of Step1's picture.
+            return
         # Only once the panels have actually been opened. A compare page
         # that has never been entered has a ViewBox range but not a VIEW,
         # and drawing that on the thumbnail would replace a true rectangle
@@ -5575,9 +5626,16 @@ class Step0Page(QWidget):
 
     def _update_full_image_view_rect(self):
         """Draw the current viewport on the Tissue Preview -- the full
-        image's while it is the view, the panels' while they are."""
+        image's while it is the view, the panels' while they are.
+
+        ONLY WHILE STEP0 IS THE STEP ON SCREEN: the popup is one window for
+        the whole process, and the rectangle on it belongs to whoever the
+        user is actually looking at.
+        """
         popup = getattr(self, "_tissue_navigator_popup", None)
         if popup is None:
+            return
+        if not self._display_scope_is_mine():
             return
         if self._compare_mode() and getattr(self, "_compare_opened", False):
             self._update_compare_view_rect()

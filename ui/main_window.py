@@ -82,6 +82,7 @@ from .step0.result_grid import ResultGridPanel
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
+from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
@@ -361,6 +362,11 @@ class MainWindow(QMainWindow):
         # a fresh dataset shows DAPI and nothing else, and ticking a channel
         # changes the picture at once.
         self._step1_preview_mode = STEP1_PREVIEW_OVERLAY
+        # WHERE THE USER IS LOOKING, shared by Step0 and Step1 (C4.5a). One
+        # small value -- dataset, centre, scale -- written only by the step
+        # on screen and applied to the step being entered. Not a bus, not a
+        # second copy of anything either page owns.
+        self._shared_camera = None
         # Remapped [0,1] channel images for the overlay, keyed by
         # (patch index, channel, display window).  This is what stops a tick
         # from re-running a percentile over every channel: the blend itself is
@@ -603,6 +609,10 @@ class MainWindow(QMainWindow):
         outer_lay.addWidget(self._stack, stretch=1)
 
         self._step0 = Step0Page(display_services=self._display)
+        # WHERE STEP0 IS LOOKING, into the one shared camera (C4.5a). A
+        # plain callable rather than a signal: one writer, one reader, and
+        # the window refuses it while another step is on screen.
+        self._step0.camera_sink = self._on_step0_camera
         self._step0.step0_complete.connect(self._on_step0_complete)
         # A committed dataset switch invalidates every Step1 fact that was
         # derived from the previous dataset.  This is a different event from
@@ -1335,6 +1345,7 @@ class MainWindow(QMainWindow):
         mount = getattr(self, "_step1_mount", None)
         if mount is None:
             mount = Step1WholeSlideMount(self, parent=self)
+            mount.camera_sink = self._on_step1_camera
             self._step1_mount = mount
             # The shared popup may not exist yet; this is the notice that it
             # does. Connected once, with the mount, so the routing survives
@@ -1394,6 +1405,75 @@ class MainWindow(QMainWindow):
         mount.set_mode(self._step1_preview_mode)
         self._wire_step1_tissue_navigation()
         return True
+
+    # ── the shared camera (C4.5a) ─────────────────────────────────────
+    def _camera_dataset(self):
+        """WHICH SLIDE a camera is a position on."""
+        return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
+
+    def _on_step0_camera(self, camera, reason=""):
+        """Step0 moved. Recorded only while Step0 is the step on screen."""
+        if self._current_step != 0:
+            return False
+        return self._remember_camera(camera, f"step0:{reason}")
+
+    def _on_step1_camera(self, camera, reason=""):
+        """Step1 moved. Recorded only while Step1 is the step on screen."""
+        if self._current_step != 1:
+            return False
+        return self._remember_camera(camera, f"step1:{reason}")
+
+    def _remember_camera(self, camera, origin=""):
+        dataset = self._camera_dataset()
+        if not dataset:
+            return False
+        shot = snapshot_from(dataset, camera, origin)
+        if shot is None:
+            return False
+        self._shared_camera = shot
+        return True
+
+    def _capture_camera_of(self, step):
+        """Read the camera of the step being LEFT, before it is hidden."""
+        if step == 0:
+            page = self.__dict__.get("_step0")
+            reader = getattr(page, "current_camera_snapshot", None)
+            camera = None if reader is None else reader()
+            return self._remember_camera(camera, "step0:leave")
+        if step == 1:
+            mount = getattr(self, "_step1_mount", None)
+            camera = None if mount is None else mount.current_camera()
+            return self._remember_camera(camera, "step1:leave")
+        return False
+
+    def _apply_shared_camera_to(self, step):
+        """Put the shared camera on the step being ENTERED, and read it back.
+
+        Read back because a viewer clamps: the slide's edge, a minimum
+        magnification, a widget that is not laid out yet. What the shared
+        value must hold is where the user ACTUALLY is, or the next step
+        would be sent somewhere nobody is.
+        """
+        shot = self._shared_camera
+        if shot is None or not shot.valid_for(self._camera_dataset()):
+            # ANOTHER SLIDE (or none yet): the first viewer to answer on
+            # this one establishes the position instead of inheriting the
+            # previous slide's coordinates.
+            self._shared_camera = None
+            return self._capture_camera_of(step)
+        cx, cy, scale = shot.camera
+        applied = False
+        if step == 0:
+            page = self.__dict__.get("_step0")
+            apply = getattr(page, "apply_camera_snapshot", None)
+            applied = bool(apply is not None and apply(cx, cy, scale))
+        elif step == 1:
+            mount = getattr(self, "_step1_mount", None)
+            applied = bool(mount is not None and mount.host.stack is not None
+                           and mount.apply_camera(cx, cy, scale))
+        if applied:
+            self._capture_camera_of(step)
+        return applied
 
     def _step1_sync_whole_slide_source(self, reason="handoff"):
         """Rebind Step1's whole-slide viewer if its source moved."""
@@ -3950,6 +4030,12 @@ class MainWindow(QMainWindow):
         self._refresh_patch_preview(reset_view=False)
 
     def _set_step_active(self, active):
+        # THE CAMERA OF THE STEP BEING LEFT, while it is still the active one
+        # -- after this line the sinks refuse its notices, which is what
+        # stops a hidden viewer from writing the shared position.
+        previous = getattr(self, "_current_step", None)
+        if previous is not None and previous != active:
+            self._capture_camera_of(previous)
         self._current_step = active
         # FIRST, so everything below reads this step's own answers. Silent:
         # it writes no owner field and starts no save -- see
@@ -3978,6 +4064,11 @@ class MainWindow(QMainWindow):
         # moved: a return to Step1 with the same scope still has to compose
         # what changed while it was away.
         self._step1_whole_slide_step_changed(active)
+        # ...and the step being entered goes to where the user was, on the
+        # viewer that is now on screen. Only this one: the other viewer is
+        # hidden, and nothing here touches it.
+        if active in (0, 1):
+            self._apply_shared_camera_to(active)
         # THE ONE public channel dock follows the step by switching its
         # ACCESSORY -- Step0's correction combo, Step1's participation box --
         # and by nothing else. No rebuild, no reparent, no row factory swap:

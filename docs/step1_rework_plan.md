@@ -312,6 +312,34 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 门用真实共享信号驱动：Step1 在屏 → 只有 Step1 相机动；Step0 在屏 → 只有 Step0 相机动；
   被拒绝的关闭 → mount 未关且 stack 仍在；被接受的关闭 → mount 关闭且置空。
 
+### C.4.5a 共享相机与 Step1 Tissue 视框（2026-09-18 用户裁定）
+**产品裁定**：Step0 与 Step1 是同一张切片的两张图，用户的观察位置共享。Step0 平移/缩放后进入 Step1 看到同样
+中心与比例；在 Step1 平移、缩放、点 patch 或 Tissue Preview 空降后回到 Step0 亦然；连续往返不漂移；
+Full Image / Compare / Step1 全片 viewer 三者同守此约。共享的只有相机位置，不重新合并勾选、当前通道或科学状态。
+
+**实现边界**
+- `ui/shared_camera.py`：`CameraSnapshot(dataset, cx, cy, scale, origin)`。共享的是**中心＋比例**
+  （level-0 中心、屏幕像素/level-0 像素），不是矩形 —— 三个 widget 宽高与纵横锁不同，矩形每次往返都会被各自重塑。
+  snapshot **带数据集身份**，换片不继承旧坐标。
+- Step0 薄端口：`current_camera_snapshot()` / `apply_camera_snapshot()`（Compare 在屏读写 Compare，否则 Full Image），
+  内部仍走既有 `_apply_full_image_camera` / `CompareStrip.set_camera`，不绕过 controller、不新增坐标算法。
+- Step1 薄端口：`current_camera()` / `apply_camera()`（按自身尺寸解矩形，走既有 `jump_to`），
+  `view_rect_l0()` / `publish_view_rect()` 写既有 `overview.set_current_view_rect`。
+- 窗口持有唯一 snapshot：**只有活动步骤写入**（sink 判 `_current_step`）；`_set_step_active` 先抓离开步骤的相机，
+  再应用到进入的步骤并**回读实际值**（边界钳制后的真实位置）。隐藏 peer 不被驱动。
+- Step1 连真实 ViewBox 的 `sigRangeChanged`（open / activate / stack 重建各连一次），
+  弹窗懒创建后也立即得到矩形；Step0 的视框发布加活动步骤门。
+
+**自动门**（`tests/test_step1_shared_camera.py`，真实 ExploreView 几何两侧）
+A 双向同步、Compare 优先、三面板共享、往返+resize 不漂移、换数据集不继承；
+B 隐藏 viewer 不被驱动（含切换瞬间）；C Tissue 视框 8 项（平移/缩放/patch/空降/懒创建/重建/隐藏不覆盖/切回接管）；
+D 相机同步过程科学状态逐项不变。
+
+**变异闸门**：只单向同步 / 传矩形而非中心+比例 / Compare 误读隐藏 Full Image / 去掉活动步骤门 /
+不连 ViewBox 只在打开时发一次 / 重建后不重连 / snapshot 去掉数据集身份 / 切换时同时驱动隐藏 peer —— 八条全红。
+
+**真机验收仍待用户执行。**
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红

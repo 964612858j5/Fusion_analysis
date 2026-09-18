@@ -424,3 +424,145 @@ def test_an_unopenable_slide_is_not_retried_on_every_step_change(
         assert len(tries) == 1, tries
     finally:
         _close(rig)
+
+
+# ── 6. C4.3: the four things the window still owes the viewer ─────────
+
+def test_a_moved_handoff_rebinds_the_source(app, monkeypatch, tmp_path):
+    """The ROI, the corrected product and the handoff revision all fold into
+    one source identity. When it moves, the viewer must rebind: the frames
+    on screen were composed from tiles of the OLD identity."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        mount = rig.w._step1_mount
+        rebinds = []
+        monkeypatch.setattr(mount_module.Step1WholeSlideMount, "source_changed",
+                            lambda self, reason="source": rebinds.append(reason))
+        monkeypatch.setattr(mount.viewer.__class__, "source_moved",
+                            lambda self: True)
+
+        _in(rig, 0)
+        _in(rig, 1)
+        assert rebinds, "coming back with a moved source did not rebind"
+
+        rebinds.clear()
+        rig.w._step1_sync_whole_slide_source("handoff")
+        assert rebinds == ["handoff"], (
+            "a handoff applied while standing in Step1 did not rebind")
+    finally:
+        _close(rig)
+
+
+def test_an_unmoved_source_is_not_rebound(app, monkeypatch, tmp_path):
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        mount = rig.w._step1_mount
+        rebinds = []
+        monkeypatch.setattr(mount_module.Step1WholeSlideMount, "source_changed",
+                            lambda self, reason="source": rebinds.append(reason))
+        monkeypatch.setattr(mount.viewer.__class__, "source_moved",
+                            lambda self: False)
+
+        _in(rig, 0)
+        _in(rig, 1)
+
+        assert rebinds == [], "an unmoved source was rebound anyway"
+    finally:
+        _close(rig)
+
+
+def test_closing_the_window_closes_the_viewer(app, monkeypatch, tmp_path):
+    """The mount owns a compose executor, a scheduler and a raw handle; the
+    loaders the window stops below are not any of them."""
+    rig = _window(app, monkeypatch, tmp_path)
+    _in(rig, 1)
+    mount = rig.w._step1_mount
+    closed = []
+    monkeypatch.setattr(mount_module.Step1WholeSlideMount, "close",
+                        lambda self: closed.append(True))
+
+    rig.w.close()
+    QtWidgets.QApplication.processEvents()
+
+    assert closed == [True], "the whole-slide viewer outlived the window"
+    assert getattr(rig.w, "_step1_mount", None) is None
+
+
+def test_the_hidden_patch_path_stops_reading_while_the_slide_is_shown(
+        app, monkeypatch, tmp_path):
+    """The old renderer is behind the new picture. Reading a panel's worth
+    of patch channels for a widget nobody can see is the cost C4 removes --
+    and the path itself stays, so it reads again when it is back on top."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        rig.w._all_patches = [(0, 256, 0, 256)]
+        reads = []
+        monkeypatch.setattr(rig.w, "_needed_channels",
+                            lambda: reads.append("asked") or ["CD3"])
+
+        rig.w._ensure_channels_cached(0)
+        assert reads == [], "the hidden patch path read behind the new picture"
+        assert rig.w._refresh_patch_preview() is None
+
+        rig.w._step1_mount.restore_legacy()
+        rig.w._ensure_channels_cached(0)
+        assert reads == ["asked"], "the rollback path stopped working"
+    finally:
+        _close(rig)
+
+
+def test_the_shared_tissue_preview_routes_to_step1_only_there(
+        app, monkeypatch, tmp_path):
+    """THE REAL shared signal, not the handler called by hand: one popup,
+    one `navigate_requested`, and the step decides who answers it."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        # THE PRODUCT'S OWN lazy creation: the popup does not exist until
+        # someone opens the Tissue Preview, which is how the routing came to
+        # be wired against a popup that was not there.
+        popup = rig.w._display.ensure_navigator()
+        QtWidgets.QApplication.processEvents()
+        overview = popup.overview
+        rig.jumps.clear()
+
+        overview.navigate_requested.emit(700, 900)
+        QtWidgets.QApplication.processEvents()
+        assert rig.jumps, "the shared preview did not reach Step1's camera"
+
+        rig.jumps.clear()
+        _in(rig, 0)
+        overview.navigate_requested.emit(400, 400)
+        QtWidgets.QApplication.processEvents()
+
+        assert rig.jumps == [], (
+            "the shared preview moved Step1's camera from another step")
+    finally:
+        _close(rig)
+
+
+def test_the_handoff_reader_syncs_the_viewer_on_success(app, monkeypatch,
+                                                        tmp_path):
+    """A handoff applied while the user is standing in Step1 has to reach the
+    viewer. Driving the whole reader needs a published project on disk, so
+    what is checked here is that its SUCCESS path calls the sync -- the sync
+    itself is gated above, on the real mount."""
+    import ast
+    import inspect
+    import textwrap
+
+    from block01.ui.main_window import MainWindow
+
+    source = textwrap.dedent(inspect.getsource(
+        MainWindow._load_step0_roi_result))
+    tree = ast.parse(source)
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "_step1_sync_whole_slide_source"]
+    assert calls, (
+        "the handoff reader does not tell the whole-slide viewer its source "
+        "moved")

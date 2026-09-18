@@ -1336,6 +1336,14 @@ class MainWindow(QMainWindow):
         if mount is None:
             mount = Step1WholeSlideMount(self, parent=self)
             self._step1_mount = mount
+            # The shared popup may not exist yet; this is the notice that it
+            # does. Connected once, with the mount, so the routing survives
+            # a popup created long after Step1 first drew anything.
+            try:
+                self._display.navigator_created.connect(
+                    self._wire_step1_tissue_navigation, Qt.UniqueConnection)
+            except TypeError:
+                pass
             layout = self.viewer_tab.layout()
             if layout is not None:
                 mount.install(layout, self.prev_gv)
@@ -1364,6 +1372,10 @@ class MainWindow(QMainWindow):
             return False
         mount = self._step1_whole_slide()
         if mount.host.stack is not None:
+            # A HANDOFF MAY HAVE LANDED while Step1 was away -- another ROI,
+            # a regenerated corrected product, a republished manifest. The
+            # identity says so; the viewer rebinds and keeps the viewport.
+            mount.sync_source("handoff")
             mount.activate()
             return True
         try:
@@ -1383,14 +1395,59 @@ class MainWindow(QMainWindow):
         self._wire_step1_tissue_navigation()
         return True
 
-    def _wire_step1_tissue_navigation(self):
+    def _step1_sync_whole_slide_source(self, reason="handoff"):
+        """Rebind Step1's whole-slide viewer if its source moved."""
+        try:
+            mount = getattr(self, "_step1_mount", None)
+            # A slide that failed to open before deserves another try once
+            # the handoff has moved: what failed may be exactly what moved.
+            if getattr(self, "_step1_mount_refused_for", None) is not None:
+                self._step1_mount_refused_for = None
+        except RuntimeError:
+            # A WINDOW THAT WAS NEVER BUILT. The handoff reader is a public
+            # entry and is exercised against half-constructed windows, whose
+            # C++ side refuses every attribute; a viewer that does not exist
+            # has no source to rebind.
+            return False
+        if mount is None or mount.host.stack is None:
+            return False
+        try:
+            return bool(mount.sync_source(reason))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1-Viewer] rebind failed: {exc}")
+            mount.restore_legacy()
+            return False
+
+    def _step1_whole_slide_active(self):
+        """Is the whole-slide viewer the picture Step1 is showing?
+
+        FALSE FOR ANYTHING THAT IS NOT A BUILT WINDOW. This gates the old
+        patch path, which is also driven against half-constructed windows
+        whose C++ side refuses every attribute; the honest answer there is
+        that no whole-slide viewer is showing, so the old path runs as it
+        always did.
+        """
+        try:
+            mount = getattr(self, "_step1_mount", None)
+            return bool(mount is not None and mount.host.stack is not None
+                        and mount.host.isVisibleTo(self.viewer_tab))
+        except RuntimeError:
+            return False
+
+    def _wire_step1_tissue_navigation(self, popup=None):
         """A click on the shared Tissue Preview, into the ONE controller.
 
         The popup, its overview and its `navigate_requested` are the ones
         that already exist; this adds no window and no control, only a
         second listener that answers while STEP1 is the step on screen.
+
+        THE POPUP IS LAZY. It is built the first time someone opens the
+        Tissue Preview, which is usually AFTER Step1 first opens its viewer,
+        so this is called from two places: here, in case it already exists,
+        and from `navigator_created`, which is the only moment it is
+        guaranteed to.
         """
-        popup = self._display.navigator()
+        popup = popup if popup is not None else self._display.navigator()
         overview = getattr(popup, "overview", None)
         signal = getattr(overview, "navigate_requested", None)
         if signal is None:
@@ -2358,6 +2415,11 @@ class MainWindow(QMainWindow):
         # complete successful read establishes Step0/Step1 readiness.
         self.step0_done = True
         self._step1_context_ready = True
+        # THE WHOLE-SLIDE VIEWER follows the handoff it draws from: another
+        # ROI, a regenerated corrected product or a republished manifest is
+        # another source identity, and frames composed from the old one are a
+        # picture of something else.
+        self._step1_sync_whole_slide_source("handoff")
         return True
 
     @staticmethod
@@ -4156,7 +4218,10 @@ class MainWindow(QMainWindow):
             self.patch_cache_status.setText("Loading patch...")
 
         # Debounce: start background preload 400 ms after last patch change
-        self._preload_debounce.start(400)
+        # -- unless the whole-slide viewer is the picture, in which case
+        # there is nothing behind it to preload for.
+        if not self._step1_whole_slide_active():
+            self._preload_debounce.start(400)
         self._schedule_step1_session_save()
 
     def _select_preview_patch(self, idx):
@@ -4529,6 +4594,16 @@ class MainWindow(QMainWindow):
         # Before the loaders, because it is the cheapest thing here to stop
         # and it holds the dataset's arrays.
         self._stop_compose_worker("the main window is closing")
+        # STEP1'S WHOLE-SLIDE VIEWER owns a compose executor, a scheduler and
+        # a raw handle of its own; none of them belongs to the loaders below,
+        # so nothing else here would stop them.
+        mount = getattr(self, "_step1_mount", None)
+        if mount is not None:
+            try:
+                mount.close()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step1-Viewer] close failed: {exc}")
+            self._step1_mount = None
         # Block01's own, PHASE ONE ONLY: new frame requests are refused so
         # nothing re-arms behind the stop, and nothing is destroyed yet. This
         # close can still be refused a few lines down -- a live overview read
@@ -4697,7 +4772,14 @@ class MainWindow(QMainWindow):
         self._signal_cache.drop_patch(patch_idx)
 
     def _refresh_patch_preview(self, reset_view=False):
-        """Draw whichever preview the current mode asks for."""
+        """Draw whichever preview the current mode asks for.
+
+        Nothing at all while the whole-slide viewer is the picture: the old
+        renderer is hidden behind it, and composing a frame for a hidden
+        widget is work with no reader.
+        """
+        if self._step1_whole_slide_active():
+            return
         with perf_trace.span("step1.frame", mode=self._step1_preview_mode,
                              patch=self._preview_patch_idx,
                              reset_view=bool(reset_view)):
@@ -5014,12 +5096,20 @@ class MainWindow(QMainWindow):
     def _ensure_channels_cached(self, idx):
         """Read what this patch is missing — only that, and only once.
 
+        NOT WHILE THE WHOLE-SLIDE VIEWER IS THE PICTURE. The patch cache
+        feeds the old renderer, which is hidden behind it; reading a panel's
+        worth of patch channels for a picture nobody can see is exactly the
+        cost C4 removes. The path itself stays -- it is the rollback -- and
+        it reads again the moment it is back on screen.
+
         A channel whose read already failed for this patch is left alone: the
         retry would fail the same way.  A channel wanted while another load is
         in flight is remembered BY NAME, so the outcome of that load, good or
         bad, cannot take the new request with it.
         """
         if self.loader is None or idx < 0 or idx >= len(self._all_patches):
+            return
+        if self._step1_whole_slide_active():
             return
         needed = self._needed_channels()
         if not needed:

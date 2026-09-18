@@ -293,6 +293,17 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
   `set_preview_mode` 转 `mount.set_mode`；`_select_preview_patch` 转 `mount.show_patch`；
   `navigate_requested`（既有信号）在 `_current_step == 1` 时转 `mount.jump_to_point`。
 
+### C.4.2 主窗口接管收口（2026-09-18 审核补）
+- **完整来源身份重绑**：`Step1ViewerBinding.source_moved()` 公开身份比较（决断 + 产物 + ROI + handoff 修订）；
+  `Step1WholeSlideMount.sync_source()` 仅在身份**真的**移动时重绑：重建 stack（保留视口）、
+  旧合成层 teardown 后按新 stack 重建、新世代重合成。调用点：进入 Step1 时、`_load_step0_roi_result` 成功时。
+- **主窗口退出关闭 mount**：`closeEvent` 在停 loader 之前关闭 mount（compose executor、scheduler、raw 句柄
+  都不属于下面停的那些 loader）。
+- **接管时不再读旧 patch**：`_ensure_channels_cached`、`_refresh_patch_preview`、预载 debounce
+  在全片 viewer 在屏时直接返回；旧路径本身保留，回滚（`restore_legacy`）后立刻恢复读取。
+- **Tissue Preview 走真实共享信号**：弹窗是**懒创建**的，原先在 open 时接线其实没接上；
+  改为在 mount 建立时连既有 `Block01DisplayServices.navigator_created`，并在 `_current_step == 1` 时才路由。
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红
@@ -333,6 +344,10 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 模式切换不清层 / 每次变化都清层 → 残留门与不闪门红
 - `_set_step_active` 不驱动 mount / 模式按钮不转 `set_mode` / patch 不转 `show_patch` /
   预览点击不判当前步 / 安装时删除旧 patch 视图 / 离开 Step1 仍合成 → 对应接管门红
+- 进入 Step1 不 `sync_source` / 未移动也重绑 / handoff 成功路径不通知 viewer → 重绑门红
+- `closeEvent` 不关 mount → 退出门红
+- 接管时仍读 patch 通道 → 隐藏读盘门红
+- 不连 `navigator_created` → 共享预览路由门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

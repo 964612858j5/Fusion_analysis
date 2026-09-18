@@ -143,6 +143,22 @@ class Step1ViewerBinding(QtCore.QObject):
         self.apply_intensity(channel)
         return stack
 
+    def source_moved(self):
+        """Would the CURRENT window answers give a different source?
+
+        The public form of the check `open` makes: the handoff revision, the
+        decisions, the corrected product and the ROI all fold into one
+        identity token, and any of them moving means the pixels this viewer
+        may draw are not the ones it is drawing.
+        """
+        if self.host.stack is None:
+            return False
+        return self._source_moved(
+            decisions=self.decisions(),
+            corrected_zarr_path=self.corrected_zarr_path(),
+            roi_name=self.roi_name(), roi_bbox=self.roi_bbox(),
+            handoff_revision=self.handoff_revision())
+
     def _source_moved(self, **kwargs):
         """Would a new table answer differently from the live one?"""
         from ..viewer.step1_source import Step1SourceTable

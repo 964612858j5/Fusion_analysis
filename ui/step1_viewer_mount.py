@@ -182,13 +182,40 @@ class Step1WholeSlideMount(QtCore.QObject):
         return self.compose.set_mode(self._mode)
 
     def source_changed(self, reason="source"):
-        """The handoff, the product or the ROI moved."""
+        """The handoff, the product or the ROI moved.
+
+        The stack is rebuilt by the viewer binding (which carries the
+        viewport across), the composed layer goes with it -- its items are a
+        picture of the OLD source -- and a new generation composes the new
+        one.
+        """
         stack = self.viewer.open()
-        if stack is not None and self.layer is not None:
-            self.layer.attach()
-        if self.compose is not None and self._active:
-            self.compose.source_changed(reason)
+        if stack is None:
+            return None
+        if self.layer is not None:
+            # The pool belongs to the view that has just been rebuilt: the
+            # old items live in a ViewBox nothing points at any more.
+            self.layer.teardown()
+        self.layer = Step1ComposedLayer(stack)
+        self.layer.attach()
+        if self.compose is not None:
+            self.compose.attach_layer(self.layer)
+            if self._active:
+                self.compose.source_changed(reason)
         return stack
+
+    def sync_source(self, reason="source"):
+        """Rebind IF the handoff, the decisions, the product or the ROI moved.
+
+        Asked whenever Step1 comes forward and whenever a handoff is applied:
+        a source that has not moved costs nothing, and one that has must not
+        go on being drawn from the old identity's tiles.
+        """
+        if self.host.stack is None:
+            return False
+        if not self.viewer.source_moved():
+            return False
+        return self.source_changed(reason) is not None
 
     # ── navigation: the same two gestures, the same camera ────────────
     def show_patch(self, bbox):

@@ -82,6 +82,7 @@ from .step0.result_grid import ResultGridPanel
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
+from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
 from .step4_page import Step4Page
@@ -1322,6 +1323,93 @@ class MainWindow(QMainWindow):
             print(f"[Layout-Step1] {where} splitter sizes=not-used tab={current_tab}")
         except Exception as e:
             print(f"[Layout] log failed: {e}")
+
+    # ── Step1's whole-slide viewer (block C4) ─────────────────────────
+    #
+    # The Viewer tab shows the whole slide, composed from the draft, on the
+    # same host B built and the same camera Step0 hands over. The old patch
+    # renderer stays in the tab, hidden, as the rollback path until D.
+    def _step1_whole_slide(self):
+        """THE mount for Step1's Viewer tab, built the first time it is
+        entered with a slide loaded."""
+        mount = getattr(self, "_step1_mount", None)
+        if mount is None:
+            mount = Step1WholeSlideMount(self, parent=self)
+            self._step1_mount = mount
+            layout = self.viewer_tab.layout()
+            if layout is not None:
+                mount.install(layout, self.prev_gv)
+        return mount
+
+    def _step1_whole_slide_step_changed(self, active):
+        """Follow the step: Step1 composes only while it is on screen.
+
+        Colours, Intensity and the fusion draft are shared, so a tick made
+        in Step0 would otherwise drive a recomposition of a picture nobody
+        is looking at. Coming back composes ONCE, which is what picks up
+        everything that moved while Step1 was away.
+        """
+        mount = getattr(self, "_step1_mount", None)
+        if active != 1:
+            if mount is not None:
+                mount.deactivate()
+            return False
+        if not getattr(self, "loader", None):
+            return False
+        path = str(getattr(self.loader, "filepath", "") or "")
+        if getattr(self, "_step1_mount_refused_for", None) == path:
+            # ALREADY TRIED AND FAILED for this slide. Retrying on every step
+            # change would repeat the same failure, and the same cost, each
+            # time the user walks back into Step1.
+            return False
+        mount = self._step1_whole_slide()
+        if mount.host.stack is not None:
+            mount.activate()
+            return True
+        try:
+            opened = mount.open()
+        except Exception as exc:                            # noqa: BLE001
+            # FAIL CLOSED, and visibly in the log: a slide this viewer cannot
+            # open leaves the OLD patch view on screen rather than an empty
+            # tab. The rollback path is why it is still there.
+            print(f"[Step1-Viewer] whole-slide viewer unavailable: {exc}")
+            opened = None
+        if opened is None:
+            self._step1_mount_refused_for = path
+            mount.restore_legacy()
+            return False
+        self._step1_mount_refused_for = None
+        mount.set_mode(self._step1_preview_mode)
+        self._wire_step1_tissue_navigation()
+        return True
+
+    def _wire_step1_tissue_navigation(self):
+        """A click on the shared Tissue Preview, into the ONE controller.
+
+        The popup, its overview and its `navigate_requested` are the ones
+        that already exist; this adds no window and no control, only a
+        second listener that answers while STEP1 is the step on screen.
+        """
+        popup = self._display.navigator()
+        overview = getattr(popup, "overview", None)
+        signal = getattr(overview, "navigate_requested", None)
+        if signal is None:
+            return False
+        try:
+            signal.connect(self._on_step1_tissue_navigate,
+                           Qt.UniqueConnection)
+        except TypeError:                       # already connected
+            return False
+        return True
+
+    def _on_step1_tissue_navigate(self, y, x):
+        """Teleport Step1's camera, keeping the viewport size."""
+        mount = getattr(self, "_step1_mount", None)
+        if mount is None or self._current_step != 1 or mount.host.stack is None:
+            return False
+        rect = mount.host.stack.view.view_box.viewRect()
+        size = max(1, int(min(rect.width(), rect.height())))
+        return mount.jump_to_point(int(y), int(x), size)
 
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
@@ -3824,6 +3912,10 @@ class MainWindow(QMainWindow):
                     resync()
             elif active == 1:
                 self._resync_step1_display_from_state()
+        # THE WHOLE-SLIDE VIEWER follows the step whether or not the scope
+        # moved: a return to Step1 with the same scope still has to compose
+        # what changed while it was away.
+        self._step1_whole_slide_step_changed(active)
         # THE ONE public channel dock follows the step by switching its
         # ACCESSORY -- Step0's correction combo, Step1's participation box --
         # and by nothing else. No rebuild, no reparent, no row factory swap:
@@ -4075,6 +4167,15 @@ class MainWindow(QMainWindow):
             btn.setChecked(i == idx)
         self._preview_patch_idx = idx
         self._selected_step1_patch_idx = idx
+        # THE WHOLE-SLIDE VIEWER treats a patch as an ANCHOR: the same
+        # `jump_to` the Tissue Preview uses, on the same camera. It is not a
+        # different picture, so nothing here reloads one.
+        mount = getattr(self, "_step1_mount", None)
+        if mount is not None and mount.host.stack is not None:
+            try:
+                mount.show_patch(self._all_patches[idx])
+            except (IndexError, TypeError):
+                pass
         # Selecting a patch switches the preview only.  Geometry belongs to the
         # shared navigator and to Step0's published handoff.
         self._schedule_step1_session_save()
@@ -4577,6 +4678,12 @@ class MainWindow(QMainWindow):
             # the disagreement this request removes. Nothing is rebuilt --
             # same popup, same camera, same ROI and patch artists.
             self._display.coordinator.request_frame(kind="mode")
+            # ...and the whole-slide viewer, through the ONE binding: the
+            # two buttons are the same two buttons, and Overlay and Fusion
+            # are one `set_mode` away from each other.
+            mount = getattr(self, "_step1_mount", None)
+            if mount is not None:
+                mount.set_mode(mode)
             self._schedule_step1_session_save()
 
     def _drop_overlay_cache_for(self, patch_idx):

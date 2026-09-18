@@ -285,6 +285,13 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
   attach 调既有 `controller.set_marker_visible(False)` 让单通道层休眠，detach/teardown 归还。
 - 权重/颜色/窗口变化 → 同坐标**原地替换**（不闪）；**模式 / 来源 / 数据集 / draft 整份恢复 / state 安装**
   → `layer.clear()`（旧像素是另一张图，留着会在平移回来时重现）。清单由 `Step1ComposeBinding.HARD_REASONS` 持有。
+- `ui/step1_viewer_mount.py`：`Step1WholeSlideMount` 把 host 装进**现有** Viewer tab 的图片位，
+  旧 patch 视图**隐藏保留**为回滚路径（删除归 D）；Overlay/Fusion 两个既有按钮 → `set_mode()`；
+  patch 按钮与 Tissue Preview 点击都走既有 `jump_to`；相机静止（既有 `gesture_quiet`）→ `recompose()`（不推进世代）；
+  提示只用既有 `view.set_status_text` 信息层（缺产物 / ROI 外 / 窗口计算中），不新增控件。
+- `ui/main_window.py`：`_set_step_active` 驱动 activate/deactivate（Step1 不在屏时不合成，回到 Step1 刷新一次）；
+  `set_preview_mode` 转 `mount.set_mode`；`_select_preview_patch` 转 `mount.show_patch`；
+  `navigate_requested`（既有信号）在 `_current_step == 1` 时转 `mount.jump_to_point`。
 
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
@@ -324,7 +331,8 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 世界矩形忽略该层 downsample → 落位门红
 - `clear()` 只清字典不移除 item → 残留门红
 - 模式切换不清层 / 每次变化都清层 → 残留门与不闪门红
-
+- `_set_step_active` 不驱动 mount / 模式按钮不转 `set_mode` / patch 不转 `show_patch` /
+  预览点击不判当前步 / 安装时删除旧 patch 视图 / 离开 Step1 仍合成 → 对应接管门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

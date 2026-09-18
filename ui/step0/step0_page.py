@@ -6132,7 +6132,7 @@ class Step0Page(QWidget):
             self._update_patch_info()
             # 新架构：patches变化时只更新UI，不自动触发计算
             # 如果有缓存结果且有选中通道，刷新显示
-            if self.current_channel and self._has_any_cache(self.current_channel):
+            if self._display_scope_is_mine() and self.current_channel and self._has_any_cache(self.current_channel):
                 self._show_channel_from_cache(self.current_channel)
         else:
             self.current_patch_idx = 0
@@ -6148,7 +6148,10 @@ class Step0Page(QWidget):
         # reset every channel's params, which ARE this page's display mapping
         # (`_display_mapping_for`). That is how six drawn patches turned the
         # compare panels and the Tissue Preview solid.
-        self._start_preload()
+        if self._display_scope_is_mine():
+            self._start_preload()
+        else:
+            perf_trace.mark("step0.patch_display_skipped", scope="step1")
 
     def _rebuild_patch_list(self):
         # Rebuilding the list is bookkeeping, not a choice the user made: the
@@ -9385,6 +9388,8 @@ class Step0Page(QWidget):
         selected = state.selected_channel()
         if selected:
             self._on_channel_selected_by_id(selected)
+        if self._display_scope_is_mine():
+            self._start_preload()
 
     def _on_channel_selected_by_id(self, cid):
         """The shared dock's selection, as a channel id, routed to the

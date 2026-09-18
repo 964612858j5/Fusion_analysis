@@ -340,6 +340,16 @@ D 相机同步过程科学状态逐项不变。
 
 **真机验收仍待用户执行。**
 
+### C.4.5b Patch 后 Tissue Preview 响应（2026-09-18，待真机验收）
+
+- **测量结论**：真实 `OverviewPanel` viewport 的中键 press/move/release 全部到达，ViewBox 在 geometry worker 忙碌期间仍移动，release 后 mouse grab 释放；`BLOCK01_MIDPAN_DEBUG` 与既有 `perf_trace`/heartbeat 是同一诊断链。`patch.persist_submit` 只提交 worker，不等待 geometry 写入。
+- **实测根因**：Step1 活跃时，隐藏 Step0 的 `_on_patches_changed_inner()` 无条件调用 `_show_channel_from_cache()` 和 `_start_preload()`；这会让隐藏 viewer 重绘并为 patch × channels 排队预载，和中键事件共享 GUI 回调窗口。Step1 scope 下现改为只做 patch/ROI 模型、列表、轻量 bookkeeping 与 `_persist_geometry_edit()`。
+- **未采用方向**：Step1 session autosave 未改架构。专项门将 autosave timer 置为待触发，立即真实中键事件先完成；500ms 到期后才触发保存。当前证据不支持它是这次即时冻结源。
+- **返回 Step0**：沿用 `resync_display_from_state()`，在 Step0 scope 下对当前 channel 做已有显示同步并最多调用一次 `_start_preload()`；不清缓存、不改科学状态、不重算相机。
+- **专项门**：`tests/test_step1_c45b_patch_responsiveness.py` 4 passed，覆盖真实 viewport patch + busy geometry worker + middle pan、隐藏显示/预载禁止、模型与 geometry 提交、Step0 resync 单次 preload、autosave 延迟。
+- **变异门**：专项断言 hidden `_show_channel_from_cache`/`_start_preload` 不调用、`_persist_geometry_edit` 仍提交、真实 eventFilter 路径移动 ViewBox、release 后 grab 清理；恢复任一隐藏显示/预载或移除 persist 即红。中键、patch/geometry、preload、Tissue/隔离、shared camera/geometry sync、viewer takeover/mount 相关既有套件均通过；完整仓库回归因过宽集合运行超过 80 分钟未完成，未宣称全绿。
+- **真机复验**：在 Step1 Tissue Preview 画一次 patch，geometry 尚未完成时立即中键拖动；确认无秒级空档、视框在保存前移动、patch 按钮/锚点与 geometry handoff 保持，返回 Step0 后当前 patch 可显示且 preload 仅启动一次。
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红

@@ -25,7 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from block01.ui import step1_viewer_mount as mount_module  # noqa: E402
 
@@ -566,3 +566,98 @@ def test_the_handoff_reader_syncs_the_viewer_on_success(app, monkeypatch,
     assert calls, (
         "the handoff reader does not tell the whole-slide viewer its source "
         "moved")
+
+
+# ── 7. C4.4: closing late, and one camera per click ───────────────────
+
+def test_a_refused_close_leaves_the_viewer_working(app, monkeypatch, tmp_path):
+    """`closeEvent` can still be REFUSED -- a fusion job that has not stopped,
+    a live overview read -- and a window that goes on living must go on
+    drawing. The viewer is closed in the irreversible half, with the shared
+    windows, not before the refusals."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        mount = rig.w._step1_mount
+        closed = []
+        monkeypatch.setattr(mount_module.Step1WholeSlideMount, "close",
+                            lambda self: closed.append(True))
+        # One patch loader still running is one of the window's own refusals.
+        class _Loader:
+            def isRunning(self):
+                return True
+
+            def stop(self):
+                return None
+
+            def wait(self, _ms=0):
+                return False
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        rig.w._patch_loaders = {0: _Loader()}
+        monkeypatch.setattr(QtCore.QTimer, "singleShot",
+                            staticmethod(lambda ms, fn: None))
+
+        event = QtGui.QCloseEvent()
+        rig.w.closeEvent(event)
+
+        assert event.isAccepted() is False, "the close was not refused"
+        assert closed == [], (
+            "the viewer was torn down for a close that did not happen")
+        assert rig.w._step1_mount is mount
+        assert mount.host.stack is not None
+    finally:
+        rig.w._patch_loaders = {}
+        _close(rig)
+
+
+def test_an_accepted_close_still_closes_the_viewer(app, monkeypatch, tmp_path):
+    rig = _window(app, monkeypatch, tmp_path)
+    _in(rig, 1)
+    closed = []
+    monkeypatch.setattr(mount_module.Step1WholeSlideMount, "close",
+                        lambda self: closed.append(True))
+
+    event = QtGui.QCloseEvent()
+    rig.w.closeEvent(event)
+    QtWidgets.QApplication.processEvents()
+
+    assert event.isAccepted() is not False
+    assert closed == [True], "the viewer outlived an accepted close"
+    assert getattr(rig.w, "_step1_mount", None) is None
+
+
+def test_one_click_moves_one_camera(app, monkeypatch, tmp_path):
+    """THE REAL shared signal again, now with BOTH listeners on it: Step0's
+    page and Step1's mount hear the same `navigate_requested`, and the step
+    on screen decides which camera moves."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        popup = rig.w._display.ensure_navigator()
+        QtWidgets.QApplication.processEvents()
+        step0_jumps = []
+        monkeypatch.setattr(rig.w._step0, "_compare_mode",
+                            lambda: step0_jumps.append("asked") or False)
+
+        rig.jumps.clear()
+        popup.overview.navigate_requested.emit(700, 900)
+        QtWidgets.QApplication.processEvents()
+
+        assert rig.jumps, "Step1's camera did not move from Step1"
+        assert step0_jumps == [], (
+            "Step0's camera answered a click meant for Step1")
+
+        _in(rig, 0)
+        rig.jumps.clear()
+        step0_jumps.clear()
+        popup.overview.navigate_requested.emit(300, 300)
+        QtWidgets.QApplication.processEvents()
+
+        assert step0_jumps == ["asked"], "Step0's camera did not answer in Step0"
+        assert rig.jumps == [], (
+            "Step1's camera answered a click meant for Step0")
+    finally:
+        _close(rig)

@@ -4594,16 +4594,6 @@ class MainWindow(QMainWindow):
         # Before the loaders, because it is the cheapest thing here to stop
         # and it holds the dataset's arrays.
         self._stop_compose_worker("the main window is closing")
-        # STEP1'S WHOLE-SLIDE VIEWER owns a compose executor, a scheduler and
-        # a raw handle of its own; none of them belongs to the loaders below,
-        # so nothing else here would stop them.
-        mount = getattr(self, "_step1_mount", None)
-        if mount is not None:
-            try:
-                mount.close()
-            except Exception as exc:                        # noqa: BLE001
-                print(f"[Step1-Viewer] close failed: {exc}")
-            self._step1_mount = None
         # Block01's own, PHASE ONE ONLY: new frame requests are refused so
         # nothing re-arms behind the stop, and nothing is destroyed yet. This
         # close can still be refused a few lines down -- a live overview read
@@ -4672,6 +4662,18 @@ class MainWindow(QMainWindow):
         # more. Now the irreversible half -- the compose thread is retired and
         # the two shared windows are closed, once.
         self._display.finalize_close("the main window is closing")
+        # STEP1'S WHOLE-SLIDE VIEWER, in the same irreversible half and for
+        # the same reason: it owns a compose executor, a scheduler and a raw
+        # handle that nothing else here stops -- and a window whose close is
+        # REFUSED above (a running fusion job, a live overview read) must go
+        # on drawing, which a torn-down viewer cannot do.
+        mount = getattr(self, "_step1_mount", None)
+        if mount is not None:
+            try:
+                mount.close()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step1-Viewer] close failed: {exc}")
+            self._step1_mount = None
         # The sink closes LAST, and finally: every loader has reported its own
         # `job.end` by now, so nothing is left to write and nothing can start
         # a second writer on a file the first one closed. Bounded, because a

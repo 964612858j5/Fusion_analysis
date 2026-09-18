@@ -304,6 +304,14 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - **Tissue Preview 走真实共享信号**：弹窗是**懒创建**的，原先在 open 时接线其实没接上；
   改为在 mount 建立时连既有 `Block01DisplayServices.navigator_created`，并在 `_current_step == 1` 时才路由。
 
+### C.4.3 关闭时机与单相机路由（2026-09-18 审核补）
+- `mount.close()` 移到 `closeEvent` 的**不可逆阶段**（`finalize_close` 之后）：该方法上面仍可能
+  `event.ignore()`（fusion job 未停、patch loader 未停、overview 读未完），被拒绝的关闭必须让 viewer 继续画。
+- Step0 的 `_on_tissue_navigate` 增加**活动步骤门**（`_display_scope_is_mine()`）：一个共享弹窗、
+  一个 `navigate_requested`，站在哪个步骤就只动那个步骤的相机。
+- 门用真实共享信号驱动：Step1 在屏 → 只有 Step1 相机动；Step0 在屏 → 只有 Step0 相机动；
+  被拒绝的关闭 → mount 未关且 stack 仍在；被接受的关闭 → mount 关闭且置空。
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红
@@ -348,6 +356,8 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - `closeEvent` 不关 mount → 退出门红
 - 接管时仍读 patch 通道 → 隐藏读盘门红
 - 不连 `navigator_created` → 共享预览路由门红
+- `mount.close()` 移回可被 ignore 的阶段 → 拒绝关闭门红
+- 去掉 Step0 的活动步骤门 → 单相机门红
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

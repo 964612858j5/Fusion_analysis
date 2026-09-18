@@ -5435,7 +5435,15 @@ class Step0Page(QWidget):
 
         In COMPARE mode the panels are the view, and they have a camera of
         their own; `_navigate_compare_to` moves that one instead.
+
+        ONLY WHILE STEP0 IS THE STEP ON SCREEN. The Tissue Preview is ONE
+        popup for the whole process and every step listens to the same
+        `navigate_requested`; a click made while the user is standing in
+        Step1 is meant for Step1's camera, and moving this page's as well
+        would leave the user's place in Step0 somewhere they never chose.
         """
+        if not self._display_scope_is_mine():
+            return
         if self._compare_mode():
             return self._navigate_compare_to(y, x)
         if not self._full_image_visible():

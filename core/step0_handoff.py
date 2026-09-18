@@ -24,6 +24,7 @@ nothing.
 
 import hashlib
 import json
+from contextlib import nullcontext
 import os
 import secrets
 import shutil
@@ -105,7 +106,7 @@ def _shape_from_bbox(bbox):
     return [max(0, y1 - y0), max(0, x1 - x0)]
 
 
-def write_handoff(spec, *, superseded=None, tag="0"):
+def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
     """Write and publish one Step0 handoff. Returns a result dict.
 
     `spec` is plain data -- see `Step0Page._handoff_spec` for the fields.
@@ -305,10 +306,15 @@ def write_handoff(spec, *, superseded=None, tag="0"):
         # replaced: everything above is a temporary file, so a Superseded here
         # leaves the published handoff exactly as the previous revision left
         # it, and the newer task publishes the newer geometry.
-        _check("publish")
-        with perf_trace.span("handoff.publish_replace", files=len(staged)):
-            for tmp, dest in staged:
-                os.replace(tmp, dest)
+        # Full Save and geometry-only persistence share this tiny critical
+        # section. The supersession check must happen AFTER acquiring it: a
+        # synchronous Save may have become authoritative while this worker was
+        # waiting to publish.
+        with (publication_lock if publication_lock is not None else nullcontext()):
+            _check("publish")
+            with perf_trace.span("handoff.publish_replace", files=len(staged)):
+                for tmp, dest in staged:
+                    os.replace(tmp, dest)
         staged = []
     finally:
         for tmp, _dest in staged:
@@ -478,7 +484,7 @@ def _read_json(path, default=None):
         return [] if default is None else default
 
 
-def commit_geometry_only(task, *, superseded=None):
+def commit_geometry_only(task, *, superseded=None, publication_lock=None):
     """Publish a patch-geometry revision of an already published handoff.
 
     ATOMIC, which the general writer is not and cannot cheaply be made:
@@ -584,9 +590,12 @@ def commit_geometry_only(task, *, superseded=None):
 
         # THE publication. One replace, of one file, and every path it names
         # already exists with its final contents.
-        _check("publish")
-        with perf_trace.span("handoff.publish_replace", files=1):
-            os.replace(manifest_tmp, manifest_path)
+        # Same final-publication lock as canonical full Save. An old geometry
+        # task cannot pass its check, then overwrite a newer Save manifest.
+        with (publication_lock if publication_lock is not None else nullcontext()):
+            _check("publish")
+            with perf_trace.span("handoff.publish_replace", files=1):
+                os.replace(manifest_tmp, manifest_path)
         written = []
     except Superseded:
         for path in written:

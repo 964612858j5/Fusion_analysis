@@ -60,6 +60,10 @@ class GeometryPersistWorker(QObject):
         self._commit = commit
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
+        # Serializes only final handoff publication. Full Step0 Save holds this
+        # across its canonical write and authority adoption; geometry-only work
+        # takes it around its own final supersession check + manifest replace.
+        self._publication_lock = threading.RLock()
         self._pending = None
         self._current = None
         self._stopping = False
@@ -73,9 +77,15 @@ class GeometryPersistWorker(QObject):
         # believes the write is in flight, and Step1 opens on the old file.
         self._confirmed_rev = 0
         self._confirmed_gen = None
+        # Full Save authority. This is deliberately separate from confirmation:
+        # it says a canonical synchronous Save has superseded geometry-only work
+        # through this revision for this dataset generation.
+        self._authoritative_gen = None
+        self._authoritative_rev = 0
         self._blocked = None           # (revision, outcome) or None
         self._stats = {"submitted": 0, "replaced": 0, "published": 0,
-                       "skipped": 0, "failed": 0, "stale_dataset": 0}
+                       "skipped": 0, "failed": 0, "stale_dataset": 0,
+                       "authoritative_retired": 0}
 
     # ── producer side (GUI thread) ──────────────────────────────────
     def submit(self, task):
@@ -101,8 +111,73 @@ class GeometryPersistWorker(QObject):
             self._published_rev = 0
             self._confirmed_rev = 0
             self._confirmed_gen = dataset_gen
+            self._authoritative_gen = None
+            self._authoritative_rev = 0
             self._blocked = None
             self._wake.notify_all()
+
+    def publication_lock(self):
+        """Lock shared with canonical Save around final handoff publication."""
+        return self._publication_lock
+
+    def authoritative_publish_barrier(self):
+        """Context-manager lock for full Save's write/apply/adopt transaction."""
+        return self._publication_lock
+
+    def _task_revision(self, task):
+        return int((task or {}).get("revision") or 0)
+
+    def _retired_by_authority(self, task):
+        """Whether a geometry-only task is obsolete under full-Save authority.
+
+        Caller holds `_lock`. Dataset generation is part of this predicate: a
+        revision number has no meaning across slides.
+        """
+        return bool(
+            task
+            and self._authoritative_gen is not None
+            and task.get("dataset_gen") == self._authoritative_gen
+            and self._task_revision(task) <= self._authoritative_rev
+        )
+
+    def _consumer_relevant(self, task):
+        """Whether queued/in-flight task can still make disk handoff stale."""
+        return bool(task and task.get("dataset_gen") == self._dataset_gen
+                    and not self._retired_by_authority(task))
+
+    def adopt_authoritative_publish(self, dataset_gen, revision):
+        """Confirm full Save's published manifest as geometry authority.
+
+        Called only after canonical handoff writer succeeded and page adopted its
+        real manifest. It never emits a geometry-only signal: Save owns visible
+        result. Old task outcomes become monotonic no-ops; later edits remain
+        normal, blocking work.
+        """
+        try:
+            dataset_gen = int(dataset_gen)
+            revision = int(revision)
+        except (TypeError, ValueError):
+            return False
+        if revision < 0:
+            return False
+        with self._wake:
+            if self._dataset_gen != dataset_gen:
+                return False
+            if self._authoritative_gen != dataset_gen:
+                self._authoritative_gen = dataset_gen
+                self._authoritative_rev = 0
+            self._authoritative_rev = max(self._authoritative_rev, revision)
+            self._published_rev = max(self._published_rev, revision)
+            self._confirmed_gen = dataset_gen
+            self._confirmed_rev = max(self._confirmed_rev, revision)
+            if self._blocked is not None and self._blocked[0] <= revision:
+                self._blocked = None
+            if self._pending is not None and self._retired_by_authority(
+                    self._pending):
+                self._pending = None
+                self._stats["authoritative_retired"] += 1
+            self._wake.notify_all()
+        return True
 
     def stats(self):
         with self._lock:
@@ -198,6 +273,8 @@ class GeometryPersistWorker(QObject):
                 self._current = None
                 stopping = self._stopping
                 name = outcome.get("outcome")
+                retired = (task.get("dataset_gen") != self._dataset_gen
+                           or self._retired_by_authority(task))
                 # The revision the WRITE used, which is not necessarily the
                 # one the task asked for: a commit numbers above what is on
                 # disk, so after a restart a task submitted as revision 1 is
@@ -207,15 +284,21 @@ class GeometryPersistWorker(QObject):
                 # catch up.
                 revision = int(outcome.get("revision")
                                or task.get("revision") or 0)
-                if name == "committed":
+                if retired:
+                    # Full Save or dataset invalidation won while this task was
+                    # running. Keep only an observability counter: no old result
+                    # may regress consumer state or trigger GUI invalidation.
+                    self._stats["authoritative_retired"] += 1
+                elif name == "committed":
                     self._published_rev = max(self._published_rev, revision)
                     self._stats["published"] += 1
                 elif name == "failed":
                     self._stats["failed"] += 1
                 else:
                     self._stats["skipped"] += 1
-                self._note_consumable(task, revision, name)
-            if stopping:
+                if not retired:
+                    self._note_consumable(task, revision, name)
+            if stopping or retired:
                 continue
             if outcome.get("outcome") == "committed":
                 self.published.emit(outcome)
@@ -246,6 +329,8 @@ class GeometryPersistWorker(QObject):
           rather than quietly handed the previous geometry.
         """
         gen = task.get("dataset_gen")
+        if gen != self._dataset_gen or self._retired_by_authority(task):
+            return
         if name in ("committed", "unchanged", "stale_revision_confirmed"):
             if self._confirmed_gen != gen:
                 self._confirmed_gen = gen
@@ -256,7 +341,13 @@ class GeometryPersistWorker(QObject):
             return
         if name == "stale_dataset":
             return                      # it belonged to a slide nobody reads
-        self._blocked = (revision, name)
+        # A late old failure cannot invalidate a full-Save authority baseline.
+        # Plain geometry-only confirmation deliberately keeps old
+        # `stale_revision_unconfirmed` fail-closed behavior.
+        if (self._authoritative_gen == gen
+                and revision <= self._authoritative_rev):
+            return
+        self._blocked = (max(revision, self._task_revision(task)), name)
 
     def consumable(self, dataset_gen, revision):
         """Is a handoff describing `revision` of `dataset_gen` on disk?
@@ -268,7 +359,8 @@ class GeometryPersistWorker(QObject):
         with self._lock:
             if self._blocked is not None:
                 return False
-            if self._current is not None or self._pending is not None:
+            if (self._consumer_relevant(self._current)
+                    or self._consumer_relevant(self._pending)):
                 return False
             if self._confirmed_gen is not None and (
                     self._confirmed_gen != dataset_gen):
@@ -289,10 +381,15 @@ class GeometryPersistWorker(QObject):
                 return True
             if self._dataset_gen != gen:
                 return True
+            if self._retired_by_authority(task):
+                return True
         return False
 
     def _run_one(self, task, gen, published_rev):
         revision = int(task.get("revision") or 0)
+        if self._superseded(task, gen, "start"):
+            return {"task": task, "outcome": "superseded",
+                    "reason": "superseded"}
         if task.get("dataset_gen") != gen:
             return {"task": task, "outcome": "stale_dataset",
                     "reason": "stale_dataset"}
@@ -316,10 +413,18 @@ class GeometryPersistWorker(QObject):
                              dataset_gen=task.get("dataset_gen")) as _sp:
             try:
                 commit = self._commit or step0_handoff.commit_geometry_only
-                result = commit(
-                    task,
-                    superseded=lambda phase=None: self._superseded(
-                        task, gen, phase))
+                if self._commit is None:
+                    result = commit(
+                        task,
+                        superseded=lambda phase=None: self._superseded(
+                            task, gen, phase),
+                        publication_lock=self._publication_lock)
+                else:
+                    # Existing injected test commits predate publication locking.
+                    result = commit(
+                        task,
+                        superseded=lambda phase=None: self._superseded(
+                            task, gen, phase))
             except step0_handoff.Superseded:
                 _sp.add(outcome="superseded")
                 return {"task": task, "outcome": "superseded",

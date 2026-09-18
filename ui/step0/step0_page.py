@@ -11038,9 +11038,36 @@ class Step0Page(QWidget):
         print("[Step0] writing ROI-specific outputs")
         print(f"[Step0] roi_id={spec['roi_id']}")
         print(f"[Step0] step0_dir={spec['step0_dir']}")
-        result = step0_handoff.write_handoff(
-            spec, tag=f"save.{os.getpid()}")
-        return self._apply_handoff_result(result)
+        # A full Save is geometry authority only after canonical manifest
+        # publication succeeded and this page adopted that real manifest. When
+        # geometry-only persistence exists, hold its publication barrier across
+        # all three operations: no old task can pass a final check then replace
+        # this manifest before its authority floor is recorded. Do not create a
+        # worker here -- projects with no geometry edit retain their old path.
+        worker = getattr(self, "_geometry_persist_worker", None)
+        if worker is None:
+            result = step0_handoff.write_handoff(
+                spec, tag=f"save.{os.getpid()}")
+            return self._apply_handoff_result(result)
+        with worker.authoritative_publish_barrier():
+            result = step0_handoff.write_handoff(
+                spec, tag=f"save.{os.getpid()}",
+                publication_lock=worker.publication_lock())
+            applied = self._apply_handoff_result(result)
+            manifest = applied[3]
+            try:
+                revision = int(manifest.get("geometry_revision") or 0)
+                dataset_gen = int(self._dataset_gen)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "published Step0 handoff has no usable geometry authority") from exc
+            if not worker.adopt_authoritative_publish(dataset_gen, revision):
+                # Dataset switched while Save was in progress. Manifest remains
+                # durable, but downstream entry must fail closed rather than
+                # borrowing authority from a different slide.
+                raise RuntimeError(
+                    "geometry worker rejected published handoff authority")
+            return applied
 
     def _emit_complete(self, config, zarr_path, decisions):
         self._btn_continue.setEnabled(True)

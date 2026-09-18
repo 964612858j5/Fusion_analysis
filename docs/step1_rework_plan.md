@@ -350,6 +350,18 @@ D 相机同步过程科学状态逐项不变。
 - **变异门**：专项断言 hidden `_show_channel_from_cache`/`_start_preload` 不调用、`_persist_geometry_edit` 仍提交、真实 eventFilter 路径移动 ViewBox、release 后 grab 清理；恢复任一隐藏显示/预载或移除 persist 即红。中键、patch/geometry、preload、Tissue/隔离、shared camera/geometry sync、viewer takeover/mount 相关既有套件均通过；完整仓库回归因过宽集合运行超过 80 分钟未完成，未宣称全绿。
 - **真机复验**：在 Step1 Tissue Preview 画一次 patch，geometry 尚未完成时立即中键拖动；确认无秒级空档、视框在保存前移动、patch 按钮/锚点与 geometry handoff 保持，返回 Step0 后当前 patch 可显示且 preload 仅启动一次。
 
+### C.4.5d 完整 Step0 Save 的 geometry 权威屏障（2026-09-18，真机待验收）
+
+- **根因**：ROI 的 geometry-only worker 正确拒绝 `roi_changed`，因为旧 corrected product 不得跨 ROI 复用；但完整 Save 已发布新 ROI 的 canonical manifest 后，`GeometryPersistWorker` 仍保留旧 `_blocked=(revision, "roi_changed")`。`geometry_ready_for_consumers()` 因而永久拒绝 Step1。
+- **权威 Save 契约**：只在同步完整 Save 的 remap、canonical handoff 写入、manifest 发布及页面 `_apply_handoff_result()` 均成功之后，Step0Page 才调用 worker 公共入口 `adopt_authoritative_publish(dataset_gen, revision)`；调用发生在 `step0_complete.emit()` 之前。无 worker 时不为确认而创建后台线程。任一 Save 失败（corrected product / handoff 写入 / manifest 发布）不调用入口、不清阻塞、Step1 继续 fail-closed。
+- **worker 规则**：worker 记录 generation-scoped authoritative floor；同 generation 且 revision `<=` floor 的旧 blocked/pending 被退休，`published`/`confirmed` 单调推进；旧 in-flight outcome、失败、拒绝、skipped 不得重设 `_blocked` 或发出迟到 invalidation。revision 更高的新编辑保持 relevant，仍阻塞直到其 geometry-only 发布或下一次完整 Save。跨 generation 即使 revision 相同也不通行。
+- **并发屏障**：GeometryPersistWorker 自持 reentrant final-publication lock。完整 Save 从 canonical writer 到 manifest apply 再到 authority adoption 一直持有；geometry-only commit 只在最终 supersession check + manifest replace 持有同锁，且 check 位于锁内。旧任务要么先发布而后被完整 Save 最终覆盖，要么在 Save 后读到 floor 并 superseded；不能在旧 check 与 `os.replace` 之间覆盖新 manifest。
+- **专项门**：新增 `tests/test_step0_authoritative_save_barrier.py`（9 passed）：真实 GeometryPersistWorker + 真实临时 handoff 文件覆盖 ROI block → 完整 Save → 实际 `_go_to_step1()` gate 放行；三类 Save 失败；迟到旧失败无 reblock/invalidation；旧发布等待并被 supersede；Save 后 N+1 编辑再锁再恢复；dataset 隔离；无 worker 兼容；`_emit_complete` 成功时 adopt 在 emit 前、失败不 adopt。
+- **实际变异门（均红）**：①完整 Save 后不通知 worker；②Save 开始即清 blocked；③Save 失败仍 adopt；④迟到旧失败重设 `_blocked`；⑤ authority 去掉 dataset generation；⑥ authority N 错放 N+1；⑦移除旧任务 authority supersession，使旧 manifest 覆盖 Save；⑧`_go_to_step1()` 绕过 geometry gate。
+- **保护回归**：geometry-only I/O 仍在 worker；未改 C4.5a 相机/视框、C4.5b 隐藏 Step0/preload、中键 patch 后拖动、Intensity、Overlay/Fusion 或任何 UI 表面。聚焦组合（C4.5d + geometry/save/handoff/invalidation + C4.5a/b）**116 passed**。
+- **维护清单回归**：明确列出 147 个模块（HEAD 的 149 个测试模块中排除 3 个长期以顶层 `viewer.*` 导入、在本包布局无法 collection 的实验 prefetch 模块，再加入本块模块）。完整顺序运行结果为 **3201 passed / 24 failed / 7:01:38**：已知 16 条仍为 `hq_marker_segmentation` 2、`preview_source_provider` 1、`step0_channel_conditioning` 6、`step0_no_process_button` 1、`step0_process_incremental` 5、`tissue_navigator_viewport_sync` 1；同一长进程另出现 8 条跨套件污染性失败（gui_watchdog、lean-carve 2、overview-middle-drag、step0-compare-tiles、step0-intensity-window、step0-tissue-preview、step1-live-controls）。8 个模块隔离复跑 **415 passed**，无 C4.5d 新失败。完整进程测试结束后未自行退出，结果打印后才停止本执行窗口自己的 runner。
+- **真机验收仍待用户执行**：新建 ROI → Step1 应拒绝；完整 Step0 Save 成功完成后 → Step1 应立即可进入；故意令 Save 失败后仍拒绝；Save 后再编辑 patch/ROI 时再次拒绝直到对应发布。
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红

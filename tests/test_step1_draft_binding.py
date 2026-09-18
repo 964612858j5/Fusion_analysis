@@ -534,3 +534,86 @@ def test_disconnecting_stops_the_frames(app):
     rig.domain.edit_channel_weight("CD3", 0.7, origin="user")
 
     assert rig.coordinator.generation == before
+
+
+# ── 5. C4: what a change does to what is already on screen ────────────
+
+class _Layer:
+    """As much of `Step1ComposedLayer` as the binding touches."""
+
+    def __init__(self):
+        self.tiles = []
+        self.cleared = 0
+
+    def on_tile_composed(self, level, tx, ty, rgba, valid=None):
+        self.tiles.append((level, tx, ty))
+
+    def clear(self):
+        self.cleared += 1
+
+
+def test_the_composed_tiles_reach_the_layer(app):
+    rig = _wired(app)
+    layer = _Layer()
+    rig.binding.attach_layer(layer)
+
+    _frame(app, rig)
+
+    assert layer.tiles, "nothing was drawn"
+
+
+@pytest.mark.parametrize("reason", ["mode", "source", "dataset",
+                                    "draft-restored", "state-installed"])
+def test_a_different_picture_clears_the_old_one(app, reason):
+    """Gate 2: the old mode's or the old slide's tiles are not a coarser
+    version of the new picture, and panning back to one would show it."""
+    rig = _wired(app)
+    layer = _Layer()
+    rig.binding.attach_layer(layer)
+    _frame(app, rig)
+
+    rig.binding.refresh(reason)
+
+    assert layer.cleared == 1, reason
+
+
+@pytest.mark.parametrize("reason", ["draft", "colour", "window", "visibility"])
+def test_a_moved_number_replaces_the_tiles_rather_than_clearing_them(app, reason):
+    """The picture stays up while a weight settles: every visible tile is
+    composed again at the same coordinates and replaced in place."""
+    rig = _wired(app)
+    layer = _Layer()
+    rig.binding.attach_layer(layer)
+    _frame(app, rig)
+    drawn = len(layer.tiles)
+
+    rig.binding.refresh(reason)
+    _settle(app, rig.coordinator, rig.executor)
+
+    assert layer.cleared == 0, reason
+    assert len(layer.tiles) > drawn, "the frame was not composed again"
+
+
+def test_the_mode_switch_clears_before_it_composes(app):
+    rig = _wired(app)
+    layer = _Layer()
+    rig.binding.attach_layer(layer)
+    _frame(app, rig)
+
+    rig.binding.set_mode(compose_core.MODE_FUSION)
+
+    assert layer.cleared == 1
+
+
+def test_detaching_the_layer_stops_the_tiles(app):
+    rig = _wired(app)
+    layer = _Layer()
+    rig.binding.attach_layer(layer)
+    _frame(app, rig)
+    drawn = len(layer.tiles)
+
+    rig.binding.detach_layer()
+    rig.binding.refresh("draft")
+    _settle(app, rig.coordinator, rig.executor)
+
+    assert len(layer.tiles) == drawn

@@ -278,6 +278,14 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 缺失产物提示可见且文案正确
 - Overlay / Fusion 两模式真机验收
 
+### C.4.1 实现（2026-09-18 授权范围）
+- `ui/step1_composed_layer.py`：`Step1ComposedLayer` 用**既有** `TileItemPool` 承载 RGBA，
+  固定 levels `(0,255)`、无 LUT；世界矩形用既有 `ExploreView.world_rect` + 该层 downsample；
+  z 基线 `OVERLAY_BASE_Z + 300`，attach 时**断言**高于 raw/precise/overlay 三个池的 `base_z + num_levels`；
+  attach 调既有 `controller.set_marker_visible(False)` 让单通道层休眠，detach/teardown 归还。
+- 权重/颜色/窗口变化 → 同坐标**原地替换**（不闪）；**模式 / 来源 / 数据集 / draft 整份恢复 / state 安装**
+  → `layer.clear()`（旧像素是另一张图，留着会在平移回来时重现）。清单由 `Step1ComposeBinding.HARD_REASONS` 持有。
+
 ### C.5 变异闸门
 - 组间 max 改 sum → 门 1 红
 - 合成层重新按数组求 auto → 门 2a 红
@@ -310,6 +318,13 @@ B **不引入**任何用户可见的新模式。Step1 用户可见模式仍只�
 - 无窗口通道猜一个窗口 → 缺窗口门红
 - overlay 权重忽略组权重 → 组权重门红
 - 任一受覆盖文件改回直接改写协调器私有帧 → C.3.1 门红
+- 合成池改用可变 levels / 加 LUT → 显示层像素门红
+- 合成层 z 基线降到单通道层之下 → z 门红
+- attach 不让单通道层休眠 → 休眠门红
+- 世界矩形忽略该层 downsample → 落位门红
+- `clear()` 只清字典不移除 item → 残留门红
+- 模式切换不清层 / 每次变化都清层 → 残留门与不闪门红
+
 
 ### C.6 回滚
 revert 本块，Step1 退回块 B 状态（旧路径服务 Overlay/Fusion）。

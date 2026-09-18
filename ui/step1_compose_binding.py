@@ -15,6 +15,14 @@ EVERY CHANGE ADVANCES THE GENERATION. The old frame's queued reads are
 cancelled and its late results are refused; the tiles it read stay in the tile
 cache, so moving a weight re-composes without touching the disk.
 
+WHAT A CHANGE DOES TO WHAT IS ALREADY ON SCREEN. Moving a weight, a colour
+or a window re-composes the same coordinates, and each composed item is
+replaced in place -- the picture stays up while it settles. A change of MODE
+or of SOURCE is not that: the tiles on screen are a DIFFERENT picture, and one
+left in the pool would come back the moment the user panned to it. Those
+clear the composed layer, which is why this object is the one that knows the
+reason.
+
 THE DRAFT, NOT THE COMMITTED SNAPSHOT. What is on screen is what the user is
 editing. What a job runs on is `committed_snapshot()`, which only a successful
 Save replaces -- nothing here writes to the domain model at all.
@@ -32,14 +40,21 @@ class Step1ComposeBinding(QtCore.QObject):
     Owns neither: it reads them, and it writes only to the coordinator.
     """
 
+    #: Reasons whose old pixels are a different picture rather than a
+    #: coarser one. Everything else is replaced tile by tile.
+    HARD_REASONS = frozenset({"mode", "source", "dataset", "draft-restored",
+                              "state-installed"})
+
     def __init__(self, coordinator, domain, state, mode=MODE_OVERLAY,
-                 scope=STEP1_SCOPE, parent=None):
+                 scope=STEP1_SCOPE, layer=None, parent=None):
         super().__init__(parent)
         self._coordinator = coordinator
         self._domain = domain
         self._state = state
         self._mode = mode
         self._scope = scope
+        self._layer = layer
+        self._layer_linked = False
         self._connected = False
 
     # ── what a frame is ───────────────────────────────────────────────
@@ -53,6 +68,34 @@ class Step1ComposeBinding(QtCore.QObject):
                                      scope=self._scope)
 
     # ── the wiring ────────────────────────────────────────────────────
+    def attach_layer(self, layer):
+        """Send the composed frames to the screen through `layer`.
+
+        The coordinator announces tiles whether or not anything is drawing
+        them (C2 gates it on its own), so this is a connection and not a
+        mode: nothing about composition changes when a layer is or is not
+        there.
+        """
+        self.detach_layer()
+        self._layer = layer
+        if layer is None:
+            return False
+        self._coordinator.tile_composed.connect(layer.on_tile_composed)
+        self._layer_linked = True
+        return True
+
+    def detach_layer(self):
+        """Stop drawing. Idempotent, and never raises on a dead layer."""
+        if self._layer_linked and self._layer is not None:
+            try:
+                self._coordinator.tile_composed.disconnect(
+                    self._layer.on_tile_composed)
+            except (TypeError, RuntimeError):
+                pass
+        self._layer_linked = False
+        self._layer = None
+        return True
+
     def connect(self):
         """Follow both owners. Idempotent."""
         if self._connected:
@@ -105,6 +148,8 @@ class Step1ComposeBinding(QtCore.QObject):
         is built.
         """
         self._coordinator.invalidate(reason)
+        if self._layer is not None and reason in self.HARD_REASONS:
+            self._layer.clear()
         return self._coordinator.compose_visible(self.spec())
 
     def recompose(self):

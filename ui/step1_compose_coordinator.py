@@ -206,6 +206,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight = set()
         self._intensity_waiting = False
+        self._intensity_waiting_epoch = 0
+        self._intensity_active_epoch = None
         self._intensity_waiting_keys = set()
         self._intensity_consumed_raw_keys = set()
         self._intensity_stats = {"submitted": 0, "completed": 0,
@@ -238,6 +240,7 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight.clear()
         self._intensity_waiting = False
+        self._intensity_active_epoch = None
         self._intensity_waiting_keys.clear()
         self._intensity_consumed_raw_keys.clear()
         self._missing.clear()
@@ -258,6 +261,7 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight.clear()
         self._intensity_waiting = False
+        self._intensity_active_epoch = None
         self._intensity_waiting_keys.clear()
         self._intensity_consumed_raw_keys.clear()
         if self._owns_executor and self._executor is not None:
@@ -369,12 +373,19 @@ class Step1ComposeCoordinator(QtCore.QObject):
                 request.key for request in requests
                 if self._tile_pixels(request.key) is None
             }
+            if missing_raw_keys:
+                self._intensity_waiting_epoch += 1
+                waiting_epoch = self._intensity_waiting_epoch
+                self._intensity_active_epoch = waiting_epoch
+                self._intensity_consumed_raw_keys.clear()
+            else:
+                waiting_epoch = None
+                self._intensity_active_epoch = None
             self._intensity_waiting_keys = set(missing_raw_keys)
             self._intensity_waiting = bool(missing_raw_keys)
-            if missing_raw_keys:
-                self._intensity_consumed_raw_keys.clear()
         else:
             missing_raw_keys = set()
+            waiting_epoch = None
         for request in requests:
             if (intensity_revision is not None
                     and request.key not in missing_raw_keys):
@@ -382,8 +393,10 @@ class Step1ComposeCoordinator(QtCore.QObject):
             stack.scheduler.request(
                 request,
                 lambda result, gen=generation, frame_spec=spec,
-                       intensity_revision=intensity_revision: self._on_tile(
-                           result, gen, frame_spec, intensity_revision))
+                       intensity_revision=intensity_revision,
+                       waiting_epoch=waiting_epoch: self._on_tile(
+                           result, gen, frame_spec, intensity_revision,
+                           waiting_epoch))
         hits = 0
         for tx, ty in tiles:
             if self._start_tile(level, tx, ty, channels, spec, generation,
@@ -682,7 +695,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         return self.generation
 
     # ── the scheduler's callback ──────────────────────────────────────
-    def _on_tile(self, result, generation, spec, intensity_revision=None):
+    def _on_tile(self, result, generation, spec, intensity_revision=None,
+                 waiting_epoch=None):
         """A read landed -- ON THE SCHEDULER'S READ WORKER.
 
         `TileScheduler` delivers from the thread that did the reading, so
@@ -693,7 +707,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         """
         self._tile_landed.emit({"result": result, "generation": generation,
                                 "spec": spec,
-                                "intensity_revision": intensity_revision})
+                                "intensity_revision": intensity_revision,
+                                "waiting_epoch": waiting_epoch})
 
     def _on_tile_landed(self, payload):
         """The read, now on this object's thread.
@@ -711,6 +726,12 @@ class Step1ComposeCoordinator(QtCore.QObject):
         if generation != self.generation:
             return
         intensity_revision = payload.get("intensity_revision")
+        waiting_epoch = payload.get("waiting_epoch")
+        if (waiting_epoch is not None
+                and waiting_epoch != self._intensity_active_epoch):
+            return
+        if waiting_epoch is not None and not self._intensity_waiting:
+            return
         if key in self._intensity_consumed_raw_keys:
             return
         if self._intensity_waiting and key in self._intensity_waiting_keys:
@@ -719,6 +740,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
             if self._intensity_waiting_keys:
                 return
             self._intensity_waiting = False
+            self._intensity_active_epoch = None
+            self._intensity_consumed_raw_keys.clear()
             if self._intensity_pending is not None:
                 _revision, spec = self._intensity_pending
                 self._intensity_pending = None

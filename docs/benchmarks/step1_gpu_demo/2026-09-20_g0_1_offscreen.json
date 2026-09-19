@@ -1,0 +1,268 @@
+{
+  "capabilities": {
+    "actual_format": {
+      "major": 3,
+      "minor": 3,
+      "profile": 1
+    },
+    "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+    "gl_vendor": "NVIDIA Corporation",
+    "gl_version": "4.6.0 NVIDIA 535.309.01",
+    "glsl_version": "4.60 NVIDIA",
+    "max_texture_image_units": 32,
+    "max_texture_size": 32768,
+    "pyopengl_file": "/tmp/block01-g0-1-pyopengl-VHAK3a/lib/python3.10/site-packages/OpenGL/__init__.py",
+    "pyopengl_version": "3.1.10",
+    "requested_format": {
+      "major": 3,
+      "minor": 3,
+      "profile": "core"
+    },
+    "software_renderer": false,
+    "texture_format": "GL_R32F / GL_RED / GL_FLOAT"
+  },
+  "cleanup": {
+    "main": {
+      "already_disposed": false,
+      "textures_destroyed": 4,
+      "textures_remaining": 0,
+      "threads_created": 0
+    },
+    "viewbox_overlay": {
+      "already_disposed": false,
+      "textures_destroyed": 4,
+      "textures_remaining": 0,
+      "threads_created": 0
+    }
+  },
+  "counters": {
+    "source_selections": 4,
+    "texture_uploads": 4,
+    "uniform_updates": 1
+  },
+  "desktop_window_exposed": false,
+  "environment": {
+    "executable": "/tmp/block01-g0-1-pyopengl-VHAK3a/bin/python",
+    "hostname": "ubuntu-H12D-8D",
+    "os": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+    "pyopengl_distribution_version": "3.1.10",
+    "pyopengl_file": "/tmp/block01-g0-1-pyopengl-VHAK3a/lib/python3.10/site-packages/OpenGL/__init__.py",
+    "pyopengl_version": "3.1.10",
+    "pyqt": "5.15.11",
+    "python": "3.10.20",
+    "qt": "5.15.14",
+    "requested_platform": "offscreen",
+    "sys_path": [
+      "/sda1/Fusion/analysis_pipline",
+      "/sda1/Fusion/analysis_pipline/block01_v14/scripts",
+      "/root/micromamba/envs/fusion_test2/lib/python310.zip",
+      "/root/micromamba/envs/fusion_test2/lib/python3.10",
+      "/root/micromamba/envs/fusion_test2/lib/python3.10/lib-dynload",
+      "/tmp/block01-g0-1-pyopengl-VHAK3a/lib/python3.10/site-packages",
+      "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages"
+    ]
+  },
+  "initial_fine_a_coarse_b": {
+    "alpha_mismatch_components": 0,
+    "max_abs_lsb": 1,
+    "max_error_index_yxrgba": [
+      0,
+      5,
+      0
+    ],
+    "nonzero_components": 1463,
+    "over_one_lsb_components": 0
+  },
+  "mixed_lod_pixels_differ": true,
+  "parameter_update": {
+    "additional_source_selections": 0,
+    "additional_texture_uploads": 0,
+    "comparison": {
+      "alpha_mismatch_components": 0,
+      "max_abs_lsb": 1,
+      "max_error_index_yxrgba": [
+        0,
+        8,
+        1
+      ],
+      "nonzero_components": 1364,
+      "over_one_lsb_components": 0
+    },
+    "pixels_changed": true
+  },
+  "pass_gates": {
+    "context_current_gl_cleanup": true,
+    "desktop_presentation": false,
+    "hardware_renderer": true,
+    "independent_mixed_lod": true,
+    "initial_c1_match_le_1_lsb": true,
+    "parameter_c1_match_le_1_lsb": true,
+    "parameter_pixels_changed": true,
+    "parameter_zero_source_read_and_upload": true,
+    "two_real_raw_texture_channels": true,
+    "viewbox_camera_adapter": true
+  },
+  "presentation_measurement": "not measured: no compositor/vsync or input-to-display timestamp API in this isolated probe",
+  "real_data_probe": {
+    "channels": [
+      0,
+      1
+    ],
+    "cleanup": {
+      "already_disposed": false,
+      "textures_destroyed": 4,
+      "textures_remaining": 0,
+      "threads_created": 0
+    },
+    "cold_open_ms": 1.3949970016255975,
+    "cpu_match_le_1_lsb": true,
+    "cpu_reference_comparison": {
+      "alpha_mismatch_components": 0,
+      "max_abs_lsb": 0,
+      "max_error_index_yxrgba": [
+        0,
+        0,
+        0
+      ],
+      "nonzero_components": 0,
+      "over_one_lsb_components": 0
+    },
+    "crop_yx": [
+      32,
+      32
+    ],
+    "dtype": "uint8",
+    "fbo_draw_readback": {
+      "count": 1,
+      "max": 0.767373014241457,
+      "p50": 0.767373014241457,
+      "p95": 0.767373014241457
+    },
+    "first_decode_ms_per_channel": [
+      4.534179985057563,
+      1.8290529842488468
+    ],
+    "level": 3,
+    "level_shape_cyx": [
+      29,
+      490,
+      450
+    ],
+    "limits": "same-handle repeat is an observed warm definition, not a general TIFF cache guarantee",
+    "path": "/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif",
+    "read_only": true,
+    "same_handle_repeat_decode_ms_per_channel": [
+      1.82971399044618,
+      1.3954680180177093
+    ],
+    "status": "measured",
+    "texture_upload_submit": {
+      "count": 1,
+      "max": 0.5369660211727023,
+      "p50": 0.5369660211727023,
+      "p95": 0.5369660211727023
+    },
+    "tifffile_version": "2024.12.12"
+  },
+  "reverse_coarse_a_fine_b": {
+    "alpha_mismatch_components": 0,
+    "max_abs_lsb": 1,
+    "max_error_index_yxrgba": [
+      0,
+      0,
+      0
+    ],
+    "nonzero_components": 1491,
+    "over_one_lsb_components": 0
+  },
+  "scenarios": {
+    "A_cold_first_prepare": "synthetic source selection and R32F upload submission measured",
+    "B_hot_same_channel_viewport": "resident-texture FBO draw/readback measured",
+    "C_resident_intensity": "uniform-only update counters and C1 readback measured",
+    "D_camera_new_region": "existing ViewBox range forwarded to world-to-UV shader uniform; no real tile I/O",
+    "E_mixed_precision": "A fine/B coarse then A coarse/B fine measured"
+  },
+  "source": {
+    "channels": 2,
+    "cold_definition": "new Qt widget before four R32F uploads",
+    "hot_definition": "same Qt widget with four raw textures resident",
+    "kind": "synthetic float32",
+    "levels_per_channel": [
+      "coarse",
+      "fine"
+    ],
+    "tile_size": [
+      32,
+      32
+    ]
+  },
+  "status": "measured",
+  "synthetic_only": true,
+  "timing_limits": {
+    "desktop_presentation": "not measured: exposed Qt window does not provide compositor/vsync/input-to-display timing",
+    "draw_submit_ms": "CPU OpenGL submission wall time; it is not GPU completion",
+    "fbo_draw_readback_ms": "draw plus blocking FBO readback; numeric correctness only, not desktop presentation",
+    "gpu_draw_query_ns_low32": "GL_TIME_ELAPSED query low 32 bits for this short draw; not presentation",
+    "ram_vram": "not measured: no reliable cross-driver accounting API in this probe",
+    "source_read_decode": "not measured: synthetic in-memory source has no disk queue/read/decode",
+    "upload_submit_ms": "CPU submission wall time; it is not GPU completion"
+  },
+  "timings": {
+    "draw_submit_ms": {
+      "count": 8,
+      "max": 0.5122809670865536,
+      "p50": 0.16451498959213495,
+      "p95": 0.5122809670865536
+    },
+    "fbo_draw_readback_ms": {
+      "count": 3,
+      "max": 2.6203009765595198,
+      "p50": 0.8024479611776769,
+      "p95": 2.6203009765595198
+    },
+    "gpu_draw_query_ns_low32": {
+      "count": 3,
+      "max": 1024.0,
+      "p50": 1024.0,
+      "p95": 1024.0
+    },
+    "source_select_ms": {
+      "count": 4,
+      "max": 0.008575967513024807,
+      "p50": 0.0022239983081817627,
+      "p95": 0.008575967513024807
+    },
+    "uniform_update_ms": {
+      "count": 1,
+      "max": 0.0010720104910433292,
+      "p50": 0.0010720104910433292,
+      "p95": 0.0010720104910433292
+    },
+    "upload_submit_ms": {
+      "count": 1,
+      "max": 0.3978280001319945,
+      "p50": 0.3978280001319945,
+      "p95": 0.3978280001319945
+    }
+  },
+  "viewbox_adapter": {
+    "camera_uniform_changes_pixels": true,
+    "overlay_matches_viewport": true,
+    "overlay_transparent_for_mouse": true,
+    "range_events": 2,
+    "resize_events": 0,
+    "same_viewbox_owner": true,
+    "uniform_world_rect": [
+      -3.9344262295081958,
+      27.934426229508198,
+      4.0,
+      28.0
+    ],
+    "world_rect": [
+      -3.9344262295081958,
+      27.934426229508198,
+      4.0,
+      28.0
+    ]
+  }
+}

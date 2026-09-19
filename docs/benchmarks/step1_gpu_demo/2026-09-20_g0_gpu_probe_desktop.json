@@ -1,0 +1,13 @@
+{
+  "blocker": "this PyQt5 build lacks the Qt QOpenGLFunctions binding needed to submit the G0 shader draw; no PyOpenGL/ctypes fallback is authorized",
+  "environment": {
+    "hostname": "ubuntu-H12D-8D",
+    "os": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+    "pyqt": "5.15.11",
+    "python": "3.10.20",
+    "qt": "5.15.14",
+    "requested_platform": "desktop"
+  },
+  "qt_qpa_platform": null,
+  "status": "blocked"
+}

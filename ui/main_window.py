@@ -1893,7 +1893,30 @@ class MainWindow(QMainWindow):
         reason = str(payload.get("reason") or "")
         message = str(payload.get("message") or
                       "The Step0 handoff is no longer valid; run Step0 Save.")
-        # Settings frozen against a handoff that no longer holds describe a
+        page = self.__dict__.get("_step0")
+        incoming_gen = payload.get("dataset_gen")
+        current_gen = getattr(page, "_dataset_gen", None)
+        if (incoming_gen is not None and current_gen is not None
+                and int(incoming_gen) != int(current_gen)):
+            return
+        incoming_roi_id = str(payload.get("roi_id") or "")
+        current_roi_id = str((self.step0_output or {}).get("roi_id") or "")
+        if incoming_roi_id and current_roi_id and incoming_roi_id != current_roi_id:
+            return
+        incoming_roi_dir = str(payload.get("roi_dir") or "")
+        current_roi_dir = str((self.step0_output or {}).get("roi_dir") or "")
+        if (incoming_roi_dir and current_roi_dir
+                and os.path.abspath(incoming_roi_dir)
+                != os.path.abspath(current_roi_dir)):
+            return
+        try:
+            incoming_revision = int(payload.get("geometry_revision") or 0)
+            current_revision = int(
+                (self.step0_output or {}).get("geometry_revision") or 0)
+        except (TypeError, ValueError):
+            return
+        if current_revision and incoming_revision < current_revision:
+            return
         # configuration nothing can reproduce.
         self._forget_fusion_settings("the handoff no longer holds")
         self.step0_done = False
@@ -2481,6 +2504,7 @@ class MainWindow(QMainWindow):
             "channel_remap_config_hash": manifest.get("channel_remap_config_hash", self.step0_output.get("channel_remap_config_hash", "")),
             "source_identity": manifest.get("source_identity", self.step0_output.get("source_identity")),
             "handoff_schema_version": manifest.get("handoff_schema_version", handoff_schema),
+            "geometry_revision": int(manifest.get("geometry_revision") or 0),
             "panel_groups": (manifest.get("panel_groups") if handoff_schema >= 2 else self.step0_output.get("panel_groups")) or {},
             "panel_nucleus": manifest.get("panel_nucleus", self.step0_output.get("panel_nucleus")),
             "rois": self._rois,

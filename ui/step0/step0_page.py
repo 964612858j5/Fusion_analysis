@@ -5055,9 +5055,13 @@ class Step0Page(QWidget):
             message = ("Patch edit is staged but was not published; Step1 is "
                        "locked until Step0 Save succeeds.")
         self._set_geometry_status(f"⚠ {message}")
+        task = dict(outcome.get("task") or {})
         self.handoff_invalidated.emit({
             "step0_manifest_path": manifest_path,
             "geometry_revision": outcome.get("revision", 0),
+            "dataset_gen": task.get("dataset_gen"),
+            "roi_id": task.get("spec", {}).get("roi_id") or "",
+            "roi_dir": task.get("spec", {}).get("roi_dir") or "",
             "reason": reason,
             "message": message,
         })
@@ -11123,6 +11127,7 @@ class Step0Page(QWidget):
             "channel_remap_config_hash": manifest.get("channel_remap_config_hash", ""),
             "source_identity": manifest.get("source_identity"),
             "handoff_schema_version": manifest.get("handoff_schema_version", 1),
+            "geometry_revision": int(manifest.get("geometry_revision") or 0),
         }
         self.step0_complete.emit(payload)
         return True

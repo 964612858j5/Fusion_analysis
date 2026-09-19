@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -404,3 +405,156 @@ def test_emit_complete_adopts_only_after_real_success_and_before_signal(
     finally:
         page.stop_background_jobs()
         page.deleteLater()
+
+
+def test_late_old_invalidation_cannot_clear_new_saved_context(app, tmp_path):
+    """A queued old failure is data for the old ROI, not the new Save."""
+    from block01.ui.main_window import MainWindow
+
+    window = MainWindow.__new__(MainWindow)
+    discarded = []
+    window.step0_output = {
+        "step0_manifest_path": str(tmp_path / "new" / "step0_roi_result.json"),
+        "roi_id": "roi-new",
+        "roi_dir": str(tmp_path / "new"),
+        "geometry_revision": 2,
+    }
+    window._step0 = SimpleNamespace(_dataset_gen=7)
+    window._forget_fusion_settings = lambda _reason: discarded.append("forget")
+    window._discard_step1_dataset_state = lambda **_kw: discarded.append("discard")
+    window._return_to_step0 = lambda _reason: discarded.append("return")
+    window._update_next_button = lambda: discarded.append("update")
+
+    window._on_step0_handoff_invalidated({
+        "step0_manifest_path": window.step0_output["step0_manifest_path"],
+        "dataset_gen": 7,
+        "geometry_revision": 1,
+        "roi_id": "roi-old",
+        "roi_dir": str(tmp_path / "old"),
+        "reason": "roi_changed",
+    })
+
+    assert discarded == []
+
+
+def test_real_save_entry_mints_new_roi_and_clears_worker_authority(
+        app, tmp_path, monkeypatch):
+    """The actual Step0 Save entry, not a direct handoff writer call."""
+    from block01.ui.step0.step0_page import Step0Page
+    import block01.ui.step0.step0_page as step0_module
+
+    class SaveLoader(_Loader):
+        def set_correction_config(self, _config):
+            pass
+
+        def set_corrected_zarr_store(self, _path, _decisions):
+            pass
+
+    raw = tmp_path / "real-save.ome.tif"
+    raw.write_bytes(b"raw-save")
+    page = Step0Page()
+    page.loader = SaveLoader(raw)
+    page.ome_path = str(raw)
+    page.output_dir = str(tmp_path)
+    page.panel_csv_path = ""
+    page.panel_groups = {}
+    page.nucleus_channel = "DAPI"
+    page._analysis_region_mode = "roi"
+    page._channel_order = ["DAPI"]
+    page._channel_decisions = {"DAPI": "original"}
+    page.overview.loader = page.loader
+    page.overview.full_h = page.overview.full_w = 96
+    page.overview._rois = [_roi((0, 32, 0, 32), "ROI_1")]
+    page.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)}]
+    page.patches = [(0, 16, 0, 16)]
+    monkeypatch.setattr(page, "_confirm_raw_channels", lambda: True)
+    monkeypatch.setattr(page, "_persist_step0_remap_config", lambda: True)
+    monkeypatch.setattr(step0_module.QMessageBox, "information",
+                        lambda *_a, **_k: None)
+    try:
+        page._save_and_continue()
+        first = page._roi_context
+        assert first is not None
+        page.overview._rois = [_roi((0, 48, 0, 48), "ROI_new")]
+        assert page._persist_geometry_edit() is True
+        worker = page._geometry_persist_worker
+        assert worker.wait_idle()
+        assert page.geometry_blocked_reason() == "roi_changed"
+
+        page._save_and_continue()
+        assert page._roi_context is not first
+        assert page.geometry_ready_for_consumers() is True
+        assert page.geometry_blocked_reason() is None
+        manifest = _manifest(Path(page._roi_context["step_dirs"]["step0"]))
+        assert manifest["roi_id"] == page._roi_context["roi_id"]
+        assert manifest["bbox_fullres"] == [0, 48, 0, 48]
+    finally:
+        page.stop_background_jobs()
+        page.deleteLater()
+
+
+def test_same_window_full_save_rebinds_mainwindow_and_reenters_step1(
+        app, tmp_path, monkeypatch):
+    """Real Save signal, authoritative reader and entry gate in one window."""
+    import block01.ui.main_window as main_window_module
+    from block01.ui.main_window import MainWindow
+
+    class SaveLoader(_Loader):
+        def set_correction_config(self, _config):
+            pass
+
+        def set_corrected_zarr_store(self, _path, _decisions):
+            pass
+
+    raw = tmp_path / "same-window.ome.tif"
+    raw.write_bytes(b"same-window-raw")
+    w = MainWindow()
+    page = w._step0
+    page.loader = SaveLoader(raw)
+    page.ome_path = str(raw)
+    page.output_dir = str(tmp_path)
+    page.panel_csv_path = ""
+    page.panel_groups = {}
+    page.nucleus_channel = "DAPI"
+    page._analysis_region_mode = "roi"
+    page._channel_order = ["DAPI"]
+    page._channel_decisions = {"DAPI": "original"}
+    page.overview.loader = page.loader
+    page.overview.full_h = page.overview.full_w = 96
+    page.overview._rois = [_roi((0, 32, 0, 32), "ROI_1")]
+    page.overview._patches = [{"roi_idx": 0, "coords": (0, 16, 0, 16)}]
+    page.patches = [(0, 16, 0, 16)]
+    monkeypatch.setattr(page, "_confirm_raw_channels", lambda: True)
+    monkeypatch.setattr(page, "_persist_step0_remap_config", lambda: True)
+    monkeypatch.setattr(main_window_module.QMessageBox, "information",
+                        lambda *_a, **_k: None)
+    monkeypatch.setattr(main_window_module.QMessageBox, "warning",
+                        lambda *_a, **_k: None)
+    try:
+        page._save_and_continue()
+        assert w._step1_context_ready is True
+        w._go_to_step1()
+        assert w._stack.currentIndex() == 1
+
+        w._go_to_step0()
+        page.overview._rois = [_roi((0, 48, 0, 48), "ROI_new")]
+        assert page._persist_geometry_edit() is True
+        worker = page._geometry_persist_worker
+        assert worker.wait_idle()
+        assert page.geometry_blocked_reason() == "roi_changed"
+        w._go_to_step1()
+        assert w._stack.currentIndex() == 0
+
+        page._save_and_continue()
+        assert w._step1_context_ready is True
+        assert w.step0_output["roi_id"] == page._roi_context["roi_id"]
+        assert w.step0_output["geometry_revision"] >= 1
+        assert page.geometry_ready_for_consumers() is True
+        w._go_to_step1()
+        assert w._stack.currentIndex() == 1
+        QtWidgets.QApplication.processEvents()
+        assert w._step1_context_ready is True
+        assert w._stack.currentIndex() == 1
+    finally:
+        page.stop_background_jobs()
+        w.close()

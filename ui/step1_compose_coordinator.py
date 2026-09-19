@@ -200,6 +200,14 @@ class Step1ComposeCoordinator(QtCore.QObject):
         #: Every submitted composition gets a token, so a result can only
         #: retire the job that is actually registered under its key.
         self._job = 0
+        # Intensity is a continuous display parameter, not a structural
+        # identity. Keep one active batch and one replaceable latest spec.
+        self._intensity_revision = 0
+        self._intensity_pending = None
+        self._intensity_inflight = set()
+        self._intensity_waiting = False
+        self._intensity_stats = {"submitted": 0, "completed": 0,
+                                 "coalesced": 0, "published": 0}
 
     # ── what the frame is made of ─────────────────────────────────────
     @property
@@ -225,6 +233,9 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._generation += 1
         self._emitted.clear()
         self._inflight.clear()
+        self._intensity_pending = None
+        self._intensity_inflight.clear()
+        self._intensity_waiting = False
         self._missing.clear()
         self._announced_missing = None
         self._issued = None
@@ -240,6 +251,9 @@ class Step1ComposeCoordinator(QtCore.QObject):
 
     def shutdown(self):
         """Stop the compose workers. Idempotent."""
+        self._intensity_pending = None
+        self._intensity_inflight.clear()
+        self._intensity_waiting = False
         if self._owns_executor and self._executor is not None:
             self._executor.shutdown(wait=True)
         self._executor = None
@@ -300,7 +314,7 @@ class Step1ComposeCoordinator(QtCore.QObject):
         return plan
 
     # ── the frame ─────────────────────────────────────────────────────
-    def compose_visible(self, spec):
+    def compose_visible(self, spec, intensity_revision=None):
         """Ask for what the visible tiles need, and start what is in hand.
 
         Returns the number of tiles served straight from the composition
@@ -343,14 +357,29 @@ class Step1ComposeCoordinator(QtCore.QObject):
         # the announcement follows the first tile, and a set that comes back
         # the same is not a change.
         self._missing.clear()
+        intensity_raw_ready = True
+        if intensity_revision is not None:
+            intensity_raw_ready = all(
+                self._tile_pixels(key) is not None
+                for tx, ty in tiles
+                for key in self._keys(level, tx, ty, channels))
         for request in self._requests(level, tiles, channels, generation):
+            if (intensity_revision is not None
+                    and self._tile_pixels(request.key) is not None):
+                continue
             stack.scheduler.request(
                 request,
-                lambda result, gen=generation: self._on_tile(result, gen, spec))
+                lambda result, gen=generation, frame_spec=spec,
+                       intensity_revision=intensity_revision: self._on_tile(
+                           result, gen, frame_spec, intensity_revision))
         hits = 0
         for tx, ty in tiles:
-            if self._start_tile(level, tx, ty, channels, spec, generation):
+            if self._start_tile(level, tx, ty, channels, spec, generation,
+                                intensity_revision):
                 hits += 1
+        if intensity_revision is not None:
+            self._intensity_waiting = (
+                not intensity_raw_ready and not self._intensity_inflight)
         return hits
 
     @staticmethod
@@ -387,7 +416,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
             return None
         return getattr(entry, "handle", entry)
 
-    def _start_tile(self, level, tx, ty, channels, spec, generation):
+    def _start_tile(self, level, tx, ty, channels, spec, generation,
+                    intensity_revision=None):
         """Publish one tile from the composition cache, or hand it to a worker.
 
         Returns True only for a composition-cache hit. What happens on this
@@ -408,7 +438,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         cache_key = self._composition_key(keys, spec)
         composed = self._compose_cache.get(cache_key)
         if composed is not None:
-            self._publish(generation, level, tx, ty, composed)
+            self._publish(generation, level, tx, ty, composed,
+                          intensity_revision)
             return True
         if cache_key in self._inflight:
             # Another channel's callback, or this pass's own sweep, already
@@ -417,9 +448,13 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._job += 1
         token = (generation, self._job)
         self._inflight[cache_key] = token
+        if intensity_revision is not None:
+            self._intensity_inflight.add(token)
+            self._intensity_stats["submitted"] += 1
         self._executor.submit(self._compose_in_worker, {
-            "generation": generation, "token": token, "level": level,
-            "tx": tx, "ty": ty, "cache_key": cache_key,
+            "generation": generation, "token": token,
+            "intensity_revision": intensity_revision,
+            "level": level, "tx": tx, "ty": ty, "cache_key": cache_key,
             "spec": self._snapshot(spec),
             "tiles": {channel: np.asarray(values, np.float32)
                       for channel, values in tiles.items()}})
@@ -472,16 +507,21 @@ class Step1ComposeCoordinator(QtCore.QObject):
         if self._inflight.get(cache_key) == payload.get("token"):
             del self._inflight[cache_key]
         if payload.get("error") is not None:
+            self._finish_intensity_job(payload)
             return
         if generation != self.generation:
+            self._finish_intensity_job(payload)
             return
         composed = payload["composed"]
         self._compose_cache.put(cache_key, composed)
         self._publish(generation, payload["level"], payload["tx"],
-                      payload["ty"], composed)
+                      payload["ty"], composed,
+                      payload.get("intensity_revision"))
+        self._finish_intensity_job(payload)
 
     # ── publishing ────────────────────────────────────────────────────
-    def _publish(self, generation, level, tx, ty, composed):
+    def _publish(self, generation, level, tx, ty, composed,
+                 intensity_revision=None):
         """Announce one composed tile, once per frame. GUI thread only."""
         if generation != self.generation:
             return False
@@ -491,6 +531,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         if (level, tx, ty) in self._emitted:
             return False
         self._emitted.add((level, tx, ty))
+        if intensity_revision is not None:
+            self._intensity_stats["published"] += 1
         self.tile_composed.emit(level, tx, ty, composed.rgba, composed.valid)
         return True
 
@@ -564,6 +606,52 @@ class Step1ComposeCoordinator(QtCore.QObject):
             self._seed_requested.add(key)
         return outstanding
 
+    def mapping_changed(self, channel=None, spec=None):
+        """Recompose a known window without voiding structural work.
+
+        A first window is structural because it changes the channel set that
+        can be drawn. A change to an existing window is display-only: one
+        active composition batch may finish as feedback while one latest
+        replacement waits behind it.
+        """
+        channel = str(channel or "")
+        previous = self._last_spec or {}
+        previous_mappings = previous.get("mappings") or {}
+        if channel not in previous_mappings:
+            return self.window_arrived(channel, spec=spec)
+        self._intensity_revision += 1
+        revision = self._intensity_revision
+        snapshot = self._snapshot(spec)
+        self._last_spec = snapshot
+        if self._intensity_inflight or self._intensity_waiting:
+            if self._intensity_pending is not None:
+                self._intensity_stats["coalesced"] += 1
+            self._intensity_pending = (revision, snapshot)
+            return 0
+        self._intensity_pending = None
+        return self.compose_visible(snapshot, intensity_revision=revision)
+
+    def intensity_stats(self):
+        """Return bounded latest-wins accounting for diagnostics and tests."""
+        stats = dict(self._intensity_stats)
+        stats["inflight"] = len(self._intensity_inflight)
+        stats["pending"] = self._intensity_pending is not None
+        stats["waiting"] = self._intensity_waiting
+        stats["revision"] = self._intensity_revision
+        return stats
+
+    def _finish_intensity_job(self, payload):
+        token = payload.get("token")
+        if token not in self._intensity_inflight:
+            return
+        self._intensity_inflight.remove(token)
+        self._intensity_stats["completed"] += 1
+        if self._intensity_inflight or self._intensity_pending is None:
+            return
+        revision, spec = self._intensity_pending
+        self._intensity_pending = None
+        self.compose_visible(spec, intensity_revision=revision)
+
     def window_arrived(self, channel=None, spec=None):
         """A window this frame was waiting for has landed.
 
@@ -585,7 +673,7 @@ class Step1ComposeCoordinator(QtCore.QObject):
         return self.generation
 
     # ── the scheduler's callback ──────────────────────────────────────
-    def _on_tile(self, result, generation, spec):
+    def _on_tile(self, result, generation, spec, intensity_revision=None):
         """A read landed -- ON THE SCHEDULER'S READ WORKER.
 
         `TileScheduler` delivers from the thread that did the reading, so
@@ -595,7 +683,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         queued slot below.
         """
         self._tile_landed.emit({"result": result, "generation": generation,
-                                "spec": spec})
+                                "spec": spec,
+                                "intensity_revision": intensity_revision})
 
     def _on_tile_landed(self, payload):
         """The read, now on this object's thread.
@@ -612,5 +701,25 @@ class Step1ComposeCoordinator(QtCore.QObject):
             return
         if generation != self.generation:
             return
+        intensity_revision = payload.get("intensity_revision")
+        if (intensity_revision is None
+                and (self._intensity_waiting
+                     or self._intensity_pending is not None)):
+            if self._intensity_pending is not None:
+                _revision, spec = self._intensity_pending
+                self._intensity_pending = None
+            else:
+                spec = self._last_spec
+            intensity_revision = self._intensity_revision
+        elif intensity_revision is not None:
+            if self._intensity_pending is not None:
+                _revision, spec = self._intensity_pending
+                self._intensity_pending = None
+            else:
+                spec = self._last_spec
+            intensity_revision = self._intensity_revision
         self._start_tile(key.tile.level, key.tile.tx, key.tile.ty,
-                         self.channels_for(spec), spec, generation)
+                         self.channels_for(spec), spec, generation,
+                         intensity_revision)
+        if intensity_revision is not None and self._intensity_inflight:
+            self._intensity_waiting = False

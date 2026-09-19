@@ -80,7 +80,7 @@ def _settle_initial(app, rig):
     return _pixel(entry)
 
 
-def _deliver_unique_key(rig, key, duplicate=False):
+def _deliver_unique_key(rig, key):
     matched = []
     remaining = []
     for req, callback in rig.host.scheduler._deferred:
@@ -94,15 +94,11 @@ def _deliver_unique_key(rig, key, duplicate=False):
         key.channel, key.tile)
     rig.host.scheduler.reads += 1
     rig.host.scheduler.cache.put(key, values)
-    result = SimpleNamespace(
-        request=matched[0][0],
-        pixels=SimpleNamespace(handle=values),
-        error=None)
-    for _req, callback in matched:
-        callback(result)
-        if duplicate:
-            callback(result)
-    return matched[-1][1], result
+    for req, callback in matched:
+        callback(SimpleNamespace(
+            request=req,
+            pixels=SimpleNamespace(handle=values),
+            error=None))
 
 
 def _latest_pixel_at(rig, tx, ty):
@@ -287,69 +283,6 @@ def test_multitile_raw_arrivals_share_one_latest_intensity_spec(app):
         for tx, ty in tiles:
             assert _latest_pixel_at(rig, tx, ty) == _expected_pixel_at(
                 rig, tx, ty)
-    finally:
-        rig.binding.disconnect_owners()
-        rig.layer.teardown()
-        rig.coordinator.shutdown()
-
-
-def test_consumed_raw_key_is_reaccepted_after_cache_eviction(app):
-    tiles = ((1, 1), (2, 1), (1, 2))
-    rig = _rig(app, compose_core.MODE_OVERLAY, tiles=tiles)
-    try:
-        rig.binding.refresh("initial")
-        for value in (50.0, 40.0, 30.0, 20.0, 10.0):
-            with rig.state.using_scope("step1"):
-                rig.state.set_mapping("CD3", 0.0, value, 1.0,
-                                      origin="test")
-        keys = []
-        for request, _callback in rig.host.scheduler._deferred:
-            if request.key not in keys:
-                keys.append(request.key)
-        assert len(keys) == 9
-
-        old_callback = None
-        old_result = None
-        for index, key in enumerate(reversed(keys)):
-            callback, result = _deliver_unique_key(
-                rig, key, duplicate=index == 0)
-            if index == 0:
-                old_callback = callback
-                old_result = result
-            app.processEvents()
-            if rig.coordinator.intensity_stats()["waiting"]:
-                assert not rig.executor.jobs
-        assert len(rig.executor.jobs) == len(tiles)
-        rig.executor.run()
-        app.processEvents()
-        assert rig.coordinator.intensity_stats()["waiting"] is False
-        assert rig.coordinator.intensity_stats()["pending"] is False
-
-        old_callback(old_result)
-        app.processEvents()
-        assert not rig.executor.jobs
-
-        revisit_key = keys[0]
-        rig.coordinator.forget_compositions()
-        rig.host.scheduler.cache._items.pop(revisit_key)
-        reads_before = rig.host.scheduler.reads
-
-        rig.stack.controller._visible_tiles = {(9, 9)}
-        rig.binding.recompose()
-        rig.host.scheduler._deferred = []
-        rig.stack.controller._visible_tiles = set(tiles)
-        rig.binding.recompose()
-        _deliver_unique_key(rig, revisit_key)
-        app.processEvents()
-        assert len(rig.executor.jobs) == len(tiles)
-        rig.executor.run()
-        app.processEvents()
-
-        assert rig.host.scheduler.reads == reads_before + 1
-        assert _latest_pixel_at(rig, revisit_key.tile.tx,
-                                revisit_key.tile.ty) == _expected_pixel_at(
-                                    rig, revisit_key.tile.tx,
-                                    revisit_key.tile.ty)
     finally:
         rig.binding.disconnect_owners()
         rig.layer.teardown()

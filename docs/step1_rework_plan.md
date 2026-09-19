@@ -368,15 +368,6 @@ D 相机同步过程科学状态逐项不变。
 - **专项门**：新增真实三可见瓦片、九个 `RawKey`、五次 mapping 变化的 interleaved raw-arrival 测试；逐个交错投递回调，确认等待未完成前无 composition worker，完成后所有瓦片的真实 `ImageItem/qimage` 都等于最终 CPU reference，且 pending 有界、provider reads 只增加九次。该测试概念上也覆盖“恢复第一个瓦片即清 pending/waiting”变异：后续瓦片会暴露旧 mapping，最终像素断言失败。
 - **结果与提交边界**：C4.5c.1 focused suite **13 passed**；本修复不改 `b497fd2`，单独创建 C4.5c.1 commit。只修改 coordinator、专项测试和本计划文档，不启动 D/GPU/Rust/Odon，不修改 UI surface 或受保护文件，不 push。
 
-### C.4.5c.2 waiting batch epoch 生命周期（2026-09-20，真机待验收）
-
-- **根因**：C4.5c.1 的 `_intensity_consumed_raw_keys` 在 waiting batch 完成后仍按裸 `RawKey` 留存；底层 raw tile 被 LRU 淘汰、相机离开再返回并重新读取同一 key 时，合法 callback 会被永久去重，直到下一次结构或 Intensity 刷新。
-- **修复**：每个 raw-waiting batch 分配递增 epoch；scheduler callback 携带产生它的 epoch。去重只在当前 active epoch 内生效，批次完成后 active epoch 立即失效并清空 consumed 集合；旧 epoch 的迟到 callback 在进入 RawKey 去重前拒收。普通相机回读 callback 不带旧 waiting epoch，可正常启动当前结构的合成。Structural invalidate、source/dataset/mode/ROI 变化和 teardown 继续使当前 epoch 失效并清理状态。
-- **专项门**：`tests/test_step1_c45c_intensity_live.py` 现 **14 passed**；新增真实三瓦片轨迹覆盖同批重复 callback 不重复启动、完成后注入上一 epoch 的迟到 callback 被拒收、淘汰一个已消费 RawKey、模拟离开/返回后重新读取同一 key、真实 `ImageItem/qimage` 恢复并等于最新 mapping CPU reference。
-- **变异门**：恢复“只要 RawKey 在 consumed set 就永久 return”后，缓存淘汰并重新读取的 qimage 恢复门失败；移除 epoch 检查后，上一 waiting epoch 的迟到 callback 会重新启动旧路径；去掉 invalidate/shutdown 的 epoch 失效后，结构 teardown 迟到结果门失败。
-- **保护回归**：C4.5c.2 compose 保护组合 **159 passed**；mount/takeover/binding **61 passed**。不恢复 FIFO，不推进 mapping structural generation，不改变 RawKey/cache/read 语义。
-- **提交边界**：本修复不 amend `b497fd2` 或 `0d39e9c`，只修改 coordinator、专项测试和本计划文档，不启动 D/GPU/Rust/Odon，不修改 UI surface 或受保护文件，不 push。
-
 ### C.4.5d 完整 Step0 Save 的 geometry 权威屏障（2026-09-18，真机待验收）
 
 - **根因**：ROI 的 geometry-only worker 正确拒绝 `roi_changed`，因为旧 corrected product 不得跨 ROI 复用；但完整 Save 已发布新 ROI 的 canonical manifest 后，`GeometryPersistWorker` 仍保留旧 `_blocked=(revision, "roi_changed")`。`geometry_ready_for_consumers()` 因而永久拒绝 Step1。

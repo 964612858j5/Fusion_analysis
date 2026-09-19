@@ -206,6 +206,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight = set()
         self._intensity_waiting = False
+        self._intensity_waiting_keys = set()
+        self._intensity_consumed_raw_keys = set()
         self._intensity_stats = {"submitted": 0, "completed": 0,
                                  "coalesced": 0, "published": 0}
 
@@ -236,6 +238,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight.clear()
         self._intensity_waiting = False
+        self._intensity_waiting_keys.clear()
+        self._intensity_consumed_raw_keys.clear()
         self._missing.clear()
         self._announced_missing = None
         self._issued = None
@@ -254,6 +258,8 @@ class Step1ComposeCoordinator(QtCore.QObject):
         self._intensity_pending = None
         self._intensity_inflight.clear()
         self._intensity_waiting = False
+        self._intensity_waiting_keys.clear()
+        self._intensity_consumed_raw_keys.clear()
         if self._owns_executor and self._executor is not None:
             self._executor.shutdown(wait=True)
         self._executor = None
@@ -357,15 +363,21 @@ class Step1ComposeCoordinator(QtCore.QObject):
         # the announcement follows the first tile, and a set that comes back
         # the same is not a change.
         self._missing.clear()
-        intensity_raw_ready = True
+        requests = self._requests(level, tiles, channels, generation)
         if intensity_revision is not None:
-            intensity_raw_ready = all(
-                self._tile_pixels(key) is not None
-                for tx, ty in tiles
-                for key in self._keys(level, tx, ty, channels))
-        for request in self._requests(level, tiles, channels, generation):
+            missing_raw_keys = {
+                request.key for request in requests
+                if self._tile_pixels(request.key) is None
+            }
+            self._intensity_waiting_keys = set(missing_raw_keys)
+            self._intensity_waiting = bool(missing_raw_keys)
+            if missing_raw_keys:
+                self._intensity_consumed_raw_keys.clear()
+        else:
+            missing_raw_keys = set()
+        for request in requests:
             if (intensity_revision is not None
-                    and self._tile_pixels(request.key) is not None):
+                    and request.key not in missing_raw_keys):
                 continue
             stack.scheduler.request(
                 request,
@@ -377,9 +389,6 @@ class Step1ComposeCoordinator(QtCore.QObject):
             if self._start_tile(level, tx, ty, channels, spec, generation,
                                 intensity_revision):
                 hits += 1
-        if intensity_revision is not None:
-            self._intensity_waiting = (
-                not intensity_raw_ready and not self._intensity_inflight)
         return hits
 
     @staticmethod
@@ -702,24 +711,25 @@ class Step1ComposeCoordinator(QtCore.QObject):
         if generation != self.generation:
             return
         intensity_revision = payload.get("intensity_revision")
-        if (intensity_revision is None
-                and (self._intensity_waiting
-                     or self._intensity_pending is not None)):
-            if self._intensity_pending is not None:
-                _revision, spec = self._intensity_pending
-                self._intensity_pending = None
-            else:
-                spec = self._last_spec
-            intensity_revision = self._intensity_revision
-        elif intensity_revision is not None:
-            if self._intensity_pending is not None:
-                _revision, spec = self._intensity_pending
-                self._intensity_pending = None
-            else:
-                spec = self._last_spec
-            intensity_revision = self._intensity_revision
-        self._start_tile(key.tile.level, key.tile.tx, key.tile.ty,
-                         self.channels_for(spec), spec, generation,
-                         intensity_revision)
-        if intensity_revision is not None and self._intensity_inflight:
+        if key in self._intensity_consumed_raw_keys:
+            return
+        if self._intensity_waiting and key in self._intensity_waiting_keys:
+            self._intensity_waiting_keys.remove(key)
+            self._intensity_consumed_raw_keys.add(key)
+            if self._intensity_waiting_keys:
+                return
             self._intensity_waiting = False
+            if self._intensity_pending is not None:
+                _revision, spec = self._intensity_pending
+                self._intensity_pending = None
+            else:
+                spec = self._last_spec
+            self.compose_visible(spec,
+                                 intensity_revision=self._intensity_revision)
+            return
+        if self._intensity_waiting or self._intensity_pending is not None:
+            return
+        if intensity_revision is not None:
+            return
+        self._start_tile(key.tile.level, key.tile.tx, key.tile.ty,
+                         self.channels_for(spec), spec, generation)

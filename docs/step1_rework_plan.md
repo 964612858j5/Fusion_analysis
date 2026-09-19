@@ -350,17 +350,6 @@ D 相机同步过程科学状态逐项不变。
 - **变异门**：专项断言 hidden `_show_channel_from_cache`/`_start_preload` 不调用、`_persist_geometry_edit` 仍提交、真实 eventFilter 路径移动 ViewBox、release 后 grab 清理；恢复任一隐藏显示/预载或移除 persist 即红。中键、patch/geometry、preload、Tissue/隔离、shared camera/geometry sync、viewer takeover/mount 相关既有套件均通过；完整仓库回归因过宽集合运行超过 80 分钟未完成，未宣称全绿。
 - **真机复验**：在 Step1 Tissue Preview 画一次 patch，geometry 尚未完成时立即中键拖动；确认无秒级空档、视框在保存前移动、patch 按钮/锚点与 geometry handoff 保持，返回 Step0 后当前 patch 可显示且 preload 仅启动一次。
 
-### C.4.5c Step1 Intensity 连续合成反馈（2026-09-19，真机待验收）
-
-- **范围裁定**：复用现有共享 Intensity 窗口、`ChannelDisplayState`、`mapping_changed`、Step1 `spec()`、Raw tile cache、composition cache、CPU `compose_core` 与 `Step1ComposedLayer`；未新增控件、timer、display state、事件总线、viewer、GPU/shader/Rust/Odon 或低分辨率路径。
-- **测量结论**：此前每次已有 mapping 都经 `Step1ComposeBinding._on_mapping_changed()` 调用 `window_arrived()`，导致 `invalidate("window")` 推进 structural generation、清空 `_inflight`，旧 worker 结果在 generation 门被拒收；连续输入快于 CPU compose 时因此没有中间 ImageItem 帧。首次缺失 mapping 仍走该严格路径。
-- **实现**：已有 mapping 走 coordinator 的 mapping-only latest-wins 支路；一个 active batch 用精确 `(generation, token)` 追踪，pending 只保存一份最新完整 spec。当前 batch 所有实际 worker job 完成后才启动 pending；当前结构仍有效的结果先上屏。`_emitted` 每个 pass 独立清空，避免下一帧同坐标被误挡。raw 尚未到齐时只保留有限 scheduler waiter，并在 tile 到达时改用最新 spec；结构 invalidation/teardown 清除 pending、inflight、waiting，迟到结果不能复活新结构。
-- **缓存与线程**：Intensity 只改变 composition key；RawKey、底层 tile cache 和 provider 读数保持不变。所有 `compose_core.compose` 仍由既有 executor 执行，Qt 线程只做 token、cache、latest spec 和 ImageItem 发布。异常结果也退休 exact token 并继续追赶 pending。
-- **专项门**：`tests/test_step1_c45c_intensity_live.py` **11 passed**，真实 `ChannelDisplayState.set_mapping()` → `mapping_changed` → `Step1ComposeBinding` → coordinator → `Step1ComposedLayer` → ImageItem/qimage；覆盖 Overlay/Fusion、中间像素、Min/Max/Gamma 最终像素、latest-only、三 tile batch、raw 未到齐、无重读、结构 invalidation、worker retirement 与科学状态保护。
-- **保护回归**：C4.5c 核心 compose/binding/async **122 passed**；layer/mount/takeover/binding **61 passed**；live controls/Tissue **88 passed**；C4.5a/b/d/d.1/handoff **82 passed**。此前完整保护组合 **353 passed**；未宣称长进程维护回归无污染。
-- **变异门**：已有 mapping 恢复 `window_arrived()` 会使 generation 变化并使中间反馈门失败；pending 改 FIFO 会使 executor batch/等待深度门失败；不在 batch 完成后启动 pending 会使最终 qimage 门失败；移除 structural clear 会使旧结果拒收/teardown 门失败；RawKey 加 mapping 或改为重读会使 reads/cache 门失败。
-- **真机验收仍待用户执行**：Step1 Overlay/Fusion 分别拖 Min、Max、Gamma，释放前确认有中间画面；快速往返后最终对应最后数值；拖动期间平移/缩放不冻结；切 Patch Results/Step0 时隐藏 Step1 不持续合成，返回后按最新 mapping 刷新一次；随后复验 C4.5a/b/d.1。
-
 ### C.4.5d 完整 Step0 Save 的 geometry 权威屏障（2026-09-18，真机待验收）
 
 - **根因**：ROI 的 geometry-only worker 正确拒绝 `roi_changed`，因为旧 corrected product 不得跨 ROI 复用；但完整 Save 已发布新 ROI 的 canonical manifest 后，`GeometryPersistWorker` 仍保留旧 `_blocked=(revision, "roi_changed")`。`geometry_ready_for_consumers()` 因而永久拒绝 Step1。

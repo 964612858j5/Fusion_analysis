@@ -194,5 +194,10 @@ class Step1ComposeBinding(QtCore.QObject):
         self.refresh("state-installed")
 
     def _on_mapping_changed(self, channel):
-        """A window settled -- continuously update the current picture."""
-        self._coordinator.mapping_changed(str(channel), spec=self.spec())
+        """A window settled -- the user's, or the seed the frame asked for.
+
+        The coordinator is told WHICH channel, so it stops holding a seed
+        request open for it, and is handed a whole new spec built from the
+        state that now has the window. Nobody edits its last frame.
+        """
+        self._coordinator.window_arrived(str(channel), spec=self.spec())

@@ -433,8 +433,8 @@ def test_a_draft_edit_advances_the_generation_by_itself(app):
     assert before in rig.host.scheduler.cancelled
 
 
-@pytest.mark.parametrize("move", ["colour", "visibility"])
-def test_structural_display_change_advances_the_generation(app, move):
+@pytest.mark.parametrize("move", ["colour", "visibility", "mapping"])
+def test_every_display_change_advances_the_generation(app, move):
     rig = _wired(app)
     rig.binding.refresh("first")
     before = rig.coordinator.generation
@@ -442,22 +442,13 @@ def test_structural_display_change_advances_the_generation(app, move):
     with rig.state.using_scope(draft_spec.STEP1_SCOPE):
         if move == "colour":
             rig.state.set_color("CD3", "#0000ff")
-        else:
+        elif move == "visibility":
             rig.state.set_display_visible("CD8", False)
+        else:
+            rig.state.set_mapping("CD3", 1.0, 200.0, 1.0)
 
     assert rig.coordinator.generation != before
     assert before in rig.host.scheduler.cancelled
-
-
-def test_mapping_display_change_keeps_structural_generation(app):
-    rig = _wired(app)
-    rig.binding.refresh("first")
-    before = rig.coordinator.generation
-
-    with rig.state.using_scope(draft_spec.STEP1_SCOPE):
-        rig.state.set_mapping("CD3", 1.0, 200.0, 1.0)
-
-    assert rig.coordinator.generation == before
 
 
 def test_a_window_arriving_recomposes_through_the_public_wiring(app):

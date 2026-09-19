@@ -1,0 +1,37 @@
+{
+  "environment": {
+    "actual_format": {
+      "major": 3,
+      "minor": 3,
+      "profile": 1
+    },
+    "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+    "gl_vendor": "NVIDIA Corporation",
+    "gl_version": "3.3.0 NVIDIA 535.309.01",
+    "glsl_version": "3.30 NVIDIA via Cg compiler",
+    "max_texture_image_units": 32,
+    "max_texture_size": 32768,
+    "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+    "pyopengl_version": "3.1.10",
+    "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+    "software_renderer": false,
+    "transient_format": "GL_RGBA32F"
+  },
+  "fusion": {
+    "alpha_mismatch_components": 0,
+    "max_abs_lsb": 1,
+    "over_one_lsb_components": 0
+  },
+  "overlay": {
+    "alpha_mismatch_components": 0,
+    "max_abs_lsb": 1,
+    "over_one_lsb_components": 0
+  },
+  "release": {
+    "already_disposed": false,
+    "cache_bytes": 0,
+    "raw_textures_remaining": 0,
+    "threads_created": 0,
+    "transient_targets_remaining": 0
+  }
+}

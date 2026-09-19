@@ -1,0 +1,184 @@
+{
+  "environment": {
+    "actual_format": {
+      "major": 3,
+      "minor": 3,
+      "profile": 1
+    },
+    "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+    "gl_vendor": "NVIDIA Corporation",
+    "gl_version": "3.3.0 NVIDIA 535.309.01",
+    "glsl_version": "3.30 NVIDIA via Cg compiler",
+    "max_texture_image_units": 32,
+    "max_texture_size": 32768,
+    "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+    "pyopengl_version": "3.1.10",
+    "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+    "software_renderer": false,
+    "transient_format": "GL_RGBA32F"
+  },
+  "final_cache": {
+    "budget_bytes": 32768,
+    "bytes": 32768,
+    "evictions": 4,
+    "hits": 2,
+    "misses": 6,
+    "peak_bytes": 32768,
+    "peak_textures": 2,
+    "textures": 2,
+    "upload_submit_ms": [
+      0.10466400999575853,
+      0.19701599376276135,
+      0.06627297261729836,
+      0.056393968407064676,
+      0.05938997492194176,
+      0.054661009926348925
+    ],
+    "uploads": 6
+  },
+  "format": {
+    "raw": "GL_R32F",
+    "readback": "RGBA8",
+    "transient": "GL_RGBA32F"
+  },
+  "limits": {
+    "gpu_presentation": "not measured",
+    "readback": "blocking FBO correctness boundary, not presentation",
+    "submission": "CPU wall time only, not GPU completion"
+  },
+  "records": [
+    {
+      "label": "cold_upload",
+      "opaque_pixels": 4096,
+      "submission": {
+        "cache": {
+          "budget_bytes": 32768,
+          "bytes": 32768,
+          "evictions": 0,
+          "hits": 0,
+          "misses": 2,
+          "peak_bytes": 32768,
+          "peak_textures": 2,
+          "textures": 2,
+          "upload_submit_ms": [
+            0.10466400999575853,
+            0.19701599376276135
+          ],
+          "uploads": 2
+        },
+        "cpu_submit_ms": 3.225035034120083,
+        "missing_windows": [],
+        "mode": "overlay",
+        "pass_count": 5,
+        "physical_size": [
+          64,
+          64
+        ]
+      },
+      "wall_ms": 4.75665699923411
+    },
+    {
+      "label": "hot_display",
+      "opaque_pixels": 4096,
+      "submission": {
+        "cache": {
+          "budget_bytes": 32768,
+          "bytes": 32768,
+          "evictions": 0,
+          "hits": 2,
+          "misses": 2,
+          "peak_bytes": 32768,
+          "peak_textures": 2,
+          "textures": 2,
+          "upload_submit_ms": [
+            0.10466400999575853,
+            0.19701599376276135
+          ],
+          "uploads": 2
+        },
+        "cpu_submit_ms": 0.2555249957367778,
+        "missing_windows": [],
+        "mode": "overlay",
+        "pass_count": 5,
+        "physical_size": [
+          64,
+          64
+        ]
+      },
+      "wall_ms": 0.3971180412918329
+    },
+    {
+      "label": "evict_upload",
+      "opaque_pixels": 4096,
+      "submission": {
+        "cache": {
+          "budget_bytes": 32768,
+          "bytes": 32768,
+          "evictions": 2,
+          "hits": 2,
+          "misses": 4,
+          "peak_bytes": 32768,
+          "peak_textures": 2,
+          "textures": 2,
+          "upload_submit_ms": [
+            0.10466400999575853,
+            0.19701599376276135,
+            0.06627297261729836,
+            0.056393968407064676
+          ],
+          "uploads": 4
+        },
+        "cpu_submit_ms": 0.7953960448503494,
+        "missing_windows": [],
+        "mode": "overlay",
+        "pass_count": 5,
+        "physical_size": [
+          64,
+          64
+        ]
+      },
+      "wall_ms": 1.0200439719483256
+    },
+    {
+      "label": "reupload",
+      "opaque_pixels": 4096,
+      "submission": {
+        "cache": {
+          "budget_bytes": 32768,
+          "bytes": 32768,
+          "evictions": 4,
+          "hits": 2,
+          "misses": 6,
+          "peak_bytes": 32768,
+          "peak_textures": 2,
+          "textures": 2,
+          "upload_submit_ms": [
+            0.10466400999575853,
+            0.19701599376276135,
+            0.06627297261729836,
+            0.056393968407064676,
+            0.05938997492194176,
+            0.054661009926348925
+          ],
+          "uploads": 6
+        },
+        "cpu_submit_ms": 0.4087190027348697,
+        "missing_windows": [],
+        "mode": "overlay",
+        "pass_count": 5,
+        "physical_size": [
+          64,
+          64
+        ]
+      },
+      "wall_ms": 0.6164840306155384
+    }
+  ],
+  "release": {
+    "already_disposed": false,
+    "cache_bytes": 0,
+    "raw_textures_remaining": 0,
+    "threads_created": 0,
+    "transient_targets_remaining": 0
+  }
+}

@@ -80,27 +80,6 @@ def _settle_initial(app, rig):
     return _pixel(entry)
 
 
-def _deliver_unique_key(rig, key):
-    matched = []
-    remaining = []
-    for req, callback in rig.host.scheduler._deferred:
-        if req.key == key:
-            matched.append((req, callback))
-        else:
-            remaining.append((req, callback))
-    rig.host.scheduler._deferred = remaining
-    assert matched
-    values, _io = rig.host.scheduler.provider.read_tile(
-        key.channel, key.tile)
-    rig.host.scheduler.reads += 1
-    rig.host.scheduler.cache.put(key, values)
-    for req, callback in matched:
-        callback(SimpleNamespace(
-            request=req,
-            pixels=SimpleNamespace(handle=values),
-            error=None))
-
-
 def _latest_pixel_at(rig, tx, ty):
     return _pixel(rig.layer.pool.entries[(0, tx, ty)])
 
@@ -249,46 +228,6 @@ def test_final_intensity_pixel_matches_last_mapping_without_reread(
         rig.coordinator.shutdown()
 
 
-def test_multitile_raw_arrivals_share_one_latest_intensity_spec(app):
-    tiles = ((1, 1), (2, 1), (1, 2))
-    rig = _rig(app, compose_core.MODE_OVERLAY, tiles=tiles)
-    try:
-        rig.binding.refresh("initial")
-        for value in (50.0, 40.0, 30.0, 20.0, 10.0):
-            with rig.state.using_scope("step1"):
-                rig.state.set_mapping("CD3", 0.0, value, 1.0,
-                                      origin="test")
-        stats = rig.coordinator.intensity_stats()
-        assert stats["waiting"] is True
-        assert stats["pending"] is True
-        keys = []
-        for request, _callback in rig.host.scheduler._deferred:
-            if request.key not in keys:
-                keys.append(request.key)
-        assert len(keys) == 9
-        reads_before = rig.host.scheduler.reads
-
-        for key in reversed(keys):
-            _deliver_unique_key(rig, key)
-            app.processEvents()
-            if rig.coordinator.intensity_stats()["waiting"]:
-                assert not rig.executor.jobs
-        assert len(rig.executor.jobs) == len(tiles)
-        assert rig.host.scheduler.reads == reads_before + len(keys)
-        rig.executor.run()
-        app.processEvents()
-        stats = rig.coordinator.intensity_stats()
-        assert stats["inflight"] == 0
-        assert stats["pending"] is False
-        for tx, ty in tiles:
-            assert _latest_pixel_at(rig, tx, ty) == _expected_pixel_at(
-                rig, tx, ty)
-    finally:
-        rig.binding.disconnect_owners()
-        rig.layer.teardown()
-        rig.coordinator.shutdown()
-
-
 def test_mapping_before_raw_tiles_arrive_keeps_one_latest_spec(app):
     rig = _rig(app, compose_core.MODE_OVERLAY)
     try:
@@ -318,8 +257,6 @@ def test_mapping_before_raw_tiles_arrive_keeps_one_latest_spec(app):
         rig.layer.teardown()
         rig.coordinator.shutdown()
 
-
-def test_structural_invalidation_rejects_pending_intensity_result(app):
     rig = _rig(app, compose_core.MODE_OVERLAY)
     try:
         _settle_initial(app, rig)

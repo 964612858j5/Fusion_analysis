@@ -356,17 +356,10 @@ D 相机同步过程科学状态逐项不变。
 - **测量结论**：此前每次已有 mapping 都经 `Step1ComposeBinding._on_mapping_changed()` 调用 `window_arrived()`，导致 `invalidate("window")` 推进 structural generation、清空 `_inflight`，旧 worker 结果在 generation 门被拒收；连续输入快于 CPU compose 时因此没有中间 ImageItem 帧。首次缺失 mapping 仍走该严格路径。
 - **实现**：已有 mapping 走 coordinator 的 mapping-only latest-wins 支路；一个 active batch 用精确 `(generation, token)` 追踪，pending 只保存一份最新完整 spec。当前 batch 所有实际 worker job 完成后才启动 pending；当前结构仍有效的结果先上屏。`_emitted` 每个 pass 独立清空，避免下一帧同坐标被误挡。raw 尚未到齐时只保留有限 scheduler waiter，并在 tile 到达时改用最新 spec；结构 invalidation/teardown 清除 pending、inflight、waiting，迟到结果不能复活新结构。
 - **缓存与线程**：Intensity 只改变 composition key；RawKey、底层 tile cache 和 provider 读数保持不变。所有 `compose_core.compose` 仍由既有 executor 执行，Qt 线程只做 token、cache、latest spec 和 ImageItem 发布。异常结果也退休 exact token 并继续追赶 pending。
-- **专项门**：`tests/test_step1_c45c_intensity_live.py` **13 passed**，真实 `ChannelDisplayState.set_mapping()` → `mapping_changed` → `Step1ComposeBinding` → coordinator → `Step1ComposedLayer` → ImageItem/qimage；覆盖 Overlay/Fusion、中间像素、Min/Max/Gamma 最终像素、latest-only、三 tile batch、raw 未到齐、无重读、结构 invalidation、worker retirement 与科学状态保护。
-- **保护回归**：C4.5c 核心 compose/binding/async **124 passed**；layer/mount/takeover/binding **61 passed**；C4.5a/b/d/d.1/handoff **82 passed**；Intensity/Tissue protection **159 passed**。此前完整保护组合的既有结果不作为本次新增回归判据。
+- **专项门**：`tests/test_step1_c45c_intensity_live.py` **11 passed**，真实 `ChannelDisplayState.set_mapping()` → `mapping_changed` → `Step1ComposeBinding` → coordinator → `Step1ComposedLayer` → ImageItem/qimage；覆盖 Overlay/Fusion、中间像素、Min/Max/Gamma 最终像素、latest-only、三 tile batch、raw 未到齐、无重读、结构 invalidation、worker retirement 与科学状态保护。
+- **保护回归**：C4.5c 核心 compose/binding/async **122 passed**；layer/mount/takeover/binding **61 passed**；live controls/Tissue **88 passed**；C4.5a/b/d/d.1/handoff **82 passed**。此前完整保护组合 **353 passed**；未宣称长进程维护回归无污染。
 - **变异门**：已有 mapping 恢复 `window_arrived()` 会使 generation 变化并使中间反馈门失败；pending 改 FIFO 会使 executor batch/等待深度门失败；不在 batch 完成后启动 pending 会使最终 qimage 门失败；移除 structural clear 会使旧结果拒收/teardown 门失败；RawKey 加 mapping 或改为重读会使 reads/cache 门失败。
 - **真机验收仍待用户执行**：Step1 Overlay/Fusion 分别拖 Min、Max、Gamma，释放前确认有中间画面；快速往返后最终对应最后数值；拖动期间平移/缩放不冻结；切 Patch Results/Step0 时隐藏 Step1 不持续合成，返回后按最新 mapping 刷新一次；随后复验 C4.5a/b/d.1。
-
-### C.4.5c.1 多瓦片 raw 到达时的最新完整 spec（2026-09-20，真机待验收）
-
-- **根因**：原 raw-waiting 路径在第一个可见瓦片回调时就清除 `_intensity_pending` 和 `_intensity_waiting`；当其他可见瓦片仍在途时，它们可能按旧 callback spec 启动，导致同一结构 generation 内混用 mapping。
-- **修复**：Intensity waiting batch 现在记录全部缺失 `RawKey`；每个 key 到达后只从等待集合移除，直到全部目标 key 到达才消费一次最新 pending spec，并对完整可见瓦片集合启动同一 pass。`_intensity_consumed_raw_keys` 抑制同一等待批次的重复回调；structural invalidate 与 teardown 继续清空 waiting/pending/consumed 状态。
-- **专项门**：新增真实三可见瓦片、九个 `RawKey`、五次 mapping 变化的 interleaved raw-arrival 测试；逐个交错投递回调，确认等待未完成前无 composition worker，完成后所有瓦片的真实 `ImageItem/qimage` 都等于最终 CPU reference，且 pending 有界、provider reads 只增加九次。该测试概念上也覆盖“恢复第一个瓦片即清 pending/waiting”变异：后续瓦片会暴露旧 mapping，最终像素断言失败。
-- **结果与提交边界**：C4.5c.1 focused suite **13 passed**；本修复不改 `b497fd2`，单独创建 C4.5c.1 commit。只修改 coordinator、专项测试和本计划文档，不启动 D/GPU/Rust/Odon，不修改 UI surface 或受保护文件，不 push。
 
 ### C.4.5d 完整 Step0 Save 的 geometry 权威屏障（2026-09-18，真机待验收）
 

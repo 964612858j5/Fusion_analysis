@@ -1,0 +1,126 @@
+{
+  "binding": {
+    "accepted_results": 1,
+    "coarse_channels": [
+      "TOX"
+    ],
+    "coarse_plane_bytes": 882000,
+    "descriptor_publications": 1,
+    "fine_channels": [],
+    "fine_plane_bytes": 0,
+    "last_error": null,
+    "rejected_late_results": 0,
+    "requests": 1,
+    "revision": 1,
+    "source": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif', dataset_fingerprint='7806426034:1779780438127752093', stage='step1', corrected_artifact='roi=None|handoff=')",
+    "unavailable": {}
+  },
+  "channel": "TOX",
+  "coarse_level": 3,
+  "coarse_ready_ms": 141.21159998467192,
+  "dataset": "/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif",
+  "fbo_alpha_nonzero": 16384,
+  "hot_display": {
+    "binding": {
+      "accepted_results": 1,
+      "coarse_channels": [
+        "TOX"
+      ],
+      "coarse_plane_bytes": 882000,
+      "descriptor_publications": 2,
+      "fine_channels": [],
+      "fine_plane_bytes": 0,
+      "last_error": null,
+      "rejected_late_results": 0,
+      "requests": 1,
+      "revision": 1,
+      "source": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif', dataset_fingerprint='7806426034:1779780438127752093', stage='step1', corrected_artifact='roi=None|handoff=')",
+      "unavailable": {}
+    },
+    "layer_cache": {
+      "budget_bytes": 33554432,
+      "bytes": 882000,
+      "evictions": 0,
+      "hits": 1,
+      "misses": 1,
+      "peak_bytes": 882000,
+      "peak_textures": 1,
+      "textures": 1,
+      "upload_submit_ms": [
+        1.3408829690888524
+      ],
+      "uploads": 1
+    },
+    "raw_upload_delta": 0,
+    "scheduler_request_delta": 0,
+    "wall_ms": 0.7945119868963957
+  },
+  "layer_submission": {
+    "cache": {
+      "budget_bytes": 33554432,
+      "bytes": 882000,
+      "evictions": 0,
+      "hits": 0,
+      "misses": 1,
+      "peak_bytes": 882000,
+      "peak_textures": 1,
+      "textures": 1,
+      "upload_submit_ms": [
+        1.3408829690888524
+      ],
+      "uploads": 1
+    },
+    "cpu_submit_ms": 4.844693001359701,
+    "missing_windows": [],
+    "mode": "overlay",
+    "pass_count": 3,
+    "physical_size": [
+      128,
+      128
+    ]
+  },
+  "limits": {
+    "coarse": "one coarsest-level tile on this dataset; no viewport fine requested",
+    "presentation": "not measured; FBO readback is correctness only"
+  },
+  "raw_cache_after_cold": {
+    "bytes": 882000,
+    "evictions": 0,
+    "hits": 0,
+    "items": 1,
+    "misses": 1
+  },
+  "release": {
+    "binding": {
+      "already_disposed": false,
+      "generations": 0,
+      "published_channels": 0
+    },
+    "layer": {
+      "already_disposed": false,
+      "cache_bytes": 0,
+      "raw_textures_remaining": 0,
+      "threads_created": 0,
+      "transient_targets_remaining": 0
+    }
+  },
+  "renderer": {
+    "actual_format": {
+      "major": 3,
+      "minor": 3,
+      "profile": 1
+    },
+    "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+    "gl_vendor": "NVIDIA Corporation",
+    "gl_version": "3.3.0 NVIDIA 535.309.01",
+    "glsl_version": "3.30 NVIDIA via Cg compiler",
+    "max_texture_image_units": 32,
+    "max_texture_size": 32768,
+    "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+    "pyopengl_version": "3.1.10",
+    "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+    "software_renderer": false,
+    "transient_format": "GL_RGBA32F"
+  },
+  "source_identity": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/tonsil/2025.12.21_Final_28127_22_Slice2_Tonsil.ome.tif', dataset_fingerprint='7806426034:1779780438127752093', stage='step1', corrected_artifact='roi=None|handoff=')"
+}

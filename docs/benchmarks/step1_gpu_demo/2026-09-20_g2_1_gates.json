@@ -1,0 +1,208 @@
+{
+  "generated": "2026-09-20",
+  "gates": {
+    "A_coarse_fairness": {
+      "pan_events_during_coarse": 24,
+      "b_coarse_requests": 9,
+      "fine_requests_by_priority_whole_run": {
+        "0": 6,
+        "200": 96
+      },
+      "fine_requests_issued_after_b_enabled_by_priority": {
+        "100": 9,
+        "200": 96
+      },
+      "pending_entries_after_24_pans": {
+        "queued": 12,
+        "running": 1,
+        "total": 13,
+        "warming": 0
+      },
+      "reads_after_b_enabled": [
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 0,
+          "x0": 0
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 0,
+          "x0": 4
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 0,
+          "x0": 8
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 4,
+          "x0": 0
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 4,
+          "x0": 4
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 4,
+          "x0": 8
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 8,
+          "x0": 0
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 8,
+          "x0": 4
+        },
+        {
+          "channel": "B",
+          "level": 1,
+          "y0": 8,
+          "x0": 8
+        },
+        {
+          "channel": "A",
+          "level": 0,
+          "y0": 0,
+          "x0": 12
+        },
+        {
+          "channel": "A",
+          "level": 0,
+          "y0": 0,
+          "x0": 16
+        },
+        {
+          "channel": "B",
+          "level": 0,
+          "y0": 0,
+          "x0": 12
+        }
+      ],
+      "b_coarse_completed": true,
+      "b_coarse_reads_all_before_any_fine_read": true,
+      "descriptors_with_partial_b": 0,
+      "descriptors_after_first_publication_missing_a": 0
+    },
+    "B_partial_coarse_framebuffer": {
+      "renderer": {
+        "pyopengl_version": "3.1.10",
+        "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+        "gl_vendor": "NVIDIA Corporation",
+        "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+        "gl_version": "3.3.0 NVIDIA 535.309.01",
+        "glsl_version": "3.30 NVIDIA via Cg compiler",
+        "actual_format": {
+          "major": 3,
+          "minor": 3,
+          "profile": 1
+        },
+        "max_texture_image_units": 32,
+        "max_texture_size": 32768,
+        "software_renderer": false,
+        "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+        "transient_format": "GL_RGBA32F"
+      },
+      "framebuffer": "24x24 RGBA8 readback of the real Step1GpuLayer final FBO",
+      "steps": [
+        {
+          "step": 0,
+          "delivered": "A-only baseline",
+          "sha256_16": "83725ea371844476",
+          "b_green_max": 0,
+          "roi_outside_alpha": 0,
+          "valid_dark_alpha": 255,
+          "valid_dark_rgb_max": 0
+        },
+        {
+          "step": 1,
+          "delivered": "B coarse tile (1, 1)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 2,
+          "delivered": "B coarse tile (0, 0)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 3,
+          "delivered": "B coarse tile (1, 0)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 4,
+          "delivered": "B coarse tile (2, 0)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 5,
+          "delivered": "B coarse tile (0, 1)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 6,
+          "delivered": "B coarse tile (2, 1)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 7,
+          "delivered": "B coarse tile (0, 2)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 8,
+          "delivered": "B coarse tile (1, 2)",
+          "sha256_16": "83725ea371844476",
+          "identical_to_a_only_baseline": true,
+          "b_green_max": 0
+        },
+        {
+          "step": 9,
+          "delivered": "B coarse tile (2, 2)",
+          "sha256_16": "2a7a936423e99317",
+          "identical_to_a_only_baseline": false,
+          "b_green_min_over_valid_area": 76,
+          "valid_pixels": 560,
+          "roi_outside_alpha": 0,
+          "a_red_unchanged": true
+        }
+      ],
+      "fine": {
+        "priority": [
+          0
+        ],
+        "sha256_16": "747dc823976982dd",
+        "green_increased_only_in_fine_region": true,
+        "a_red_unchanged": true,
+        "alpha_unchanged": true
+      }
+    }
+  }
+}

@@ -60,6 +60,114 @@ SOURCE_CORRECTED = "corrected"
 SOURCE_RAW = "raw"
 SOURCE_MISSING = "missing"
 
+#: The PERSISTED COARSE PLANE (G3.2b.4E).
+#:
+#: A corrected product has no pyramid, so the coarsest level of a corrected
+#: channel is reduced from level 0 on demand -- and because that level is
+#: the whole region, the first tick of a cuCIM channel waited for a whole
+#: region to be averaged: 8.9-10.5 s measured on a real 59040x35520 slide,
+#: while the tiles the viewport actually needed were in hand in 38 ms.
+#:
+#: This is that same plane, written once beside the product and read back
+#: instead of recomputed. It is NOT a cache and NOT another authority:
+#: nothing at runtime writes it, there is no eviction and no generation, and
+#: every question it answers is checked against the product's own identity
+#: first. A plane that is missing, stale, incomplete or for another level is
+#: not used at all -- the runtime reduction below is still the definition.
+COARSE_SIDECAR_DIRNAME = "corrected_coarse.zarr"
+
+#: Bumped when the numbers a plane holds would change. A plane stamped with
+#: another version is stale by definition.
+COARSE_PLANE_FORMAT_VERSION = 1
+
+#: Copied from the product's own array attrs when a plane is written, and
+#: compared field by field when one is read. Any of them moving -- another
+#: method, another parameter, another correction algorithm version, another
+#: ROI, a reshaped product -- retires the plane.
+COARSE_IDENTITY_FIELDS = (
+    "channel_name", "correction_method", "correction_param_name",
+    "correction_param_value", "bg_correction_algo_version", "roi_name",
+    "roi_bbox_fullres", "source_shape",
+    # THE ONE FIELD THE STATIC ONES CANNOT REPLACE. Everything above is the
+    # SETTING a channel was computed with, and a second Save with the same
+    # settings produces the same values for all of them -- while the pixels
+    # underneath may be different (a changed raw slide, a re-run after an
+    # interrupted write, a fixed polygon). `source_identity` is minted anew
+    # by the writer every time a channel's level 0 is actually recomputed,
+    # so a plane left over from the previous write cannot match the product
+    # it now sits beside. It is the same field `_product_token` already
+    # reads, not a second authority.
+    "source_identity",
+)
+
+
+def coarse_block_range(bbox, stride):
+    """The blocks of the global level-0 grid that cover `bbox`.
+
+    `(origin, shape)`. The grid is anchored at the level-0 origin, so an ROI
+    that does not start on a block boundary still lands on the same blocks a
+    tile read would use -- which is the whole point of anchoring it there.
+    """
+    y0, y1, x0, x1 = (int(v) for v in bbox)
+    stride = max(1, int(stride))
+    by0, bx0 = y0 // stride, x0 // stride
+    by1, bx1 = -(-y1 // stride), -(-x1 // stride)
+    return (by0, bx0), (max(0, by1 - by0), max(0, bx1 - bx0))
+
+
+def coarse_plane_identity(array_attrs, stride, level=None):
+    """The attrs a plane must carry to be usable for this product."""
+    identity = {field: array_attrs.get(field) for field in COARSE_IDENTITY_FIELDS}
+    identity["stride"] = int(stride)
+    identity["format_version"] = COARSE_PLANE_FORMAT_VERSION
+    if level is not None:
+        identity["level"] = int(level)
+    return identity
+
+
+class CoarsePlane:
+    """One channel's persisted coarse plane, already checked against its
+    product.
+
+    It answers a tile by SLICING, never by reducing: the block grid it holds
+    is the same grid `reduce_corrected` anchors at the level-0 origin, so a
+    tile's blocks are `rect` itself, offset by where the plane starts.
+    """
+
+    def __init__(self, array, stride, origin):
+        self.array = array
+        self.stride = int(stride)
+        self.origin = (int(origin[0]), int(origin[1]))
+
+    @property
+    def shape(self):
+        return tuple(int(v) for v in self.array.shape)
+
+    def tile(self, rect):
+        """`(values, valid)` for a LEVEL-k rectangle, or None to fall back.
+
+        `valid` is where the plane has blocks, which is exactly where the
+        runtime reduction counts at least one sample: the plane covers the
+        blocks the ROI covers and nothing else.
+        """
+        y0, y1, x0, x1 = (int(v) for v in rect)
+        height, width = max(0, y1 - y0), max(0, x1 - x0)
+        values = np.zeros((height, width), np.float32)
+        valid = np.zeros((height, width), bool)
+        if not height or not width:
+            return values, valid
+        by0, bx0 = self.origin
+        ph, pw = self.shape
+        sy0, sy1 = max(y0 - by0, 0), min(y1 - by0, ph)
+        sx0, sx1 = max(x0 - bx0, 0), min(x1 - bx0, pw)
+        if sy1 <= sy0 or sx1 <= sx0:
+            return values, valid          # north or west of the region
+        block = np.asarray(self.array[sy0:sy1, sx0:sx1], dtype=np.float32)
+        oy, ox = sy0 + by0 - y0, sx0 + bx0 - x0
+        values[oy:oy + block.shape[0], ox:ox + block.shape[1]] = block
+        valid[oy:oy + block.shape[0], ox:ox + block.shape[1]] = True
+        return values, valid
+
 
 class MissingProduct:
     """Why a channel the decisions call corrected cannot be drawn."""
@@ -146,6 +254,10 @@ class Step1SourceTable:
         self._open = open_corrected
         self._regions = {}
         self._missing = {}
+        #: Resolved persisted coarse planes, and the channels that have none.
+        #: Asked once per channel per stride: a product without a plane must
+        #: not pay a directory lookup per tile.
+        self._coarse_planes = {}
 
     # ── identity ──────────────────────────────────────────────────────
     def identity_token(self):
@@ -235,6 +347,69 @@ class Step1SourceTable:
         self._regions[channel] = CorrectedRegion(array, bbox)
         return SOURCE_CORRECTED
 
+    def coarse_plane(self, channel, stride):
+        """The persisted coarse plane for `channel` at `stride`, or None.
+
+        None means "reduce it the way we always did" and is the answer for
+        every product written before this existed, every plane whose
+        identity does not match the product beside it, every incomplete one
+        and every level that is not the one it was written for.
+        """
+        stride = max(1, int(stride))
+        key = (str(channel), stride)
+        if key in self._coarse_planes:
+            return self._coarse_planes[key]
+        plane = None
+        try:
+            plane = self._resolve_coarse_plane(str(channel), stride)
+        except Exception:                                   # noqa: BLE001
+            # A plane is an optimisation. Nothing it can do -- a missing
+            # directory, an unreadable store, an attr of the wrong type --
+            # may stop the tile being produced the old way.
+            plane = None
+        self._coarse_planes[key] = plane
+        return plane
+
+    def _resolve_coarse_plane(self, channel, stride):
+        if stride <= 1 or self.source_of(channel) != SOURCE_CORRECTED:
+            return None
+        if not self._path:
+            return None
+        import os
+        sidecar = os.path.join(os.path.dirname(self._path),
+                               COARSE_SIDECAR_DIRNAME)
+        if not os.path.isdir(sidecar):
+            return None
+        array = self._open(sidecar, channel, self._roi_name or None)
+        if array is None:
+            return None
+        attrs = dict(getattr(array, "attrs", {}) or {})
+        if not attrs.get("complete"):
+            # Written last, after the pixels. A run that was cancelled or
+            # died leaves the pixels without it, and they are not read.
+            return None
+        region = self._regions[channel]
+        product = dict(getattr(region.array, "attrs", {}) or {})
+        if not str(product.get("source_identity") or "").strip():
+            # A product that cannot say WHICH WRITE it is gets no plane. The
+            # static fields would match a plane left over from an earlier
+            # write of the same channel with the same settings and different
+            # pixels, and there would be no way to tell. Products written
+            # before this existed therefore keep reducing at runtime -- which
+            # is correct, just as slow as it was.
+            return None
+        expected = coarse_plane_identity(product, stride)
+        for field, value in expected.items():
+            if _as_plain(attrs.get(field)) != _as_plain(value):
+                return None
+        origin, shape = coarse_block_range(region.bbox, stride)
+        if tuple(int(v) for v in array.shape) != tuple(shape):
+            return None
+        if (int(attrs.get("block_origin", (-1, -1))[0]) != origin[0]
+                or int(attrs.get("block_origin", (-1, -1))[1]) != origin[1]):
+            return None
+        return CoarsePlane(array, stride, origin)
+
     def region(self, channel):
         """The corrected region, or None when this channel is not corrected."""
         return (self._regions.get(str(channel))
@@ -245,6 +420,15 @@ class Step1SourceTable:
         for channel in list(self._decisions):
             self.source_of(channel)
         return [self._missing[ch] for ch in sorted(self._missing)]
+
+
+def _as_plain(value):
+    """Compare attrs by value, not by the container zarr handed back."""
+    if isinstance(value, (list, tuple)):
+        return [_as_plain(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def box_downsample_valid(values, valid, stride, phase=(0, 0)):
@@ -282,6 +466,90 @@ def box_downsample_valid(values, valid, stride, phase=(0, 0)):
     return out, out_valid
 
 
+def _isqrt(value):
+    """Integer square root, without trusting a float round-trip."""
+    value = max(0, int(value))
+    root = int(np.sqrt(value))
+    while root > 0 and root * root > value:
+        root -= 1
+    while (root + 1) * (root + 1) <= value:
+        root += 1
+    return root
+
+
+def _slab_geometry(stride, max_elements):
+    """`(rows, band)`: how much of the region one pass may hold, in pixels.
+
+    Both are WHOLE MULTIPLES OF `stride`, so the walk steps along the global
+    block grid and every slab but the first and last on each axis is already
+    block-aligned.
+
+    The budget is spent on `(rows + stride) x (band + stride)`, not on
+    `rows x band`. The region's own first and last row/column need not sit on
+    the block grid, so one slab per axis may have to be padded out by up to a
+    block before it can be reshaped -- and it would be no use bounding the
+    READ if the padded temporary were then allowed to exceed the same limit.
+    """
+    budget = max(1, int(max_elements))
+    blocks = max(1, budget // (stride * stride))
+    side = max(1, _isqrt(blocks))
+    band_blocks = max(1, side - 1)
+    rows_blocks = max(1, blocks // (band_blocks + 1) - 1)
+    return rows_blocks * stride, band_blocks * stride
+
+
+def _span_per_block(front, length, stride, blocks):
+    """How many of `length` real samples land in each of `blocks` blocks.
+
+    The padding a slab needed to reach whole blocks contributes pixels to a
+    sum (zeros, which add nothing) but must never contribute to a COUNT, or
+    the block at an ROI edge would be divided by samples that do not exist
+    and the edge would go dark. This is that count, as two small vectors
+    instead of a mask the size of the slab.
+    """
+    starts = np.arange(blocks, dtype=np.int64) * stride
+    lo = np.maximum(starts, int(front))
+    hi = np.minimum(starts + stride, int(front) + int(length))
+    return np.maximum(hi - lo, 0)
+
+
+def _accumulate_blocks(sums, counts, slab, placed, stride, base_by, base_bx):
+    """Add one slab into the global block sums and counts, VECTORISED.
+
+    The slab is padded out to whole blocks OF THE GLOBAL GRID -- the pad is
+    zeros, which add nothing to a sum -- and then reshaped so both block axes
+    are summed at once. No level-0 pixel is ever scattered individually.
+
+    The phase comes from where the slab actually sits (`placed`), never from
+    where the walk asked it to be, so a region that hands back less than was
+    asked for still lands on the right blocks.
+    """
+    values = np.asarray(slab, np.float32)
+    if values.ndim != 2 or not values.size:
+        return
+    sy0, _sy1, sx0, _sx1 = placed
+    height, width = values.shape
+    front_y, front_x = int(sy0) % stride, int(sx0) % stride
+    pad_y = (-(front_y + height)) % stride
+    pad_x = (-(front_x + width)) % stride
+    if front_y or front_x or pad_y or pad_x:
+        values = np.pad(values, ((front_y, pad_y), (front_x, pad_x)))
+    bh = values.shape[0] // stride
+    bw = values.shape[1] // stride
+    if not bh or not bw:
+        return
+    block_sums = values.reshape(bh, stride, bw, stride).sum(axis=(1, 3),
+                                                            dtype=np.float64)
+    rows_in = _span_per_block(front_y, height, stride, bh)
+    cols_in = _span_per_block(front_x, width, stride, bw)
+    # A block's index is its own position on the level-0 grid minus the
+    # rectangle's first block -- see `reduce_corrected`.
+    oy = int(sy0) // stride - base_by
+    ox = int(sx0) // stride - base_bx
+    sums[oy:oy + bh, ox:ox + bw] += block_sums
+    counts[oy:oy + bh, ox:ox + bw] += rows_in[:, None] * cols_in[None, :]
+
+
 def reduce_corrected(region, rect, stride, max_elements=MAX_REDUCTION_ELEMENTS):
     """Mean of a corrected product over `rect`, in BOUNDED chunks.
 
@@ -294,12 +562,49 @@ def reduce_corrected(region, rect, stride, max_elements=MAX_REDUCTION_ELEMENTS):
 
     Returns `(mean, valid)` at `stride`, shaped like the rectangle's own
     coarse grid.
+
+    TWO PATHS, because they are two different questions.
+
+    * `stride == 1` IS NOT A REDUCTION. A block of one pixel is that pixel,
+      so there is nothing to average: the overlap is read once and copied
+      into place. The old path still built a block index per pixel and
+      scattered every value through `np.add.at` to divide it by one, which
+      cost about six times what the read itself costs.
+    * `stride > 1` sums whole blocks with a reshape rather than scattering
+      level-0 pixels one at a time. Same grid, same valid-sample
+      normalisation, same bound -- see `_accumulate_blocks`.
+
+    Neither path changes what a block MEANS: the mean over the valid samples
+    of a grid anchored at the level-0 origin. A sample whose value is 0 is a
+    sample; a position outside the region is not.
     """
     y0, y1, x0, x1 = (int(v) for v in rect)
     stride = max(1, int(stride))
+    height, width = max(0, y1 - y0), max(0, x1 - x0)
+    budget = max(1, int(max_elements))
+
+    if stride == 1 and height * width <= budget:
+        # The rectangle IS the block grid. `overlaps` is asked first so a
+        # tile that misses the region entirely reads nothing at all.
+        values = np.zeros((height, width), np.float32)
+        valid = np.zeros((height, width), bool)
+        if (region is not None and height and width
+                and region.overlaps(y0, y1, x0, x1)):
+            pixels, placed = region.read(y0, y1, x0, x1)
+            if pixels is not None:
+                pixels = np.asarray(pixels, np.float32)
+                oy0, _oy1, ox0, _ox1 = placed
+                # Sized from the pixels that came back, not from the
+                # rectangle that was asked for.
+                ph, pw = pixels.shape
+                ry, rx = int(oy0) - y0, int(ox0) - x0
+                values[ry:ry + ph, rx:rx + pw] = pixels
+                valid[ry:ry + ph, rx:rx + pw] = True
+        return values, valid
+
     py, px = y0 % stride, x0 % stride
-    out_h = -(-(py + max(0, y1 - y0)) // stride)
-    out_w = -(-(px + max(0, x1 - x0)) // stride)
+    out_h = -(-(py + height) // stride)
+    out_w = -(-(px + width) // stride)
     sums = np.zeros((out_h, out_w), np.float64)
     counts = np.zeros((out_h, out_w), np.int64)
     if region is not None and out_h and out_w:
@@ -307,32 +612,30 @@ def reduce_corrected(region, rect, stride, max_elements=MAX_REDUCTION_ELEMENTS):
         oy0, oy1 = max(y0, by0), min(y1, by1)
         ox0, ox1 = max(x0, bx0), min(x1, bx1)
         if oy1 > oy0 and ox1 > ox0:
-            budget = max(1, int(max_elements))
             # WHOLE BLOCKS IN BOTH AXES, and never more than the budget. A
             # single row of blocks across a whole slide is itself gigabytes
             # (256 x 40000 at an overview stride), so the walk is a grid of
             # slabs, not a stack of full-width strips.
-            band = max(stride, int(np.sqrt(budget)) // stride * stride)
-            rows = max(stride, (budget // band) // stride * stride)
+            rows, band = _slab_geometry(stride, budget)
+            # `y0 - y0 % stride` is the rectangle's first block on the
+            # level-0 grid, so a level-0 row `r` belongs to output block
+            # `r // stride - base_by`.
+            base_by, base_bx = y0 // stride, x0 // stride
             cursor_y = oy0
             while cursor_y < oy1:
-                stop_y = min(oy1, cursor_y + rows)
+                # STEP TO A BLOCK BOUNDARY, so only the very first and very
+                # last slab on an axis can be off the grid.
+                stop_y = min(oy1, (cursor_y // stride) * stride + rows)
                 cursor_x = ox0
                 while cursor_x < ox1:
-                    stop_x = min(ox1, cursor_x + band)
+                    stop_x = min(ox1, (cursor_x // stride) * stride + band)
                     slab, placed = region.read(cursor_y, stop_y,
                                                cursor_x, stop_x)
                     cursor_x = stop_x
                     if slab is None:
                         continue
-                    sy0, sy1, sx0, sx1 = placed
-                    block_y = (np.arange(sy0, sy1) - y0 + py) // stride
-                    block_x = (np.arange(sx0, sx1) - x0 + px) // stride
-                    flat = (block_y[:, None] * out_w
-                            + block_x[None, :]).ravel()
-                    np.add.at(sums.ravel(), flat,
-                              slab.ravel().astype(np.float64))
-                    np.add.at(counts.ravel(), flat, 1)
+                    _accumulate_blocks(sums, counts, slab, placed, stride,
+                                       base_by, base_bx)
                 cursor_y = stop_y
     valid = counts > 0
     mean = np.where(valid, sums / np.maximum(counts, 1), 0.0).astype(np.float32)
@@ -375,7 +678,17 @@ def read_tile(table, channel, rect, stride=1, read_raw=None,
         return values, valid
 
     # CORRECTED: one ROI-shaped array with no pyramid, reduced in bounded
-    # chunks from the level-0 rectangle this tile covers.
+    # chunks from the level-0 rectangle this tile covers -- unless that
+    # exact plane was written beside the product, in which case this tile is
+    # a slice of it. The two are the same numbers: `rect` in level-k
+    # coordinates IS the block range, because the blocks are anchored at the
+    # level-0 origin and `y0 * stride % stride == 0`.
+    plane = table.coarse_plane(channel, stride) if stride > 1 else None
+    if plane is not None:
+        try:
+            return plane.tile((y0, y1, x0, x1))
+        except Exception:                                   # noqa: BLE001
+            pass            # a read that failed is not an answer; reduce it
     level0 = (y0 * stride, y1 * stride, x0 * stride, x1 * stride)
     return reduce_corrected(table.region(channel), level0, stride,
                             max_elements=max_elements)

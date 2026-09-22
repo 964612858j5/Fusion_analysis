@@ -635,20 +635,37 @@ def _full_rect(page):
     return (x0, y0, x1 - x0, y1 - y0)
 
 
-def test_leaving_without_moving_comes_back_centred_on_the_clicked_point(app):
-    """THE rule, and the assertion the delta algorithm fails: P is where
-    the panels opened, so P is where the full image comes back to."""
+def test_leaving_without_moving_comes_back_where_the_full_image_was(app):
+    """USER RULING 2026-09-21, replacing this test's previous assertion.
+
+    It used to require the opposite -- that leaving an UNMOVED comparison
+    put the full image on P, the point that had been right-clicked. That is
+    the behaviour the user rejected: a right-click at a fixed screen pixel
+    names a different world point every round, so carrying P back made
+    repeated round trips walk the view across the slide (measured
+    `(-334, -115)` screen px per round, `2026-09-21_g3_2b_4b12_3b_camera.json`).
+
+    "Compare here" is unchanged -- the panels DO open on P, which
+    `test_the_panels_open_on_the_clicked_point` and
+    `test_compare_here_still_opens_on_the_clicked_point` both pin. What
+    changed is only what an UNMOVED comparison does on the way out.
+    """
     page = _page(app)
     cam = page._full_image_camera()
     P = (cam[0] + 700.0, cam[1] - 400.0)
 
-    _enter(page, *P)
+    strip = _enter(page, *P)
+    # the panels really did open on P...
+    opened = strip.camera(0)
+    assert opened[0] == pytest.approx(P[0], abs=1.0)
+    assert opened[1] == pytest.approx(P[1], abs=1.0)
     page._exit_compare_mode()
     QtTest.QTest.qWait(10)
 
+    # ...and leaving without touching them puts the full image back.
     back = page._full_image_camera()
-    assert back[0] == pytest.approx(P[0], abs=1.0)
-    assert back[1] == pytest.approx(P[1], abs=1.0)
+    assert back[0] == pytest.approx(cam[0], abs=1.0)
+    assert back[1] == pytest.approx(cam[1], abs=1.0)
     assert back[2] == pytest.approx(cam[2], rel=1e-6)
 
 
@@ -698,9 +715,14 @@ def test_the_full_image_shows_more_ground_at_the_same_magnification(app):
 
 
 def test_ten_entries_and_exits_at_the_same_point_do_not_drift(app):
-    """The panels always open on the point under the cursor and the full
-    image always comes back to the panels' centre, so the cycle is a fixed
-    point rather than a walk."""
+    """Ten unmoved round trips leave the full image exactly where it began.
+
+    A FIXED LEVEL-0 POINT is handed in here, which is why this test passed
+    while the user's gesture drifted: a hand holds a fixed SCREEN pixel, and
+    that is a different world point once the view has moved.
+    `tests/test_step0_compare_toggle_drift.py` sends real `QMouseEvent`s for
+    exactly that reason; this one keeps the algebraic case.
+    """
     page = _page(app)
     cam = page._full_image_camera()
     P = (cam[0] + 700.0, cam[1] - 400.0)
@@ -709,8 +731,8 @@ def test_ten_entries_and_exits_at_the_same_point_do_not_drift(app):
         page._exit_compare_mode()
         QtTest.QTest.qWait(10)
     back = page._full_image_camera()
-    assert back[0] == pytest.approx(P[0], abs=1.0)
-    assert back[1] == pytest.approx(P[1], abs=1.0)
+    assert back[0] == pytest.approx(cam[0], abs=1.0)
+    assert back[1] == pytest.approx(cam[1], abs=1.0)
     assert back[2] == pytest.approx(cam[2], rel=1e-6)
 
 

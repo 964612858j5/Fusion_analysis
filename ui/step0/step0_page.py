@@ -360,6 +360,19 @@ class Step0Page(QWidget):
         # The normal way out takes the panels' camera directly -- see
         # `_exit_compare_mode`.
         self._compare_entry_full_camera = None
+        # ...and what the PANELS actually read back once they had really
+        # landed on the clicked point. It is the baseline for one question
+        # and nothing else: did the user move the camera while comparing?
+        #
+        # It is not a second camera. It drives no ViewBox, is never applied
+        # to anything, and is read in exactly one place
+        # (`_returning_full_camera`). It has to be the panels' OWN read-back
+        # rather than the `(px, py, scale)` that was asked for, because the
+        # three panels solve their own rectangles and `viewPixelSize`
+        # answers with whatever device transform the graphics view carries:
+        # comparing a requested value with a read-back one would call every
+        # entry a movement.
+        self._compare_entry_panel_camera = None
         # True while the full image is behind the channel the page is on,
         # because compare mode was up when the row changed. See
         # `_sync_full_image_to_channel`.
@@ -1582,6 +1595,12 @@ class Step0Page(QWidget):
             return self._explore_tab
         self._explore_tab = Step0ExploreTab(
             self, busy_probe=self.production_correction_busy)
+        # The SAME answer the compare strip prepares from: one spec per
+        # switchable channel, in the order the user sees them, with each
+        # channel's live effective parameters. Both modes prepare the same
+        # neighbourhood of the same slide, so a second provider would only
+        # be a second way for the two to disagree.
+        self._explore_tab.set_hot_specs_provider(self._compare_hot_specs)
         self._full_image_host.addWidget(self._explore_tab, stretch=1)
         # Catch up on the dataset: `set_dataset` may have run before this
         # existed. `ome_path` is None until a slide is loaded, which is
@@ -1879,6 +1898,10 @@ class Step0Page(QWidget):
         if not self._compare_mode():
             return False
         camera = self._returning_full_camera()
+        # The entry reading belongs to ONE compare session. Cleared here, so
+        # a later session that never records one (a build that failed) can
+        # never be judged "unmoved" against the previous session's panels.
+        self._compare_entry_panel_camera = None
         self._hand_gpu_to_full_image()
         self._set_compare_mode(False)
         # The channel the user settled on while comparing, applied ONCE and
@@ -1904,18 +1927,79 @@ class Step0Page(QWidget):
         three times as wide as one panel and a rectangle handed between the
         two would be reshaped by one of the aspect locks.
 
-        The entry camera is the fallback for the one case that has no
-        panels' camera to adopt.
+        ...UNLESS the user never moved them (user ruling, 2026-09-21).
+        "Compare here" puts the panels on the point under the cursor, so a
+        right-click at a fixed screen pixel names a DIFFERENT world point
+        every round -- and carrying that point back to the full image made
+        repeated round trips walk the view across the slide. Measured on the
+        real widget stack, ten rounds at one fixed pixel
+        (`2026-09-21_g3_2b_4b12_3b_camera.json`): a constant
+        `(-334, -115)` screen pixels per round, which is exactly the
+        pointer's offset from the centre of the viewport, while every other
+        seam -- entry landing on the click point, the panels between entry
+        and exit, the exit's application, the layout settle -- measured
+        **0.000000** screen pixels.
+
+        So the question is only whether the panels moved:
+
+        * they did not -- the user just looked at this spot and came back,
+          so the full image goes back to where it was;
+        * they did -- a pan, a zoom, a Patch or a Tissue landing -- so the
+          full image adopts the panels, exactly as before.
+
+        "Did they move" is asked in SCREEN space, against the panels' own
+        read-back at entry, with a one-screen-pixel budget for integer
+        pixel and floating point quantisation. Not a level-0 tolerance: the
+        same level-0 distance is a different gesture at different
+        magnifications.
         """
         now = self._compare_camera()
         if now is not None:
             cx, cy, scale = (float(v) for v in now)
             if scale > 0 and math.isfinite(scale):
+                if self._compare_camera_unmoved_since_entry((cx, cy, scale)):
+                    saved = getattr(self, "_compare_entry_full_camera", None)
+                    if saved is not None:
+                        return tuple(float(v) for v in saved)
                 return (cx, cy, scale)
         saved = getattr(self, "_compare_entry_full_camera", None)
         if saved is None:
             return None
         return tuple(float(v) for v in saved)
+
+    #: A centre this far from the entry centre, ON SCREEN, is quantisation
+    #: rather than a gesture: a pointer names an integer pixel and the
+    #: mapping resolves that pixel's corner.
+    _COMPARE_UNMOVED_SCREEN_PX = 1.0
+    #: ...and a magnification this close is the same magnification. A real
+    #: wheel step is orders of magnitude bigger than this.
+    _COMPARE_UNMOVED_SCALE_REL = 1e-6
+
+    def _compare_camera_unmoved_since_entry(self, now):
+        """Is `now` the camera the panels were given when compare opened?
+
+        False whenever there is nothing to compare against, so a page with
+        no entry reading behaves exactly as it did before this existed.
+        """
+        entry = getattr(self, "_compare_entry_panel_camera", None)
+        if entry is None or now is None:
+            return False
+        try:
+            ex, ey, escale = (float(v) for v in entry)
+            cx, cy, scale = (float(v) for v in now)
+        except (TypeError, ValueError):
+            return False
+        if not (escale > 0 and scale > 0
+                and math.isfinite(escale) and math.isfinite(scale)):
+            return False
+        # SCALE FIRST: a zoom about an unchanged centre moves no centre at
+        # all, and calling that "unmoved" would throw the user's zoom away.
+        if abs(scale - escale) > self._COMPARE_UNMOVED_SCALE_REL * escale:
+            return False
+        # The centre difference as the user would see it, in screen pixels.
+        budget = self._COMPARE_UNMOVED_SCREEN_PX
+        return (abs(cx - ex) * scale <= budget
+                and abs(cy - ey) * scale <= budget)
 
     def _apply_full_image_view_rect(self, rect):
         """Put level-0 `(x, y, w, h)` on the full image's camera.
@@ -2349,6 +2433,11 @@ class Step0Page(QWidget):
         # geography -- which is the point of comparing, and the opposite of
         # shrinking the content threefold to fit the same ground in.
         self._apply_compare_camera(px, py, scale)
+        # READ BACK, after the panels have really been placed -- see the
+        # field's own comment. Recorded here and not before
+        # `_apply_compare_camera`, because before it the panels are still
+        # wherever the previous entry left them.
+        self._compare_entry_panel_camera = self._compare_camera()
         self._compare_opened = True
         self._btn_snapshot_patch.setEnabled(True)
         self._compare_where_lbl.setText(
@@ -2453,7 +2542,20 @@ class Step0Page(QWidget):
             tint=self._full_image_tint(),
             nucleus=self._full_image_nucleus_args(),
             viewport_l0=viewport,
-            overview_store=getattr(stack_for_store, "overview_store", None))
+            overview_store=getattr(stack_for_store, "overview_store", None),
+            # ...and its two tile LRUs, lent the same way (user ruling,
+            # 2026-09-21). A `CorrectionKey` carries the source identity,
+            # the channel, the method and the effective parameter, so a
+            # corrected tile the full image already computed for this
+            # viewport IS the answer the strip needs -- and the other way
+            # round on the way back. The full image stays the owner; the
+            # strip is torn down before it and never empties them.
+            caches=getattr(stack_for_store, "caches", None),
+            # ...and the corrected-floor cache, for the same reason: the
+            # floor for this channel, method and parameters is already
+            # computed, and recomputing it is what made entering compare
+            # redraw a floor that was on screen a moment earlier.
+            floor_cache=getattr(stack_for_store, "floor_cache", None))
         if built is None:
             self._preview_status.setText(
                 "Compare could not be opened \u2014 the full image is "
@@ -10516,6 +10618,9 @@ class Step0Page(QWidget):
             strip.set_dataset(None)
         self._compare_opened = False
         self._compare_entry_full_camera = None
+        # ...and the panels' entry reading with it: a new slide's panels
+        # must never be judged "unmoved" against the old slide's.
+        self._compare_entry_panel_camera = None
         # True while the full image is behind the channel the page is on,
         # because compare mode was up when the row changed. See
         # `_sync_full_image_to_channel`.

@@ -8,6 +8,7 @@ import json
 import time
 import shutil
 import traceback
+import uuid
 
 import numpy as np
 import tifffile
@@ -43,6 +44,7 @@ from ...core.bg_correction import (
     stamp_corrected_channel_identity,
 )
 from ...core.io_loader import OMETIFFLoader
+from ...viewer import step1_source as sources
 from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -1974,6 +1976,114 @@ def read_corrected_zarr_state(zarr_path):
     return signatures, sorted(roi_bboxes)
 
 
+class _CoarsePlaneAccumulator:
+    """The Step1 coarse plane, accumulated while level 0 is being written.
+
+    Step1 draws a corrected channel's coarsest level by averaging the whole
+    corrected region -- the product has no pyramid -- and that cost lands on
+    the first tick of the channel: 9.2-11.6 s measured on a real
+    59040x35520 product (G3.2b.4C/4E). The pixels it averages pass through
+    this worker anyway, one 4096 tile at a time, so the same plane is
+    accumulated here for free instead of being recomputed on demand later.
+
+    It is the SAME plane, by construction and by gate
+    (`tests/test_step1_coarse_plane.py`, `tests/test_step0_coarse_plane_write.py`):
+    blocks anchored at the LEVEL-0 origin, each divided by the number of
+    samples that actually exist inside the region, float64 sums, float32
+    out. Nothing here changes level 0 or what any other consumer reads.
+
+    Bounded: one float64 sum and one int64 count per BLOCK, so a whole-slide
+    region at stride 64 is 923 x 555 x 16 B = 8.2 MiB, whatever the slide.
+    """
+
+    def __init__(self, bbox, stride):
+        self.bbox = tuple(int(v) for v in bbox)
+        self.stride = max(1, int(stride))
+        (self.by0, self.bx0), (bh, bw) = sources.coarse_block_range(
+            self.bbox, self.stride)
+        self._sums = np.zeros((bh, bw), np.float64)
+        self._counts = np.zeros((bh, bw), np.int64)
+
+    def add(self, values, roi_y0, roi_x0):
+        """One written tile, at its ROI-LOCAL top-left corner."""
+        values = np.asarray(values, np.float32)
+        if values.ndim != 2 or not values.size:
+            return
+        stride = self.stride
+        gy = self.bbox[0] + int(roi_y0)
+        gx = self.bbox[2] + int(roi_x0)
+        height, width = values.shape
+        front_y, front_x = gy % stride, gx % stride
+        pad_y = (-(front_y + height)) % stride
+        pad_x = (-(front_x + width)) % stride
+        if front_y or front_x or pad_y or pad_x:
+            values = np.pad(values, ((front_y, pad_y), (front_x, pad_x)))
+        rows = values.shape[0] // stride
+        cols = values.shape[1] // stride
+        if not rows or not cols:
+            return
+        block_sums = values.reshape(rows, stride, cols, stride).sum(
+            axis=(1, 3), dtype=np.float64)
+        # The pad contributed zeros to the sums, which add nothing; it must
+        # NOT contribute to the counts, or a block at the region's edge
+        # would be divided by samples that do not exist and go dark.
+        starts = np.arange(rows, dtype=np.int64) * stride
+        row_span = np.maximum(
+            np.minimum(starts + stride, front_y + height)
+            - np.maximum(starts, front_y), 0)
+        starts = np.arange(cols, dtype=np.int64) * stride
+        col_span = np.maximum(
+            np.minimum(starts + stride, front_x + width)
+            - np.maximum(starts, front_x), 0)
+        oy = gy // stride - self.by0
+        ox = gx // stride - self.bx0
+        self._sums[oy:oy + rows, ox:ox + cols] += block_sums
+        self._counts[oy:oy + rows, ox:ox + cols] += (row_span[:, None]
+                                                     * col_span[None, :])
+
+    def plane(self):
+        """`(mean, complete)` -- float32 means, and whether every block of
+        the region received at least one sample."""
+        valid = self._counts > 0
+        mean = np.zeros(self._sums.shape, np.float32)
+        np.divide(self._sums, np.maximum(self._counts, 1), out=mean,
+                  where=valid, casting="unsafe")
+        return mean, bool(valid.all())
+
+    def nbytes(self):
+        return int(self._sums.nbytes + self._counts.nbytes)
+
+
+def coarsest_level_stride(slide_path):
+    """`(level, stride)` Step1 will ask a corrected channel for, or None.
+
+    Read from the slide's OWN pyramid, exactly the way the viewer's provider
+    reads it (`viewer/raw_tile_provider.py`: `series[0].levels`, and
+    `level_downsample` rounds `h0 / hL`). A slide whose pyramid cannot be
+    read this way gets NO plane -- the runtime reduction is still correct,
+    and a guessed stride would be a wrong picture.
+    """
+    try:
+        import tifffile
+        with tifffile.TiffFile(str(slide_path)) as handle:
+            shapes = [tuple(level.shape) for level in handle.series[0].levels]
+    except Exception:                                       # noqa: BLE001
+        return None
+    if len(shapes) < 2:
+        return None
+    try:
+        h0 = int(shapes[0][-2])
+        hn = int(shapes[-1][-2])
+    except (IndexError, TypeError, ValueError):
+        return None
+    if h0 <= 0 or hn <= 0:
+        return None
+    stride = int(round(h0 / float(hn)))
+    if stride < 2:
+        return None
+    return len(shapes) - 1, stride
+
+
 class WsiCorrectionWorker(QThread):
     progress = pyqtSignal(int, int, int, int, str, str, int)
     finished = pyqtSignal(str, dict)
@@ -2001,6 +2111,32 @@ class WsiCorrectionWorker(QThread):
         self._cancel_requested = True
 
     @staticmethod
+    def _sidecar_path(output_dir):
+        return os.path.join(output_dir, sources.COARSE_SIDECAR_DIRNAME)
+
+    @staticmethod
+    def _drop_plane(sidecar_path, group_name, ch_name):
+        """Make this channel's plane unusable BEFORE its level 0 moves.
+
+        Deleted, not overwritten: between here and the moment the new plane
+        is marked complete there must be NO plane for this channel at all,
+        so an interrupted run cannot leave one that matches the product it
+        no longer describes.
+        """
+        if not os.path.isdir(sidecar_path):
+            return False
+        try:
+            root = zarr.open_group(sidecar_path, mode="a")
+            if group_name in root and ch_name in root[group_name]:
+                del root[group_name][ch_name]
+                return True
+        except Exception:                                   # noqa: BLE001
+            # A plane that cannot be deleted must not be readable either;
+            # the identity check refuses it once level 0 has a new token.
+            return False
+        return False
+
+    @staticmethod
     def _discard_partial(zarr_path, incremental, group, ch_name):
         """What a cancel leaves behind. Fresh save: nothing -- the whole
         zarr goes, it held only this run's output. Incremental save: the
@@ -2009,6 +2145,11 @@ class WsiCorrectionWorker(QThread):
         never holds a half-written channel that reads as corrected."""
         if not incremental:
             shutil.rmtree(zarr_path, ignore_errors=True)
+            # The planes described a product that no longer exists.
+            shutil.rmtree(
+                os.path.join(os.path.dirname(zarr_path),
+                             sources.COARSE_SIDECAR_DIRNAME),
+                ignore_errors=True)
             return
         if group is not None and ch_name is not None and ch_name in group:
             try:
@@ -2032,6 +2173,47 @@ class WsiCorrectionWorker(QThread):
         )
         _cv2.fillPoly(mask, [pts], color=1)
         return mask.astype(bool)
+
+    @staticmethod
+    def _publish_plane(sidecar_path, group_name, ch_name, accumulator, ds,
+                       level_stride, write_token):
+        """Write the plane, then say it is there. Never the other way round.
+
+        A plane whose `complete` mark is missing is refused by Step1
+        (`viewer/step1_source.py`), so a run that dies between the pixels
+        and the mark costs a runtime reduction -- not a wrong picture. A
+        region with a block that received no sample at all is not published
+        at all: that would be a plane that disagrees with the reduction.
+        """
+        level, stride = level_stride
+        plane, complete = accumulator.plane()
+        if not complete:
+            return False
+        try:
+            root = zarr.open_group(sidecar_path, mode="a")
+            group = root.require_group(group_name)
+            out = group.create_dataset(
+                ch_name, shape=plane.shape, dtype=np.float32,
+                chunks=(min(512, plane.shape[0]), min(512, plane.shape[1])),
+                overwrite=True)
+            out[:, :] = plane
+            product_attrs = dict(ds.attrs)
+            product_attrs["source_identity"] = write_token
+            identity = sources.coarse_plane_identity(product_attrs, stride,
+                                                     level=level)
+            for key, value in identity.items():
+                out.attrs[key] = value
+            origin, _shape = sources.coarse_block_range(
+                product_attrs.get("roi_bbox_fullres") or [], stride)
+            out.attrs["block_origin"] = [int(origin[0]), int(origin[1])]
+            out.attrs["written_by"] = "WsiCorrectionWorker"
+            out.attrs["written_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            out.attrs["complete"] = True          # LAST
+        except Exception:                                   # noqa: BLE001
+            # The plane is an optimisation for Step1; level 0 is the
+            # product. A plane that could not be written is not an error.
+            return False
+        return True
 
     def run(self):
         try:
@@ -2078,8 +2260,16 @@ class WsiCorrectionWorker(QThread):
             zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")
 
             incremental = self._incremental and os.path.isdir(zarr_path)
+            sidecar_path = self._sidecar_path(self.output_dir)
             if not incremental and os.path.exists(zarr_path):
                 shutil.rmtree(zarr_path, ignore_errors=True)
+                # Every plane belonged to the product just removed.
+                shutil.rmtree(sidecar_path, ignore_errors=True)
+            # Which level Step1 will ask a corrected channel for, read from
+            # the slide's own pyramid. `None` means "do not write a plane" --
+            # never a guessed stride.
+            level_stride = coarsest_level_stride(
+                getattr(self.loader, "filepath", "") or "")
 
             if not channels:
                 # Nothing to (re)compute. In incremental mode the zarr already
@@ -2172,6 +2362,14 @@ class WsiCorrectionWorker(QThread):
                     print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
                     overlap = method_overlap(method, param)
                     tiles = list(_tile_slices(roi_h, roi_w, 4096, overlap))
+                    # THIS CHANNEL'S PLANE GOES FIRST. Its level 0 is about
+                    # to be rewritten, so the plane beside it stops being
+                    # true at the first tile written below.
+                    self._drop_plane(sidecar_path, info["group_name"], ch_name)
+                    accumulator = None
+                    if level_stride is not None:
+                        accumulator = _CoarsePlaneAccumulator(
+                            info["bbox"], level_stride[1])
                     ds = group.create_dataset(
                         ch_name,
                         shape=(roi_h, roi_w),
@@ -2225,6 +2423,10 @@ class WsiCorrectionWorker(QThread):
                             out = out.copy()
                             out[~poly_mask[y0:y1, x0:x1]] = 0
                         ds[y0:y1, x0:x1] = out
+                        if accumulator is not None:
+                            # The pixels that were just written, while they
+                            # are still in hand. Level 0 is never re-read.
+                            accumulator.add(out, y0, x0)
                         elapsed = max(0.001, time.time() - started)
                         done_units = completed_units + tile_idx
                         remain = int((total_units - done_units) * (elapsed / done_units))
@@ -2238,6 +2440,22 @@ class WsiCorrectionWorker(QThread):
                             remain,
                         )
 
+                    # WHICH WRITE THIS IS. Minted once per channel per real
+                    # recomputation, after its level 0 is whole: the static
+                    # identity above says what the settings were, this says
+                    # that these are the pixels those settings produced THIS
+                    # time. Step1 compares it against the plane's copy, so a
+                    # plane from an earlier write of the same channel with
+                    # the same settings can never be mistaken for this one.
+                    # An incremental Save that SKIPS a channel never reaches
+                    # here, so that channel's token -- and its plane -- stand.
+                    write_token = uuid.uuid4().hex
+                    ds.attrs["source_identity"] = write_token
+                    ds.attrs["written_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    if accumulator is not None:
+                        self._publish_plane(
+                            sidecar_path, info["group_name"], ch_name,
+                            accumulator, ds, level_stride, write_token)
                     corrected_decisions[ch_name] = method
                     completed_units += len(tiles)
                     if self._cancel_requested:

@@ -763,6 +763,7 @@ constructor, mirrored by `scripts/explore_demo.py --directional-prefetch /
 """
 
 import collections
+import dataclasses
 import functools
 import logging
 import threading
@@ -838,6 +839,32 @@ PRUNE_MARGIN_TILES = 1
 # `_pick_floor_level_and_stride`).
 FLOOR_MIN_MAX_DIM = 1024
 FLOOR_MAX_PIXELS = 4_000_000
+
+
+@dataclasses.dataclass(frozen=True)
+class _FloorRequest:
+    """One floor computation's whole input, frozen.
+
+    The job used to read the LIVE selection off the controller as it built
+    its worker closure, which is exactly why it could only ever compute the
+    floor that was already on screen. Freezing the input is what lets the
+    same single-job machinery also prepare the OTHER method's floor in the
+    background -- same code, same gains, same key -- with `foreground`
+    saying which of the two it is.
+
+    `foreground=False` means: put the result in the cache under `ctx` and
+    do NOTHING else. No ImageItem, no `_floor_ctx`, no `_floor_ready`, no
+    gain table, no `floor_ready_changed`.
+    """
+
+    generation: int
+    channel: str
+    method: object
+    base_params: tuple
+    floor_level: int
+    stride: int
+    ctx: tuple
+    foreground: bool
 
 # Per-level display-gain calibration (module docstring "Per-level display
 # gain for CORRECTED pixels"): 3 tissue-dense, non-overlapping level-0
@@ -2210,7 +2237,8 @@ class ExploreController(QtCore.QObject):
                  probe: bool = False, item_budget: int = DEFAULT_ITEM_BUDGET,
                  intermediate_corrected_fallback: bool = True,
                  directional_prefetch: bool = True, *,
-                 gen_ns=None, overview_store=None):
+                 gen_ns=None, overview_store=None,
+                 floor_cache=None, owns_floor_cache=True):
         """`gen_ns` and `overview_store` exist for the ONE case where
         several controllers share one backend: the compare strip, which is
         three views of the same slide side by side.
@@ -2318,8 +2346,27 @@ class ExploreController(QtCore.QObject):
         # Small on purpose: a floor is ONE array per (channel, method,
         # params, level), and only a handful of selections are ever flipped
         # between. Cleared wherever the pixels underneath it change.
-        self._floor_cache = collections.OrderedDict()
+        # THE FLOOR CACHE, optionally LENT by whoever owns it.
+        # `7d7bb5a` gave every controller its own 8-entry OrderedDict, which
+        # is why flipping back to a method this controller has already shown
+        # recomputes nothing. What it cannot do is let a SECOND controller --
+        # the compare strip's three panels -- see the full image's floors, so
+        # right-clicking into compare recomputed the very floor that was on
+        # screen a moment before. Lending the same OrderedDict fixes that
+        # without a second cache: the key already carries the source
+        # identity, the channel, the method and the effective parameters, so
+        # a floor computed by one controller IS the answer for the other.
+        # Every get/put/move_to_end below runs on the GUI thread (worker
+        # threads only ever hand back an immutable result through
+        # `_floor_delivered`), so the sharing needs no lock.
+        self._floor_cache = (collections.OrderedDict()
+                             if floor_cache is None else floor_cache)
+        self._owns_floor_cache = bool(owns_floor_cache
+                                      if floor_cache is not None else True)
         self._floor_cache_limit = 8
+        #: At most ONE background floor request waits at a time -- a single
+        #: immutable value, not a queue: a newer one simply replaces it.
+        self._floor_background_request = None
         self._floor_pending = False
         self._floor_threads = []
 
@@ -2404,6 +2451,16 @@ class ExploreController(QtCore.QObject):
         self._suspended = False
         self._suspend_reason = None
         self._suspend_badge = None
+
+        # ── this controller's OWN viewport supply (`set_viewport_requests_enabled`) ──
+        # True everywhere by default, so Step0's full image, the compare
+        # strip and the CPU fallback behave exactly as they always have.
+        # Step1 turns it off once its GPU layer has really taken the
+        # picture over: this controller's own ImageItems are then behind an
+        # opacity-0 layer, so every tile it reads for THEM can never reach
+        # the screen -- while it goes on being the one camera, the one
+        # mouse and the one publisher of interaction/quiet/view-rect.
+        self._viewport_requests_enabled = True
 
         # ── teardown bookkeeping ──
         self._teardown_order = []
@@ -3455,12 +3512,24 @@ class ExploreController(QtCore.QObject):
         current for the LIVE selection (same scaling the tile path uses,
         via `effective_param`, but against the floor's TOTAL downsample
         `level_downsample(floor_level) * stride`)."""
+        return self._floor_ctx_for(self.channel, self.method, self.params,
+                                   floor_level, stride)
+
+    def _floor_ctx_for(self, channel, method, params,
+                       floor_level: Optional[int], stride: int = 1):
+        """The SAME identity rule, for a selection that is not the live one.
+
+        One rule, one place: a floor prepared in the background for the
+        other method has to be filed under exactly the key the foreground
+        will look it up by, or the preparation is worthless.
+        """
         if floor_level is None:
             return None
         ds = self.provider.level_downsample(floor_level) * stride
-        eff_params = tuple(effective_param(p, floor_level, ds) for p in self.params)
+        eff_params = tuple(effective_param(p, floor_level, ds)
+                           for p in tuple(params or ()))
         source = self.provider.source_identity()
-        return (source, self.channel, self.method, eff_params)
+        return (source, str(channel), method, eff_params)
 
     def _display_gain_for_level(self, level: int) -> float:
         """Per-level display gain for CORRECTED pixels (module docstring).
@@ -3564,6 +3633,70 @@ class ExploreController(QtCore.QObject):
     @property
     def suspended(self) -> bool:
         return self._suspended
+
+    # ── this controller's own viewport supply ────────────────────────────
+
+    @property
+    def viewport_requests_enabled(self) -> bool:
+        """Whether this controller still reads tiles FOR ITS OWN LAYERS."""
+        return self._viewport_requests_enabled
+
+    def set_viewport_requests_enabled(self, enabled: bool) -> bool:
+        """Turn this controller's own camera-driven tile reads on or off.
+
+        WHAT IT STOPS, and nothing else: the reads this controller issues to
+        fill ITS OWN raw/marker/precise ImageItems -- the current level's
+        visible batch, the level+1 raw underlay, the one-tile prefetch ring,
+        the overlay's copies of those, the settled/precise batch and the
+        corrected floor. Measured (G3.2b.4B2, real slide, real Step1 GPU
+        mount): those are 73 % of everything read on a cold Patch and 79 %
+        on a cold Tissue landing, and under the GPU layer not one of their
+        pixels can reach the screen.
+
+        WHAT IT LEAVES ALONE -- all of it, deliberately: the ViewBox and the
+        camera, the mouse, `jump_to`, both motion and settle timers,
+        `interaction_event`, `gesture_quiet`, `selection_context_changed`,
+        `overview_prepared`, every camera/view-rect query the Tissue Preview
+        reads, and anything a DIFFERENT consumer asks the shared scheduler
+        for under its own generation. This is not `suspend_for_production`:
+        nothing is locked, nothing is joined, no badge is shown and the
+        scheduler is not drained.
+
+        Turning it OFF cancels what this controller had queued under its own
+        generations and nobody else's -- the tokens are `("raw", n)` /
+        `("precise", n)` / the overlay's `("dapi_raw", n)`, namespaced per
+        controller, so a consumer like `Step1GpuBinding` (whose tokens begin
+        `"step1-gpu-binding"`) cannot be touched. Work already started is
+        left to finish; its result simply starts no further round.
+
+        Turning it ON re-issues for the CURRENT viewport exactly once, so a
+        caller that hands the picture back does not need the user to move
+        the camera first.
+
+        Returns True when the state actually changed. Idempotent.
+        """
+        enabled = bool(enabled)
+        if enabled == self._viewport_requests_enabled:
+            return False
+        self._viewport_requests_enabled = enabled
+        if self._torn_down:
+            return True
+        if not enabled:
+            # Only this controller's own generations, through the same
+            # cancel path everything else here uses.
+            self.scheduler.cancel_generation(self.view_generation)
+            self.scheduler.cancel_generation(self._settled_generation)
+            self._cancel_directional_prefetch()
+            if self._overlay is not None:
+                try:
+                    self._overlay.cancel_inflight()
+                except Exception:                           # noqa: BLE001
+                    pass
+            return True
+        # Back on: exactly one re-issue for where the camera is now.
+        if self._current_bbox is not None and not self._blocked_on_overview():
+            self._issue_raw_requests()
+        return True
 
     def _suspend_badge_text(self) -> str:
         if self._suspend_badge is not None:
@@ -3711,6 +3844,62 @@ class ExploreController(QtCore.QObject):
             return None, floor_level, stride
         return (ctx, int(floor_level), int(stride)), floor_level, stride
 
+    # ── preparing a floor the user has NOT selected (public) ─────────────
+
+    def has_cached_floor(self, channel, method, params=()) -> bool:
+        """Is the floor for this exact selection already in the cache?
+
+        Asked of the SAME key the foreground will use
+        (`_floor_ctx_for` + `_pick_floor_level_and_stride`), so a True here
+        means the user's next flip to it installs from memory.
+        """
+        if self._torn_down or method is None:
+            return False
+        floor_level, stride = self._pick_floor_level_and_stride()
+        ctx = self._floor_ctx_for(channel, method, params, floor_level, stride)
+        if ctx is None:
+            return False
+        return (ctx, int(floor_level), int(stride)) in self._floor_cache
+
+    def prepare_floor_async(self, channel, method, params=()) -> bool:
+        """Compute a floor for a selection that is NOT on screen, and only
+        put it in the cache.
+
+        Nothing visible moves: the live selection, `_floor_ctx`,
+        `_floor_ready`, the gain table and every ImageItem are left exactly
+        as they are. When the user later flips to this method, the existing
+        `_restore_cached_floor()` installs it -- this only means it is
+        already there.
+
+        Returns True when a job was started or one is already in flight for
+        it, False when it is already cached, refused, or not applicable.
+        Never calls `set_selection()`: that would change the real product
+        state and the picture.
+        """
+        if (self._torn_down or self._suspended or method is None
+                or not self._viewport_requests_enabled):
+            return False
+        floor_level, stride = self._pick_floor_level_and_stride()
+        ctx = self._floor_ctx_for(channel, method, params, floor_level, stride)
+        if ctx is None:
+            return False
+        if (ctx, int(floor_level), int(stride)) in self._floor_cache:
+            return False
+        request = _FloorRequest(
+            generation=self._floor_gen, channel=str(channel), method=method,
+            base_params=tuple(params or ()), floor_level=int(floor_level),
+            stride=int(stride), ctx=ctx, foreground=False)
+        if self._floor_job_running:
+            # ONE JOB AT A TIME, and one waiting value -- a newer background
+            # request simply replaces the older one rather than queueing.
+            if (self._floor_background_request is not None
+                    and self._floor_background_request.ctx == ctx):
+                return True
+            self._floor_background_request = request
+            return True
+        self._run_floor_job(request)
+        return True
+
     def _remember_floor(self, ctx, floor_level, stride, gray, gains):
         key = (ctx, int(floor_level), int(stride))
         cache = self._floor_cache
@@ -3777,19 +3966,37 @@ class ExploreController(QtCore.QObject):
         levels match) and dispatch `compute.correct_array` on a worker
         thread. Exactly one such job is ever in flight (enforced by
         `_ensure_corrected_floor`/`_handle_floor_result`)."""
-        if self._suspended:
-            # A production run holds the GPU. Deferred, not dropped:
-            # `resume_from_production` starts the pending job against
-            # whatever selection is current then.
+        if self._suspended or not self._viewport_requests_enabled:
+            # A production run holds the GPU, or this controller's own
+            # layers are not the picture. Deferred, not dropped:
+            # `resume_from_production` / `set_viewport_requests_enabled(True)`
+            # start the pending job against whatever selection is current
+            # then.
             self._floor_pending = True
             return
-        self._floor_job_running = True
         floor_level, stride = self._pick_floor_level_and_stride()
         self._floor_level = floor_level
         self._floor_stride = stride
         self.stats["floor_level"] = floor_level
         self.stats["floor_stride"] = stride
-        ctx = self._current_floor_ctx(floor_level, stride)
+        self._run_floor_job(_FloorRequest(
+            generation=gen, channel=self.channel, method=self.method,
+            base_params=tuple(self.params or ()), floor_level=int(floor_level),
+            stride=int(stride),
+            ctx=self._current_floor_ctx(floor_level, stride),
+            foreground=True))
+
+    def _run_floor_job(self, request):
+        """Run ONE frozen floor request on the existing single worker.
+
+        Identical arithmetic for both kinds -- the only difference is what
+        `_handle_floor_result` is allowed to do with what comes back.
+        """
+        self._floor_job_running = True
+        gen = request.generation
+        floor_level = request.floor_level
+        stride = request.stride
+        ctx = request.ctx
 
         # Reuse the already-resident overview array when the floor lands on
         # the same level (the common case -- both pickers land on the
@@ -3805,26 +4012,33 @@ class ExploreController(QtCore.QObject):
         # context -- pixels from one channel, identity claiming another.
         # When it does not match, `work()` reads the level itself, on the
         # worker thread.
+        # The overview is per (source, channel) and carries no method, so
+        # it is reusable for a BACKGROUND request for the other method of
+        # the same channel -- but only when it really is that channel's.
         overview_arr = None
         if (floor_level == getattr(self, "_overview_level", None)
-                and self._overview_matches_selection()):
+                and self._overview_matches_selection()
+                and request.channel == self.channel):
             overview_arr = self._overview_arr
 
-        method = self.method
+        method = request.method
         eff_params = ctx[3]
         param = int(eff_params[0]) if eff_params else 0
         compute = self.compute
         provider = self.provider
-        channel = self.channel
+        channel = request.channel
         k = stride
-        base_params = self.params
+        base_params = request.base_params
         # Same hazard, second site: the gain calibration picks its
         # tissue-dense sampling windows by block means over this array. Fed
         # a stale channel's overview it would choose windows by the WRONG
         # channel's intensity distribution and calibrate the whole per-level
         # gain table against it. None here means "no usable overview" and
         # the calibration falls back to reading what it needs.
-        cal_overview_arr = self._overview_arr if self._overview_matches_selection() else None
+        cal_overview_arr = (self._overview_arr
+                            if (self._overview_matches_selection()
+                                and request.channel == self.channel)
+                            else None)
         cal_overview_level = getattr(self, "_overview_level", floor_level)
 
         def work():
@@ -3857,7 +4071,8 @@ class ExploreController(QtCore.QObject):
                 gain_error = exc
 
             self._floor_delivered.emit(
-                (gen, ctx, floor_level, stride, result_arr, error, gains, gain_error))
+                (gen, ctx, floor_level, stride, result_arr, error, gains,
+                 gain_error, request))
 
         t = threading.Thread(target=work, daemon=True, name="explore-floor-compute")
         # Drop already-finished threads so a long session with many
@@ -3872,10 +4087,53 @@ class ExploreController(QtCore.QObject):
         no longer matches the live `_floor_gen`, or if the selection
         context has since changed. Then, if a newer request was coalesced
         in while this job ran, start it -- never two jobs in flight."""
-        gen, ctx, floor_level, stride, result_arr, error, gains, gain_error = payload
+        # THE REQUEST IS OPTIONAL, and its absence means FOREGROUND. The
+        # payload grew a ninth element when background preparation was
+        # added; callers that still deliver the historical eight (the
+        # controller's own gates drive this slot directly) keep meaning
+        # exactly what they always meant.
+        gen, ctx, floor_level, stride, result_arr, error, gains, gain_error = \
+            payload[:8]
+        request = payload[8] if len(payload) > 8 else None
+        foreground = request is None or request.foreground
         self._floor_job_running = False
         if self._torn_down:
+            # NOTHING IS WRITTEN BACK after teardown, cached or not: the
+            # cache may belong to somebody who is still using it.
             self._floor_pending = False
+            self._floor_background_request = None
+            return
+
+        if not foreground:
+            # A BACKGROUND PREPARATION. It may put its result in the cache
+            # under its OWN key and do nothing else -- the live selection,
+            # the gain table, `_floor_ctx`, `_floor_ready` and every
+            # ImageItem are somebody else's business. A selection change
+            # while it ran therefore costs nothing: the answer is still the
+            # right answer for the key it was asked under.
+            if error is None and result_arr is not None:
+                self._remember_floor(
+                    ctx, floor_level, stride,
+                    np.asarray(result_arr, dtype=np.float32), gains)
+                self.stats["floor_background_prepared"] = self.stats.get(
+                    "floor_background_prepared", 0) + 1
+            else:
+                self.stats["floor_background_failed"] = self.stats.get(
+                    "floor_background_failed", 0) + 1
+            # THE FOREGROUND STILL GOES FIRST -- the same rule, and the same
+            # two lines, the foreground branch below already runs. A user who
+            # changes to a selection whose floor is NOT cached while a
+            # background preparation is running has `_floor_pending` set by
+            # `_ensure_corrected_floor` (the one-job-at-a-time rule). Serving
+            # `_start_next_floor_job()` here instead put the NEXT background
+            # preparation ahead of the floor the user is waiting for -- and
+            # left the owed foreground job unstarted altogether, since
+            # nothing else consumes `_floor_pending`.
+            if self._floor_pending:
+                self._floor_pending = False
+                self._start_floor_job(self._floor_gen)
+            else:
+                self._start_next_floor_job()
             return
 
         current = gen == self._floor_gen and ctx == self._current_floor_ctx(floor_level, stride)
@@ -3927,8 +4185,28 @@ class ExploreController(QtCore.QObject):
             self._start_floor_job(self._floor_gen)
         else:
             self.floor_preparing_changed.emit(False)
+            self._start_next_floor_job()
 
         self._update_layer_visibility()
+
+    def _start_next_floor_job(self):
+        """Let a waiting BACKGROUND preparation run, if one still wants to.
+
+        The foreground always goes first: this is only ever reached once no
+        foreground job is running and none is owed. A request whose answer
+        has arrived in the meantime, or whose controller has gone, is
+        dropped rather than run.
+        """
+        request = self._floor_background_request
+        self._floor_background_request = None
+        if request is None or self._torn_down or self._floor_job_running:
+            return
+        if self._suspended or not self._viewport_requests_enabled:
+            return
+        key = (request.ctx, request.floor_level, request.stride)
+        if key in self._floor_cache:
+            return
+        self._run_floor_job(request)
 
     def _downsample_yx(self, level: int) -> Tuple[float, float]:
         """(ds_y, ds_x) for `level`, using the provider's unrounded
@@ -4062,7 +4340,7 @@ class ExploreController(QtCore.QObject):
                 # else is requested by `_issue_settled_request` and shows
                 # the coarser fallback until it actually arrives.
                 cache = getattr(self.scheduler, "corrected_cache", None)
-                if cache is not None:
+                if cache is not None and self._viewport_requests_enabled:
                     gen = self._settled_generation
                     for tx, ty in newly:
                         k = self._make_correction_key(tx, ty)
@@ -4143,7 +4421,8 @@ class ExploreController(QtCore.QObject):
         this is no longer raw-only."""
         t0 = time.perf_counter() if self.probe else None
 
-        if self._blocked_on_overview() or self._suspended:
+        if (self._blocked_on_overview() or self._suspended
+                or not self._viewport_requests_enabled):
             return
 
         self.scheduler.cancel_generation(self.view_generation)
@@ -4257,7 +4536,8 @@ class ExploreController(QtCore.QObject):
         membership test, exactly as the intermediate CORRECTED fallback
         does, so a result that arrives after the camera moved on is
         dropped rather than pooled at a coordinate nothing wants."""
-        if self._suspended or not self._raw_layer_visible():
+        if (self._suspended or not self._viewport_requests_enabled
+                or not self._raw_layer_visible()):
             self._raw_underlay_level = None
             self._raw_underlay_tiles = set()
             return
@@ -4314,7 +4594,8 @@ class ExploreController(QtCore.QObject):
         draws nothing, so a ring tile can never be mistaken for a visible one.
         A pan that exposes a ring tile has the next motion tick request it
         as visible, and the cache answers synchronously."""
-        if self._suspended or RAW_PREFETCH_RING_TILES <= 0:
+        if (self._suspended or not self._viewport_requests_enabled
+                or RAW_PREFETCH_RING_TILES <= 0):
             return
         ring = self._ring_tiles_center_out(bbox_level, visible)
         if not ring:
@@ -4486,7 +4767,8 @@ class ExploreController(QtCore.QObject):
         self._fallback_level = None
         self._fallback_visible_tiles = set()
 
-        if not self._wants_precise() or self._current_bbox is None:
+        if (not self._wants_precise() or self._current_bbox is None
+                or not self._viewport_requests_enabled):
             return
 
         ds = self.provider.level_downsample(self.level)
@@ -4737,6 +5019,7 @@ class ExploreController(QtCore.QObject):
         design."""
         gate_ok = (
             self.directional_prefetch and self._wants_precise()
+            and self._viewport_requests_enabled
             and not self._viewport_zooming and self._current_bbox is not None
         )
         if not gate_ok:
@@ -5085,8 +5368,13 @@ class ExploreController(QtCore.QObject):
             return
         self._torn_down = True
         # The cached floors go with the view: they are whole levels of
-        # corrected pixels and nothing will ask for them again.
-        self._floor_cache.clear()
+        # corrected pixels and nothing will ask for them again -- UNLESS
+        # this controller only borrowed the cache, in which case its owner
+        # is still using it and emptying it here would throw away exactly
+        # what the sharing exists to reuse.
+        if self._owns_floor_cache:
+            self._floor_cache.clear()
+        self._floor_background_request = None
 
         # The overlay goes FIRST and it releases only what it owns -- its
         # generation, its signals, its pool. It never shuts the scheduler or

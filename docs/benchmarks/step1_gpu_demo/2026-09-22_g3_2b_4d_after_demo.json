@@ -1,0 +1,2669 @@
+{
+ "block": "G3.2b.4C (first cuCIM enable, segmented)",
+ "dataset": {
+  "name": "demo",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "corrected_zarr": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270/step0/corrected_channels.zarr",
+  "roi_bbox": [
+   0,
+   19480,
+   0,
+   21804
+  ],
+  "cucim_channel": "CD22",
+  "raw_channel": "CD8",
+  "note": "a REAL project opened read-only; NOT the user's machine and not necessarily their slide"
+ },
+ "view": [
+  1200,
+  900
+ ],
+ "os_page_cache_dropped": false,
+ "rounds": 5,
+ "arms": {
+  "first_cucim": [
+   {
+    "cold": {
+     "label": "first_enable/CD22/round0",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 12.33,
+      "events_processed": 15.94,
+      "first_gpu_submit": 16.0,
+      "complete_coarse_published": 2633.91,
+      "first_texture_upload": 2633.93,
+      "viewport_fine_complete": 2634.04,
+      "first_natural_paint_after_complete": 2634.13,
+      "first_provider_read": 1.57,
+      "last_coarse_read_returned": 2595.01,
+      "first_fine_request": 0.92,
+      "first_fine_read": 1.79,
+      "all_fine_reads_returned": 686.37
+     },
+     "gui_worst_gap_ms": 43.5,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2593.43,
+       "median": 2593.43,
+       "max": 2593.43,
+       "sum": 2593.43
+      },
+      "fine": {
+       "n": 9,
+       "min": 117.31,
+       "median": 400.24,
+       "max": 684.58,
+       "sum": 3942.86
+      },
+      "corrected": {
+       "n": 10,
+       "min": 117.31,
+       "median": 583.73,
+       "max": 2593.43,
+       "sum": 6536.29
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD22/round0",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 3.76,
+      "events_processed": 4.18,
+      "complete_coarse_published": 4.26,
+      "first_gpu_submit": 4.28,
+      "viewport_fine_complete": 4.37,
+      "first_fine_request": 0.46
+     },
+     "gui_worst_gap_ms": 6.4,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD22/round1",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 15.89,
+      "events_processed": 16.82,
+      "first_gpu_submit": 16.88,
+      "complete_coarse_published": 2537.99,
+      "first_texture_upload": 2538.01,
+      "viewport_fine_complete": 2538.13,
+      "first_natural_paint_after_complete": 2538.24,
+      "first_provider_read": 1.39,
+      "last_coarse_read_returned": 2526.45,
+      "first_fine_request": 0.83,
+      "first_fine_read": 1.6,
+      "all_fine_reads_returned": 639.82
+     },
+     "gui_worst_gap_ms": 16.8,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2525.06,
+       "median": 2525.06,
+       "max": 2525.06,
+       "sum": 2525.06
+      },
+      "fine": {
+       "n": 9,
+       "min": 115.73,
+       "median": 405.6,
+       "max": 638.22,
+       "sum": 3609.68
+      },
+      "corrected": {
+       "n": 10,
+       "min": 115.73,
+       "median": 570.68,
+       "max": 2525.06,
+       "sum": 6134.74
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD22/round1",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 3.94,
+      "events_processed": 4.48,
+      "complete_coarse_published": 4.55,
+      "first_gpu_submit": 4.56,
+      "viewport_fine_complete": 4.66,
+      "first_fine_request": 0.54
+     },
+     "gui_worst_gap_ms": 6.8,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD22/round2",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 14.75,
+      "events_processed": 16.77,
+      "first_gpu_submit": 16.83,
+      "complete_coarse_published": 2638.06,
+      "first_texture_upload": 2638.08,
+      "viewport_fine_complete": 2638.2,
+      "first_natural_paint_after_complete": 2638.32,
+      "first_provider_read": 1.42,
+      "last_coarse_read_returned": 2627.26,
+      "first_fine_request": 0.77,
+      "first_fine_read": 1.61,
+      "all_fine_reads_returned": 666.52
+     },
+     "gui_worst_gap_ms": 16.8,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2625.84,
+       "median": 2625.84,
+       "max": 2625.84,
+       "sum": 2625.84
+      },
+      "fine": {
+       "n": 9,
+       "min": 114.04,
+       "median": 424.4,
+       "max": 664.91,
+       "sum": 3743.87
+      },
+      "corrected": {
+       "n": 10,
+       "min": 114.04,
+       "median": 532.11,
+       "max": 2625.84,
+       "sum": 6369.7
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD22/round2",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 2.56,
+      "events_processed": 2.85,
+      "complete_coarse_published": 2.88,
+      "first_gpu_submit": 2.89,
+      "viewport_fine_complete": 2.93,
+      "first_fine_request": 0.38
+     },
+     "gui_worst_gap_ms": 7.0,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD22/round3",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 9.6,
+      "events_processed": 11.17,
+      "first_gpu_submit": 11.24,
+      "complete_coarse_published": 2440.33,
+      "first_texture_upload": 2440.34,
+      "viewport_fine_complete": 2440.41,
+      "first_natural_paint_after_complete": 2440.53,
+      "first_provider_read": 1.69,
+      "last_coarse_read_returned": 2430.33,
+      "first_fine_request": 0.89,
+      "first_fine_read": 1.86,
+      "all_fine_reads_returned": 565.82
+     },
+     "gui_worst_gap_ms": 14.7,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2428.64,
+       "median": 2428.64,
+       "max": 2428.64,
+       "sum": 2428.64
+      },
+      "fine": {
+       "n": 9,
+       "min": 98.9,
+       "median": 321.94,
+       "max": 563.96,
+       "sum": 3330.56
+      },
+      "corrected": {
+       "n": 10,
+       "min": 98.9,
+       "median": 537.48,
+       "max": 2428.64,
+       "sum": 5759.2
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD22/round3",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 2.4,
+      "events_processed": 2.71,
+      "complete_coarse_published": 2.74,
+      "first_gpu_submit": 2.75,
+      "viewport_fine_complete": 2.79,
+      "first_fine_request": 0.27
+     },
+     "gui_worst_gap_ms": 6.6,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD22/round4",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 13.87,
+      "events_processed": 16.1,
+      "first_gpu_submit": 16.17,
+      "complete_coarse_published": 2520.31,
+      "first_texture_upload": 2520.33,
+      "viewport_fine_complete": 2520.44,
+      "first_natural_paint_after_complete": 2520.61,
+      "first_provider_read": 1.49,
+      "last_coarse_read_returned": 2508.14,
+      "first_fine_request": 0.81,
+      "first_fine_read": 1.66,
+      "all_fine_reads_returned": 599.9
+     },
+     "gui_worst_gap_ms": 16.1,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2506.65,
+       "median": 2506.65,
+       "max": 2506.65,
+       "sum": 2506.65
+      },
+      "fine": {
+       "n": 9,
+       "min": 100.71,
+       "median": 407.35,
+       "max": 597.75,
+       "sum": 3564.64
+      },
+      "corrected": {
+       "n": 10,
+       "min": 100.71,
+       "median": 552.55,
+       "max": 2506.65,
+       "sum": 6071.29
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD22/round4",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 3.76,
+      "events_processed": 4.21,
+      "complete_coarse_published": 4.27,
+      "first_gpu_submit": 4.28,
+      "viewport_fine_complete": 4.46,
+      "first_fine_request": 0.58
+     },
+     "gui_worst_gap_ms": 6.7,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "first_raw": [
+   {
+    "cold": {
+     "label": "first_enable/CD8/round0",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 21.1,
+      "events_processed": 29.44,
+      "complete_coarse_published": 54.88,
+      "first_texture_upload": 54.9,
+      "first_gpu_submit": 54.91,
+      "viewport_fine_complete": 55.02,
+      "first_natural_paint_after_complete": 55.12,
+      "first_provider_read": 1.77,
+      "last_coarse_read_returned": 26.41,
+      "first_fine_request": 1.04,
+      "first_fine_read": 2.05,
+      "all_fine_reads_returned": 29.19
+     },
+     "gui_worst_gap_ms": 29.4,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 14,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 13
+      },
+      "coarse_requests": 1,
+      "fine_requests": 13,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 4,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 7,
+      "rejected_late_results": 4
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 24.64,
+       "median": 24.64,
+       "max": 24.64,
+       "sum": 24.64
+      },
+      "fine": {
+       "n": 9,
+       "min": 4.54,
+       "median": 19.6,
+       "max": 26.48,
+       "sum": 163.58
+      },
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD8/round0",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 5.14,
+      "events_processed": 5.57,
+      "complete_coarse_published": 5.63,
+      "first_gpu_submit": 5.64,
+      "viewport_fine_complete": 5.73,
+      "first_fine_request": 0.67
+     },
+     "gui_worst_gap_ms": 6.4,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD8/round1",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 24.59,
+      "events_processed": 30.63,
+      "complete_coarse_published": 41.82,
+      "first_texture_upload": 41.84,
+      "first_gpu_submit": 41.84,
+      "viewport_fine_complete": 41.95,
+      "first_natural_paint_after_complete": 42.05,
+      "first_provider_read": 2.29,
+      "last_coarse_read_returned": 19.6,
+      "first_fine_request": 1.27,
+      "first_fine_read": 2.49,
+      "all_fine_reads_returned": 28.56
+     },
+     "gui_worst_gap_ms": 30.6,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 18,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 17
+      },
+      "coarse_requests": 1,
+      "fine_requests": 17,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 7,
+      "raw_cache_misses": 11,
+      "gpu_uploads": 10,
+      "gpu_submits": 4,
+      "rejected_late_results": 8
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 17.31,
+       "median": 17.31,
+       "max": 17.31,
+       "sum": 17.31
+      },
+      "fine": {
+       "n": 9,
+       "min": 4.55,
+       "median": 20.45,
+       "max": 25.96,
+       "sum": 156.24
+      },
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD8/round1",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 4.64,
+      "events_processed": 5.11,
+      "complete_coarse_published": 5.18,
+      "first_gpu_submit": 5.19,
+      "viewport_fine_complete": 5.28,
+      "first_fine_request": 0.74
+     },
+     "gui_worst_gap_ms": 6.5,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD8/round2",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 24.57,
+      "events_processed": 31.82,
+      "complete_coarse_published": 50.74,
+      "first_texture_upload": 50.76,
+      "first_gpu_submit": 50.76,
+      "viewport_fine_complete": 50.89,
+      "first_natural_paint_after_complete": 51.04,
+      "first_provider_read": 1.47,
+      "last_coarse_read_returned": 25.45,
+      "first_fine_request": 0.84,
+      "first_fine_read": 1.67,
+      "all_fine_reads_returned": 24.61
+     },
+     "gui_worst_gap_ms": 31.8,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 23.98,
+       "median": 23.98,
+       "max": 23.98,
+       "sum": 23.98
+      },
+      "fine": {
+       "n": 9,
+       "min": 2.61,
+       "median": 19.18,
+       "max": 22.94,
+       "sum": 141.22
+      },
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD8/round2",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 2.91,
+      "events_processed": 3.19,
+      "complete_coarse_published": 3.23,
+      "first_gpu_submit": 3.23,
+      "viewport_fine_complete": 3.27,
+      "first_fine_request": 0.56
+     },
+     "gui_worst_gap_ms": 6.7,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD8/round3",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 23.58,
+      "events_processed": 30.56,
+      "complete_coarse_published": 42.21,
+      "first_texture_upload": 42.22,
+      "first_gpu_submit": 42.23,
+      "viewport_fine_complete": 42.33,
+      "first_natural_paint_after_complete": 42.49,
+      "first_provider_read": 1.53,
+      "last_coarse_read_returned": 17.36,
+      "first_fine_request": 0.87,
+      "first_fine_read": 1.71,
+      "all_fine_reads_returned": 29.45
+     },
+     "gui_worst_gap_ms": 30.6,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 19,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 18
+      },
+      "coarse_requests": 1,
+      "fine_requests": 18,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 4,
+      "raw_cache_misses": 15,
+      "gpu_uploads": 10,
+      "gpu_submits": 7,
+      "rejected_late_results": 9
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 15.83,
+       "median": 15.83,
+       "max": 15.83,
+       "sum": 15.83
+      },
+      "fine": {
+       "n": 9,
+       "min": 3.6,
+       "median": 21.54,
+       "max": 27.33,
+       "sum": 174.13
+      },
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD8/round3",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 3.87,
+      "events_processed": 4.33,
+      "complete_coarse_published": 4.39,
+      "first_gpu_submit": 4.4,
+      "viewport_fine_complete": 4.48,
+      "first_fine_request": 0.62
+     },
+     "gui_worst_gap_ms": 6.9,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CD8/round4",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 20.73,
+      "events_processed": 31.72,
+      "complete_coarse_published": 48.69,
+      "first_texture_upload": 48.71,
+      "first_gpu_submit": 48.72,
+      "viewport_fine_complete": 48.82,
+      "first_natural_paint_after_complete": 49.0,
+      "first_provider_read": 1.67,
+      "last_coarse_read_returned": 18.84,
+      "first_fine_request": 0.92,
+      "first_fine_read": 1.94,
+      "all_fine_reads_returned": 28.09
+     },
+     "gui_worst_gap_ms": 31.7,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 18,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 17
+      },
+      "coarse_requests": 1,
+      "fine_requests": 17,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 7,
+      "raw_cache_misses": 11,
+      "gpu_uploads": 10,
+      "gpu_submits": 4,
+      "rejected_late_results": 8
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 17.17,
+       "median": 17.17,
+       "max": 17.17,
+       "sum": 17.17
+      },
+      "fine": {
+       "n": 9,
+       "min": 4.74,
+       "median": 20.33,
+       "max": 25.42,
+       "sum": 156.5
+      },
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CD8/round4",
+     "channel": "CD8",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 4.12,
+      "events_processed": 4.58,
+      "complete_coarse_published": 4.64,
+      "first_gpu_submit": 4.65,
+      "viewport_fine_complete": 4.74,
+      "first_fine_request": 0.65
+     },
+     "gui_worst_gap_ms": 6.5,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 9,
+      "requests_by_origin": {
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 0,
+      "fine_requests": 9,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 9,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD8"
+      ],
+      "fine_channels": [
+       "CD8"
+      ],
+      "fine_tiles": {
+       "CD8": 9
+      },
+      "fine_levels": {
+       "CD8": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "save_then_cucim": [
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 481.67,
+     "gui_worst_gap_ms": 492.3,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 490194.052573979,
+       "t1": 490194.056533905,
+       "ms": 3.96,
+       "at_ms": 33.99
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 490194.056551638,
+       "t1": 490194.462062246,
+       "ms": 405.51,
+       "at_ms": 37.96
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 490194.073339435,
+       "t1": 490194.075690845,
+       "ms": 2.35,
+       "at_ms": 54.75
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 490194.073469195,
+       "t1": 490194.074708007,
+       "ms": 1.24,
+       "at_ms": 54.88
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 490194.075763409,
+       "t1": 490194.459081982,
+       "ms": 383.32,
+       "at_ms": 57.18
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 490194.462077904,
+       "t1": 490194.497410459,
+       "ms": 35.33,
+       "at_ms": 443.49
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round0",
+     "channel": "CD22",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 11.17,
+      "events_processed": 13.15,
+      "first_gpu_submit": 13.21,
+      "complete_coarse_published": 2504.35,
+      "first_texture_upload": 2504.37,
+      "viewport_fine_complete": 2504.47,
+      "first_natural_paint_after_complete": 2504.55,
+      "first_provider_read": 1.39,
+      "last_coarse_read_returned": 2493.34,
+      "first_fine_request": 0.8,
+      "first_fine_read": 1.66,
+      "all_fine_reads_returned": 620.67
+     },
+     "gui_worst_gap_ms": 13.1,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2491.95,
+       "median": 2491.95,
+       "max": 2491.95,
+       "sum": 2491.95
+      },
+      "fine": {
+       "n": 9,
+       "min": 112.51,
+       "median": 362.34,
+       "max": 618.14,
+       "sum": 3590.95
+      },
+      "corrected": {
+       "n": 10,
+       "min": 112.51,
+       "median": 570.2,
+       "max": 2491.95,
+       "sum": 6082.9
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 296.74,
+     "gui_worst_gap_ms": 311.2,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 490207.11634037,
+       "t1": 490207.122493604,
+       "ms": 6.15,
+       "at_ms": 33.49
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 490207.122509072,
+       "t1": 490207.311024192,
+       "ms": 188.52,
+       "at_ms": 39.66
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 490207.139135723,
+       "t1": 490207.141328971,
+       "ms": 2.19,
+       "at_ms": 56.29
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 490207.139252018,
+       "t1": 490207.14036619,
+       "ms": 1.11,
+       "at_ms": 56.41
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 490207.141396706,
+       "t1": 490207.308365774,
+       "ms": 166.97,
+       "at_ms": 58.55
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 490207.311037457,
+       "t1": 490207.374318543,
+       "ms": 63.28,
+       "at_ms": 228.19
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round1",
+     "channel": "CD22",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 21.15,
+      "events_processed": 27.39,
+      "first_gpu_submit": 27.47,
+      "complete_coarse_published": 2881.69,
+      "first_texture_upload": 2881.7,
+      "viewport_fine_complete": 2881.8,
+      "first_natural_paint_after_complete": 2881.91,
+      "first_provider_read": 1.56,
+      "last_coarse_read_returned": 2871.52,
+      "first_fine_request": 0.94,
+      "first_fine_read": 1.74,
+      "all_fine_reads_returned": 750.65
+     },
+     "gui_worst_gap_ms": 27.4,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2869.97,
+       "median": 2869.97,
+       "max": 2869.97,
+       "sum": 2869.97
+      },
+      "fine": {
+       "n": 9,
+       "min": 111.96,
+       "median": 394.37,
+       "max": 748.16,
+       "sum": 3927.8
+      },
+      "corrected": {
+       "n": 10,
+       "min": 111.96,
+       "median": 583.36,
+       "max": 2869.97,
+       "sum": 6797.77
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 263.1,
+     "gui_worst_gap_ms": 436.2,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 490220.595463643,
+       "t1": 490220.600085995,
+       "ms": 4.62,
+       "at_ms": 34.18
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 490220.600103147,
+       "t1": 490220.768111387,
+       "ms": 168.01,
+       "at_ms": 38.81
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 490220.608518667,
+       "t1": 490220.610473564,
+       "ms": 1.95,
+       "at_ms": 47.23
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 490220.608623411,
+       "t1": 490220.609820406,
+       "ms": 1.2,
+       "at_ms": 47.34
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 490220.61051421,
+       "t1": 490220.764167339,
+       "ms": 153.65,
+       "at_ms": 49.23
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 490220.768128839,
+       "t1": 490220.818943336,
+       "ms": 50.81,
+       "at_ms": 206.84
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round2",
+     "channel": "CD22",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 8.93,
+      "events_processed": 10.4,
+      "first_gpu_submit": 10.46,
+      "complete_coarse_published": 2578.83,
+      "first_texture_upload": 2578.85,
+      "viewport_fine_complete": 2578.95,
+      "first_natural_paint_after_complete": 2579.06,
+      "first_provider_read": 1.41,
+      "last_coarse_read_returned": 2565.06,
+      "first_fine_request": 0.73,
+      "first_fine_read": 1.97,
+      "all_fine_reads_returned": 794.02
+     },
+     "gui_worst_gap_ms": 13.8,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2563.65,
+       "median": 2563.65,
+       "max": 2563.65,
+       "sum": 2563.65
+      },
+      "fine": {
+       "n": 9,
+       "min": 104.18,
+       "median": 382.57,
+       "max": 792.05,
+       "sum": 3711.3
+      },
+      "corrected": {
+       "n": 10,
+       "min": 104.18,
+       "median": 547.27,
+       "max": 2563.65,
+       "sum": 6274.96
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 335.18,
+     "gui_worst_gap_ms": 351.8,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 490233.542497521,
+       "t1": 490233.547536385,
+       "ms": 5.04,
+       "at_ms": 35.42
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 490233.547557023,
+       "t1": 490233.789345776,
+       "ms": 241.79,
+       "at_ms": 40.48
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 490233.565407662,
+       "t1": 490233.567763361,
+       "ms": 2.36,
+       "at_ms": 58.33
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 490233.56560655,
+       "t1": 490233.566824073,
+       "ms": 1.22,
+       "at_ms": 58.53
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 490233.567841726,
+       "t1": 490233.785944473,
+       "ms": 218.1,
+       "at_ms": 60.77
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 490233.789362177,
+       "t1": 490233.839108332,
+       "ms": 49.75,
+       "at_ms": 282.29
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round3",
+     "channel": "CD22",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 12.86,
+      "events_processed": 15.89,
+      "first_gpu_submit": 15.96,
+      "complete_coarse_published": 2693.71,
+      "first_texture_upload": 2693.73,
+      "viewport_fine_complete": 2693.84,
+      "first_natural_paint_after_complete": 2694.02,
+      "first_provider_read": 3.59,
+      "last_coarse_read_returned": 2682.3,
+      "first_fine_request": 3.0,
+      "first_fine_read": 3.86,
+      "all_fine_reads_returned": 678.5
+     },
+     "gui_worst_gap_ms": 15.5,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2678.71,
+       "median": 2678.71,
+       "max": 2678.71,
+       "sum": 2678.71
+      },
+      "fine": {
+       "n": 9,
+       "min": 106.62,
+       "median": 421.98,
+       "max": 673.79,
+       "sum": 3715.32
+      },
+      "corrected": {
+       "n": 10,
+       "min": 106.62,
+       "median": 554.49,
+       "max": 2678.71,
+       "sum": 6394.03
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 277.85,
+     "gui_worst_gap_ms": 288.3,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 490246.726597845,
+       "t1": 490246.7317995,
+       "ms": 5.2,
+       "at_ms": 34.73
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 490246.731814738,
+       "t1": 490246.924286158,
+       "ms": 192.47,
+       "at_ms": 39.95
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 490246.74883939,
+       "t1": 490246.751220557,
+       "ms": 2.38,
+       "at_ms": 56.97
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 490246.748962108,
+       "t1": 490246.750230645,
+       "ms": 1.27,
+       "at_ms": 57.09
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 490246.751293001,
+       "t1": 490246.920775021,
+       "ms": 169.48,
+       "at_ms": 59.42
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 490246.924301407,
+       "t1": 490246.966464005,
+       "ms": 42.16,
+       "at_ms": 232.43
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round4",
+     "channel": "CD22",
+     "source_of_channel": "raw",
+     "target_level": 2,
+     "target_visible_tiles": 9,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 337.62,
+      "events_processed": 341.84,
+      "first_gpu_submit": 342.2,
+      "complete_coarse_published": 2818.18,
+      "first_texture_upload": 2818.2,
+      "viewport_fine_complete": 2818.31,
+      "first_natural_paint_after_complete": 2818.5,
+      "first_provider_read": 327.98,
+      "last_coarse_read_returned": 2805.86,
+      "first_fine_request": 0.85,
+      "first_fine_read": 328.23,
+      "all_fine_reads_returned": 959.19
+     },
+     "gui_worst_gap_ms": 341.8,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 10,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 9
+      },
+      "coarse_requests": 1,
+      "fine_requests": 9,
+      "provider_reads": 10,
+      "coarse_reads": 1,
+      "fine_reads": 9,
+      "corrected_reads": 10,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 10,
+      "gpu_uploads": 10,
+      "gpu_submits": 11,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2477.88,
+       "median": 2477.88,
+       "max": 2477.88,
+       "sum": 2477.88
+      },
+      "fine": {
+       "n": 9,
+       "min": 101.25,
+       "median": 393.07,
+       "max": 630.15,
+       "sum": 3394.55
+      },
+      "corrected": {
+       "n": 10,
+       "min": 101.25,
+       "median": 502.05,
+       "max": 2477.88,
+       "sum": 5872.43
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 9
+      },
+      "fine_levels": {
+       "CD22": [
+        2
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "patch_then_cucim": [
+   {
+    "patch": "P1",
+    "cold": {
+     "label": "patch_then_enable/P1/round0",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 9.65,
+      "events_processed": 11.12,
+      "first_gpu_submit": 11.23,
+      "complete_coarse_published": 2578.49,
+      "first_texture_upload": 2578.5,
+      "viewport_fine_complete": 2578.65,
+      "first_natural_paint_after_complete": 2578.74,
+      "first_provider_read": 1.77,
+      "last_coarse_read_returned": 2530.54,
+      "first_fine_request": 0.86,
+      "first_fine_read": 2.04,
+      "all_fine_reads_returned": 28.17
+     },
+     "gui_worst_gap_ms": 51.4,
+     "natural_paints": 4,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 13,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 12
+      },
+      "coarse_requests": 1,
+      "fine_requests": 12,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 13,
+      "gpu_uploads": 13,
+      "gpu_submits": 14,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2528.78,
+       "median": 2528.78,
+       "max": 2528.78,
+       "sum": 2528.78
+      },
+      "fine": {
+       "n": 12,
+       "min": 6.92,
+       "median": 11.08,
+       "max": 20.84,
+       "sum": 141.29
+      },
+      "corrected": {
+       "n": 13,
+       "min": 6.92,
+       "median": 11.08,
+       "max": 2528.78,
+       "sum": 2670.07
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 12
+      },
+      "fine_levels": {
+       "CD22": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "P2",
+    "cold": {
+     "label": "patch_then_enable/P2/round1",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 16,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 11.24,
+      "events_processed": 11.92,
+      "first_gpu_submit": 11.98,
+      "complete_coarse_published": 2504.49,
+      "first_texture_upload": 2504.5,
+      "viewport_fine_complete": 2504.65,
+      "first_natural_paint_after_complete": 2504.76,
+      "first_provider_read": 2.0,
+      "last_coarse_read_returned": 2458.89,
+      "first_fine_request": 1.12,
+      "first_fine_read": 2.18,
+      "all_fine_reads_returned": 31.43
+     },
+     "gui_worst_gap_ms": 48.5,
+     "natural_paints": 4,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 17,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 16
+      },
+      "coarse_requests": 1,
+      "fine_requests": 16,
+      "provider_reads": 17,
+      "coarse_reads": 1,
+      "fine_reads": 16,
+      "corrected_reads": 17,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 17,
+      "gpu_uploads": 17,
+      "gpu_submits": 18,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2456.88,
+       "median": 2456.88,
+       "max": 2456.88,
+       "sum": 2456.88
+      },
+      "fine": {
+       "n": 16,
+       "min": 6.85,
+       "median": 10.63,
+       "max": 17.16,
+       "sum": 179.36
+      },
+      "corrected": {
+       "n": 17,
+       "min": 6.85,
+       "median": 10.63,
+       "max": 2456.88,
+       "sum": 2636.24
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 16
+      },
+      "fine_levels": {
+       "CD22": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "P3",
+    "cold": {
+     "label": "patch_then_enable/P3/round2",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 16.36,
+      "events_processed": 24.26,
+      "first_gpu_submit": 29.66,
+      "complete_coarse_published": 2573.02,
+      "first_texture_upload": 2573.03,
+      "viewport_fine_complete": 2573.1,
+      "first_natural_paint_after_complete": 2573.21,
+      "first_provider_read": 1.71,
+      "last_coarse_read_returned": 2556.81,
+      "first_fine_request": 0.92,
+      "first_fine_read": 1.93,
+      "all_fine_reads_returned": 31.43
+     },
+     "gui_worst_gap_ms": 24.2,
+     "natural_paints": 3,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 13,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 12
+      },
+      "coarse_requests": 1,
+      "fine_requests": 12,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 13,
+      "gpu_uploads": 13,
+      "gpu_submits": 14,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2555.1,
+       "median": 2555.1,
+       "max": 2555.1,
+       "sum": 2555.1
+      },
+      "fine": {
+       "n": 12,
+       "min": 7.88,
+       "median": 14.77,
+       "max": 20.78,
+       "sum": 163.8
+      },
+      "corrected": {
+       "n": 13,
+       "min": 7.88,
+       "median": 14.77,
+       "max": 2555.1,
+       "sum": 2718.9
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 12
+      },
+      "fine_levels": {
+       "CD22": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "P4",
+    "cold": {
+     "label": "patch_then_enable/P4/round3",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 14.71,
+      "events_processed": 23.34,
+      "first_gpu_submit": 28.07,
+      "complete_coarse_published": 2397.89,
+      "first_texture_upload": 2397.9,
+      "viewport_fine_complete": 2398.03,
+      "first_natural_paint_after_complete": 2398.17,
+      "first_provider_read": 1.88,
+      "last_coarse_read_returned": 2376.7,
+      "first_fine_request": 0.94,
+      "first_fine_read": 2.12,
+      "all_fine_reads_returned": 23.03
+     },
+     "gui_worst_gap_ms": 24.1,
+     "natural_paints": 3,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 13,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 12
+      },
+      "coarse_requests": 1,
+      "fine_requests": 12,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 13,
+      "gpu_uploads": 13,
+      "gpu_submits": 14,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2374.81,
+       "median": 2374.81,
+       "max": 2374.81,
+       "sum": 2374.81
+      },
+      "fine": {
+       "n": 12,
+       "min": 3.24,
+       "median": 9.47,
+       "max": 16.56,
+       "sum": 114.87
+      },
+      "corrected": {
+       "n": 13,
+       "min": 3.24,
+       "median": 9.47,
+       "max": 2374.81,
+       "sum": 2489.68
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 12
+      },
+      "fine_levels": {
+       "CD22": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "P5",
+    "cold": {
+     "label": "patch_then_enable/P5/round4",
+     "channel": "CD22",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 12.85,
+      "events_processed": 15.73,
+      "first_gpu_submit": 23.05,
+      "complete_coarse_published": 2473.94,
+      "first_texture_upload": 2473.96,
+      "viewport_fine_complete": 2474.1,
+      "first_natural_paint_after_complete": 2474.27,
+      "first_provider_read": 1.88,
+      "last_coarse_read_returned": 2457.17,
+      "first_fine_request": 0.97,
+      "first_fine_read": 2.17,
+      "all_fine_reads_returned": 24.68
+     },
+     "gui_worst_gap_ms": 21.0,
+     "natural_paints": 3,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 13,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 12
+      },
+      "coarse_requests": 1,
+      "fine_requests": 12,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 13,
+      "gpu_uploads": 13,
+      "gpu_submits": 14,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 2455.29,
+       "median": 2455.29,
+       "max": 2455.29,
+       "sum": 2455.29
+      },
+      "fine": {
+       "n": 12,
+       "min": 6.12,
+       "median": 10.09,
+       "max": 19.42,
+       "sum": 119.02
+      },
+      "corrected": {
+       "n": 13,
+       "min": 6.12,
+       "median": 10.09,
+       "max": 2455.29,
+       "sum": 2574.31
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CD22"
+      ],
+      "fine_channels": [
+       "CD22"
+      ],
+      "fine_tiles": {
+       "CD22": 12
+      },
+      "fine_levels": {
+       "CD22": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ]
+ },
+ "medians": {
+  "first_cucim_complete": {
+   "n": 5,
+   "min": 2440.41,
+   "median": 2538.13,
+   "max": 2638.2,
+   "sum": 12771.22
+  },
+  "first_cucim_coarse": {
+   "n": 5,
+   "min": 2440.33,
+   "median": 2537.99,
+   "max": 2638.06,
+   "sum": 12770.6
+  },
+  "first_raw_complete": {
+   "n": 5,
+   "min": 41.95,
+   "median": 48.82,
+   "max": 55.02,
+   "sum": 239.01
+  },
+  "hot_retick_cucim_complete": {
+   "n": 5,
+   "min": 2.79,
+   "median": 4.37,
+   "max": 4.66,
+   "sum": 19.21
+  },
+  "save_rebind_ms": {
+   "n": 5,
+   "min": 263.1,
+   "median": 296.74,
+   "max": 481.67,
+   "sum": 1654.54
+  },
+  "save_then_cucim_complete": {
+   "n": 5,
+   "min": 2504.47,
+   "median": 2693.84,
+   "max": 2881.8,
+   "sum": 13477.37
+  },
+  "patch_then_cucim_complete": {
+   "n": 5,
+   "min": 2398.03,
+   "median": 2504.65,
+   "max": 2578.65,
+   "sum": 12528.53
+  },
+  "patch_then_cucim_coarse": {
+   "n": 5,
+   "min": 2397.89,
+   "median": 2504.49,
+   "max": 2578.49,
+   "sum": 12527.83
+  },
+  "patch_then_cucim_fine_reads_done": {
+   "n": 5,
+   "min": 23.03,
+   "median": 28.17,
+   "max": 31.43,
+   "sum": 138.74
+  }
+ },
+ "project_readonly": {
+  "files_before": 8000,
+  "files_after": 8000,
+  "changed": []
+ }
+}

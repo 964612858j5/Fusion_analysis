@@ -1,0 +1,162 @@
+{
+ "block": "G3.2b.4E end-to-end (synthetic /tmp project)",
+ "project": "/tmp/g324e_save_bench/with0",
+ "channel": "CH_A",
+ "os_page_cache_dropped": false,
+ "runs": [
+  {
+   "with_plane": true,
+   "round": 0,
+   "plane_resolved": true,
+   "tick_returned_ms": 15.83,
+   "complete_ms": 313.9,
+   "first_natural_paint_after_complete_ms": 313.9,
+   "gui_worst_gap_ms": 67.2,
+   "natural_paints": 12,
+   "level0_pixels_read": 57671680,
+   "level0_reads": 70,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 31,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  },
+  {
+   "with_plane": false,
+   "round": 0,
+   "plane_resolved": false,
+   "tick_returned_ms": 10.44,
+   "complete_ms": 620.3,
+   "first_natural_paint_after_complete_ms": 620.4,
+   "gui_worst_gap_ms": 59.1,
+   "natural_paints": 14,
+   "level0_pixels_read": 111149056,
+   "level0_reads": 90,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 16,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  },
+  {
+   "with_plane": true,
+   "round": 1,
+   "plane_resolved": true,
+   "tick_returned_ms": 10.66,
+   "complete_ms": 252.6,
+   "first_natural_paint_after_complete_ms": null,
+   "gui_worst_gap_ms": 52.9,
+   "natural_paints": 10,
+   "level0_pixels_read": 57671680,
+   "level0_reads": 70,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 31,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  },
+  {
+   "with_plane": false,
+   "round": 1,
+   "plane_resolved": false,
+   "tick_returned_ms": 10.2,
+   "complete_ms": 459.8,
+   "first_natural_paint_after_complete_ms": 459.9,
+   "gui_worst_gap_ms": 51.4,
+   "natural_paints": 14,
+   "level0_pixels_read": 111149056,
+   "level0_reads": 90,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 16,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  },
+  {
+   "with_plane": true,
+   "round": 2,
+   "plane_resolved": true,
+   "tick_returned_ms": 16.08,
+   "complete_ms": 238.1,
+   "first_natural_paint_after_complete_ms": null,
+   "gui_worst_gap_ms": 62.9,
+   "natural_paints": 11,
+   "level0_pixels_read": 57671680,
+   "level0_reads": 70,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 31,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  },
+  {
+   "with_plane": false,
+   "round": 2,
+   "plane_resolved": false,
+   "tick_returned_ms": 10.8,
+   "complete_ms": 568.9,
+   "first_natural_paint_after_complete_ms": 569.0,
+   "gui_worst_gap_ms": 56.9,
+   "natural_paints": 15,
+   "level0_pixels_read": 111149056,
+   "level0_reads": 90,
+   "provider_reads": 16,
+   "provider_reads_corrected": 16,
+   "requests": 16,
+   "gpu_uploads": 32,
+   "gpu_submits": 35,
+   "after_pan_coarse_channels": [
+    "CH_A"
+   ],
+   "after_zoom_out_coarse_channels": [
+    "CH_A"
+   ],
+   "zoom_out_has_coarse_plane": true,
+   "zoom_out_fine_planes": 25
+  }
+ ],
+ "median_complete_ms_with_plane_True": 252.6,
+ "median_level0_pixels_read_with_plane_True": 57671680,
+ "median_complete_ms_with_plane_False": 568.9,
+ "median_level0_pixels_read_with_plane_False": 111149056
+}

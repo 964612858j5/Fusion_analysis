@@ -1,0 +1,2525 @@
+{
+  "label": "g324b11-before",
+  "when": "2026-09-21 18:22:43",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "viewport_l0": [
+    9000,
+    9000,
+    2048,
+    2048
+  ],
+  "honesty": [
+    "the OS page cache was NOT dropped; nothing here is a cold disk read",
+    "'resident' means the corrected tile is in the corrected LRU",
+    "the corrected floor has no cache and is counted separately",
+    "the demo slide and project are opened read-only"
+  ],
+  "runs": [
+    {
+      "shown_method": "tophat",
+      "new_channel": "CD4",
+      "dwell_s": 1.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          22.5
+        ],
+        [
+          "gesture_quiet",
+          181.4
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "CD4",
+        "CD22",
+        "PD1",
+        "FOXP3"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 3,
+        "hot_tiles_requested": 516,
+        "hot_tiles_completed": 514,
+        "hot_cancelled": 28,
+        "overviews_requested": 3,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 3,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 2
+      },
+      "readiness_samples": [
+        {
+          "ms": 259.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 361.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 463.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 566.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 668.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 770.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 874.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 975.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1078.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 86,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 70
+        },
+        "corrected_floor_computes": 99,
+        "corrected_floor_ms": 386.9,
+        "provider_reads": 112
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 104.9,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 189.9,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": "tophat",
+      "new_channel": "PD1",
+      "dwell_s": 2.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          19.0
+        ],
+        [
+          "gesture_quiet",
+          186.5
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "PD1",
+        "CD4",
+        "FOXP3",
+        "CD22",
+        "TCF1"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 4,
+        "hot_tiles_requested": 866,
+        "hot_tiles_completed": 864,
+        "hot_cancelled": 28,
+        "overviews_requested": 4,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 4,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 2
+      },
+      "readiness_samples": [
+        {
+          "ms": 268.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 370.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 473.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 574.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 676.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 780.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 883.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 985.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1087.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1189.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1292.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1394.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1496.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1598.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1700.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1802.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1903.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2006.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 86,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 70
+        },
+        "corrected_floor_computes": 99,
+        "corrected_floor_ms": 425.9,
+        "provider_reads": 112
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 59.06,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 152.1,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": "tophat",
+      "new_channel": "FOXP3",
+      "dwell_s": 3.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          27.6
+        ],
+        [
+          "gesture_quiet",
+          226.7
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "FOXP3",
+        "PD1",
+        "TCF1",
+        "CD4",
+        "TIM3"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 5,
+        "hot_tiles_requested": 1216,
+        "hot_tiles_completed": 1214,
+        "hot_cancelled": 28,
+        "overviews_requested": 5,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 5,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 2
+      },
+      "readiness_samples": [
+        {
+          "ms": 299.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 401.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 504.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 607.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 711.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 814.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 919.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1021.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1123.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1225.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1328.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1430.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1533.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1635.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1738.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1840.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1942.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2044.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2146.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2249.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2351.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2454.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2556.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2658.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2761.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2863.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2966.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 3067.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 86,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 70
+        },
+        "corrected_floor_computes": 99,
+        "corrected_floor_ms": 556.0,
+        "provider_reads": 112
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 132.34,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 283.5,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": "cucim",
+      "new_channel": "TCF1",
+      "dwell_s": 1.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          18.9
+        ],
+        [
+          "gesture_quiet",
+          230.6
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "TCF1",
+        "FOXP3",
+        "TIM3",
+        "PD1",
+        "TOX"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 6,
+        "hot_tiles_requested": 1561,
+        "hot_tiles_completed": 1557,
+        "hot_cancelled": 28,
+        "overviews_requested": 6,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 6,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 2
+      },
+      "readiness_samples": [
+        {
+          "ms": 312.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 415.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 517.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 619.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 723.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 825.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 930.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1033.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 80,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 64
+        },
+        "corrected_floor_computes": 92,
+        "corrected_floor_ms": 587.9,
+        "provider_reads": 110
+      },
+      "switch": {
+        "to_method": "tophat",
+        "ms_until_viewport_resident": 131.03,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 17,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 1
+        },
+        "corrected_floor_computes": 31,
+        "corrected_floor_ms": 233.7,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": "cucim",
+      "new_channel": "TIM3",
+      "dwell_s": 2.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          26.9
+        ],
+        [
+          "gesture_quiet",
+          240.4
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "TIM3",
+        "TCF1",
+        "TOX",
+        "FOXP3",
+        "CD45RA"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 7,
+        "hot_tiles_requested": 1911,
+        "hot_tiles_completed": 1907,
+        "hot_cancelled": 33,
+        "overviews_requested": 7,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 7,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 4
+      },
+      "readiness_samples": [
+        {
+          "ms": 313.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 416.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 518.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 620.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 722.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 826.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 934.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1037.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1140.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1244.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1346.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1449.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1550.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1652.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1753.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1855.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1957.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2060.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 91,
+        "corrected_tile_computes_by_level": {
+          "1": 16,
+          "0": 75
+        },
+        "corrected_floor_computes": 104,
+        "corrected_floor_ms": 732.0,
+        "provider_reads": 114
+      },
+      "switch": {
+        "to_method": "tophat",
+        "ms_until_viewport_resident": 106.27,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 220.9,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": "cucim",
+      "new_channel": "TOX",
+      "dwell_s": 3.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          28.5
+        ],
+        [
+          "gesture_quiet",
+          242.9
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "TOX",
+        "TIM3",
+        "CD45RA",
+        "TCF1"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 8,
+        "hot_tiles_requested": 2191,
+        "hot_tiles_completed": 2187,
+        "hot_cancelled": 33,
+        "overviews_requested": 7,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 8,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 4
+      },
+      "readiness_samples": [
+        {
+          "ms": 314.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 417.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 519.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 622.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 725.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 827.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 930.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1032.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1134.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1237.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1340.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1441.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1544.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1646.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1749.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1851.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1954.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2056.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2159.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2261.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2363.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2466.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2568.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2671.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2773.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2876.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2978.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 3081.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 236.8,
+        "provider_reads": 48
+      },
+      "switch": {
+        "to_method": "tophat",
+        "ms_until_viewport_resident": 124.45,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 242.2,
+        "provider_reads": 12,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": null,
+      "new_channel": "CD45RA",
+      "dwell_s": 1.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          25.4
+        ],
+        [
+          "gesture_quiet",
+          122.3
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "CD45RA",
+        "TOX",
+        "TIM3"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 9,
+        "hot_tiles_requested": 2401,
+        "hot_tiles_completed": 2397,
+        "hot_cancelled": 33,
+        "overviews_requested": 7,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 9,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 4
+      },
+      "readiness_samples": [
+        {
+          "ms": 153.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 255.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 357.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 459.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 562.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 664.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 767.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 869.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 972.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1073.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 0,
+        "corrected_tile_computes_by_level": {},
+        "corrected_floor_computes": 0,
+        "corrected_floor_ms": 0,
+        "provider_reads": 4
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 139.34,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 21,
+        "corrected_floor_ms": 210.2,
+        "provider_reads": 37,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": null,
+      "new_channel": "CD22",
+      "dwell_s": 2.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          32.0
+        ],
+        [
+          "gesture_quiet",
+          115.6
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "CD22",
+        "CD4",
+        "PD1"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 10,
+        "hot_tiles_requested": 2611,
+        "hot_tiles_completed": 2607,
+        "hot_cancelled": 33,
+        "overviews_requested": 7,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 10,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 4
+      },
+      "readiness_samples": [
+        {
+          "ms": 146.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 248.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 350.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 453.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 555.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 658.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 760.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 863.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 965.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1068.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1170.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1273.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1375.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1477.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1580.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1681.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1783.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1885.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1988.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2090.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 0,
+        "corrected_tile_computes_by_level": {},
+        "corrected_floor_computes": 0,
+        "corrected_floor_ms": 0,
+        "provider_reads": 0
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 183.38,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 16,
+        "corrected_tile_computes_by_level": {
+          "1": 16
+        },
+        "corrected_floor_computes": 29,
+        "corrected_floor_ms": 272.0,
+        "provider_reads": 44,
+        "cache_hits_delta": 70
+      }
+    },
+    {
+      "shown_method": null,
+      "new_channel": "CD4",
+      "dwell_s": 3.0,
+      "events_ms": [
+        [
+          "CHANNEL_SWITCH",
+          31.6
+        ],
+        [
+          "gesture_quiet",
+          122.6
+        ],
+        [
+          "hot_confirm_batches",
+          1
+        ]
+      ],
+      "hot_plan_after_dwell": [
+        "CD4",
+        "CD22",
+        "PD1",
+        "FOXP3"
+      ],
+      "hot_plan_centre_first": true,
+      "hot_active_requests_before_click": 0,
+      "hot_stats": {
+        "hot_batches": 11,
+        "hot_tiles_requested": 2891,
+        "hot_tiles_completed": 2887,
+        "hot_cancelled": 33,
+        "overviews_requested": 7,
+        "overviews_failed": 0,
+        "hot_tiles_failed": 0,
+        "settle_confirmations": 11,
+        "settle_aborted": 0,
+        "hot_abandoned_finished": 4
+      },
+      "readiness_samples": [
+        {
+          "ms": 145.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 247.6,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 349.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 452.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 554.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 657.1,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 759.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 862.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 964.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1066.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1169.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1271.7,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1374.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1476.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1579.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1682.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1784.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1886.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 1989.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2091.8,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2194.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2296.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2399.0,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2501.4,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2603.9,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2706.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2808.2,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 2910.3,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        },
+        {
+          "ms": 3012.5,
+          "tophat": [
+            35,
+            35
+          ],
+          "cucim": [
+            35,
+            35
+          ]
+        }
+      ],
+      "final_resident": {
+        "tophat": [
+          35,
+          35
+        ],
+        "cucim": [
+          35,
+          35
+        ]
+      },
+      "during_dwell": {
+        "corrected_tile_computes": 0,
+        "corrected_tile_computes_by_level": {},
+        "corrected_floor_computes": 0,
+        "corrected_floor_ms": 0,
+        "provider_reads": 0
+      },
+      "switch": {
+        "to_method": "cucim",
+        "ms_until_viewport_resident": 80.12,
+        "viewport_tiles_recomputed": 0,
+        "corrected_tile_computes": 0,
+        "corrected_tile_computes_by_level": {},
+        "corrected_floor_computes": 13,
+        "corrected_floor_ms": 76.4,
+        "provider_reads": 12,
+        "cache_hits_delta": 86
+      }
+    }
+  ]
+}

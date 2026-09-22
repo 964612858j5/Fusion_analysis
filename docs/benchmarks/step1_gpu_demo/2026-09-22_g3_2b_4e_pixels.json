@@ -1,0 +1,79 @@
+{
+ "block": "G3.2b.4E pixel check (synthetic /tmp project)",
+ "note": "every framebuffer below is a FORCED grab, taken after the natural-paint observation above it",
+ "states": [
+  {
+   "with_plane": true,
+   "plane_resolved": true,
+   "complete_ms": 298.1,
+   "natural_paints_total": 10,
+   "natural_paint_after_complete_ms": 0.1,
+   "natural_paint_waited_ms": 3000,
+   "forced_grab_at_camera": [
+    3072.0,
+    4352.0,
+    0.08
+   ],
+   "frame_shape": [
+    900,
+    1200,
+    4
+   ],
+   "blank_at_camera": {
+    "alpha_zero": 0,
+    "pure_black": 725714,
+    "total": 1080000
+   },
+   "blank_after_zoom_out": {
+    "alpha_zero": 0,
+    "pure_black": 1074544,
+    "total": 1080000
+   }
+  },
+  {
+   "with_plane": false,
+   "plane_resolved": false,
+   "complete_ms": 538.1,
+   "natural_paints_total": 11,
+   "natural_paint_after_complete_ms": 0.1,
+   "natural_paint_waited_ms": 3000,
+   "forced_grab_at_camera": [
+    3072.0,
+    4352.0,
+    0.08
+   ],
+   "frame_shape": [
+    900,
+    1200,
+    4
+   ],
+   "blank_at_camera": {
+    "alpha_zero": 0,
+    "pure_black": 725714,
+    "total": 1080000
+   },
+   "blank_after_zoom_out": {
+    "alpha_zero": 0,
+    "pure_black": 1074544,
+    "total": 1080000
+   }
+  }
+ ],
+ "pixel_comparison_same_camera": {
+  "shape": [
+   900,
+   1200,
+   4
+  ],
+  "rgb_max_abs_diff_lsb": 0,
+  "alpha_identical": true,
+  "differing_pixels": 0,
+  "identical": true
+ },
+ "pixel_comparison_zoomed_out": {
+  "rgb_max_abs_diff_lsb": 0,
+  "alpha_identical": true,
+  "differing_pixels": 0,
+  "identical": true
+ }
+}

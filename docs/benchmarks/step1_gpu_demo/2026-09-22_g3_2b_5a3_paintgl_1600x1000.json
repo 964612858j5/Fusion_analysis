@@ -1,0 +1,865 @@
+{
+ "block": "G3.2b.5A.3",
+ "hooked_package": "block01",
+ "module_aliases": [
+  "block01"
+ ],
+ "gl_widgets_found": [
+  [
+   "attr:gpu_layer",
+   "Step1GpuLayer",
+   [
+    1323,
+    737
+   ],
+   true
+  ],
+  [
+   "findChildren",
+   "Step1GpuLayer",
+   [
+    1323,
+    737
+   ],
+   true
+  ]
+ ],
+ "opengl": {
+  "vendor": "b'NVIDIA Corporation'",
+  "renderer": "b'NVIDIA GeForce RTX 4090/PCIe/SSE2'",
+  "version": "b'4.6.0 NVIDIA 535.309.01'",
+  "doneCurrent": true
+ },
+ "thumbnail": {
+  "ov_h": 609,
+  "ov_w": 682,
+  "has_pixels": true,
+  "status": "Full image 19480\u00d721804 px  |  Overview 609\u00d7682 px  (1.7s)"
+ },
+ "identity": {
+  "loader_filepath": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "page_ome_path": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "loader_shape": [
+   19480,
+   21804
+  ],
+  "overview_full_hw": [
+   19480,
+   21804
+  ],
+  "viewer_level0_shape": [
+   19480,
+   21804
+  ],
+  "viewer_source_identity": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='step1', corrected_artifact='roi=None|handoff=')",
+  "overview_downsample": 32,
+  "overview_grid": [
+   609,
+   682
+  ],
+  "same_file": true,
+  "same_shape": true
+ },
+ "scenes": [
+  {
+   "label": "A_idle_baseline",
+   "first_record": 18,
+   "last_record": 19
+  },
+  {
+   "label": "B_first_patch",
+   "first_record": 20,
+   "last_record": 31
+  },
+  {
+   "label": "C_second_patch",
+   "first_record": 32,
+   "last_record": 44
+  },
+  {
+   "label": "C_third_patch",
+   "first_record": 45,
+   "last_record": 57
+  },
+  {
+   "label": "D_move_patch",
+   "first_record": 58,
+   "last_record": 59
+  },
+  {
+   "label": "E_click_pn",
+   "first_record": 60,
+   "last_record": 69
+  }
+ ],
+ "n_patches_final": 3,
+ "records": [
+  {
+   "i": 1,
+   "t_ms": 3751.997,
+   "kind": "paintGL.enter",
+   "paint_seq": 1,
+   "consumes_submit_seq": 0,
+   "widget_size": [
+    640,
+    480
+   ],
+   "fbo_target_size": null,
+   "device_pixel_ratio": 1.0,
+   "widget_physical_size": null,
+   "blit_is_rescaled": false,
+   "default_fbo": 1,
+   "initialized": true
+  },
+  {
+   "i": 2,
+   "t_ms": 3752.009,
+   "kind": "paintGL.return",
+   "paint_seq": 1
+  },
+  {
+   "i": 3,
+   "t_ms": 3755.066,
+   "kind": "submit.enter",
+   "submit_seq": 1,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": null,
+   "viewport": {
+    "world_rect": [
+     -2211.1602,
+     24015.1602,
+     0.0,
+     19480.0
+    ],
+    "logical_size": [
+     640,
+     480
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     640,
+     480
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 4,
+   "t_ms": 3758.164,
+   "kind": "submit.return",
+   "submit_seq": 1,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 5,
+   "t_ms": 3758.359,
+   "kind": "submit.enter",
+   "submit_seq": 2,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport": {
+    "world_rect": [
+     -2211.1602,
+     24015.1602,
+     0.0,
+     19480.0
+    ],
+    "logical_size": [
+     640,
+     480
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     640,
+     480
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 6,
+   "t_ms": 3758.47,
+   "kind": "submit.return",
+   "submit_seq": 2,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 7,
+   "t_ms": 3868.604,
+   "kind": "submit.enter",
+   "submit_seq": 3,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport": {
+    "world_rect": [
+     -2211.1602,
+     24015.1602,
+     0.0,
+     19480.0
+    ],
+    "logical_size": [
+     640,
+     480
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     640,
+     480
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 8,
+   "t_ms": 3868.909,
+   "kind": "submit.return",
+   "submit_seq": 3,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 9,
+   "t_ms": 4449.836,
+   "kind": "submit.enter",
+   "submit_seq": 4,
+   "widget_size": [
+    611,
+    450
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport": {
+    "world_rect": [
+     -2467.9537,
+     24271.9537,
+     0.0,
+     19480.0
+    ],
+    "logical_size": [
+     611,
+     450
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     611,
+     450
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 10,
+   "t_ms": 4454.11,
+   "kind": "submit.return",
+   "submit_seq": 4,
+   "target_size_after": [
+    611,
+    450
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 11,
+   "t_ms": 4455.349,
+   "kind": "resizeGL",
+   "w": 611,
+   "h": 450,
+   "target_size": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 12,
+   "t_ms": 4465.29,
+   "kind": "resizeGL",
+   "w": 1323,
+   "h": 737,
+   "target_size": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 13,
+   "t_ms": 4478.029,
+   "kind": "paintGL.enter",
+   "paint_seq": 2,
+   "consumes_submit_seq": 4,
+   "widget_size": [
+    1323,
+    737
+   ],
+   "fbo_target_size": [
+    611,
+    450
+   ],
+   "device_pixel_ratio": 1.0,
+   "widget_physical_size": [
+    1323,
+    737
+   ],
+   "blit_is_rescaled": true,
+   "default_fbo": 1,
+   "initialized": true
+  },
+  {
+   "i": 14,
+   "t_ms": 4495.863,
+   "kind": "submit.enter",
+   "submit_seq": 5,
+   "widget_size": [
+    1323,
+    737
+   ],
+   "target_size_before": [
+    611,
+    450
+   ],
+   "viewport": {
+    "world_rect": [
+     -6776.3032,
+     28580.3032,
+     0.0,
+     19480.0
+    ],
+    "logical_size": [
+     1323,
+     737
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     1323,
+     737
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 15,
+   "t_ms": 4497.666,
+   "kind": "submit.return",
+   "submit_seq": 5,
+   "target_size_after": [
+    1323,
+    737
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 16,
+   "t_ms": 4499.697,
+   "kind": "paintGL.enter",
+   "paint_seq": 3,
+   "consumes_submit_seq": 5,
+   "widget_size": [
+    1323,
+    737
+   ],
+   "fbo_target_size": [
+    1323,
+    737
+   ],
+   "device_pixel_ratio": 1.0,
+   "widget_physical_size": [
+    1323,
+    737
+   ],
+   "blit_is_rescaled": false,
+   "default_fbo": 1,
+   "initialized": true
+  },
+  {
+   "i": 17,
+   "t_ms": 4499.891,
+   "kind": "paintGL.return",
+   "paint_seq": 3
+  },
+  {
+   "i": 18,
+   "t_ms": 10155.962,
+   "kind": "scene.A_idle_baseline.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 19,
+   "t_ms": 12156.0,
+   "kind": "scene.A_idle_baseline.end",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 20,
+   "t_ms": 12156.013,
+   "kind": "scene.B_first_patch.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 21,
+   "t_ms": 12337.665,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 22,
+   "t_ms": 12340.467,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 23,
+   "t_ms": 12460.572,
+   "kind": "main._on_patches.enter"
+  },
+  {
+   "i": 24,
+   "t_ms": 12460.581,
+   "kind": "main._rebuild_patch_buttons.enter"
+  },
+  {
+   "i": 25,
+   "t_ms": 12460.699,
+   "kind": "main._rebuild_patch_buttons.return"
+  },
+  {
+   "i": 26,
+   "t_ms": 12460.771,
+   "kind": "main._on_patches.return"
+  },
+  {
+   "i": 27,
+   "t_ms": 12461.051,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 28,
+   "t_ms": 12477.654,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 29,
+   "t_ms": 12477.69,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 30,
+   "t_ms": 18080.824,
+   "kind": "gesture.patches_added",
+   "added": 1
+  },
+  {
+   "i": 31,
+   "t_ms": 20580.91,
+   "kind": "scene.B_first_patch.end",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 32,
+   "t_ms": 20580.928,
+   "kind": "scene.C_second_patch.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 33,
+   "t_ms": 20762.694,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 34,
+   "t_ms": 20766.219,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 35,
+   "t_ms": 20886.31,
+   "kind": "main._on_patches.enter"
+  },
+  {
+   "i": 36,
+   "t_ms": 20886.319,
+   "kind": "main._rebuild_patch_buttons.enter"
+  },
+  {
+   "i": 37,
+   "t_ms": 20886.486,
+   "kind": "main._rebuild_patch_buttons.return"
+  },
+  {
+   "i": 38,
+   "t_ms": 20886.556,
+   "kind": "main._on_patches.return"
+  },
+  {
+   "i": 39,
+   "t_ms": 20886.667,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 40,
+   "t_ms": 20887.604,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 41,
+   "t_ms": 20896.981,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 42,
+   "t_ms": 20897.081,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 43,
+   "t_ms": 26506.609,
+   "kind": "gesture.patches_added",
+   "added": 1
+  },
+  {
+   "i": 44,
+   "t_ms": 29006.668,
+   "kind": "scene.C_second_patch.end",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 45,
+   "t_ms": 29006.682,
+   "kind": "scene.C_third_patch.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 46,
+   "t_ms": 29188.373,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 47,
+   "t_ms": 29193.068,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 48,
+   "t_ms": 29313.162,
+   "kind": "main._on_patches.enter"
+  },
+  {
+   "i": 49,
+   "t_ms": 29313.173,
+   "kind": "main._rebuild_patch_buttons.enter"
+  },
+  {
+   "i": 50,
+   "t_ms": 29313.386,
+   "kind": "main._rebuild_patch_buttons.return"
+  },
+  {
+   "i": 51,
+   "t_ms": 29313.462,
+   "kind": "main._on_patches.return"
+  },
+  {
+   "i": 52,
+   "t_ms": 29313.575,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 53,
+   "t_ms": 29314.589,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 54,
+   "t_ms": 29323.117,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 55,
+   "t_ms": 29323.151,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 56,
+   "t_ms": 34933.513,
+   "kind": "gesture.patches_added",
+   "added": 1
+  },
+  {
+   "i": 57,
+   "t_ms": 37433.572,
+   "kind": "scene.C_third_patch.end",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 58,
+   "t_ms": 37433.583,
+   "kind": "scene.D_move_patch.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 59,
+   "t_ms": 39938.774,
+   "kind": "scene.D_move_patch.end",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 60,
+   "t_ms": 39938.786,
+   "kind": "scene.E_click_pn.start",
+   "camera": [
+    -6776.3032,
+    28580.3032,
+    0.0,
+    19480.0
+   ]
+  },
+  {
+   "i": 61,
+   "t_ms": 39938.814,
+   "kind": "main._select_preview_patch.enter"
+  },
+  {
+   "i": 62,
+   "t_ms": 39938.852,
+   "kind": "mount.show_patch.enter"
+  },
+  {
+   "i": 63,
+   "t_ms": 39942.097,
+   "kind": "submit.enter",
+   "submit_seq": 6,
+   "widget_size": [
+    1323,
+    737
+   ],
+   "target_size_before": [
+    1323,
+    737
+   ],
+   "viewport": {
+    "world_rect": [
+     1038.2643,
+     10737.7357,
+     3328.0,
+     8672.0
+    ],
+    "logical_size": [
+     1323,
+     737
+    ],
+    "dpr": 1.0,
+    "physical_size": [
+     1323,
+     737
+    ]
+   },
+   "display": {
+    "mode": "overlay",
+    "mappings": {},
+    "weights": {},
+    "nucleus": [
+     "",
+     0.0
+    ]
+   },
+   "source": []
+  },
+  {
+   "i": 64,
+   "t_ms": 39942.947,
+   "kind": "submit.return",
+   "submit_seq": 6,
+   "target_size_after": [
+    1323,
+    737
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 65,
+   "t_ms": 39944.056,
+   "kind": "mount.show_patch.return"
+  },
+  {
+   "i": 66,
+   "t_ms": 39944.072,
+   "kind": "main._select_preview_patch.return"
+  },
+  {
+   "i": 67,
+   "t_ms": 39945.49,
+   "kind": "paintGL.enter",
+   "paint_seq": 4,
+   "consumes_submit_seq": 6,
+   "widget_size": [
+    1323,
+    737
+   ],
+   "fbo_target_size": [
+    1323,
+    737
+   ],
+   "device_pixel_ratio": 1.0,
+   "widget_physical_size": [
+    1323,
+    737
+   ],
+   "blit_is_rescaled": false,
+   "default_fbo": 1,
+   "initialized": true
+  },
+  {
+   "i": 68,
+   "t_ms": 39945.6,
+   "kind": "paintGL.return",
+   "paint_seq": 4
+  },
+  {
+   "i": 69,
+   "t_ms": 42444.11,
+   "kind": "scene.E_click_pn.end",
+   "camera": [
+    1038.2643,
+    10737.7357,
+    3328.0,
+    8672.0
+   ]
+  }
+ ],
+ "honesty": [
+  "every wrapper calls the real function and returns its real result; no event was swallowed, reordered or delayed",
+  "nothing called processEvents/update/repaint/grab to drive drawing other than the bench's own pump between scenes",
+  "GL was only READ, inside a context that was already current",
+  "no project is bound, so no geometry was persisted: the persistence chain is NOT exercised here and is reported as a gap"
+ ]
+}

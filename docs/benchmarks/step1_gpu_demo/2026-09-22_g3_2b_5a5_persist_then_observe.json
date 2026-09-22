@@ -1,0 +1,716 @@
+{
+ "block": "G3.2b.5A.5",
+ "phase1": {
+  "handoff_files": [
+   "corrected_channels.zarr",
+   "correction_config.json",
+   "patch_config.json",
+   "roi_config.json",
+   "step0_roi_result.json"
+  ],
+  "step0_dir": "/tmp/g325a5_valid_project/roi1/step0",
+  "outcomes": [
+   [
+    "published",
+    {
+     "task": {
+      "revision": 1,
+      "dataset_gen": 0,
+      "step0_dir": "/tmp/g325a5_valid_project/roi1/step0",
+      "step0_manifest_path": "/tmp/g325a5_valid_project/roi1/step0/step0_roi_result.json",
+      "rois": [
+       {
+        "name": "<deep>",
+        "display_name": "<deep>",
+        "bbox_fullres": "<deep>",
+        "polygon_fullres": "<deep>",
+        "shape": "<deep>",
+        "type": "<deep>",
+        "roi_id": "<deep>",
+        "roi_dir": "<deep>"
+       }
+      ],
+      "patches": [
+       {
+        "name": "<deep>",
+        "roi_name": "<deep>",
+        "bbox_fullres": "<deep>",
+        "bbox_local": "<deep>",
+        "coords": "<deep>"
+       }
+      ],
+      "roi_context_changed": false,
+      "spec": {
+       "raw_path": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+       "step0_dir": "/tmp/g325a5_valid_project/roi1/step0",
+       "config": {
+        "method_params": "<deep>",
+        "channel_decisions": "<deep>",
+        "channel_params": "<deep>"
+       },
+       "rois": [
+        "<deep>"
+       ],
+       "patches": [
+        "<deep>"
+       ],
+       "corrected_path": "/tmp/g325a5_valid_project/roi1/step0/corrected_channels.zarr",
+       "manifest_path": "/tmp/g325a5_valid_project/roi1/step0/step0_roi_result.json",
+       "analysis_region_type": "roi",
+       "roi_id": "roi1",
+       "roi_dir": "/tmp/g325a5_valid_project/roi1",
+       "project_dir": "/tmp/g325a5_valid_project",
+       "step1_dir": "/tmp/g325a5_valid_project/roi1/step1",
+       "step2_dir": "/tmp/g325a5_valid_project/roi1/step2",
+       "panel_csv_path": "",
+       "panel_groups": {},
+       "nucleus_channel": "DAPI",
+       "remap_path": "/tmp/g325a5_valid_project/roi1/step0/step0_channel_remap.json",
+       "geometry_revision": 1
+      }
+     },
+     "revision": 1,
+     "step0_manifest_path": "/tmp/g325a5_valid_project/roi1/step0/step0_roi_result.json",
+     "geometry_revision": 1,
+     "outcome": "committed",
+     "rois": [
+      {
+       "name": "ROI_1",
+       "display_name": "ROI_1",
+       "bbox_fullres": [
+        "<deep>",
+        "<deep>",
+        "<deep>",
+        "<deep>"
+       ],
+       "polygon_fullres": [
+        "<deep>",
+        "<deep>",
+        "<deep>",
+        "<deep>"
+       ],
+       "shape": [
+        "<deep>",
+        "<deep>"
+       ],
+       "type": "roi",
+       "roi_id": "roi1",
+       "roi_dir": "/tmp/g325a5_valid_project/roi1"
+      }
+     ],
+     "patches": [
+      {
+       "name": "P1",
+       "roi_name": "ROI_1",
+       "bbox_fullres": [
+        "<deep>",
+        "<deep>",
+        "<deep>",
+        "<deep>"
+       ],
+       "bbox_local": [
+        "<deep>",
+        "<deep>",
+        "<deep>",
+        "<deep>"
+       ],
+       "coords": [
+        "<deep>",
+        "<deep>",
+        "<deep>",
+        "<deep>"
+       ]
+      }
+     ],
+     "patch_config_path": "/tmp/g325a5_valid_project/roi1/step0/patch_config.rev1.d33fad7a9e4f10.json",
+     "result": {
+      "manifest_path": "/tmp/g325a5_valid_project/roi1/step0/step0_roi_result.json"
+     }
+    }
+   ],
+   [
+    "skipped",
+    "roi_changed"
+   ]
+  ],
+  "geometry_committed_fired": 1,
+  "files_after": [
+   "roi1/step0/corrected_channels.zarr/.zattrs",
+   "roi1/step0/corrected_channels.zarr/.zgroup",
+   "roi1/step0/corrected_channels.zarr/ROI_1/.zattrs",
+   "roi1/step0/corrected_channels.zarr/ROI_1/.zgroup",
+   "roi1/step0/correction_config.json",
+   "roi1/step0/patch_config.json",
+   "roi1/step0/patch_config.rev1.d33fad7a9e4f10.json",
+   "roi1/step0/roi_config.json",
+   "roi1/step0/step0_roi_result.json",
+   "rois/roi1/roi_index.json"
+  ],
+  "n_files_after": 10,
+  "persist_state": "published",
+  "worker_stats": {
+   "submitted": 1,
+   "replaced": 0,
+   "published": 1,
+   "skipped": 0,
+   "failed": 0,
+   "stale_dataset": 0,
+   "authoritative_retired": 0,
+   "pending": false,
+   "busy": false,
+   "published_revision": 1
+  },
+  "chain_works": true
+ },
+ "phase2": {
+  "patches_added": 1,
+  "files_changed": [],
+  "geometry_committed_total": 1,
+  "first_display_change": null,
+  "submits": 5,
+  "paints": 4
+ },
+ "records": [
+  {
+   "i": 1,
+   "t_ms": 2363.084,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.rebind_source"
+  },
+  {
+   "i": 2,
+   "t_ms": 2363.096,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount._rebind_source"
+  },
+  {
+   "i": 3,
+   "t_ms": 2363.099,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.set_source"
+  },
+  {
+   "i": 4,
+   "t_ms": 2884.271,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 5,
+   "t_ms": 2884.323,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 6,
+   "t_ms": 2884.355,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 7,
+   "t_ms": 2884.358,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 8,
+   "t_ms": 2886.75,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 9,
+   "t_ms": 2886.778,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 10,
+   "t_ms": 2886.887,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 11,
+   "t_ms": 2886.893,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 12,
+   "t_ms": 3029.393,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 13,
+   "t_ms": 3029.476,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 14,
+   "t_ms": 3029.59,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 15,
+   "t_ms": 3029.599,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 16,
+   "t_ms": 3035.264,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 17,
+   "t_ms": 3035.33,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 18,
+   "t_ms": 3756.307,
+   "kind": "paintGL.enter",
+   "paint_seq": 1,
+   "consumes_submit": 0,
+   "widget_size": [
+    640,
+    480
+   ],
+   "fbo_target_size": null,
+   "widget_physical_size": null,
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 19,
+   "t_ms": 3756.322,
+   "kind": "paintGL.return",
+   "paint_seq": 1
+  },
+  {
+   "i": 20,
+   "t_ms": 3759.277,
+   "kind": "submit.enter",
+   "submit_seq": 1,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_before": null,
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 21,
+   "t_ms": 3762.388,
+   "kind": "submit.return",
+   "submit_seq": 1,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 22,
+   "t_ms": 3762.599,
+   "kind": "submit.enter",
+   "submit_seq": 2,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 23,
+   "t_ms": 3762.697,
+   "kind": "submit.return",
+   "submit_seq": 2,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 24,
+   "t_ms": 3867.366,
+   "kind": "submit.enter",
+   "submit_seq": 3,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 25,
+   "t_ms": 3867.654,
+   "kind": "submit.return",
+   "submit_seq": 3,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 26,
+   "t_ms": 4449.29,
+   "kind": "submit.enter",
+   "submit_seq": 4,
+   "widget_size": [
+    611,
+    450
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    611,
+    450
+   ],
+   "world_rect": [
+    -2467.954,
+    24271.954,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 27,
+   "t_ms": 4452.169,
+   "kind": "submit.return",
+   "submit_seq": 4,
+   "target_after": [
+    611,
+    450
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 28,
+   "t_ms": 4453.253,
+   "kind": "resizeGL",
+   "w": 611,
+   "h": 450,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 29,
+   "t_ms": 4464.358,
+   "kind": "resizeGL",
+   "w": 1123,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 30,
+   "t_ms": 4472.117,
+   "kind": "resizeGL",
+   "w": 1122,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 31,
+   "t_ms": 4472.436,
+   "kind": "paintGL.enter",
+   "paint_seq": 2,
+   "consumes_submit": 4,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    611,
+    450
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 32,
+   "t_ms": 4486.24,
+   "kind": "paintGL.enter",
+   "paint_seq": 3,
+   "consumes_submit": 4,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    611,
+    450
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 33,
+   "t_ms": 4496.356,
+   "kind": "submit.enter",
+   "submit_seq": 5,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "target_before": [
+    611,
+    450
+   ],
+   "viewport_physical": [
+    1122,
+    637
+   ],
+   "world_rect": [
+    -6469.502,
+    28273.502,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 34,
+   "t_ms": 4498.347,
+   "kind": "submit.return",
+   "submit_seq": 5,
+   "target_after": [
+    1122,
+    637
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 35,
+   "t_ms": 4498.629,
+   "kind": "paintGL.enter",
+   "paint_seq": 4,
+   "consumes_submit": 5,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    1122,
+    637
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 36,
+   "t_ms": 4500.097,
+   "kind": "paintGL.return",
+   "paint_seq": 4
+  },
+  {
+   "i": 37,
+   "t_ms": 5699.534,
+   "kind": "phase1.handoff_written",
+   "step0_dir": "/tmp/g325a5_valid_project/roi1/step0",
+   "files": [
+    "corrected_channels.zarr",
+    "correction_config.json",
+    "patch_config.json",
+    "roi_config.json",
+    "step0_roi_result.json"
+   ]
+  },
+  {
+   "i": 38,
+   "t_ms": 5700.065,
+   "kind": "phase1.edit_made"
+  },
+  {
+   "i": 39,
+   "t_ms": 5700.07,
+   "kind": "step0._persist_geometry_edit.enter"
+  },
+  {
+   "i": 40,
+   "t_ms": 5700.194,
+   "kind": "step0._persist_geometry_edit.return"
+  },
+  {
+   "i": 41,
+   "t_ms": 5707.379,
+   "kind": "step0._on_geometry_persist_published.enter"
+  },
+  {
+   "i": 42,
+   "t_ms": 5707.421,
+   "kind": "main._on_step0_geometry_committed.enter"
+  },
+  {
+   "i": 43,
+   "t_ms": 5707.427,
+   "kind": "main._on_step0_geometry_committed.return"
+  },
+  {
+   "i": 44,
+   "t_ms": 5707.48,
+   "kind": "SIGNAL.geometry_committed",
+   "payload": {
+    "step0_manifest_path": "/tmp/g325a5_valid_project/roi1/step0/step0_roi_result.json",
+    "geometry_revision": 1,
+    "rois": [
+     {
+      "name": "ROI_1",
+      "display_name": "ROI_1",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "polygon_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "shape": [
+       "<deep>",
+       "<deep>"
+      ],
+      "type": "roi",
+      "roi_id": "roi1",
+      "roi_dir": "/tmp/g325a5_valid_project/roi1"
+     }
+    ],
+    "patches": [
+     {
+      "name": "P1",
+      "roi_name": "ROI_1",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "bbox_local": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "coords": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "i": 45,
+   "t_ms": 5707.493,
+   "kind": "step0._on_geometry_persist_published.return"
+  },
+  {
+   "i": 46,
+   "t_ms": 6911.225,
+   "kind": "phase2.page_overview_patches_cleared",
+   "page_patches": 0
+  },
+  {
+   "i": 47,
+   "t_ms": 11180.945,
+   "kind": "phase2.gesture.start"
+  },
+  {
+   "i": 48,
+   "t_ms": 11362.421,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 49,
+   "t_ms": 11364.558,
+   "kind": "step0._persist_geometry_edit.enter"
+  },
+  {
+   "i": 50,
+   "t_ms": 11364.75,
+   "kind": "step0._persist_geometry_edit.return"
+  },
+  {
+   "i": 51,
+   "t_ms": 11364.757,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 52,
+   "t_ms": 11366.248,
+   "kind": "step0._on_geometry_persist_skipped.enter"
+  },
+  {
+   "i": 53,
+   "t_ms": 11366.296,
+   "kind": "step0._on_geometry_persist_skipped.return"
+  },
+  {
+   "i": 54,
+   "t_ms": 38997.53,
+   "kind": "phase2.gesture.end"
+  }
+ ],
+ "honesty": [
+  "the worker published on its own; no completion callback was driven",
+  "a source re-bind is only reported if a re-bind entry was actually called -- a written .zattrs is not taken as evidence of one",
+  "co-occurrence in time is a lead, not proof of causation"
+ ]
+}

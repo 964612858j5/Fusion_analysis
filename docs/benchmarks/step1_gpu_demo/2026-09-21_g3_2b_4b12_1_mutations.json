@@ -1,0 +1,208 @@
+{
+  "baseline_sha256": {
+    "viewer/explore_view.py": "24367a6dfeb9e1c5bc77d3b567267cb7b6b3a6b6f80cf9c58f5cfc4640a2c3d1",
+    "viewer/multichannel_prefetch.py": "9528bed84a18df240c0ced59fdb8a3ed0ba7df11dd629e7e8ad0675c5c8a36e6",
+    "ui/step0/compare_strip.py": "d9f4cfa87e1d18f377463a5cd44660acb8d2200044669e3e531fdbb0483028d7",
+    "ui/step0/step0_explore_tab.py": "61545d69f15961f24e3fa0d7277fd866bb4fd025e6cbf8439382a97fd4b69b83",
+    "ui/step0/step0_page.py": "453df3f22f20902b13ccb913f331331fdfd1a868459b45f6dbcdbe951a40dc4a"
+  },
+  "final_sha256": {
+    "viewer/explore_view.py": "24367a6dfeb9e1c5bc77d3b567267cb7b6b3a6b6f80cf9c58f5cfc4640a2c3d1",
+    "viewer/multichannel_prefetch.py": "9528bed84a18df240c0ced59fdb8a3ed0ba7df11dd629e7e8ad0675c5c8a36e6",
+    "ui/step0/compare_strip.py": "d9f4cfa87e1d18f377463a5cd44660acb8d2200044669e3e531fdbb0483028d7",
+    "ui/step0/step0_explore_tab.py": "61545d69f15961f24e3fa0d7277fd866bb4fd025e6cbf8439382a97fd4b69b83",
+    "ui/step0/step0_page.py": "453df3f22f20902b13ccb913f331331fdfd1a868459b45f6dbcdbe951a40dc4a"
+  },
+  "all_restored": true,
+  "results": [
+    {
+      "mutation": "M1 background result reaches _floor_ctx/_floor_ready/ImageItem",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_a_background_result_only_reaches_the_cache"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.62s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M2 prepare_floor_async() changes the visible selection",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_preparing_a_floor_never_changes_what_is_on_screen"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 6.28s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M3 background floor jumps ahead of the owed foreground floor",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_a_landing_background_floor_serves_the_owed_foreground_first"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.57s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M4 the single background request becomes a queue",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_a_background_request_waits_for_the_running_job_and_does_not_queue"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.55s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M5 compare borrower teardown clears the shared floor cache",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_compare_teardown_leaves_the_borrowed_floor_cache_alone",
+        "test_coming_back_to_the_full_image_finds_its_floors_still_there"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 4.26s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6a the floor key drops the METHOD",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_has_cached_floor_asks_the_key_the_foreground_will_use"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.54s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6b the floor key drops the SOURCE IDENTITY",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_the_floor_key_carries_level_stride_and_source_as_well",
+        "test_a_new_dataset_never_inherits_the_old_ones_floor"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.55s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6c the floor key drops the EFFECTIVE PARAMS",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_has_cached_floor_asks_the_key_the_foreground_will_use",
+        "test_a_changed_parameter_computes_once_and_then_stays_warm"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.56s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6d the floor key drops the LEVEL and STRIDE",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_the_first_flip_to_the_other_method_adds_no_floor_work",
+        "test_coming_back_to_the_full_image_finds_its_floors_still_there"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 5.10s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M7a the floor cache budget is raised above eight",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_the_cache_never_grows_past_eight_entries",
+        "test_the_limit_is_still_eight_and_shared_rather_than_multiplied"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed, 1 passed in 2.57s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M7b each compare controller holds its own eight entries",
+      "files": [
+        "ui/step0/compare_strip.py"
+      ],
+      "gates": [
+        "test_the_three_compare_panels_borrow_the_one_floor_cache",
+        "test_compare_teardown_leaves_the_borrowed_floor_cache_alone"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 3.90s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M8 floors are prepared for the neighbouring channels as well",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_only_the_current_channel_is_given_a_floor"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 6.07s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M9 HOT uses a different bbox/tile rule for the level+1 band",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_the_prepared_fallback_band_is_the_foregrounds_own_covering_set",
+        "test_the_lookahead_ring_is_the_only_level_plus_one_work_left"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 4.88s"
+      ],
+      "restored_sha256_matches_baseline": true
+    }
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "label": "g324b1",
+  "when": "2026-09-21 05:47:51",
+  "slide": "synthetic 4096-square, 4 levels, ramp",
+  "honesty": [
+    "synthetic slide: absolute ms are a lower bound, the shape is the finding",
+    "'resident' means the corrected tiles are in the cache, not photons on a display",
+    "the corrected floor has no cache and is counted separately",
+    "the A/B is the public API: no specs provider installed = the old behaviour"
+  ],
+  "before_no_hot": {
+    "with_hot": false,
+    "level": 0,
+    "visible_tiles": 8,
+    "hot_mounted": false,
+    "hot_stats": null,
+    "after_settle_resident": {
+      "CD3/tophat": [
+        8,
+        8
+      ],
+      "CD3/cucim": [
+        0,
+        8
+      ],
+      "CD20/tophat": [
+        0,
+        8
+      ],
+      "CD20/cucim": [
+        0,
+        8
+      ]
+    },
+    "switches": [
+      {
+        "to": "cucim",
+        "round": 1,
+        "ms_until_viewport_resident": 123.0,
+        "ms_since_call": 126.22
+      },
+      {
+        "to": "tophat",
+        "round": 1,
+        "ms_until_viewport_resident": 39.85,
+        "ms_since_call": 43.41
+      },
+      {
+        "to": "cucim",
+        "round": 2,
+        "ms_until_viewport_resident": 15.79,
+        "ms_since_call": 20.11
+      },
+      {
+        "to": "tophat",
+        "round": 2,
+        "ms_until_viewport_resident": 17.89,
+        "ms_since_call": 22.19
+      },
+      {
+        "to": "cucim",
+        "round": 3,
+        "ms_until_viewport_resident": 14.61,
+        "ms_since_call": 18.33
+      },
+      {
+        "to": "tophat",
+        "round": 3,
+        "ms_until_viewport_resident": 18.09,
+        "ms_since_call": 22.1
+      }
+    ],
+    "switch_ms_median": 17.99,
+    "switch_ms_max": 123.0,
+    "deltas_over_six_switches": {
+      "provider_read_region": 13,
+      "provider_read_tile": 13,
+      "corrected_tile_computes": 32,
+      "corrected_floor_computes": 45,
+      "corrected_cache_hits": 137
+    }
+  },
+  "after_with_hot": {
+    "with_hot": true,
+    "level": 0,
+    "visible_tiles": 8,
+    "hot_mounted": true,
+    "hot_stats": {
+      "hot_batches": 2,
+      "hot_tiles_requested": 32,
+      "hot_tiles_completed": 32,
+      "hot_cancelled": 2,
+      "overviews_requested": 1,
+      "overviews_failed": 0,
+      "hot_tiles_failed": 0,
+      "settle_confirmations": 2,
+      "settle_aborted": 0,
+      "hot_abandoned_finished": 0
+    },
+    "after_settle_resident": {
+      "CD3/tophat": [
+        8,
+        8
+      ],
+      "CD3/cucim": [
+        8,
+        8
+      ],
+      "CD20/tophat": [
+        8,
+        8
+      ],
+      "CD20/cucim": [
+        8,
+        8
+      ]
+    },
+    "switches": [
+      {
+        "to": "cucim",
+        "round": 1,
+        "ms_until_viewport_resident": 86.27,
+        "ms_since_call": 90.27
+      },
+      {
+        "to": "tophat",
+        "round": 1,
+        "ms_until_viewport_resident": 46.37,
+        "ms_since_call": 50.04
+      },
+      {
+        "to": "cucim",
+        "round": 2,
+        "ms_until_viewport_resident": 14.53,
+        "ms_since_call": 18.12
+      },
+      {
+        "to": "tophat",
+        "round": 2,
+        "ms_until_viewport_resident": 17.84,
+        "ms_since_call": 21.68
+      },
+      {
+        "to": "cucim",
+        "round": 3,
+        "ms_until_viewport_resident": 13.86,
+        "ms_since_call": 18.58
+      },
+      {
+        "to": "tophat",
+        "round": 3,
+        "ms_until_viewport_resident": 17.47,
+        "ms_since_call": 21.77
+      }
+    ],
+    "switch_ms_median": 17.66,
+    "switch_ms_max": 86.27,
+    "deltas_over_six_switches": {
+      "provider_read_region": 13,
+      "provider_read_tile": 16,
+      "corrected_tile_computes": 24,
+      "corrected_floor_computes": 37,
+      "corrected_cache_hits": 144
+    }
+  }
+}

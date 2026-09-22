@@ -1,0 +1,526 @@
+{
+ "block": "G3.2b.5A.4",
+ "question": "on a real Patch creation, what display state changes FIRST, and who triggered it?",
+ "opengl": {
+  "vendor": "b'NVIDIA Corporation'",
+  "renderer": "b'NVIDIA GeForce RTX 4090/PCIe/SSE2'",
+  "version": "b'4.6.0 NVIDIA 535.309.01'"
+ },
+ "gl_layer": {
+  "size": [
+   1122,
+   637
+  ],
+  "visible": true,
+  "is_top_level": false
+ },
+ "popup_is_independent_window": true,
+ "temp_project": "/tmp/g325a4_temp_project",
+ "identity": {
+  "loader_filepath": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "page_ome_path": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "loader_shape": [
+   19480,
+   21804
+  ],
+  "overview_full_hw": [
+   19480,
+   21804
+  ],
+  "viewer_level0_shape": [
+   19480,
+   21804
+  ],
+  "viewer_source_identity": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='step1', corrected_artifact='roi=None|handoff=')",
+  "overview_downsample": 32,
+  "overview_grid": [
+   609,
+   682
+  ],
+  "same_file": true,
+  "same_shape": true
+ },
+ "thumbnail_grid": [
+  609,
+  682
+ ],
+ "window_size": [
+  1400,
+  900
+ ],
+ "firsts": [
+  {
+   "scene": "patch_1",
+   "patches_added": 1,
+   "first_change": null
+  },
+  {
+   "scene": "patch_2",
+   "patches_added": 1,
+   "first_change": null
+  },
+  {
+   "scene": "patch_3",
+   "patches_added": 1,
+   "first_change": null
+  }
+ ],
+ "temp_project_files_written": [],
+ "persistence_reached_disk": false,
+ "records": [
+  {
+   "i": 1,
+   "t_ms": 2891.045,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 2,
+   "t_ms": 2891.11,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 3,
+   "t_ms": 2893.678,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 4,
+   "t_ms": 2893.706,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 5,
+   "t_ms": 3035.229,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 6,
+   "t_ms": 3035.302,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 7,
+   "t_ms": 3040.968,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 8,
+   "t_ms": 3041.029,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 9,
+   "t_ms": 3836.095,
+   "kind": "paintGL.enter",
+   "paint_seq": 1,
+   "consumes_submit_seq": 0,
+   "widget_size": [
+    640,
+    480
+   ],
+   "fbo_target_size": null,
+   "widget_physical_size": null,
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 10,
+   "t_ms": 3836.107,
+   "kind": "paintGL.return",
+   "paint_seq": 1
+  },
+  {
+   "i": 11,
+   "t_ms": 3839.01,
+   "kind": "submit.enter",
+   "submit_seq": 1,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": null,
+   "viewport_logical": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.1602,
+    24015.1602,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 12,
+   "t_ms": 3842.288,
+   "kind": "submit.return",
+   "submit_seq": 1,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 13,
+   "t_ms": 3842.492,
+   "kind": "submit.enter",
+   "submit_seq": 2,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport_logical": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.1602,
+    24015.1602,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 14,
+   "t_ms": 3842.602,
+   "kind": "submit.return",
+   "submit_seq": 2,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 15,
+   "t_ms": 3949.523,
+   "kind": "submit.enter",
+   "submit_seq": 3,
+   "widget_size": [
+    640,
+    480
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport_logical": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.1602,
+    24015.1602,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 16,
+   "t_ms": 3949.848,
+   "kind": "submit.return",
+   "submit_seq": 3,
+   "target_size_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 17,
+   "t_ms": 4530.57,
+   "kind": "submit.enter",
+   "submit_seq": 4,
+   "widget_size": [
+    611,
+    450
+   ],
+   "target_size_before": [
+    640,
+    480
+   ],
+   "viewport_logical": [
+    611,
+    450
+   ],
+   "viewport_physical": [
+    611,
+    450
+   ],
+   "world_rect": [
+    -2467.9537,
+    24271.9537,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 18,
+   "t_ms": 4533.91,
+   "kind": "submit.return",
+   "submit_seq": 4,
+   "target_size_after": [
+    611,
+    450
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 19,
+   "t_ms": 4535.061,
+   "kind": "resizeGL",
+   "w": 611,
+   "h": 450,
+   "target_size": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 20,
+   "t_ms": 4547.514,
+   "kind": "resizeGL",
+   "w": 1123,
+   "h": 637,
+   "target_size": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 21,
+   "t_ms": 4556.249,
+   "kind": "resizeGL",
+   "w": 1122,
+   "h": 637,
+   "target_size": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 22,
+   "t_ms": 4556.372,
+   "kind": "paintGL.enter",
+   "paint_seq": 2,
+   "consumes_submit_seq": 4,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    611,
+    450
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 23,
+   "t_ms": 4569.347,
+   "kind": "paintGL.enter",
+   "paint_seq": 3,
+   "consumes_submit_seq": 4,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    611,
+    450
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 24,
+   "t_ms": 4579.254,
+   "kind": "submit.enter",
+   "submit_seq": 5,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "target_size_before": [
+    611,
+    450
+   ],
+   "viewport_logical": [
+    1122,
+    637
+   ],
+   "viewport_physical": [
+    1122,
+    637
+   ],
+   "world_rect": [
+    -6469.5024,
+    28273.5024,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 25,
+   "t_ms": 4581.212,
+   "kind": "submit.return",
+   "submit_seq": 5,
+   "target_size_after": [
+    1122,
+    637
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 26,
+   "t_ms": 4581.494,
+   "kind": "paintGL.enter",
+   "paint_seq": 4,
+   "consumes_submit_seq": 5,
+   "widget_size": [
+    1122,
+    637
+   ],
+   "fbo_target_size": [
+    1122,
+    637
+   ],
+   "widget_physical_size": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 27,
+   "t_ms": 4583.021,
+   "kind": "paintGL.return",
+   "paint_seq": 4
+  },
+  {
+   "i": 28,
+   "t_ms": 10247.305,
+   "kind": "scene.patch_1.start"
+  },
+  {
+   "i": 29,
+   "t_ms": 10429.511,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 30,
+   "t_ms": 10431.821,
+   "kind": "step0._persist_submit.enter"
+  },
+  {
+   "i": 31,
+   "t_ms": 10432.457,
+   "kind": "step0._persist_submit.return"
+  },
+  {
+   "i": 32,
+   "t_ms": 10432.469,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 33,
+   "t_ms": 38159.472,
+   "kind": "scene.patch_1.end",
+   "patches_added": 1
+  },
+  {
+   "i": 34,
+   "t_ms": 38159.504,
+   "kind": "scene.patch_2.start"
+  },
+  {
+   "i": 35,
+   "t_ms": 38341.304,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 36,
+   "t_ms": 38344.643,
+   "kind": "step0._persist_submit.enter"
+  },
+  {
+   "i": 37,
+   "t_ms": 38344.849,
+   "kind": "step0._persist_submit.return"
+  },
+  {
+   "i": 38,
+   "t_ms": 38344.856,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 39,
+   "t_ms": 66072.957,
+   "kind": "scene.patch_2.end",
+   "patches_added": 1
+  },
+  {
+   "i": 40,
+   "t_ms": 66072.976,
+   "kind": "scene.patch_3.start"
+  },
+  {
+   "i": 41,
+   "t_ms": 66254.601,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 42,
+   "t_ms": 66258.821,
+   "kind": "step0._persist_submit.enter"
+  },
+  {
+   "i": 43,
+   "t_ms": 66258.977,
+   "kind": "step0._persist_submit.return"
+  },
+  {
+   "i": 44,
+   "t_ms": 66258.984,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 45,
+   "t_ms": 93984.162,
+   "kind": "scene.patch_3.end",
+   "patches_added": 1
+  }
+ ],
+ "honesty": [
+  "the FBO/widget size mismatch proved in 5A.3 is a SEPARATE finding; its relevance to this wobble is not established and it is not treated as a cause here",
+  "co-occurrence in time is a lead, not a proof of causation",
+  "every wrapper calls the real function and returns its real result"
+ ]
+}

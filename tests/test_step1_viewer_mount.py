@@ -189,7 +189,11 @@ def _mount(app, decisions=None, windows=CHANNELS, corrected_path=""):
     window = _Window(state, domain, decisions=decisions,
                      corrected_path=corrected_path or "/tmp/c4-none.zarr")
     host = Step1ViewerHost(stack_factory=_stack_factory(raws))
-    mount = Step1WholeSlideMount(window, host=host)
+    # THE CPU COMPOSITION IS THE ROLLBACK PATH NOW (G3): the product mount
+    # prefers the GPU backend, so this suite -- the C4 gates for the CPU
+    # whole-slide composition -- asks for that path explicitly. The GPU
+    # backend has its own gates in `tests/test_step1_gpu_takeover.py`.
+    mount = Step1WholeSlideMount(window, host=host, gpu=False)
     mount.open("CD3")
     _settle(app)
     return SimpleNamespace(mount=mount, window=window, state=state,

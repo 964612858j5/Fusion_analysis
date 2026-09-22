@@ -1,0 +1,77 @@
+{
+  "label": "after-fix",
+  "notes": [
+    "grabFramebuffer forces a render; the two pixel oracles are marked",
+    "paint events are a Qt presentation signal, not photon latency"
+  ],
+  "backend": "gpu",
+  "renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+  "patch_return": {
+    "return_to_A": {
+      "scheduler_requests": 4,
+      "provider_reads": 0,
+      "raw_uploads": 0,
+      "gpu_submits_inside_the_call": 1,
+      "gpu_submits_total": 1
+    },
+    "when_show_patch_returned": {
+      "target_tiles_on_screen_when_the_call_returned": 4,
+      "target_tiles_wanted": 4
+    },
+    "natural_paints": 1,
+    "first_natural_paint": {
+      "target_tiles_on_screen": 4,
+      "target_tiles_wanted": 4,
+      "complete": true,
+      "submits_so_far": 13
+    },
+    "paint_trail": [
+      {
+        "target_tiles_on_screen": 4,
+        "target_tiles_wanted": 4,
+        "complete": true,
+        "submits_so_far": 13
+      }
+    ],
+    "coarse_only_or_partial_paints": 0,
+    "final_frame_matches_before_leaving_A": true,
+    "final_frame_note": "FORCED grabFramebuffer, twice, as the pixel oracle"
+  },
+  "before_fix": {
+    "return_to_A": {
+      "scheduler_requests": 4,
+      "provider_reads": 0,
+      "raw_uploads": 0,
+      "gpu_submits_inside_the_call": 1,
+      "gpu_submits_total": 5
+    },
+    "when_show_patch_returned": {
+      "target_tiles_on_screen_when_the_call_returned": 0,
+      "target_tiles_wanted": 4
+    },
+    "natural_paints": 2,
+    "first_natural_paint": {
+      "target_tiles_on_screen": 0,
+      "target_tiles_wanted": 4,
+      "complete": false,
+      "submits_so_far": 23
+    },
+    "paint_trail": [
+      {
+        "target_tiles_on_screen": 0,
+        "target_tiles_wanted": 4,
+        "complete": false,
+        "submits_so_far": 23
+      },
+      {
+        "target_tiles_on_screen": 4,
+        "target_tiles_wanted": 4,
+        "complete": true,
+        "submits_so_far": 27
+      }
+    ],
+    "coarse_only_or_partial_paints": 1,
+    "final_frame_matches_before_leaving_A": true,
+    "final_frame_note": "FORCED grabFramebuffer, twice, as the pixel oracle"
+  }
+}

@@ -1,0 +1,175 @@
+{
+  "label": "g324b1-real",
+  "when": "2026-09-21 05:48:51",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "mode": "real",
+  "honesty": [
+    "synthetic slide: absolute ms are a lower bound, the shape is the finding",
+    "'resident' means the corrected tiles are in the cache, not photons on a display",
+    "the corrected floor has no cache and is counted separately",
+    "the A/B is the public API: no specs provider installed = the old behaviour"
+  ],
+  "before_no_hot": {
+    "with_hot": false,
+    "level": 0,
+    "visible_tiles": 35,
+    "hot_mounted": false,
+    "hot_stats": null,
+    "channels": [
+      "CD22",
+      "CD4"
+    ],
+    "after_settle_resident": {
+      "CD22/tophat": [
+        35,
+        35
+      ],
+      "CD22/cucim": [
+        0,
+        35
+      ],
+      "CD4/tophat": [
+        0,
+        35
+      ],
+      "CD4/cucim": [
+        0,
+        35
+      ]
+    },
+    "switches": [
+      {
+        "to": "cucim",
+        "round": 1,
+        "ms_until_viewport_resident": 434.5,
+        "ms_since_call": 441.4
+      },
+      {
+        "to": "tophat",
+        "round": 1,
+        "ms_until_viewport_resident": 77.85,
+        "ms_since_call": 90.35
+      },
+      {
+        "to": "cucim",
+        "round": 2,
+        "ms_until_viewport_resident": 44.54,
+        "ms_since_call": 54.41
+      },
+      {
+        "to": "tophat",
+        "round": 2,
+        "ms_until_viewport_resident": 59.37,
+        "ms_since_call": 69.34
+      },
+      {
+        "to": "cucim",
+        "round": 3,
+        "ms_until_viewport_resident": 51.98,
+        "ms_since_call": 61.66
+      },
+      {
+        "to": "tophat",
+        "round": 3,
+        "ms_until_viewport_resident": 34.07,
+        "ms_since_call": 41.78
+      }
+    ],
+    "switch_ms_median": 55.67,
+    "switch_ms_max": 434.5,
+    "deltas_over_six_switches": {
+      "provider_read_region": 0,
+      "provider_read_tile": 0,
+      "corrected_tile_computes": 67,
+      "corrected_floor_computes": 80,
+      "corrected_cache_hits": 742
+    }
+  },
+  "after_with_hot": {
+    "with_hot": true,
+    "level": 0,
+    "visible_tiles": 35,
+    "hot_mounted": true,
+    "hot_stats": {
+      "hot_batches": 2,
+      "hot_tiles_requested": 148,
+      "hot_tiles_completed": 146,
+      "hot_cancelled": 28,
+      "overviews_requested": 1,
+      "overviews_failed": 0,
+      "hot_tiles_failed": 0,
+      "settle_confirmations": 2,
+      "settle_aborted": 0,
+      "hot_abandoned_finished": 2
+    },
+    "channels": [
+      "CD22",
+      "CD4"
+    ],
+    "after_settle_resident": {
+      "CD22/tophat": [
+        35,
+        35
+      ],
+      "CD22/cucim": [
+        35,
+        35
+      ],
+      "CD4/tophat": [
+        35,
+        35
+      ],
+      "CD4/cucim": [
+        35,
+        35
+      ]
+    },
+    "switches": [
+      {
+        "to": "cucim",
+        "round": 1,
+        "ms_until_viewport_resident": 103.94,
+        "ms_since_call": 113.35
+      },
+      {
+        "to": "tophat",
+        "round": 1,
+        "ms_until_viewport_resident": 97.8,
+        "ms_since_call": 107.41
+      },
+      {
+        "to": "cucim",
+        "round": 2,
+        "ms_until_viewport_resident": 52.35,
+        "ms_since_call": 61.77
+      },
+      {
+        "to": "tophat",
+        "round": 2,
+        "ms_until_viewport_resident": 55.54,
+        "ms_since_call": 65.6
+      },
+      {
+        "to": "cucim",
+        "round": 3,
+        "ms_until_viewport_resident": 27.17,
+        "ms_since_call": 33.24
+      },
+      {
+        "to": "tophat",
+        "round": 3,
+        "ms_until_viewport_resident": 55.27,
+        "ms_since_call": 65.73
+      }
+    ],
+    "switch_ms_median": 55.41,
+    "switch_ms_max": 103.94,
+    "deltas_over_six_switches": {
+      "provider_read_region": 0,
+      "provider_read_tile": 0,
+      "corrected_tile_computes": 32,
+      "corrected_floor_computes": 45,
+      "corrected_cache_hits": 484
+    }
+  }
+}

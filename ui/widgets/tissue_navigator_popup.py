@@ -112,8 +112,99 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         self._empty_hint.setStyleSheet("color:#888;font-size:10px;")
         outer.addWidget(self._empty_hint)
 
+        self._install_overview_status_policy()
         self._refresh_bar_text()
         self._update_empty_state()
+
+    # ── the overview's status line, in THIS popup ─────────────────────
+    def _install_overview_status_policy(self):
+        """Give the canvas back the row the success line was sitting on.
+
+        `OverviewPanel.status` is a real QLabel in the panel's layout, not an
+        overlay, so the row it occupies is not part of the canvas: a click
+        there never reaches `gview.viewport()` and no `navigate_requested`
+        comes out of it. In the popup that row is pure metadata -- "Full
+        image WxH px | Overview wxh px (t)" -- and it costs the user a whole
+        strip of the tissue they are trying to click on.
+
+        THIS POPUP'S OWN LABEL, NOT THE CLASS. The panel is shared with
+        Step0's page, where that line is wanted and stays exactly as it is.
+        Nothing here changes what the panel writes or when: only whether
+        this one instance's label is shown, and hiding it releases its
+        layout height because the label keeps the default size policy.
+
+        The hook is the label's own `setText`, wrapped on the instance.
+        QLabel has no text-changed signal, and the parent's LayoutRequest is
+        only posted when the size hint actually moves, so neither is a
+        reliable place to notice every message the panel writes.
+        """
+        label = getattr(self._overview, "status", None)
+        if label is None:
+            return False
+        original = label.setText
+
+        def set_text(text, _original=original):
+            _original(text)
+            self._apply_overview_status_policy()
+
+        label.setText = set_text
+        self._apply_overview_status_policy()
+        return True
+
+    @staticmethod
+    def _is_overview_metadata(text):
+        """Is this the success line, and nothing the user needs to read?
+
+        Matched on the message the panel actually writes, with its spacing
+        normalised -- not on colour, font or a flag somebody has to keep in
+        step with it.
+        """
+        collapsed = " ".join(str(text or "").split())
+        return collapsed.startswith("Full image ") and "| Overview " in collapsed
+
+    def _apply_overview_status_policy(self):
+        """Hide the rows this popup duplicates; show anything to be read.
+
+        TWO ROWS SIT BETWEEN THE CANVAS AND THE USER'S CLICK, not one.
+        Hiding the success line alone just lets the info row underneath move
+        up into the strip it freed -- and that row keeps its height even
+        when its text is empty, so the band next to the bottom of the
+        tissue is still not canvas and a click there still reaches no
+        viewport. Both are handled here, and both give their height back
+        because they keep the default size policy.
+        """
+        panel = self._overview
+        label = getattr(panel, "status", None)
+        if label is None:
+            return None
+        metadata = self._is_overview_metadata(label.text())
+        label.setVisible(not metadata)
+        # NOT KEPT ANYWHERE. An earlier revision moved the hidden success
+        # line into the canvas's tooltip, reasoning that a reader could
+        # still find it without adding a visible surface. A tooltip IS a
+        # surface: resting the pointer anywhere on the tissue popped up
+        # "Full image … | Overview …" a moment later, over the picture the
+        # user is trying to aim at. The user asked for it to go (2026-09-22),
+        # so it is cleared here rather than relocated -- no status tip, no
+        # "what's this", no second entry point of any kind.
+        #
+        # Unconditionally, and on the viewport too: the tooltip Qt shows for
+        # a QGraphicsView comes from whichever of the two the pointer is
+        # actually over, so clearing only the view would leave a stale one
+        # behind on the widget that receives the hover.
+        panel.gview.setToolTip("")
+        viewport = panel.gview.viewport()
+        if viewport is not None:
+            viewport.setToolTip("")
+        # THE INFO ROW is the same ROI/patch summary this popup's own
+        # ROI/Patch lists already show. It is dropped only while those lists
+        # are mounted here; a bare popup keeps it, and Step0's page -- which
+        # has no such lists and is a different panel instance -- is
+        # untouched either way.
+        info = getattr(panel, "_info_lbl", None)
+        if info is not None:
+            info.setVisible(self._roi_lists is None)
+        return metadata
 
     def set_region_selector(self, widget):
         """Host the analysis-region selector (ROI vs Full WSI) at the top.
@@ -158,6 +249,9 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
         idx = (idx + 1) if idx >= 0 else self._outer.count()
         self._outer.insertWidget(idx, widget, 2)     # ~2/5 (1/5 per list inside)
         widget.setVisible(True)
+        # These lists say what the panel's own info row says, so that row is
+        # now a duplicate sitting between the canvas and the user's click.
+        self._apply_overview_status_policy()
 
     # ── reused overview / ROI adapter (no forked ROI logic) ──────────────
     @property

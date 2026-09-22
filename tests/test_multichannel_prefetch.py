@@ -760,6 +760,15 @@ def test_hot_request_sequence_matches_the_pre_extraction_golden(app):
     the channel, method, level-scaled params, tile, priority, generation
     and stale-notification flag of every request HOT issues after a settle,
     in order, for three different centres, plus HOT's own stats.
+
+    THE GENERATION IS COMPARED BY PATTERN, NOT BY VALUE. The scheduler's own
+    contract says a generation token is OPAQUE, and HOT now namespaces its
+    token per instance (`("hot", n)`) because a plain per-instance integer
+    let a re-mounted coordinator issue under a token the scheduler had
+    already cancelled. What this golden is guarding is the SHAPE -- every
+    request of one batch under ONE token, and that token being the one
+    cancelled -- so both sides are rewritten to "the Nth distinct token
+    seen" before they are compared. The recording itself is untouched.
     """
     import json
     import pathlib
@@ -767,6 +776,17 @@ def test_hot_request_sequence_matches_the_pre_extraction_golden(app):
     golden_path = (pathlib.Path(__file__).parent / "data"
                    / "hot_request_sequence_golden.json")
     golden = json.loads(golden_path.read_text())
+
+    def by_pattern(requests, cancels):
+        order = {}
+
+        def index(token):
+            key = tuple(token) if isinstance(token, list) else token
+            return order.setdefault(key, len(order))
+
+        return ([{**r, "generation": index(r["generation"])}
+                 for r in requests],
+                [index(c) for c in cancels])
 
     for centre, expected in sorted(golden.items()):
         controller, scheduler, hot = _make()
@@ -790,9 +810,13 @@ def test_hot_request_sequence_matches_the_pre_extraction_golden(app):
                 "notify_stale": r["request"].notify_on_stale_completion,
             } for r in scheduler.requests]
 
-            assert actual == expected["requests"], (
+            actual_requests, actual_cancels = by_pattern(
+                actual, scheduler.cancelled_generations)
+            expected_requests, expected_cancels = by_pattern(
+                expected["requests"], expected["cancels"])
+            assert actual_requests == expected_requests, (
                 f"HOT's request sequence changed for centre {centre}")
-            assert scheduler.cancelled_generations == expected["cancels"]
+            assert actual_cancels == expected_cancels
             assert {k: v for k, v in hot.stats.items()} == expected["stats"]
         finally:
             hot.stop()

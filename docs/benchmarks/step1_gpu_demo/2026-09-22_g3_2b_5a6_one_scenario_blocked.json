@@ -1,0 +1,490 @@
+{
+ "block": "G3.2b.5A.6",
+ "blocked": "popup thumbnail never loaded",
+ "records": [
+  {
+   "i": 1,
+   "t_ms": 2374.826,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.rebind_source"
+  },
+  {
+   "i": 2,
+   "t_ms": 2374.843,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount._rebind_source"
+  },
+  {
+   "i": 3,
+   "t_ms": 2374.846,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.set_source"
+  },
+  {
+   "i": 4,
+   "t_ms": 2374.848,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount._rebuild_source"
+  },
+  {
+   "i": 5,
+   "t_ms": 2374.85,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.refresh_source"
+  },
+  {
+   "i": 6,
+   "t_ms": 2907.121,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 7,
+   "t_ms": 2907.182,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 8,
+   "t_ms": 2907.223,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 9,
+   "t_ms": 2907.227,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 10,
+   "t_ms": 2909.76,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 11,
+   "t_ms": 2909.789,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 12,
+   "t_ms": 2909.901,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 13,
+   "t_ms": 2909.907,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 14,
+   "t_ms": 3061.436,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 15,
+   "t_ms": 3061.517,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 16,
+   "t_ms": 3061.631,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 17,
+   "t_ms": 3061.639,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 18,
+   "t_ms": 3067.458,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 19,
+   "t_ms": 3067.527,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 20,
+   "t_ms": 3810.744,
+   "kind": "paintGL.enter",
+   "n": 1,
+   "consumes_submit": 0,
+   "widget": [
+    640,
+    480
+   ],
+   "fbo": null,
+   "widget_physical": null,
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 21,
+   "t_ms": 3810.776,
+   "kind": "paintGL.return",
+   "n": 1
+  },
+  {
+   "i": 22,
+   "t_ms": 3814.406,
+   "kind": "submit.enter",
+   "n": 1,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": null,
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 23,
+   "t_ms": 3818.15,
+   "kind": "submit.return",
+   "n": 1,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 24,
+   "t_ms": 3818.363,
+   "kind": "submit.enter",
+   "n": 2,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 25,
+   "t_ms": 3818.465,
+   "kind": "submit.return",
+   "n": 2,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 26,
+   "t_ms": 3928.877,
+   "kind": "main._save_step1_session.enter"
+  },
+  {
+   "i": 27,
+   "t_ms": 3930.511,
+   "kind": "main._save_step1_session.return"
+  },
+  {
+   "i": 28,
+   "t_ms": 3930.774,
+   "kind": "submit.enter",
+   "n": 3,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 29,
+   "t_ms": 3931.063,
+   "kind": "submit.return",
+   "n": 3,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 30,
+   "t_ms": 4511.947,
+   "kind": "submit.enter",
+   "n": 4,
+   "widget": [
+    611,
+    450
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    611,
+    450
+   ],
+   "world_rect": [
+    -2467.954,
+    24271.954,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 31,
+   "t_ms": 4515.095,
+   "kind": "submit.return",
+   "n": 4,
+   "target_after": [
+    611,
+    450
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 32,
+   "t_ms": 4516.239,
+   "kind": "resizeGL",
+   "w": 611,
+   "h": 450,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 33,
+   "t_ms": 4539.015,
+   "kind": "resizeGL",
+   "w": 1123,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 34,
+   "t_ms": 4548.835,
+   "kind": "resizeGL",
+   "w": 1122,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 35,
+   "t_ms": 4548.94,
+   "kind": "paintGL.enter",
+   "n": 2,
+   "consumes_submit": 4,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    611,
+    450
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 36,
+   "t_ms": 4562.08,
+   "kind": "paintGL.enter",
+   "n": 3,
+   "consumes_submit": 4,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    611,
+    450
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 37,
+   "t_ms": 4571.9,
+   "kind": "submit.enter",
+   "n": 5,
+   "widget": [
+    1122,
+    637
+   ],
+   "target_before": [
+    611,
+    450
+   ],
+   "viewport_physical": [
+    1122,
+    637
+   ],
+   "world_rect": [
+    -6469.502,
+    28273.502,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 38,
+   "t_ms": 4573.801,
+   "kind": "submit.return",
+   "n": 5,
+   "target_after": [
+    1122,
+    637
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 39,
+   "t_ms": 4574.025,
+   "kind": "paintGL.enter",
+   "n": 4,
+   "consumes_submit": 5,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    1122,
+    637
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 40,
+   "t_ms": 4575.54,
+   "kind": "paintGL.return",
+   "n": 4
+  },
+  {
+   "i": 41,
+   "t_ms": 5775.442,
+   "kind": "project.published",
+   "files": [
+    "corrected_channels.zarr",
+    "correction_config.json",
+    "patch_config.json",
+    "roi_config.json",
+    "step0_roi_result.json"
+   ]
+  },
+  {
+   "i": 42,
+   "t_ms": 5775.456,
+   "kind": "nucleus.before",
+   "page": "DAPI",
+   "overview": "DAPI"
+  },
+  {
+   "i": 43,
+   "t_ms": 5775.459,
+   "kind": "nucleus.after",
+   "page": "DAPI",
+   "overview": "DAPI",
+   "loader_shape": [
+    19480,
+    21804
+   ]
+  },
+  {
+   "i": 44,
+   "t_ms": 5781.871,
+   "kind": "step0.furnish_navigator.enter"
+  },
+  {
+   "i": 45,
+   "t_ms": 5792.128,
+   "kind": "step0.furnish_navigator.return"
+  },
+  {
+   "i": 46,
+   "t_ms": 6594.359,
+   "kind": "popup.furnished",
+   "patches_changed_receivers": 1,
+   "is_window": true
+  },
+  {
+   "i": 47,
+   "t_ms": 156602.336,
+   "kind": "BLOCKED.no_thumbnail",
+   "status": "Overview load failed: \"Channel '' not found\"",
+   "page_nucleus": "DAPI",
+   "page_overview_nuc": "DAPI",
+   "popup_overview_nuc": "",
+   "page_loader": "<block01.core.io_loader.OMETIFFLoader object at 0x7a2e51f5e710>",
+   "page_loader_shape": [
+    19480,
+    21804
+   ],
+   "page_loader_channels": [
+    "DAPI",
+    "TOX",
+    "TIM3",
+    "CD22",
+    "CD31",
+    "CD68"
+   ],
+   "bench_loader_shape": [
+    19480,
+    21804
+   ],
+   "popup_loader": "<block01.core.io_loader.OMETIFFLoader object at 0x7a2e51f5e710>",
+   "popup_loader_shape": [
+    19480,
+    21804
+   ]
+  }
+ ]
+}

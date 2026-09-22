@@ -325,6 +325,12 @@ def _wait_until(app, predicate, *, timeout=20.0):
         time.sleep(0.005)
 
 
+def _fine_requests(scheduler, channel, since=0):
+    """The binding's fine requests for one channel (anything not coarse)."""
+    return [request for request in scheduler.requests[since:]
+            if request.key.channel == channel and request.priority != PRIORITY_COARSE]
+
+
 def _coarse_requests(scheduler, channel):
     return [request for request in scheduler.requests if request.key.channel == channel and request.priority == 100]
 
@@ -418,10 +424,19 @@ def test_atomic_complete_coarse_uses_public_rawkeys_and_geometry(app):
             assert not any(any(source.channel == "A" for source in call[0].channels) for call in layer.calls)
         scheduler.deliver(requests[-1].key, array=np.full((4, 4), 0.2, np.float32))
         _events(app)
+        # G3.2b: the complete coarse is in, but this channel has never been
+        # drawn and its current viewport's fine is still on its way, so it
+        # is held back rather than shown blurry and then sharpened.
+        assert not any(any(source.channel == "A" for source in call[0].channels)
+                       for call in layer.calls)
+        fine = _fine_requests(scheduler, "A")
+        assert fine, "the viewport's fine must have been asked for"
+        _deliver_all(app, scheduler, fine, value=np.full((4, 4), 0.5, np.float32))
         published = [call[0] for call in layer.calls if any(source.channel == "A" for source in call[0].channels)]
-        assert len(published) == 1
+        assert len(published) == 1, "the channel must appear exactly once"
         a = next(source for source in published[0].channels if source.channel == "A")
-        assert len(a.coarse) == 4 and not a.fine and a.selected_level == "coarse"
+        assert len(a.coarse) == 4 and a.fine and a.selected_level == "fine", \
+            "the first appearance must already carry the viewport's fine"
         assert {plane.identity for plane in a.coarse} == {request.key for request in requests}
         assert {plane.world_rect for plane in a.coarse} == {
             (0.0, 4.0, 0.0, 4.0), (4.0, 8.0, 0.0, 4.0),
@@ -486,6 +501,10 @@ def test_late_source_and_old_viewport_results_cannot_publish(app):
         _deliver_all(app, scheduler, old_requests, value=np.full((4, 4), 0.9, np.float32))
         assert binding.stats()["rejected_late_results"] >= len(old_requests)
         _deliver_all(app, scheduler, new_requests, value=np.full((4, 4), 0.2, np.float32))
+        # G3.2b: a first appearance also waits for its viewport fine.
+        for channel in ("A", "B"):
+            _deliver_all(app, scheduler, _fine_requests(scheduler, channel),
+                         value=np.full((4, 4), 0.2, np.float32))
         latest = next(call[0] for call in reversed(layer.calls) if call[0].channels)
         assert all(plane.identity.source == provider.source_identity()
                    for source in latest.channels for plane in source.coarse)
@@ -513,20 +532,30 @@ def test_fine_is_immediate_atomic_and_retains_complete_coarse(app):
     try:
         binding.source_changed()
         _deliver_all(app, scheduler, list(scheduler.requests), value=np.full((4, 4), 0.2, np.float32))
-        controller.set_snapshot(visible_tiles=((0, 0),), epoch=2)
+        # G3.2b: both channels appear only once their viewport fine is in.
+        for channel in ("A", "B"):
+            _deliver_all(app, scheduler, _fine_requests(scheduler, channel),
+                         value=np.full((4, 4), 0.2, np.float32))
+        assert binding.stats()["fine_channels"] == ("A", "B")
+        # Jump to a tile whose fine is NOT already in hand, or there is
+        # nothing for the jump to ask for.
+        controller.set_snapshot(visible_tiles=((1, 0),), epoch=2)
         request_before_jump = len(scheduler.requests)
         controller.interaction_event.emit("NAVIGATOR_JUMP", controller.snapshot())
         _events(app)
         fine = [request for request in scheduler.requests[request_before_jump:] if request.priority == 0]
         assert fine, "jump must request visible fine before gesture_quiet"
-        # A alone may commit fine while B remains complete coarse.
+        # A alone may commit a SHARPER fine while B keeps what it has: a
+        # channel already on screen is never held back.
         a_fine = [request for request in fine if request.key.channel == "A"]
         _deliver_all(app, scheduler, a_fine, value=np.full((4, 4), 0.9, np.float32))
         latest = next(call[0] for call in reversed(layer.calls) if call[0].channels)
         a = next(source for source in latest.channels if source.channel == "A")
         b = next(source for source in latest.channels if source.channel == "B")
-        assert a.selected_level == "fine" and len(a.fine) == 1
-        assert b.selected_level == "coarse" and len(b.coarse) == 4
+        assert a.selected_level == "fine"
+        assert any(np.allclose(np.asarray(plane.values), 0.9) for plane in a.fine), \
+            "the jump's own sharper tile is on screen"
+        assert len(b.coarse) == 4, "B keeps its complete coarse"
     finally:
         binding.dispose()
 
@@ -556,16 +585,29 @@ def test_hardware_fbo_full_coarse_then_local_fine_and_roi_alpha(app):
                 value[0, 0] = np.nan
             scheduler.deliver(request.key, array=value)
         _events(app)
+        # G3.2b: a first appearance also waits for its viewport fine. The
+        # fine has to repeat the coarse's holes, or it would fill them in.
+        for channel in ("A", "B"):
+            for request in _fine_requests(scheduler, channel):
+                value = np.full((4, 4), 0.2 if channel == "A" else 0.3, np.float32)
+                if channel == "A" and request.key.tile.tx == 0 and request.key.tile.ty == 0:
+                    value[0, 0] = np.nan
+                scheduler.deliver_request(request, array=value)
+        _events(app)
         coarse = layer.readback_rgba_for_test()
         assert np.all(coarse[..., 3][1:, 1:] == 255)
         assert coarse[0, 0, 3] == 255  # B makes the A-invalid corner valid.
-        controller.set_snapshot(visible_tiles=((0, 0),), epoch=2)
+        # Sharpen a tile whose fine is NOT already in hand: tile (1, 1) at
+        # level 0 covers world 4..8, which is pixel (5, 5) of this readback.
+        controller.set_snapshot(visible_tiles=((1, 1),), epoch=2)
         before_fine = len(scheduler.requests)
         binding.update_viewport(controller.snapshot())
-        fine = [request for request in scheduler.requests[before_fine:] if request.priority == 0 and request.key.channel == "A"]
+        fine = [request for request in scheduler.requests[before_fine:]
+                if request.priority == 0 and request.key.channel == "A"]
+        assert fine, "the new viewport tile must be asked for"
         _deliver_all(app, scheduler, fine, value=np.full((4, 4), 0.9, np.float32))
         refined = layer.readback_rgba_for_test()
-        assert refined[1, 1, 0] > coarse[1, 1, 0]
+        assert refined[5, 5, 0] > coarse[5, 5, 0]
         assert refined[6, 6, 1] == coarse[6, 6, 1]  # B coarse survives A fine.
         assert layer.environment_report()["software_renderer"] is False
     finally:
@@ -645,7 +687,10 @@ def test_new_channel_complete_coarse_is_not_starved_by_continuous_pan_fine(app):
         pending_after_first_sweep = scheduler.activity_snapshot()["total"]
         pan_sweep(3 + 12)
         assert scheduler.activity_snapshot()["total"] == pending_after_first_sweep
-        assert pending_after_first_sweep <= 9 + 7   # 9 B coarse + 7 distinct fine tiles
+        # 9 B coarse + the distinct fine tiles of BOTH channels: since
+        # G3.2b a channel's viewport fine is asked for while its coarse is
+        # still loading, so B contributes fine keys here too.
+        assert pending_after_first_sweep <= 9 + 7 + 7
 
         issued = scheduler.public_requests[request_marker:]
         fine_issued = [request for request in issued if request.priority != PRIORITY_COARSE]
@@ -734,6 +779,18 @@ def test_hardware_fbo_partial_coarse_never_shows_a_centre_first_channel(app):
                 values[0:2, 2:4] = 0.0      # world x 4..8: valid, but dark
             scheduler.deliver(request.key, array=values)
         _events(app)
+        # G3.2b: a first appearance also waits for its viewport fine. The
+        # fine is a LEVEL-0 tile, a quarter of the coarse one, so the holes
+        # are whole tiles here: (0,0) is the no-pixel corner and (1,0) is
+        # the valid-but-dark block the coarse marked.
+        for request in _fine_requests(scheduler, "A"):
+            values = coarse_values("A")
+            if request.key.tile.ty == 0 and request.key.tile.tx == 0:
+                values[:] = np.nan
+            elif request.key.tile.ty == 0 and request.key.tile.tx == 1:
+                values[:] = 0.0
+            scheduler.deliver_request(request, array=values)
+        _events(app)
         baseline = layer.readback_rgba_for_test()
         assert baseline.shape == (24, 24, 4)
         assert np.all(baseline[0:4, 0:4, 3] == 0), "outside the ROI alpha stays 0"
@@ -747,7 +804,8 @@ def test_hardware_fbo_partial_coarse_never_shows_a_centre_first_channel(app):
         before_b = len(scheduler.requests)
         binding.refresh_display()
         b_requests = [request for request in scheduler.requests[before_b:]
-                      if request.key.channel == "B"]
+                      if request.key.channel == "B"
+                      and request.priority == PRIORITY_COARSE]
         assert len(b_requests) == 9
         by_address = {(request.key.tile.tx, request.key.tile.ty): request
                       for request in b_requests}
@@ -784,6 +842,17 @@ def test_hardware_fbo_partial_coarse_never_shows_a_centre_first_channel(app):
         last = by_address[order[-1]]
         scheduler.deliver(last.key, array=coarse_values("B"))
         _events(app)
+        # G3.2b: the complete coarse is in, but B has never been drawn, so
+        # it waits for its viewport fine too and the picture is STILL the
+        # A-only baseline -- no blurry B, not even for one frame.
+        held = layer.readback_rgba_for_test()
+        assert np.array_equal(held, baseline), \
+            "B appeared before its viewport fine was ready"
+        b_fine = [request for request in scheduler.requests[before_b:]
+                  if request.key.channel == "B"
+                  and request.priority != PRIORITY_COARSE]
+        assert b_fine, "B's viewport fine must have been asked for"
+        _deliver_all(app, scheduler, b_fine, value=coarse_values("B"))
         complete = layer.readback_rgba_for_test()
         assert binding.coarse_pending_channels() == ()
         assert not np.array_equal(complete, baseline)
@@ -814,3 +883,426 @@ def test_hardware_fbo_partial_coarse_never_shows_a_centre_first_channel(app):
         binding.dispose()
         layer.dispose()
         layer.close()
+
+
+def test_results_from_a_superseded_binding_revision_are_refused(app):
+    """A rebind that lands on the SAME source still refuses the old round.
+
+    The tile keys are identical across the rebind, so nothing but the
+    binding's own revision and generation can tell the two rounds apart.
+    """
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0),))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, _ = _binding(provider, scheduler, controller, layer,
+                          display=_display(("A",)))
+    try:
+        binding.source_changed()
+        first = list(scheduler.requests)
+        assert first
+        binding.source_changed()
+        second = scheduler.requests[len(first):]
+        assert {request.key for request in second} == {request.key for request in first}
+        before = binding.stats()["rejected_late_results"]
+
+        _deliver_all(app, scheduler, first, value=np.full((4, 4), 0.9, np.float32))
+        assert binding.stats()["rejected_late_results"] >= before + len(first)
+        assert binding.stats()["coarse_channels"] == (), \
+            "a superseded revision's tiles reached the picture"
+        assert not any(call[0].channels for call in layer.calls)
+
+        _deliver_all(app, scheduler, second, value=np.full((4, 4), 0.2, np.float32))
+        assert binding.stats()["coarse_channels"] == ("A",)
+    finally:
+        binding.dispose()
+
+
+def _fine_budgets(fine_bytes):
+    return BindingBudgets(64, 1_000_000, 64, fine_bytes, motion_interval_ms=1)
+
+
+def _settle_coarse(app, scheduler, binding):
+    _deliver_all(app, scheduler, list(scheduler.requests),
+                 value=np.full((4, 4), 0.2, np.float32))
+    assert binding.stats()["coarse_channels"] == ("A",)
+
+
+def test_a_carried_layer_never_pushes_the_current_target_out_of_budget(app):
+    """G3.2a.1: the target level is reserved BEFORE any stand-in is kept.
+
+    A layer carried across a zoom is only a stand-in until the target
+    arrives.  If it were allowed to eat the budget first, the target could
+    be refused for good and the viewport would sit on the stand-in -- which
+    is exactly the "some zoom levels stay blurry" report.
+    """
+    provider = _Provider(level_shape=(8, 8), levels=2)     # L1 2x2, L0 4x4
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0),
+                                                      (0, 1), (1, 1)), level=1)
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    tile_bytes = 4 * 4 * 4
+    # Room for the six-tile target set and ONE stand-in, and no more.
+    binding, _ = _binding(provider, scheduler, controller, layer,
+                          display=_display(("A",)),
+                          budgets=_fine_budgets(7 * tile_bytes))
+    try:
+        binding.source_changed()
+        _settle_coarse(app, scheduler, binding)
+        # Fill the coarser level's fine first: four planes, all of which
+        # will still overlap the level-0 viewport below.
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        _deliver_all(app, scheduler, scheduler.requests[marker:],
+                     value=np.full((4, 4), 0.3, np.float32))
+        assert binding.stats()["fine_levels"]["A"] == (1,)
+        assert binding.stats()["fine_tiles"]["A"] == 4
+
+        # Cross to level 0. Target = six tiles; the four stand-ins plus the
+        # target would be ten, well over the seven-tile budget.
+        controller.set_snapshot(visible_tiles=((0, 0), (1, 0), (2, 0),
+                                               (0, 1), (1, 1), (2, 1)),
+                                level=0, epoch=2)
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        stats = binding.stats()
+        assert stats["fine_budget_refused"] == (), \
+            f"the target level was refused for a stand-in: {stats['last_error']}"
+        issued = scheduler.requests[marker:]
+        assert len(issued) == 6, f"the whole target set must be asked for: {len(issued)}"
+        assert stats["retained_fine_last_epoch"] == 1, \
+            "the stand-in may only use what the target set left over"
+
+        _deliver_all(app, scheduler, issued, value=np.full((4, 4), 0.9, np.float32))
+        settled = binding.stats()
+        assert 0 in settled["fine_levels"]["A"]
+        # Six target tiles reached the screen, plus the one stand-in the
+        # leftover budget allowed -- and not a byte more.
+        assert settled["fine_tiles"]["A"] == 7, settled["fine_tiles"]
+        assert settled["fine_plane_bytes"] <= 7 * tile_bytes
+        resident = {key for key in binding._published_fine["A"]
+                    if int(key.tile.level) == 0}
+        assert len(resident) == 6, "the whole target level must be resident"
+    finally:
+        binding.dispose()
+
+
+def test_a_target_level_that_does_not_fit_by_itself_fails_closed(app):
+    """The refusal that IS legitimate: this viewport's own target is too big."""
+    provider = _Provider(level_shape=(8, 8), levels=2)
+    controller = _Controller(provider, visible_tiles=((0, 0),), level=1)
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    tile_bytes = 4 * 4 * 4
+    binding, _ = _binding(provider, scheduler, controller, layer,
+                          display=_display(("A",)),
+                          budgets=_fine_budgets(2 * tile_bytes))
+    try:
+        binding.source_changed()
+        _settle_coarse(app, scheduler, binding)
+        controller.set_snapshot(visible_tiles=((0, 0), (1, 0), (2, 0), (3, 0)),
+                                level=0, epoch=2)
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        assert scheduler.requests[marker:] == [], \
+            "a target set that cannot fit must not be half-requested"
+        stats = binding.stats()
+        assert stats["fine_budget_refused"] == ("A",)
+        assert "target level needs" in str(stats["last_error"])
+    finally:
+        binding.dispose()
+
+
+def test_unticking_a_channel_cancels_its_fine_and_releases_its_planes(app):
+    """G3.2a.1: the release is on the untick, with the camera standing still."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, display_holder = _binding(provider, scheduler, controller, layer,
+                                       display=_display(("A", "B")))
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        assert binding.stats()["coarse_channels"] == ("A", "B")
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        fine = scheduler.requests[marker:]
+        b_fine = [request for request in fine if request.key.channel == "B"]
+        assert b_fine
+        # Deliver A's fine only, so B still has one in flight.
+        _deliver_all(app, scheduler, [r for r in fine if r.key.channel == "A"],
+                     value=np.full((4, 4), 0.9, np.float32))
+        assert binding.stats()["fine_tiles"].get("A", 0) > 0
+        before_cancelled = len(scheduler.cancelled)
+
+        display_holder[0] = _display(("A",))
+        binding.refresh_display()
+        _events(app)
+        stats = binding.stats()
+        assert "B" not in stats["fine_tiles"], "B kept its fine after the untick"
+        assert "B" not in stats["fine_channels"]
+        assert len(scheduler.cancelled) > before_cancelled, \
+            "B's unfinished fine request was not cancelled"
+        assert stats["fine_tiles"].get("A", 0) > 0, "A was released too"
+        latest = next(call[0] for call in reversed(layer.calls))
+        assert {source.channel for source in latest.channels} == {"A"}
+
+        # B's late tile must not resurrect it.
+        _deliver_all(app, scheduler, b_fine, value=np.full((4, 4), 0.5, np.float32))
+        assert "B" not in binding.stats()["fine_tiles"]
+
+        # Ticking B back asks for this viewport's fine again.
+        marker = len(scheduler.requests)
+        display_holder[0] = _display(("A", "B"))
+        binding.refresh_display()
+        _events(app)
+        again = [r for r in scheduler.requests[marker:] if r.key.channel == "B"]
+        assert again, "the channel came back but was never asked for"
+        _deliver_all(app, scheduler, again, value=np.full((4, 4), 0.7, np.float32))
+        assert binding.stats()["fine_tiles"].get("B", 0) > 0
+    finally:
+        binding.dispose()
+
+
+def test_a_display_only_change_still_asks_for_nothing_after_the_release(app):
+    """The release must not turn a colour or a weight into new I/O."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, display_holder = _binding(provider, scheduler, controller, layer,
+                                       display=_display(("A", "B")))
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        _deliver_all(app, scheduler, scheduler.requests[marker:],
+                     value=np.full((4, 4), 0.9, np.float32))
+        before = len(scheduler.requests)
+        submissions = len(binding.descriptor_history)
+
+        # Same channels, different numbers: a weight and a window.
+        display_holder[0] = dataclasses_replace(
+            display_holder[0], weights={"A": 0.4, "B": 1.0})
+        binding.refresh_display()
+        display_holder[0] = dataclasses_replace(
+            display_holder[0], mappings={"A": (10.0, 900.0, 0.8),
+                                         "B": (0.0, 1.0, 1.0)})
+        binding.refresh_display()
+        _events(app)
+        assert len(scheduler.requests) == before, "a display change asked for tiles"
+        assert len(binding.descriptor_history) > submissions
+        assert binding.stats()["fine_tiles"]["A"] > 0
+        assert binding.stats()["fine_tiles"]["B"] > 0
+    finally:
+        binding.dispose()
+
+
+def test_unticking_the_last_channel_and_ticking_it_back_restores_its_fine(app):
+    """G3.2a.2: the only channel comes back WITHOUT a camera move.
+
+    Unticking the last one leaves the active set empty; if that were not
+    recorded, ticking the same channel back would look like "nothing
+    changed" and its fine would never be planned again.
+    """
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, display_holder = _binding(provider, scheduler, controller, layer,
+                                       display=_display(("A",)))
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        _deliver_all(app, scheduler, scheduler.requests[marker:],
+                     value=np.full((4, 4), 0.9, np.float32))
+        loaded = binding.stats()["fine_tiles"].get("A", 0)
+        assert loaded > 0
+
+        display_holder[0] = _display(())
+        binding.refresh_display()
+        _events(app)
+        emptied = binding.stats()
+        assert emptied["fine_channels"] == () and emptied["fine_plane_bytes"] == 0
+        assert emptied["coarse_channels"] == ("A",), "the coarse is kept"
+
+        # Tick it back. THE CAMERA HAS NOT MOVED.
+        marker = len(scheduler.requests)
+        display_holder[0] = _display(("A",))
+        binding.refresh_display()
+        _events(app)
+        again = scheduler.requests[marker:]
+        assert again, "the only channel came back but was never asked for"
+        _deliver_all(app, scheduler, again, value=np.full((4, 4), 0.9, np.float32))
+        assert binding.stats()["fine_tiles"].get("A", 0) == loaded
+        latest = next(call[0] for call in reversed(layer.calls) if call[0].channels)
+        assert next(s for s in latest.channels if s.channel == "A").fine
+    finally:
+        binding.dispose()
+
+
+def test_unticking_one_channel_leaves_the_other_channels_load_alone(app):
+    """G3.2a.2: a removal touches the removed channel and nothing else."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, display_holder = _binding(provider, scheduler, controller, layer,
+                                       display=_display(("A", "B")))
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.snapshot())
+        fine = scheduler.requests[marker:]
+        a_fine = [request for request in fine if request.key.channel == "A"]
+        b_fine = [request for request in fine if request.key.channel == "B"]
+        assert a_fine and b_fine
+        # NEITHER has landed: both channels are still loading.
+        a_generations = {request.generation for request in a_fine}
+        cancelled_before = len(scheduler.cancelled)
+        requests_before = len(scheduler.requests)
+
+        display_holder[0] = _display(("A",))
+        binding.refresh_display()
+        _events(app)
+
+        assert len(scheduler.requests) == requests_before, \
+            "the surviving channel's tiles were asked for again"
+        new_cancels = scheduler.cancelled[cancelled_before:]
+        assert new_cancels, "the unticked channel's request was not cancelled"
+        assert not (set(new_cancels) & a_generations), \
+            "the surviving channel's generation was cancelled too"
+
+        # A's ORIGINAL requests still publish: its generation is untouched.
+        _deliver_all(app, scheduler, a_fine, value=np.full((4, 4), 0.9, np.float32))
+        assert binding.stats()["fine_tiles"].get("A", 0) == len(a_fine)
+        # B's late tiles do not bring it back.
+        _deliver_all(app, scheduler, b_fine, value=np.full((4, 4), 0.5, np.float32))
+        assert "B" not in binding.stats()["fine_tiles"]
+    finally:
+        binding.dispose()
+
+
+def _enable_second_channel(app, binding, display_holder, scheduler):
+    """Tick B on with A already drawn, and hand B its complete coarse."""
+    display_holder[0] = _display(("A", "B"))
+    binding.refresh_display()
+    _events(app)
+    coarse = _coarse_requests(scheduler, "B")
+    assert coarse, "B's complete coarse must have been asked for"
+    _deliver_all(app, scheduler, coarse, value=np.full((4, 4), 0.4, np.float32))
+    return coarse
+
+
+def _drawn(layer):
+    latest = next((call[0] for call in reversed(layer.calls) if call[0].channels), None)
+    return set() if latest is None else {s.channel for s in latest.channels}
+
+
+def test_a_first_channel_over_the_fine_budget_stays_off_the_screen(app):
+    """G3.2b.1: a refused viewport is not 'ready'. Fail closed, stay hidden.
+
+    The complete coarse is in hand, but the current viewport's target level
+    does not fit the per-channel fine budget, so there is no plan in flight
+    and there never will be one. That must not be read as 'the fine is
+    ready' -- showing the coarse then would be exactly the blurry first
+    appearance this contract removes.
+    """
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    tile_bytes = 4 * 4 * 4
+    binding, display_holder = _binding(
+        provider, scheduler, controller, layer, display=_display(("A",)),
+        budgets=_budgets(fine_bytes=2 * tile_bytes))   # room for two tiles
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        _deliver_all(app, scheduler, _fine_requests(scheduler, "A"),
+                     value=np.full((4, 4), 0.2, np.float32))
+        assert _drawn(layer) == {"A"}
+
+        # Now widen the viewport past the budget. A is already on screen and
+        # keeps what it has; B has never been drawn.
+        controller.set_snapshot(visible_tiles=((0, 0), (1, 0), (0, 1)), epoch=2)
+        binding.update_viewport(controller.snapshot())
+        _events(app)
+        assert _drawn(layer) == {"A"}
+        marker = len(scheduler.requests)
+        _enable_second_channel(app, binding, display_holder, scheduler)
+        stats = binding.stats()
+        assert "B" in stats["coarse_channels"], "B's complete coarse is in hand"
+        assert "B" in stats["fine_budget_refused"], "the refusal must be recorded"
+        assert "target level needs" in str(stats["last_error"])
+        assert not _fine_requests(scheduler, "B", marker), \
+            "a refused viewport must not be half-requested"
+        assert _drawn(layer) == {"A"}, "B leaked its coarse onto the screen"
+
+        # An ordinary redraw must not let it out either.
+        for _ in range(3):
+            binding.refresh_display()
+            _events(app)
+            assert _drawn(layer) == {"A"}, "a refresh leaked the refused channel"
+        assert "B" in binding.stats()["fine_budget_refused"]
+    finally:
+        binding.dispose()
+
+
+def test_a_first_channel_whose_fine_tile_fails_stays_off_the_screen(app):
+    """G3.2b.1: one failed tile is not 'ready' either."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, display_holder = _binding(provider, scheduler, controller, layer,
+                                       display=_display(("A",)))
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        _deliver_all(app, scheduler, _fine_requests(scheduler, "A"),
+                     value=np.full((4, 4), 0.2, np.float32))
+        assert _drawn(layer) == {"A"}
+
+        marker = len(scheduler.requests)
+        _enable_second_channel(app, binding, display_holder, scheduler)
+        # The LIVE plan's own requests: a first planning happened while the
+        # coarse was still loading and was superseded when it landed.
+        generation = binding._fine["B"].generation
+        fine = [request for request in scheduler.requests
+                if request.key.channel == "B" and request.generation == generation]
+        assert len(fine) >= 2, "this gate needs more than one viewport tile"
+        del marker
+        # One tile lands, the next one fails.
+        scheduler.deliver_request(fine[0], array=np.full((4, 4), 0.4, np.float32))
+        _events(app)
+        scheduler.deliver_request(fine[1], error="read failed")
+        _events(app)
+
+        stats = binding.stats()
+        assert "B" in stats["coarse_channels"]
+        # PARTIAL fine really is resident -- one tile landed, the other
+        # failed -- and the channel is STILL not on screen. That is the
+        # whole point: a partial viewport is not a reason to show it.
+        assert stats["fine_tiles"].get("B") == 1, stats["fine_tiles"]
+        assert "B" in stats["fine_channels"]
+        assert _drawn(layer) == {"A"}, "B leaked its coarse after a failed tile"
+        assert "fine tile failed for B" in str(stats["last_error"])
+
+        for _ in range(3):
+            binding.refresh_display()
+            _events(app)
+            assert _drawn(layer) == {"A"}, "a refresh leaked the failed channel"
+    finally:
+        binding.dispose()

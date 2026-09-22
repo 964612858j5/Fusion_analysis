@@ -1,0 +1,119 @@
+{
+  "label": "after-fix",
+  "repeats": 5,
+  "channel_sharp_ms": [
+    151.02,
+    74.69,
+    110.31,
+    74.34,
+    150.74
+  ],
+  "median_channel_sharp_ms": 110.31,
+  "median_coarse_phase_ms": 110.15,
+  "median_fine_phase_after_coarse_ms": 0.03,
+  "fine_requested_before_coarse_landed": [
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "worst_gui_gap_ms": 76.6,
+  "runs": [
+    {
+      "channel": "CD8",
+      "held_read_ms": 40,
+      "stages_ms": {
+        "tick_accepted": 0.0,
+        "enable_returned": 12.5,
+        "first_fine_REQUEST_issued": 74.44,
+        "complete_coarse_landed": 150.9,
+        "first_fine_plane_landed": 150.92,
+        "viewport_fine_complete": 150.92,
+        "channel_sharp": 151.02
+      },
+      "coarse_phase_ms": 150.9,
+      "fine_phase_ms": 0.02,
+      "fine_requested_before_coarse_landed": true,
+      "coarse_tiles": 9,
+      "fine_tiles": 4,
+      "worst_gui_gap_ms": 76.6
+    },
+    {
+      "channel": "CD8",
+      "held_read_ms": 40,
+      "stages_ms": {
+        "tick_accepted": 0.0,
+        "enable_returned": 15.98,
+        "first_fine_REQUEST_issued": 41.36,
+        "complete_coarse_landed": 74.53,
+        "first_fine_plane_landed": 74.55,
+        "viewport_fine_complete": 74.56,
+        "channel_sharp": 74.69
+      },
+      "coarse_phase_ms": 74.53,
+      "fine_phase_ms": 0.03,
+      "fine_requested_before_coarse_landed": true,
+      "coarse_tiles": 9,
+      "fine_tiles": 4,
+      "worst_gui_gap_ms": 23.2
+    },
+    {
+      "channel": "CD8",
+      "held_read_ms": 40,
+      "stages_ms": {
+        "tick_accepted": 0.01,
+        "enable_returned": 15.29,
+        "first_fine_REQUEST_issued": 36.8,
+        "complete_coarse_landed": 110.15,
+        "first_fine_plane_landed": 110.17,
+        "viewport_fine_complete": 110.18,
+        "channel_sharp": 110.31
+      },
+      "coarse_phase_ms": 110.15,
+      "fine_phase_ms": 0.03,
+      "fine_requested_before_coarse_landed": true,
+      "coarse_tiles": 9,
+      "fine_tiles": 4,
+      "worst_gui_gap_ms": 57.6
+    },
+    {
+      "channel": "CD8",
+      "held_read_ms": 40,
+      "stages_ms": {
+        "tick_accepted": 0.0,
+        "enable_returned": 14.57,
+        "first_fine_REQUEST_issued": 35.1,
+        "complete_coarse_landed": 74.2,
+        "first_fine_plane_landed": 74.21,
+        "viewport_fine_complete": 74.22,
+        "channel_sharp": 74.34
+      },
+      "coarse_phase_ms": 74.2,
+      "fine_phase_ms": 0.02,
+      "fine_requested_before_coarse_landed": true,
+      "coarse_tiles": 9,
+      "fine_tiles": 4,
+      "worst_gui_gap_ms": 24.0
+    },
+    {
+      "channel": "CD8",
+      "held_read_ms": 40,
+      "stages_ms": {
+        "tick_accepted": 0.01,
+        "enable_returned": 14.61,
+        "first_fine_REQUEST_issued": 79.45,
+        "complete_coarse_landed": 150.58,
+        "first_fine_plane_landed": 150.61,
+        "viewport_fine_complete": 150.62,
+        "channel_sharp": 150.74
+      },
+      "coarse_phase_ms": 150.58,
+      "fine_phase_ms": 0.04,
+      "fine_requested_before_coarse_landed": true,
+      "coarse_tiles": 9,
+      "fine_tiles": 4,
+      "worst_gui_gap_ms": 71.2
+    }
+  ]
+}

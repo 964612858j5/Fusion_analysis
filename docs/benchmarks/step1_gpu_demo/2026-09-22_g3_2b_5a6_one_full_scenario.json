@@ -1,0 +1,701 @@
+{
+ "block": "G3.2b.5A.6",
+ "one_gesture": true,
+ "all_of_1_to_3_hold": true,
+ "checks": {
+  "1_popup_added": 1,
+  "1_page_model_received": 1,
+  "2_worker_outcomes": [
+   [
+    "published",
+    "committed",
+    "/tmp/g325a6_project/roi1/step0/patch_config.rev1.0bde7f8ef3252f.json"
+   ]
+  ],
+  "2_files_added": [
+   "roi1/step0/patch_config.rev1.0bde7f8ef3252f.json"
+  ],
+  "3_geometry_committed_fired": 1,
+  "3_main_adopted": 1,
+  "4_submits": 5,
+  "4_paints": 4,
+  "4_first_display_change": null
+ },
+ "records": [
+  {
+   "i": 1,
+   "t_ms": 2367.943,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.rebind_source"
+  },
+  {
+   "i": 2,
+   "t_ms": 2367.956,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount._rebind_source"
+  },
+  {
+   "i": 3,
+   "t_ms": 2367.959,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.set_source"
+  },
+  {
+   "i": 4,
+   "t_ms": 2367.962,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount._rebuild_source"
+  },
+  {
+   "i": 5,
+   "t_ms": 2367.964,
+   "kind": "hook.missing",
+   "target": "Step1WholeSlideMount.refresh_source"
+  },
+  {
+   "i": 6,
+   "t_ms": 2906.011,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 7,
+   "t_ms": 2906.079,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 8,
+   "t_ms": 2906.117,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 9,
+   "t_ms": 2906.121,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 10,
+   "t_ms": 2908.674,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 11,
+   "t_ms": 2908.703,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 12,
+   "t_ms": 2908.825,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 13,
+   "t_ms": 2908.831,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 14,
+   "t_ms": 3051.051,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 15,
+   "t_ms": 3051.122,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 16,
+   "t_ms": 3051.234,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 17,
+   "t_ms": 3051.241,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 18,
+   "t_ms": 3056.769,
+   "kind": "main._refresh_patch_preview.enter"
+  },
+  {
+   "i": 19,
+   "t_ms": 3056.84,
+   "kind": "main._refresh_patch_preview.return"
+  },
+  {
+   "i": 20,
+   "t_ms": 3831.642,
+   "kind": "paintGL.enter",
+   "n": 1,
+   "consumes_submit": 0,
+   "widget": [
+    640,
+    480
+   ],
+   "fbo": null,
+   "widget_physical": null,
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 21,
+   "t_ms": 3831.66,
+   "kind": "paintGL.return",
+   "n": 1
+  },
+  {
+   "i": 22,
+   "t_ms": 3835.272,
+   "kind": "submit.enter",
+   "n": 1,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": null,
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 23,
+   "t_ms": 3839.137,
+   "kind": "submit.return",
+   "n": 1,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 24,
+   "t_ms": 3839.37,
+   "kind": "submit.enter",
+   "n": 2,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 25,
+   "t_ms": 3839.471,
+   "kind": "submit.return",
+   "n": 2,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 26,
+   "t_ms": 3949.097,
+   "kind": "main._save_step1_session.enter"
+  },
+  {
+   "i": 27,
+   "t_ms": 3950.713,
+   "kind": "main._save_step1_session.return"
+  },
+  {
+   "i": 28,
+   "t_ms": 3950.971,
+   "kind": "submit.enter",
+   "n": 3,
+   "widget": [
+    640,
+    480
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    640,
+    480
+   ],
+   "world_rect": [
+    -2211.16,
+    24015.16,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 29,
+   "t_ms": 3951.256,
+   "kind": "submit.return",
+   "n": 3,
+   "target_after": [
+    640,
+    480
+   ],
+   "reallocated": false
+  },
+  {
+   "i": 30,
+   "t_ms": 4532.243,
+   "kind": "submit.enter",
+   "n": 4,
+   "widget": [
+    611,
+    450
+   ],
+   "target_before": [
+    640,
+    480
+   ],
+   "viewport_physical": [
+    611,
+    450
+   ],
+   "world_rect": [
+    -2467.954,
+    24271.954,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 31,
+   "t_ms": 4536.663,
+   "kind": "submit.return",
+   "n": 4,
+   "target_after": [
+    611,
+    450
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 32,
+   "t_ms": 4537.786,
+   "kind": "resizeGL",
+   "w": 611,
+   "h": 450,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 33,
+   "t_ms": 4574.326,
+   "kind": "resizeGL",
+   "w": 1123,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 34,
+   "t_ms": 4582.889,
+   "kind": "resizeGL",
+   "w": 1122,
+   "h": 637,
+   "target": [
+    611,
+    450
+   ]
+  },
+  {
+   "i": 35,
+   "t_ms": 4582.967,
+   "kind": "paintGL.enter",
+   "n": 2,
+   "consumes_submit": 4,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    611,
+    450
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 36,
+   "t_ms": 4596.629,
+   "kind": "paintGL.enter",
+   "n": 3,
+   "consumes_submit": 4,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    611,
+    450
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": true
+  },
+  {
+   "i": 37,
+   "t_ms": 4608.149,
+   "kind": "submit.enter",
+   "n": 5,
+   "widget": [
+    1122,
+    637
+   ],
+   "target_before": [
+    611,
+    450
+   ],
+   "viewport_physical": [
+    1122,
+    637
+   ],
+   "world_rect": [
+    -6469.502,
+    28273.502,
+    0.0,
+    19480.0
+   ],
+   "levels": []
+  },
+  {
+   "i": 38,
+   "t_ms": 4610.074,
+   "kind": "submit.return",
+   "n": 5,
+   "target_after": [
+    1122,
+    637
+   ],
+   "reallocated": true
+  },
+  {
+   "i": 39,
+   "t_ms": 4610.282,
+   "kind": "paintGL.enter",
+   "n": 4,
+   "consumes_submit": 5,
+   "widget": [
+    1122,
+    637
+   ],
+   "fbo": [
+    1122,
+    637
+   ],
+   "widget_physical": [
+    1122,
+    637
+   ],
+   "blit_is_rescaled": false
+  },
+  {
+   "i": 40,
+   "t_ms": 4611.807,
+   "kind": "paintGL.return",
+   "n": 4
+  },
+  {
+   "i": 41,
+   "t_ms": 5809.851,
+   "kind": "project.published",
+   "files": [
+    "corrected_channels.zarr",
+    "correction_config.json",
+    "patch_config.json",
+    "roi_config.json",
+    "step0_roi_result.json"
+   ]
+  },
+  {
+   "i": 42,
+   "t_ms": 5809.867,
+   "kind": "nucleus.before",
+   "page": "DAPI",
+   "overview": "DAPI"
+  },
+  {
+   "i": 43,
+   "t_ms": 5809.87,
+   "kind": "nucleus.after",
+   "page": "DAPI",
+   "overview": "DAPI",
+   "loader_shape": [
+    19480,
+    21804
+   ]
+  },
+  {
+   "i": 44,
+   "t_ms": 5809.889,
+   "kind": "roi_model.synced",
+   "model_nucleus": "DAPI",
+   "model_loader_shape": [
+    19480,
+    21804
+   ],
+   "model_rois": 1,
+   "model_patches": 0,
+   "model_full_wsi": false
+  },
+  {
+   "i": 45,
+   "t_ms": 5809.958,
+   "kind": "mainwindow.bound_to_handoff",
+   "path": "/tmp/g325a6_project/roi1/step0/step0_roi_result.json"
+  },
+  {
+   "i": 46,
+   "t_ms": 5816.811,
+   "kind": "step0.furnish_navigator.enter"
+  },
+  {
+   "i": 47,
+   "t_ms": 5829.527,
+   "kind": "step0.furnish_navigator.return"
+  },
+  {
+   "i": 48,
+   "t_ms": 6631.959,
+   "kind": "popup.furnished",
+   "patches_changed_receivers": 1,
+   "is_window": true,
+   "model_nucleus": "DAPI",
+   "popup_overview_nucleus": "DAPI",
+   "page_nucleus": "DAPI"
+  },
+  {
+   "i": 49,
+   "t_ms": 10144.413,
+   "kind": "gesture.start",
+   "popup_patches": 0,
+   "page_patches": 0
+  },
+  {
+   "i": 50,
+   "t_ms": 10326.0,
+   "kind": "overview._add_patch.enter"
+  },
+  {
+   "i": 51,
+   "t_ms": 10326.68,
+   "kind": "step0._reconcile_roi_edit.enter"
+  },
+  {
+   "i": 52,
+   "t_ms": 10329.6,
+   "kind": "step0._persist_geometry_edit.enter"
+  },
+  {
+   "i": 53,
+   "t_ms": 10329.787,
+   "kind": "step0._persist_geometry_edit.return"
+  },
+  {
+   "i": 54,
+   "t_ms": 10329.791,
+   "kind": "step0._reconcile_roi_edit.return"
+  },
+  {
+   "i": 55,
+   "t_ms": 10329.795,
+   "kind": "overview._add_patch.return"
+  },
+  {
+   "i": 56,
+   "t_ms": 10340.895,
+   "kind": "step0._on_geometry_persist_published.enter"
+  },
+  {
+   "i": 57,
+   "t_ms": 10340.947,
+   "kind": "main._on_step0_geometry_committed.enter"
+  },
+  {
+   "i": 58,
+   "t_ms": 10341.02,
+   "kind": "main._on_patches.enter"
+  },
+  {
+   "i": 59,
+   "t_ms": 10341.029,
+   "kind": "main._rebuild_patch_buttons.enter"
+  },
+  {
+   "i": 60,
+   "t_ms": 10341.137,
+   "kind": "main._rebuild_patch_buttons.return"
+  },
+  {
+   "i": 61,
+   "t_ms": 10341.141,
+   "kind": "main._show_active_roi_preview.enter"
+  },
+  {
+   "i": 62,
+   "t_ms": 10341.156,
+   "kind": "main._show_active_roi_preview.return"
+  },
+  {
+   "i": 63,
+   "t_ms": 10341.198,
+   "kind": "main._schedule_step1_session_save.enter"
+  },
+  {
+   "i": 64,
+   "t_ms": 10341.207,
+   "kind": "main._schedule_step1_session_save.return"
+  },
+  {
+   "i": 65,
+   "t_ms": 10341.209,
+   "kind": "main._on_patches.return"
+  },
+  {
+   "i": 66,
+   "t_ms": 10341.217,
+   "kind": "main._on_step0_geometry_committed.return"
+  },
+  {
+   "i": 67,
+   "t_ms": 10341.263,
+   "kind": "SIGNAL.geometry_committed",
+   "payload": {
+    "step0_manifest_path": "/tmp/g325a6_project/roi1/step0/step0_roi_result.json",
+    "geometry_revision": 1,
+    "rois": [
+     {
+      "name": "ROI_1",
+      "display_name": "ROI_1",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "polygon_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "shape": [
+       "<deep>",
+       "<deep>"
+      ],
+      "type": "roi",
+      "roi_id": "roi1",
+      "roi_dir": "/tmp/g325a6_project/roi1",
+      "color": "#ff6b6b",
+      "polygon_display": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ]
+     }
+    ],
+    "patches": [
+     {
+      "name": "P1",
+      "roi_name": "ROI_1",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "bbox_local": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "coords": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "i": 68,
+   "t_ms": 10341.268,
+   "kind": "step0._on_geometry_persist_published.return"
+  },
+  {
+   "i": 69,
+   "t_ms": 10341.537,
+   "kind": "qt.LayoutRequest",
+   "who": "QWidget"
+  },
+  {
+   "i": 70,
+   "t_ms": 10356.304,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 71,
+   "t_ms": 10356.338,
+   "kind": "qt.LayoutRequest",
+   "who": "MainWindow"
+  },
+  {
+   "i": 72,
+   "t_ms": 10815.819,
+   "kind": "main._save_step1_session.enter"
+  },
+  {
+   "i": 73,
+   "t_ms": 10817.454,
+   "kind": "main._save_step1_session.return"
+  },
+  {
+   "i": 74,
+   "t_ms": 18849.861,
+   "kind": "gesture.end"
+  }
+ ],
+ "honesty": [
+  "the popup was furnished by the product's own furnish_navigator(); no signal was hand-connected",
+  "a source re-bind is reported only if a real entry was called; a written .zattrs is not evidence of one",
+  "all four checks come from the SAME gesture"
+ ]
+}

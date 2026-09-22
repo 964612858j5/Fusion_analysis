@@ -581,6 +581,11 @@ class GlobalChannelDock(QtWidgets.QWidget):
         old_layout = self.parentWidget().layout() if self.parentWidget() else None
         if old_layout is not None:
             old_layout.removeWidget(self)
+            # The dock already belongs to another step. Move it to this
+            # host before inserting into its layout; otherwise addWidget()
+            # does the reparent and relayout together, which took about
+            # 0.5 s for 29 rows on the measured Step0 -> Step1 path.
+            self.setParent(layout.parentWidget())
         if index is None:
             layout.addWidget(self, stretch)
         else:

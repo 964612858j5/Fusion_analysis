@@ -661,3 +661,66 @@ def test_one_click_moves_one_camera(app, monkeypatch, tmp_path):
             "Step1's camera answered a click meant for Step0")
     finally:
         _close(rig)
+
+
+def test_a_first_patch_click_starts_no_loader_behind_the_slide_viewer(
+        app, monkeypatch, tmp_path):
+    """G3.2b.2: a patch is an ANCHOR, including the very first time.
+
+    Every other patch path already refuses to work for the hidden renderer
+    -- `_ensure_channels_cached`, `_refresh_patch_preview` and the debounced
+    preload all check `_step1_whole_slide_active()`. The FIRST visit to a
+    patch was the one branch that did not, so clicking a patch the old cache
+    had never seen still started a `PreviewLoaderThread` that read that
+    patch's channels at full resolution for a picture nobody can see --
+    competing with the GPU viewer for the very same reads. That is why a
+    first patch felt slower than a Tissue Preview landing to the same place.
+    """
+    from block01.ui import main_window as main_window_module
+
+    rig = _window(app, monkeypatch, tmp_path)
+    built = []
+
+    class _CountingLoaderThread:
+        def __init__(self, patch_idx, loader, channels, *a, **k):
+            built.append((patch_idx, tuple(channels)))
+            raise RuntimeError("no loader may be built behind the viewer")
+
+    monkeypatch.setattr(main_window_module, "PreviewLoaderThread",
+                        _CountingLoaderThread)
+    try:
+        _in(rig, 1)
+        rig.w._all_patches = [(0, 256, 0, 256), (256, 512, 256, 512)]
+        assert rig.w._step1_whole_slide_active()
+
+        # A FIRST click: nothing cached for it and no loader in flight.
+        rig.w._patch_load_ready = set()
+        rig.w._patch_loaders = {}
+        rig.jumps.clear()
+        rig.w._select_preview_patch(0)
+
+        assert rig.jumps == [(0, 0, 256, 256)], \
+            f"the patch must still anchor the one camera: {rig.jumps}"
+        assert built == [], \
+            f"a first patch click built {len(built)} PreviewLoaderThread(s) " \
+            f"behind the whole-slide viewer: {built}"
+
+        # The same place reached by the Tissue Preview does the same move
+        # and, as it always did, builds nothing.
+        rig.jumps.clear()
+        assert rig.w._on_step1_tissue_navigate(128, 128) is True
+        assert rig.jumps, "the Tissue Preview landing moved no camera"
+        assert built == []
+
+        # THE ROLLBACK PATH IS UNCHANGED: back on the old renderer, a first
+        # click loads exactly as it always has.
+        rig.w._step1_mount.restore_legacy()
+        assert not rig.w._step1_whole_slide_active()
+        rig.w._patch_load_ready = set()
+        rig.w._patch_loaders = {}
+        with pytest.raises(RuntimeError):
+            rig.w._select_preview_patch(1)
+        assert [item[0] for item in built] == [1], \
+            f"the rollback path stopped starting its loader: {built}"
+    finally:
+        _close(rig)

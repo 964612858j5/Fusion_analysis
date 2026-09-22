@@ -1,0 +1,269 @@
+{
+ "block": "G3.2b.5A.5 (step 1: why no publish)",
+ "temp_project": "/tmp/g325a5_temp_project",
+ "files_written": [],
+ "worker_exists": true,
+ "worker_running": true,
+ "worker_stats_final": {
+  "submitted": 1,
+  "replaced": 0,
+  "published": 0,
+  "skipped": 1,
+  "failed": 0,
+  "stale_dataset": 0,
+  "authoritative_retired": 0,
+  "pending": false,
+  "busy": false,
+  "published_revision": 0
+ },
+ "geometry_persist_state": "staged",
+ "records": [
+  {
+   "t_ms": 5761.549,
+   "kind": "bench.roi_context_set",
+   "roi_context": {
+    "step_dirs": {
+     "step0": "/tmp/g325a5_temp_project/step0"
+    }
+   }
+  },
+  {
+   "t_ms": 7531.66,
+   "kind": "bench.worker_signals_connected",
+   "is_running": true
+  },
+  {
+   "t_ms": 7531.667,
+   "kind": "bench.connected_before_gesture",
+   "ok": true
+  },
+  {
+   "t_ms": 7531.669,
+   "kind": "gesture.start"
+  },
+  {
+   "t_ms": 7715.565,
+   "kind": "task.built",
+   "task": {
+    "revision": 1,
+    "dataset_gen": 0,
+    "step0_dir": "/tmp/g325a5_temp_project/step0",
+    "step0_manifest_path": "/tmp/g325a5_temp_project/step0/step0_roi_result.json",
+    "rois": [
+     {
+      "name": "Full WSI",
+      "display_name": "Full WSI",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "polygon_fullres": null,
+      "shape": [
+       "<deep>",
+       "<deep>"
+      ],
+      "type": "full_wsi",
+      "analysis_region_type": "full_wsi",
+      "roi_id": "",
+      "roi_dir": ""
+     }
+    ],
+    "patches": [
+     {
+      "name": "P1",
+      "roi_name": "Full WSI",
+      "bbox_fullres": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "bbox_local": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ],
+      "coords": [
+       "<deep>",
+       "<deep>",
+       "<deep>",
+       "<deep>"
+      ]
+     }
+    ],
+    "roi_context_changed": true,
+    "spec": {
+     "raw_path": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+     "step0_dir": "/tmp/g325a5_temp_project/step0",
+     "config": {
+      "method_params": {
+       "tophat_radius": "<deep>",
+       "cucim_sigma": "<deep>"
+      },
+      "channel_decisions": {},
+      "channel_params": {}
+     },
+     "rois": [
+      {
+       "name": "<deep>",
+       "display_name": "<deep>",
+       "bbox_fullres": "<deep>",
+       "polygon_fullres": "<deep>",
+       "shape": "<deep>",
+       "type": "<deep>",
+       "analysis_region_type": "<deep>",
+       "roi_id": "<deep>",
+       "roi_dir": "<deep>"
+      }
+     ],
+     "patches": [
+      {
+       "name": "<deep>",
+       "roi_name": "<deep>",
+       "bbox_fullres": "<deep>",
+       "bbox_local": "<deep>",
+       "coords": "<deep>"
+      }
+     ],
+     "corrected_path": "/tmp/g325a5_temp_project/step0/corrected_channels.zarr",
+     "manifest_path": "/tmp/g325a5_temp_project/step0/step0_roi_result.json",
+     "analysis_region_type": "full_wsi",
+     "roi_id": "",
+     "roi_dir": "",
+     "project_dir": "/nvme0n1p1/2025.12.20_Final_17209_16_Slice4/Scan1/pipeline_v2",
+     "step1_dir": "",
+     "step2_dir": "",
+     "panel_csv_path": "",
+     "panel_groups": {},
+     "nucleus_channel": "DAPI",
+     "remap_path": "/tmp/g325a5_temp_project/step0/step0_channel_remap.json",
+     "geometry_revision": 1
+    }
+   },
+   "task_keys": [
+    "dataset_gen",
+    "patches",
+    "revision",
+    "roi_context_changed",
+    "rois",
+    "spec",
+    "step0_dir",
+    "step0_manifest_path"
+   ],
+   "step0_dir": "/tmp/g325a5_temp_project/step0",
+   "step0_dir_exists": true,
+   "manifest_path": "/tmp/g325a5_temp_project/step0/step0_roi_result.json",
+   "manifest_exists": false,
+   "n_rois": 1,
+   "n_patches": 1,
+   "revision": 1,
+   "dataset_gen": 0,
+   "roi_context_changed": true
+  },
+  {
+   "t_ms": 7715.624,
+   "kind": "worker.submit",
+   "returned": true,
+   "stats_before": {
+    "submitted": 0,
+    "replaced": 0,
+    "published": 0,
+    "skipped": 0,
+    "failed": 0,
+    "stale_dataset": 0,
+    "authoritative_retired": 0,
+    "pending": false,
+    "busy": false,
+    "published_revision": 0
+   },
+   "stats_after": {
+    "submitted": 1,
+    "replaced": 0,
+    "published": 0,
+    "skipped": 0,
+    "failed": 0,
+    "stale_dataset": 0,
+    "authoritative_retired": 0,
+    "pending": true,
+    "busy": false,
+    "published_revision": 0
+   }
+  },
+  {
+   "t_ms": 7717.02,
+   "kind": "worker.SKIPPED",
+   "payload": {
+    "task": {
+     "revision": 1,
+     "dataset_gen": 0,
+     "step0_dir": "/tmp/g325a5_temp_project/step0",
+     "step0_manifest_path": "/tmp/g325a5_temp_project/step0/step0_roi_result.json",
+     "rois": [
+      {
+       "name": "<deep>",
+       "display_name": "<deep>",
+       "bbox_fullres": "<deep>",
+       "polygon_fullres": "<deep>",
+       "shape": "<deep>",
+       "type": "<deep>",
+       "analysis_region_type": "<deep>",
+       "roi_id": "<deep>",
+       "roi_dir": "<deep>"
+      }
+     ],
+     "patches": [
+      {
+       "name": "<deep>",
+       "roi_name": "<deep>",
+       "bbox_fullres": "<deep>",
+       "bbox_local": "<deep>",
+       "coords": "<deep>"
+      }
+     ],
+     "roi_context_changed": true,
+     "spec": {
+      "raw_path": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+      "step0_dir": "/tmp/g325a5_temp_project/step0",
+      "config": {
+       "method_params": "<deep>",
+       "channel_decisions": "<deep>",
+       "channel_params": "<deep>"
+      },
+      "rois": [
+       "<deep>"
+      ],
+      "patches": [
+       "<deep>"
+      ],
+      "corrected_path": "/tmp/g325a5_temp_project/step0/corrected_channels.zarr",
+      "manifest_path": "/tmp/g325a5_temp_project/step0/step0_roi_result.json",
+      "analysis_region_type": "full_wsi",
+      "roi_id": "",
+      "roi_dir": "",
+      "project_dir": "/nvme0n1p1/2025.12.20_Final_17209_16_Slice4/Scan1/pipeline_v2",
+      "step1_dir": "",
+      "step2_dir": "",
+      "panel_csv_path": "",
+      "panel_groups": {},
+      "nucleus_channel": "DAPI",
+      "remap_path": "/tmp/g325a5_temp_project/step0/step0_channel_remap.json",
+      "geometry_revision": 1
+     }
+    },
+    "revision": 1,
+    "step0_manifest_path": "",
+    "geometry_revision": 1,
+    "outcome": "no_published_handoff"
+   },
+   "reason": null
+  },
+  {
+   "t_ms": 43340.957,
+   "kind": "gesture.end",
+   "patches_added": 1
+  }
+ ]
+}

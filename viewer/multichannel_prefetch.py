@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections import deque
 
 from PyQt5 import QtCore
@@ -14,9 +15,29 @@ from PyQt5 import QtCore
 # bound `from ... import hot_order` would silently keep working against a
 # stale function object and make that proof impossible.
 from . import prefetch_policy as prefetch_rules
+from . import request_planning as planning
 from .prefetch_policy import ChannelCorrectionSpec
-from .tile_types import CorrectionKey, TileAddress, TileRequest, effective_param
+from .tile_types import (CorrectionKey, TileAddress, TileRequest,
+                         effective_param, tiles_covering)
 
+
+#: Generation tokens, UNIQUE ACROSS INSTANCES of this class.
+#:
+#: `TileScheduler.cancel_generation` marks a token stale on the SHARED
+#: scheduler and never un-marks it, and the scheduler's own contract says
+#: generation tokens are opaque and that callers should namespace them "so
+#: two independent generation counters never collide". A plain per-instance
+#: integer breaks exactly that: a coordinator that is stopped and mounted
+#: again on the same scheduler -- which is what leaving Step0 and coming
+#: back does -- starts counting at 0 again and issues under tokens the
+#: PREVIOUS coordinator had already cancelled, so every tile it asks for
+#: comes straight back as `cancelled` and nothing is ever prepared.
+#:
+#: Measured before this counter existed: after a hide/show round trip the
+#: current channel's second method stayed at 0 of 3 tiles resident, with
+#: `hot_tiles_requested = 12`, `hot_tiles_completed = 6`, `hot_cancelled =
+#: 6` and no abort of its own (`settle_aborted = 0`).
+_GENERATION_SERIAL = itertools.count(1)
 
 SETTLE_CONFIRM_MS = 120
 HOT_INFLIGHT = 2
@@ -32,7 +53,8 @@ class MultiChannelPrefetchController(QtCore.QObject):
     completed correction results to ``corrected_cache``.
 
     HOT ONLY (P2, the i-1/i+1/i-2/i+2 neighbourhood given by
-    ``prefetch_rules.hot_order``). COVERAGE (P3, every remaining channel)
+    ``prefetch_rules.hot_order``, plus the CURRENT channel itself when the
+    host asked for ``include_center``). COVERAGE (P3, every remaining channel)
     is not part of the production path: it lives in
     ``viewer.experimental.coverage_prefetch``, which subclasses this class
     and fills in the four lifecycle hooks at the bottom of this file.
@@ -52,7 +74,30 @@ class MultiChannelPrefetchController(QtCore.QObject):
     def __init__(self, controller, scheduler, specs, grid,
                  settle_confirm_ms=SETTLE_CONFIRM_MS,
                  hot_inflight=HOT_INFLIGHT,
+                 include_center=False,
                  parent=None):
+        """`include_center` adds the CURRENT channel to the plan, first.
+
+        WHY IT IS NOT THE DEFAULT, and why it has to exist at all.
+
+        `prefetch_rules.hot_order` deliberately excludes the centre: in the
+        compare strip the current channel is already being prepared by the
+        three panels themselves, which show Original, TopHat and cuCIM of
+        that one channel side by side. Spending a HOT slot on it there would
+        prepare what the foreground is preparing anyway.
+
+        THE FULL IMAGE IS ONE PANEL. It shows one method at a time, so
+        nothing else ever prepares the other one, and switching TopHat <->
+        cuCIM recomputes from scratch. There is no way to ask for that
+        through the existing interface: the host can choose WHICH channels
+        are in `specs` and in what order, but the centre is dropped by the
+        ordering rule after the fact, and `HOT_METHODS` is not addressable
+        per channel.
+
+        So the flag says which of those two worlds the host lives in.
+        Default `False` keeps every existing caller -- the compare strip --
+        on exactly the plan and exactly the neighbour order it has today.
+        """
         super().__init__(parent)
         self.controller = controller
         self.scheduler = scheduler
@@ -60,6 +105,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self.grid = grid
         self.settle_confirm_ms = settle_confirm_ms
         self.hot_inflight = hot_inflight
+        self.include_center = bool(include_center)
 
         self.stats = {
             "hot_batches": 0,
@@ -91,7 +137,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._confirm_serial = None
 
         self._settled = False
-        self._hot_generation = 0
+        self._hot_generation = ("hot", next(_GENERATION_SERIAL))
         self._hot_snapshot = None
         self._overview_plan = []
         self._overview_position = 0
@@ -104,6 +150,10 @@ class MultiChannelPrefetchController(QtCore.QObject):
         self._request_serial = 0
         self._pumping_tiles = False
         self._stopped = False
+        #: `(generation, channel)` the centre's floors were last asked for.
+        #: One small tuple, read for one comparison -- it stops the pump
+        #: asking again on every tick, and nothing else.
+        self._floors_asked_for = None
 
         self._tile_delivered.connect(self._on_tile_result,
                                      QtCore.Qt.QueuedConnection)
@@ -298,7 +348,13 @@ class MultiChannelPrefetchController(QtCore.QObject):
         if center is None:
             self._overview_plan = []
         else:
-            order = prefetch_rules.hot_order(center, len(self.specs))
+            order = list(prefetch_rules.hot_order(center, len(self.specs)))
+            if self.include_center:
+                # FIRST, and ahead of every neighbour: it is the channel the
+                # user is looking at, so its other method is the one they can
+                # ask for with a single click. The neighbours keep their own
+                # order and simply start one place further down.
+                order.insert(0, center)
             self._overview_plan = [
                 (self.specs[index].channel, hot_index)
                 for hot_index, index in enumerate(order)
@@ -320,6 +376,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
 
         self._settled = False
         self._hot_snapshot = None
+        self._floors_asked_for = None
         self._overview_plan.clear()
         self._overview_position = 0
         if self._tile_queue:
@@ -343,7 +400,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
         # released there. The count therefore spans generations on purpose --
         # it meters physical work, not the current plan's work.
         old_generation = self._hot_generation
-        self._hot_generation += 1
+        self._hot_generation = ("hot", next(_GENERATION_SERIAL))
         self.scheduler.cancel_generation(old_generation)
 
         # Both call sites (`_on_interaction`, `_on_selection_context_changed`)
@@ -420,6 +477,38 @@ class MultiChannelPrefetchController(QtCore.QObject):
                                      base_param)
                 self._tile_queue.append((generation,
                                          HOT_PRIORITY_BASE + hot_index, key))
+        if self.include_center and channel == snapshot.channel:
+            # THE CENTRE CHANNEL ALSO GETS ITS level+1 FALLBACK. The
+            # foreground asks for that band on every method change
+            # (`_issue_settled_request`'s intermediate corrected fallback),
+            # so a flip to the other method recomputed it however warm the
+            # display level was. Current level first -- these are appended
+            # after -- and only for the channel on screen: a neighbour's
+            # fallback is work for a picture nobody has asked for.
+            for tx, ty in self._fallback_tiles(snapshot):
+                for method, base_param in self._method_params(spec):
+                    key = self._make_key(snapshot, channel, tx, ty, method,
+                                         base_param,
+                                         level=snapshot.level + 1)
+                    self._tile_queue.append(
+                        (generation, HOT_PRIORITY_BASE + hot_index, key))
+
+    def _fallback_tiles(self, snapshot):
+        """The level+1 tiles covering the SAME viewport, or none.
+
+        The host's own rule, through the host's own helpers
+        (`request_planning.bbox_to_level` + `tiles_covering`) -- a second
+        coordinate calculation here is how the two would drift into asking
+        for different tiles. Empty when the display is already on the
+        coarsest level, so no fallback exists to prepare.
+        """
+        level = int(snapshot.level) + 1
+        bbox = getattr(snapshot, "bbox_l0", None)
+        if bbox is None or level >= int(self.controller.provider.num_levels):
+            return ()
+        downsample = self.controller.provider.level_downsample(level)
+        bbox_level = planning.bbox_to_level(bbox, downsample)
+        return tuple(sorted(tiles_covering(bbox_level, self.grid.tile_size)))
 
     def _pump_tiles(self):
         if self._stopped or not self._settled or self._pumping_tiles:
@@ -454,10 +543,83 @@ class MultiChannelPrefetchController(QtCore.QObject):
                     self.stats["hot_cancelled"] += 1
         finally:
             self._pumping_tiles = False
+        # ...and once the tiles are in hand, the CENTRE channel's other
+        # corrected floor. Last on purpose: the foreground's own method and
+        # the visible tiles come first.
+        self._prepare_centre_floors()
         # HOT's queue/in-flight state may just have gone idle (or become
         # busy); an experiment gated on it gets a chance to react every time
         # HOT's pump runs.
         self._after_hot_activity()
+
+    def _prepare_centre_floors(self):
+        """Ask the host to have BOTH corrected floors of the CURRENT channel.
+
+        A floor is a whole downsampled level, so it is per (channel, method,
+        parameters) and not per viewport -- which is exactly why preparing
+        the one the user has not selected is worth it: the first flip to the
+        other method then installs from the host's existing floor cache
+        instead of computing. The host owns the single-job rule, the cache
+        and the key; this only says which selection is worth having.
+
+        Only the centre. A neighbour's floor is a whole level of corrected
+        pixels for a picture nobody has asked for.
+        """
+        if self._stopped or not self.include_center or not self._settled:
+            return
+        snapshot = self._hot_snapshot
+        if snapshot is None:
+            return
+        if not self._hot_idle():
+            return
+        channel = snapshot.channel
+        spec = self._spec_by_channel.get(channel)
+        if spec is None:
+            return
+        asked = (self._hot_generation, channel)
+        if self._floors_asked_for == asked:
+            return
+        prepare = getattr(self.controller, "prepare_floor_async", None)
+        if prepare is None:
+            return
+        self._floors_asked_for = asked
+        # THE FOREGROUND'S OWN METHOD IS NOT HOT'S TO PREPARE.
+        #
+        # The host keeps ONE replaceable background floor request, not a
+        # queue -- deliberately, so a newer wish supersedes an older one
+        # instead of piling up. Asking for both methods here therefore means
+        # the LAST one asked for wins the slot, and the last one is always
+        # `HOT_METHODS[-1]`. Measured on the real slide with the foreground
+        # floor still running (`2026-09-21_g3_2b_4b12_3a_attribution.json`):
+        #
+        #   PREPARE tophat  cached=False running=cucim  slot: None   -> tophat
+        #   PREPARE cucim   cached=False running=cucim  slot: tophat -> cucim
+        #   RESULT  cucim   foreground                  (cucim now cached)
+        #   NEXT    waiting=cucim  already_cached=True  -> dropped
+        #
+        # ...so with cuCIM on screen, TopHat -- the only floor the user
+        # could actually need next -- was evicted by a request for the very
+        # method the foreground was already computing, and the flip to
+        # TopHat recomputed from scratch. With TopHat on screen the same
+        # eviction happened but the survivor was the OTHER method, so it
+        # worked by luck of the fixed order.
+        #
+        # The fix is not an ordering tweak and not a second slot: the method
+        # the foreground is showing already has an owner, so HOT simply does
+        # not ask for it. `snapshot.method` is what decides, so Original
+        # (no method, no foreground floor) still gets both, and neither
+        # method is named here.
+        shown = snapshot.method
+        for method, base_param in self._method_params(spec):
+            if method == shown:
+                continue
+            try:
+                prepare(channel, method, (base_param,))
+            except Exception:                               # noqa: BLE001
+                # A floor that cannot be prepared is a slower flip, never a
+                # broken one.
+                self.stats["floor_prepare_refused"] = self.stats.get(
+                    "floor_prepare_refused", 0) + 1
 
     def _on_tile_result(self, token, generation, result):
         if self._active_requests.pop(token, None) is None:
@@ -518,13 +680,15 @@ class MultiChannelPrefetchController(QtCore.QObject):
         # builder; no controller-private state is consulted here.
         return self.controller.provider.level_downsample(level)
 
-    def _make_key(self, snapshot, channel, tx, ty, method, base_param):
-        downsample = self._level_downsample(snapshot.level)
-        param = effective_param(base_param, snapshot.level, downsample)
+    def _make_key(self, snapshot, channel, tx, ty, method, base_param,
+                  level=None):
+        level = int(snapshot.level if level is None else level)
+        downsample = self._level_downsample(level)
+        param = effective_param(base_param, level, downsample)
         return CorrectionKey(
             source=snapshot.source,
             channel=channel,
-            tile=TileAddress(grid=self.grid, level=snapshot.level,
+            tile=TileAddress(grid=self.grid, level=level,
                              tx=tx, ty=ty),
             method=method,
             params=(param,),

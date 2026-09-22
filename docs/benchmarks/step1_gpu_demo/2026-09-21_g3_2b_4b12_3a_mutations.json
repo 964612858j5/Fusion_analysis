@@ -1,0 +1,117 @@
+{
+  "baseline_sha256": {
+    "viewer/multichannel_prefetch.py": "c48a3ba32f0425d1ea03b777c4578e6010ba39d3cb2979f6888e789a4b10f291",
+    "viewer/explore_view.py": "24367a6dfeb9e1c5bc77d3b567267cb7b6b3a6b6f80cf9c58f5cfc4640a2c3d1"
+  },
+  "final_sha256": {
+    "viewer/multichannel_prefetch.py": "c48a3ba32f0425d1ea03b777c4578e6010ba39d3cb2979f6888e789a4b10f291",
+    "viewer/explore_view.py": "24367a6dfeb9e1c5bc77d3b567267cb7b6b3a6b6f80cf9c58f5cfc4640a2c3d1"
+  },
+  "all_restored": true,
+  "results": [
+    {
+      "mutation": "M1 back to a fixed TopHat->cuCIM request of BOTH floors",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[cucim-expected1]",
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[tophat-expected0]",
+        "test_the_foregrounds_own_method_never_evicts_the_waiting_floor"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "3 failed in 42.81s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M2 showing cuCIM, ask for cuCIM again and not for TopHat",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[cucim-expected1]",
+        "test_the_foregrounds_own_method_never_evicts_the_waiting_floor"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 39.12s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M3 showing TopHat, ask for TopHat again and not for cuCIM",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[tophat-expected0]"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 6.35s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M4 showing Original, prepare only ONE method",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[None-expected2]",
+        "test_original_prepares_both_and_either_first_click_hits[cucim]"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 39.01s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M5 decide by a hard-coded method instead of snapshot.method",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[tophat-expected0]",
+        "test_hot_never_asks_for_the_method_the_foreground_is_showing[None-expected2]"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed, 1 passed in 10.03s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6 prepare floors for the neighbouring channels too",
+      "files": [
+        "viewer/multichannel_prefetch.py"
+      ],
+      "gates": [
+        "test_the_neighbouring_channels_still_get_no_floor_at_all"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 6.02s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M7 the single background waiting value becomes a queue",
+      "files": [
+        "viewer/explore_view.py"
+      ],
+      "gates": [
+        "test_a_background_request_waits_for_the_running_job_and_does_not_queue",
+        "test_the_foregrounds_own_method_never_evicts_the_waiting_floor"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 35.33s"
+      ],
+      "restored_sha256_matches_baseline": true
+    }
+  ]
+}

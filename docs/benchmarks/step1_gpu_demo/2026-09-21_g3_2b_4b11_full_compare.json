@@ -1,0 +1,105 @@
+{
+  "label": "g324b11",
+  "when": "2026-09-21 18:28:38",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "channel": "CD22",
+  "viewport_l0": [
+    9000,
+    9000,
+    2048,
+    2048
+  ],
+  "honesty": [
+    "the OS page cache was NOT dropped; nothing here is a cold disk read",
+    "'hit' means the CorrectionKey was answered from the corrected LRU",
+    "the corrected floor has no cache and is counted separately",
+    "the demo slide and project are read-only",
+    "the two arms differ only by ensure_built(caches=...)"
+  ],
+  "before_private_caches": {
+    "shared": false,
+    "full_image_prepared": {
+      "tophat": [
+        45,
+        45
+      ],
+      "cucim": [
+        45,
+        45
+      ]
+    },
+    "cache_identity": {
+      "raw_same_object": false,
+      "corrected_same_object": false,
+      "scheduler_same_object": false,
+      "provider_same_object": false,
+      "controller_same_object": false,
+      "strip_owns_caches": true
+    },
+    "entering_compare": {
+      "wall_ms": 6169.5,
+      "corrected_tile_computes": 30,
+      "already_prepared_keys_recomputed": 0,
+      "prepared_key_total": 90,
+      "corrected_floor_computes": 56,
+      "corrected_floor_ms": 457.2,
+      "computes_by_level": {
+        "2": 18,
+        "1": 12
+      }
+    },
+    "back_to_full_image": {
+      "wall_ms": 4000.9,
+      "corrected_tile_computes": 0,
+      "already_prepared_keys_recomputed": 0,
+      "corrected_floor_computes": 0
+    },
+    "after_strip_teardown_full_image_still_resident": [
+      45,
+      45
+    ]
+  },
+  "after_shared_caches": {
+    "shared": true,
+    "full_image_prepared": {
+      "tophat": [
+        45,
+        45
+      ],
+      "cucim": [
+        45,
+        45
+      ]
+    },
+    "cache_identity": {
+      "raw_same_object": true,
+      "corrected_same_object": true,
+      "scheduler_same_object": false,
+      "provider_same_object": false,
+      "controller_same_object": false,
+      "strip_owns_caches": false
+    },
+    "entering_compare": {
+      "wall_ms": 6122.9,
+      "corrected_tile_computes": 12,
+      "already_prepared_keys_recomputed": 0,
+      "prepared_key_total": 90,
+      "corrected_floor_computes": 38,
+      "corrected_floor_ms": 280.2,
+      "computes_by_level": {
+        "1": 12
+      }
+    },
+    "back_to_full_image": {
+      "wall_ms": 4009.7,
+      "corrected_tile_computes": 0,
+      "already_prepared_keys_recomputed": 0,
+      "corrected_floor_computes": 0
+    },
+    "after_strip_teardown_full_image_still_resident": [
+      45,
+      45
+    ]
+  }
+}

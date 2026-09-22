@@ -26,6 +26,7 @@ the source table's, unchanged.
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
+from ..utils import perf_trace
 from ..viewer import step1_source as sources
 from ..viewer.tile_types import SourceIdentity
 
@@ -206,6 +207,21 @@ class Step1ViewerHost(QtWidgets.QWidget):
         return self._stack
 
     @property
+    def stack_factory(self):
+        """How this host builds its stack. The seam, made readable.
+
+        It was always an injection point (`__init__`); reading it back is
+        what lets an owner that knows something the factory cannot -- which
+        renderer is about to draw the picture -- wrap the one it was given
+        instead of replacing it. Setting None restores the real one.
+        """
+        return self._stack_factory
+
+    @stack_factory.setter
+    def stack_factory(self, factory):
+        self._stack_factory = factory or build_step1_stack
+
+    @property
     def channel(self):
         return self._channel
 
@@ -260,12 +276,14 @@ class Step1ViewerHost(QtWidgets.QWidget):
                 decisions=decisions, corrected_zarr_path=corrected_zarr_path,
                 roi_name=roi_name, roi_bbox=roi_bbox,
                 handoff_revision=handoff_revision)
-            self._stack = self._stack_factory(dataset_path, channel,
-                                              self._table, self)
+            with perf_trace.span("step1.entry.stack_factory"):
+                self._stack = self._stack_factory(dataset_path, channel,
+                                                  self._table, self)
             self._dataset_path = dataset_path
             self._channel = channel
             self.missing_notice = list(self._table.missing())
-            self._show(self._stack.view)
+            with perf_trace.span("step1.entry.stack_show"):
+                self._show(self._stack.view)
             self.refresh_status()
         elif channel and channel != self._channel:
             self.set_channel(channel)
@@ -327,7 +345,8 @@ class Step1ViewerHost(QtWidgets.QWidget):
         if stack is None:
             return False
         try:
-            stack.teardown(wait_for_floor=wait_for_floor)
+            with perf_trace.span("step1.entry.stack_teardown"):
+                stack.teardown(wait_for_floor=wait_for_floor)
         finally:
             self._show(self._placeholder)
         return True
@@ -346,13 +365,21 @@ class Step1ViewerHost(QtWidgets.QWidget):
             widget.setVisible(True)
 
 
-def build_step1_stack(dataset_path, channel, table, parent_widget=None):
+def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
+                      load_overview=True):
     """The real stack: provider -> scheduler -> controller -> view.
 
     Composed from the same primitives Step0's factory uses
     (`RawTileProvider`, `TileScheduler`, `LRUByteCache`, `TileGridSpec`,
     `ExploreView`, `ExploreController`) -- the pieces are shared, the
     ownership is not: Step0's own stack is neither moved nor touched.
+
+    `load_overview=False` builds the same stack WITHOUT the synchronous
+    coarsest-level read below. It is for the one caller that knows the
+    controller's own layers will not be the picture -- the GPU takeover sets
+    them to opacity 0 -- and it is not a default: a stack whose layers are
+    going to be looked at needs its overview, and needs it before anything
+    is drawn or requested (`ExploreController._blocked_on_overview`).
     """
     import pyqtgraph as pg
 
@@ -368,7 +395,8 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None):
 
     raw = provider = scheduler = controller = view = None
     try:
-        raw = RawTileProvider(dataset_path)
+        with perf_trace.span("step1.entry.raw_provider"):
+            raw = RawTileProvider(dataset_path)
         if not channel or channel not in raw.channel_names:
             channel = raw.channel_names[0]
         provider = Step1TileProvider(raw, table)
@@ -379,10 +407,13 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None):
                                   corrected_cache)
         grid = TileGridSpec(tile_size=TILE_SIZE, source_chunk_shape=(),
                             grid_version="v1")
-        view = ExploreView(parent_widget)
-        controller = ExploreController(provider, scheduler, compute, grid,
-                                       view, channel)
-        controller.load_overview()
+        with perf_trace.span("step1.entry.qt_view"):
+            view = ExploreView(parent_widget)
+            controller = ExploreController(provider, scheduler, compute, grid,
+                                           view, channel)
+        if load_overview:
+            with perf_trace.span("step1.entry.controller_overview"):
+                controller.load_overview()
         h0, w0 = raw.level_shape(0)
         view.view_box.setRange(xRange=(0, w0), yRange=(0, h0), padding=0)
         return ExploreStack(provider, scheduler, controller, view,

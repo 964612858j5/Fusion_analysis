@@ -1,0 +1,362 @@
+{
+  "label": "g324b121",
+  "when": "2026-09-21 20:48:27",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "viewport_l0": [
+    9000,
+    9000,
+    2048,
+    2048
+  ],
+  "floor_level_stride": [
+    2,
+    1
+  ],
+  "floor_cache_limit": 8,
+  "honesty": [
+    "the floor cache ALREADY EXISTS (explore_view `_floor_cache`, 8 entries)",
+    "the OS page cache was NOT dropped; nothing here is a cold disk read",
+    "'hit' means the floor came from that existing OrderedDict",
+    "the demo slide and project are read-only",
+    "`correct_array` is called INSIDE CorrectionCompute.compute() and inside the gain calibration, so floor work is counted at _run_floor_job and tile work at compute(); the earlier revision of this script conflated the three"
+  ],
+  "A_new_channel_first_flip": [
+    {
+      "arrive": {
+        "channel": "CD4",
+        "method": "tophat",
+        "wall_ms": 3037.9,
+        "at_show_source_return": {
+          "floor_ready": false,
+          "floor_jobs": 1,
+          "tile_computes": 0
+        },
+        "tile_computes": 90,
+        "tile_computes_by_level": {
+          "1": 20,
+          "0": 70
+        },
+        "fallback_covering_computes": 8,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 2,
+        "floor_jobs_foreground": 1,
+        "floor_jobs_background": 1,
+        "correct_array_calls_all_causes": 116,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 4,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      },
+      "first_flip": {
+        "channel": "CD4",
+        "method": "cucim",
+        "wall_ms": 3009.1,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 12,
+        "tile_computes_by_level": {
+          "1": 12
+        },
+        "fallback_covering_computes": 0,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 0,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 0,
+        "correct_array_calls_all_causes": 12,
+        "floor_cache_hits_delta": 1,
+        "floor_cache": {
+          "floor_cache_items": 4,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 1
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "PD1",
+        "method": "cucim",
+        "wall_ms": 3033.1,
+        "at_show_source_return": {
+          "floor_ready": false,
+          "floor_jobs": 1,
+          "tile_computes": 0
+        },
+        "tile_computes": 90,
+        "tile_computes_by_level": {
+          "1": 20,
+          "0": 70
+        },
+        "fallback_covering_computes": 8,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 2,
+        "floor_jobs_foreground": 1,
+        "floor_jobs_background": 1,
+        "correct_array_calls_all_causes": 116,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 6,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 1
+        }
+      },
+      "first_flip": {
+        "channel": "PD1",
+        "method": "tophat",
+        "wall_ms": 3015.0,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 12,
+        "tile_computes_by_level": {
+          "1": 12
+        },
+        "fallback_covering_computes": 0,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 0,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 0,
+        "correct_array_calls_all_causes": 12,
+        "floor_cache_hits_delta": 1,
+        "floor_cache": {
+          "floor_cache_items": 6,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 2
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "FOXP3",
+        "method": null,
+        "wall_ms": 3015.4,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 78,
+        "tile_computes_by_level": {
+          "1": 8,
+          "0": 70
+        },
+        "fallback_covering_computes": 8,
+        "fallback_ring_computes": 0,
+        "floor_jobs_run": 2,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 2,
+        "correct_array_calls_all_causes": 104,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 8,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 2
+        }
+      },
+      "first_flip": {
+        "channel": "FOXP3",
+        "method": "tophat",
+        "wall_ms": 3012.5,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 12,
+        "tile_computes_by_level": {
+          "1": 12
+        },
+        "fallback_covering_computes": 0,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 0,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 0,
+        "correct_array_calls_all_causes": 12,
+        "floor_cache_hits_delta": 1,
+        "floor_cache": {
+          "floor_cache_items": 8,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 3
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "TCF1",
+        "method": null,
+        "wall_ms": 3037.1,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 8,
+        "tile_computes_by_level": {
+          "1": 8
+        },
+        "fallback_covering_computes": 8,
+        "fallback_ring_computes": 0,
+        "floor_jobs_run": 2,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 2,
+        "correct_array_calls_all_causes": 34,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 8,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 3
+        }
+      },
+      "first_flip": {
+        "channel": "TCF1",
+        "method": "cucim",
+        "wall_ms": 3008.6,
+        "at_show_source_return": {
+          "floor_ready": true,
+          "floor_jobs": 0,
+          "tile_computes": 0
+        },
+        "tile_computes": 12,
+        "tile_computes_by_level": {
+          "1": 12
+        },
+        "fallback_covering_computes": 0,
+        "fallback_ring_computes": 12,
+        "floor_jobs_run": 0,
+        "floor_jobs_foreground": 0,
+        "floor_jobs_background": 0,
+        "correct_array_calls_all_causes": 12,
+        "floor_cache_hits_delta": 1,
+        "floor_cache": {
+          "floor_cache_items": 8,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 4
+        }
+      }
+    }
+  ],
+  "C_repeat_round_trip": [
+    {
+      "channel": "CD4",
+      "method": "tophat",
+      "wall_ms": 1538.1,
+      "at_show_source_return": {
+        "floor_ready": true,
+        "floor_jobs": 0,
+        "tile_computes": 0
+      },
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "fallback_covering_computes": 0,
+      "fallback_ring_computes": 0,
+      "floor_jobs_run": 0,
+      "floor_jobs_foreground": 0,
+      "floor_jobs_background": 0,
+      "correct_array_calls_all_causes": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 8,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 5
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "cucim",
+      "wall_ms": 1511.6,
+      "at_show_source_return": {
+        "floor_ready": true,
+        "floor_jobs": 0,
+        "tile_computes": 0
+      },
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "fallback_covering_computes": 0,
+      "fallback_ring_computes": 0,
+      "floor_jobs_run": 0,
+      "floor_jobs_foreground": 0,
+      "floor_jobs_background": 0,
+      "correct_array_calls_all_causes": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 8,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 6
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "tophat",
+      "wall_ms": 1512.8,
+      "at_show_source_return": {
+        "floor_ready": true,
+        "floor_jobs": 0,
+        "tile_computes": 0
+      },
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "fallback_covering_computes": 0,
+      "fallback_ring_computes": 0,
+      "floor_jobs_run": 0,
+      "floor_jobs_foreground": 0,
+      "floor_jobs_background": 0,
+      "correct_array_calls_all_causes": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 8,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 7
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "cucim",
+      "wall_ms": 1512.8,
+      "at_show_source_return": {
+        "floor_ready": true,
+        "floor_jobs": 0,
+        "tile_computes": 0
+      },
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "fallback_covering_computes": 0,
+      "fallback_ring_computes": 0,
+      "floor_jobs_run": 0,
+      "floor_jobs_foreground": 0,
+      "floor_jobs_background": 0,
+      "correct_array_calls_all_causes": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 8,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 8
+      }
+    }
+  ],
+  "B_full_to_compare": {
+    "built": true,
+    "error": null,
+    "wall_ms": 8140.6,
+    "tile_computes": 5,
+    "tile_computes_by_level": {
+      "2": 5
+    },
+    "floor_jobs_run": 0,
+    "floor_jobs_background": 0,
+    "correct_array_calls_all_causes": 5,
+    "floor_cache_same_object": [
+      true,
+      true,
+      true
+    ],
+    "raw_cache_same_object": true,
+    "corrected_cache_same_object": true
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "label": "before-fix",
+  "mode": "both",
+  "notes": [
+    "GUI heartbeat is a 5 ms QTimer; its largest gap is the longest interval the event loop could not run. Not photon latency.",
+    "the synthetic pyramid reads much faster than the demo slide: the absolute milliseconds are a lower bound, the breakdown is the point"
+  ],
+  "backend": "gpu",
+  "renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+  "A_cold_patch": [
+    {
+      "label": "first visit, cold",
+      "stages_ms": {
+        "entry_accepted": 0.01,
+        "camera_updated": 23.88,
+        "first_scheduler_request": 54.32,
+        "coarse_complete": 54.33,
+        "first_fine_plane": 54.33,
+        "first_raw_upload": 54.34,
+        "first_gpu_submit": 54.35,
+        "target_viewport_complete[CD3]": 54.44,
+        "target_level_drawable": 54.61
+      },
+      "provider_reads": 9,
+      "scheduler_requests": 20,
+      "cache_hits": 11,
+      "raw_uploads": 4,
+      "gpu_submits": 5,
+      "worst_gui_gap_ms": 5.8,
+      "reached_target_level": true
+    },
+    {
+      "label": "second patch, cold",
+      "stages_ms": {
+        "entry_accepted": 0.0,
+        "camera_updated": 12.06,
+        "first_scheduler_request": 21.99,
+        "coarse_complete": 21.99,
+        "first_fine_plane": 21.99,
+        "first_raw_upload": 22.0,
+        "first_gpu_submit": 22.0,
+        "target_viewport_complete[CD3]": 22.04,
+        "target_level_drawable": 35.52
+      },
+      "provider_reads": 5,
+      "scheduler_requests": 17,
+      "cache_hits": 12,
+      "raw_uploads": 4,
+      "gpu_submits": 4,
+      "worst_gui_gap_ms": 6.2,
+      "reached_target_level": true
+    },
+    {
+      "label": "return, hot",
+      "stages_ms": {
+        "entry_accepted": 0.0,
+        "camera_updated": 5.55,
+        "first_scheduler_request": 5.68,
+        "coarse_complete": 5.69,
+        "first_fine_plane": 5.69,
+        "first_raw_upload": 5.7,
+        "first_gpu_submit": 5.7,
+        "target_viewport_complete[CD3]": 5.74,
+        "target_level_drawable": 5.75
+      },
+      "provider_reads": 0,
+      "scheduler_requests": 4,
+      "cache_hits": 4,
+      "raw_uploads": 0,
+      "gpu_submits": 1,
+      "worst_gui_gap_ms": 7.0,
+      "reached_target_level": true
+    }
+  ],
+  "A_first_channel": {
+    "channel": "CD8",
+    "stages_ms": {
+      "tick_accepted": 0.0,
+      "enable_returned": 140.6,
+      "first_scheduler_request": 140.84,
+      "coarse_complete": 140.84,
+      "first_fine_plane": 140.84,
+      "first_raw_upload": 140.85,
+      "first_gpu_submit": 140.85,
+      "target_viewport_complete[CD3]": 140.88,
+      "target_viewport_complete[CD8]": 140.88,
+      "channel_sharp": 140.89
+    },
+    "coarse_tiles": 9,
+    "fine_tiles": 4,
+    "provider_reads": 13,
+    "scheduler_requests": 13,
+    "raw_uploads": 13,
+    "gpu_submits": 6,
+    "worst_gui_gap_ms": 11.8,
+    "reached": true
+  },
+  "B_unchanged_source": {
+    "sync_source_returned": false,
+    "sync_source_ms": 0.1,
+    "stack_rebuilt": false,
+    "gpu_layer_rebuilt": false,
+    "binding_rebuilt": false,
+    "provider_reads": 0,
+    "raw_uploads": 0,
+    "fine_tiles_before": {
+      "CD3": 9
+    },
+    "fine_tiles_after": {
+      "CD3": 9
+    },
+    "worst_gui_gap_ms": 5.2
+  },
+  "B_source_rebind": {
+    "sync_source_total_ms": 205.98,
+    "sync_source_returned": true,
+    "old_source_identity": "SourceIdentity(dataset_path='/x/g3.ome.tif', dataset_fingerprint='1:1', stage='step1', corrected_artifact='roi=(256, 1280, 256, 1280)|handoff=rev-1')",
+    "new_source_identity": "SourceIdentity(dataset_path='/x/g3.ome.tif', dataset_fingerprint='1:1', stage='step1', corrected_artifact='roi=(256, 1280, 256, 1280)|handoff=rev-cucim-1')",
+    "identity_changed": true,
+    "phase_ms": {
+      "source_moved_check_ms": 0.18,
+      "teardown_and_scheduler_join_ms": 116.98,
+      "new_stack_build_ms": 33.42
+    },
+    "stages_ms": {
+      "handoff_visible": 49.61,
+      "sync_source_returned": 255.63,
+      "first_scheduler_request": 650.2,
+      "coarse_complete": 650.24,
+      "first_fine_plane": 650.24,
+      "first_raw_upload": 650.26,
+      "first_gpu_submit": 650.27,
+      "target_viewport_complete[CD3]": 650.32,
+      "new_source_sharp": 650.33
+    },
+    "worst_gui_gap_ms": 227.3,
+    "held_read_ms": 150,
+    "provider_reads": 28,
+    "scheduler_requests": 53,
+    "raw_uploads": 4,
+    "gpu_submits": 0,
+    "any_old_source_pixel_published": false,
+    "rejected_late_results": 0,
+    "reached_new_source_sharp": true
+  }
+}

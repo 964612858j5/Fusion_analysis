@@ -16,8 +16,9 @@ import numpy as np
 import pytest
 
 from block01.viewer.step1_source import (
-    SOURCE_CORRECTED, SOURCE_MISSING, SOURCE_RAW, MissingProduct,
-    Step1SourceTable, box_downsample_valid, read_tile,
+    MAX_REDUCTION_ELEMENTS, SOURCE_CORRECTED, SOURCE_MISSING, SOURCE_RAW,
+    MissingProduct, Step1SourceTable, _slab_geometry, box_downsample_valid,
+    read_tile,
 )
 
 
@@ -394,6 +395,7 @@ class _HugeProduct:
         self.dtype = np.float32
         self._value = value
         self.largest_read = 0
+        self.reads = 0
 
     def __getitem__(self, key):
         ys, xs = key
@@ -401,6 +403,7 @@ class _HugeProduct:
         width = xs.stop - xs.start
         size = height * width
         self.largest_read = max(self.largest_read, size)
+        self.reads += 1
         if size > self.LIMIT:
             raise AssertionError(
                 f"a single read of {size} pixels: the reduction is not bounded")
@@ -427,3 +430,68 @@ def test_the_bound_is_honoured_for_a_coarse_tile_too():
     read_tile(table, "CD3", (0, 512, 0, 512), stride=16)
 
     assert product.largest_read <= _HugeProduct.LIMIT
+
+
+def test_the_whole_slide_product_is_never_taken_in_one_read():
+    """The bound has to BITE: one read of everything would also pass a
+    `largest_read <= LIMIT` check if the walk had quietly stopped walking."""
+    bbox = (0, 60000, 0, 40000)
+    product = _HugeProduct(bbox)
+    table = _table({"CD3": "tophat"}, {"CD3": product}, roi_bbox=bbox)
+
+    read_tile(table, "CD3", (0, 234, 0, 157), stride=256)
+
+    assert product.reads > 1, "the overview was read in a single slab"
+    assert product.largest_read <= _HugeProduct.LIMIT
+
+
+@pytest.mark.parametrize("stride", [1, 2, 4, 16, 64, 256])
+def test_a_slab_still_fits_the_budget_after_the_padding_it_may_need(stride):
+    """The read is not the only thing that has to stay inside the budget.
+
+    A slab is padded out to whole blocks of the global grid before it is
+    summed, which can add up to one block on each axis. `_HugeProduct` can
+    only see READS, so this is the arithmetic that protects the temporary --
+    the thing no product-side gate can observe.
+    """
+    rows, band = _slab_geometry(stride, MAX_REDUCTION_ELEMENTS)
+
+    assert rows % stride == 0 and band % stride == 0
+    assert rows * band <= MAX_REDUCTION_ELEMENTS
+    assert (rows + stride) * (band + stride) <= MAX_REDUCTION_ELEMENTS
+
+
+def test_the_reduction_budget_has_not_been_raised():
+    """Speed may not be bought with memory (G3.2b.4A)."""
+    assert MAX_REDUCTION_ELEMENTS == 4 * 1024 * 1024
+
+
+def test_a_fine_corrected_tile_is_copied_rather_than_reduced():
+    """`stride == 1` is not a reduction: a block of one pixel is the pixel.
+
+    The reduction walk would cut this rectangle into slabs smaller than the
+    budget, so the read count is what tells the copy apart from the walk.
+    """
+    pixels = np.arange(64 * 64, dtype=np.float32).reshape(64, 64)
+    bbox = (0, 64, 0, 64)
+    product = _CountingArray(bbox, pixels)
+    table = _table({"CD3": "cucim"}, {"CD3": product}, roi_bbox=bbox)
+
+    values, valid = read_tile(table, "CD3", (0, 64, 0, 64), stride=1)
+
+    assert values.shape == (64, 64) and valid.all()
+    assert np.array_equal(values, pixels)
+    assert product.reads == 1, (
+        f"a fine tile took {product.reads} reads; it is being reduced")
+
+
+class _CountingArray(_Array):
+    """`_Array`, plus how many times its pixels were actually asked for."""
+
+    def __init__(self, bbox, fill=None):
+        super().__init__(bbox, fill)
+        self.reads = 0
+
+    def __getitem__(self, key):
+        self.reads += 1
+        return super().__getitem__(key)

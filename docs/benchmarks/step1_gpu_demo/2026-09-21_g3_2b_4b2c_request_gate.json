@@ -1,0 +1,3651 @@
+{
+  "label": "g324b2c",
+  "when": "2026-09-21 16:40:30",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "channel": "CD22",
+  "cold_definition": "each arm is a FRESH window and viewer stack; inside an arm every measured landing is a region that arm has never visited. The OS page cache is NOT dropped, so no number here is a cold disk read",
+  "honesty": [
+    "the two arms differ ONLY by the controller's public switch",
+    "the patch action is a real QTest.mouseClick on the real P-button",
+    "the tissue action is the real navigate_requested slot",
+    "the GUI heartbeat's worst gap is event-loop unresponsiveness",
+    "the demo project is read-only; the session autosave writes to a scratch directory"
+  ],
+  "before_controller_requests_on": {
+    "arm": "before",
+    "controller_viewport_requests_enabled": true,
+    "backend": "gpu",
+    "actions": [
+      {
+        "label": "before-1-patch-0",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 22.79,
+          "T10b_first_gpu_submit": 23.31,
+          "T10_first_raw_texture_upload": 38.47,
+          "T9_viewport_target_fine_ready": 446.69,
+          "T4_first_binding_request": 12.88,
+          "T8_first_binding_callback": 28.6,
+          "T6_first_provider_read_start": 6.62,
+          "T6b_first_provider_read_end": 25.26,
+          "T5_first_scheduler_request": 1.55,
+          "T7_last_request_issued": 13.03
+        },
+        "gui_worst_gap_ms": 371.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 44,
+          "requests_by_origin": {
+            "legacy-controller/raw": 32,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 32,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 32,
+          "legacy_keys_binding_never_asked": 32,
+          "duplicate_requests": 0,
+          "provider_reads": 44,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 32,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 62,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 9.55,
+            "median": 12.36,
+            "max": 17.51,
+            "sum": 157.62
+          },
+          "raw": {
+            "n": 32,
+            "min": 7.6,
+            "median": 14.82,
+            "max": 75.35,
+            "sum": 659.01
+          },
+          "all": {
+            "n": 44,
+            "min": 7.6,
+            "median": 13.82,
+            "max": 75.35,
+            "sum": 816.63
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-2-tissue-0",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          4200,
+          5200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 4728.79,
+          "y": 3850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 5200.0,
+          "cy": 4200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            9,
+            11
+          ],
+          "ty": [
+            7,
+            8
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 87.95,
+          "T10_first_raw_texture_upload": 139.33,
+          "T10b_first_gpu_submit": 139.34,
+          "T9_viewport_target_fine_ready": 139.42,
+          "T4_first_binding_request": 13.15,
+          "T8_first_binding_callback": 69.49,
+          "T6_first_provider_read_start": 7.09,
+          "T6b_first_provider_read_end": 68.04,
+          "T5_first_scheduler_request": 2.23,
+          "T7_last_request_issued": 13.3
+        },
+        "gui_worst_gap_ms": 139.4,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 28,
+          "requests_by_origin": {
+            "legacy-controller/raw": 22,
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 22,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 22,
+          "legacy_keys_binding_never_asked": 22,
+          "duplicate_requests": 0,
+          "provider_reads": 28,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 22,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 42,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 11.98,
+            "median": 16.69,
+            "max": 21.65,
+            "sum": 96.72
+          },
+          "raw": {
+            "n": 22,
+            "min": 5.62,
+            "median": 11.54,
+            "max": 66.12,
+            "sum": 411.3
+          },
+          "all": {
+            "n": 28,
+            "min": 5.62,
+            "median": 12.58,
+            "max": 66.12,
+            "sum": 508.02
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-3-tissue-1",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          15200,
+          16800
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 16328.79,
+          "y": 14850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 16800.0,
+          "cy": 15200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            31,
+            33
+          ],
+          "ty": [
+            29,
+            30
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 60.09,
+          "T10_first_raw_texture_upload": 112.43,
+          "T10b_first_gpu_submit": 112.44,
+          "T9_viewport_target_fine_ready": 112.53,
+          "T4_first_binding_request": 18.32,
+          "T8_first_binding_callback": 39.86,
+          "T6_first_provider_read_start": 7.19,
+          "T6b_first_provider_read_end": 32.61,
+          "T5_first_scheduler_request": 2.39,
+          "T7_last_request_issued": 18.47
+        },
+        "gui_worst_gap_ms": 112.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 28,
+          "requests_by_origin": {
+            "legacy-controller/raw": 22,
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 22,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 22,
+          "legacy_keys_binding_never_asked": 22,
+          "duplicate_requests": 0,
+          "provider_reads": 28,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 22,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 42,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 9.89,
+            "median": 16.02,
+            "max": 17.39,
+            "sum": 89.86
+          },
+          "raw": {
+            "n": 22,
+            "min": 7.14,
+            "median": 16.13,
+            "max": 36.02,
+            "sum": 416.37
+          },
+          "all": {
+            "n": 28,
+            "min": 7.14,
+            "median": 16.02,
+            "max": 36.02,
+            "sum": 506.24
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-4-patch-1",
+        "kind": "patch",
+        "patch_index": 1,
+        "patch_bbox": [
+          12672,
+          14080,
+          8256,
+          10144
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 8252.19,
+          "y": 12672.0,
+          "w": 1895.62,
+          "h": 1408.0,
+          "cx": 9200.0,
+          "cy": 13376.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 16,
+        "visible_tile_range": {
+          "tx": [
+            16,
+            19
+          ],
+          "ty": [
+            24,
+            27
+          ]
+        },
+        "visible_world_area_l0": 2669033.0,
+        "stages_ms": {
+          "T1_slot_returned": 52.52,
+          "T10b_first_gpu_submit": 54.99,
+          "T10_first_raw_texture_upload": 182.66,
+          "T9_viewport_target_fine_ready": 482.85,
+          "T4_first_binding_request": 14.63,
+          "T8_first_binding_callback": 54.8,
+          "T6_first_provider_read_start": 7.1,
+          "T6b_first_provider_read_end": 49.77,
+          "T5_first_scheduler_request": 2.16,
+          "T7_last_request_issued": 14.94
+        },
+        "gui_worst_gap_ms": 415.4,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 53,
+          "requests_by_origin": {
+            "legacy-controller/raw": 37,
+            "gpu-binding/fine": 16
+          },
+          "binding_requests": 16,
+          "legacy_requests": 37,
+          "unique_binding_rawkeys": 16,
+          "unique_legacy_rawkeys": 37,
+          "legacy_keys_binding_never_asked": 37,
+          "duplicate_requests": 0,
+          "provider_reads": 53,
+          "provider_reads_corrected": 16,
+          "provider_reads_raw": 37,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 73,
+          "gpu_uploads": 16,
+          "gpu_texture_bytes_delta": 16777216,
+          "gpu_submits": 17,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 16,
+            "min": 10.04,
+            "median": 11.99,
+            "max": 21.93,
+            "sum": 215.9
+          },
+          "raw": {
+            "n": 37,
+            "min": 8.11,
+            "median": 15.59,
+            "max": 138.56,
+            "sum": 1502.27
+          },
+          "all": {
+            "n": 53,
+            "min": 8.11,
+            "median": 13.72,
+            "max": 138.56,
+            "sum": 1718.17
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 16
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-5-patch-2",
+        "kind": "patch",
+        "patch_index": 2,
+        "patch_bbox": [
+          6848,
+          8000,
+          12384,
+          13376
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 12104.52,
+          "y": 6848.0,
+          "w": 1550.96,
+          "h": 1152.0,
+          "cx": 12880.0,
+          "cy": 7424.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            23,
+            26
+          ],
+          "ty": [
+            13,
+            15
+          ]
+        },
+        "visible_world_area_l0": 1786705.9,
+        "stages_ms": {
+          "T1_slot_returned": 98.36,
+          "T10b_first_gpu_submit": 99.18,
+          "T10_first_raw_texture_upload": 161.46,
+          "T9_viewport_target_fine_ready": 520.98,
+          "T4_first_binding_request": 17.39,
+          "T8_first_binding_callback": 100.21,
+          "T6_first_provider_read_start": 7.64,
+          "T6b_first_provider_read_end": 100.03,
+          "T5_first_scheduler_request": 2.9,
+          "T7_last_request_issued": 17.66
+        },
+        "gui_worst_gap_ms": 420.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 44,
+          "requests_by_origin": {
+            "legacy-controller/raw": 32,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 32,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 32,
+          "legacy_keys_binding_never_asked": 32,
+          "duplicate_requests": 0,
+          "provider_reads": 44,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 32,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 62,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 10.81,
+            "median": 31.55,
+            "max": 37.31,
+            "sum": 311.56
+          },
+          "raw": {
+            "n": 32,
+            "min": 6.28,
+            "median": 11.77,
+            "max": 101.62,
+            "sum": 457.04
+          },
+          "all": {
+            "n": 44,
+            "min": 6.28,
+            "median": 13.17,
+            "max": 101.62,
+            "sum": 768.6
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-6-tissue-2",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          9600,
+          18400
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 17928.79,
+          "y": 9250.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 18400.0,
+          "cy": 9600.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 4,
+        "visible_tile_range": {
+          "tx": [
+            35,
+            36
+          ],
+          "ty": [
+            18,
+            19
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 32.86,
+          "T10_first_raw_texture_upload": 72.46,
+          "T10b_first_gpu_submit": 72.48,
+          "T9_viewport_target_fine_ready": 72.54,
+          "T4_first_binding_request": 9.84,
+          "T8_first_binding_callback": 24.2,
+          "T6_first_provider_read_start": 6.99,
+          "T6b_first_provider_read_end": 22.25,
+          "T5_first_scheduler_request": 2.13,
+          "T7_last_request_issued": 10.22
+        },
+        "gui_worst_gap_ms": 72.6,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 22,
+          "requests_by_origin": {
+            "legacy-controller/raw": 18,
+            "gpu-binding/fine": 4
+          },
+          "binding_requests": 4,
+          "legacy_requests": 18,
+          "unique_binding_rawkeys": 4,
+          "unique_legacy_rawkeys": 18,
+          "legacy_keys_binding_never_asked": 18,
+          "duplicate_requests": 0,
+          "provider_reads": 22,
+          "provider_reads_corrected": 4,
+          "provider_reads_raw": 18,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 34,
+          "gpu_uploads": 4,
+          "gpu_texture_bytes_delta": 4194304,
+          "gpu_submits": 5,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 4,
+            "min": 12.88,
+            "median": 15.12,
+            "max": 19.93,
+            "sum": 63.05
+          },
+          "raw": {
+            "n": 18,
+            "min": 8.76,
+            "median": 12.35,
+            "max": 23.13,
+            "sum": 242.2
+          },
+          "all": {
+            "n": 22,
+            "min": 8.76,
+            "median": 13.4,
+            "max": 23.13,
+            "sum": 305.25
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 4
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-7-tissue-3",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          16800,
+          4200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 3728.79,
+          "y": 16450.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 4200.0,
+          "cy": 16800.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            7,
+            9
+          ],
+          "ty": [
+            32,
+            33
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 31.41,
+          "T10_first_raw_texture_upload": 83.36,
+          "T10b_first_gpu_submit": 83.38,
+          "T9_viewport_target_fine_ready": 83.46,
+          "T4_first_binding_request": 7.33,
+          "T8_first_binding_callback": 13.94,
+          "T6_first_provider_read_start": 7.59,
+          "T6b_first_provider_read_end": 13.83,
+          "T5_first_scheduler_request": 2.63,
+          "T7_last_request_issued": 7.39
+        },
+        "gui_worst_gap_ms": 83.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 28,
+          "requests_by_origin": {
+            "legacy-controller/raw": 22,
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 22,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 22,
+          "legacy_keys_binding_never_asked": 22,
+          "duplicate_requests": 0,
+          "provider_reads": 28,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 22,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 42,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 6.13,
+            "median": 17.0,
+            "max": 18.95,
+            "sum": 88.72
+          },
+          "raw": {
+            "n": 22,
+            "min": 4.34,
+            "median": 10.02,
+            "max": 16.78,
+            "sum": 235.99
+          },
+          "all": {
+            "n": 28,
+            "min": 4.34,
+            "median": 10.35,
+            "max": 18.95,
+            "sum": 324.71
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-8-patch-3",
+        "kind": "patch",
+        "patch_index": 3,
+        "patch_bbox": [
+          2048,
+          3136,
+          16384,
+          17696
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 16307.6,
+          "y": 2048.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 17040.0,
+          "cy": 2592.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            31,
+            34
+          ],
+          "ty": [
+            4,
+            6
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 27.62,
+          "T10b_first_gpu_submit": 28.08,
+          "T10_first_raw_texture_upload": 143.81,
+          "T9_viewport_target_fine_ready": 143.96,
+          "T4_first_binding_request": 17.43,
+          "T8_first_binding_callback": 27.86,
+          "T6_first_provider_read_start": 7.73,
+          "T6b_first_provider_read_end": 27.7,
+          "T5_first_scheduler_request": 3.05,
+          "T7_last_request_issued": 17.73
+        },
+        "gui_worst_gap_ms": 115.2,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 44,
+          "requests_by_origin": {
+            "legacy-controller/raw": 32,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 32,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 32,
+          "legacy_keys_binding_never_asked": 32,
+          "duplicate_requests": 0,
+          "provider_reads": 44,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 32,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 62,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 7.62,
+            "median": 11.97,
+            "max": 16.93,
+            "sum": 144.86
+          },
+          "raw": {
+            "n": 32,
+            "min": 6.1,
+            "median": 10.72,
+            "max": 24.45,
+            "sum": 388.25
+          },
+          "all": {
+            "n": 44,
+            "min": 6.1,
+            "median": 11.12,
+            "max": 24.45,
+            "sum": 533.1
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-9-patch-4",
+        "kind": "patch",
+        "patch_index": 4,
+        "patch_bbox": [
+          15360,
+          16448,
+          2048,
+          3360
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 1971.6,
+          "y": 15360.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 2704.0,
+          "cy": 15904.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            3,
+            6
+          ],
+          "ty": [
+            30,
+            32
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 46.53,
+          "T10b_first_gpu_submit": 74.35,
+          "T10_first_raw_texture_upload": 164.6,
+          "T9_viewport_target_fine_ready": 164.72,
+          "T4_first_binding_request": 25.76,
+          "T8_first_binding_callback": 51.37,
+          "T6_first_provider_read_start": 8.72,
+          "T6b_first_provider_read_end": 39.24,
+          "T5_first_scheduler_request": 4.09,
+          "T7_last_request_issued": 26.16
+        },
+        "gui_worst_gap_ms": 74.4,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 41,
+          "requests_by_origin": {
+            "legacy-controller/raw": 29,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 29,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 29,
+          "legacy_keys_binding_never_asked": 29,
+          "duplicate_requests": 0,
+          "provider_reads": 39,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 27,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 4,
+          "raw_cache_misses": 53,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 10.71,
+            "median": 20.57,
+            "max": 29.01,
+            "sum": 232.87
+          },
+          "raw": {
+            "n": 27,
+            "min": 5.1,
+            "median": 13.98,
+            "max": 36.42,
+            "sum": 459.82
+          },
+          "all": {
+            "n": 39,
+            "min": 5.1,
+            "median": 17.02,
+            "max": 36.42,
+            "sum": 692.69
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-10-tissue-4",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          6200,
+          9200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 8728.79,
+          "y": 5850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 9200.0,
+          "cy": 6200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 4,
+        "visible_tile_range": {
+          "tx": [
+            17,
+            18
+          ],
+          "ty": [
+            11,
+            12
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 31.07,
+          "T10b_first_gpu_submit": 51.07,
+          "T10_first_raw_texture_upload": 79.04,
+          "T9_viewport_target_fine_ready": 79.11,
+          "T4_first_binding_request": 12.07,
+          "T8_first_binding_callback": 34.44,
+          "T6_first_provider_read_start": 7.64,
+          "T6b_first_provider_read_end": 23.29,
+          "T5_first_scheduler_request": 2.91,
+          "T7_last_request_issued": 12.16
+        },
+        "gui_worst_gap_ms": 50.6,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 22,
+          "requests_by_origin": {
+            "legacy-controller/raw": 18,
+            "gpu-binding/fine": 4
+          },
+          "binding_requests": 4,
+          "legacy_requests": 18,
+          "unique_binding_rawkeys": 4,
+          "unique_legacy_rawkeys": 18,
+          "legacy_keys_binding_never_asked": 18,
+          "duplicate_requests": 0,
+          "provider_reads": 22,
+          "provider_reads_corrected": 4,
+          "provider_reads_raw": 18,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 34,
+          "gpu_uploads": 4,
+          "gpu_texture_bytes_delta": 4194304,
+          "gpu_submits": 5,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 4,
+            "min": 17.67,
+            "median": 22.37,
+            "max": 28.1,
+            "sum": 90.51
+          },
+          "raw": {
+            "n": 18,
+            "min": 8.2,
+            "median": 17.03,
+            "max": 21.21,
+            "sum": 291.42
+          },
+          "all": {
+            "n": 22,
+            "min": 8.2,
+            "median": 17.76,
+            "max": 28.1,
+            "sum": 381.93
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 4
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ],
+    "matched_geometry": [
+      {
+        "label": "before-matched-patch",
+        "kind": "patch",
+        "patch_index": 7,
+        "patch_bbox": [
+          17600,
+          18688,
+          12800,
+          14112
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 12723.6,
+          "y": 17600.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 13456.0,
+          "cy": 18144.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            24,
+            27
+          ],
+          "ty": [
+            34,
+            36
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 25.06,
+          "T10b_first_gpu_submit": 25.2,
+          "T10_first_raw_texture_upload": 61.62,
+          "T9_viewport_target_fine_ready": 157.14,
+          "T4_first_binding_request": 15.48,
+          "T8_first_binding_callback": 31.96,
+          "T6_first_provider_read_start": 8.0,
+          "T6b_first_provider_read_end": 25.45,
+          "T5_first_scheduler_request": 3.32,
+          "T7_last_request_issued": 15.99
+        },
+        "gui_worst_gap_ms": 118.6,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 44,
+          "requests_by_origin": {
+            "legacy-controller/raw": 32,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 32,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 32,
+          "legacy_keys_binding_never_asked": 32,
+          "duplicate_requests": 0,
+          "provider_reads": 44,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 32,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 62,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 10.73,
+            "median": 16.56,
+            "max": 24.74,
+            "sum": 203.29
+          },
+          "raw": {
+            "n": 32,
+            "min": 7.15,
+            "median": 12.8,
+            "max": 20.53,
+            "sum": 436.62
+          },
+          "all": {
+            "n": 44,
+            "min": 7.15,
+            "median": 13.57,
+            "max": 24.74,
+            "sum": 639.91
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-matched-tissue",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          5944,
+          2856
+        ],
+        "camera_before": {
+          "x": 2411.6,
+          "y": 2600.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 3144.0,
+          "cy": 3144.0
+        },
+        "camera_after": {
+          "x": 2123.6,
+          "y": 5400.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 2856.0,
+          "cy": 5944.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            4,
+            7
+          ],
+          "ty": [
+            10,
+            12
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 36.43,
+          "T10_first_raw_texture_upload": 89.31,
+          "T10b_first_gpu_submit": 89.33,
+          "T9_viewport_target_fine_ready": 161.74,
+          "T4_first_binding_request": 19.1,
+          "T8_first_binding_callback": 35.09,
+          "T6_first_provider_read_start": 7.91,
+          "T6b_first_provider_read_end": 29.2,
+          "T5_first_scheduler_request": 3.23,
+          "T7_last_request_issued": 19.4
+        },
+        "gui_worst_gap_ms": 89.4,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 43,
+          "requests_by_origin": {
+            "legacy-controller/raw": 31,
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 31,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 31,
+          "legacy_keys_binding_never_asked": 31,
+          "duplicate_requests": 0,
+          "provider_reads": 43,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 31,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 1,
+          "raw_cache_misses": 60,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 13.53,
+            "median": 19.16,
+            "max": 30.84,
+            "sum": 256.56
+          },
+          "raw": {
+            "n": 31,
+            "min": 6.53,
+            "median": 15.07,
+            "max": 30.7,
+            "sum": 479.58
+          },
+          "all": {
+            "n": 43,
+            "min": 6.53,
+            "median": 15.71,
+            "max": 30.84,
+            "sum": 736.14
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ],
+    "hot": [
+      {
+        "label": "before-hot-patch",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 20.22,
+          "T10b_first_gpu_submit": 20.31,
+          "T9_viewport_target_fine_ready": 20.42,
+          "T4_first_binding_request": 11.69,
+          "T8_first_binding_callback": 11.76,
+          "T5_first_scheduler_request": 11.69,
+          "T7_last_request_issued": 12.26
+        },
+        "gui_worst_gap_ms": 20.4,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 30,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-hot-patch-again",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 13.01,
+          "T10b_first_gpu_submit": 13.08,
+          "T9_viewport_target_fine_ready": 13.19
+        },
+        "gui_worst_gap_ms": 13.1,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 0,
+          "requests_by_origin": {},
+          "binding_requests": 0,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 0,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 18,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "before-hot-tissue",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          4200,
+          5200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 4728.79,
+          "y": 3850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 5200.0,
+          "cy": 4200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            9,
+            11
+          ],
+          "ty": [
+            7,
+            8
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 14.85,
+          "T10b_first_gpu_submit": 14.93,
+          "T9_viewport_target_fine_ready": 15.0,
+          "T4_first_binding_request": 9.78,
+          "T8_first_binding_callback": 9.85,
+          "T5_first_scheduler_request": 9.78,
+          "T7_last_request_issued": 10.06
+        },
+        "gui_worst_gap_ms": 15.0,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 6,
+          "requests_by_origin": {
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 20,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ]
+  },
+  "after_controller_requests_off": {
+    "arm": "after",
+    "controller_viewport_requests_enabled": false,
+    "backend": "gpu",
+    "actions": [
+      {
+        "label": "after-1-patch-0",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 11.32,
+          "T10b_first_gpu_submit": 12.3,
+          "T10_first_raw_texture_upload": 364.66,
+          "T9_viewport_target_fine_ready": 377.58,
+          "T4_first_binding_request": 2.9,
+          "T8_first_binding_callback": 12.22,
+          "T6_first_provider_read_start": 3.65,
+          "T6b_first_provider_read_end": 12.08,
+          "T5_first_scheduler_request": 2.9,
+          "T7_last_request_issued": 3.27
+        },
+        "gui_worst_gap_ms": 351.3,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 7.72,
+            "median": 10.35,
+            "max": 15.07,
+            "sum": 130.95
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 7.72,
+            "median": 10.35,
+            "max": 15.07,
+            "sum": 130.95
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-2-tissue-0",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          4200,
+          5200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 4728.79,
+          "y": 3850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 5200.0,
+          "cy": 4200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            9,
+            11
+          ],
+          "ty": [
+            7,
+            8
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 72.88,
+          "T10b_first_gpu_submit": 73.6,
+          "T10_first_raw_texture_upload": 118.69,
+          "T9_viewport_target_fine_ready": 118.78,
+          "T4_first_binding_request": 2.82,
+          "T8_first_binding_callback": 73.95,
+          "T6_first_provider_read_start": 4.53,
+          "T6b_first_provider_read_end": 73.83,
+          "T5_first_scheduler_request": 2.82,
+          "T7_last_request_issued": 3.07
+        },
+        "gui_worst_gap_ms": 73.7,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 6,
+          "requests_by_origin": {
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 6,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 6,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 67.67,
+            "median": 69.16,
+            "max": 70.61,
+            "sum": 414.81
+          },
+          "raw": null,
+          "all": {
+            "n": 6,
+            "min": 67.67,
+            "median": 69.16,
+            "max": 70.61,
+            "sum": 414.81
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-3-tissue-1",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          15200,
+          16800
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 16328.79,
+          "y": 14850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 16800.0,
+          "cy": 15200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            31,
+            33
+          ],
+          "ty": [
+            29,
+            30
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 102.85,
+          "T10b_first_gpu_submit": 102.99,
+          "T10_first_raw_texture_upload": 124.72,
+          "T9_viewport_target_fine_ready": 129.99,
+          "T4_first_binding_request": 2.84,
+          "T8_first_binding_callback": 103.89,
+          "T6_first_provider_read_start": 3.6,
+          "T6b_first_provider_read_end": 103.74,
+          "T5_first_scheduler_request": 2.84,
+          "T7_last_request_issued": 3.11
+        },
+        "gui_worst_gap_ms": 103.0,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 6,
+          "requests_by_origin": {
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 6,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 6,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 99.66,
+            "median": 100.81,
+            "max": 103.52,
+            "sum": 606.92
+          },
+          "raw": null,
+          "all": {
+            "n": 6,
+            "min": 99.66,
+            "median": 100.81,
+            "max": 103.52,
+            "sum": 606.92
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-4-patch-1",
+        "kind": "patch",
+        "patch_index": 1,
+        "patch_bbox": [
+          12672,
+          14080,
+          8256,
+          10144
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 8252.19,
+          "y": 12672.0,
+          "w": 1895.62,
+          "h": 1408.0,
+          "cx": 9200.0,
+          "cy": 13376.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 16,
+        "visible_tile_range": {
+          "tx": [
+            16,
+            19
+          ],
+          "ty": [
+            24,
+            27
+          ]
+        },
+        "visible_world_area_l0": 2669033.0,
+        "stages_ms": {
+          "T1_slot_returned": 53.14,
+          "T10_first_raw_texture_upload": 66.45,
+          "T10b_first_gpu_submit": 66.46,
+          "T9_viewport_target_fine_ready": 106.84,
+          "T4_first_binding_request": 1.94,
+          "T8_first_binding_callback": 51.59,
+          "T6_first_provider_read_start": 43.02,
+          "T6b_first_provider_read_end": 51.47,
+          "T5_first_scheduler_request": 1.94,
+          "T7_last_request_issued": 2.18
+        },
+        "gui_worst_gap_ms": 66.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 16,
+          "requests_by_origin": {
+            "gpu-binding/fine": 16
+          },
+          "binding_requests": 16,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 16,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 16,
+          "provider_reads_corrected": 16,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 16,
+          "gpu_uploads": 16,
+          "gpu_texture_bytes_delta": 16777216,
+          "gpu_submits": 17,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 16,
+            "min": 4.75,
+            "median": 9.32,
+            "max": 18.88,
+            "sum": 166.05
+          },
+          "raw": null,
+          "all": {
+            "n": 16,
+            "min": 4.75,
+            "median": 9.32,
+            "max": 18.88,
+            "sum": 166.05
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 16
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-5-patch-2",
+        "kind": "patch",
+        "patch_index": 2,
+        "patch_bbox": [
+          6848,
+          8000,
+          12384,
+          13376
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 12104.52,
+          "y": 6848.0,
+          "w": 1550.96,
+          "h": 1152.0,
+          "cx": 12880.0,
+          "cy": 7424.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            23,
+            26
+          ],
+          "ty": [
+            13,
+            15
+          ]
+        },
+        "visible_world_area_l0": 1786705.9,
+        "stages_ms": {
+          "T1_slot_returned": 91.49,
+          "T10b_first_gpu_submit": 92.28,
+          "T10_first_raw_texture_upload": 128.72,
+          "T9_viewport_target_fine_ready": 142.64,
+          "T4_first_binding_request": 2.37,
+          "T8_first_binding_callback": 93.29,
+          "T6_first_provider_read_start": 19.47,
+          "T6b_first_provider_read_end": 93.12,
+          "T5_first_scheduler_request": 2.37,
+          "T7_last_request_issued": 2.69
+        },
+        "gui_worst_gap_ms": 92.3,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 9.56,
+            "median": 73.27,
+            "max": 99.34,
+            "sum": 791.59
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 9.56,
+            "median": 73.27,
+            "max": 99.34,
+            "sum": 791.59
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-6-tissue-2",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          9600,
+          18400
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 17928.79,
+          "y": 9250.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 18400.0,
+          "cy": 9600.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 4,
+        "visible_tile_range": {
+          "tx": [
+            35,
+            36
+          ],
+          "ty": [
+            18,
+            19
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 102.39,
+          "T10b_first_gpu_submit": 102.51,
+          "T10_first_raw_texture_upload": 120.09,
+          "T9_viewport_target_fine_ready": 120.2,
+          "T4_first_binding_request": 2.48,
+          "T8_first_binding_callback": 103.53,
+          "T6_first_provider_read_start": 3.43,
+          "T6b_first_provider_read_end": 103.38,
+          "T5_first_scheduler_request": 2.48,
+          "T7_last_request_issued": 2.68
+        },
+        "gui_worst_gap_ms": 102.5,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 4,
+          "requests_by_origin": {
+            "gpu-binding/fine": 4
+          },
+          "binding_requests": 4,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 4,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 4,
+          "provider_reads_corrected": 4,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 4,
+          "gpu_uploads": 4,
+          "gpu_texture_bytes_delta": 4194304,
+          "gpu_submits": 5,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 4,
+            "min": 99.43,
+            "median": 100.2,
+            "max": 100.9,
+            "sum": 400.73
+          },
+          "raw": null,
+          "all": {
+            "n": 4,
+            "min": 99.43,
+            "median": 100.2,
+            "max": 100.9,
+            "sum": 400.73
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 4
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-7-tissue-3",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          16800,
+          4200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 3728.79,
+          "y": 16450.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 4200.0,
+          "cy": 16800.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            7,
+            9
+          ],
+          "ty": [
+            32,
+            33
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 114.71,
+          "T10_first_raw_texture_upload": 120.52,
+          "T10b_first_gpu_submit": 120.54,
+          "T9_viewport_target_fine_ready": 129.89,
+          "T4_first_binding_request": 1.48,
+          "T8_first_binding_callback": 113.95,
+          "T6_first_provider_read_start": 70.12,
+          "T6b_first_provider_read_end": 113.83,
+          "T5_first_scheduler_request": 1.48,
+          "T7_last_request_issued": 84.04
+        },
+        "gui_worst_gap_ms": 120.6,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 6,
+          "requests_by_origin": {
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 6,
+          "provider_reads_corrected": 6,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 6,
+          "gpu_uploads": 6,
+          "gpu_texture_bytes_delta": 6291456,
+          "gpu_submits": 7,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 6,
+            "min": 8.44,
+            "median": 9.08,
+            "max": 43.71,
+            "sum": 90.25
+          },
+          "raw": null,
+          "all": {
+            "n": 6,
+            "min": 8.44,
+            "median": 9.08,
+            "max": 43.71,
+            "sum": 90.25
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-8-patch-3",
+        "kind": "patch",
+        "patch_index": 3,
+        "patch_bbox": [
+          2048,
+          3136,
+          16384,
+          17696
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 16307.6,
+          "y": 2048.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 17040.0,
+          "cy": 2592.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            31,
+            34
+          ],
+          "ty": [
+            4,
+            6
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 100.71,
+          "T10b_first_gpu_submit": 100.87,
+          "T10_first_raw_texture_upload": 115.53,
+          "T9_viewport_target_fine_ready": 141.05,
+          "T4_first_binding_request": 3.06,
+          "T8_first_binding_callback": 102.51,
+          "T6_first_provider_read_start": 70.97,
+          "T6b_first_provider_read_end": 102.32,
+          "T5_first_scheduler_request": 3.06,
+          "T7_last_request_issued": 3.42
+        },
+        "gui_worst_gap_ms": 100.9,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 7.66,
+            "median": 31.73,
+            "max": 37.7,
+            "sum": 312.74
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 7.66,
+            "median": 31.73,
+            "max": 37.7,
+            "sum": 312.74
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-9-patch-4",
+        "kind": "patch",
+        "patch_index": 4,
+        "patch_bbox": [
+          15360,
+          16448,
+          2048,
+          3360
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 1971.6,
+          "y": 15360.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 2704.0,
+          "cy": 15904.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            3,
+            6
+          ],
+          "ty": [
+            30,
+            32
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 12.62,
+          "T10b_first_gpu_submit": 12.7,
+          "T10_first_raw_texture_upload": 27.0,
+          "T9_viewport_target_fine_ready": 55.11,
+          "T4_first_binding_request": 3.4,
+          "T8_first_binding_callback": 13.64,
+          "T6_first_provider_read_start": 4.95,
+          "T6b_first_provider_read_end": 13.48,
+          "T5_first_scheduler_request": 3.4,
+          "T7_last_request_issued": 3.78
+        },
+        "gui_worst_gap_ms": 39.1,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 5.82,
+            "median": 9.94,
+            "max": 16.37,
+            "sum": 131.85
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 5.82,
+            "median": 9.94,
+            "max": 16.37,
+            "sum": 131.85
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-10-tissue-4",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          6200,
+          9200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 8728.79,
+          "y": 5850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 9200.0,
+          "cy": 6200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 4,
+        "visible_tile_range": {
+          "tx": [
+            17,
+            18
+          ],
+          "ty": [
+            11,
+            12
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 8.78,
+          "T10b_first_gpu_submit": 8.88,
+          "T10_first_raw_texture_upload": 14.49,
+          "T9_viewport_target_fine_ready": 22.03,
+          "T4_first_binding_request": 2.79,
+          "T8_first_binding_callback": 11.09,
+          "T6_first_provider_read_start": 3.56,
+          "T6b_first_provider_read_end": 10.95,
+          "T5_first_scheduler_request": 2.79,
+          "T7_last_request_issued": 3.02
+        },
+        "gui_worst_gap_ms": 12.6,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 4,
+          "requests_by_origin": {
+            "gpu-binding/fine": 4
+          },
+          "binding_requests": 4,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 4,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 4,
+          "provider_reads_corrected": 4,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 4,
+          "gpu_uploads": 4,
+          "gpu_texture_bytes_delta": 4194304,
+          "gpu_submits": 5,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 4,
+            "min": 7.39,
+            "median": 9.53,
+            "max": 12.35,
+            "sum": 38.8
+          },
+          "raw": null,
+          "all": {
+            "n": 4,
+            "min": 7.39,
+            "median": 9.53,
+            "max": 12.35,
+            "sum": 38.8
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 4
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ],
+    "matched_geometry": [
+      {
+        "label": "after-matched-patch",
+        "kind": "patch",
+        "patch_index": 7,
+        "patch_bbox": [
+          17600,
+          18688,
+          12800,
+          14112
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 12723.6,
+          "y": 17600.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 13456.0,
+          "cy": 18144.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            24,
+            27
+          ],
+          "ty": [
+            34,
+            36
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 11.01,
+          "T10b_first_gpu_submit": 11.06,
+          "T10_first_raw_texture_upload": 22.66,
+          "T9_viewport_target_fine_ready": 37.01,
+          "T4_first_binding_request": 1.95,
+          "T8_first_binding_callback": 11.97,
+          "T6_first_provider_read_start": 3.11,
+          "T6b_first_provider_read_end": 11.8,
+          "T5_first_scheduler_request": 1.95,
+          "T7_last_request_issued": 2.15
+        },
+        "gui_worst_gap_ms": 23.0,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 4.99,
+            "median": 11.05,
+            "max": 16.94,
+            "sum": 135.46
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 4.99,
+            "median": 11.05,
+            "max": 16.94,
+            "sum": 135.46
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-matched-tissue",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          5944,
+          2856
+        ],
+        "camera_before": {
+          "x": 2411.6,
+          "y": 2600.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 3144.0,
+          "cy": 3144.0
+        },
+        "camera_after": {
+          "x": 2123.6,
+          "y": 5400.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 2856.0,
+          "cy": 5944.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            4,
+            7
+          ],
+          "ty": [
+            10,
+            12
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 11.35,
+          "T10b_first_gpu_submit": 11.59,
+          "T10_first_raw_texture_upload": 21.09,
+          "T9_viewport_target_fine_ready": 59.5,
+          "T4_first_binding_request": 3.0,
+          "T8_first_binding_callback": 13.16,
+          "T6_first_provider_read_start": 3.74,
+          "T6b_first_provider_read_end": 13.05,
+          "T5_first_scheduler_request": 3.0,
+          "T7_last_request_issued": 3.41
+        },
+        "gui_worst_gap_ms": 30.9,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 12,
+          "provider_reads_corrected": 12,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 12,
+          "gpu_uploads": 12,
+          "gpu_texture_bytes_delta": 12582912,
+          "gpu_submits": 13,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": {
+            "n": 12,
+            "min": 6.58,
+            "median": 10.16,
+            "max": 13.5,
+            "sum": 123.58
+          },
+          "raw": null,
+          "all": {
+            "n": 12,
+            "min": 6.58,
+            "median": 10.16,
+            "max": 13.5,
+            "sum": 123.58
+          }
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ],
+    "hot": [
+      {
+        "label": "after-hot-patch",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 9.64,
+          "T10b_first_gpu_submit": 9.74,
+          "T9_viewport_target_fine_ready": 9.85,
+          "T4_first_binding_request": 3.16,
+          "T8_first_binding_callback": 3.26,
+          "T5_first_scheduler_request": 3.16,
+          "T7_last_request_issued": 3.73
+        },
+        "gui_worst_gap_ms": 11.0,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 12,
+          "requests_by_origin": {
+            "gpu-binding/fine": 12
+          },
+          "binding_requests": 12,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 12,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 12,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-hot-patch-again",
+        "kind": "patch",
+        "patch_index": 0,
+        "patch_bbox": [
+          8896,
+          9984,
+          5632,
+          6944
+        ],
+        "tissue_point_yx": null,
+        "camera_before": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "camera_after": {
+          "x": 5555.6,
+          "y": 8896.0,
+          "w": 1464.8,
+          "h": 1088.0,
+          "cx": 6288.0,
+          "cy": 9440.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 12,
+        "visible_tile_range": {
+          "tx": [
+            10,
+            13
+          ],
+          "ty": [
+            17,
+            19
+          ]
+        },
+        "visible_world_area_l0": 1593702.4,
+        "stages_ms": {
+          "T1_slot_returned": 7.34,
+          "T10b_first_gpu_submit": 7.47,
+          "T9_viewport_target_fine_ready": 7.61
+        },
+        "gui_worst_gap_ms": 11.1,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 0,
+          "requests_by_origin": {},
+          "binding_requests": 0,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 0,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 0,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 1,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 12
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      },
+      {
+        "label": "after-hot-tissue",
+        "kind": "tissue",
+        "patch_index": null,
+        "patch_bbox": null,
+        "tissue_point_yx": [
+          4200,
+          5200
+        ],
+        "camera_before": {
+          "x": 2478.79,
+          "y": 2600.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 2950.0,
+          "cy": 2950.0
+        },
+        "camera_after": {
+          "x": 4728.79,
+          "y": 3850.0,
+          "w": 942.42,
+          "h": 700.0,
+          "cx": 5200.0,
+          "cy": 4200.0
+        },
+        "target_level": 0,
+        "level_downsample": 1,
+        "visible_tiles": 6,
+        "visible_tile_range": {
+          "tx": [
+            9,
+            11
+          ],
+          "ty": [
+            7,
+            8
+          ]
+        },
+        "visible_world_area_l0": 659694.0,
+        "stages_ms": {
+          "T1_slot_returned": 7.84,
+          "T10b_first_gpu_submit": 7.9,
+          "T9_viewport_target_fine_ready": 7.98,
+          "T4_first_binding_request": 2.85,
+          "T8_first_binding_callback": 2.94,
+          "T5_first_scheduler_request": 2.85,
+          "T7_last_request_issued": 3.15
+        },
+        "gui_worst_gap_ms": 11.1,
+        "natural_paints": 0,
+        "counts": {
+          "scheduler_requests": 6,
+          "requests_by_origin": {
+            "gpu-binding/fine": 6
+          },
+          "binding_requests": 6,
+          "legacy_requests": 0,
+          "unique_binding_rawkeys": 6,
+          "unique_legacy_rawkeys": 0,
+          "legacy_keys_binding_never_asked": 0,
+          "duplicate_requests": 0,
+          "provider_reads": 0,
+          "provider_reads_corrected": 0,
+          "provider_reads_raw": 0,
+          "duplicate_real_reads": {},
+          "raw_cache_hits": 6,
+          "raw_cache_misses": 0,
+          "gpu_uploads": 0,
+          "gpu_texture_bytes_delta": 0,
+          "gpu_submits": 1,
+          "rejected_late_results": 0,
+          "cancelled_requests": 0
+        },
+        "read_ms": {
+          "corrected": null,
+          "raw": null,
+          "all": null
+        },
+        "product_work_delta": {
+          "preview_loader_threads": 0,
+          "ensure_channels_cached": 0,
+          "refresh_patch_preview": 0,
+          "session_saves_scheduled": 0,
+          "session_saves_written": 0,
+          "session_save_ms": []
+        },
+        "binding_stats": {
+          "coarse_channels": [
+            "CD22"
+          ],
+          "fine_channels": [
+            "CD22"
+          ],
+          "fine_tiles": {
+            "CD22": 6
+          },
+          "fine_levels": {
+            "CD22": [
+              0
+            ]
+          },
+          "fine_budget_refused": [],
+          "last_error": null
+        }
+      }
+    ]
+  }
+}

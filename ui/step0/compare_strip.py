@@ -80,7 +80,8 @@ class CompareStacks:
 
     def __init__(self, provider, scheduler, compute, grid, caches,
                  overview_store, controllers, views, overlays,
-                 owns_overview_store=True):
+                 owns_overview_store=True, owns_caches=True,
+                 owns_floor_cache=True, floor_cache=None):
         self.provider = provider
         self.scheduler = scheduler
         self.compute = compute
@@ -91,6 +92,15 @@ class CompareStacks:
         # Shutting a borrowed pool down would leave the full image unable
         # to switch channels for the rest of the session.
         self.owns_overview_store = bool(owns_overview_store)
+        # False when the two tile caches were BORROWED from the full image's
+        # stack. Emptying somebody else's cache on the way out would throw
+        # away exactly the corrected tiles this sharing exists to reuse --
+        # the same reason a borrowed overview store is not shut down here.
+        self.owns_caches = bool(owns_caches)
+        #: The corrected-floor cache the three panels use. False when it was
+        #: lent by the full image -- a borrower never empties it.
+        self.floor_cache = floor_cache
+        self.owns_floor_cache = bool(owns_floor_cache)
         self.controllers = list(controllers)
         self.views = list(views)
         self.overlays = list(overlays)
@@ -131,10 +141,11 @@ class CompareStacks:
                 controllers[0].teardown(shutdown_backend=True,
                                         wait_for_floor=wait_for_floor)
         finally:
-            for cache in (self.caches or ()):
-                clear = getattr(cache, "clear", None)
-                if clear is not None:
-                    clear()
+            if self.owns_caches:
+                for cache in (self.caches or ()):
+                    clear = getattr(cache, "clear", None)
+                    if clear is not None:
+                        clear()
             self.caches = None
 
 
@@ -142,7 +153,8 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
                          sources=COMPARE_SOURCES, params_for=None,
                          tint=None, nucleus_channel=None, nucleus_tint=None,
                          nucleus_enabled=False, viewport_l0=None,
-                         overview_store=None):
+                         overview_store=None, caches=None,
+                         floor_cache=None):
     """Build the three tile stacks for `path` over ONE backend.
 
     `overview_store` is the FULL IMAGE's whole-slide overview store, lent
@@ -154,15 +166,26 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
     whole pyramid level the full image had already read and still held.
     Sharing the store turns that read into a memcpy.
 
-    Only the store. The provider, the scheduler and the two tile caches
-    stay the strip's own: sharing the scheduler would make
-    `suspend_for_production`'s "wait until idle" mean "wait for the other
-    mode too", which is a GUI-thread wait on somebody else's work, and
-    sharing the 2 GB corrected cache would make the two modes evict each
-    other's tiles. Neither is worth 163 ms.
+    `caches` is `(raw_cache, corrected_cache)`, the full image's own two
+    LRUs, lent the same way (user ruling, 2026-09-21). An earlier revision
+    of this docstring argued the two modes should keep private caches so
+    they could not evict each other. That traded the wrong thing away: the
+    corrected tiles the full image had already computed for THIS viewport,
+    this channel and these parameters were recomputed from scratch the
+    moment the user right-clicked into compare, and again on the way back.
+    A `CorrectionKey` already carries the source identity, the channel, the
+    method and the effective parameter, so a tile computed in one mode is
+    by construction the right answer in the other. Sharing also LOWERS the
+    ceiling rather than raising it: one 2 GiB corrected cache for both
+    modes instead of one each.
 
-    None means the strip makes and owns a private store, which is what a
-    strip built with no full image behind it must do.
+    NOT the scheduler, and not the provider or the compute: sharing the
+    scheduler would make `suspend_for_production`'s "wait until idle" mean
+    "wait for the other mode too", which is a GUI-thread wait on somebody
+    else's work.
+
+    None (for either) means the strip makes and owns that piece privately,
+    which is what a strip built with no full image behind it must do.
 
     `params_for(source)` returns the parameter tuple that source should come
     up with -- `()` for Original, `(radius,)` for TopHat, `(sigma,)` for
@@ -200,17 +223,31 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
         provider = RawTileProvider(path)
         if not channel or channel not in provider.channel_names:
             channel = provider.channel_names[0]
-        # ONE of each. Sized as the full image's are: the three panels look
-        # at the same place at the same moment, so they want one cache the
-        # size of one view's, not three.
-        raw_cache = LRUByteCache(RAW_CACHE_BYTES)
-        corrected_cache = LRUByteCache(CORRECTED_CACHE_BYTES)
+        # ONE of each -- BORROWED from the full image when it has them, so a
+        # corrected tile it already computed for this viewport is a cache
+        # read here rather than a recomputation. Sized as the full image's
+        # are when private: the three panels look at the same place at the
+        # same moment, so they want one cache the size of one view's, not
+        # three.
+        owns_caches = not (caches and len(caches) == 2
+                           and all(c is not None for c in caches))
+        if owns_caches:
+            raw_cache = LRUByteCache(RAW_CACHE_BYTES)
+            corrected_cache = LRUByteCache(CORRECTED_CACHE_BYTES)
+        else:
+            raw_cache, corrected_cache = caches
         compute = CorrectionCompute(provider, raw_cache)
         scheduler = TileScheduler(provider, compute, raw_cache,
                                   corrected_cache)
         grid = TileGridSpec(tile_size=TILE_SIZE, source_chunk_shape=(),
                             grid_version="v1")
         owns_store = overview_store is None
+        # BORROWED, like the store and the two tile caches: a floor the full
+        # image already computed for this channel, method and parameters is
+        # the answer these three panels need. None means each controller
+        # keeps its own private 8-entry cache, which is what a strip with no
+        # full image behind it must do.
+        owns_floor_cache = floor_cache is None
         store = SharedOverviewStore() if owns_store else overview_store
 
         for source in sources:
@@ -220,7 +257,8 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
             view = ExploreView(parent_widget)
             controller = ExploreController(
                 provider, scheduler, compute, grid, view, channel,
-                gen_ns=source, overview_store=store)
+                gen_ns=source, overview_store=store,
+                floor_cache=floor_cache, owns_floor_cache=owns_floor_cache)
             if method is not None:
                 # Before the overview, exactly as `build_default_stack` does
                 # it: the controller withholds the floor and issues nothing
@@ -261,7 +299,10 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
         return CompareStacks(provider, scheduler, compute, grid,
                              (raw_cache, corrected_cache), store,
                              controllers, views, overlays,
-                             owns_overview_store=owns_store)
+                             owns_overview_store=owns_store,
+                             owns_caches=owns_caches,
+                             owns_floor_cache=owns_floor_cache,
+                             floor_cache=floor_cache)
     except Exception:
         _cleanup_partial(controllers, store if owns_store else None,
                          scheduler, provider, views)
@@ -480,8 +521,33 @@ class CompareStrip(QtWidgets.QWidget):
         self._dataset_path = path
         self._build_error = None
 
+    def _factory_takes(self, name):
+        """Whether this strip's builder accepts `name`.
+
+        The builder is a seam: test rigs and anything written before a
+        given argument existed still have the older signature, and handing
+        them a keyword they do not take raises inside `ensure_built` and
+        surfaces as "Compare could not be opened". Everything lent here is
+        therefore OFFERED, not forced.
+        """
+        import inspect
+
+        try:
+            parameters = inspect.signature(self._stack_factory).parameters
+        except (TypeError, ValueError):                     # not introspectable
+            return False
+        if name in parameters:
+            return True
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in parameters.values())
+
+    def _factory_takes_caches(self):
+        """Whether this strip's builder accepts lent tile caches."""
+        return self._factory_takes("caches")
+
     def ensure_built(self, channel, *, params_for=None, tint=None,
-                     nucleus=None, viewport_l0=None, overview_store=None):
+                     nucleus=None, viewport_l0=None, overview_store=None,
+                     caches=None, floor_cache=None):
         """Build on first use; afterwards return what is already there.
 
         Returns the `CompareStacks`, or None when there is no dataset or the
@@ -491,12 +557,23 @@ class CompareStrip(QtWidgets.QWidget):
             return self._stacks
         if not self._dataset_path:
             return None
+        extra = {}
+        if floor_cache is not None and self._factory_takes("floor_cache"):
+            extra["floor_cache"] = floor_cache
+        if caches is not None and self._factory_takes_caches():
+            # OFFERED, NOT FORCED. `_stack_factory` is a seam: several test
+            # rigs and any older builder have the signature this function
+            # had before caches were lent, and passing an argument they do
+            # not take would raise inside the try below and be reported as
+            # "Compare could not be opened". A builder that cannot borrow
+            # simply makes its own, which is the behaviour it always had.
+            extra["caches"] = caches
         try:
             stacks = self._stack_factory(
                 self._dataset_path, channel, self,
                 params_for=params_for, tint=tint,
                 viewport_l0=viewport_l0, overview_store=overview_store,
-                **dict(nucleus or {}))
+                **extra, **dict(nucleus or {}))
         except Exception as exc:                            # noqa: BLE001
             self._build_error = str(exc)
             self._placeholder.setText(

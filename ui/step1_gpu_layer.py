@@ -289,8 +289,23 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
 
     # Public G1 boundary -------------------------------------------------
 
+    @property
+    def initialized(self) -> bool:
+        """Did Qt realize this widget's context and did G1 set itself up?
+
+        Read-only. A caller that must decide between the GPU backend and the
+        existing CPU path asks this instead of reaching for private state,
+        and it is never allowed to report success on a failed setup.
+        """
+        return bool(self._initialized)
+
+    @property
+    def init_error(self) -> Optional[Exception]:
+        """Why realization failed, exactly as raised. None while it has not."""
+        return self._init_error
+
     def attach(self, view_adapter) -> None:
-        """Test-only sibling overlay attachment; it never changes camera/input state."""
+        """Sibling overlay attachment on an existing view; it never changes camera/input state."""
         if self._initialized:
             raise Step1GpuLayerError("attach must happen before QOpenGLWidget realization")
         if not hasattr(view_adapter, "graphics") or not hasattr(view_adapter, "view_box"):

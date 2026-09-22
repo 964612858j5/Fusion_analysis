@@ -95,17 +95,38 @@ class ExploreStack:
     """
 
     def __init__(self, provider, scheduler, controller, view, caches,
-                 overlay=None):
+                 overlay=None, owns_caches=True):
         self.provider = provider
         self.scheduler = scheduler
         self.controller = controller
         self.view = view
         self.caches = caches
+        # THE FULL IMAGE OWNS ITS TWO LRUs, and the compare strip borrows
+        # them (`build_compare_stacks(caches=...)`). Ownership is what
+        # decides who may empty them: this stack does, on teardown, and the
+        # strip never does -- exactly as with `overview_store`.
+        self.owns_caches = bool(owns_caches)
         # The additive nucleus layer, or None when the dataset has no
         # nucleus channel. Held here so the host can reach it, but torn down
         # BY the controller, which owns the ordering.
         self.overlay = overlay
         self.torn_down = False
+
+    @property
+    def floor_cache(self):
+        """The corrected-floor cache this stack's controller owns.
+
+        Exposed for the same reason `overview_store` is: the compare strip
+        BORROWS it. A cached floor is filed under `(source, channel, method,
+        effective params, level, stride)`, so a floor one controller
+        computed is by construction the answer another controller over the
+        same slide needs -- and recomputing it is what made right-clicking
+        into compare redraw a floor that was on screen a moment earlier.
+
+        This stack OWNS it; the strip is torn down before this one and
+        never empties it.
+        """
+        return getattr(self.controller, "_floor_cache", None)
 
     @property
     def overview_store(self):
@@ -143,10 +164,11 @@ class ExploreStack:
         try:
             self.controller.teardown(wait_for_floor=wait_for_floor)
         finally:
-            for cache in (self.caches or ()):
-                clear = getattr(cache, "clear", None)
-                if clear is not None:
-                    clear()
+            if self.owns_caches:
+                for cache in (self.caches or ()):
+                    clear = getattr(cache, "clear", None)
+                    if clear is not None:
+                        clear()
             self.caches = None
 
 
@@ -330,6 +352,11 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._dataset_path = None
         self._build_attempts = 0
         self._build_error = None
+        # Neighbour/current-channel preparation. One coordinator for this
+        # one viewer, mounted on the stack it is looking at and torn down
+        # with it. See `start_hot`.
+        self._hot = None
+        self._hot_specs_provider = None
         # Set by `release_for_production`, cleared by `resume_from_production`
         # or by anything that discards the stack: the live stack is
         # SUSPENDED for a production run and must be resumed afterwards.
@@ -378,6 +405,127 @@ class Step0ExploreTab(QtWidgets.QWidget):
         `resume_from_production` (or a dataset change / teardown): the live
         stack is suspended because a production run asked for the GPU."""
         return self._released
+
+    # ── preparing the OTHER method of the current channel (HOT) ───────
+    #
+    # THE FULL IMAGE IS ONE PANEL. It shows one channel through one method,
+    # so the moment the user switches TopHat <-> cuCIM the second method is
+    # computed from scratch and they wait for it. The compare strip does not
+    # have this problem: its three panels show Original, TopHat and cuCIM of
+    # the same channel at once, so both corrected methods are already being
+    # prepared in the foreground.
+    #
+    # This mounts the SAME production coordinator the strip uses
+    # (`viewer.multichannel_prefetch.MultiChannelPrefetchController`) on this
+    # tab's own stack -- its scheduler, its corrected cache, its overview
+    # store -- with `include_center=True`, which is what adds the current
+    # channel's own two methods to the plan. The neighbours it also prepares
+    # are the same i-1/i+1/i-2/i+2 neighbourhood, by the same rule.
+    #
+    # It writes CACHES ONLY. It never touches the view, the pools or the
+    # camera: a prepared method is one whose corrected tiles are resident, so
+    # switching to it is a cache read instead of a computation. What the user
+    # sees is still produced by the one controller, from the same code path
+    # as an unprepared method.
+
+    def set_hot_specs_provider(self, provider):
+        """Install the callback that answers "which channels, in what order".
+
+        `provider()` returns the `ChannelCorrectionSpec`s for every channel
+        the user can switch to, IN THE ORDER THE USER SEES THEM -- the
+        page's answer, not this tab's, and the same one the compare strip
+        asks for. A callback rather than a list because the parameters in it
+        are live: it is re-read on every re-plan, so a spec can never be
+        older than the last plan.
+        """
+        self._hot_specs_provider = provider
+
+    @property
+    def hot(self):
+        """The live coordinator, or None. For tests and measurement."""
+        return self._hot
+
+    def hot_stats(self):
+        """Its counters, or None when it is not running."""
+        return dict(self._hot.stats) if self._hot is not None else None
+
+    def _hot_specs(self):
+        provider = self._hot_specs_provider
+        if provider is None:
+            return ()
+        try:
+            return tuple(provider() or ())
+        except Exception:                                   # noqa: BLE001
+            return ()
+
+    def start_hot(self):
+        """Mount the coordinator, or re-plan the one already mounted.
+
+        Refuses when there is no stack, while the stack is SUSPENDED for a
+        production run, and while this tab is not visible -- preparing
+        channels for a viewer nobody is looking at is exactly the hidden
+        work the suspend contract exists to stop, and it is what would
+        otherwise keep Step0 reading while Step1 is on screen.
+        """
+        if self._stack is None or self._released or not self.isVisible():
+            return None
+        specs = self._hot_specs()
+        if not specs:
+            return None
+        if self._hot is not None:
+            self._hot.set_specs(specs)
+            self._hot.replan()
+            return self._hot
+        from ...viewer.multichannel_prefetch import (
+            MultiChannelPrefetchController)
+        try:
+            hot = MultiChannelPrefetchController(
+                self._stack.controller, self._stack.scheduler, specs,
+                self._stack.controller.grid, include_center=True, parent=self)
+        except Exception:                                   # noqa: BLE001
+            # A viewer that cannot prepare its methods is a slower viewer,
+            # never a broken one.
+            return None
+        self._hot = hot
+        # The camera is already sitting where the user put it, so there is no
+        # gesture left to go quiet on its own. `replan` arms the same
+        # confirmation a real settle would.
+        hot.replan()
+        return hot
+
+    def stop_hot(self):
+        """Cancel it and let go of the host. Idempotent."""
+        hot, self._hot = self._hot, None
+        if hot is None:
+            return
+        try:
+            hot.stop()
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            hot.setParent(None)
+            hot.deleteLater()
+        except RuntimeError:
+            pass
+
+    def refresh_hot(self):
+        """Re-read the specs. A no-op when nothing it cares about moved."""
+        if self._hot is None:
+            return
+        self._hot.set_specs(self._hot_specs())
+
+    # Qt's own lifecycle is the whole gate: switching to Step1 hides this
+    # widget's page, so `hideEvent` arrives and the preparation stops; coming
+    # back to Step0 shows it again and `showEvent` restarts it against
+    # whatever channel, method and viewport are current by then. No new
+    # signal, no step registry, no second notion of "active".
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.start_hot()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.stop_hot()
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def set_dataset(self, path):
@@ -483,6 +631,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
+        # A fresh stack has a fresh scheduler and a fresh corrected cache,
+        # so the preparation is mounted on THIS one or not at all.
+        self.start_hot()
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
                     tint=None, nucleus=None):
@@ -564,6 +715,13 @@ class Step0ExploreTab(QtWidgets.QWidget):
                                    host=controller)
         if viewport_l0 is not None:
             controller.jump_to(*(int(v) for v in viewport_l0))
+        # The channel or the parameters may just have moved, and the specs
+        # are the page's live answer. `set_specs` is a no-op when nothing it
+        # cares about changed, so this costs nothing on a repeat click.
+        if self._hot is None:
+            self.start_hot()
+        else:
+            self.refresh_hot()
         return True
 
     def _pull_channel_from_page(self):
@@ -601,6 +759,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         """
         if self._stack is None or self._released:
             return
+        # BEFORE the suspend: its queued work is cancelled with its own
+        # generation rather than being waited out by the scheduler drain.
+        self.stop_hot()
         t0 = time.perf_counter()
         timings = self._stack.controller.suspend_for_production(reason) or {}
         self._released = True
@@ -619,6 +780,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return
         self._released = False
         self._stack.controller.resume_from_production()
+        self.start_hot()
         print("[explore] resumed after production run", flush=True)
 
     def teardown(self, *, wait_for_floor: bool = False):
@@ -641,7 +803,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
     # ── internals ─────────────────────────────────────────────────────
     def _discard_stack(self, *, wait_for_floor: bool = False):
         # A suspended stack is torn down like any other; the suspension
-        # simply ends with it.
+        # simply ends with it. The preparation goes first: it holds the
+        # controller and the scheduler that are about to be shut down.
+        self.stop_hot()
         self._released = False
         stack, self._stack = self._stack, None
         if stack is None:

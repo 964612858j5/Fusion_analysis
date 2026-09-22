@@ -1,0 +1,117 @@
+{
+  "baseline_sha256": {
+    "ui/step0/step0_page.py": "24ce834d31e4806efc9e6fe592cc47f639a2f5d9e11485db1bfed686f12cc874"
+  },
+  "final_sha256": {
+    "ui/step0/step0_page.py": "24ce834d31e4806efc9e6fe592cc47f639a2f5d9e11485db1bfed686f12cc874"
+  },
+  "all_restored": true,
+  "results": [
+    {
+      "mutation": "M1 back to the old rule: leaving always adopts the panels' camera",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_ten_fixed_pixel_round_trips_do_not_walk",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_half_screen_pixel_click_does_not_accumulate"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 5.07s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M2 unmoved returns the COMPARE entry camera, not the full one",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_ten_fixed_pixel_round_trips_do_not_walk",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_an_unmoved_comparison_returns_the_entry_camera_at_every_stage"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 3.55s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M3 always restore the entry full camera, moved or not",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_panned_comparison_is_still_adopted",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_zoomed_comparison_is_still_adopted_even_with_the_same_centre",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_landing_inside_compare_is_carried_back"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "3 failed in 4.12s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M4 compare centres only, ignoring the magnification",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_zoomed_comparison_is_still_adopted_even_with_the_same_centre"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 3.10s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M5 a fixed LEVEL-0 tolerance instead of a screen-pixel one",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_panned_comparison_is_still_adopted",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_landing_inside_compare_is_carried_back"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed, 1 passed in 3.61s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M6 record the entry reading BEFORE the panels have landed",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_ten_fixed_pixel_round_trips_do_not_walk",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_an_unmoved_comparison_returns_the_entry_camera_at_every_stage"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 3.48s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M7 a dataset change keeps the previous slide's entry reading",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_a_dataset_change_drops_the_entry_reading"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 3.14s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M8 ignore the clicked point: always open compare at the full centre",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_compare_here_still_opens_on_the_clicked_point",
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_tiles.py::test_leaving_without_moving_comes_back_where_the_full_image_was"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "2 failed in 3.41s"
+      ],
+      "restored_sha256_matches_baseline": true
+    },
+    {
+      "mutation": "M9 a second entry point reappears in the UI",
+      "gates": [
+        "/sda1/Fusion/analysis_pipline/block01_v14/tests/test_step0_compare_toggle_drift.py::test_no_compare_button_was_reintroduced"
+      ],
+      "turned_red": true,
+      "pytest_tail": [
+        "1 failed in 2.75s"
+      ],
+      "restored_sha256_matches_baseline": true
+    }
+  ]
+}

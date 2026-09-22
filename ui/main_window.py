@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QMessageBox, QProgressBar,
     QApplication, QSplitter, QCheckBox, QDialog, QSizePolicy,
-    QProgressDialog,
+    QProgressDialog, QToolButton, QMenu,
 )
 
 from ..config import (
@@ -89,6 +89,30 @@ from .step3_page import Step3Page
 from .step4_page import Step4Page
 
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
+
+
+# How many patch buttons the Step1 selector keeps INLINE. The row used to
+# hold one button per patch, so its width grew without bound: measured at
+# twenty patches it was 916 px wide and the last button's right edge sat at
+# 1309 px, i.e. outside a 1000 px window entirely. Seven is what the row
+# showed before, so nothing that fits today moves; patch eight onwards lives
+# in the "Patch" menu, which is always there and always lists ALL of them.
+STEP1_INLINE_PATCH_BUTTONS = 7
+
+# The inline patch button's fixed size and the strip's spacing. They were
+# literals inside the rebuild; the dropdown's width is derived from them, so
+# they have to be one definition -- a menu 250 px wide (Qt's default for
+# twenty "P12" items, measured) next to a 318 px strip reads as a different
+# control, not as the rest of the same row.
+STEP1_PATCH_BTN_W = 42
+STEP1_PATCH_BTN_H = 22
+STEP1_PATCH_BTN_SPACING = 4
+
+
+def step1_patch_menu_width():
+    """As wide as a full inline strip: seven buttons and their gaps."""
+    n = STEP1_INLINE_PATCH_BUTTONS
+    return n * STEP1_PATCH_BTN_W + (n - 1) * STEP1_PATCH_BTN_SPACING
 
 # The overlay's channels are remapped BEFORE they are composited (so the
 # expensive part can be cached), and the compositor it hands them to is
@@ -851,11 +875,41 @@ class MainWindow(QMainWindow):
             "cyto in red and nucleus in blue.")
         pl.addLayout(head_row)
 
+        # PATCH SELECTOR. The inline strip is capped at
+        # `STEP1_INLINE_PATCH_BUTTONS`, so the row's width no longer grows
+        # with the patch count: measured before this cap, twenty patches made
+        # the strip 916 px wide and put the last button's right edge at 1309 px
+        # in a 1400 px window. Everything -- including whatever the strip
+        # cannot show -- is reachable from the "Patch" menu, which is the
+        # row's title and its dropdown at the same time.
         sel_row = QHBoxLayout()
-        sel_row.addWidget(QLabel("Preview patch:"))
+        self._patch_menu_btn = QToolButton()
+        self._patch_menu_btn.setText("Patch")
+        self._patch_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self._patch_menu_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._patch_menu_btn.setFixedHeight(STEP1_PATCH_BTN_H)
+        self._patch_menu_btn.setStyleSheet(
+            "QToolButton{color:#9bd0ff;background:#182230;"
+            "border:1px solid #354a63;border-radius:3px;"
+            "font-size:10px;font-weight:bold;padding:2px 8px;}"
+            "QToolButton::menu-indicator{subcontrol-position:right center;"
+            "subcontrol-origin:padding;left:-4px;}")
+        self._patch_menu = QMenu(self._patch_menu_btn)
+        # The dropdown is as wide as a full inline strip, so the list reads
+        # as the continuation of the row it drops out of. A MINIMUM, not a
+        # fixed width: a list taller than the screen is laid out by Qt in
+        # columns, and a hard 318 px then clips every column but the first
+        # -- measured, with P19 and P20 sitting at x=318 in a 318 px wide
+        # menu, i.e. unreachable. Each column is a full strip wide instead.
+        self._patch_menu.setMinimumWidth(step1_patch_menu_width())
+        self._patch_menu_btn.setMenu(self._patch_menu)
+        #: One action per patch, in patch order. Derived from
+        #: `_all_patches` on every rebuild -- never a second patch model.
+        self._patch_menu_actions = []
+        sel_row.addWidget(self._patch_menu_btn)
         self._patch_sel_btns = []
         self._patch_sel_container = QHBoxLayout()
-        self._patch_sel_container.setSpacing(4)
+        self._patch_sel_container.setSpacing(STEP1_PATCH_BTN_SPACING)
         sel_row.addLayout(self._patch_sel_container)
         sel_row.addStretch()
         pl.addLayout(sel_row)
@@ -1386,11 +1440,14 @@ class MainWindow(QMainWindow):
             # A HANDOFF MAY HAVE LANDED while Step1 was away -- another ROI,
             # a regenerated corrected product, a republished manifest. The
             # identity says so; the viewer rebinds and keeps the viewport.
-            mount.sync_source("handoff")
-            mount.activate()
+            with perf_trace.span("step1.entry.sync_source"):
+                mount.sync_source("handoff")
+            with perf_trace.span("step1.entry.activate"):
+                mount.activate()
             return True
         try:
-            opened = mount.open()
+            with perf_trace.span("step1.entry.mount_open"):
+                opened = mount.open()
         except Exception as exc:                            # noqa: BLE001
             # FAIL CLOSED, and visibly in the log: a slide this viewer cannot
             # open leaves the OLD patch view on screen rather than an empty
@@ -2019,7 +2076,8 @@ class MainWindow(QMainWindow):
         self.step0_done = False
         self._step1_context_ready = False
 
-        accepted = self._load_step0_roi_result(auto=True)
+        with perf_trace.span("step1.handoff.accept_after_save"):
+            accepted = self._load_step0_roi_result(auto=True)
         if accepted is True:
             # Step0 is considered complete only after a valid handoff was
             # accepted. Step1 readiness is tracked separately below.
@@ -2523,7 +2581,8 @@ class MainWindow(QMainWindow):
         # ROI, a regenerated corrected product or a republished manifest is
         # another source identity, and frames composed from the old one are a
         # picture of something else.
-        self._step1_sync_whole_slide_source("handoff")
+        with perf_trace.span("step1.handoff.sync_viewer"):
+            self._step1_sync_whole_slide_source("handoff")
         return True
 
     @staticmethod
@@ -3734,15 +3793,18 @@ class MainWindow(QMainWindow):
                 and str(handoff.get("step1_dir") or "").strip()
             )
             if has_bound_handoff:
-                accepted = self._load_step0_roi_result(auto=True) is True
+                with perf_trace.span("step1.entry.load_handoff"):
+                    accepted = self._load_step0_roi_result(auto=True) is True
             if not accepted:
                 self.prev_status.setText(
                     "Step1 is not ready: load a valid Step0 handoff or use Load Previous Step1 Session."
                 )
                 return
             self._step1_context_ready = True
-        self._stack.setCurrentIndex(1)
-        self._set_step_active(1)
+        with perf_trace.span("step1.entry.total"):
+            with perf_trace.span("step1.entry.show_page"):
+                self._stack.setCurrentIndex(1)
+            self._set_step_active(1)
         self._log_step1_layout("enter Step1")
 
     def _go_to_step1_5(self):
@@ -4053,6 +4115,37 @@ class MainWindow(QMainWindow):
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
 
+    def _trace_step1_entry_picture(self):
+        if not perf_trace.enabled() or self._current_step != 1:
+            return
+        mount = getattr(self, "_step1_mount", None)
+        if mount is None:
+            perf_trace.mark("step1.entry.picture", backend="no-mount")
+            return
+        binding = mount.gpu_binding
+        layer = mount.gpu_layer
+        if binding is None:
+            perf_trace.mark("step1.entry.picture", backend=mount.backend,
+                            reason=mount.gpu_status().get("reason", ""))
+            return
+        stats = binding.stats()
+        history = binding.descriptor_history
+        descriptor = history[-1][0] if history else None
+        display = history[-1][1] if history else None
+        perf_trace.mark(
+            "step1.entry.picture", backend=mount.backend,
+            layer_visible=bool(layer and layer.isVisible()),
+            layer_size=f"{layer.width()}x{layer.height()}" if layer else "",
+            drawn=",".join(source.channel for source in descriptor.channels)
+                  if descriptor else "",
+            requested=stats["requests"], accepted=stats["accepted_results"],
+            coarse=",".join(stats["coarse_channels"]),
+            fine=",".join(stats["fine_channels"]),
+            pending=",".join(stats["coarse_pending"]),
+            weights=str(display.weights) if display else "",
+            mappings=",".join(display.mappings) if display else "",
+            error=stats["last_error"] or "")
+
     def _set_step_active(self, active):
         # THE CAMERA OF THE STEP BEING LEFT, while it is still the active one
         # -- after this line the sinks refuse its notices, which is what
@@ -4087,20 +4180,29 @@ class MainWindow(QMainWindow):
         # THE WHOLE-SLIDE VIEWER follows the step whether or not the scope
         # moved: a return to Step1 with the same scope still has to compose
         # what changed while it was away.
-        self._step1_whole_slide_step_changed(active)
+        with perf_trace.span("step1.entry.viewer", step=active):
+            self._step1_whole_slide_step_changed(active)
+        if active == 1 and perf_trace.enabled():
+            # A successful mount is not proof that a visible channel reached
+            # the GPU. Sample after the event loop has had time to deliver
+            # tile results; this is diagnostic only and is off by default.
+            QTimer.singleShot(1500, self._trace_step1_entry_picture)
         # ...and the step being entered goes to where the user was, on the
         # viewer that is now on screen. Only this one: the other viewer is
         # hidden, and nothing here touches it.
         if active in (0, 1):
-            self._apply_shared_camera_to(active)
+            with perf_trace.span("step1.entry.camera", step=active):
+                self._apply_shared_camera_to(active)
         # THE ONE public channel dock follows the step by switching its
         # ACCESSORY -- Step0's correction combo, Step1's participation box --
         # and by nothing else. No rebuild, no reparent, no row factory swap:
         # the dock and every row are the same objects in every step.
         dock = getattr(self, "_channel_dock", None)
         if dock is not None:
-            dock.set_step(active)
-            self._mount_channels_dock(active)
+            with perf_trace.span("step1.entry.dock_set_step", step=active):
+                dock.set_step(active)
+            with perf_trace.span("step1.entry.dock_mount", step=active):
+                self._mount_channels_dock(active)
         # The ONE place the shared navigator's edit policy is decided.  Every
         # navigation path goes through here, so an already-open popup follows
         # the step immediately: no reopen, no extra click.
@@ -4116,8 +4218,9 @@ class MainWindow(QMainWindow):
         # moves, and so a weight moved there is still that weight in Step3
         # and back in Step1. Nothing is copied at the transition; copying is
         # what made a downstream edit disappear on the next step change.
-        self._display.coordinator.set_active_context(
-            self._STEP_CONTEXTS.get(active))
+        with perf_trace.span("step1.entry.tissue_context", step=active):
+            self._display.coordinator.set_active_context(
+                self._STEP_CONTEXTS.get(active))
         # ...and the Intensity window's rights, from the same transition and
         # by the same rule: one window, one set of numbers, and what changes
         # with the step is only what may be edited.
@@ -4187,38 +4290,96 @@ class MainWindow(QMainWindow):
 
     # ── Patch selector button management ────────────────────────────
 
+    def _patch_btn_state(self, idx):
+        """The load state of patch `idx` -- read from the existing sets."""
+        if idx in self._patch_load_ready:
+            return 'ready'
+        if idx in self._patch_loaders:
+            return 'loading'
+        return 'idle'
+
+    @staticmethod
+    def _patch_btn_label(idx, state):
+        return {'idle': f'P{idx+1}', 'loading': f'P{idx+1} ⟳',
+                'ready': f'P{idx+1} ✓',
+                'error': f'P{idx+1} ✗'}.get(state, f'P{idx+1}')
+
     def _rebuild_patch_buttons(self, patches):
-        """Rebuild P1/P2/… selector buttons; preserve load-state styling."""
+        """Rebuild the P1/P2/… selector; preserve load-state styling.
+
+        The inline strip shows at most `STEP1_INLINE_PATCH_BUTTONS`; the
+        menu shows every patch. Both are built from `patches` on each call,
+        so there is exactly one patch model and the menu cannot drift away
+        from it.
+        """
         for btn in self._patch_sel_btns:
             self._patch_sel_container.removeWidget(btn)
             btn.deleteLater()
         self._patch_sel_btns.clear()
 
-        for i in range(len(patches)):
-            color = PATCH_COLORS[i % len(PATCH_COLORS)]
+        inline = min(len(patches), STEP1_INLINE_PATCH_BUTTONS)
+        for i in range(inline):
             btn = QPushButton(f"P{i+1}")
             btn.setCheckable(True)
-            btn.setFixedSize(42, 22)
+            btn.setFixedSize(STEP1_PATCH_BTN_W, STEP1_PATCH_BTN_H)
             btn.clicked.connect(lambda _, idx=i: self._select_preview_patch(idx))
             self._patch_sel_container.addWidget(btn)
             self._patch_sel_btns.append(btn)
-            # Apply correct state style immediately
-            state = ('ready' if i in self._patch_load_ready
-                     else 'loading' if i in self._patch_loaders
-                     else 'idle')
-            self._set_patch_btn_state(i, state)
 
-        if 0 <= self._preview_patch_idx < len(self._patch_sel_btns):
-            self._patch_sel_btns[self._preview_patch_idx].setChecked(True)
+        self._rebuild_patch_menu(len(patches))
+        for i in range(len(patches)):
+            # Apply correct state style immediately -- inline and menu both.
+            self._set_patch_btn_state(i, self._patch_btn_state(i))
+
+        self._sync_patch_selection_marks(self._preview_patch_idx)
+
+    def _rebuild_patch_menu(self, count):
+        """One checkable menu action per patch, in patch order."""
+        menu = getattr(self, "_patch_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        # `clear()` drops the actions, not the width -- restate it so the
+        # dropdown cannot shrink back to whatever its longest label asks for.
+        menu.setMinimumWidth(step1_patch_menu_width())
+        self._patch_menu_actions = []
+        btn = self._patch_menu_btn
+        if count <= 0:
+            btn.setEnabled(False)
+            btn.setToolTip("No patches yet")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip(f"{count} patch{'es' if count != 1 else ''} — "
+                       "click to choose")
+        for i in range(count):
+            act = menu.addAction(f"P{i+1}")
+            act.setCheckable(True)
+            # THE SAME ENTRY POINT the inline buttons use. The menu selects
+            # patches; it does not know how to.
+            act.triggered.connect(lambda _=False, idx=i:
+                                  self._select_preview_patch(idx))
+            self._patch_menu_actions.append(act)
+
+    def _sync_patch_selection_marks(self, idx):
+        """Show `idx` as the selection in the strip and in the menu."""
+        for i, btn in enumerate(self._patch_sel_btns):
+            btn.setChecked(i == idx)
+        for i, act in enumerate(getattr(self, "_patch_menu_actions", [])):
+            act.setChecked(i == idx)
 
     def _set_patch_btn_state(self, idx, state: str):
         """Update button label+style for states: idle / loading / ready / error."""
+        label = self._patch_btn_label(idx, state)
+        actions = getattr(self, "_patch_menu_actions", [])
+        if idx < len(actions):
+            # The menu carries the SAME label, from the same states -- the
+            # entry for a patch the strip cannot show must still say whether
+            # it is loading, ready or in error.
+            actions[idx].setText(label)
         if idx >= len(self._patch_sel_btns):
             return
         btn   = self._patch_sel_btns[idx]
         color = PATCH_COLORS[idx % len(PATCH_COLORS)]
-        labels = {'idle': f'P{idx+1}', 'loading': f'P{idx+1} ⟳',
-                  'ready': f'P{idx+1} ✓', 'error': f'P{idx+1} ✗'}
         styles = {
             'idle': (
                 f"QPushButton{{color:#666;border:1px solid #444;"
@@ -4242,7 +4403,7 @@ class MainWindow(QMainWindow):
                 f"QPushButton:checked{{background:#311;color:#f88;}}"
             ),
         }
-        btn.setText(labels.get(state, f'P{idx+1}'))
+        btn.setText(label)
         btn.setStyleSheet(styles.get(state, styles['idle']))
 
     # ── ROI changes ─────────────────────────────────────────────────
@@ -4318,8 +4479,7 @@ class MainWindow(QMainWindow):
         if new_idx != self._preview_patch_idx:
             self._preview_patch_idx = new_idx
             self._selected_step1_patch_idx = new_idx
-            for i, btn in enumerate(self._patch_sel_btns):
-                btn.setChecked(i == new_idx)
+            self._sync_patch_selection_marks(new_idx)
 
         # Show cached render instantly if available; otherwise wait for preload
         if self._preview_patch_idx in self._patch_load_ready:
@@ -4343,8 +4503,7 @@ class MainWindow(QMainWindow):
         """User clicked a patch button — render from cache if ready, else show status."""
         if idx < 0 or idx >= len(self._all_patches):
             return
-        for i, btn in enumerate(self._patch_sel_btns):
-            btn.setChecked(i == idx)
+        self._sync_patch_selection_marks(idx)
         self._preview_patch_idx = idx
         self._selected_step1_patch_idx = idx
         # THE WHOLE-SLIDE VIEWER treats a patch as an ANCHOR: the same
@@ -4369,8 +4528,18 @@ class MainWindow(QMainWindow):
         elif idx in self._patch_loaders:
             self.prev_img.clear()
             self.patch_cache_status.setText("Loading patch...")
-        else:
-            # Not yet started — kick off a single loader for this patch immediately
+        elif not self._step1_whole_slide_active():
+            # Not yet started — kick off a single loader for this patch
+            # immediately. NOT WHILE THE WHOLE-SLIDE VIEWER IS THE PICTURE:
+            # the old renderer is hidden behind it, so reading this patch's
+            # channels at full resolution is work with no reader -- and it
+            # competes with the viewer for the very same reads, which is why
+            # a first patch felt slower than a Tissue Preview landing to the
+            # same place. `_ensure_channels_cached`, `_refresh_patch_preview`
+            # and the debounced preload above already refuse for this reason;
+            # this was the one branch that did not. The path itself stays: it
+            # is the rollback, and it loads again the moment it is back on
+            # top.
             self.prev_img.clear()
             self.patch_cache_status.setText("Loading patch...")
             self._start_loader_for(idx)

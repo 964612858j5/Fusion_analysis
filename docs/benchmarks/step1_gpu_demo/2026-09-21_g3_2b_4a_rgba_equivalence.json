@@ -1,0 +1,80 @@
+{
+  "complete_coarse_stride64": {
+    "overlay": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        305,
+        341,
+        4
+      ]
+    },
+    "fusion": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        305,
+        341,
+        4
+      ]
+    },
+    "tile_max_abs_diff": 0.0,
+    "tile_valid_identical": true
+  },
+  "fine_tile_stride1": {
+    "overlay": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        512,
+        512,
+        4
+      ]
+    },
+    "fusion": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        512,
+        512,
+        4
+      ]
+    },
+    "tile_max_abs_diff": 0.0,
+    "tile_valid_identical": true
+  },
+  "mid_coarse_stride4": {
+    "overlay": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        512,
+        512,
+        4
+      ]
+    },
+    "fusion": {
+      "max_rgb_diff_lsb": 0,
+      "max_alpha_diff": 0,
+      "alpha_identical": true,
+      "valid_identical": true,
+      "shape": [
+        512,
+        512,
+        4
+      ]
+    },
+    "tile_max_abs_diff": 0.0,
+    "tile_valid_identical": true
+  }
+}

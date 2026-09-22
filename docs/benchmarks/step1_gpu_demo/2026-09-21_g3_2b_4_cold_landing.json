@@ -1,0 +1,4191 @@
+{
+  "label": "baseline-g324",
+  "when": "2026-09-21 04:31:17",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "corrected_zarr": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270/step0/corrected_channels.zarr",
+  "view": [
+    1200,
+    900
+  ],
+  "honesty": [
+    "the OS page cache was NOT dropped; 'cold' means new-region first product access / in-process cold path, never a cold disk read",
+    "the GUI heartbeat's worst gap is event-loop unresponsiveness, not input-to-photon latency",
+    "natural paints are Qt presentation events on the mounted widget",
+    "the demo project was opened read-only; nothing was written"
+  ],
+  "channels": {
+    "CD22_corrected": {
+      "channels": [
+        "CD22"
+      ],
+      "backend": "gpu",
+      "gpu": {
+        "pyopengl_version": "3.1.10",
+        "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+        "gl_vendor": "NVIDIA Corporation",
+        "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+        "gl_version": "4.6.0 NVIDIA 535.309.01",
+        "glsl_version": "4.60 NVIDIA",
+        "actual_format": {
+          "major": 3,
+          "minor": 3,
+          "profile": 1
+        },
+        "max_texture_image_units": 32,
+        "max_texture_size": 32768,
+        "software_renderer": false,
+        "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+        "transient_format": "GL_RGBA32F"
+      },
+      "source_of_channels": {
+        "CD22": "corrected"
+      },
+      "complete_coarse_ms": 8293.56,
+      "complete_coarse_landed": true,
+      "complete_coarse_reads": 10,
+      "complete_coarse_read_ms": 38932.65,
+      "cold_patches": [
+        {
+          "label": "P1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 29.02,
+            "first_gpu_submit": 33.1,
+            "first_raw_texture_upload": 57.21,
+            "viewport_target_fine_ready": 243.99,
+            "first_binding_request": 19.98,
+            "first_binding_callback": 45.08
+          },
+          "gui_worst_gap_ms": 186.0,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 32,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 12
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 32,
+              "min": 17.45,
+              "median": 35.16,
+              "max": 159.11,
+              "sum": 1372.64
+            },
+            "raw": null,
+            "all": {
+              "n": 32,
+              "min": 17.45,
+              "median": 35.16,
+              "max": 159.11,
+              "sum": 1372.64
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -13.42,
+              "median": 24.89,
+              "max": 34.25,
+              "sum": 124.69
+            },
+            "legacy": {
+              "n": 32,
+              "min": 2.63,
+              "median": 63.55,
+              "max": 152.31,
+              "sum": 2256.79
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 13
+            },
+            "fine_levels": {
+              "CD22": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 1,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 27.34,
+            "first_gpu_submit": 38.46,
+            "first_raw_texture_upload": 140.47,
+            "viewport_target_fine_ready": 239.18,
+            "first_binding_request": 19.36,
+            "first_binding_callback": 47.35
+          },
+          "gui_worst_gap_ms": 99.6,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 53,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 37,
+              "gpu-binding/fine": 16
+            },
+            "binding_requests": 16,
+            "legacy_controller_requests": 37,
+            "unique_binding_rawkeys": 16,
+            "unique_legacy_rawkeys": 37,
+            "legacy_keys_the_binding_never_asked_for": 21,
+            "provider_reads": 37,
+            "provider_reads_corrected": 37,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 73,
+            "gpu_uploads": 16,
+            "gpu_submits": 17,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 28
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 37,
+              "min": 14.86,
+              "median": 30.61,
+              "max": 130.39,
+              "sum": 1261.39
+            },
+            "raw": null,
+            "all": {
+              "n": 37,
+              "min": 14.86,
+              "median": 30.61,
+              "max": 130.39,
+              "sum": 1261.39
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 16,
+              "min": -12.8,
+              "median": 29.13,
+              "max": 60.54,
+              "sum": 331.94
+            },
+            "legacy": {
+              "n": 37,
+              "min": 4.32,
+              "median": 72.57,
+              "max": 144.86,
+              "sum": 2797.25
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 17
+            },
+            "fine_levels": {
+              "CD22": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 1,
+            "requested_fine_last_epoch": 16,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 25.7,
+            "first_gpu_submit": 31.63,
+            "first_raw_texture_upload": 56.31,
+            "viewport_target_fine_ready": 220.02,
+            "first_binding_request": 18.14,
+            "first_binding_callback": 38.11
+          },
+          "gui_worst_gap_ms": 138.3,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 32,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 40
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 32,
+              "min": 15.58,
+              "median": 30.78,
+              "max": 146.4,
+              "sum": 1288.9
+            },
+            "raw": null,
+            "all": {
+              "n": 32,
+              "min": 15.58,
+              "median": 30.78,
+              "max": 146.4,
+              "sum": 1288.9
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 0.84,
+              "median": 19.83,
+              "max": 31.86,
+              "sum": 177.61
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.73,
+              "median": 63.88,
+              "max": 156.54,
+              "sum": 2197.45
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P4",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 19.04,
+            "first_gpu_submit": 23.13,
+            "first_raw_texture_upload": 41.43,
+            "viewport_target_fine_ready": 219.41,
+            "first_binding_request": 12.06,
+            "first_binding_callback": 28.55
+          },
+          "gui_worst_gap_ms": 145.0,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 32,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 52
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 32,
+              "min": 13.1,
+              "median": 25.28,
+              "max": 132.11,
+              "sum": 1219.5
+            },
+            "raw": null,
+            "all": {
+              "n": 32,
+              "min": 13.1,
+              "median": 25.28,
+              "max": 132.11,
+              "sum": 1219.5
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 0.61,
+              "median": 16.37,
+              "max": 26.53,
+              "sum": 143.43
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.84,
+              "median": 51.92,
+              "max": 147.35,
+              "sum": 2052.63
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P5",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 27.49,
+            "first_gpu_submit": 44.63,
+            "first_raw_texture_upload": 236.89,
+            "viewport_target_fine_ready": 286.43,
+            "first_binding_request": 18.12,
+            "first_binding_callback": 36.96
+          },
+          "gui_worst_gap_ms": 241.8,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 46,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 34,
+            "provider_reads_corrected": 34,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 64,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 64
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 34,
+              "min": 13.91,
+              "median": 23.45,
+              "max": 175.93,
+              "sum": 1584.3
+            },
+            "raw": null,
+            "all": {
+              "n": 34,
+              "min": 13.91,
+              "median": 23.45,
+              "max": 175.93,
+              "sum": 1584.3
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 0.92,
+              "median": 22.63,
+              "max": 50.91,
+              "sum": 280.39
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.64,
+              "median": 159.48,
+              "max": 195.17,
+              "sum": 3604.38
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "cold_landings": [
+        {
+          "label": "T1",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 31.68,
+            "first_gpu_submit": 43.45,
+            "first_raw_texture_upload": 238.87,
+            "viewport_target_fine_ready": 309.89,
+            "first_binding_request": 22.55,
+            "first_binding_callback": 41.11
+          },
+          "gui_worst_gap_ms": 266.0,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 56,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 40,
+              "gpu-binding/fine": 16
+            },
+            "binding_requests": 16,
+            "legacy_controller_requests": 40,
+            "unique_binding_rawkeys": 16,
+            "unique_legacy_rawkeys": 40,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 40,
+            "provider_reads_corrected": 40,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 76,
+            "gpu_uploads": 16,
+            "gpu_submits": 17,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 80
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 40,
+              "min": 14.49,
+              "median": 26.15,
+              "max": 179.82,
+              "sum": 1755.87
+            },
+            "raw": null,
+            "all": {
+              "n": 40,
+              "min": 14.49,
+              "median": 26.15,
+              "max": 179.82,
+              "sum": 1755.87
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 16,
+              "min": -4.88,
+              "median": 33.79,
+              "max": 78.08,
+              "sum": 516.53
+            },
+            "legacy": {
+              "n": 40,
+              "min": 4.75,
+              "median": 92.79,
+              "max": 211.77,
+              "sum": 4386.26
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 16
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 16,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T2",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 25.7,
+            "first_gpu_submit": 43.94,
+            "first_raw_texture_upload": 177.61,
+            "viewport_target_fine_ready": 222.85,
+            "first_binding_request": 19.14,
+            "first_binding_callback": 36.79
+          },
+          "gui_worst_gap_ms": 178.2,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 32,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 92
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 32,
+              "min": 18.37,
+              "median": 28.99,
+              "max": 136.09,
+              "sum": 1127.35
+            },
+            "raw": null,
+            "all": {
+              "n": 32,
+              "min": 18.37,
+              "median": 28.99,
+              "max": 136.09,
+              "sum": 1127.35
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -1.52,
+              "median": 17.49,
+              "max": 31.99,
+              "sum": 143.29
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.67,
+              "median": 67.14,
+              "max": 132.42,
+              "sum": 2099.14
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T3",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 30.13,
+            "first_gpu_submit": 55.21,
+            "first_raw_texture_upload": 256.74,
+            "viewport_target_fine_ready": 294.29,
+            "first_binding_request": 19.75,
+            "first_binding_callback": 32.92
+          },
+          "gui_worst_gap_ms": 238.6,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 46,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 34,
+            "provider_reads_corrected": 34,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 64,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 104
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 34,
+              "min": 13.13,
+              "median": 30.44,
+              "max": 168.3,
+              "sum": 1800.23
+            },
+            "raw": null,
+            "all": {
+              "n": 34,
+              "min": 13.13,
+              "median": 30.44,
+              "max": 168.3,
+              "sum": 1800.23
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -1.76,
+              "median": 27.9,
+              "max": 111.38,
+              "sum": 409.54
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.36,
+              "median": 163.1,
+              "max": 219.06,
+              "sum": 3965.64
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T4",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 15,
+          "stages_ms": {
+            "public_call_returned": 31.32,
+            "first_gpu_submit": 53.27,
+            "first_raw_texture_upload": 208.17,
+            "viewport_target_fine_ready": 335.74,
+            "first_binding_request": 26.36,
+            "first_binding_callback": 50.49
+          },
+          "gui_worst_gap_ms": 281.5,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 54,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 39,
+              "gpu-binding/fine": 15
+            },
+            "binding_requests": 15,
+            "legacy_controller_requests": 39,
+            "unique_binding_rawkeys": 15,
+            "unique_legacy_rawkeys": 39,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 39,
+            "provider_reads_corrected": 39,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 74,
+            "gpu_uploads": 15,
+            "gpu_submits": 16,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 119
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 39,
+              "min": 13.92,
+              "median": 34.34,
+              "max": 199.55,
+              "sum": 2078.09
+            },
+            "raw": null,
+            "all": {
+              "n": 39,
+              "min": 13.92,
+              "median": 34.34,
+              "max": 199.55,
+              "sum": 2078.09
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 15,
+              "min": -11.45,
+              "median": 29.8,
+              "max": 150.65,
+              "sum": 686.32
+            },
+            "legacy": {
+              "n": 39,
+              "min": 1.72,
+              "median": 163.71,
+              "max": 246.31,
+              "sum": 4945.4
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 15
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 15,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T5",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 19.25,
+            "first_gpu_submit": 29.99,
+            "first_raw_texture_upload": 63.65,
+            "viewport_target_fine_ready": 220.31,
+            "first_binding_request": 12.2,
+            "first_binding_callback": 41.21
+          },
+          "gui_worst_gap_ms": 156.6,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 32,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 131
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 32,
+              "min": 16.03,
+              "median": 32.98,
+              "max": 142.16,
+              "sum": 1343.3
+            },
+            "raw": null,
+            "all": {
+              "n": 32,
+              "min": 16.03,
+              "median": 32.98,
+              "max": 142.16,
+              "sum": 1343.3
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 0.21,
+              "median": 28.84,
+              "max": 40.76,
+              "sum": 218.01
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.66,
+              "median": 74.22,
+              "max": 165.43,
+              "sum": 2464.32
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "hot_returns": [
+        {
+          "label": "hot-P1-1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 10.93,
+            "first_gpu_submit": 14.55,
+            "viewport_target_fine_ready": 14.78,
+            "first_binding_request": 7.47,
+            "first_binding_callback": 7.53
+          },
+          "gui_worst_gap_ms": 14.5,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 143
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 13.35,
+            "first_gpu_submit": 17.15,
+            "viewport_target_fine_ready": 17.38,
+            "first_binding_request": 7.71,
+            "first_binding_callback": 7.77
+          },
+          "gui_worst_gap_ms": 17.1,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 171
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 12.61,
+            "first_gpu_submit": 15.64,
+            "viewport_target_fine_ready": 15.83,
+            "first_binding_request": 7.03,
+            "first_binding_callback": 7.1
+          },
+          "gui_worst_gap_ms": 15.6,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 18,
+              "0": 199
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22"
+            ],
+            "fine_channels": [
+              "CD22"
+            ],
+            "fine_tiles": {
+              "CD22": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ]
+    },
+    "CD8_raw": {
+      "channels": [
+        "CD8"
+      ],
+      "backend": "gpu",
+      "gpu": {
+        "pyopengl_version": "3.1.10",
+        "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+        "gl_vendor": "NVIDIA Corporation",
+        "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+        "gl_version": "4.6.0 NVIDIA 535.309.01",
+        "glsl_version": "4.60 NVIDIA",
+        "actual_format": {
+          "major": 3,
+          "minor": 3,
+          "profile": 1
+        },
+        "max_texture_image_units": 32,
+        "max_texture_size": 32768,
+        "software_renderer": false,
+        "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+        "transient_format": "GL_RGBA32F"
+      },
+      "source_of_channels": {
+        "CD8": "raw"
+      },
+      "complete_coarse_ms": 0.03,
+      "complete_coarse_landed": true,
+      "complete_coarse_reads": 10,
+      "complete_coarse_read_ms": 138.55,
+      "cold_patches": [
+        {
+          "label": "P1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 45.67,
+            "first_raw_texture_upload": 111.12,
+            "first_gpu_submit": 111.13,
+            "viewport_target_fine_ready": 154.12,
+            "first_binding_request": 22.99,
+            "first_binding_callback": 38.42
+          },
+          "gui_worst_gap_ms": 111.1,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 32,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 21
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 32,
+              "min": 5.7,
+              "median": 21.94,
+              "max": 42.47,
+              "sum": 701.05
+            },
+            "all": {
+              "n": 32,
+              "min": 5.7,
+              "median": 21.94,
+              "max": 42.47,
+              "sum": 701.05
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -16.67,
+              "median": 11.27,
+              "max": 19.59,
+              "sum": 0.39
+            },
+            "legacy": {
+              "n": 32,
+              "min": 2.87,
+              "median": 38.61,
+              "max": 70.72,
+              "sum": 1177.88
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 13
+            },
+            "fine_levels": {
+              "CD8": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 1,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 41.83,
+            "first_raw_texture_upload": 130.53,
+            "first_gpu_submit": 130.55,
+            "viewport_target_fine_ready": 227.93,
+            "first_binding_request": 28.63,
+            "first_binding_callback": 38.08
+          },
+          "gui_worst_gap_ms": 130.0,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 53,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 37,
+              "gpu-binding/fine": 16
+            },
+            "binding_requests": 16,
+            "legacy_controller_requests": 37,
+            "unique_binding_rawkeys": 16,
+            "unique_legacy_rawkeys": 37,
+            "legacy_keys_the_binding_never_asked_for": 21,
+            "provider_reads": 37,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 37,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 73,
+            "gpu_uploads": 16,
+            "gpu_submits": 17,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 37
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 37,
+              "min": 6.14,
+              "median": 15.06,
+              "max": 36.96,
+              "sum": 629.18
+            },
+            "all": {
+              "n": 37,
+              "min": 6.14,
+              "median": 15.06,
+              "max": 36.96,
+              "sum": 629.18
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 16,
+              "min": -22.05,
+              "median": 10.8,
+              "max": 23.64,
+              "sum": 12.66
+            },
+            "legacy": {
+              "n": 37,
+              "min": 4.1,
+              "median": 44.55,
+              "max": 61.63,
+              "sum": 1411.36
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 17
+            },
+            "fine_levels": {
+              "CD8": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 1,
+            "requested_fine_last_epoch": 16,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 39.65,
+            "first_raw_texture_upload": 102.19,
+            "first_gpu_submit": 102.2,
+            "viewport_target_fine_ready": 198.87,
+            "first_binding_request": 11.42,
+            "first_binding_callback": 29.33
+          },
+          "gui_worst_gap_ms": 102.2,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 32,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 49
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 32,
+              "min": 10.32,
+              "median": 15.51,
+              "max": 26.53,
+              "sum": 542.87
+            },
+            "all": {
+              "n": 32,
+              "min": 10.32,
+              "median": 15.51,
+              "max": 26.53,
+              "sum": 542.87
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 1.52,
+              "median": 16.49,
+              "max": 22.21,
+              "sum": 131.83
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.84,
+              "median": 38.27,
+              "max": 63.5,
+              "sum": 1102.07
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P4",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 60.95,
+            "first_raw_texture_upload": 126.67,
+            "first_gpu_submit": 126.68,
+            "viewport_target_fine_ready": 137.08,
+            "first_binding_request": 17.28,
+            "first_binding_callback": 38.63
+          },
+          "gui_worst_gap_ms": 126.7,
+          "natural_paints": 2,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 32,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 61
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 32,
+              "min": 7.16,
+              "median": 17.21,
+              "max": 29.61,
+              "sum": 523.42
+            },
+            "all": {
+              "n": 32,
+              "min": 7.16,
+              "median": 17.21,
+              "max": 29.61,
+              "sum": 523.42
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 2.24,
+              "median": 12.7,
+              "max": 21.83,
+              "sum": 128.7
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.49,
+              "median": 35.53,
+              "max": 58.43,
+              "sum": 1133.34
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P5",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 45.96,
+            "first_raw_texture_upload": 127.96,
+            "first_gpu_submit": 127.97,
+            "viewport_target_fine_ready": 222.23,
+            "first_binding_request": 18.26,
+            "first_binding_callback": 34.01
+          },
+          "gui_worst_gap_ms": 127.6,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 46,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 34,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 34,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 64,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 73
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 34,
+              "min": 4.65,
+              "median": 14.87,
+              "max": 36.04,
+              "sum": 511.68
+            },
+            "all": {
+              "n": 34,
+              "min": 4.65,
+              "median": 14.87,
+              "max": 36.04,
+              "sum": 511.68
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 1.14,
+              "median": 18.32,
+              "max": 26.07,
+              "sum": 171.48
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.77,
+              "median": 40.32,
+              "max": 63.82,
+              "sum": 1292.88
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "cold_landings": [
+        {
+          "label": "T1",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 51.27,
+            "first_raw_texture_upload": 165.1,
+            "first_gpu_submit": 165.11,
+            "viewport_target_fine_ready": 270.31,
+            "first_binding_request": 21.72,
+            "first_binding_callback": 37.98
+          },
+          "gui_worst_gap_ms": 164.3,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 56,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 40,
+              "gpu-binding/fine": 16
+            },
+            "binding_requests": 16,
+            "legacy_controller_requests": 40,
+            "unique_binding_rawkeys": 16,
+            "unique_legacy_rawkeys": 40,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 40,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 40,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 76,
+            "gpu_uploads": 16,
+            "gpu_submits": 17,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 89
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 40,
+              "min": 8.7,
+              "median": 13.9,
+              "max": 31.07,
+              "sum": 588.29
+            },
+            "all": {
+              "n": 40,
+              "min": 8.7,
+              "median": 13.9,
+              "max": 31.07,
+              "sum": 588.29
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 16,
+              "min": 3.28,
+              "median": 20.69,
+              "max": 34.17,
+              "sum": 309.88
+            },
+            "legacy": {
+              "n": 40,
+              "min": 4.65,
+              "median": 47.6,
+              "max": 69.81,
+              "sum": 1772.84
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 16
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 16,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T2",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 41.06,
+            "first_raw_texture_upload": 92.92,
+            "first_gpu_submit": 92.93,
+            "viewport_target_fine_ready": 204.86,
+            "first_binding_request": 17.49,
+            "first_binding_callback": 37.41
+          },
+          "gui_worst_gap_ms": 111.1,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 32,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 101
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 32,
+              "min": 7.54,
+              "median": 14.91,
+              "max": 25.99,
+              "sum": 494.4
+            },
+            "all": {
+              "n": 32,
+              "min": 7.54,
+              "median": 14.91,
+              "max": 25.99,
+              "sum": 494.4
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": 2.77,
+              "median": 11.87,
+              "max": 26.25,
+              "sum": 156.7
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.74,
+              "median": 37.24,
+              "max": 64.59,
+              "sum": 1218.95
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T3",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 46.11,
+            "first_raw_texture_upload": 117.75,
+            "first_gpu_submit": 117.76,
+            "viewport_target_fine_ready": 231.22,
+            "first_binding_request": 20.63,
+            "first_binding_callback": 35.17
+          },
+          "gui_worst_gap_ms": 117.7,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 46,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 34,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 34,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 64,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 113
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 34,
+              "min": 5.15,
+              "median": 15.29,
+              "max": 32.28,
+              "sum": 565.74
+            },
+            "all": {
+              "n": 34,
+              "min": 5.15,
+              "median": 15.29,
+              "max": 32.28,
+              "sum": 565.74
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -7.69,
+              "median": 15.29,
+              "max": 21.8,
+              "sum": 105.94
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.72,
+              "median": 36.48,
+              "max": 62.07,
+              "sum": 1174.54
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T4",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 15,
+          "stages_ms": {
+            "public_call_returned": 44.15,
+            "first_raw_texture_upload": 119.58,
+            "first_gpu_submit": 119.6,
+            "viewport_target_fine_ready": 208.33,
+            "first_binding_request": 23.36,
+            "first_binding_callback": 42.74
+          },
+          "gui_worst_gap_ms": 119.6,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 54,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 39,
+              "gpu-binding/fine": 15
+            },
+            "binding_requests": 15,
+            "legacy_controller_requests": 39,
+            "unique_binding_rawkeys": 15,
+            "unique_legacy_rawkeys": 39,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 39,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 39,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 74,
+            "gpu_uploads": 15,
+            "gpu_submits": 16,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 128
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 39,
+              "min": 7.95,
+              "median": 18.46,
+              "max": 33.54,
+              "sum": 746.81
+            },
+            "all": {
+              "n": 39,
+              "min": 7.95,
+              "median": 18.46,
+              "max": 33.54,
+              "sum": 746.81
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 15,
+              "min": -9.95,
+              "median": 17.88,
+              "max": 31.64,
+              "sum": 220.39
+            },
+            "legacy": {
+              "n": 39,
+              "min": 4.15,
+              "median": 44.25,
+              "max": 82.87,
+              "sum": 1688.73
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 15
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 15,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T5",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 50.88,
+            "first_raw_texture_upload": 124.82,
+            "first_gpu_submit": 124.83,
+            "viewport_target_fine_ready": 193.84,
+            "first_binding_request": 28.41,
+            "first_binding_callback": 41.83
+          },
+          "gui_worst_gap_ms": 124.8,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 44,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 32,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 32,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 62,
+            "gpu_uploads": 12,
+            "gpu_submits": 13,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 140
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": {
+              "n": 32,
+              "min": 7.01,
+              "median": 19.53,
+              "max": 27.43,
+              "sum": 578.21
+            },
+            "all": {
+              "n": 32,
+              "min": 7.01,
+              "median": 19.53,
+              "max": 27.43,
+              "sum": 578.21
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 12,
+              "min": -8.31,
+              "median": 5.92,
+              "max": 15.87,
+              "sum": 32.5
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.03,
+              "median": 35.68,
+              "max": 63.19,
+              "sum": 1152.7
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "hot_returns": [
+        {
+          "label": "hot-P1-1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 17.82,
+            "first_gpu_submit": 21.51,
+            "viewport_target_fine_ready": 21.73,
+            "first_binding_request": 10.97,
+            "first_binding_callback": 11.05
+          },
+          "gui_worst_gap_ms": 21.5,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 152
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 20.55,
+            "first_gpu_submit": 95.62,
+            "viewport_target_fine_ready": 95.95,
+            "first_binding_request": 10.62,
+            "first_binding_callback": 10.72
+          },
+          "gui_worst_gap_ms": 95.6,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 180
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD8"
+          ],
+          "source_of_channels": {
+            "CD8": "raw"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 19.31,
+            "first_gpu_submit": 22.76,
+            "viewport_target_fine_ready": 22.97,
+            "first_binding_request": 11.29,
+            "first_binding_callback": 11.37
+          },
+          "gui_worst_gap_ms": 22.7,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 12,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 12
+            },
+            "binding_requests": 12,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 12,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 30,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 9,
+              "0": 208
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD8"
+            ],
+            "fine_channels": [
+              "CD8"
+            ],
+            "fine_tiles": {
+              "CD8": 12
+            },
+            "fine_levels": {
+              "CD8": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 12,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ]
+    },
+    "four_corrected": {
+      "channels": [
+        "CD22",
+        "CD4",
+        "PD1",
+        "FOXP3"
+      ],
+      "backend": "gpu",
+      "gpu": {
+        "pyopengl_version": "3.1.10",
+        "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+        "gl_vendor": "NVIDIA Corporation",
+        "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+        "gl_version": "4.6.0 NVIDIA 535.309.01",
+        "glsl_version": "4.60 NVIDIA",
+        "actual_format": {
+          "major": 3,
+          "minor": 3,
+          "profile": 1
+        },
+        "max_texture_image_units": 32,
+        "max_texture_size": 32768,
+        "software_renderer": false,
+        "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+        "transient_format": "GL_RGBA32F"
+      },
+      "source_of_channels": {
+        "CD22": "corrected",
+        "CD4": "corrected",
+        "PD1": "corrected",
+        "FOXP3": "corrected"
+      },
+      "complete_coarse_ms": 31936.37,
+      "complete_coarse_landed": true,
+      "complete_coarse_reads": 40,
+      "complete_coarse_read_ms": 247800.87,
+      "cold_patches": [
+        {
+          "label": "P1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 209.19,
+            "first_gpu_submit": 215.49,
+            "first_raw_texture_upload": 436.01,
+            "viewport_target_fine_ready": 542.3,
+            "first_binding_request": 9.53,
+            "first_binding_callback": 226.43
+          },
+          "gui_worst_gap_ms": 220.0,
+          "natural_paints": 2,
+          "counts": {
+            "scheduler_requests_total": 80,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 68,
+            "provider_reads_corrected": 68,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 98,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 48
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 68,
+              "min": 9.13,
+              "median": 23.1,
+              "max": 325.54,
+              "sum": 2726.21
+            },
+            "raw": null,
+            "all": {
+              "n": 68,
+              "min": 9.13,
+              "median": 23.1,
+              "max": 325.54,
+              "sum": 2726.21
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -3.18,
+              "median": 128.68,
+              "max": 370.14,
+              "sum": 8480.71
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.5,
+              "median": 377.59,
+              "max": 409.74,
+              "sum": 10969.79
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 13,
+              "CD4": 13,
+              "FOXP3": 13,
+              "PD1": 13
+            },
+            "fine_levels": {
+              "CD22": [
+                0,
+                2
+              ],
+              "CD4": [
+                0,
+                2
+              ],
+              "FOXP3": [
+                0,
+                2
+              ],
+              "PD1": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 4,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 31.23,
+            "first_gpu_submit": 35.42,
+            "first_raw_texture_upload": 62.61,
+            "viewport_target_fine_ready": 425.43,
+            "first_binding_request": 20.88,
+            "first_binding_callback": 36.81
+          },
+          "gui_worst_gap_ms": 254.5,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 101,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 37,
+              "gpu-binding/fine": 64
+            },
+            "binding_requests": 64,
+            "legacy_controller_requests": 37,
+            "unique_binding_rawkeys": 64,
+            "unique_legacy_rawkeys": 37,
+            "legacy_keys_the_binding_never_asked_for": 21,
+            "provider_reads": 85,
+            "provider_reads_corrected": 85,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 121,
+            "gpu_uploads": 64,
+            "gpu_submits": 65,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 112
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 85,
+              "min": 10.28,
+              "median": 24.4,
+              "max": 128.92,
+              "sum": 2193.2
+            },
+            "raw": null,
+            "all": {
+              "n": 85,
+              "min": 10.28,
+              "median": 24.4,
+              "max": 128.92,
+              "sum": 2193.2
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 64,
+              "min": -14.47,
+              "median": 112.9,
+              "max": 211.74,
+              "sum": 6488.07
+            },
+            "legacy": {
+              "n": 37,
+              "min": 3.58,
+              "median": 225.79,
+              "max": 265.8,
+              "sum": 6762.14
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 17,
+              "CD4": 17,
+              "FOXP3": 17,
+              "PD1": 17
+            },
+            "fine_levels": {
+              "CD22": [
+                0,
+                2
+              ],
+              "CD4": [
+                0,
+                2
+              ],
+              "FOXP3": [
+                0,
+                2
+              ],
+              "PD1": [
+                0,
+                2
+              ]
+            },
+            "retained_fine_last_epoch": 4,
+            "requested_fine_last_epoch": 64,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 15.5,
+            "first_gpu_submit": 19.21,
+            "first_raw_texture_upload": 49.7,
+            "viewport_target_fine_ready": 358.95,
+            "first_binding_request": 8.09,
+            "first_binding_callback": 30.75
+          },
+          "gui_worst_gap_ms": 308.7,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 80,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 68,
+            "provider_reads_corrected": 68,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 98,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 160
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 68,
+              "min": 10.7,
+              "median": 22.91,
+              "max": 99.62,
+              "sum": 1778.22
+            },
+            "raw": null,
+            "all": {
+              "n": 68,
+              "min": 10.7,
+              "median": 22.91,
+              "max": 99.62,
+              "sum": 1778.22
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": 1.29,
+              "median": 96.66,
+              "max": 157.45,
+              "sum": 3804.35
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.94,
+              "median": 174.27,
+              "max": 216.38,
+              "sum": 5366.75
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P4",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 28.78,
+            "first_gpu_submit": 47.79,
+            "first_raw_texture_upload": 188.74,
+            "viewport_target_fine_ready": 396.07,
+            "first_binding_request": 18.52,
+            "first_binding_callback": 45.78
+          },
+          "gui_worst_gap_ms": 347.5,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 80,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 68,
+            "provider_reads_corrected": 68,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 98,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 208
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 68,
+              "min": 9.31,
+              "median": 22.38,
+              "max": 135.04,
+              "sum": 1937.7
+            },
+            "raw": null,
+            "all": {
+              "n": 68,
+              "min": 9.31,
+              "median": 22.38,
+              "max": 135.04,
+              "sum": 1937.7
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -6.39,
+              "median": 122.83,
+              "max": 183.59,
+              "sum": 4881.21
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.63,
+              "median": 201.62,
+              "max": 233.63,
+              "sum": 5469.32
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "P5",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 45.15,
+            "first_raw_texture_upload": 289.75,
+            "first_gpu_submit": 289.77,
+            "viewport_target_fine_ready": 447.23,
+            "first_binding_request": 17.98,
+            "first_binding_callback": 33.82
+          },
+          "gui_worst_gap_ms": 288.8,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 82,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 70,
+            "provider_reads_corrected": 70,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 100,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 256
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 70,
+              "min": 11.25,
+              "median": 22.44,
+              "max": 134.13,
+              "sum": 2104.22
+            },
+            "raw": null,
+            "all": {
+              "n": 70,
+              "min": 11.25,
+              "median": 22.44,
+              "max": 134.13,
+              "sum": 2104.22
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -5.11,
+              "median": 139.67,
+              "max": 204.99,
+              "sum": 5597.96
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.62,
+              "median": 221.89,
+              "max": 255.35,
+              "sum": 6027.94
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "cold_landings": [
+        {
+          "label": "T1",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 16,
+          "stages_ms": {
+            "public_call_returned": 33.78,
+            "first_gpu_submit": 48.38,
+            "first_raw_texture_upload": 261.9,
+            "viewport_target_fine_ready": 632.12,
+            "first_binding_request": 21.41,
+            "first_binding_callback": 36.75
+          },
+          "gui_worst_gap_ms": 424.8,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 104,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 40,
+              "gpu-binding/fine": 64
+            },
+            "binding_requests": 64,
+            "legacy_controller_requests": 40,
+            "unique_binding_rawkeys": 64,
+            "unique_legacy_rawkeys": 40,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 88,
+            "provider_reads_corrected": 88,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 124,
+            "gpu_uploads": 64,
+            "gpu_submits": 65,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 320
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 88,
+              "min": 11.32,
+              "median": 21.72,
+              "max": 162.63,
+              "sum": 2774.96
+            },
+            "raw": null,
+            "all": {
+              "n": 88,
+              "min": 11.32,
+              "median": 21.72,
+              "max": 162.63,
+              "sum": 2774.96
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 64,
+              "min": -8.62,
+              "median": 194.47,
+              "max": 285.51,
+              "sum": 11180.9
+            },
+            "legacy": {
+              "n": 40,
+              "min": 4.76,
+              "median": 298.05,
+              "max": 337.45,
+              "sum": 9852.96
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 16,
+              "CD4": 16,
+              "FOXP3": 16,
+              "PD1": 16
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 64,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T2",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 26.4,
+            "first_gpu_submit": 51.34,
+            "first_raw_texture_upload": 315.87,
+            "viewport_target_fine_ready": 483.0,
+            "first_binding_request": 9.71,
+            "first_binding_callback": 33.22
+          },
+          "gui_worst_gap_ms": 430.3,
+          "natural_paints": 2,
+          "counts": {
+            "scheduler_requests_total": 80,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 68,
+            "provider_reads_corrected": 68,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 98,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 368
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 68,
+              "min": 12.24,
+              "median": 29.95,
+              "max": 114.15,
+              "sum": 2265.15
+            },
+            "raw": null,
+            "all": {
+              "n": 68,
+              "min": 12.24,
+              "median": 29.95,
+              "max": 114.15,
+              "sum": 2265.15
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -3.02,
+              "median": 108.18,
+              "max": 210.39,
+              "sum": 4613.14
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.52,
+              "median": 219.6,
+              "max": 276.81,
+              "sum": 6199.26
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T3",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 50.91,
+            "first_raw_texture_upload": 274.23,
+            "first_gpu_submit": 274.25,
+            "viewport_target_fine_ready": 557.19,
+            "first_binding_request": 18.03,
+            "first_binding_callback": 38.27
+          },
+          "gui_worst_gap_ms": 283.3,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 82,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 34,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 34,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 34,
+            "legacy_keys_the_binding_never_asked_for": 22,
+            "provider_reads": 70,
+            "provider_reads_corrected": 70,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 100,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 416
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 70,
+              "min": 15.23,
+              "median": 25.65,
+              "max": 169.17,
+              "sum": 2566.03
+            },
+            "raw": null,
+            "all": {
+              "n": 70,
+              "min": 15.23,
+              "median": 25.65,
+              "max": 169.17,
+              "sum": 2566.03
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -8.86,
+              "median": 179.3,
+              "max": 249.85,
+              "sum": 7373.13
+            },
+            "legacy": {
+              "n": 34,
+              "min": 4.81,
+              "median": 265.96,
+              "max": 304.08,
+              "sum": 7172.36
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T4",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 15,
+          "stages_ms": {
+            "public_call_returned": 28.96,
+            "first_gpu_submit": 42.27,
+            "first_raw_texture_upload": 83.66,
+            "viewport_target_fine_ready": 651.72,
+            "first_binding_request": 16.96,
+            "first_binding_callback": 40.05
+          },
+          "gui_worst_gap_ms": 372.3,
+          "natural_paints": 4,
+          "counts": {
+            "scheduler_requests_total": 99,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 39,
+              "gpu-binding/fine": 60
+            },
+            "binding_requests": 60,
+            "legacy_controller_requests": 39,
+            "unique_binding_rawkeys": 60,
+            "unique_legacy_rawkeys": 39,
+            "legacy_keys_the_binding_never_asked_for": 24,
+            "provider_reads": 84,
+            "provider_reads_corrected": 84,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 119,
+            "gpu_uploads": 60,
+            "gpu_submits": 61,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 476
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 84,
+              "min": 13.51,
+              "median": 27.5,
+              "max": 211.53,
+              "sum": 3125.11
+            },
+            "raw": null,
+            "all": {
+              "n": 84,
+              "min": 13.51,
+              "median": 27.5,
+              "max": 211.53,
+              "sum": 3125.11
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 60,
+              "min": -5.22,
+              "median": 219.49,
+              "max": 315.84,
+              "sum": 11519.02
+            },
+            "legacy": {
+              "n": 39,
+              "min": 4.1,
+              "median": 330.28,
+              "max": 388.19,
+              "sum": 10685.55
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 15,
+              "CD4": 15,
+              "FOXP3": 15,
+              "PD1": 15
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 60,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "T5",
+          "kind": "tissue",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 98.3,
+            "first_raw_texture_upload": 398.91,
+            "first_gpu_submit": 398.94,
+            "viewport_target_fine_ready": 541.69,
+            "first_binding_request": 20.93,
+            "first_binding_callback": 60.12
+          },
+          "gui_worst_gap_ms": 398.2,
+          "natural_paints": 3,
+          "counts": {
+            "scheduler_requests_total": 80,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 32,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 32,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 32,
+            "legacy_keys_the_binding_never_asked_for": 20,
+            "provider_reads": 68,
+            "provider_reads_corrected": 68,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 98,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 524
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 68,
+              "min": 18.28,
+              "median": 35.22,
+              "max": 163.05,
+              "sum": 2789.51
+            },
+            "raw": null,
+            "all": {
+              "n": 68,
+              "min": 18.28,
+              "median": 35.22,
+              "max": 163.05,
+              "sum": 2789.51
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": -12.67,
+              "median": 155.25,
+              "max": 277.36,
+              "sum": 6421.98
+            },
+            "legacy": {
+              "n": 32,
+              "min": 4.4,
+              "median": 295.43,
+              "max": 348.98,
+              "sum": 7411.71
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ],
+      "hot_returns": [
+        {
+          "label": "hot-P1-1",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 19.99,
+            "first_gpu_submit": 66.07,
+            "first_raw_texture_upload": 274.48,
+            "viewport_target_fine_ready": 398.14,
+            "first_binding_request": 8.47,
+            "first_binding_callback": 43.12
+          },
+          "gui_worst_gap_ms": 207.8,
+          "natural_paints": 2,
+          "counts": {
+            "scheduler_requests_total": 66,
+            "scheduler_requests_by_origin": {
+              "legacy-controller/raw": 18,
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 18,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 18,
+            "legacy_keys_the_binding_never_asked_for": 18,
+            "provider_reads": 66,
+            "provider_reads_corrected": 66,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 0,
+            "raw_cache_misses": 84,
+            "gpu_uploads": 48,
+            "gpu_submits": 49,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 572
+            }
+          },
+          "read_ms": {
+            "corrected": {
+              "n": 66,
+              "min": 18.68,
+              "median": 30.79,
+              "max": 41.21,
+              "sum": 2011.66
+            },
+            "raw": null,
+            "all": {
+              "n": 66,
+              "min": 18.68,
+              "median": 30.79,
+              "max": 41.21,
+              "sum": 2011.66
+            }
+          },
+          "queue_ms": {
+            "binding": {
+              "n": 48,
+              "min": 2.39,
+              "median": 96.81,
+              "max": 170.08,
+              "sum": 4206.46
+            },
+            "legacy": {
+              "n": 18,
+              "min": 4.62,
+              "median": 210.4,
+              "max": 236.81,
+              "sum": 3710.23
+            }
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-2",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 20.49,
+            "first_gpu_submit": 23.72,
+            "viewport_target_fine_ready": 24.2,
+            "first_binding_request": 7.74,
+            "first_binding_callback": 7.8
+          },
+          "gui_worst_gap_ms": 23.7,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 48,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 66,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 684
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        },
+        {
+          "label": "hot-P1-3",
+          "kind": "patch",
+          "moved": true,
+          "channels": [
+            "CD22",
+            "CD4",
+            "PD1",
+            "FOXP3"
+          ],
+          "source_of_channels": {
+            "CD22": "corrected",
+            "CD4": "corrected",
+            "PD1": "corrected",
+            "FOXP3": "corrected"
+          },
+          "target_level": 0,
+          "target_visible_tiles": 12,
+          "stages_ms": {
+            "public_call_returned": 26.71,
+            "first_gpu_submit": 74.26,
+            "viewport_target_fine_ready": 74.85,
+            "first_binding_request": 6.89,
+            "first_binding_callback": 6.95
+          },
+          "gui_worst_gap_ms": 74.2,
+          "natural_paints": 1,
+          "counts": {
+            "scheduler_requests_total": 48,
+            "scheduler_requests_by_origin": {
+              "gpu-binding/fine": 48
+            },
+            "binding_requests": 48,
+            "legacy_controller_requests": 0,
+            "unique_binding_rawkeys": 48,
+            "unique_legacy_rawkeys": 0,
+            "legacy_keys_the_binding_never_asked_for": 0,
+            "provider_reads": 0,
+            "provider_reads_corrected": 0,
+            "provider_reads_raw": 0,
+            "duplicate_real_reads_of_one_key": {},
+            "raw_cache_hits": 66,
+            "raw_cache_misses": 0,
+            "gpu_uploads": 0,
+            "gpu_submits": 1,
+            "rejected_late_results": 0,
+            "fine_requests_by_priority": {
+              "200": 72,
+              "0": 796
+            }
+          },
+          "read_ms": {
+            "corrected": null,
+            "raw": null,
+            "all": null
+          },
+          "queue_ms": {
+            "binding": null,
+            "legacy": null
+          },
+          "binding_stats": {
+            "coarse_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_channels": [
+              "CD22",
+              "CD4",
+              "FOXP3",
+              "PD1"
+            ],
+            "fine_tiles": {
+              "CD22": 12,
+              "CD4": 12,
+              "FOXP3": 12,
+              "PD1": 12
+            },
+            "fine_levels": {
+              "CD22": [
+                0
+              ],
+              "CD4": [
+                0
+              ],
+              "FOXP3": [
+                0
+              ],
+              "PD1": [
+                0
+              ]
+            },
+            "retained_fine_last_epoch": 0,
+            "requested_fine_last_epoch": 48,
+            "fine_budget_refused": [],
+            "last_error": null
+          }
+        }
+      ]
+    }
+  }
+}

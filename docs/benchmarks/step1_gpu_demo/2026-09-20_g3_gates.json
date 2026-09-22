@@ -1,0 +1,458 @@
+{
+  "generated": "2026-09-20",
+  "block": "G3",
+  "gates": {
+    "A_production_takeover": {
+      "backend": "gpu",
+      "reason": "",
+      "gpu_widget_parent_is_viewbox_viewport": true,
+      "gpu_widget_transparent_for_mouse": true,
+      "binding_uses_stack_provider": true,
+      "binding_uses_stack_scheduler": true,
+      "binding_uses_stack_controller": true,
+      "cpu_compose_coordinator": null,
+      "cpu_compose_binding": null,
+      "cpu_composed_layer": null
+    },
+    "B_real_widget_framebuffer": {
+      "method": "QOpenGLWidget.grabFramebuffer() on the mounted overlay",
+      "environment": {
+        "pyopengl_version": "3.1.10",
+        "pyopengl_file": "/root/micromamba/envs/fusion_test2/lib/python3.10/site-packages/OpenGL/__init__.py",
+        "gl_vendor": "NVIDIA Corporation",
+        "gl_renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+        "gl_version": "4.6.0 NVIDIA 535.309.01",
+        "glsl_version": "4.60 NVIDIA",
+        "actual_format": {
+          "major": 3,
+          "minor": 3,
+          "profile": 1
+        },
+        "max_texture_image_units": 32,
+        "max_texture_size": 32768,
+        "software_renderer": false,
+        "raw_texture_format": "GL_R32F / GL_RED / GL_FLOAT",
+        "transient_format": "GL_RGBA32F"
+      },
+      "frame_shape": [
+        478,
+        638,
+        4
+      ],
+      "frame_sha256_16": "e4d0fdeb962e3cd7",
+      "max_rgb": 42,
+      "fbo_alpha_min_max": [
+        0,
+        255
+      ]
+    },
+    "C_no_centre_diffusion": {
+      "order": [
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "steps": [
+        {
+          "step": 0,
+          "delivered": "CD3-only baseline",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "cd8_red_max": 0
+        },
+        {
+          "step": 1,
+          "delivered": "CD8 coarse tile (1, 1)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 2,
+          "delivered": "CD8 coarse tile (0, 0)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 3,
+          "delivered": "CD8 coarse tile (1, 0)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 4,
+          "delivered": "CD8 coarse tile (2, 0)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 5,
+          "delivered": "CD8 coarse tile (0, 1)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 6,
+          "delivered": "CD8 coarse tile (2, 1)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 7,
+          "delivered": "CD8 coarse tile (0, 2)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 8,
+          "delivered": "CD8 coarse tile (1, 2)",
+          "sha256_16": "e4d0fdeb962e3cd7",
+          "identical_to_baseline": true,
+          "cd8_red_max": 0
+        },
+        {
+          "step": 9,
+          "delivered": "CD8 coarse tile (2, 2)",
+          "sha256_16": "afdd52d0b84c2f04",
+          "identical_to_baseline": false,
+          "cd8_red_min_over_valid_area": 28,
+          "cd8_red_max_outside_valid_area": 0,
+          "valid_pixels": 100488,
+          "cd3_green_unchanged": true
+        }
+      ]
+    },
+    "D_overlay_fusion_vs_c1": {
+      "overlay": {
+        "c1_max_abs_rgb_difference": 1,
+        "alpha_exact_against_c1": true,
+        "frame_sha256_16": "dc30736adf7d54fe",
+        "totals_after": {
+          "reads": 28,
+          "requests": 117,
+          "uploads": 27,
+          "cpu_compose": 0,
+          "submits": 13
+        },
+        "totals_before": {
+          "reads": 28,
+          "requests": 117,
+          "uploads": 27,
+          "cpu_compose": 0,
+          "submits": 8
+        },
+        "texture_cache": {
+          "budget_bytes": 536870912,
+          "bytes": 7077888,
+          "peak_bytes": 7077888,
+          "textures": 27,
+          "peak_textures": 27,
+          "hits": 270,
+          "misses": 27,
+          "uploads": 27,
+          "upload_submit_ms": [
+            0.3156560123898089,
+            0.5356440087780356,
+            0.18383102724328637,
+            0.1841320190578699,
+            0.19796798005700111,
+            0.18466298934072256,
+            0.1792029943317175,
+            0.19979098578915,
+            0.18099596491083503,
+            0.3690259763970971,
+            0.23133005015552044,
+            0.20726502407342196,
+            0.19152596360072494,
+            0.1911550061777234,
+            0.17191999359056354,
+            0.168552971445024,
+            0.1829300308600068,
+            0.8544669835828245,
+            0.4913720185868442,
+            0.5387300043366849,
+            0.487424957100302,
+            0.4601650289259851,
+            0.46541396295651793,
+            0.5363349919207394,
+            0.4548350116237998,
+            0.7731950026936829,
+            0.4721070290543139
+          ],
+          "evictions": 0
+        }
+      },
+      "fusion": {
+        "c1_max_abs_rgb_difference": 1,
+        "alpha_exact_against_c1": true,
+        "frame_sha256_16": "dff22eb01f04020b",
+        "totals_after": {
+          "reads": 28,
+          "requests": 117,
+          "uploads": 27,
+          "cpu_compose": 0,
+          "submits": 14
+        },
+        "totals_before": {
+          "reads": 28,
+          "requests": 117,
+          "uploads": 27,
+          "cpu_compose": 0,
+          "submits": 9
+        },
+        "texture_cache": {
+          "budget_bytes": 536870912,
+          "bytes": 7077888,
+          "peak_bytes": 7077888,
+          "textures": 27,
+          "peak_textures": 27,
+          "hits": 297,
+          "misses": 27,
+          "uploads": 27,
+          "upload_submit_ms": [
+            0.26990100741386414,
+            0.5214479751884937,
+            0.1790120149962604,
+            0.19725703168660402,
+            0.16617903020232916,
+            0.1650269841775298,
+            0.1640350092202425,
+            0.16773201059550047,
+            0.17672794638201594,
+            0.21595100406557322,
+            0.2686380175873637,
+            0.18499302677810192,
+            0.19131496082991362,
+            0.18324999837204814,
+            0.16356399282813072,
+            0.17592700896784663,
+            0.18065597396343946,
+            5.825255997478962,
+            0.19008299568668008,
+            0.20465999841690063,
+            0.18579501193016768,
+            0.18877099500969052,
+            0.18298899522051215,
+            0.4856910090893507,
+            0.5161280278116465,
+            0.7271800423040986,
+            0.48415898345410824
+          ],
+          "evictions": 0
+        }
+      }
+    },
+    "F_live_intensity": {
+      "overlay": [
+        {
+          "mapping": [
+            300.0,
+            4096.0,
+            1.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "cc0746a1d38ea57c"
+        },
+        {
+          "mapping": [
+            300.0,
+            2000.0,
+            1.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "e5678cc8b0678bee"
+        },
+        {
+          "mapping": [
+            300.0,
+            2000.0,
+            0.5
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "113a8025d238399d"
+        },
+        {
+          "mapping": [
+            0.0,
+            1500.0,
+            2.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "4f725264905143bc"
+        },
+        {
+          "mapping": [
+            100.0,
+            1200.0,
+            0.8
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "16ce50c7b422ead3"
+        }
+      ],
+      "fusion": [
+        {
+          "mapping": [
+            300.0,
+            4096.0,
+            1.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "6359365d76c8ed4f"
+        },
+        {
+          "mapping": [
+            300.0,
+            2000.0,
+            1.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "5a66180db3219dcb"
+        },
+        {
+          "mapping": [
+            300.0,
+            2000.0,
+            0.5
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "ed6723bc6ccfafad"
+        },
+        {
+          "mapping": [
+            0.0,
+            1500.0,
+            2.0
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "6de8641d1b2d0518"
+        },
+        {
+          "mapping": [
+            100.0,
+            1200.0,
+            0.8
+          ],
+          "provider_read_delta": 0,
+          "scheduler_request_delta": 0,
+          "raw_upload_delta": 0,
+          "cpu_compose_delta": 0,
+          "gpu_submit_delta": 1,
+          "framebuffer_changed": true,
+          "sha256_16": "408e59b673b0bb84"
+        }
+      ]
+    },
+    "D_mode_switch": {
+      "provider_read_delta": 0,
+      "scheduler_request_delta": 0,
+      "raw_upload_delta": 0,
+      "cpu_compose_delta": 0,
+      "overlay_sha256_16": "dc30736adf7d54fe",
+      "fusion_sha256_16": "dff22eb01f04020b",
+      "overlay_green_max": 42,
+      "fusion_green_max": 0
+    },
+    "H_lifecycle_and_budget": {
+      "submits_while_away": 0,
+      "reads_while_away": 0,
+      "submits_on_return": 1,
+      "raw_texture_budget_bytes": 536870912,
+      "texture_cache_peak_bytes": 4718592,
+      "texture_cache_peak_textures": 18,
+      "texture_cache_evictions": 0,
+      "textures_after_close": 0,
+      "bytes_after_close": 0
+    },
+    "I_no_double_work": {
+      "cpu_compose_coordinator_built": false,
+      "scheduler_requests_total": 72,
+      "from_the_gpu_binding": 63,
+      "from_the_existing_ExploreController_as_camera_owner": 9,
+      "note": "The camera owner's own single-channel requests are recorded, not suppressed: G3 changes no shared controller or scheduler."
+    }
+  }
+}

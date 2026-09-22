@@ -1,0 +1,236 @@
+{
+  "label": "g324b12-before",
+  "when": "2026-09-21 19:48:15",
+  "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+  "project": "/sda1/Fusion/tmp/rois/full_wsi_20260813_023722_f270",
+  "viewport_l0": [
+    9000,
+    9000,
+    2048,
+    2048
+  ],
+  "floor_level_stride": [
+    2,
+    1
+  ],
+  "floor_cache_limit": 8,
+  "honesty": [
+    "the floor cache ALREADY EXISTS (explore_view `_floor_cache`, 8 entries)",
+    "the OS page cache was NOT dropped; nothing here is a cold disk read",
+    "'hit' means the floor came from that existing OrderedDict",
+    "the demo slide and project are read-only"
+  ],
+  "A_new_channel_first_flip": [
+    {
+      "arrive": {
+        "channel": "CD4",
+        "method": "tophat",
+        "wall_ms": 3043.1,
+        "tile_computes": 86,
+        "tile_computes_by_level": {
+          "1": 16,
+          "0": 70
+        },
+        "floor_correct_array_calls": 99,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 2,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      },
+      "first_flip": {
+        "channel": "CD4",
+        "method": "cucim",
+        "wall_ms": 3010.1,
+        "tile_computes": 16,
+        "tile_computes_by_level": {
+          "1": 16
+        },
+        "floor_correct_array_calls": 29,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 3,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "PD1",
+        "method": "cucim",
+        "wall_ms": 3037.6,
+        "tile_computes": 86,
+        "tile_computes_by_level": {
+          "1": 16,
+          "0": 70
+        },
+        "floor_correct_array_calls": 99,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 4,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      },
+      "first_flip": {
+        "channel": "PD1",
+        "method": "tophat",
+        "wall_ms": 3011.0,
+        "tile_computes": 16,
+        "tile_computes_by_level": {
+          "1": 16
+        },
+        "floor_correct_array_calls": 29,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 5,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "FOXP3",
+        "method": null,
+        "wall_ms": 3014.6,
+        "tile_computes": 70,
+        "tile_computes_by_level": {
+          "0": 70
+        },
+        "floor_correct_array_calls": 70,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 5,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      },
+      "first_flip": {
+        "channel": "FOXP3",
+        "method": "tophat",
+        "wall_ms": 3007.1,
+        "tile_computes": 16,
+        "tile_computes_by_level": {
+          "1": 16
+        },
+        "floor_correct_array_calls": 29,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 6,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      }
+    },
+    {
+      "arrive": {
+        "channel": "TCF1",
+        "method": null,
+        "wall_ms": 3034.9,
+        "tile_computes": 0,
+        "tile_computes_by_level": {},
+        "floor_correct_array_calls": 0,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 6,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      },
+      "first_flip": {
+        "channel": "TCF1",
+        "method": "cucim",
+        "wall_ms": 3014.4,
+        "tile_computes": 16,
+        "tile_computes_by_level": {
+          "1": 16
+        },
+        "floor_correct_array_calls": 29,
+        "floor_cache_hits_delta": 0,
+        "floor_cache": {
+          "floor_cache_items": 7,
+          "floor_cache_limit": 8,
+          "floor_cache_hits": 0
+        }
+      }
+    }
+  ],
+  "C_repeat_round_trip": [
+    {
+      "channel": "CD4",
+      "method": "tophat",
+      "wall_ms": 1534.8,
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "floor_correct_array_calls": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 7,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 1
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "cucim",
+      "wall_ms": 1508.8,
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "floor_correct_array_calls": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 7,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 2
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "tophat",
+      "wall_ms": 1513.8,
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "floor_correct_array_calls": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 7,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 3
+      }
+    },
+    {
+      "channel": "CD4",
+      "method": "cucim",
+      "wall_ms": 1514.7,
+      "tile_computes": 0,
+      "tile_computes_by_level": {},
+      "floor_correct_array_calls": 0,
+      "floor_cache_hits_delta": 1,
+      "floor_cache": {
+        "floor_cache_items": 7,
+        "floor_cache_limit": 8,
+        "floor_cache_hits": 4
+      }
+    }
+  ],
+  "B_full_to_compare": {
+    "built": true,
+    "error": null,
+    "wall_ms": 8151.7,
+    "tile_computes": 2,
+    "tile_computes_by_level": {
+      "2": 2
+    },
+    "floor_correct_array_calls": 28,
+    "floor_cache_same_object": [
+      false,
+      false,
+      false
+    ],
+    "raw_cache_same_object": true,
+    "corrected_cache_same_object": true
+  }
+}

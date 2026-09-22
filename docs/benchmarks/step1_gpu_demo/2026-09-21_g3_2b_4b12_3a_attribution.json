@@ -1,0 +1,3413 @@
+{
+  "what_this_file_is": "G3.2b.4B1.2.3a. Four real-slide runs of the same four trajectories: the natural timing before and after the fix (on this demo slide the foreground floor finishes before HOT ever asks, so the defect cannot occur), and the FORCED window (--slow-floor 400 --dwell 9000) in which the foreground floor is still running when _prepare_centre_floors() fires, which is the real machine's timing. The before/after pair of forced runs uses identical settings.",
+  "honesty": [
+    "the OS page cache was NOT dropped; nothing here is a cold disk read",
+    "the demo slide biopsy.ome.tif is opened read-only; the larger slide in the user's own log is not available here and no number is invented",
+    "--slow-floor sleeps on the floor worker thread only and changes no decision, no key and no pixel; --dwell only lengthens the stand-still"
+  ],
+  "before_natural": {
+    "label": "before",
+    "when": "2026-09-21 22:11:49",
+    "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+    "viewport_l0": [
+      9000,
+      9000,
+      2048,
+      2048
+    ],
+    "floor_level_stride": [
+      2,
+      1
+    ],
+    "honesty": [
+      "the OS page cache was NOT dropped; nothing here is a cold read",
+      "the demo slide is opened read-only",
+      "every entry point below is WRAPPED TO RECORD ONLY; no decision is changed by this script"
+    ],
+    "trajectories": [
+      {
+        "channel": "CD4",
+        "shown_method": "tophat",
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 7322.925,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 7884.468,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 7885.09,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 7885.675,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 8227.421,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "has_cached_floor": true,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": false
+          },
+          {
+            "t_ms": 8227.521,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 8228.293,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 8554.455,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 8554.523,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 8554.571,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "CD4",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      },
+      {
+        "channel": "PD1",
+        "shown_method": "cucim",
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 13857.434,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 14454.412,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 14454.982,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 14455.556,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 14816.745,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 14817.617,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 14817.7,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "has_cached_floor": true,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": false
+          },
+          {
+            "t_ms": 15145.327,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 15145.392,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 15145.453,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "PD1",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "FOXP3",
+        "shown_method": null,
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 21231.795,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21232.597,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 21232.693,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 21558.912,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21558.962,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 21558.98,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21559.734,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 21906.242,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 21906.277,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 21906.346,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 78,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 5.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "FOXP3",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "TCF1",
+        "shown_method": null,
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 27239.328,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27240.029,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 27240.124,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 27573.614,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27574.479,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 27574.497,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27575.259,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 27900.417,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 27900.459,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 27900.532,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 8,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 5.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "TCF1",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "before_forced": {
+    "label": "before_slow",
+    "when": "2026-09-21 22:20:38",
+    "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+    "viewport_l0": [
+      9000,
+      9000,
+      2048,
+      2048
+    ],
+    "floor_level_stride": [
+      2,
+      1
+    ],
+    "slow_floor_ms": 400,
+    "dwell_ms": 9000,
+    "honesty": [
+      "the OS page cache was NOT dropped; nothing here is a cold read",
+      "the demo slide is opened read-only",
+      "every entry point below is WRAPPED TO RECORD ONLY; no decision is changed by this script",
+      "--slow-floor sleeps on the FLOOR WORKER THREAD only, to reproduce a large slide's timing; it changes no decision, no key and no pixel"
+    ],
+    "trajectories": [
+      {
+        "channel": "CD4",
+        "shown_method": "tophat",
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 7336.575,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 8240.078,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 8240.177,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "background_slot_after": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 9403.992,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 9404.649,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 9404.673,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 9405.495,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 11350.702,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 11350.76,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 11350.809,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.7,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "CD4",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      },
+      {
+        "channel": "PD1",
+        "shown_method": "cucim",
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 18889.181,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 19812.939,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 19812.992,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "background_slot_before": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_after": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 20976.592,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 20977.199,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": true
+          },
+          {
+            "t_ms": 20977.669,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": false,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.3,
+          "floor_ready_at_show_source_return": false,
+          "floor_cache_hits_delta": 0,
+          "floor_jobs_started": 1,
+          "tile_computes": 12,
+          "events": [
+            {
+              "t_ms": 27897.088,
+              "phase": "click:PD1:tophat",
+              "event": "floor_job_START",
+              "request": {
+                "channel": "PD1",
+                "method": "tophat",
+                "base_params": [
+                  15
+                ],
+                "foreground": true,
+                "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+              }
+            },
+            {
+              "t_ms": 29833.747,
+              "phase": "click:PD1:tophat",
+              "event": "floor_result",
+              "request": {
+                "channel": "PD1",
+                "method": "tophat",
+                "base_params": [
+                  15
+                ],
+                "foreground": true,
+                "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+              },
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "foreground": true,
+              "error": null,
+              "floor_pending_before": false,
+              "background_slot_before": null
+            },
+            {
+              "t_ms": 29834.389,
+              "phase": "click:PD1:tophat",
+              "event": "start_next_floor_job",
+              "waiting": null,
+              "job_running": false,
+              "already_cached": false
+            },
+            {
+              "t_ms": 29834.919,
+              "phase": "click:PD1:tophat",
+              "event": "floor_result_done",
+              "cached_now": [
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+                "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+              ]
+            }
+          ],
+          "selection": {
+            "channel": "PD1",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "FOXP3",
+        "shown_method": null,
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 31265.421,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 31265.853,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 31265.949,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 33201.382,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 33201.453,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 33201.474,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 33201.917,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 35181.405,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 35181.47,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 35181.571,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 78,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 5.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "FOXP3",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "TCF1",
+        "shown_method": null,
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 42258.678,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 42259.093,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 42259.139,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 44224.317,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 44224.832,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 44224.856,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 44225.357,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 46170.591,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 46170.663,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 46170.756,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 8,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 5.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "TCF1",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "after_forced": {
+    "label": "after_slow",
+    "when": "2026-09-21 22:19:29",
+    "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+    "viewport_l0": [
+      9000,
+      9000,
+      2048,
+      2048
+    ],
+    "floor_level_stride": [
+      2,
+      1
+    ],
+    "slow_floor_ms": 400,
+    "dwell_ms": 9000,
+    "honesty": [
+      "the OS page cache was NOT dropped; nothing here is a cold read",
+      "the demo slide is opened read-only",
+      "every entry point below is WRAPPED TO RECORD ONLY; no decision is changed by this script",
+      "--slow-floor sleeps on the FLOOR WORKER THREAD only, to reproduce a large slide's timing; it changes no decision, no key and no pixel"
+    ],
+    "trajectories": [
+      {
+        "channel": "CD4",
+        "shown_method": "tophat",
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 7334.716,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 8217.636,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 9403.94,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 9404.62,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 9404.643,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 9405.537,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 11345.579,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 11345.634,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 11345.681,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.2,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "CD4",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      },
+      {
+        "channel": "PD1",
+        "shown_method": "cucim",
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 18883.51,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 19798.695,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 20952.247,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 20952.896,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 20952.92,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 20953.804,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 22902.576,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 22902.635,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 22902.695,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.3,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "PD1",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "FOXP3",
+        "shown_method": null,
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 31234.774,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 31235.227,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 31235.323,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 33188.22,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 33188.285,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 33188.305,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 33188.833,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 35163.133,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 35163.174,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 35163.213,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 78,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 5.4,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "FOXP3",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "TCF1",
+        "shown_method": null,
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 42270.646,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 42271.139,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 42271.236,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 44214.256,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 44215.231,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 44215.255,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 44215.715,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 46170.084,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 46170.167,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 46170.242,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 8,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.8,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "TCF1",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "after_natural": {
+    "label": "after_normal",
+    "when": "2026-09-21 22:36:25",
+    "slide": "/sda1/Fusion/benchmark/biopsy.ome.tif",
+    "viewport_l0": [
+      9000,
+      9000,
+      2048,
+      2048
+    ],
+    "floor_level_stride": [
+      2,
+      1
+    ],
+    "slow_floor_ms": 0,
+    "dwell_ms": 4000,
+    "honesty": [
+      "the OS page cache was NOT dropped; nothing here is a cold read",
+      "the demo slide is opened read-only",
+      "every entry point below is WRAPPED TO RECORD ONLY; no decision is changed by this script",
+      "--slow-floor sleeps on the FLOOR WORKER THREAD only, to reproduce a large slide's timing; it changes no decision, no key and no pixel"
+    ],
+    "trajectories": [
+      {
+        "channel": "CD4",
+        "shown_method": "tophat",
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 7297.906,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 7897.175,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 7897.96,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 7898.498,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 8218.786,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 8219.379,
+            "phase": "arrive:CD4:tophat",
+            "event": "prepare_floor_async",
+            "asked_channel": "CD4",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 8554.291,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result",
+            "request": {
+              "channel": "CD4",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 8554.326,
+            "phase": "arrive:CD4:tophat",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 8554.371,
+            "phase": "arrive:CD4:tophat",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 7.0,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "CD4",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      },
+      {
+        "channel": "PD1",
+        "shown_method": "cucim",
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 13842.191,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 14444.675,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": true,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+            "foreground": true,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 14445.253,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 14445.801,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 14778.266,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 14779.094,
+            "phase": "arrive:PD1:cucim",
+            "event": "prepare_floor_async",
+            "asked_channel": "PD1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 15113.616,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result",
+            "request": {
+              "channel": "PD1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 15113.67,
+            "phase": "arrive:PD1:cucim",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 15113.73,
+            "phase": "arrive:PD1:cucim",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 90,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 9.7,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "PD1",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "FOXP3",
+        "shown_method": null,
+        "clicked": "tophat",
+        "arrive_events": [
+          {
+            "t_ms": 21243.906,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21244.55,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 21244.597,
+            "phase": "arrive:FOXP3:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "FOXP3",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 21571.676,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21571.725,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 21571.744,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 21572.457,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 21918.596,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "FOXP3",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 21918.645,
+            "phase": "arrive:FOXP3:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 21918.714,
+            "phase": "arrive:FOXP3:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 78,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 6.5,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "FOXP3",
+            "method": "tophat",
+            "params": [
+              15
+            ]
+          }
+        }
+      },
+      {
+        "channel": "TCF1",
+        "shown_method": null,
+        "clicked": "cucim",
+        "arrive_events": [
+          {
+            "t_ms": 27229.767,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27230.495,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "tophat",
+            "asked_params": [
+              15
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": false,
+            "running_request": null,
+            "background_slot_before": null,
+            "background_slot_after": null,
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 27230.548,
+            "phase": "arrive:TCF1:None",
+            "event": "prepare_floor_async",
+            "asked_channel": "TCF1",
+            "asked_method": "cucim",
+            "asked_params": [
+              50
+            ],
+            "floor_key": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "has_cached_floor": false,
+            "floor_job_running": true,
+            "running_request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "background_slot_before": null,
+            "background_slot_after": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "floor_pending": false,
+            "returned": true
+          },
+          {
+            "t_ms": 27575.257,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "tophat",
+              "base_params": [
+                15
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27576.035,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 27576.05,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_job_START",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            }
+          },
+          {
+            "t_ms": 27576.467,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD22|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          },
+          {
+            "t_ms": 27900.167,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result",
+            "request": {
+              "channel": "TCF1",
+              "method": "cucim",
+              "base_params": [
+                50
+              ],
+              "foreground": false,
+              "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+            },
+            "ctx": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+            "foreground": false,
+            "error": null,
+            "floor_pending_before": false,
+            "background_slot_before": null
+          },
+          {
+            "t_ms": 27900.207,
+            "phase": "arrive:TCF1:None",
+            "event": "start_next_floor_job",
+            "waiting": null,
+            "job_running": false,
+            "already_cached": false
+          },
+          {
+            "t_ms": 27900.266,
+            "phase": "arrive:TCF1:None",
+            "event": "floor_result_done",
+            "cached_now": [
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+              "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+            ]
+          }
+        ],
+        "arrive_tile_computes": 8,
+        "both_floors_cached_after_dwell": {
+          "tophat": true,
+          "cucim": true
+        },
+        "floor_keys": {
+          "tophat": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1",
+          "cucim": "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1"
+        },
+        "floor_cache_contents": [
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|CD4|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|FOXP3|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|PD1|tophat|(1,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|cucim|(3,)|L2|s1",
+          "SourceIdentity(dataset_path='/sda1/Fusion/benchmark/biopsy.ome.tif', dataset_fingerprint='1160521455:1779795326317389596', stage='raw', corrected_artifact=None)|TCF1|tophat|(1,)|L2|s1"
+        ],
+        "click": {
+          "show_source_return_ms": 6.2,
+          "floor_ready_at_show_source_return": true,
+          "floor_cache_hits_delta": 1,
+          "floor_jobs_started": 0,
+          "tile_computes": 12,
+          "events": [],
+          "selection": {
+            "channel": "TCF1",
+            "method": "cucim",
+            "params": [
+              50
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

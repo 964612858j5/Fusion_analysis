@@ -1,32 +1,38 @@
-"""Two DIFFERENT gestures for the same two pages, and why one of them moves.
+"""The Full Image <-> Compare round trip must not walk the view.
 
 Manual acceptance: "right-clicking to swap between the full image and the
 compare panels still shifts up and to the left, and doing it over and over
-walks the window's centre." That report is correct, and the first thing
-this module does is state why it is not a bug:
+walks the window's centre."
 
-    1. a right-click on the full image means COMPARE HERE -- the level-0
-       point under the cursor becomes the panels' centre;
-    2. leaving adopts the panels' CURRENT centre and magnification;
-    3. therefore, with the mouse parked at a fixed screen pixel that is not
-       the centre of the view, each right-click re-centres on a point that
-       the PREVIOUS right-click moved under that pixel.
+AN EARLIER REVISION OF THIS MODULE ARGUED THAT WAS NOT A BUG. That argument
+went: a right-click means COMPARE HERE, leaving adopts the panels' camera,
+therefore a mouse parked at a fixed screen pixel re-centres each round on
+the point the previous round moved under it -- a consequence of the
+contract rather than a defect. **The user has ruled otherwise (2026-09-21)
+and that product judgement is withdrawn.** The measurement it was built on
+was right and is kept; only the conclusion was wrong.
 
-Three cannot hold at once with (1) and (2), and (1) and (2) are the product
-contract. The existing tests missed it because they handed the SAME level-0
-point P in on every round; a user's hand hands in the same SCREEN pixel,
-which is a different world point every time. Type A below sends real
-`QMouseEvent`s at a fixed viewport pixel and records what each round's
-world point actually is -- documenting the semantics rather than pretending
-the drift is not there.
+The contract now is:
 
-So there is a second way in that has no "here" in it: one toolbar button,
-"Compare current center" on the full image and "Back to full image" on the
-panels. It reads no mouse position. It is not a second camera state machine
--- it calls the same `_enter_compare_mode` / `_exit_compare_mode` that the
-right-click and Esc call, with no point, and entering with no point already
-means the middle of the view. Type B presses it ten times and measures the
-drift, which is zero.
+    1. "Compare here" STAYS: right-click at P and the panels open on P;
+    2. leave WITHOUT having moved the panels, and the full image goes back
+       to the camera it had before -- a temporary look, not a navigation;
+    3. leave AFTER moving them -- a pan, a zoom, a Patch or a Tissue
+       landing -- and the full image adopts the panels, exactly as before;
+    4. no new button. The removed "Compare current center" stays removed.
+
+Measured on this rig before the fix, ten rounds at one fixed viewport
+pixel: a constant `(-334, -115)` screen pixels per round, which is exactly
+the pointer's offset from the centre of the viewport -- while every other
+seam (entry landing on the click point, the panels between entry and exit,
+the exit's application, the layout settle) measured 0.000000. After the
+fix the same ten rounds walk 0.0 px and the panned case still lands on Q.
+
+Type A sends real `QMouseEvent`s at a fixed viewport pixel -- the mistake
+the older tests made was handing the SAME level-0 point in every round; a
+user's hand hands in the same SCREEN pixel, which was a different world
+point every time. Type B drives the two page calls the removed button used
+to make, which is still the page's own symmetry and still worth pinning.
 
 Own module, like the other page-heavy Step0 suites: combined runs segfault
 in offscreen pyqtgraph.
@@ -185,13 +191,13 @@ FIXED_PIXEL = QtCore.QPointF(180.0, 120.0)      # off-centre, on purpose
 
 
 def test_a_right_click_at_a_fixed_pixel_centres_that_rounds_world_point(app):
-    """Four rounds, mouse never moved. Each entry centres on the point that
-    was under the cursor AT THAT MOMENT -- which is a different level-0
-    point each round, because the previous round moved the slide under it.
+    """Four rounds, mouse never moved.
 
-    That is what "Compare here" MEANS. The rounds are recorded rather than
-    asserted equal to one another: a test that fed the same P in every time
-    is exactly the test that could not see the walk the user reported.
+    "Compare here" is unchanged: each entry centres on the point under the
+    cursor at that moment, at the full image's own magnification. What HAS
+    changed is the consequence -- because leaving an unmoved comparison now
+    puts the full image back, the same screen pixel names the SAME world
+    point every round instead of walking.
     """
     page = _real_page(app)
     rounds = []
@@ -214,10 +220,15 @@ def test_a_right_click_at_a_fixed_pixel_centres_that_rounds_world_point(app):
         page._exit_compare_mode()
         _settle(page)
 
-    # The documented consequence: a fixed screen pixel is NOT a fixed world
-    # point once the first entry has moved the view.
-    firsts = rounds[0]["level0"]
-    assert rounds[1]["level0"] != pytest.approx(firsts, abs=1.0)
+    # The contract's consequence: the view comes back, so a fixed screen
+    # pixel IS a fixed world point round after round.
+    first = rounds[0]["level0"]
+    for row in rounds[1:]:
+        assert row["level0"] == pytest.approx(first, abs=1.0), (
+            "the same screen pixel named a different world point -- the "
+            "view did not come back")
+        assert row["full_before"] == pytest.approx(rounds[0]["full_before"],
+                                                   rel=1e-9, abs=1e-6)
 
 
 def test_the_exit_adopts_the_panels_camera_not_the_entry_camera(app):
@@ -253,20 +264,28 @@ def test_the_residual_right_click_drift_is_pointer_QUANTISATION(app):
     * click 554 and the world point is half a screen pixel to the LEFT of
       the centre; click 555 and it is half a screen pixel to the RIGHT.
 
-    Compare-here then centres there, leaving adopts it, and the next round
-    starts from the moved view: a constant half-screen-pixel step, in one
-    direction, for ever. On the whole slide fitted to the window that half
-    pixel is tens of level-0 pixels, which is the "keeps sliding up and to
-    the left" of the manual report.
+    Compare-here then centres there. What used to happen next was that
+    leaving adopted it and the next round started from the moved view -- a
+    constant sub-screen-pixel step, in one direction, for ever.
 
-    Asserted as a BOUND on the offending stage, not corrected. A constant
-    added anywhere downstream would only move the bias to a different
-    zoom level; the fix, if the product ever wants one, is the button
-    below, which names no pixel at all.
+    THE ENTRY SEAM IS STILL THAT, and is still measured here as a bound:
+    the pointer's quantisation is real and nothing downstream should
+    pretend otherwise. What no longer happens is the ACCUMULATION, because
+    leaving an unmoved comparison puts the full image back -- asserted
+    below, and again over ten rounds in
+    `test_ten_fixed_pixel_round_trips_do_not_walk`. No compensation
+    constant is added anywhere: the step is allowed to exist and is simply
+    not carried out of compare mode.
+
+    On this rig the viewport is 1028x470, whose centre (514.0, 235.0) an
+    integer pixel names exactly, so this particular gesture measures a step
+    of zero; `test_a_half_screen_pixel_click_does_not_accumulate` applies
+    the sub-pixel offset directly, where the step is real.
     """
     page = _real_page(app)
     vp = _viewport(page)
     px = QtCore.QPointF(float(int(vp.width() / 2)), float(int(vp.height() / 2)))
+    started = page._full_image_camera()
     steps = []
     for _ in range(10):
         before = page._full_image_camera()
@@ -278,12 +297,17 @@ def test_the_residual_right_click_drift_is_pointer_QUANTISATION(app):
                       (entry[1] - before[1]) * entry[2]))
         page._exit_compare_mode()
         _settle(page)
-    # Every round moves by the SAME amount -- a constant, not an
+    # Every round's ENTRY moves by the same amount -- a constant, not an
     # accumulating error -- and that amount is at most half a screen pixel.
     for dx, dy in steps:
         assert abs(dx) <= 0.5 + 1e-9
         assert abs(dy) <= 0.5 + 1e-9
         assert (dx, dy) == pytest.approx(steps[0], abs=1e-6)
+    # ...and none of it is carried out: the full image is where it started.
+    after = page._full_image_camera()
+    assert after[0] == pytest.approx(started[0], abs=1e-6)
+    assert after[1] == pytest.approx(started[1], abs=1e-6)
+    assert after[2] == pytest.approx(started[2], rel=1e-9)
 
 
 def test_every_stage_after_the_pointer_is_exact(app):
@@ -330,11 +354,15 @@ def test_the_numeric_diagnosis_of_one_round_trip(app):
     # the panels do not move between entry and exit.
     assert compare_before_exit == pytest.approx(compare_after_entry, rel=1e-9,
                                                 abs=1e-6)
-    # exit adopts them, and the stacked-page relayout does not shift it.
-    assert full_immediate_after_exit[0] == pytest.approx(
-        compare_before_exit[0], abs=1.0)
-    assert full_immediate_after_exit[1] == pytest.approx(
-        compare_before_exit[1], abs=1.0)
+    # ...so nothing was navigated, and the exit puts the full image back
+    # where it was rather than adopting the "compare here" point.
+    assert full_immediate_after_exit[0] == pytest.approx(full_before[0],
+                                                         abs=1e-6)
+    assert full_immediate_after_exit[1] == pytest.approx(full_before[1],
+                                                         abs=1e-6)
+    assert full_immediate_after_exit[2] == pytest.approx(full_before[2],
+                                                         rel=1e-9)
+    # and the stacked-page relayout does not shift it afterwards.
     assert full_after_layout_settle == pytest.approx(
         full_immediate_after_exit, rel=1e-9, abs=1e-6)
 
@@ -473,9 +501,14 @@ def test_move_to_q_then_back_then_compare_again_stays_on_q(app):
 
 
 def test_the_button_shares_the_right_clicks_way_back(app):
-    """Not a second state machine: entering with the button and leaving
-    with Esc, or entering with a right-click and leaving with the button,
-    both work and both adopt the panels' camera."""
+    """Not a second state machine: the two ways in and the two ways out are
+    the same two page calls, and they agree about what leaving means.
+
+    Entering with a right-click at P and leaving WITHOUT having moved the
+    panels goes back to the camera the full image had -- the same answer
+    Esc gives, and the same answer the page gives when it was entered with
+    no point at all.
+    """
     page = _real_page(app)
     _toggle(page)
     _settle(page)
@@ -483,15 +516,20 @@ def test_the_button_shares_the_right_clicks_way_back(app):
     _settle(page)
     assert page._compare_mode() is False
 
+    before = page._full_image_camera()
     _send_right_click(page, FIXED_PIXEL)
     _settle(page)
     compare = page._compare_camera()
+    # the panels really did go somewhere else -- otherwise the assertion
+    # below would be true for the wrong reason.
+    assert abs(compare[0] - before[0]) * compare[2] > 10.0
     _toggle(page)
     _settle(page)
     assert page._compare_mode() is False
     full = page._full_image_camera()
-    assert full[0] == pytest.approx(compare[0], abs=1.0)
-    assert full[1] == pytest.approx(compare[1], abs=1.0)
+    assert full[0] == pytest.approx(before[0], abs=1e-6)
+    assert full[1] == pytest.approx(before[1], abs=1e-6)
+    assert full[2] == pytest.approx(before[2], rel=1e-9)
 
 
 def test_a_cold_first_press_still_shows_the_preparing_badge(app):
@@ -511,3 +549,307 @@ def test_a_cold_first_press_still_shows_the_preparing_badge(app):
     assert seen == [True]
     assert page._compare_mode() is True
     assert page._compare_strip_widget.built is True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# C. The 2026-09-21 ruling, gated.
+#
+# "Compare here" stays; a comparison the user never moved does not move the
+# full image; a comparison they DID move is adopted exactly as before. No
+# new button, no compensation constant, no direction-specific correction.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _round_trip(page, pixel, exit_with="right_click"):
+    """One round trip at `pixel`, panels untouched.
+
+    IN through a real `QMouseEvent` on the full image -- that gesture is the
+    whole subject. OUT through the production handler the panels' own
+    right-click is connected to (`_on_compare_right_click`, see
+    `_connect_compare_right_click`) or through Esc. A second mouse event on
+    the full image's viewport would reach nothing: the full image is hidden
+    while comparing, and the way back is wired to the PANELS' views.
+    """
+    _send_right_click(page, pixel)
+    _settle(page)
+    assert page._compare_mode() is True
+    if exit_with == "escape":
+        page._on_compare_escape()
+    else:
+        page._on_compare_right_click()
+    _settle(page)
+    assert page._compare_mode() is False
+
+
+def _screen_delta(before, after):
+    """`(dx, dy)` between two cameras, in SCREEN pixels."""
+    scale = float(after[2])
+    return (abs(float(after[0]) - float(before[0])) * scale,
+            abs(float(after[1]) - float(before[1])) * scale)
+
+
+# ── Gate A: ten rounds at a fixed OFF-CENTRE pixel ────────────────────
+
+def test_ten_fixed_pixel_round_trips_do_not_walk(app):
+    """The user's own gesture, ten times, with a real mouse.
+
+    Measured before the fix on this rig: a constant `(-334, -115)` screen
+    pixels per round -- exactly the pointer's offset from the centre of the
+    viewport -- for a total walk of `(-3340, -1150)`. The budget here is one
+    screen pixel PER ROUND and for the whole run, and the scale must not
+    creep either.
+    """
+    page = _real_page(app)
+    first = page._full_image_camera()
+    previous = first
+    for index in range(10):
+        _round_trip(page, FIXED_PIXEL)
+        now = page._full_image_camera()
+        dx, dy = _screen_delta(previous, now)
+        assert dx <= 1.0 and dy <= 1.0, (
+            f"round {index} moved the full image by ({dx:.3f}, {dy:.3f}) "
+            "screen px")
+        assert now[2] == pytest.approx(previous[2], rel=1e-9), (
+            f"round {index} changed the magnification")
+        previous = now
+    total_x, total_y = _screen_delta(first, previous)
+    assert total_x <= 1.0 and total_y <= 1.0, (
+        f"ten round trips walked ({total_x:.3f}, {total_y:.3f}) screen px")
+    assert previous[2] == pytest.approx(first[2], rel=1e-9)
+
+
+# ── Gate B: a genuine SUB-PIXEL offset must not accumulate ────────────
+
+def test_a_half_screen_pixel_click_does_not_accumulate(app):
+    """The older suite's half-pixel story, applied where it is real.
+
+    That suite described a 1091-wide viewport whose centre falls on a pixel
+    BOUNDARY, so no integer pixel can name it. This rig's offscreen layout
+    pins the viewport at 1028x470 whatever the page is resized to (measured:
+    1200..1301 all give 1028) and 514 names its centre exactly -- so that
+    geometry cannot be reproduced here and the nearest-integer gesture
+    measures a step of zero. The sub-pixel offset is therefore applied
+    directly, which is the phenomenon rather than the geometry.
+
+    Measured before the fix: exactly 1 screen pixel per round, 10 px over
+    ten rounds. No compensation constant is used to remove it -- the step
+    is simply not carried out of compare mode.
+    """
+    page = _real_page(app)
+    vp = _viewport(page)
+    half = QtCore.QPointF(vp.width() / 2.0 + 0.5, vp.height() / 2.0 + 0.5)
+    first = page._full_image_camera()
+    for _ in range(10):
+        _round_trip(page, half)
+    last = page._full_image_camera()
+    dx, dy = _screen_delta(first, last)
+    assert dx <= 1.0 and dy <= 1.0, (
+        f"a half-pixel click accumulated ({dx:.3f}, {dy:.3f}) screen px "
+        "over ten rounds")
+    assert last[2] == pytest.approx(first[2], rel=1e-9)
+
+
+# ── Gate C: "Compare here" still means here ───────────────────────────
+
+def test_compare_here_still_opens_on_the_clicked_point(app):
+    """The capability the ruling explicitly keeps."""
+    page = _real_page(app)
+    before = page._full_image_camera()
+    want = _level0_under(page, FIXED_PIXEL)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    entry = page._compare_camera()
+    assert entry[0] == pytest.approx(want[0], abs=1.0)
+    assert entry[1] == pytest.approx(want[1], abs=1.0)
+    # ...at the magnification the full image was at.
+    assert entry[2] == pytest.approx(before[2], rel=1e-6)
+    # ...and it really is somewhere else, so this is not vacuous.
+    assert abs(entry[0] - before[0]) * entry[2] > 10.0
+
+
+# ── Gate D: every stage of an unmoved round trip ──────────────────────
+
+def test_an_unmoved_comparison_returns_the_entry_camera_at_every_stage(app):
+    page = _real_page(app)
+    full_before = page._full_image_camera()
+    want = _level0_under(page, FIXED_PIXEL)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    entry = page._compare_camera()
+    assert entry[0] == pytest.approx(want[0], abs=1.0)
+    before_exit = page._compare_camera()
+    assert before_exit == pytest.approx(entry, rel=1e-9, abs=1e-6)
+    page._exit_compare_mode()
+    immediate = page._full_image_camera()
+    assert immediate == pytest.approx(full_before, rel=1e-9, abs=1e-6)
+    _settle(page)
+    settled = page._full_image_camera()
+    assert settled == pytest.approx(full_before, rel=1e-9, abs=1e-6)
+
+
+# ── Gate E / F: a comparison the user DID move is adopted ─────────────
+
+def test_a_panned_comparison_is_still_adopted(app):
+    page = _real_page(app)
+    full_before = page._full_image_camera()
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    scale = page._compare_camera()[2]
+    q = (3300.0, 1700.0)
+    page._compare_strip_widget.set_camera(q[0], q[1], scale)
+    QtTest.QTest.qWait(20)
+    page._exit_compare_mode()
+    _settle(page)
+    full = page._full_image_camera()
+    assert full[0] == pytest.approx(q[0], abs=1.0)
+    assert full[1] == pytest.approx(q[1], abs=1.0)
+    assert full[2] == pytest.approx(scale, rel=1e-6)
+    assert abs(full[0] - full_before[0]) * full[2] > 10.0, (
+        "the pan was thrown away and the entry camera restored")
+
+
+def test_a_zoomed_comparison_is_still_adopted_even_with_the_same_centre(app):
+    """Gate F: a zoom about an unchanged centre moves no centre at all.
+
+    Comparing centres alone would call this "unmoved" and throw the user's
+    magnification away, so the scale is checked first.
+    """
+    page = _real_page(app)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    cx, cy, scale = page._compare_camera()
+    page._compare_strip_widget.set_camera(cx, cy, scale * 2.0)
+    QtTest.QTest.qWait(20)
+    zoomed = page._compare_camera()
+    assert zoomed[2] == pytest.approx(scale * 2.0, rel=1e-3)
+    assert zoomed[0] == pytest.approx(cx, abs=1e-6)
+    page._exit_compare_mode()
+    _settle(page)
+    full = page._full_image_camera()
+    assert full[2] == pytest.approx(zoomed[2], rel=1e-6), (
+        "the zoom was discarded because the centre had not moved")
+    assert full[0] == pytest.approx(cx, abs=1.0)
+
+
+# ── Gate G: Patch / Tissue landings inside compare ────────────────────
+
+def test_a_landing_inside_compare_is_carried_back(app):
+    """A Patch or Tissue jump moves the panels through the page's own
+    entry, so leaving must land there and not restore the old position."""
+    page = _real_page(app)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    scale = page._compare_camera()[2]
+    landing = (1200.0, 3400.0)
+    assert page._apply_compare_camera(landing[0], landing[1], scale) is True
+    QtTest.QTest.qWait(20)
+    page._exit_compare_mode()
+    _settle(page)
+    full = page._full_image_camera()
+    assert full[0] == pytest.approx(landing[0], abs=1.0)
+    assert full[1] == pytest.approx(landing[1], abs=1.0)
+
+
+# ── Gate H: changing only the channel is not a camera move ────────────
+
+def test_changing_only_the_channel_still_returns_the_entry_camera(app):
+    page = _real_page(app)
+    full_before = page._full_image_camera()
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    entry_panels = page._compare_camera()
+    page.current_channel = "CD20"
+    page._refresh_preview_display(keep_zoom=True)
+    _settle(page)
+    # the channel change moved no camera...
+    assert page._compare_camera() == pytest.approx(entry_panels, rel=1e-9,
+                                                   abs=1e-6)
+    page._exit_compare_mode()
+    _settle(page)
+    assert page._full_image_camera() == pytest.approx(full_before, rel=1e-9,
+                                                      abs=1e-6)
+
+
+# ── Gate I: the entry reading belongs to one session ──────────────────
+
+def test_the_entry_reading_is_cleared_on_the_way_out(app):
+    page = _real_page(app)
+    assert page._compare_entry_panel_camera is None
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    assert page._compare_entry_panel_camera is not None
+    page._exit_compare_mode()
+    _settle(page)
+    assert page._compare_entry_panel_camera is None, (
+        "the entry reading outlived its compare session")
+
+
+def test_a_dataset_change_drops_the_entry_reading(app):
+    page = _real_page(app)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    assert page._compare_entry_panel_camera is not None
+    page._exit_compare_mode()
+    _settle(page)
+    page._compare_entry_panel_camera = (1.0, 2.0, 3.0)      # as if stale
+    page._reset_dataset_view_state()
+    assert page._compare_entry_panel_camera is None, (
+        "a new dataset inherited the previous one's entry reading")
+    assert page._compare_entry_full_camera is None
+
+
+def test_with_no_entry_reading_the_panels_are_adopted_as_before(app):
+    """The pre-existing behaviour is what a page with no reading falls back
+    to -- so a build that never recorded one cannot restore a stale place."""
+    page = _real_page(app)
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    panels = page._compare_camera()
+    page._compare_entry_panel_camera = None
+    assert page._returning_full_camera() == pytest.approx(panels, rel=1e-9,
+                                                          abs=1e-6)
+
+
+# ── Gate J: the shared camera port reads what is on screen ────────────
+
+def test_the_shared_camera_port_follows_the_round_trip(app):
+    """Step0's snapshot is the view that is on screen, and an unmoved
+    temporary comparison must not permanently rewrite where Step0 is."""
+    page = _real_page(app)
+    before = page.current_camera_snapshot()
+    _send_right_click(page, FIXED_PIXEL)
+    _settle(page)
+    # while comparing, the panels ARE the view
+    assert page.current_camera_snapshot() == pytest.approx(
+        page._compare_camera(), rel=1e-9, abs=1e-6)
+    page._exit_compare_mode()
+    _settle(page)
+    after = page.current_camera_snapshot()
+    assert after == pytest.approx(before, rel=1e-9, abs=1e-6), (
+        "a temporary Compare here permanently moved Step0's shared camera")
+
+
+# ── the ruling's fourth clause: no new button ─────────────────────────
+
+def test_no_compare_button_was_reintroduced(app):
+    """The removed "Compare current center" stays removed, and this fix
+    added no entry of its own."""
+    import inspect
+    source = inspect.getsource(sp)
+    for banned in ("Compare current center", "Compare current centre"):
+        assert banned not in source, f"{banned!r} came back"
+    page = _real_page(app)
+    labels = [w.text() for w in page.findChildren(QtWidgets.QAbstractButton)]
+    for text in labels:
+        assert "compare current" not in (text or "").lower()
+
+
+def test_the_right_click_and_escape_ways_out_agree(app):
+    """Contract: the two exits are the same exit."""
+    page = _real_page(app)
+    before = page._full_image_camera()
+    _round_trip(page, FIXED_PIXEL, exit_with="right_click")
+    by_click = page._full_image_camera()
+    _round_trip(page, FIXED_PIXEL, exit_with="escape")
+    by_escape = page._full_image_camera()
+    assert by_click == pytest.approx(before, rel=1e-9, abs=1e-6)
+    assert by_escape == pytest.approx(by_click, rel=1e-9, abs=1e-6)

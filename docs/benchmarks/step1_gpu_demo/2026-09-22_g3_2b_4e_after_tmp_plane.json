@@ -1,0 +1,1487 @@
+{
+ "block": "G3.2b.4C (first cuCIM enable, segmented)",
+ "dataset": {
+  "name": "tmp_plane",
+  "slide": "/tmp/g324e_save_bench/slide.ome.tif",
+  "project": "/tmp/g324e_save_bench/with0",
+  "corrected_zarr": "/tmp/g324e_save_bench/with0/corrected_channels.zarr",
+  "roi_bbox": [
+   0,
+   8704,
+   0,
+   6144
+  ],
+  "cucim_channel": "CH_A",
+  "raw_channel": "CH_B",
+  "note": "a REAL project opened read-only; NOT the user's machine and not necessarily their slide"
+ },
+ "view": [
+  1200,
+  900
+ ],
+ "os_page_cache_dropped": false,
+ "rounds": 3,
+ "arms": {
+  "first_cucim": [
+   {
+    "cold": {
+     "label": "first_enable/CH_A/round0",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 19.51,
+      "events_processed": 26.41,
+      "first_gpu_submit": 26.5,
+      "complete_coarse_published": 36.91,
+      "first_texture_upload": 311.0,
+      "viewport_fine_complete": 311.25,
+      "first_provider_read": 1.94,
+      "last_coarse_read_returned": 28.48,
+      "first_fine_request": 1.08,
+      "first_fine_read": 2.33,
+      "all_fine_reads_returned": 251.67
+     },
+     "gui_worst_gap_ms": 65.5,
+     "natural_paints": 9,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 26.55,
+       "median": 26.55,
+       "max": 26.55,
+       "sum": 26.55
+      },
+      "fine": {
+       "n": 15,
+       "min": 15.23,
+       "median": 146.52,
+       "max": 195.53,
+       "sum": 1736.6
+      },
+      "corrected": {
+       "n": 16,
+       "min": 15.23,
+       "median": 146.52,
+       "max": 195.53,
+       "sum": 1763.14
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_A/round0",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 8.6,
+      "events_processed": 9.03,
+      "complete_coarse_published": 9.1,
+      "first_gpu_submit": 9.11,
+      "viewport_fine_complete": 9.24,
+      "first_fine_request": 0.73
+     },
+     "gui_worst_gap_ms": 9.0,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 15,
+      "requests_by_origin": {
+       "gpu-binding/fine": 15
+      },
+      "coarse_requests": 0,
+      "fine_requests": 15,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 15,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CH_A/round1",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 9.83,
+      "events_processed": 23.08,
+      "first_gpu_submit": 24.73,
+      "complete_coarse_published": 30.86,
+      "first_texture_upload": 266.3,
+      "viewport_fine_complete": 266.5,
+      "first_natural_paint_after_complete": 266.61,
+      "first_provider_read": 1.77,
+      "last_coarse_read_returned": 26.08,
+      "first_fine_request": 0.99,
+      "first_fine_read": 2.13,
+      "all_fine_reads_returned": 236.62
+     },
+     "gui_worst_gap_ms": 30.7,
+     "natural_paints": 11,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 24.31,
+       "median": 24.31,
+       "max": 24.31,
+       "sum": 24.31
+      },
+      "fine": {
+       "n": 15,
+       "min": 20.29,
+       "median": 102.06,
+       "max": 169.84,
+       "sum": 1554.43
+      },
+      "corrected": {
+       "n": 16,
+       "min": 20.29,
+       "median": 102.06,
+       "max": 169.84,
+       "sum": 1578.74
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_A/round1",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 8.18,
+      "events_processed": 8.63,
+      "complete_coarse_published": 8.71,
+      "first_gpu_submit": 8.72,
+      "viewport_fine_complete": 8.85,
+      "first_fine_request": 0.59
+     },
+     "gui_worst_gap_ms": 8.6,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 15,
+      "requests_by_origin": {
+       "gpu-binding/fine": 15
+      },
+      "coarse_requests": 0,
+      "fine_requests": 15,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 15,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CH_A/round2",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 13.68,
+      "events_processed": 30.12,
+      "complete_coarse_published": 36.19,
+      "first_gpu_submit": 36.2,
+      "first_texture_upload": 351.35,
+      "viewport_fine_complete": 351.43,
+      "first_natural_paint_after_complete": 351.65,
+      "first_provider_read": 1.78,
+      "last_coarse_read_returned": 15.56,
+      "first_fine_request": 1.08,
+      "first_fine_read": 2.15,
+      "all_fine_reads_returned": 253.32
+     },
+     "gui_worst_gap_ms": 98.4,
+     "natural_paints": 9,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 13.78,
+       "median": 13.78,
+       "max": 13.78,
+       "sum": 13.78
+      },
+      "fine": {
+       "n": 15,
+       "min": 14.19,
+       "median": 87.9,
+       "max": 176.25,
+       "sum": 1577.72
+      },
+      "corrected": {
+       "n": 16,
+       "min": 13.78,
+       "median": 87.9,
+       "max": 176.25,
+       "sum": 1591.49
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_A/round2",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 5.44,
+      "events_processed": 5.9,
+      "complete_coarse_published": 5.97,
+      "first_gpu_submit": 5.98,
+      "viewport_fine_complete": 6.11,
+      "first_fine_request": 0.65
+     },
+     "gui_worst_gap_ms": 6.4,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 15,
+      "requests_by_origin": {
+       "gpu-binding/fine": 15
+      },
+      "coarse_requests": 0,
+      "fine_requests": 15,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 15,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "first_raw": [
+   {
+    "cold": {
+     "label": "first_enable/CH_B/round0",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 1.2,
+      "events_processed": 1.74,
+      "first_gpu_submit": 1.81
+     },
+     "gui_worst_gap_ms": 7.1,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_B/round0",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 0.54,
+      "events_processed": 0.89,
+      "first_gpu_submit": 0.94
+     },
+     "gui_worst_gap_ms": 7.0,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CH_B/round1",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 0.92,
+      "events_processed": 1.29,
+      "first_gpu_submit": 1.33
+     },
+     "gui_worst_gap_ms": 7.4,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_B/round1",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 0.52,
+      "events_processed": 0.92,
+      "first_gpu_submit": 0.97
+     },
+     "gui_worst_gap_ms": 8.5,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "cold": {
+     "label": "first_enable/CH_B/round2",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 0.86,
+      "events_processed": 1.26,
+      "first_gpu_submit": 1.32
+     },
+     "gui_worst_gap_ms": 7.3,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    },
+    "hot": {
+     "label": "hot_retick/CH_B/round2",
+     "channel": "CH_B",
+     "source_of_channel": "corrected",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 0.93,
+      "events_processed": 1.33,
+      "first_gpu_submit": 1.38
+     },
+     "gui_worst_gap_ms": 7.2,
+     "natural_paints": 1,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 0,
+      "requests_by_origin": {},
+      "coarse_requests": 0,
+      "fine_requests": 0,
+      "provider_reads": 0,
+      "coarse_reads": 0,
+      "fine_reads": 0,
+      "corrected_reads": 0,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 0,
+      "gpu_uploads": 0,
+      "gpu_submits": 1,
+      "rejected_late_results": 0
+     },
+     "read_ms": {
+      "coarse": null,
+      "fine": null,
+      "corrected": null
+     },
+     "binding_stats": {
+      "coarse_channels": [],
+      "fine_channels": [],
+      "fine_tiles": {},
+      "fine_levels": {},
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "save_then_cucim": [
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 92.25,
+     "gui_worst_gap_ms": 95.5,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 494701.474952397,
+       "t1": 494701.481428752,
+       "ms": 6.48,
+       "at_ms": 4.62
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 494701.481452706,
+       "t1": 494701.535286271,
+       "ms": 53.83,
+       "at_ms": 11.12
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 494701.483843187,
+       "t1": 494701.486252101,
+       "ms": 2.41,
+       "at_ms": 13.51
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 494701.483992443,
+       "t1": 494701.485237004,
+       "ms": 1.24,
+       "at_ms": 13.66
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 494701.4863054,
+       "t1": 494701.533138078,
+       "ms": 46.83,
+       "at_ms": 15.97
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 494701.535301579,
+       "t1": 494701.561961075,
+       "ms": 26.66,
+       "at_ms": 64.97
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round0",
+     "channel": "CH_A",
+     "source_of_channel": "raw",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 15.97,
+      "events_processed": 19.6,
+      "complete_coarse_published": 30.09,
+      "first_gpu_submit": 30.1,
+      "first_texture_upload": 289.74,
+      "viewport_fine_complete": 289.92,
+      "first_natural_paint_after_complete": 290.04,
+      "first_provider_read": 2.09,
+      "last_coarse_read_returned": 19.27,
+      "first_fine_request": 1.05,
+      "first_fine_read": 2.81,
+      "all_fine_reads_returned": 256.33
+     },
+     "gui_worst_gap_ms": 35.1,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 17.18,
+       "median": 17.18,
+       "max": 17.18,
+       "sum": 17.18
+      },
+      "fine": {
+       "n": 15,
+       "min": 12.92,
+       "median": 108.65,
+       "max": 186.99,
+       "sum": 1684.96
+      },
+      "corrected": {
+       "n": 16,
+       "min": 12.92,
+       "median": 108.65,
+       "max": 186.99,
+       "sum": 1702.14
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 94.79,
+     "gui_worst_gap_ms": 103.2,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 495066.676594741,
+       "t1": 495066.682141605,
+       "ms": 5.55,
+       "at_ms": 4.25
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 495066.68216021,
+       "t1": 495066.738295731,
+       "ms": 56.14,
+       "at_ms": 9.82
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 495066.684261659,
+       "t1": 495066.686662451,
+       "ms": 2.4,
+       "at_ms": 11.92
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 495066.684441351,
+       "t1": 495066.685630492,
+       "ms": 1.19,
+       "at_ms": 12.1
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 495066.686721982,
+       "t1": 495066.736229197,
+       "ms": 49.51,
+       "at_ms": 14.38
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 495066.73831119,
+       "t1": 495066.766512247,
+       "ms": 28.2,
+       "at_ms": 65.97
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round1",
+     "channel": "CH_A",
+     "source_of_channel": "raw",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 14.13,
+      "events_processed": 19.74,
+      "first_gpu_submit": 19.81,
+      "complete_coarse_published": 32.57,
+      "first_texture_upload": 276.83,
+      "viewport_fine_complete": 277.0,
+      "first_natural_paint_after_complete": 277.11,
+      "first_provider_read": 4.3,
+      "last_coarse_read_returned": 27.71,
+      "first_fine_request": 3.44,
+      "first_fine_read": 4.71,
+      "all_fine_reads_returned": 242.64
+     },
+     "gui_worst_gap_ms": 34.4,
+     "natural_paints": 10,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 23.41,
+       "median": 23.41,
+       "max": 23.41,
+       "sum": 23.41
+      },
+      "fine": {
+       "n": 15,
+       "min": 13.77,
+       "median": 92.39,
+       "max": 177.26,
+       "sum": 1549.65
+      },
+      "corrected": {
+       "n": 16,
+       "min": 13.77,
+       "median": 92.39,
+       "max": 177.26,
+       "sum": 1573.06
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "rebind": {
+     "source_moved": true,
+     "rebound": true,
+     "sync_source_ms": 109.02,
+     "gui_worst_gap_ms": 113.0,
+     "phases_ms": [
+      {
+       "phase": "stop_gpu_backend",
+       "t0": 495431.939469179,
+       "t1": 495431.948103323,
+       "ms": 8.63,
+       "at_ms": 4.35
+      },
+      {
+       "phase": "viewer_open",
+       "t0": 495431.948137166,
+       "t1": 495432.004549188,
+       "ms": 56.41,
+       "at_ms": 13.01
+      },
+      {
+       "phase": "host_teardown",
+       "t0": 495431.951455649,
+       "t1": 495431.954228372,
+       "ms": 2.77,
+       "at_ms": 16.33
+      },
+      {
+       "phase": "scheduler_shutdown_join",
+       "t0": 495431.951684703,
+       "t1": 495431.952993987,
+       "ms": 1.31,
+       "at_ms": 16.56
+      },
+      {
+       "phase": "build_step1_stack",
+       "t0": 495431.954299794,
+       "t1": 495432.002960587,
+       "ms": 48.66,
+       "at_ms": 19.18
+      },
+      {
+       "phase": "start_gpu_backend",
+       "t0": 495432.004565168,
+       "t1": 495432.043332516,
+       "ms": 38.77,
+       "at_ms": 69.44
+      }
+     ]
+    },
+    "cold": {
+     "label": "save_then_enable/round2",
+     "channel": "CH_A",
+     "source_of_channel": "raw",
+     "target_level": 1,
+     "target_visible_tiles": 15,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 12.59,
+      "events_processed": 19.7,
+      "first_gpu_submit": 20.0,
+      "complete_coarse_published": 32.92,
+      "first_texture_upload": 297.16,
+      "viewport_fine_complete": 297.34,
+      "first_natural_paint_after_complete": 297.46,
+      "first_provider_read": 2.04,
+      "last_coarse_read_returned": 23.38,
+      "first_fine_request": 1.16,
+      "first_fine_read": 2.69,
+      "all_fine_reads_returned": 270.41
+     },
+     "gui_worst_gap_ms": 27.4,
+     "natural_paints": 7,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 31,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 30
+      },
+      "coarse_requests": 1,
+      "fine_requests": 30,
+      "provider_reads": 16,
+      "coarse_reads": 1,
+      "fine_reads": 15,
+      "corrected_reads": 16,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 0,
+      "raw_cache_misses": 31,
+      "gpu_uploads": 16,
+      "gpu_submits": 17,
+      "rejected_late_results": 15
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 21.33,
+       "median": 21.33,
+       "max": 21.33,
+       "sum": 21.33
+      },
+      "fine": {
+       "n": 15,
+       "min": 23.45,
+       "median": 155.22,
+       "max": 182.35,
+       "sum": 1825.97
+      },
+      "corrected": {
+       "n": 16,
+       "min": 21.33,
+       "median": 155.22,
+       "max": 182.35,
+       "sum": 1847.3
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 15
+      },
+      "fine_levels": {
+       "CH_A": [
+        1
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ],
+  "patch_then_cucim": [
+   {
+    "patch": "S1",
+    "cold": {
+     "label": "patch_then_enable/S1/round0",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 16,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 9.9,
+      "events_processed": 11.49,
+      "first_gpu_submit": 11.56,
+      "complete_coarse_published": 23.52,
+      "first_texture_upload": 83.42,
+      "viewport_fine_complete": 83.5,
+      "first_natural_paint_after_complete": 83.57,
+      "first_provider_read": 1.9,
+      "last_coarse_read_returned": 11.86,
+      "first_fine_request": 0.94,
+      "first_fine_read": 2.46,
+      "all_fine_reads_returned": 30.2
+     },
+     "gui_worst_gap_ms": 44.1,
+     "natural_paints": 3,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 33,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 32
+      },
+      "coarse_requests": 1,
+      "fine_requests": 32,
+      "provider_reads": 17,
+      "coarse_reads": 1,
+      "fine_reads": 16,
+      "corrected_reads": 17,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 1,
+      "raw_cache_misses": 32,
+      "gpu_uploads": 17,
+      "gpu_submits": 17,
+      "rejected_late_results": 16
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 9.97,
+       "median": 9.97,
+       "max": 9.97,
+       "sum": 9.97
+      },
+      "fine": {
+       "n": 16,
+       "min": 3.53,
+       "median": 11.05,
+       "max": 19.81,
+       "sum": 181.42
+      },
+      "corrected": {
+       "n": 17,
+       "min": 3.53,
+       "median": 10.1,
+       "max": 19.81,
+       "sum": 191.39
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 16
+      },
+      "fine_levels": {
+       "CH_A": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "S2",
+    "cold": {
+     "label": "patch_then_enable/S2/round1",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 8.8,
+      "events_processed": 18.83,
+      "complete_coarse_published": 26.12,
+      "first_gpu_submit": 26.14,
+      "first_texture_upload": 58.09,
+      "viewport_fine_complete": 58.22,
+      "first_provider_read": 1.69,
+      "last_coarse_read_returned": 15.44,
+      "first_fine_request": 0.9,
+      "first_fine_read": 2.19,
+      "all_fine_reads_returned": 26.34
+     },
+     "gui_worst_gap_ms": 39.2,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 22,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 21
+      },
+      "coarse_requests": 1,
+      "fine_requests": 21,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 6,
+      "raw_cache_misses": 16,
+      "gpu_uploads": 13,
+      "gpu_submits": 8,
+      "rejected_late_results": 9
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 13.75,
+       "median": 13.75,
+       "max": 13.75,
+       "sum": 13.75
+      },
+      "fine": {
+       "n": 12,
+       "min": 5.8,
+       "median": 11.23,
+       "max": 17.62,
+       "sum": 128.14
+      },
+      "corrected": {
+       "n": 13,
+       "min": 5.8,
+       "median": 11.23,
+       "max": 17.62,
+       "sum": 141.89
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 12
+      },
+      "fine_levels": {
+       "CH_A": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   },
+   {
+    "patch": "S3",
+    "cold": {
+     "label": "patch_then_enable/S3/round2",
+     "channel": "CH_A",
+     "source_of_channel": "corrected",
+     "target_level": 0,
+     "target_visible_tiles": 12,
+     "num_levels": 4,
+     "stages_ms": {
+      "tick_returned": 10.93,
+      "events_processed": 19.18,
+      "complete_coarse_published": 25.64,
+      "first_gpu_submit": 25.65,
+      "first_texture_upload": 50.08,
+      "viewport_fine_complete": 50.39,
+      "first_provider_read": 1.71,
+      "last_coarse_read_returned": 15.37,
+      "first_fine_request": 0.85,
+      "first_fine_read": 1.92,
+      "all_fine_reads_returned": 25.34
+     },
+     "gui_worst_gap_ms": 30.8,
+     "natural_paints": 2,
+     "phases_ms": [],
+     "counts": {
+      "requests_total": 21,
+      "requests_by_origin": {
+       "gpu-binding/coarse": 1,
+       "gpu-binding/fine": 20
+      },
+      "coarse_requests": 1,
+      "fine_requests": 20,
+      "provider_reads": 13,
+      "coarse_reads": 1,
+      "fine_reads": 12,
+      "corrected_reads": 13,
+      "duplicate_real_reads": {},
+      "raw_cache_hits": 4,
+      "raw_cache_misses": 17,
+      "gpu_uploads": 13,
+      "gpu_submits": 10,
+      "rejected_late_results": 8
+     },
+     "read_ms": {
+      "coarse": {
+       "n": 1,
+       "min": 13.66,
+       "median": 13.66,
+       "max": 13.66,
+       "sum": 13.66
+      },
+      "fine": {
+       "n": 12,
+       "min": 7.15,
+       "median": 11.31,
+       "max": 17.4,
+       "sum": 131.31
+      },
+      "corrected": {
+       "n": 13,
+       "min": 7.15,
+       "median": 11.31,
+       "max": 17.4,
+       "sum": 144.96
+      }
+     },
+     "binding_stats": {
+      "coarse_channels": [
+       "CH_A"
+      ],
+      "fine_channels": [
+       "CH_A"
+      ],
+      "fine_tiles": {
+       "CH_A": 12
+      },
+      "fine_levels": {
+       "CH_A": [
+        0
+       ]
+      },
+      "fine_budget_refused": [],
+      "last_error": null
+     }
+    }
+   }
+  ]
+ },
+ "medians": {
+  "first_cucim_complete": {
+   "n": 3,
+   "min": 266.5,
+   "median": 311.25,
+   "max": 351.43,
+   "sum": 929.18
+  },
+  "first_cucim_coarse": {
+   "n": 3,
+   "min": 30.86,
+   "median": 36.19,
+   "max": 36.91,
+   "sum": 103.96
+  },
+  "first_raw_complete": null,
+  "hot_retick_cucim_complete": {
+   "n": 3,
+   "min": 6.11,
+   "median": 8.85,
+   "max": 9.24,
+   "sum": 24.2
+  },
+  "save_rebind_ms": {
+   "n": 3,
+   "min": 92.25,
+   "median": 94.79,
+   "max": 109.02,
+   "sum": 296.06
+  },
+  "save_then_cucim_complete": {
+   "n": 3,
+   "min": 277.0,
+   "median": 289.92,
+   "max": 297.34,
+   "sum": 864.26
+  },
+  "patch_then_cucim_complete": {
+   "n": 3,
+   "min": 50.39,
+   "median": 58.22,
+   "max": 83.5,
+   "sum": 192.11
+  },
+  "patch_then_cucim_coarse": {
+   "n": 3,
+   "min": 23.52,
+   "median": 25.64,
+   "max": 26.12,
+   "sum": 75.28
+  },
+  "patch_then_cucim_fine_reads_done": {
+   "n": 3,
+   "min": 25.34,
+   "median": 26.34,
+   "max": 30.2,
+   "sum": 81.88
+  }
+ },
+ "project_readonly": {
+  "files_before": 125,
+  "files_after": 125,
+  "changed": []
+ }
+}

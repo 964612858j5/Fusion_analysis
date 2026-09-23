@@ -38,6 +38,7 @@ from ...core.channel_remap import apply_channel_remap
 from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
+from .roi_context_model import Patch, default_patch_name, patch_id
 
 class TileSelectDialog(QDialog):
     """
@@ -1064,9 +1065,14 @@ class OverviewPanel(QWidget):
     ──────────
     _rois    : [{"name", "color", "polygon_display", "polygon_fullres",
                  "downsample", "bbox_fullres", "patch_indices": [int,…]}, …]
-    _patches : [{"roi_idx": int|None, "coords": (y0,y1,x0,x1)}, …]
+    _patches : [{"roi_idx": int|None, "coords": (y0,y1,x0,x1),
+                 "id": int, "name": str}, …]
 
-    Patch numbering is always 1-based and contiguous (renumbered on delete).
+    Patch identity is STABLE (user ruling, 2026-09-24): a patch keeps its id
+    for life, deleting one does not renumber the others, and an id is never
+    reused. New ids come from `patch_id_allocator` -- the host's single model
+    -- or, for a panel nobody registered, from this panel's own high-water
+    mark. Every view shows the patch's `name`, `P{id}` until it is renamed.
 
     Signals
     ───────
@@ -1110,6 +1116,11 @@ class OverviewPanel(QWidget):
         self._rois    = []
         self._patches = []
         self._selected_patch_idx = -1
+        #: Where new patch ids come from. The host (Step0Page) points every
+        #: panel over its model at the model's allocator, so two panels can
+        #: never hand out the same id; None falls back to `_patch_id_high`.
+        self.patch_id_allocator = None
+        self._patch_id_high = 0
 
         # ── Edit policy ───────────────────────────────────────────────
         # Which edits this panel accepts AT ALL.  The gate sits on the actions
@@ -2275,6 +2286,52 @@ class OverviewPanel(QWidget):
 
     # ── Patch helpers ─────────────────────────────────────────────────
 
+    def _allocate_patch_id(self):
+        if self.patch_id_allocator is not None:
+            pid = int(self.patch_id_allocator())
+        else:
+            pid = self._patch_id_high + 1
+        self._patch_id_high = max(self._patch_id_high, pid)
+        return pid
+
+    def _new_patch_entry(self, coords, roi_idx):
+        pid = self._allocate_patch_id()
+        return {"roi_idx": roi_idx, "coords": tuple(int(v) for v in coords),
+                "id": pid, "name": default_patch_name(pid)}
+
+    def patch_name(self, patch_idx):
+        """What every view shows for the patch at `patch_idx`."""
+        if 0 <= patch_idx < len(self._patches):
+            pd = self._patches[patch_idx]
+            return pd.get("name") or default_patch_name(pd.get("id") or patch_idx + 1)
+        return ""
+
+    def rename_patch(self, patch_idx, name):
+        """Give the patch at `patch_idx` a new name; its id does not change.
+
+        Refused (returns False) for an empty name or one another patch
+        already has -- two patches answering to one name is exactly the
+        confusion stable names are for. A rename is a finished edit, so it
+        goes out through `patches_changed` like every other.
+        """
+        if not self._patch_edit_allowed:
+            return False
+        if not 0 <= patch_idx < len(self._patches):
+            return False
+        new = str(name or "").strip()
+        if not new:
+            return False
+        if any(self.patch_name(i) == new for i in range(len(self._patches)) if i != patch_idx):
+            return False
+        if self.patch_name(patch_idx) == new:
+            return True
+        self._patches[patch_idx]["name"] = new
+        self._rebuild_patch_artists()
+        self._update_info()
+        self._refresh_hint()
+        self.patches_changed.emit(self._patch_coords())
+        return True
+
     def _patches_in_roi(self, roi_idx):
         return sum(1 for p in self._patches if p["roi_idx"] == roi_idx)
 
@@ -2287,10 +2344,7 @@ class OverviewPanel(QWidget):
         """
         if not self._patch_edit_allowed:
             return
-        self._patches.append({
-            "roi_idx": roi_idx,
-            "coords":  (fy0, fy1, fx0, fx1),
-        })
+        self._patches.append(self._new_patch_entry((fy0, fy1, fx0, fx1), roi_idx))
         if roi_idx is not None:
             self._rois[roi_idx]["patch_indices"].append(
                 len(self._patches) - 1
@@ -2319,7 +2373,7 @@ class OverviewPanel(QWidget):
 
         """
         coords = (int(fy0), int(fy1), int(fx0), int(fx1))
-        self._patches.append({"roi_idx": roi_idx, "coords": coords})
+        self._patches.append(self._new_patch_entry(coords, roi_idx))
         if roi_idx is not None and 0 <= roi_idx < len(self._rois):
             self._rois[roi_idx]["patch_indices"].append(len(self._patches) - 1)
         self._rebuild_patch_artists()
@@ -2587,10 +2641,8 @@ class OverviewPanel(QWidget):
                     self._patches[patch_idx]["coords"] = tuple(revert_to)
                 self._rebuild_patch_artists()
                 return False
-        self._patches[patch_idx] = {
-            "roi_idx": roi_idx,
-            "coords": (fy0, fy1, fx0, fx1),
-        }
+        self._patches[patch_idx] = dict(
+            self._patches[patch_idx], roi_idx=roi_idx, coords=(fy0, fy1, fx0, fx1))
         for roi in self._rois:
             roi["patch_indices"] = []
         for i, patch in enumerate(self._patches):
@@ -2660,7 +2712,7 @@ class OverviewPanel(QWidget):
                     grip.setBrush(pg.mkBrush(color))
                     grip.setZValue(22)
                     grip.setAcceptedMouseButtons(Qt.NoButton)
-            lbl = pg.TextItem(f"P{i+1}", color=color, anchor=(0, 1))
+            lbl = pg.TextItem(self.patch_name(i), color=color, anchor=(0, 1))
             lbl.setPos(x, y)
             lbl.setZValue(21)
             self.vb.addItem(rect)
@@ -2680,8 +2732,9 @@ class OverviewPanel(QWidget):
         self.patches_changed.emit([])
 
     def _patch_coords(self):
-        """Return list of (y0,y1,x0,x1) — compatible with existing MainWindow code."""
-        return [p["coords"] for p in self._patches]
+        """The patches as `Patch` objects: the (y0,y1,x0,x1) tuple every
+        existing consumer reads, carrying its id and name along."""
+        return [Patch(p["coords"], p.get("id"), p.get("name")) for p in self._patches]
 
     # ── Info label ────────────────────────────────────────────────────
 
@@ -2693,7 +2746,7 @@ class OverviewPanel(QWidget):
         idx = self._selected_patch_idx
         if 0 <= idx < len(self._patches):
             self.hint.setText(
-                f"Adjusting P{idx + 1} — drag = Move  |  handles = Resize  |  "
+                f"Adjusting {self.patch_name(idx)} — drag = Move  |  handles = Resize  |  "
                 f"Del = Remove  |  click elsewhere to finish"
             )
             self.hint.setStyleSheet("color:#ffd166;font-size:10px;")
@@ -2721,7 +2774,7 @@ class OverviewPanel(QWidget):
             lines.append("<span style='color:#bbb'>Patches: "
                          + "  ".join(
                              f"<span style='color:{PATCH_COLORS[i%len(PATCH_COLORS)]}'>"
-                             f"P{i+1}</span>"
+                             f"{self.patch_name(i)}</span>"
                              for i in range(len(self._patches))
                          ) + "</span>")
         if not lines:
@@ -2835,10 +2888,16 @@ class OverviewPanel(QWidget):
             roi_idx = None
             if self._rois and not self.full_wsi_mode:
                 roi_idx = self._find_roi_for_patch(cy, cx)
-            self._patches.append({
-                "roi_idx": roi_idx,
-                "coords": (y0, y1, x0, x1),
-            })
+            # A patch from the model keeps its identity; a bare rectangle
+            # (a caller that predates stable ids) gets one here.
+            pid = patch_id(patch)
+            if pid is None:
+                entry = self._new_patch_entry((y0, y1, x0, x1), roi_idx)
+            else:
+                self._patch_id_high = max(self._patch_id_high, int(pid))
+                entry = {"roi_idx": roi_idx, "coords": (y0, y1, x0, x1), "id": int(pid),
+                         "name": getattr(patch, "name", "") or default_patch_name(pid)}
+            self._patches.append(entry)
         for i, patch in enumerate(self._patches):
             ri = patch.get("roi_idx")
             if ri is not None and 0 <= ri < len(self._rois):

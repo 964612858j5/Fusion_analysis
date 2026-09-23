@@ -281,6 +281,12 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
             "shape": rois[0].get("shape", []) if rois else [],
             "n_rois": len(rois),
             "n_patches": len(patches),
+            # The patch-id baseline (ids are never reused): above every id
+            # this Save writes, and never below what the handoff on disk
+            # already promised.
+            "next_patch_id": next_patch_id(
+                (published_handoff(step0_dir) or (None,) * 5)[4], patches,
+                spec.get("next_patch_id")),
             # Carried through a full Save as well: it is the baseline every
             # later geometry revision is numbered above, and a Save that
             # dropped it would hand the next patch edit a number that a file
@@ -375,6 +381,41 @@ def geometry_bboxes(items):
     return out
 
 
+def patch_identities(items):
+    """`(id, name, bbox)` per patch record, in order.
+
+    What makes two patch lists the same once patches have stable ids and
+    names (user ruling, 2026-09-24): a rename moves no rectangle, and a list
+    compared by bboxes alone would call it unchanged and never publish it.
+    A record from before stable ids has neither, and compares as (None, "").
+    """
+    out = []
+    for item in items or []:
+        if isinstance(item, dict):
+            bbox = item.get("bbox_fullres")
+            pid, name = item.get("id"), item.get("name") if item.get("id") is not None else ""
+        else:
+            bbox, pid, name = item, getattr(item, "id", None), getattr(item, "name", "")
+        if bbox and len(bbox) == 4:
+            out.append((None if pid is None else int(pid), str(name or ""),
+                        [int(v) for v in bbox]))
+    return out
+
+
+def next_patch_id(manifest, patches, requested=0):
+    """The patch-id baseline a manifest must carry: never lowered, above
+    every id in `patches`. A manifest from before stable ids numbered its
+    patches 1..n by position."""
+    manifest = manifest or {}
+    try:
+        on_disk = int(manifest.get("next_patch_id")
+                      or int(manifest.get("n_patches") or 0) + 1)
+    except (TypeError, ValueError):
+        on_disk = 1
+    ids = [pid for pid, _name, _bbox in patch_identities(patches) if pid is not None]
+    return max([int(requested or 0), on_disk] + [i + 1 for i in ids] + [1])
+
+
 def published_geometry(step0_dir, manifest=None):
     """(roi bboxes, patch bboxes) as the PUBLISHED MANIFEST describes them.
 
@@ -450,8 +491,13 @@ def geometry_matches(step0_dir, rois, patches):
     number can be stale in either direction.
     """
     old_rois, old_patches = published_geometry(step0_dir)
-    return (geometry_bboxes(rois) == old_rois
-            and geometry_bboxes(patches) == old_patches)
+    if not (geometry_bboxes(rois) == old_rois
+            and geometry_bboxes(patches) == old_patches):
+        return False
+    published = published_handoff(step0_dir)
+    manifest = published[4] if published else {}
+    _roi_path, patch_path = manifest_geometry_paths(manifest, step0_dir)
+    return patch_identities(patches) == patch_identities(_read_json(patch_path))
 
 
 def _resolve(path, base):
@@ -524,10 +570,14 @@ def commit_geometry_only(task, *, superseded=None, publication_lock=None):
     patches = task["patches"]
     old_roi_path, old_patch_path = manifest_geometry_paths(manifest, step0_dir)
     old_rois = geometry_bboxes(_read_json(old_roi_path))
-    old_patches = geometry_bboxes(_read_json(old_patch_path))
+    old_patch_records = _read_json(old_patch_path)
+    old_patches = geometry_bboxes(old_patch_records)
     roi_changed = (bool(task.get("roi_context_changed"))
                    or geometry_bboxes(rois) != old_rois)
-    patch_changed = geometry_bboxes(patches) != old_patches
+    # Identity as well as geometry: a rename moves nothing and still has to
+    # be published.
+    patch_changed = (geometry_bboxes(patches) != old_patches
+                     or patch_identities(patches) != patch_identities(old_patch_records))
     if not roi_changed and not patch_changed:
         return dict(info, outcome="unchanged")
 
@@ -576,6 +626,8 @@ def commit_geometry_only(task, *, superseded=None, publication_lock=None):
         new_manifest = dict(manifest)
         new_manifest["patch_config_path"] = os.path.abspath(patch_path)
         new_manifest["n_patches"] = len(patches)
+        new_manifest["next_patch_id"] = next_patch_id(
+            manifest, patches, task.get("next_patch_id"))
         new_manifest["geometry_revision"] = revision
         new_manifest["step0_roi_result_path"] = os.path.abspath(manifest_path)
 

@@ -95,7 +95,7 @@ from ..widgets.channel_dock import template as channel_template
 from ..block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, _to_hex as _color_hex,
 )
-from .roi_context_model import RoiContextModel
+from .roi_context_model import RoiContextModel, patch_name
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     load_channel_remap_config,
@@ -734,6 +734,8 @@ class Step0Page(QWidget):
         })()
         self.overview = OverviewPanel(_dummy_loader, self.nucleus_channel, lazy=True)
         self.overview.full_wsi_mode = False
+        # Every panel over the one model takes its new patch ids from it.
+        self.overview.patch_id_allocator = self._roi_model.allocate_patch_id
         self.overview.patches_changed.connect(self._on_patches_changed)
         self.overview.rois_changed.connect(self._on_rois_changed)
         # v14.2b: also adopt Step0-overview edits into the single ROI model and
@@ -822,6 +824,10 @@ class Step0Page(QWidget):
         # hear about the click that was meant to put the patch under
         # adjustment. itemClicked hears every one of them.
         self._patch_list.itemClicked.connect(self._on_patch_item_clicked)
+        # Double-clicking a patch renames it, as ROIs are renamed (user
+        # ruling, 2026-09-24).
+        self._patch_list.itemDoubleClicked.connect(
+            lambda item: self._rename_patch_at(self._patch_list.row(item)))
         ll_lay.addWidget(self._patch_list, stretch=1)   # Patch list ~1/5 of popup
 
         self._patch_warning = QLabel("")
@@ -4493,6 +4499,7 @@ class Step0Page(QWidget):
         # (navigator-layout) ROI/Patch lists below the overview (3/5 overview,
         # 1/5 each list). Mode buttons stay above via set_roi_toolbar.
         popup.set_roi_lists(self._roi_patch_lists)
+        popup.overview.patch_id_allocator = self._roi_model.allocate_patch_id
         # Feed the popup overview from the SINGLE model (no file IO).
         self._feed_popup_from_model()
         # Adopt popup-overview edits into the same model and mirror them back
@@ -5065,6 +5072,7 @@ class Step0Page(QWidget):
                 if step0_dir else ""),
             "rois": rois,
             "patches": patches,
+            "next_patch_id": int(self._roi_model.next_patch_id),
             # In MEMORY, so the callback answers it without a file: a new
             # analysis region is refused rather than published.
             "roi_context_changed": (
@@ -5081,8 +5089,20 @@ class Step0Page(QWidget):
         loaded -- must not start numbering at 1 again, because the file of
         that name is the one the published manifest is pointing at.
         """
+        # The patch-id baseline travels with it, for the same reason: ids are
+        # never reused (user ruling, 2026-09-24), and a page that starts
+        # numbering at 1 on a project whose patches are P1..P5 would hand the
+        # next patch an id already on disk. A manifest from before stable
+        # ids numbered its patches 1..n by position.
+        manifest = manifest or {}
         try:
-            revision = int((manifest or {}).get("geometry_revision") or 0)
+            baseline = int(manifest.get("next_patch_id")
+                           or int(manifest.get("n_patches") or 0) + 1)
+        except (TypeError, ValueError):
+            baseline = 1
+        self._roi_model.raise_next_patch_id(baseline)
+        try:
+            revision = int(manifest.get("geometry_revision") or 0)
         except (TypeError, ValueError):
             return self._geometry_revision
         self._geometry_revision = max(int(self._geometry_revision), revision)
@@ -6245,6 +6265,7 @@ class Step0Page(QWidget):
 
         # v14.2b: keep the single ROI model in lockstep with this reset and the
         # newly-loaded loader/nucleus; re-feed the popup overview if it exists.
+        self._roi_model.reset_patch_ids()
         self._roi_model.adopt(
             rois=[], patches=[], full_wsi_mode=False,
             loader=self.loader, nucleus_channel=self.nucleus_channel)
@@ -6410,7 +6431,8 @@ class Step0Page(QWidget):
                 y0, y1, x0, x1 = patch["coords"]
                 roi_idx = patch.get("roi_idx")
                 roi_name = self.overview._rois[roi_idx]["name"] if roi_idx is not None and roi_idx < len(self.overview._rois) else "No ROI"
-                self._patch_list.addItem(f"P{idx+1}  {roi_name}  [{y1-y0}x{x1-x0}px]")
+                self._patch_list.addItem(
+                    f"{self.overview.patch_name(idx)}  {roi_name}  [{y1-y0}x{x1-x0}px]")
             if self.overview._patches:
                 self._patch_selected_idx = min(max(sel, 0), len(self.overview._patches) - 1)
                 self._patch_list.setCurrentRow(self._patch_selected_idx)
@@ -6693,6 +6715,38 @@ class Step0Page(QWidget):
             pass
         self.overview._update_info()
         self.overview.rois_changed.emit(list(self.overview._rois))
+
+    def _current_patch_label(self):
+        idx = self.current_patch_idx
+        if 0 <= idx < len(self.patches):
+            return patch_name(self.patches[idx], idx)
+        return f"P{idx+1}"
+
+    def _rename_patch_at(self, idx):
+        """Ask for a new name for the patch in list row `idx`.
+
+        The id stays; only what every view shows changes. The edit goes out
+        through the panel's `patches_changed`, the same path as any other
+        patch edit, so the navigator, the lists, Step1 and the published
+        geometry all follow it.
+        """
+        panel = self.overview
+        if panel is None or not 0 <= idx < len(panel._patches):
+            return False
+        if not getattr(panel, "_patch_edit_allowed", True):
+            return False
+        current = panel.patch_name(idx)
+        name, ok = QInputDialog.getText(self, "Rename patch", "Patch name:", text=current)
+        if not ok:
+            return False
+        new = str(name).strip()
+        if not new or new == current:
+            return False
+        if any(panel.patch_name(i) == new for i in range(len(panel._patches)) if i != idx):
+            QMessageBox.warning(self, "Duplicate name",
+                                f'Patch name "{new}" already exists.\nPlease choose a different name.')
+            return False
+        return panel.rename_patch(idx, new)
 
     def _delete_selected_patch(self):
         idx = self._patch_selected_idx
@@ -9076,7 +9130,8 @@ class Step0Page(QWidget):
         inline = min(len(self.patches), PATCH_INLINE_BUTTONS)
         for row in self._all_patch_rows():
             for i in range(inline):
-                btn = QPushButton(f"P{i+1}")
+                btn = QPushButton(patch_name(self.patches[i], i))
+                btn.setProperty("patch_index", i)
                 btn.setCheckable(True)
                 btn.setFixedSize(PATCH_BTN_W, PATCH_BTN_H)
                 color = PATCH_COLORS[i % len(PATCH_COLORS)]
@@ -9110,7 +9165,8 @@ class Step0Page(QWidget):
         btn.setToolTip(f"{count} patch{'es' if count != 1 else ''} — "
                        "click to choose")
         for i in range(count):
-            act = menu.addAction(f"P{i+1}")
+            label = patch_name(self.patches[i], i) if i < len(self.patches) else f"P{i+1}"
+            act = menu.addAction(label)
             act.setCheckable(True)
             # The same entry point the inline buttons use.
             act.triggered.connect(lambda _=False, idx=i: self._select_patch(idx))
@@ -9120,8 +9176,10 @@ class Step0Page(QWidget):
         for row in self._all_patch_rows():
             for i in range(row.count()):
                 widget = row.itemAt(i).widget()
-                if isinstance(widget, QPushButton):
-                    widget.setChecked(widget.text() == f"P{self.current_patch_idx+1}")
+                if isinstance(widget, QPushButton) and widget.property("patch_index") is not None:
+                    # By index, not by label: labels are names now, and a
+                    # renamed patch no longer reads "P<index+1>".
+                    widget.setChecked(int(widget.property("patch_index")) == self.current_patch_idx)
         for i, act in enumerate(getattr(self, "_patch_menu_actions", [])):
             act.setChecked(i == self.current_patch_idx)
 
@@ -9147,7 +9205,7 @@ class Step0Page(QWidget):
             return
         y0, y1, x0, x1 = self.patches[self.current_patch_idx]
         self._patch_info.setText(
-            f"Current patch: P{self.current_patch_idx+1}  [{y0}:{y1}, {x0}:{x1}]  {(y1-y0):,}x{(x1-x0):,} px"
+            f"Current patch: {self._current_patch_label()}  [{y0}:{y1}, {x0}:{x1}]  {(y1-y0):,}x{(x1-x0):,} px"
         )
 
     # ══ 通道/方法 选择事件 ═══════════════════════════════════════════
@@ -9970,7 +10028,7 @@ class Step0Page(QWidget):
         not_computed = []
         if payload.get("tophat_disp") is None: not_computed.append("TopHat")
         if payload.get("cucim_disp")  is None: not_computed.append("cucim")
-        status = f"[cache] {ch}  P{self.current_patch_idx+1}"
+        status = f"[cache] {ch}  {self._current_patch_label()}"
         if not_computed:
             status += f"  ({', '.join(not_computed)} not computed)"
         self._preview_status.setText(status)
@@ -10376,7 +10434,7 @@ class Step0Page(QWidget):
         self._preview_req_id += 1
         req_id = self._preview_req_id
         self._preview_status.setText(
-            f"Computing preview for {self.current_channel} on P{self.current_patch_idx+1}…"
+            f"Computing preview for {self.current_channel} on {self._current_patch_label()}…"
         )
         # Preview uses the Per-Channel Decision box's LIVE values (the current
         # channel's tuning), falling back to the global defaults it was seeded with.
@@ -10412,7 +10470,7 @@ class Step0Page(QWidget):
         self._metrics_tophat.setText(self._metric_text("TopHat", payload["tophat_metrics"]))
         self._metrics_cucim.setText(self._metric_text("cucim", payload["cucim_metrics"]))
         self._preview_status.setText(
-            f"Preview ready for {self.current_channel} on P{self.current_patch_idx+1}."
+            f"Preview ready for {self.current_channel} on {self._current_patch_label()}."
         )
         self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
 
@@ -11225,7 +11283,8 @@ class Step0Page(QWidget):
         patches = []
         raw_patches = list(self.overview._patches if self.overview else [])
         if not raw_patches:
-            raw_patches = [{"coords": p} for p in self.patches]
+            raw_patches = [{"coords": p, "id": getattr(p, "id", None),
+                            "name": getattr(p, "name", "")} for p in self.patches]
         for idx, patch_obj in enumerate(raw_patches, start=1):
             coords = patch_obj.get("coords") if isinstance(patch_obj, dict) else patch_obj
             if not coords or len(coords) != 4:
@@ -11233,8 +11292,15 @@ class Step0Page(QWidget):
             y0, y1, x0, x1 = [int(v) for v in coords]
             roi_name, roi_bbox = self._patch_roi_name((y0, y1, x0, x1), rois)
             ry0, _, rx0, _ = roi_bbox
+            # The patch's own id and name (stable, user ruling 2026-09-24),
+            # not its position: a record written after a delete must say P3
+            # for the patch the user has been calling P3.
+            pid = patch_obj.get("id") if isinstance(patch_obj, dict) else None
+            pid = int(pid) if pid is not None else idx
+            name = (patch_obj.get("name") if isinstance(patch_obj, dict) else "") or f"P{pid}"
             patches.append({
-                "name": f"P{idx}",
+                "id": pid,
+                "name": name,
                 "roi_name": roi_name,
                 "bbox_fullres": [y0, y1, x0, x1],
                 "bbox_local": [y0 - ry0, y1 - ry0, x0 - rx0, x1 - rx0],
@@ -11325,6 +11391,7 @@ class Step0Page(QWidget):
             # drop the geometry baseline and the next patch edit would be
             # numbered over a file the manifest still names.
             "geometry_revision": int(self._geometry_revision),
+            "next_patch_id": int(self._roi_model.next_patch_id),
         }
 
     def _apply_handoff_result(self, result):

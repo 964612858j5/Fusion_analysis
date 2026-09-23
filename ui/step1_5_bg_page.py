@@ -32,6 +32,7 @@ from ..core.bg_correction import (
     _apply_background_method_tiled, _compute_bg_metrics,
 )
 from ..core.io_loader import OMETIFFLoader
+from .step0.roi_context_model import patch_name
 from .step0.search_ctrl import (
     BatchProcessWorker, WsiCorrectionWorker, _WsiCorrectionProgressDialog,
 )
@@ -533,7 +534,10 @@ class Step15BackgroundCorrectionPage(QWidget):
 
         self.current_patch_idx = min(self.current_patch_idx, len(self.patches) - 1)
         for i in range(len(self.patches)):
-            btn = QPushButton(f'P{i+1}')
+            # The patch's own name (stable ids, plan block P), and matched by
+            # index below -- a renamed patch no longer reads "P<index+1>".
+            btn = QPushButton(patch_name(self.patches[i], i))
+            btn.setProperty('patch_index', i)
             btn.setCheckable(True)
             btn.setFixedSize(44, 22)
             color = PATCH_COLORS[i % len(PATCH_COLORS)]
@@ -547,12 +551,18 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._patch_buttons_row.addStretch()
         self._update_patch_info()
 
+    def _current_patch_label(self):
+        idx = self.current_patch_idx
+        if 0 <= idx < len(self.patches):
+            return patch_name(self.patches[idx], idx)
+        return f"P{idx + 1}"
+
     def _select_patch(self, idx):
         self.current_patch_idx = idx
         for i in range(self._patch_buttons_row.count()):
             widget = self._patch_buttons_row.itemAt(i).widget()
-            if isinstance(widget, QPushButton):
-                widget.setChecked(widget.text() == f'P{idx+1}')
+            if isinstance(widget, QPushButton) and widget.property('patch_index') is not None:
+                widget.setChecked(int(widget.property('patch_index')) == idx)
         self._update_patch_info()
         if self._bg_state == 'review_ready' and self.current_channel:
             self._show_current_channel()
@@ -564,7 +574,7 @@ class Step15BackgroundCorrectionPage(QWidget):
             return
         y0, y1, x0, x1 = self.patches[self.current_patch_idx]
         self._patch_info.setText(
-            f'Current patch: P{self.current_patch_idx+1}  '
+            f'Current patch: {self._current_patch_label()}  '
             f'[{y0}:{y1}, {x0}:{x1}]  '
             f'{(y1-y0):,}×{(x1-x0):,} px'
         )
@@ -866,7 +876,7 @@ class Step15BackgroundCorrectionPage(QWidget):
             self._metrics_cucim.setText('cucim     → Not computed')
         else:
             self._metrics_cucim.setText(self._metric_text('cucim', payload.get('cucim_metrics') or {"snr": 0.0, "bg_cv": 0.0}))
-        self._preview_status.setText(f'{ch}  P{self.current_patch_idx+1}')
+        self._preview_status.setText(f'{ch}  {self._current_patch_label()}')
         self._preview_status.setStyleSheet('color:#aaa;font-size:10px;')
 
     def _cache_payload(self, ch, patch_idx, payload):
@@ -1119,8 +1129,8 @@ class Step15BackgroundCorrectionPage(QWidget):
     def _sync_patch_buttons(self):
         for i in range(self._patch_buttons_row.count()):
             widget = self._patch_buttons_row.itemAt(i).widget()
-            if isinstance(widget, QPushButton):
-                widget.setChecked(widget.text() == f'P{self.current_patch_idx+1}')
+            if isinstance(widget, QPushButton) and widget.property('patch_index') is not None:
+                widget.setChecked(int(widget.property('patch_index')) == self.current_patch_idx)
 
     def _start_lazy_compute(self, ch):
         if self._bg_state != 'review_ready' or ch == self.nucleus_channel:

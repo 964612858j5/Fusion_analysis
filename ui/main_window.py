@@ -71,6 +71,9 @@ from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from ..workers.preview_compose_worker import PreviewComposeWorker
 from ..workers.mesmer_worker import run_mesmer_patch_preview
 from .step0.step0_page import Step0Page
+from .step0.roi_context_model import (
+    Patch, patch_from_record, patch_id as _patch_id_of, patch_name as _patch_name_of,
+    with_patch_ids)
 from .block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, STEP1 as _CTX_STEP1,
     STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
@@ -2082,11 +2085,9 @@ class MainWindow(QMainWindow):
             return
 
         rois = [dict(r) for r in (payload.get("rois") or [])]
-        patches = []
-        for item in payload.get("patches") or []:
-            bbox = item.get("bbox_fullres") if isinstance(item, dict) else item
-            if bbox and len(bbox) == 4:
-                patches.append(tuple(int(v) for v in bbox))
+        # With their ids and names (stable, user ruling 2026-09-24): a bare
+        # bbox list would make Step1 number them by position again.
+        patches = self._patches_from_records(payload.get("patches") or [])
 
         self._rois = rois
         self._active_roi = rois[0] if rois else None
@@ -2603,14 +2604,7 @@ class MainWindow(QMainWindow):
                     patch_cfg = json.load(f)
                 if handoff_schema >= 2 and not isinstance(patch_cfg, list):
                     raise ValueError("patch config root must be an array")
-                patches = []
-                for item in patch_cfg:
-                    if isinstance(item, dict):
-                        coords = item.get("coords") or item.get("bbox_fullres")
-                    else:
-                        coords = item
-                    if coords and len(coords) == 4:
-                        patches.append(tuple(int(v) for v in coords))
+                patches = self._patches_from_records(patch_cfg)
             except Exception as e:
                 print(f"[Step1] failed to load patch_config.json: {e}")
                 if handoff_schema >= 2:
@@ -3036,7 +3030,8 @@ class MainWindow(QMainWindow):
         for i, patch in enumerate(self._all_patches):
             y0, y1, x0, x1 = [int(v) for v in patch]
             item = {
-                "name": f"P{i+1}",
+                "id": _patch_id_of(patch),
+                "name": self._patch_label(i),
                 "bbox_fullres": [y0, y1, x0, x1],
             }
             if roi_bbox and len(roi_bbox) == 4:
@@ -3072,7 +3067,7 @@ class MainWindow(QMainWindow):
             "roi_bbox": roi_bbox,
             "rois": self._rois,
             "patches": patches,
-            "selected_patch": f"P{self._preview_patch_idx+1}" if 0 <= self._preview_patch_idx < len(self._all_patches) else "",
+            "selected_patch": self._patch_key(self._preview_patch_idx) if 0 <= self._preview_patch_idx < len(self._all_patches) else "",
             "corrected_zarr_path": self._corrected_zarr_path or os.path.join(out_dir, "corrected_channels.zarr"),
             "corrected_zarr_mode": self._corrected_zarr_mode,
             "fusion_zarr_path": self._fused_zarr_path or (self.step1_output or {}).get("zarr_path", ""),
@@ -3128,7 +3123,7 @@ class MainWindow(QMainWindow):
     def _record_segmentation_preview_result(self, patch_idx, params, masks):
         params = normalize_segmentation_config(params or {})
         method = params.get("method") or CELLPOSE_WHOLECELL_FUSION
-        patch_name = f"P{int(patch_idx) + 1}"
+        patch_name = self._patch_key(int(patch_idx))
         cells = int(np.asarray(masks).max()) if masks is not None else 0
         device = str(params.get("device_used") or params.get("device") or "unknown")
         record = {
@@ -3161,7 +3156,7 @@ class MainWindow(QMainWindow):
         labels = int(mask_arr.max()) if mask_arr is not None and mask_arr.size else 0
         bbox = tuple(int(v) for v in self._all_patches[patch_idx]) if 0 <= patch_idx < len(self._all_patches) else ()
         result = {
-            "patch_id": f"P{patch_idx + 1}",
+            "patch_id": self._patch_key(patch_idx),
             "patch_idx": patch_idx,
             "bbox_global": list(bbox),
             "bbox_fullres": list(bbox),
@@ -3550,13 +3545,10 @@ class MainWindow(QMainWindow):
         }
 
         selected_name = sess.get("selected_patch")
-        if selected_name and selected_name.startswith("P"):
-            try:
-                sel_idx = int(selected_name[1:]) - 1
-                if 0 <= sel_idx < len(self._all_patches):
-                    self._select_preview_patch(sel_idx)
-            except Exception:
-                pass
+        if selected_name:
+            sel_idx = self._patch_index_for_key(selected_name)
+            if sel_idx >= 0:
+                self._select_preview_patch(sel_idx)
         self.step1_done = bool(self._fused_zarr_path)
         if hasattr(self._step2, "set_roi_context"):
             self._step2.set_roi_context(
@@ -3835,11 +3827,15 @@ class MainWindow(QMainWindow):
             if self._active_roi and self._active_roi.get("bbox_fullres"):
                 ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
             for item in sess.get("patches") or []:
+                pid = item.get("id")
+                name = item.get("name") if pid is not None else ""
                 if item.get("bbox_fullres"):
-                    patches.append(tuple(int(v) for v in item["bbox_fullres"]))
+                    patches.append(Patch(item["bbox_fullres"], pid, name))
                 elif item.get("bbox_local"):
                     y0, y1, x0, x1 = [int(v) for v in item["bbox_local"]]
-                    patches.append((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1))
+                    patches.append(Patch((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1), pid, name))
+            # A session from before stable ids: P1..Pn by position, as shown.
+            patches, _ = with_patch_ids(patches)
             self._p2_params = sess.get("p2_params")
             if self._p2_params and hasattr(self.search, "apply_seg_config_to_ui"):
                 self.search.apply_seg_config_to_ui(self._p2_params)
@@ -3875,13 +3871,10 @@ class MainWindow(QMainWindow):
             self._on_rois_changed(self._rois)
             self._on_patches(patches)
             selected_name = sess.get("selected_patch")
-            if selected_name and selected_name.startswith("P"):
-                try:
-                    sel_idx = int(selected_name[1:]) - 1
-                    if 0 <= sel_idx < len(self._all_patches):
-                        self._select_preview_patch(sel_idx)
-                except Exception:
-                    pass
+            if selected_name:
+                sel_idx = self._patch_index_for_key(selected_name)
+                if sel_idx >= 0:
+                    self._select_preview_patch(sel_idx)
             self._show_active_roi_preview()
             self.step0_done = True
             self._step1_context_ready = True
@@ -4545,8 +4538,44 @@ class MainWindow(QMainWindow):
         ry0, ry1, rx0, rx1 = [int(v) for v in bbox]
         return ry0 <= y0 and y1 <= ry1 and rx0 <= x0 and x1 <= rx1
 
+    @staticmethod
+    def _patches_from_records(items):
+        """`Patch` objects, with ids, from persisted records or bare bboxes.
+
+        A list from before stable ids gets P1..Pn by position -- the numbers
+        it was shown with (plan block P)."""
+        patches = [p for p in (patch_from_record(i) for i in items or []) if p is not None]
+        return with_patch_ids(patches)[0]
+
+    def _patch_label(self, idx):
+        """The one name every Step1 view shows for patch `idx`."""
+        if 0 <= idx < len(self._all_patches):
+            return _patch_name_of(self._all_patches[idx], idx)
+        return f"P{idx + 1}"
+
+    def _patch_key(self, idx):
+        """What Step1's histories and the session remember a patch by: its
+        permanent id, written `P<id>` -- the very string sessions written
+        before stable ids used, since those ids are the old positions."""
+        if 0 <= idx < len(self._all_patches):
+            pid = _patch_id_of(self._all_patches[idx])
+            if pid is not None:
+                return f"P{pid}"
+        return f"P{idx + 1}"
+
+    def _patch_index_for_key(self, key):
+        """The current index of the patch a history/session key names, or -1."""
+        for i in range(len(self._all_patches)):
+            if self._patch_key(i) == key:
+                return i
+        return -1
+
     def _filter_patches_to_roi(self, patches, roi):
-        kept = [tuple(int(v) for v in p) for p in patches if self._patch_inside_roi_bbox(p, roi)]
+        # Identity survives the filter: a patch dropped here must not make
+        # the next one take its number (the old positional renumbering is
+        # how Step0's P3 used to show as Step1's P2).
+        kept = [p if isinstance(p, Patch) else Patch(p, _patch_id_of(p), getattr(p, "name", ""))
+                for p in patches if self._patch_inside_roi_bbox(p, roi)]
         dropped = len(patches) - len(kept)
         if dropped:
             print(f"[Step1] dropped {dropped} patch(es) outside active ROI bbox")
@@ -4589,11 +4618,11 @@ class MainWindow(QMainWindow):
             return 'loading'
         return 'idle'
 
-    @staticmethod
-    def _patch_btn_label(idx, state):
-        return {'idle': f'P{idx+1}', 'loading': f'P{idx+1} ⟳',
-                'ready': f'P{idx+1} ✓',
-                'error': f'P{idx+1} ✗'}.get(state, f'P{idx+1}')
+    def _patch_btn_label(self, idx, state):
+        name = self._patch_label(idx)
+        return {'idle': name, 'loading': f'{name} ⟳',
+                'ready': f'{name} ✓',
+                'error': f'{name} ✗'}.get(state, name)
 
     def _rebuild_patch_buttons(self, patches):
         """Rebuild the P1/P2/… selector; preserve load-state styling.
@@ -4610,7 +4639,7 @@ class MainWindow(QMainWindow):
 
         inline = min(len(patches), STEP1_INLINE_PATCH_BUTTONS)
         for i in range(inline):
-            btn = QPushButton(f"P{i+1}")
+            btn = QPushButton(self._patch_label(i))
             btn.setCheckable(True)
             btn.setFixedSize(STEP1_PATCH_BTN_W, STEP1_PATCH_BTN_H)
             btn.clicked.connect(lambda _, idx=i: self._select_preview_patch(idx))
@@ -4643,7 +4672,7 @@ class MainWindow(QMainWindow):
         btn.setToolTip(f"{count} patch{'es' if count != 1 else ''} — "
                        "click to choose")
         for i in range(count):
-            act = menu.addAction(f"P{i+1}")
+            act = menu.addAction(self._patch_label(i))
             act.setCheckable(True)
             # THE SAME ENTRY POINT the inline buttons use. The menu selects
             # patches; it does not know how to.
@@ -4709,6 +4738,9 @@ class MainWindow(QMainWindow):
 
     def _on_patches(self, patches):
         old_rois = [p for p in self._all_patches]
+        # Every patch carries its permanent id from here on; a caller that
+        # still passes bare bboxes gets P1..Pn by position.
+        patches, _ = with_patch_ids(patches)
         self._all_patches = list(patches)
         self._rebuild_patch_buttons(patches)
         self._show_active_roi_preview()
@@ -4738,12 +4770,20 @@ class MainWindow(QMainWindow):
                 for i in range(len(patches))
             }
         if len(patches) != len(old_rois):
-            # Patch names are positional ("P3"), so adding or removing one
-            # renumbers the rest: every name-keyed result now points at a
-            # different rectangle and none of it may be shown as current.
-            self._seg_preview_history = {}
-            self._active_preview_patch = ""
+            # Index-keyed view state follows positions, which an add or a
+            # delete shifts.
             self._preserve_view_after_patch_load.clear()
+        # Histories are keyed by the patch's PERMANENT id (plan block P): a
+        # delete no longer renumbers anyone, so only the history of a patch
+        # that is gone, or whose rectangle moved, stops describing it.
+        new_by_key = {self._patch_key(i): tuple(p) for i, p in enumerate(patches)}
+        for i, old in enumerate(old_rois):
+            key = (f"P{_patch_id_of(old)}" if _patch_id_of(old) is not None
+                   else f"P{i+1}")
+            if new_by_key.get(key) != tuple(old):
+                self._seg_preview_history.pop(key, None)
+                if self._active_preview_patch == key:
+                    self._active_preview_patch = ""
         for idx, roi in enumerate(patches):
             if idx < len(old_rois) and roi != old_rois[idx]:
                 self._patch_channel_cache.pop(idx, None)
@@ -4752,11 +4792,7 @@ class MainWindow(QMainWindow):
                 self._stop_loader_for(idx)
                 self._patch_seg_results.pop(idx, None)
                 self._preserve_view_after_patch_load.pop(idx, None)
-                # Same rectangle name, different rectangle: its previews and
-                # segmentation history describe pixels that are no longer there.
-                self._seg_preview_history.pop(f"P{idx+1}", None)
-                if self._active_preview_patch == f"P{idx+1}":
-                    self._active_preview_patch = ""
+                # (Name-keyed history was settled above, by id.)
 
         # Auto-select only newly added patches; keep selection on move/resize.
         if len(patches) > len(old_rois):
@@ -4776,7 +4812,7 @@ class MainWindow(QMainWindow):
         if self._preview_patch_idx in self._patch_load_ready:
             self._refresh_patch_preview(reset_view=True)
             self.patch_cache_status.setText(
-                f"P{self._preview_patch_idx+1} (cached) — "
+                f"{self._patch_label(self._preview_patch_idx)} (cached) — "
                 f"preloading remaining patches in background…"
             )
         else:
@@ -4973,7 +5009,7 @@ class MainWindow(QMainWindow):
 
     def _on_patch_loaded_from(self, thread, patch_idx, cache):
         if not self._is_current_patch_loader(thread, patch_idx):
-            print(f"[Step1] dropped a late patch result for P{patch_idx+1}: "
+            print(f"[Step1] dropped a late patch result for {self._patch_label(patch_idx)}: "
                   "it came from a loader that is no longer current")
             return
         self._on_patch_loaded(patch_idx, cache)
@@ -4985,7 +5021,7 @@ class MainWindow(QMainWindow):
 
     def _on_patch_error_from(self, thread, patch_idx, msg):
         if not self._is_current_patch_loader(thread, patch_idx):
-            print(f"[Step1] dropped a late patch error for P{patch_idx+1}: "
+            print(f"[Step1] dropped a late patch error for {self._patch_label(patch_idx)}: "
                   "it came from a loader that is no longer current")
             return
         self._on_patch_error(patch_idx, msg)
@@ -5013,13 +5049,13 @@ class MainWindow(QMainWindow):
 
         # Stop any existing loader for this patch before replacing it.
         if not self._stop_loader_for(idx):
-            self.prev_status.setText(f"P{idx+1} is still stopping… please wait")
+            self.prev_status.setText(f"{self._patch_label(idx)} is still stopping… please wait")
             return
 
         patch_bbox = self._all_patches[idx]
         y0, y1, x0, x1 = self._limited_patch_bbox(patch_bbox)
         if self._active_roi and not self._patch_inside_roi_bbox((y0, y1, x0, x1), self._active_roi):
-            self.prev_status.setText(f"⚠ P{idx+1} is outside active ROI")
+            self.prev_status.setText(f"⚠ {self._patch_label(idx)} is outside active ROI")
             return
         print(f"[Step1-preview] roi_bbox={(self._active_roi or {}).get('bbox_fullres')}")
         print(f"[Step1-preview] patch_bbox={list(map(int, patch_bbox))}")
@@ -5048,7 +5084,7 @@ class MainWindow(QMainWindow):
             # Nothing is in flight, so nothing may claim to be.
             self._patch_loaders.pop(idx, None)
             self._loader_channels.pop(idx, None)
-            print(f"[Step1] failed to start the loader for P{idx+1}:\n"
+            print(f"[Step1] failed to start the loader for {self._patch_label(idx)}:\n"
                   f"{traceback.format_exc()}")
             raise
         print("[Step1-preview] full_image_load=False")
@@ -5056,7 +5092,7 @@ class MainWindow(QMainWindow):
     def _on_patch_progress(self, patch_idx, done, total, ch):
         if patch_idx == self._preview_patch_idx:
             self.patch_cache_status.setText(
-                f"P{patch_idx+1} loading ({done+1}/{total}): {ch}"
+                f"{self._patch_label(patch_idx)} loading ({done+1}/{total}): {ch}"
             )
 
     def _on_patch_loaded(self, patch_idx, cache):
@@ -5079,7 +5115,7 @@ class MainWindow(QMainWindow):
             local_txt = (
                 f" local=[{y0-ry0},{y1-ry0},{x0-rx0},{x1-rx0}]"
             )
-        print(f"[Preview] P{patch_idx+1} ready — {len(cache)} ch, {h}×{w} px{local_txt}")
+        print(f"[Preview] {self._patch_label(patch_idx)} ready — {len(cache)} ch, {h}×{w} px{local_txt}")
         print(f"[Step1-preview] loaded_shape={(h, w)}")
 
         # If this is the currently viewed patch, render it immediately
@@ -5087,7 +5123,7 @@ class MainWindow(QMainWindow):
             nuc_ok = "✓" if nuc_ch in cache else "✗(not found!)"
             cyto_n = len([c for c in cache if c != nuc_ch])
             self.patch_cache_status.setText(
-                f"P{patch_idx+1} ready  nucleus({nuc_ch}){nuc_ok}  "
+                f"{self._patch_label(patch_idx)} ready  nucleus({nuc_ch}){nuc_ok}  "
                 f"cyto: {cyto_n} ch  {h}×{w} px (full-res crop)"
             )
             saved = self._preserve_view_after_patch_load.pop(patch_idx, None)
@@ -5113,8 +5149,8 @@ class MainWindow(QMainWindow):
             self._failed_channels.setdefault(patch_idx, set()).update(failed)
         self._set_patch_btn_state(patch_idx, 'error')
         if patch_idx == self._preview_patch_idx:
-            self.patch_cache_status.setText(f"P{patch_idx+1} load error: {msg}")
-        print(f"[Preview] P{patch_idx+1} error: {msg}")
+            self.patch_cache_status.setText(f"{self._patch_label(patch_idx)} load error: {msg}")
+        print(f"[Preview] {self._patch_label(patch_idx)} error: {msg}")
 
     def _on_patch_loader_finished(self, patch_idx, thread):
         """One loader ended.  Serve a demand that arrived while it ran — once.
@@ -5176,7 +5212,7 @@ class MainWindow(QMainWindow):
                 pass
             if t.isRunning():
                 survivors[idx] = t
-                print(f"[Preview] loader P{idx+1} still running after stop request; keeping reference")
+                print(f"[Preview] loader {self._patch_label(idx)} still running after stop request; keeping reference")
         self._patch_loaders = survivors
 
     def closeEvent(self, event):

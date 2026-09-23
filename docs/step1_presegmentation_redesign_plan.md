@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.12：块 P 已执行，写入执行记录和 advisory（重启后 Step0 模型为空）。
+- v3.11：新增块 P（patch 稳定编号与同步：编号永久不变、不复用；只显示一个名字；Navigator 可重命名），排在 A1 之前。A1 按用户意见修订：悬停时不显示信息；已勾选的小块可以用 × 删除、双击重命名；可修改规则文件。
 - v3.10：V0 已执行，新增 7.10.8，记录执行结果、实测数据、执行中的发现（Cellpose 原地改写输入；conda 和 pip 同名包；子进程工作目录）和输入归属表。
 - v3.9：块 V 按用户裁定，由「每个引擎一个环境」改为「一个环境 `fusion_mesmer`，每个引擎一个子进程」；记录这个环境的实际改动和核验结果；写入经用户审定的 V0 范围（导出清单、照清单临时重建后删除、模型清单与断网验证、子进程原型放进仓库 `seg_runner/`、输入归属表）。
 - v3.8：按审核意见收口。R13 改为「按相同规则参与构造」；「只定标一次」改为「应用侧不额外拉伸，每个引擎只执行一套标准预处理」；Mesmer nuclei 的第二个通道为 0，并记录 Step2 现在给的是 fusion；多余定标改为「新流程不再调用」，旧参数保持原语义；搬迁和新行为分开验收；7.11.4 写明「读取区域相同」的定义，输入数组按方法构造后再比较；几处过强的说法改为待验证。
@@ -251,17 +253,124 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **白名单**：只写本文档，以及 scratchpad 里的只读诊断脚本。
 - **验收**：用户逐条确认。
 
-### 块 A1 — Patches 区（已有 patch 的勾选）
+### 块 P — patch 稳定编号与同步（用户裁定 2026-09-24；排在 A1 之前；**跨模块，须单独启动**）
+
+**用户裁定**：
+- **P-1 编号稳定**：删掉 P2 后，P3 及以后的编号**不变**。新 patch 的编号是「历史上用过的最大号 + 1」，**不回填空号**，已删除的号永不复用。例如有 P1、P2、P3，删掉 P3 再新增，新的 patch 叫 **P4**。随机生成的 patch 也遵守这条规则。
+- **P-2 显示**：每个 patch 只显示**一个名字**，默认就是它的 `Px`，不附加尺寸、坐标或其他任何内容。重命名之后，显示的就是新名字（这是对用户「只显示 Px」的理解，按单一名字执行；用户如有不同意见，另行更正）。内部始终用永久编号来识别 patch。
+- **P-3 同步与编辑**：以下各处显示的 patch 编号和名字必须一致：Tissue Navigator / Tissue Preview、Step0、Step1 viewer 顶部的 patch 选择器、Method & Parameters 里的 Patches 栏。Tissue Navigator 可以移动、调整大小、删除和**重命名** patch；重命名的方式是在 patch 列表中**双击**，和现在 ROI 的改名方式一样。
+
+**现状**（2026-09-24 核查）：
+- 代码里**没有**任何稳定的 patch 编号，所有 `P{i+1}` 都是按列表位置临时算出来的：
+  - `overview_panel.py:2663/2724`；
+  - `step0_page.py:6413/9079/9113/11237`；
+  - `main_window.py:4594-4646/3039/3075/3131`；
+  - `step1_5_bg_page.py:536`。
+- Step0、Navigator、Step1 之间**只传坐标**。`geometry_committed` 携带的名字在 `main_window.py:2068-2101` 被丢掉了。
+- 判断 patch 是否变化**只比较坐标**（`core/step0_handoff.py:369/445/525`），所以只改名字不会被发布出去。
+- Step1 会先按 ROI 的 bbox 过滤 patch，再按位置编号（`main_window.py:4548`），导致**现在** Step0 的 P3 在 Step1 可能显示为 P2。
+- Navigator 编辑后，要等 Step0 保存过至少一次才会发布到 Step1（`step0_handoff.py:516`）。这条行为保持不变。
+
+**做法**：
+- **数据**：每个 patch 记录增加 `id`（整数，永久不变）和 `name`（默认 `P{id}`）。patch 配置里另记 `next_patch_id`。
+- **旧数据迁移**：没有 `id` 的旧记录，第一次读取时按原来的顺序补上 1…n，这样和用户以前看到的编号一致。
+- **变化比较**：改为比较 `(id, name, bbox)` 三项。
+- **Step1**：接收 `id` 和 `name`。工具栏按钮、Patch 菜单、结果历史（`_seg_preview_history`）、session 里的 `selected_patch`，都改为按 `id` 来记。
+  - 按下标索引的缓存（通道缓存、加载状态等）保持现在的失效规则，只影响性能，不影响正确性。
+- **Navigator 重命名**：在 Step0 的 patch 列表中双击改名，名字不能为空，也不能和其他 patch 重复。
+- **不改**：分割 worker 的 npz 命名（`cellpose_worker.py:491`、`mesmer_worker.py:162`），以及旧的结果网格。这两处会在块 C 和块 E 里整体重写。
+
+**白名单**（启动时再确认一次）：
+- `ui/step0/overview_panel.py`
+- `ui/step0/step0_page.py`
+- `ui/step0/roi_context_model.py`
+- `core/step0_handoff.py`
+- `ui/main_window.py`：只改 patch 接收、显示和历史相关的部分
+- `ui/step1_5_bg_page.py`：只改按钮显示
+- 测试：
+  - 新增 `tests/test_patch_stable_ids.py`；
+  - 更新按位置写死 `P1..Pn` 的现有测试：`test_step1_patch_selector_menu.py`、`test_step0_step1_surface_details.py`、`test_step0_channel_conditioning.py`（`:300/:473`）、`test_step1_geometry_sync.py`、`test_step1_dataset_switch.py`、`test_tissue_navigator_popup.py:452` 等。每条修改都在报告里逐条说明。
+
+**验收门**：
+- 删掉中间的 patch 后，其余 patch 的编号和名字都不变；删掉最大号后再新增，编号顺延，不复用。
+- 重命名之后，Navigator、Step0 画布和列表、Step1 工具栏和菜单、Patches 栏同时更新，并且写进磁盘、能被发布出去。
+- 旧项目读取后的编号和原来一致。
+- 在 Step1 打开 Navigator 做的编辑，Step1 能收到，编号不错位（包括 ROI 过滤之后）。
+- 全量回归；真机验收。
+
+**风险与回退**：
+- 数据格式只增加字段，旧文件可以读取，旧代码读取新文件时会忽略新字段。
+- 可以按文件回退。
+
+**执行记录**（2026-09-24 启动，待用户验收）：
+- **用户补充裁定**：重命名后显示用户起的名字，不必再是 Px。内部永久编号不变。
+- **做法**：
+  - `ui/step0/roi_context_model.py` 新增 `Patch` 类型。它仍然是 `(y0, y1, x0, x1)` 这个 4 元组，现有代码照常拆包、转换和比较；在此基础上多带 `id` 和 `name`，所以能原样经过 `patches_changed`、Navigator 弹窗（`tissue_navigator_popup.py` 不用改）、Step0 列表和 handoff。
+  - 编号统一由模型的 `allocate_patch_id` 分配，只增不减。换数据集时重置；绑定到已发布的项目时，从 manifest 的 `next_patch_id` 取起点。旧 manifest 没有这个字段，就取 `n_patches + 1`。
+- **Step0**：
+  - 画布标签、信息行、提示、patch 列表、按钮和菜单都显示名字；
+  - 按钮通过 `patch_index` 属性来匹配，不再按文字匹配；
+  - 在 patch 列表中**双击可以重命名**，名字不能为空、不能重复，改名走 `patches_changed` 通道发布；
+  - 写入磁盘的记录带上 `id` 和 `name`。
+- **handoff**：
+  - `patch_identities` 按 `(id, name, bbox)` 比较，所以只改名字也会发布；
+  - manifest 带上 `next_patch_id`，全量 Save 和只改几何的发布都写，而且这个值只增不减。
+- **Step1**：
+  - 从 Step0 提交、磁盘、session 读入 patch 时都保留 `id` 和 `name`；
+  - ROI 过滤之后编号不重排；
+  - 工具栏、菜单、状态文字都显示名字；
+  - 历史记录（`_seg_preview_history`）和 session 的 `selected_patch` 改为按编号记，键写成 `P{id}`，和旧 session 兼容；
+  - 删除一个 patch 时，只清掉被删掉的或矩形变了的那几个 patch 的历史，其余保留。按下标索引的缓存仍用原来的失效规则。
+- **Step1.5**：按钮显示名字，按下标匹配。
+- **Step0 patch 列表的行格式**：保持原来的 `名字  ROI  [HxWpx]`，只把 `P{idx+1}` 换成了名字。P-2 说的「只显示一个名字」，这里理解为指 patch 标签本身；列表这一行要不要去掉 ROI 和尺寸，**请用户确认**。
+- **测试**：
+  - `tests/test_patch_stable_ids.py` 共 11 条。
+  - 在 HEAD 导出树上运行会报收集错误。
+  - 另做了两处反向注入，对应的测试都会失败：handoff 只比较 bbox；ROI 过滤时丢掉 id。
+  - 与 patch 相关的现有模块全部通过，只剩附录基线里原有的 7 条失败。
+- **全量回归**（2026-09-24，171 个模块，每个模块单独一个进程）：
+  - 结果：3757 passed / 16 failed / 1 skipped。回归期间代码冻结，结束后逐个核对哈希，都没有变化。
+  - 16 条失败和附录基线的清单**逐条相同**。
+  - 其中 `test_step0_channel_conditioning` 落在本块改过的 Step0 patch 路径上，所以不能直接拿基线豁免，另外做了核对：
+    - `test_dapi_lazy_loads_like_a_marker` 的断言信息和上一轮不同：上一轮是 `[] == ['DAPI']`，这一轮是 `None is not None`；
+    - 在 HEAD 导出树上把整个模块跑两次、单条跑三次，都是 `None is not None`，而且其中一次整模块运行还多了一条已知的偶发失败；
+    - 当前代码的表现和 HEAD 完全相同。
+    - 结论：这条用例的断言信息本来就随运行状态变化，**不是本块引入的**。
+  - 其余 5 个有失败的模块，断言信息和上一轮逐条相同。
+- **Advisory**（本块之前就存在，**未实测**）：
+  - Step0 重启后不会从磁盘把 patch 读回模型：`_roi_model` 只会通过 Step0 自己的编辑填充。
+  - 所以重启之后，如果直接在 Step1 打开 Navigator 编辑，Navigator 看到的可能是一个空模型，发布出去的几何可能会覆盖磁盘上原有的 patch。
+  - 块 P 只保证编号不冲突，也就是 `next_patch_id` 从 manifest 取起点。这个问题本身需要另外核实，并单独立块处理。
+
+### 块 A1 — Patches 区（已有 patch 的勾选；依赖块 P；用户 2026-09-24 修订）
+- **内容**：
+  - 在 Method & Parameters 页的**顶部**放一个 Patches 栏，旧控件原样留在它下面，到块 E 再退场。
+  - 每个 patch 是一个可勾选的小块，显示它的名字（P-2），边框颜色用 `PATCH_COLORS`。
+  - **鼠标悬停时不显示任何信息**（用户裁定）。
+  - 小块自动换行，最多显示 3 行，超出时在栏内滚动。
+  - 下方一行：`Select all`、`Select none`、已选 k/n。
+  - 默认全选，新 patch 也默认勾选；勾选状态**按 patch 编号保留**。
+  - 没有 patch 时，显示提示 `No patches yet — draw them in Step0 or the Tissue Navigator`。
+- **编辑**（用户裁定）：
+  - **已勾选的**小块右上角有一个小 `×`，点击即删除该 patch；
+  - **双击**小块可以重命名。
+  - 这两个操作走的是和 Navigator 编辑**同一条**发布通道（`_reconcile_roi_edit` → `_persist_geometry_edit`），不另建一条路径。所以编辑结果会同步到 Navigator、Step0 和 Step1 工具栏。
+- **勾选结果目前不接入任何计算**，要到块 C 才接上；也不写进 session。
+- **规则文件**：用户同意在 `UI_SURFACE_RULES.md` 第 4 节补充 Patches 栏的描述。
 - **白名单**：
-  - 新文件 `ui/step1_presegmentation/patches_panel.py`（包目录名开工时确认）；
-  - `ui/main_window.py` 中 Method & Parameters 标签页的装配处和 patch 列表同步处；
+  - 新文件 `ui/step1_presegmentation/__init__.py`、`ui/step1_presegmentation/patches_panel.py`（控件本身和自动换行布局）；
+  - `ui/main_window.py`：Method & Parameters 页的装配处（约 `:1176-1203`）、`_on_patches`（约 `:4710`），以及删除和重命名接到发布通道的接线；
+  - `UI_SURFACE_RULES.md` 第 4 节；
   - 测试：新增 `tests/test_step1_patches_panel.py`。
 - **验收门**：
-  - 紧凑网格布局正确；
-  - 默认全选，全选/全不选、逐个取消后的勾选集合正确；
-  - patch 增删后，按 bbox 保留原有的勾选状态；
+  - 布局正确，能自动换行，高度有上限；
+  - **不会抬高左栏的最小宽度**：最小宽度不超过一个小块加上边距；
+  - 默认全选；全选、全不选、逐个取消后，勾选集合都正确；
+  - patch 增删之后，按编号保留勾选状态；
   - 没有 patch 时显示提示；
-  - 真机验收。
+  - 点击 `×` 删除、双击重命名之后，Navigator、Step0、Step1 工具栏都同步更新；
+  - 新测试先在 HEAD 导出树上跑，确认会失败；
+  - 全量回归；真机验收。
 
 ### 块 A2 — 随机生成 patch（A0 的组织和 ROI 判定确认之后）
 - **白名单**：

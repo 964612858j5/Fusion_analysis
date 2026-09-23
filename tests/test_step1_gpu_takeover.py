@@ -1026,6 +1026,16 @@ def test_a_zero_channel_weight_is_never_given_an_intensity_window(app):
     A channel at an explicit `0.0` keeps its participation and is not read,
     not mapped and not composed -- so its window is not worked out either.
     Turning the weight up is what asks for one, exactly once.
+
+    2026-09-23 DISPLAY-SEMANTICS RULING (G3.2d.1). The tick now means "is
+    this channel shown now" in Fusion exactly as in Overlay, so an unticked
+    channel contributes nothing whatever its weight. That makes the tick a
+    variable this gate has to hold still instead of ignore: it is moved in
+    a phase of its own, every original weight assertion is kept word for
+    word, and the new rule is asserted at the end. The tick could not simply
+    be set at the start, because SHOWING a channel legitimately asks for its
+    Intensity window on its own -- which would have silently destroyed the
+    zero-weight assertion this gate exists for.
     """
     rig = _mount(app, visible=("CD3",), windows=("CD3", "DAPI"))
     try:
@@ -1037,6 +1047,17 @@ def test_a_zero_channel_weight_is_never_given_an_intensity_window(app):
             "a zero-weight channel asked for an Intensity window"
         assert "CD8" not in rig.mount.notice()
 
+        # Phase 2 -- THE TICK ALONE, weight still 0.0. Showing a channel
+        # does not buy it a window either: at an effective 0.0 it is still
+        # not read, mapped or composed, so this gate's own rule holds in
+        # both tick states and the seed below belongs to the WEIGHT alone.
+        _enable(rig, "CD8", visible=True)
+        _settle(app, rounds=20)
+        assert "CD8" not in rig.window.seeds, \
+            "a zero-weight channel asked for a window once it was shown"
+
+        # Phase 3 -- THE WEIGHT ALONE, the tick held still. The original
+        # assertion, unchanged: exactly one window for CD8, never a second.
         rig.domain.edit_channel_weight("CD8", 0.6)
         _settle(app, rounds=20)
         assert rig.window.seeds.count("CD8") == 1, \
@@ -1054,11 +1075,37 @@ def test_a_zero_channel_weight_is_never_given_an_intensity_window(app):
         assert "CD8" not in rig.mount.notice()
         assert "CD8" in {source.channel for source
                          in _last_submission(rig)[0].channels}
+
+        # Phase 4 -- THE NEW RULE. A positive weight is not enough: untick
+        # CD8 and it leaves the picture, asks for nothing more, and keeps
+        # the weight the user gave it.
+        seeds_before = list(rig.window.seeds)
+        _enable(rig, "CD8", visible=False)
+        _settle(app, rounds=20)
+        assert rig.window.seeds == seeds_before, \
+            "unticking asked for a mapping seed"
+        assert "CD8" not in {source.channel for source
+                             in _last_submission(rig)[0].channels}, \
+            "an unticked channel is still in the GPU submission"
+        assert rig.domain.channel_weight("CD8") == pytest.approx(0.6), \
+            "unticking rewrote the weight"
     finally:
         _close(rig)
 
 
 def test_a_zero_group_weight_is_never_given_an_intensity_window(app):
+    """A channel in a zero-weight group is not read, mapped or composed.
+
+    2026-09-23 DISPLAY-SEMANTICS RULING (G3.2d.1). The tick now means "is
+    this channel shown now" in Fusion exactly as in Overlay, so an unticked
+    channel contributes nothing whatever its weight. That makes the tick a
+    variable this gate has to hold still instead of ignore: it is moved in
+    a phase of its own, every original weight assertion is kept word for
+    word, and the new rule is asserted at the end. The tick could not simply
+    be set at the start, because SHOWING a channel legitimately asks for its
+    Intensity window on its own -- which would have silently destroyed the
+    zero-weight assertion this gate exists for.
+    """
     rig = _mount(app, visible=("CD3",), windows=("CD3", "DAPI"))
     try:
         _require_gpu(rig)
@@ -1069,15 +1116,50 @@ def test_a_zero_group_weight_is_never_given_an_intensity_window(app):
             "a channel in a zero-weight group asked for a window"
         assert "CD8" not in rig.mount.notice()
 
+        # Phase 2 -- THE TICK ALONE, the group still at 0.0. Showing a
+        # member of a zero-weight group buys no window: the seed below
+        # belongs to the GROUP WEIGHT alone.
+        _enable(rig, "CD8", visible=True)
+        _settle(app, rounds=20)
+        assert "CD8" not in rig.window.seeds, \
+            "a zero-weight group asked for a window once its member was shown"
+
+        # Phase 3 -- THE GROUP WEIGHT ALONE. Original assertion, unchanged.
         rig.domain.set_group_weight("markers", 1.0)
         _settle(app, rounds=20)
         assert rig.window.seeds.count("CD8") == 1, \
             "the group coming back must ask for the window once"
+
+        # Phase 4 -- THE NEW RULE: a restored group weight does not overrule
+        # the tick, and unticking does not rewrite the group weight.
+        seeds_before = list(rig.window.seeds)
+        _enable(rig, "CD8", visible=False)
+        _settle(app, rounds=20)
+        assert rig.window.seeds == seeds_before, \
+            "unticking asked for a mapping seed"
+        assert "CD8" not in {source.channel for source
+                             in _last_submission(rig)[0].channels}, \
+            "an unticked group member is still in the GPU submission"
+        assert rig.domain.effective_config()["groups"]["markers"][
+            "group_weight"] == pytest.approx(1.0), \
+            "unticking rewrote the group weight"
     finally:
         _close(rig)
 
 
 def test_a_zero_nucleus_weight_is_never_given_an_intensity_window(app):
+    """A zero-weight nucleus is not read, mapped or composed.
+
+    2026-09-23 DISPLAY-SEMANTICS RULING (G3.2d.1). The tick now means "is
+    this channel shown now" in Fusion exactly as in Overlay, so an unticked
+    channel contributes nothing whatever its weight. That makes the tick a
+    variable this gate has to hold still instead of ignore: it is moved in
+    a phase of its own, every original weight assertion is kept word for
+    word, and the new rule is asserted at the end. The tick could not simply
+    be set at the start, because SHOWING a channel legitimately asks for its
+    Intensity window on its own -- which would have silently destroyed the
+    zero-weight assertion this gate exists for.
+    """
     rig = _mount(app, visible=("CD3",), windows=("CD3", "CD8"))
     try:
         _require_gpu(rig)
@@ -1088,10 +1170,32 @@ def test_a_zero_nucleus_weight_is_never_given_an_intensity_window(app):
             "a zero-weight nucleus asked for an Intensity window"
         assert "DAPI" not in rig.mount.notice()
 
+        # Phase 2 -- THE TICK ALONE, the nucleus still at 0.0. Showing it
+        # buys no window: the seed below belongs to the WEIGHT alone.
+        _enable(rig, "DAPI", visible=True)
+        _settle(app, rounds=20)
+        assert "DAPI" not in rig.window.seeds, \
+            "a zero-weight nucleus asked for a window once it was shown"
+
+        # Phase 3 -- THE NUCLEUS WEIGHT ALONE. Original assertion, unchanged.
         rig.domain.set_nucleus_weight(1.0)
         _settle(app, rounds=20)
         assert rig.window.seeds.count("DAPI") == 1, \
             "the nucleus coming back must ask for the window once"
+
+        # Phase 4 -- THE NEW RULE, and the defect G3.2d.1 fixed: a weighted
+        # nucleus that is unticked is not drawn, and the model keeps its
+        # weight so the re-tick restores the picture.
+        seeds_before = list(rig.window.seeds)
+        _enable(rig, "DAPI", visible=False)
+        _settle(app, rounds=20)
+        assert rig.window.seeds == seeds_before, \
+            "unticking asked for a mapping seed"
+        assert "DAPI" not in {source.channel for source
+                              in _last_submission(rig)[0].channels}, \
+            "an unticked nucleus is still in the GPU submission"
+        assert rig.domain.effective_config()["nucleus"]["weight"] == \
+            pytest.approx(1.0), "unticking rewrote the nucleus weight"
     finally:
         _close(rig)
 

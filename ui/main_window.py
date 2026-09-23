@@ -1648,14 +1648,27 @@ class MainWindow(QMainWindow):
             wanted = [ch for ch in self.config.visible_channels()]
             weights = {ch: self._overlay_weight(ch) for ch in wanted}
         else:
+            # THE TICK DECIDES WHAT THIS FRAME SHOWS, in Fusion as in
+            # Overlay (user ruling, 2026-09-23). The effective config is
+            # still the model's whole answer -- weights, groups and the
+            # nucleus are read from it and never written by this -- and the
+            # ticks decide which of them this thumbnail and the published
+            # spec are made of. An unticked nucleus leaves as `("", 0.0)`,
+            # the shape the composer already reads as "no nucleus".
             effective = self._effective_fusion_config()
-            groups = {name: dict(data.get("channels") or {})
+            shown = set(self.config.visible_channels())
+            groups = {name: {ch: weight
+                             for ch, weight in (data.get("channels") or {}).items()
+                             if ch in shown}
                       for name, data in (effective.get("groups") or {}).items()}
             group_weights = {
                 name: float(data.get("group_weight", 1.0) or 0.0)
                 for name, data in (effective.get("groups") or {}).items()}
             nuc = effective.get("nucleus") or {}
             nuc_ch = str(nuc.get("channel", "") or "")
+            if nuc_ch and nuc_ch not in shown:
+                nuc_ch = ""
+                nuc = {"channel": "", "weight": 0.0}
             wanted = list({nuc_ch} if nuc_ch else set())
             for ch_weights in groups.values():
                 wanted.extend(ch_weights.keys())
@@ -4574,6 +4587,19 @@ class MainWindow(QMainWindow):
             wanted.append(nuc_ch)
         return wanted
 
+    def _fusion_display_contributors(self):
+        """The fusion contributors THIS FRAME shows (user ruling, 2026-09-23).
+
+        `_fusion_weighted_channels()` stays what it was: what the MODEL
+        requires, which is what a Save commits. This is the display view of
+        the same list -- the tick decides what is on screen in Fusion just
+        as it does in Overlay -- and it keeps no state of its own: it reads
+        the model's list and the display's ticks, both of which already
+        exist.
+        """
+        shown = set(self.config.visible_channels())
+        return [ch for ch in self._fusion_weighted_channels() if ch in shown]
+
     def _needed_channels(self):
         """The channels Step1 must hold pixels for, for the preview it is
         showing.
@@ -4592,7 +4618,11 @@ class MainWindow(QMainWindow):
         except Exception:
             return []
         if self._step1_preview_mode == STEP1_PREVIEW_FUSION:
-            needed = [ch for ch in self._fusion_weighted_channels()]
+            # WHAT IS SHOWN, not what the model requires: an unticked
+            # contributor -- the nucleus included -- is not part of this
+            # picture. The Save path below still asks
+            # `_fusion_weighted_channels()` for the model's own list.
+            needed = [ch for ch in self._fusion_display_contributors()]
         else:
             needed = [ch for ch in self.config.visible_channels()
                       if ch in available]

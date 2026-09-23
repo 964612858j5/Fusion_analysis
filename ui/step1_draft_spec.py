@@ -103,17 +103,47 @@ def build_spec(domain, state, mode=MODE_OVERLAY, scope=STEP1_SCOPE):
         return {"mode": mode, "weights": {}, "colors": {}, "mappings": {}}
 
     if mode == MODE_FUSION:
+        # THE TICK IS THE SAME COMMAND IN BOTH MODES (user ruling,
+        # 2026-09-23). It says what is SHOWN NOW; the fusion model keeps
+        # saying what the science is. So this branch reads the effective
+        # config whole -- groups, their weights and the nucleus are still
+        # the model's -- and then lets only the TICKED channels into THIS
+        # frame's spec. Nothing here writes to the model: unticking the
+        # nucleus leaves `effective_config()['nucleus']` exactly as it was,
+        # and re-ticking restores it from there, at its own weight, with no
+        # second copy of the answer kept anywhere.
+        #
+        # Before this, the branch copied the config straight through and an
+        # unticked DAPI still reached the GPU as `nucleus=('DAPI', 1.0)`:
+        # measured on the real machine, the frame was byte-identical before
+        # and after the tick.
         config = domain.effective_config()
+        shown = set(visible_channels(state, scope)) if state is not None else None
+
+        def _is_shown(channel):
+            # No display state at all (a headless spec) shows everything the
+            # model names, which is what every caller without a state got
+            # before this rule existed.
+            return shown is None or str(channel) in shown
+
         groups = {str(name): {str(ch): float(weight or 0.0)
-                              for ch, weight in (data.get("channels") or {}).items()}
+                              for ch, weight in (data.get("channels") or {}).items()
+                              if _is_shown(ch)}
                   for name, data in (config.get("groups") or {}).items()}
         group_weights = {
             str(name): float(data.get("group_weight", 1.0) or 0.0)
             for name, data in (config.get("groups") or {}).items()}
         nucleus_config = config.get("nucleus") or {}
-        nucleus = (str(nucleus_config.get("channel") or ""),
-                   float(nucleus_config.get("weight") or 0.0))
-        channels = fusion_channels(config)
+        nucleus_channel = str(nucleus_config.get("channel") or "")
+        nucleus_weight = float(nucleus_config.get("weight") or 0.0)
+        if nucleus_channel and not _is_shown(nucleus_channel):
+            # NOT A WEIGHT OF ZERO IN THE MODEL -- an absent contributor in
+            # THIS spec. `("", 0.0)` is the shape every consumer already
+            # reads as "no nucleus this frame".
+            nucleus = ("", 0.0)
+        else:
+            nucleus = (nucleus_channel, nucleus_weight)
+        channels = [ch for ch in fusion_channels(config) if _is_shown(ch)]
         spec = {"mode": MODE_FUSION, "groups": groups,
                 "group_weights": group_weights, "nucleus": nucleus}
     else:

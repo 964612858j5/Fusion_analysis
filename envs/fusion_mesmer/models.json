@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "models": {
+    "cellpose_cpsam": {
+      "engine": "cellpose",
+      "root": "~/.cellpose/models",
+      "files": [
+        {
+          "path": "cpsam",
+          "size": 1233587898,
+          "sha256": "e1440429eb384f95afe32bcba6510f90d518eaedc917ede549bed6804004abe2"
+        }
+      ]
+    },
+    "stardist_2D_versatile_fluo": {
+      "engine": "stardist",
+      "root": "~/.keras/models/StarDist2D/2D_versatile_fluo",
+      "files": [
+        {
+          "path": "2D_versatile_fluo.zip",
+          "size": 5320433,
+          "sha256": "4ad678d0758eed6e55625f1b5ae30771e59adb79f1239e09b9772eac8846c3dd"
+        },
+        {
+          "path": "2D_versatile_fluo_extracted/config.json",
+          "size": 1021,
+          "sha256": "836da16282c3e0db1ba2e58f377e977419887ace8c737ebde16a094d58d50f74"
+        },
+        {
+          "path": "2D_versatile_fluo_extracted/thresholds.json",
+          "size": 39,
+          "sha256": "5cd6aac6e923f8659b63a9e297485920d45a59dad35371ddb8b6ae4be398d805"
+        },
+        {
+          "path": "2D_versatile_fluo_extracted/weights_best.h5",
+          "size": 5771480,
+          "sha256": "42202bd269c8106782316f1a2c75afb3f5ffa65e525c2e155ee0ced3a95da349"
+        },
+        {
+          "path": "config.json",
+          "size": 1021,
+          "sha256": "836da16282c3e0db1ba2e58f377e977419887ace8c737ebde16a094d58d50f74"
+        },
+        {
+          "path": "thresholds.json",
+          "size": 39,
+          "sha256": "5cd6aac6e923f8659b63a9e297485920d45a59dad35371ddb8b6ae4be398d805"
+        },
+        {
+          "path": "weights_best.h5",
+          "size": 5771480,
+          "sha256": "42202bd269c8106782316f1a2c75afb3f5ffa65e525c2e155ee0ced3a95da349"
+        }
+      ]
+    },
+    "mesmer_multiplex_segmentation": {
+      "engine": "mesmer",
+      "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation",
+      "env_override": "DEEPCELL_MESMER_MODEL_PATH",
+      "files": [
+        {
+          "path": "keras_metadata.pb",
+          "size": 478538,
+          "sha256": "4f4e1e74ff4bd3e345e22fb2d08ae6480c87097c46f02a9f660a10a6999049ef"
+        },
+        {
+          "path": "saved_model.pb",
+          "size": 3781429,
+          "sha256": "c15a685d8e43b675ebca99e295e0dfebb3266f685a6659961ff86e0b72ce753b"
+        },
+        {
+          "path": "variables/variables.data-00000-of-00001",
+          "size": 104254725,
+          "sha256": "d965183a2099ad4af5b5f7e5bd7fb07f78cc6cf1bbea6b77e47498ca231b3845"
+        },
+        {
+          "path": "variables/variables.index",
+          "size": 24295,
+          "sha256": "a69941a894b867639472ae9b48bca287a6973e03224e58fef2bafa004a03ebfd"
+        }
+      ]
+    }
+  }
+}

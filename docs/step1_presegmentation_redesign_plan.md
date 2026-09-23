@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.10：V0 已执行，新增 7.10.8，记录执行结果、实测数据、执行中的发现（Cellpose 原地改写输入；conda 和 pip 同名包；子进程工作目录）和输入归属表。
 - v3.9：块 V 按用户裁定，由「每个引擎一个环境」改为「一个环境 `fusion_mesmer`，每个引擎一个子进程」；记录这个环境的实际改动和核验结果；写入经用户审定的 V0 范围（导出清单、照清单临时重建后删除、模型清单与断网验证、子进程原型放进仓库 `seg_runner/`、输入归属表）。
 - v3.8：按审核意见收口。R13 改为「按相同规则参与构造」；「只定标一次」改为「应用侧不额外拉伸，每个引擎只执行一套标准预处理」；Mesmer nuclei 的第二个通道为 0，并记录 Step2 现在给的是 fusion；多余定标改为「新流程不再调用」，旧参数保持原语义；搬迁和新行为分开验收；7.11.4 写明「读取区域相同」的定义，输入数组按方法构造后再比较；几处过强的说法改为待验证。
 - v3.7：用户裁定 Mesmer 的膜通道用 Fusion、CLAHE 保留。写定 Mesmer 的输入为 `[fusion 核通道, fusion]`，并列出 Step1 的两处修改：膜通道要 ÷ 65535，核通道要改为带权重的 fusion 核通道。新界面只提供 Fusion 当膜通道（已裁定）。
@@ -979,7 +980,7 @@ v3.1 起，各条的裁定结果标在原位，汇总见 7.9。「设计选择�
 
 #### 7.10.7 三个交付阶段
 
-**V0：运行环境验证**（范围已经用户审定，2026-09-23；**尚未启动，要等用户说「启动」**）
+**V0：运行环境验证**（范围已经用户审定；2026-09-23 已启动并执行，结果见 7.10.8，**待用户验收**）
 
 - **目标**：证明三件事：
   1. `fusion_mesmer` 能**照清单重建**；
@@ -1032,6 +1033,93 @@ v3.1 起，各条的裁定结果标在原位，汇总见 7.9。「设计选择�
 - 复用同一个 runner。保留 Step2 现有的切块、合并和恢复机制，只替换每个切块的推理调用。
 - 验证：参数语义一致；输入语义按 7.10.4 和用户的裁定执行；引擎身份和 Step1 保存的参数文件一致，不一致时拒绝运行。
 
+
+#### 7.10.8 V0 执行结果（2026-09-23，待用户验收）
+
+**新增文件**（都没有接入主程序）：
+- `envs/fusion_mesmer/`：
+  - `conda-linux-64.lock`：161 个包，带 md5；
+  - `requirements-pip.txt`：216 个包，精确版本；
+  - `environment.yml`；
+  - `models.json`；
+  - `README.md`：部署说明。
+- `scripts/`：
+  - `export_fusion_mesmer_env.sh`：导出环境清单；
+  - `rebuild_fusion_mesmer_env_check.sh`：照清单临时重建，比对后删除；
+  - `model_manifest.py`：写入或核对模型清单。
+- `seg_runner/`：
+  - `protocol.py`：消息格式、原子写盘；
+  - `engines.py`：三个引擎；
+  - `runner.py`：子进程入口；
+  - `client.py`：父进程侧的启动、派发、终态登记和清理；
+  - `selftest.py`：自检；
+  - `synthetic.py`：合成输入。
+- `tests/test_seg_runner.py`：13 条测试。
+
+**验收门的结果**：
+
+| # | 验收门 | 结果 |
+|---|---|---|
+| 1 | 照清单临时重建 | conda 部分 161 个包逐条相同；pip 的 216 个版本锁定全部满足；`pip check` 没有冲突。耗时 3 分 20 秒（包缓存是热的），体积 12 GB。重建出的环境里自检全部通过，13 条测试全部通过。**已删除。** |
+| 2 | 断网 | 在 `unshare -n` 里先确认连域名都解析不了，再跑自检：三个引擎都能加载模型，都能完成分割，退出码都是 0 |
+| 3 | 子进程结果和直接调用相同 | Cellpose、StarDist、Mesmer（nuclear-guided 的细胞和核）都**逐像素相同** |
+| 4 | Stop / 崩溃 / 关闭 | Stop 时，已完成的任务保留为 ok，其余登记为 cancelled，进程组清空；`kill -9` 后，所有任务登记为 failed，退出码 -9，不会卡住；正常关闭时退出码为 0，进程组清空；任务报错后，下一个任务照常运行 |
+| 5 | 不改现有的东西 | 没有改主程序和现有 worker；`fusion_test2`、`fusion_mesmer` 两个环境没有变化；`cufile.log` 始终是 4449898 B，SHA-256 `04c8a602…` |
+| 6 | 测试不是空断言 | 新测试在 HEAD 导出树上会报收集错误。另外做了两处**反向注入**，各自对应的测试都会失败：去掉 Cellpose 的输入拷贝；去掉「stdout 只走协议」的重定向。恢复代码后测试通过 |
+
+**全量回归**（2026-09-24，按附录的方法：170 个模块，每个模块单独一个进程，`fusion_test2`）：
+- 结果：**3745 passed / 17 failed / 1 skipped**。回归期间代码冻结，运行结束后逐个核对文件哈希，都没有变化。
+- 17 个失败中，有 16 条和附录基线的清单**逐条相同**，而且不涉及本块的任何路径。
+  - `git diff c9f80df HEAD` 显示，生产代码和基线相同，只有本计划文档有改动。
+  - 附录里提到的偶发失败 `test_loaded_channel_switch_is_cache_hit`，这一次通过了。
+- 第 17 条是**本块新引入的**：`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call`。
+  - 原因：这条测试的「直接调用」参照在 pytest 进程里导入 StarDist，而回归命令没有设置 `KERAS_BACKEND`。`fusion_test2` 里 Keras 默认用 torch 后端，csbdeep 会拒绝。这是测试自身的问题：主程序在 `workers/cellpose_worker.py:181` 设置了这个变量，引擎子进程也由客户端设置了。
+  - 修复：测试模块开头改为 `os.environ.setdefault("KERAS_BACKEND", "tensorflow")`。
+  - 修复后，按回归命令（清空 `KERAS_BACKEND`）重跑这个模块：`fusion_test2` 12 passed / 1 skipped（Mesmer 因为缺 deepcell 而跳过），`fusion_mesmer` 13 passed。
+  - 这次修改只改了这一个测试文件，其他模块不受影响，所以没有重跑整个回归。
+
+**实测数据**（384×384 的合成图）：
+
+| 引擎 | 设备 | 加载模型 | 一个任务 | 峰值内存 | 显存 |
+|---|---|---|---|---|---|
+| cellpose | cuda:0 | 6.1 s | 1.3 s | 1.8 GiB | 3.2 GiB（进程退出后释放） |
+| stardist | cpu | 2.5 s | 1.3 s | 0.7 GiB | 0 |
+| mesmer | cpu | 9.4 s | 3.1 s | 1.4 GiB | 0 |
+
+**执行中的发现**：
+1. **Cellpose 4.1.1 在 `eval` 时会原地改写多通道的输入数组**，改动幅度最大 0.04（在 [0,1] 的数据上）。同一个数组传进去两次，第二次分割的其实是被改过的图，结果就会不同。
+   - 单通道输入不受影响。
+   - 排查时我一度以为这是「第一次调用效应」或 GPU 不确定性，**这个判断是错的**。每次传入一份新拷贝，结果就完全确定。
+   - `seg_runner` 的做法是传拷贝。已核对：现有的 Step1（`cellpose_worker.py:577`）和 Step2（`segment_merge_worker.py:2008-2016`）在 `eval` 之后都**没有复用**那个数组，不受影响。
+   - 在 7.12 的共用输入构造里，这一条要作为约束写进去。
+2. **环境导出时 conda 和 pip 有同名包**：conda 的 `tzdata` 是时区数据库，pip 的 `tzdata` 是 Python 包。第一版导出脚本按名字区分两者，漏掉了 pip 的 `tzdata`，第一次重建因此 `pip check` 报错。改成按 pip 自己记录的安装者（`INSTALLER`）区分后，第二次重建全部通过。
+3. **子进程的工作目录不能是仓库**：CUDA 库会把 `cufile.log` 这类文件写到当前工作目录，所以引擎进程的工作目录改为系统临时目录。相应地，协议里的路径一律由客户端转成绝对路径。
+4. 在 `fusion_test2` 里跑 `test_seg_runner.py`，结果是 12 条通过、1 条跳过（Mesmer，因为那个环境里没有 deepcell）。
+
+**输入归属表**（交付第 5 项；这是 V1/C 和 V2 的新流程。旧参数按 7.11.5 保持原有语义）：
+
+**所有方法都由应用侧完成的公共步骤**，按顺序：
+1. `read_bbox = patch ± HALO`，并与 ROI 的 bbox 取交集（7.11.3）；
+2. fusion：committed 窗口（min/max/gamma）和权重（R13），`fuse_fullres` 或 fused.zarr；
+3. 量化为 uint16；
+4. 多边形以外置 0；
+5. ÷ 65535 得到 `F`；
+6. 按下表构造数组，交给引擎（**必须交拷贝**，见发现 1）；
+7. 引擎返回之后：按 Step2 生效的归属代码（7.11.3）裁出中央区域，重新编号，统计细胞数。
+
+| 方法 | 输入（应用侧构造） | dtype / 值域 | 定标（引擎侧，一套、一次） | 推理参数 | 扩张 | 其他后处理 | 输出 |
+|---|---|---|---|---|---|---|---|
+| Cellpose whole-cell | `stack([F0, F0, F1], -1)`，HWC，`channel_axis=-1` | float32 [0,1] | `eval(normalize=True)`：逐通道取 1–99 百分位（`cellpose/models.py:274-292`） | diameter、flow、cellprob、min_size | — | 在 `eval` 内部完成（min_size） | 细胞 |
+| Cellpose nuclei | `F1`，HW | 同上 | 同上 | 同上 | — | 同上 | 核 |
+| Cellpose nuclei + expansion | `F1`，HW | 同上 | 同上 | 同上 | **引擎侧**：`expand_labels(distance)`，同时**保留扩张前的核 mask** | 同上 | 细胞（扩张后）、核（扩张前） |
+| StarDist nuclei | `F1`，HW | 同上 | csbdeep `normalize(1, 99.8)`，只做一次（`seg_runner/engines.py`） | prob、nms（None 时用模型默认值） | — | — | 核 |
+| StarDist nuclei + expansion | `F1`，HW | 同上 | 同上 | 同上 | **引擎侧**：同 Cellpose expansion | — | 细胞、核 |
+| Mesmer whole-cell | `stack([F1, F0], -1)`，HW2 | 同上 | DeepCell 默认预处理：99.9% 截断、rescale、CLAHE 128（`mesmer.py:62-70`） | image_mpp、compartment=whole-cell；P1 的阈值给 whole_cell kwargs | — | **引擎侧**：`postprocess_mask`（min_size 等） | 细胞 |
+| Mesmer nuclei | `stack([F1, 0], -1)` | 同上 | 同上 | compartment=nuclear；P1 的阈值给 nuclear kwargs | — | 同上 | 核 |
+| Mesmer nuclear-guided | `stack([F1, F0], -1)` | 同上 | 同上，两次调用（O2） | 细胞用 P1 的阈值，核用默认值（P2） | — | 同上 | 细胞、核（`paired: false`） |
+
+- **原型的边界**：扩张和 `postprocess_mask` 目前还**没有**写进 `seg_runner`（V0 只覆盖推理）。按上表，它们放在引擎侧，由 V1/C 实现，届时由 7.10.6 的逐像素对比来把关。
+- 表中「引擎侧」的步骤只在引擎里做，「应用侧」的步骤只在应用后台任务里做，两边都不能重复做（7.10.4）。
 
 ### 7.11 模型输入契约（R10–R12；V1/C 和 V2 接入之前必须写定）
 

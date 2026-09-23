@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import math
 import pathlib
 import time
 from dataclasses import dataclass, field
@@ -93,6 +94,29 @@ class ViewportSnapshot:
     logical_size: Tuple[int, int]
     device_pixel_ratio: float = 1.0
     repaint_request: Optional[Any] = None
+    #: THE ANALYSIS REGION, in the same `(x0, x1, y0, y1)` level-0 order as
+    #: `world_rect` -- not the source table's own `(y0, y1, x0, x1)`; the
+    #: owner converts once, here it is one rectangle in one order.
+    #:
+    #: Why the final output needs it: a coarse plane is drawn over the whole
+    #: world area of every texel it has, and a texel whose block only PARTLY
+    #: meets the region is a real sample, so it paints up to a whole block
+    #: beyond the region's edge (measured: 22 640 opaque pixels outside a
+    #: 600x600 region at a 64-pixel stride). The region is a display input,
+    #: not a source rule: `None` means a whole slide and clips nothing.
+    roi_world_rect: Optional[Tuple[float, float, float, float]] = None
+    #: THE DRAWN SHAPE, in level-0 world coordinates as `(x, y)` points --
+    #: the order Step0 stores `polygon_fullres` in. The rectangle above is
+    #: its bounding box and stays in force; this narrows the picture to what
+    #: the user actually drew, which for a real ROI is a good deal less: the
+    #: nine-point region from the 2026-09-22 machine covers 79.4 % of its
+    #: own bbox, and a raw channel (no Step0 polygon mask) filled the other
+    #: 20.6 %. `None` keeps G3.2c's rectangle behaviour exactly.
+    #:
+    #: FIRST VERSION: one simple polygon, no holes. Self-intersecting or
+    #: multi-ring input is not supported and is not silently approximated --
+    #: see `sanitize_roi_polygon`.
+    roi_polygon_world: Optional[Tuple[Tuple[float, float], ...]] = None
 
     @property
     def physical_size(self) -> Tuple[int, int]:
@@ -243,6 +267,87 @@ class _TextureLru:
         }
 
 
+#: How far a polygon's own bounds may sit from the ROI rectangle before the
+#: pair is refused. They come from the same Step0 write, where the bbox IS
+#: the polygon's bounding box, so this is a rounding allowance, not a fit.
+ROI_POLYGON_BOUNDS_TOLERANCE = 1.0
+
+
+def sanitize_roi_polygon(points, roi_rect):
+    """`(polygon, error)` -- the polygon to clip with, or why there is none.
+
+    The polygon and the rectangle must describe the SAME region: Step0
+    writes `bbox_fullres` as the bounding box of `polygon_fullres`, so a
+    polygon whose own bounds do not match the rectangle in force is not this
+    ROI's -- it is a leftover from another one, and stapling it onto this
+    source would clip the picture to the wrong shape.
+
+    A polygon that is present but unusable returns `(None, reason)`. The
+    caller must NOT treat that as "no polygon was given": the rectangle
+    still clips, and the reason is reported rather than swallowed.
+    """
+    if points is None:
+        return None, ""
+    try:
+        cleaned = [(float(x), float(y)) for x, y in points]
+    except (TypeError, ValueError):
+        return None, "polygon points are not (x, y) numbers"
+    if len(cleaned) < 3:
+        return None, f"polygon has {len(cleaned)} points, need at least 3"
+    if not all(math.isfinite(v) for point in cleaned for v in point):
+        return None, "polygon contains a non-finite coordinate"
+    if roi_rect is not None:
+        bx0, bx1, by0, by1 = (float(v) for v in roi_rect)
+        xs = [x for x, _y in cleaned]
+        ys = [y for _x, y in cleaned]
+        tol = ROI_POLYGON_BOUNDS_TOLERANCE
+        if (abs(min(xs) - bx0) > tol or abs(max(xs) - bx1) > tol
+                or abs(min(ys) - by0) > tol or abs(max(ys) - by1) > tol):
+            return None, (
+                f"polygon bounds (x {min(xs)}..{max(xs)}, y {min(ys)}..{max(ys)}) "
+                f"are not this ROI's rectangle (x {bx0}..{bx1}, y {by0}..{by1})")
+    return tuple(cleaned), ""
+
+
+def roi_scissor_box(view_rect, roi_rect, size):
+    """The output pixels whose CENTRE lies inside `roi_rect`.
+
+    `(x, y, width, height)` in GL framebuffer pixels (origin bottom-left),
+    or `None` when there is nothing to clip to. A pixel is kept when its
+    centre is inside the region, which is the same rule the rest of the
+    pipeline uses for "which sample is this" -- no pixel is half-kept and
+    the edge cannot drift with the camera, because it is recomputed from
+    the world rectangle every submission.
+
+    The vertical flip is the shader's: `v_screen_uv.y = 0` is the BOTTOM of
+    the framebuffer and maps to `world.y = view_rect.w` (see
+    `ui/shaders/step1_gpu.frag`, PASS_SOURCE), so world y grows downward on
+    screen.
+    """
+    if roi_rect is None:
+        return None
+    vx0, vx1, vy0, vy1 = (float(v) for v in view_rect)
+    bx0, bx1, by0, by1 = (float(v) for v in roi_rect)
+    width, height = int(size[0]), int(size[1])
+    if width <= 0 or height <= 0 or vx1 <= vx0 or vy1 <= vy0:
+        return (0, 0, 0, 0)
+    if bx1 <= bx0 or by1 <= by0:
+        return (0, 0, 0, 0)
+    step_x = (vx1 - vx0) / width
+    step_y = (vy1 - vy0) / height
+    # columns: centre = vx0 + (i + 0.5) * step_x
+    first_col = math.ceil((bx0 - vx0) / step_x - 0.5)
+    stop_col = math.ceil((bx1 - vx0) / step_x - 0.5)
+    # rows, from the bottom: centre = vy1 - (j + 0.5) * step_y
+    first_row = math.floor((vy1 - by1) / step_y - 0.5) + 1
+    stop_row = math.floor((vy1 - by0) / step_y - 0.5) + 1
+    x = max(0, min(width, first_col))
+    right = max(0, min(width, stop_col))
+    y = max(0, min(height, first_row))
+    top = max(0, min(height, stop_row))
+    return (x, y, max(0, right - x), max(0, top - y))
+
+
 def _as_name(value) -> int:
     if isinstance(value, (tuple, list, np.ndarray)):
         return int(value[0])
@@ -271,6 +376,18 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._programs: Dict[str, int] = {}
         self._uniforms: Dict[str, Dict[str, int]] = {}
         self._vao = 0
+        #: The polygon mask's own GL names (G3.2c.1). Created on first use,
+        #: destroyed with every other GL name this layer owns.
+        self._mask_program = 0
+        self._mask_vao = 0
+        self._mask_vbo = 0
+        #: The stencil the mask writes into. It belongs to the `final`
+        #: target and is recreated whenever that target is.
+        self._stencil_rbo = 0
+        #: Why the last submission's polygon was not used, "" when it was.
+        #: A refused polygon is never silently the same as no polygon: this
+        #: is set, `submit()` reports it, and the rectangle still clips.
+        self._roi_polygon_error = ""
         self._targets: Dict[str, Tuple[int, int]] = {}
         self._target_size: Optional[Tuple[int, int]] = None
         self._initialized = False
@@ -357,6 +474,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 "cpu_submit_ms": (time.perf_counter() - submit_started) * 1000.0,
                 "cache": self._cache.stats(),
                 "physical_size": viewport_snapshot.physical_size,
+                "roi_scissor": self._submission.get("roi_scissor"),
+                "roi_polygon_points": self._submission.get("roi_polygon_points", 0),
+                "roi_polygon_error": self._submission.get("roi_polygon_error", ""),
             }
             if callable(viewport_snapshot.repaint_request):
                 viewport_snapshot.repaint_request()
@@ -405,6 +525,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         return {"already_disposed": False, "raw_textures_remaining": len(self._cache.records),
                 "transient_targets_remaining": len(self._targets), "cache_bytes": self._cache.bytes,
                 "threads_created": 0}
+
+    def roi_polygon_error(self) -> str:
+        """Why the last submission's ROI polygon was refused, or ""."""
+        return self._roi_polygon_error
 
     def cache_stats(self) -> Dict[str, int]:
         return self._cache.stats()
@@ -545,7 +669,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             weight = min(1.0, float(display.weights.get(channel, 0.0) or 0.0))
             self._contribute("accum", weight, display.colors.get(channel, (1.0, 1.0, 1.0)), 0,
                              blend_equation=(gl.GL_FUNC_ADD, gl.GL_MAX))
-        self._finalize("accum", "final", "final_overlay")
+        self._finalize("accum", "final", "final_overlay", viewport)
 
     def _render_fusion(self, groups: Mapping[str, Mapping[str, ChannelSource]], nucleus_source: Optional[ChannelSource],
                        display: DisplaySnapshot, viewport: ViewportSnapshot) -> None:
@@ -565,7 +689,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             self._render_signal(nucleus_source, display.mappings[nucleus_channel], viewport)
             self._contribute("fusion", min(1.0, max(0.0, float(nucleus_weight))), (0.0, 0.0, 1.0), 2,
                              blend_equation=(gl.GL_MAX, gl.GL_MAX))
-        self._finalize("fusion", "final", "final_fusion")
+        self._finalize("fusion", "final", "final_fusion", viewport)
 
     def _render_signal(self, source: ChannelSource, mapping: Tuple[float, float, float],
                        viewport: ViewportSnapshot) -> None:
@@ -616,16 +740,77 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         gl.glUseProgram(0)
         gl.glDisable(gl.GL_BLEND)
 
-    def _finalize(self, source: str, target: str, program: str) -> None:
+    def _finalize(self, source: str, target: str, program: str,
+                  viewport: Optional[ViewportSnapshot] = None) -> None:
         gl = self._gl
         self._bind_target(target)
         gl.glDisable(gl.GL_BLEND)
-        gl.glUseProgram(self._programs[program])
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._targets[source][1])
-        self._uniform1i(program, "u_input", 0)
-        self._draw()
-        gl.glUseProgram(0)
+        # THE ANALYSIS REGION IS A DISPLAY BOUNDARY, applied once, here, to
+        # whatever the passes above produced. Everything outside it is
+        # CLEARED rather than left over: the clear happens with the scissor
+        # off, the draw with it on, so a pixel outside the region ends this
+        # submission at alpha 0 no matter what was in the target before.
+        scissor = None
+        polygon = None
+        polygon_error = ""
+        if viewport is not None:
+            scissor = roi_scissor_box(viewport.world_rect,
+                                      viewport.roi_world_rect,
+                                      self._target_size)
+            polygon, polygon_error = sanitize_roi_polygon(
+                viewport.roi_polygon_world, viewport.roi_world_rect)
+            if polygon_error:
+                # NOT SILENTLY "no polygon": a polygon was offered and
+                # refused, so the reason travels with the submission and the
+                # rectangle still clips. The picture is bounded, and the
+                # caller can see that the shape it asked for was not used.
+                self._roi_polygon_error = polygon_error
+        self._submission["roi_polygon_error"] = polygon_error
+        if not polygon_error:
+            self._roi_polygon_error = ""
+        self._submission["roi_polygon_points"] = 0 if polygon is None else len(polygon)
+        if scissor is not None or polygon is not None:
+            gl.glDisable(gl.GL_SCISSOR_TEST)
+            gl.glDisable(gl.GL_STENCIL_TEST)
+            gl.glStencilMask(0xFF)
+            gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+            gl.glClearStencil(0)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
+            if scissor is not None and (scissor[2] <= 0 or scissor[3] <= 0):
+                # The region is not on screen at all. The cleared target IS
+                # the answer; drawing a zero-sized scissor is undefined.
+                # THE EARLY RETURN RESTORES STATE TOO -- it used to leave the
+                # stencil write mask at 0, which the state gate caught.
+                self._submission["roi_scissor"] = tuple(scissor)
+                self._restore_clip_state()
+                _check_gl(gl, f"G1 {program} roi clip")
+                return
+        # FROM THE FIRST STATE CHANGE ONWARDS the restore is in a `finally`:
+        # a shader error, a lost context or a failed draw -- in the mask as
+        # much as in the composition -- must not hand the next frame, or
+        # `paintGL`'s blit, a scissor, a stencil test or a closed colour
+        # mask that nobody asked for. (G3.2d review: the first version
+        # started the `try` after the mask had already been written.)
+        try:
+            if scissor is not None or polygon is not None:
+                if polygon is not None:
+                    self._write_polygon_stencil(polygon, viewport)
+                else:
+                    gl.glStencilMask(0x00)
+                if scissor is not None:
+                    gl.glEnable(gl.GL_SCISSOR_TEST)
+                    gl.glScissor(*scissor)
+            gl.glUseProgram(self._programs[program])
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._targets[source][1])
+            self._uniform1i(program, "u_input", 0)
+            self._draw()
+            gl.glUseProgram(0)
+        finally:
+            if scissor is not None or polygon is not None:
+                self._restore_clip_state()
+                if scissor is not None:
+                    self._submission["roi_scissor"] = tuple(scissor)
         _check_gl(gl, f"G1 {program}")
 
     def _draw(self) -> None:
@@ -643,6 +828,85 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             raise self._init_error or Step1GpuLayerError("G1 Qt OpenGL widget is not initialized")
         if QtGui.QOpenGLContext.currentContext() is not self.context():
             raise Step1GpuLayerError("G1 GL operation requires its exact Qt context current")
+
+    def _ensure_mask_resources(self) -> None:
+        """The polygon program and its vertex buffer, created once.
+
+        Separate from the five composition programs because it is the only
+        one with real vertex input: `step1_gpu.vert` builds its fullscreen
+        triangle from `gl_VertexID` and cannot carry a polygon.
+        """
+        if self._mask_program:
+            return
+        gl = self._gl
+        vertex = (_SHADER_DIR / "step1_gpu_mask.vert").read_text(encoding="utf-8")
+        fragment = (_SHADER_DIR / "step1_gpu_mask.frag").read_text(encoding="utf-8")
+        self._mask_program = self._link_program(vertex, fragment)
+        self._uniforms["mask"] = {}
+        self._programs["mask"] = self._mask_program
+        self._mask_vao = _as_name(gl.glGenVertexArrays(1))
+        self._mask_vbo = _as_name(gl.glGenBuffers(1))
+        gl.glBindVertexArray(self._mask_vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._mask_vbo)
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        gl.glBindVertexArray(0)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+        _check_gl(gl, "G1 polygon mask setup")
+
+    def _restore_clip_state(self) -> None:
+        """Hand the GL state back exactly as it was found.
+
+        Every clipping path goes through here -- including the one that
+        returns early because the region is off screen, which is where a
+        stencil write mask of 0 was once left behind for the next frame.
+        """
+        gl = self._gl
+        gl.glDisable(gl.GL_SCISSOR_TEST)
+        gl.glDisable(gl.GL_STENCIL_TEST)
+        gl.glStencilMask(0xFF)
+        gl.glStencilFunc(gl.GL_ALWAYS, 0, 0xFF)
+        gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_KEEP)
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+
+    def _write_polygon_stencil(self, polygon, viewport) -> int:
+        """Stamp the polygon into the stencil buffer. Returns its point count.
+
+        EVEN-ODD, NOT A SOLID FAN. A triangle fan over a concave polygon
+        covers area outside the shape as well; with `GL_INVERT` on the low
+        bit, every pixel ends with bit 0 set exactly where an odd number of
+        fan triangles covered it -- which is the inside of the polygon,
+        concave or not, clockwise or anticlockwise.
+
+        The colour mask is off while this runs, so the fan contributes no
+        pixels of its own.
+        """
+        gl = self._gl
+        self._ensure_mask_resources()
+        data = np.asarray(polygon, dtype=np.float32).reshape(-1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._mask_vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+
+        gl.glEnable(gl.GL_STENCIL_TEST)
+        gl.glStencilMask(0x01)
+        gl.glStencilFunc(gl.GL_ALWAYS, 0, 0x01)
+        gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_INVERT)
+        gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE)
+        gl.glDisable(gl.GL_BLEND)
+        gl.glUseProgram(self._mask_program)
+        self._uniform4("mask", "u_view_rect", viewport.world_rect)
+        gl.glBindVertexArray(self._mask_vao)
+        gl.glDrawArrays(gl.GL_TRIANGLE_FAN, 0, len(polygon))
+        gl.glBindVertexArray(0)
+        gl.glUseProgram(0)
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+        # ...and from here on, draw only where the polygon put bit 0.
+        gl.glStencilMask(0x00)
+        gl.glStencilFunc(gl.GL_EQUAL, 0x01, 0x01)
+        gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_KEEP)
+        self._submission["pass_count"] = int(self._submission.get("pass_count", 0)) + 1
+        return len(polygon)
 
     def _compile_programs(self) -> None:
         vertex = (_SHADER_DIR / "step1_gpu.vert").read_text(encoding="utf-8")
@@ -705,6 +969,23 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, texture, 0)
             if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
                 raise Step1GpuLayerError(f"G1 {name} framebuffer incomplete")
+            if name == "final":
+                # THE POLYGON MASK LIVES HERE, and only here: the transient
+                # float targets never need it, and a stencil on all five
+                # would be four buffers nobody reads. Recreated with the
+                # targets, so it always matches the physical output.
+                stencil = _as_name(gl.glGenRenderbuffers(1))
+                gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, stencil)
+                gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_STENCIL_INDEX8,
+                                         size[0], size[1])
+                gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER,
+                                             gl.GL_STENCIL_ATTACHMENT,
+                                             gl.GL_RENDERBUFFER, stencil)
+                gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, 0)
+                if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
+                    raise Step1GpuLayerError(
+                        "G1 final framebuffer incomplete with its stencil")
+                self._stencil_rbo = stencil
             self._targets[name] = (fbo, texture)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
         self._target_size = size
@@ -747,10 +1028,14 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if self._gl is None:
             self._targets.clear()
             self._target_size = None
+            self._stencil_rbo = 0
             return
         for fbo, texture in self._targets.values():
             self._gl.glDeleteFramebuffers(1, [fbo])
             self._gl.glDeleteTextures([texture])
+        if self._stencil_rbo:
+            self._gl.glDeleteRenderbuffers(1, [self._stencil_rbo])
+            self._stencil_rbo = 0
         self._targets.clear()
         self._target_size = None
 
@@ -762,6 +1047,13 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if self._vao:
             self._gl.glDeleteVertexArrays(1, [self._vao])
             self._vao = 0
+        if self._mask_vao:
+            self._gl.glDeleteVertexArrays(1, [self._mask_vao])
+            self._mask_vao = 0
+        if self._mask_vbo:
+            self._gl.glDeleteBuffers(1, [self._mask_vbo])
+            self._mask_vbo = 0
+        self._mask_program = 0          # deleted below with every program
         for program in self._programs.values():
             self._gl.glDeleteProgram(program)
         self._programs.clear()

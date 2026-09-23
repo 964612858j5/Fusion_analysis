@@ -141,6 +141,71 @@ Odon 参考版本：本地 `/sda1/Fusion/analysis_pipline/odon`，`b01faef010b14
 
 **退出门：** 真实 Step0 CD22→cuCIM→Save→Step1 轨迹中 GUI 事件持续响应；来源切换全程不显示旧 CD22/raw；当前视口校正信号到达时间和各分段耗时有真实记录；ROI/数据集快速变化、关闭和 CPU fallback 不泄漏线程/句柄。
 
+#### G3.2d — G3 / G3.2 最终收口（复核 + 回归 + 真机清单）
+
+**状态：复核与回归完成，等待用户对最终真机清单逐项反馈；G3 未关闭，成果未提交、未 push。G4 未启动。**
+起止 HEAD 同为 `b50e392`。本块**不实施新架构**。
+**复核（G3.2c/c.1 生产 diff `+335/-4`，两个文件）：** ROI 身份与 polygon 不错配
+（多边形包围盒必须等于当前 ROI 矩形，否则拒绝并上报）；A→B→无 ROI 不留旧 mask（每次清颜色+stencil）；
+空交集、resize、销毁路径均已收口。**复核中发现并修复一处错误路径缺口**：
+状态恢复原本在 draw 之后、`try` 起点晚于 mask 写入，mask 或 draw 抛错会把 scissor/stencil/颜色写掩码
+留给下一帧与 `paintGL` 的 blit；现改为从第一次状态改动起即在 `try/finally` 内，
+新增注入 `_draw` 失败的门（修复前红）。另新增**CPU fallback 限制门**，
+把"本块不覆盖 CPU 多边形裁切"写成可执行事实。
+**回归（强制 GPU，renderer `NVIDIA GeForce RTX 4090/PCIe/SSE2`，`-rs` 确认无 skip）：**
+十模块 **`170 passed / 0 failed / 0 skipped`**；另 compose 21、fusion_core 35、overlay_preview 55、
+channel_state_contract 55、live_controls 22、display_mapping_commit 16、coarse_plane 24、
+step0_coarse_plane_write 12、corrected_reduction 74、source_table 42、patch_selector_menu 32、
+shared_camera 15、camera_stability 6、geometry_sync 5、viewer_takeover 20、handoff_contract 39、
+handoff_invalidation 12、dataset_switch 5、viewer_host 23、viewer_binding 13、composed_layer 13、
+display_isolation 21、navigator_policy 13、shared_navigator 6、to_step2_handoff 5 —— 全部 passed，
+**本轮无间歇失败**，未为求全绿而改范围外文件、降断言或删门。
+**Blocker（未解决）：** G3.2b.5A 画 Patch 晃动，真机录像证实存在、台架未复现、根因未定，诊断线仍暂停。
+**Advisory：** Step1 入口 GUI 心跳曾录得 1712 ms（用户主观验收为不到 1 秒）；
+多边形首版只支持单个无孔洞简单多边形、按像素中心判定、与 Step0 `cv2.fillPoly` 可能差约一个像素；
+CPU fallback 不做多边形裁切；持久化 coarse 只对带 `source_identity` 的新产物生效，旧产物仍走运行时归约；
+用户切片上 `TileScheduler.shutdown()` 的 join 由 1.3 ms 升至 329 ms，原因未查清。
+**最终真机清单（只列尚未逐项验收的）：** Overlay/Fusion 切换、Intensity 与权重（含显式零权）、
+首次启用新 cuCIM 通道一次完整清晰、P8 以后的 Patch 选择与空降/热返回、
+离开返回与换 ROI 再 Save 后边界跟随、关闭与退出、（可选）GPU 不可用时的 CPU 回退显示。
+**回退：** 不传 `roi_polygon_world` 即回到矩形裁切，不传 `roi_world_rect` 即回到全片行为；
+两个生产文件可整体回到 `b50e392`。
+详见 `docs/benchmarks/step1_gpu_demo/2026-09-22_g3_2d_report.md`。
+
+#### G3.2c.1 — 按手绘 ROI 多边形裁切 GPU 最终显示（用户 2026-09-22 明确授权的扩围）
+
+**状态：已实施，自动化与真实显示器取证完成，等待用户真机验收；不得记为通过。**
+**起因（已定位，非猜测）：** G3.2c 的 bbox 裁切在真机探针里已证明生效
+（`state_005.json`：backend `gpu`，bbox 外 FBO 与可见 Viewer 像素皆 0）；
+用户看到的是**手绘多边形之外、外接矩形之内**的 raw DAPI——那份 ROI 的多边形只占 bbox 的 **79.4 %**，
+而 raw/original 通道在 `viewer/step1_source.py` 里只按 bbox 裁（全文件无多边形逻辑），
+corrected 通道则由 Step0 写盘时以多边形掩膜置 0。
+**做法：** `ViewportSnapshot.roi_polygon_world`（`(x,y)` 世界点，与 Step0 的 `polygon_fullres` 同序）；
+`sanitize_roi_polygon()` 要求**多边形包围盒等于当前 ROI 矩形**（容差 1 px），
+旧 ROI 的多边形不可能贴到新来源上；`final` FBO 挂 stencil（跟随物理尺寸、检查完整性、随目标重建/释放）；
+**三角扇 + `GL_INVERT` 奇偶填充**（凹缺口留空），新增最小 `step1_gpu_mask.vert/.frag`
+（既有 `step1_gpu.vert` 只能产生固定全屏三角形）；finalize 同时受 stencil 与 bbox scissor 限制；
+`_restore_clip_state()` 在**所有路径（含离屏提前返回）**归还 scissor/stencil/颜色写掩码；
+**坏多边形不被当成"没有多边形"**——`roi_polygon_error` 明确上报，矩形裁切继续生效。
+**真实显示器证据**（`DISPLAY=:1`、RTX 4090、用户 20:20 那份 9 点 ROI、raw DAPI）：
+多边形内屏幕像素 6 752，**FBO 内 6 752 全覆盖、外 0**，**GL widget 合成外 0**，**窗口截图外 0**。
+**门：** 新增 `tests/test_step1_gpu_roi_polygon_clip.py` **22 条**（凹缺口、顺/逆时针、
+coarse/fine/混合、raw DAPI / Overlay / Fusion、平移/缩放/非整数、DPR 1.0/1.5/2.0、resize、
+离屏、A→B→清除无残留、只有 bbox 时维持 G3.2c、坏多边形被拒、GL 状态归还×2、用户真实 9 点 ROI），
+产品路径门再加一条（多边形从 handoff 到 GPU 逐点相同）。
+**本轮修掉三处：** 离屏提前返回漏还 `glStencilMask`（**代码真 bug**，被状态门抓到）；
+产品路径门里一次"补提交"测的是产品从未画过的帧；**offscreen 的 `grabFramebuffer()` 不可信**
+（同一夹具一次全 496 958 像素非黑、一次 60 %，而 FBO 两次都精确等于区域）——
+故离屏门只断言 FBO，合成证据改由真实显示器提供。
+**回归：** 强制 GPU 十模块 **`169 passed / 0 failed / 0 skipped`**；
+shared_camera 15、viewer_host 23、viewer_binding 13、handoff_invalidation 12、
+display_isolation 21、composed_layer 13、dataset_switch 5 全 passed。
+**限制：** 首版只支持**单个无孔洞简单多边形**；边界按**像素中心**判定、不羽化，
+与 Step0 的 `cv2.fillPoly` 掩膜**可能相差约一个像素**（门用膨胀/腐蚀一像素的严格内外判定）；
+**CPU fallback 未改**，其多边形行为不在本块承诺内。
+`cufile.log` 零增长；真实项目只读；未暂存、未提交、未 push。
+详见 `docs/benchmarks/step1_gpu_demo/2026-09-22_g3_2c_1_report.md`。
+
 #### G3.2c — ROI bbox 的 GPU 精确裁切（G3.2b 通过后，约 0.5 天）
 
 **工作：** 将既有 level-0 `roi_bbox_fullres` 作为不可变显示参数交给 GPU 最终输出，按世界坐标裁切 Overlay/Fusion 的所有通道，包括 DAPI。粗层可以继续使用既有有效样本归约，但 coarse 单元跨过 bbox 的部分不得上屏。ROI 外 alpha 必须为 0；不采用“全片显示 DAPI、其他通道 ROI-only”的退让方案。
@@ -150,6 +215,84 @@ Odon 参考版本：本地 `/sda1/Fusion/analysis_pipline/odon`，`b01faef010b14
 **边界：** 本块只承诺现有产品契约中的矩形 `roi_bbox_fullres`。任意多边形精确裁切不在本块范围，若提出须重新裁定。
 
 **退出门：** 在粗层、fine、二者混合、Overlay 与 Fusion 下，bbox 内边缘像素保持原值，bbox 外 DAPI 和 marker 均透明；相邻 tile、跨 level、平移缩放后边界不漂移。
+
+**状态（2026-09-22 20:20 真机探针）：bbox 裁切已在真机验证生效；用户看到的越界来自
+多边形与外接矩形之差，属本块范围之外，等待扩围裁定。G3.2c 仍不记为通过。**
+用户在看到越界当下按 Ctrl+Alt+R，`/tmp/g32c_probe/state_005.json`（20:20:50，`trigger=manual`）：
+backend **gpu**；来源 ROI `(640, 11104, 4320, 16992)`，与他 20:20:18 刚存的
+`roi_20260922_202018_5715` 逐值相同；`roi_world_rect (4320,16992,640,11104)`、
+`roi_scissor (124,20,678,567)`、视口 `1122×645` DPR 1.0；
+**FBO 框外不透明像素 0**、**可见 Viewer 框外非黑像素 0**；
+两张 PNG 的着色范围（行 58–624、列 124–801）与 bbox 像素范围（58.3–625.0 / 123.6–801.6）
+**逐边吻合**；GL layer 与 host/viewport/graphics_view 几何完全重合，下方无图层可画。
+**根因：** 那一帧通道集合始终是 `['DAPI']`，而该项目**没有任何 corrected 通道**；
+corrected 通道由 Step0 用多边形掩膜置 0（`search_ctrl.py:2424`），
+**raw/original 通道在 `viewer/step1_source.py` 里只按 bbox 裁，全文件没有多边形逻辑**。
+用户这次的 ROI 是 9 点不规则多边形，面积只占外接矩形 **79.4 %**，
+于是 DAPI 铺满整个矩形、以四条直边收尾，多出的约 20.6 %（约 2 700 万 level-0 像素）
+正是他看到的"框外图像"。
+**本块按规格只裁矩形，故不改代码。最小扩围建议：** 在 `ui/step1_gpu_layer.py` 给 final 目标加
+stencil 附件、把多边形写入 stencil，在 `_finalize()` 同一 pass 打开 `GL_STENCIL_TEST`
+（**无需改 shader / 新 uniform**），多边形经 `ViewportSnapshot` 世界坐标传入，
+mount 从既有 `_active_roi["polygon_fullres"]` 只读；只影响显示边界，不动科学来源与 CPU fallback，
+不传多边形即回退。**未实施，等待裁定。**
+
+**（下面是此前两轮的记录，保留备查）**
+**状态（2026-09-22 晚更新）：真机仍然失败，本块不得记为通过。**
+用户完全重启后：Step0 Full Image 模式画 ROI → Step1 仍在 ROI 外接矩形四条直边之外看到图像
+（非多边形轮廓）。本轮沿真实公开路径逐环取证（用户自己 18:47 那次 Save 的产物，
+只读符号链接 + JSON 副本，真实项目未被写入）：
+manifest `roi_only` / `ROI_1` / `[0, 11520, 4672, 20992]` → `_active_roi` → `binding.roi_bbox()`
+→ 活 stack 的 `source_table.roi_bbox()` → `mount._gpu_roi_world_rect (4672,20992,0,11520)`
+→ **每一次 submit 都带这个 bbox**；backend `gpu`；**FBO bbox 外不透明像素 0**、内 25 192；
+**GL widget 合成输出 bbox 外非黑像素 0**；ViewBox 内没有别的图元在作画。
+**「Full Image 下画的 ROI 被当成 None」已排除**（`_is_full_wsi_mode()` 即 `_roi_count()==0`，
+用户那次 manifest 本身就是 `roi_only` + 真实 bbox）。
+**本轮未能复现用户现象**，因此不宣称已修复。两条待用户下次真机区分的线索：
+`ui/step1_gpu_layer.py` 写入于 **18:29:50** 而用户 Save 于 **18:47**——若应用进程早于 18:29 启动，
+跑的就是没有裁切的旧代码；以及该次是否落在**本块明确未裁切的 CPU 回退**上
+（进入 Step1 时看 `mount.backend` 是 `gpu` 还是 `cpu-fallback`）。
+新增 `tests/test_step1_gpu_roi_clip_product_path.py` **7 条产品路径门**（合成 /tmp 项目 + 真实
+MainWindow + 真实 v2 handoff → `_set_step_active(1)` → 产品勾选；断言 bbox 抵达每次 submit、
+ROI 是严格子矩形且四边在相机内、scissor 非退化、backend 为 GPU 且 renderer 非软件、
+DAPI/marker/Overlay/Fusion/平移/缩放下 FBO 与合成输出 bbox 外皆为 0），全绿。
+**三处台架缺陷已修**（都会让门在空画面上假通过）：进 Step1 必须走 `_set_step_active(1)`；
+只设 `set_display_visible` 而不进 fusion 则权重为 0、画面全黑；
+MainWindow 启动绑定的是配置里的演示切片，未 `_bind_fusion_dataset` + `config.load_panel`
+建组就写权重，权重落在别的 identity 下。
+强制 GPU 九模块 **`146 passed / 0 skipped / 0 failed`**；受影响保护门
+shared_camera 15、viewer_host 23、viewer_binding 13、handoff_invalidation 12、
+handoff_contract 39、dataset_switch 5 全 passed。
+**若真机确认是 CPU 回退，则裁切 `Step1ComposedLayer` 属白名单外，须另行裁定。**
+
+**（下面是首轮实施记录，保留备查）**
+**修复前后真实像素证据（同一 GPU `RTX 4090`、同一提交、FBO 回读，512×512，
+世界 `[0,1024)²`，ROI `(y0,y1,x0,x1)=(200,800,300,900)`，coarse 步长 64）：
+bbox 外不透明像素 `22 640 → 0`；bbox 内 `90 000 / 90 000` 不变；
+不透明行 `96–415 → 100–399`、列 `128–479 → 150–449`，与像素中心规则完全一致。**
+**做法：** `ViewportSnapshot` 新增不可变的 `roi_world_rect`（`(x0,x1,y0,y1)` 序），
+mount 每次 submit 从**活的**来源表读 `roi_bbox()`（`(y0,y1,x0,x1)` 序）并**只在这里转换一次**，
+来源重建即带来新 bbox、旧 bbox 不可能残留；层在 `_finalize()` 里
+**先在 scissor 关闭下把 final 清成 (0,0,0,0)，再开 scissor 画原来的那一个 pass，画完立刻关闭**。
+**因此没有改任何 shader，也没有新增 uniform**：bbox 外必然 alpha=0，bbox 内是同一 pass 的同一批像素。
+判定用**像素中心规则**（`roi_scissor_box()` 纯函数，与逐像素暴力枚举在 4 000 组随机参数上完全一致）。
+**门：** 新增 `tests/test_step1_gpu_roi_clip.py` **25 条（18 条 GPU framebuffer 像素门、7 条坐标与接线逻辑门）**，
+ROI 与图像相交的 GPU 像素门同时断言「bbox 外 alpha=0」与「bbox 内与不带 ROI 的同一提交逐像素相同」；屏外和无 ROI 的用例验证各自行为，
+并先确认「不裁切时确实泄漏」；覆盖 coarse/fine/混合、Overlay/Fusion、DAPI、零权通道、四边、
+部分 coarse 单元、相邻 tile 接缝、平移、zoom-out、非整数缩放、DPR 1.0/1.5/2.0、
+ROI 完全在屏外、全图模式逐字节不变、来源切换换 bbox，以及 mount 的顺序换算。
+**变异 6/6 全红**（不裁切／不清除只画 scissor 内／边缘取整代替像素中心／忘记垂直翻转／
+画完不关 scissor／mount 按来源序传递），每次按 SHA-256 还原。
+**如实记录：** 第一轮变异用精简环境跑 pytest 导致 GPU fixture error、18 条像素门根本没运行，
+M1/M2/M5/M6 曾假绿；改用完整环境后重跑。**M6 在补门前是真绿**——所有像素门都直接驱动层、
+不经过 mount 的轴序换算，已补一条四值互不相同的换算门后转红。
+**回归：** 强制 GPU 八模块 **`139 passed / 0 skipped`**；Step1 保护集 shared_camera 15、
+camera_stability 6、viewer_host 23、viewer_binding 13、dataset_switch 5、handoff_invalidation 12、
+display_isolation 21、coarse_plane 24、composed_layer 13，全部 passed，无既有失败。
+**限制：** 像素中心粒度、**不做边缘羽化**；**只裁矩形 bbox，不做多边形裁切**；
+CPU fallback 一行未改、其边界行为与从前相同；**不得记为真机通过**。
+`cufile.log` 本块零增长（`4449898` B，SHA 未变），真实项目与切片**本块一次未读**。
+详见 `docs/benchmarks/step1_gpu_demo/2026-09-22_g3_2c_report.md`。**未暂存、未提交、未 push。**
 
 #### G3.2d — G3 最终收口（前三块真机通过后，0.5–1 天）
 
@@ -1085,3 +1228,27 @@ Odon 参考版本：本地 `/sda1/Fusion/analysis_pipline/odon`，`b01faef010b14
 - **G3.2b.4F（Step0 Save 后首次进入 Step1 时 GUI 冻结）：共享通道栏搬移的最小修复已通过本次真机体验验收。** 原真机入口 1919 ms / GUI 心跳 2104 ms；Save 后后台预导入 PyOpenGL 虽测得入口 1052 ms，却导致无图像，已撤回，回退后用户确认图像恢复。主窗口启动时的同线程预导入也在用户真机体验中失败：画面正常，但入口 2285 ms / GUI 心跳 2611 ms，GL `show()` 已降至 157 ms，反而是通道栏搬移涨至 1734 ms，已撤回。当前只在 dock 已有旧宿主时显式 `setParent(new_host)` 再 `addWidget()`；真实 GPU 台架六次交替使搬移从 461–537 ms 降至 48–88 ms，Step1 入口三次由 1745–1767 ms 到 999–1372 ms，TIM3 帧缓冲均有像素。产品代码台架入口 1298 ms，coarse/fine 到齐。保护合集 151 passed / 42 skipped / 1 failed，唯一固定像素几何门在完全撤掉本块修改后仍同值失败，非本块引入；其余跨 Step 身份、焦点、滚动门通过。用户最终真机反馈：图像正常、通道立刻加载、Step0 Save→Step1 不到 1 秒、窗口没有感到卡住；同次日志入口 **994.70 ms**、dock 搬移 **93.14 ms**。但 GUI 心跳仍记录跨切换的 **1712 ms** 间隔，留作性能 advisory，不宣称事件循环全程无长间隔。最初 5–6 秒未在本轮重现；预建 Viewer 会把 GUI 停顿挪到 Save 结束，未采用。证据与限制见 `docs/benchmarks/step1_gpu_demo/2026-09-22_g3_2b_4f_entry_freeze_report.md`。
 - 本文新增不代表 CPU 回退基线已被接管。
 - `AGENTS.md` 与 `P0_SCOPE_RULES.md` 为本项目持久规则；未写入平台级记忆、未修改其他项目。
+
+- **G3.2d.1（Fusion 模式取消勾选 DAPI 仍显示）：修复完成，待一次聚焦真机验收。** 用户 2026-09-23 裁定
+  勾选框在 Overlay 与 Fusion 下含义一致——「这个通道现在是否显示」；取消勾选只移除**当前显示**的贡献，
+  不得改动 nucleus 通道/权重、group/channel 权重、Fusion Settings、Save 配置或会话权威。
+  生产改动 `+66 / -6`：`ui/step1_draft_spec.py::build_spec()` **仅 Fusion 分支**用 Overlay 分支已在使用的
+  `visible_channels(state, scope)` 过滤贡献者（GPU Viewer 与 CPU compose 共用此构造器，一处修好两面，
+  不新增 visibility authority）；`ui/main_window.py` 新增 `_fusion_display_contributors()`，
+  `_needed_channels()` 与 `tissue_render_snapshot()` Fusion 分支（含同函数内已发布 render spec）同步过滤。
+  `_fusion_weighted_channels()` **保持未过滤**——Save 必须提交模型完整列表（用户裁定）。
+  真机 GPU 证据：`DisplaySnapshot.nucleus` `['DAPI',1.0]→['',0.0]`，蓝色主导像素 **20 591 → 0**，
+  CD3 红色 64 032 不变，模型 nucleus 未改，重新勾选帧**逐字节相同**且 **0 次上传**。
+  新增 `tests/test_step1_fusion_visibility.py`（10 门，强制 GPU，产品夹具），**七项变异 7/7 红**。
+  **如实记录两次假绿**：round 2 的 M5/M5b/M6 全绿是因为台架只设了 mount 模式、`_step1_preview_mode`
+  仍是 overlay，Tissue Preview 与 `_needed_channels()` 的 Fusion 分支从未执行（断言在对 `None` 求值）；
+  round 3 的 M5 仍绿则是真实覆盖缺口——该门唯一取消勾选的是不属于任何 group 的 nucleus。
+  两处修补后才 7/7。经用户追加授权改写 `tests/test_step1_gpu_takeover.py` 中三条编码旧语义的门
+  （`+104 / -0`，未删测试、未降低 weight 断言）：改为四阶段，勾选独立成段——因为实测
+  「一开始就勾选」会让夹具立刻为该通道请求 Intensity window，直接摧毁该门赖以存在的零权重断言。
+  回归：162 + 262 + 90 + 48 + 119 passed，零 skip。
+  `test_a_continuous_drag_keeps_the_picture_moving_before_the_button_is_up` 仅在六模块合并且排在最后时
+  失败一次（单次 435 ms 停顿 / 预算 132 ms）：单独运行 3/3 通过，把它排到最前 119 passed 全绿，
+  且该门全程不进入 Fusion 模式——判为进程累积/计时敏感，非本次修复引起，登记为 advisory，未修改。
+  `cufile.log` 零增长（4449898 B）。**未暂存、未提交、未 push；G3.2d 保持打开。**
+  详见 `docs/benchmarks/step1_gpu_demo/2026-09-23_g3_2d_1_report.md`。

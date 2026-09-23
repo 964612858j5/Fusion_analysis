@@ -693,8 +693,56 @@ class Step1WholeSlideMount(QtCore.QObject):
             ratio = float(layer.devicePixelRatioF())
         except AttributeError:                              # very old Qt
             ratio = float(layer.devicePixelRatio())
+        roi_rect = self._gpu_roi_world_rect(stack)
         return ViewportSnapshot((float(x0), float(x1), float(y0), float(y1)),
-                                (width, height), ratio if ratio > 0 else 1.0)
+                                (width, height), ratio if ratio > 0 else 1.0,
+                                roi_world_rect=roi_rect,
+                                roi_polygon_world=self._gpu_roi_polygon(roi_rect))
+
+    @staticmethod
+    def _gpu_roi_world_rect(stack):
+        """The analysis region for THIS stack, in the layer's rect order.
+
+        Read from the live source table every submission, so a rebuilt
+        stack -- another ROI, another handoff -- brings its own region and
+        an old one cannot survive the rebind. `Step1SourceTable.roi_bbox()`
+        answers `(y0, y1, x0, x1)`; the layer's rectangles are
+        `(x0, x1, y0, y1)`. `None` (a whole-slide project) clips nothing.
+        """
+        table = getattr(getattr(stack, "provider", None), "source_table", None)
+        bbox = None
+        if table is not None:
+            try:
+                bbox = table.roi_bbox()
+            except Exception:                               # noqa: BLE001
+                bbox = None
+        if not bbox or len(bbox) != 4:
+            return None
+        y0, y1, x0, x1 = (float(v) for v in bbox)
+        return (x0, x1, y0, y1)
+
+    def _gpu_roi_polygon(self, roi_rect):
+        """The drawn shape for the region THIS stack is clipped to (G3.2c.1).
+
+        Read from the window's active ROI, but only accepted when it belongs
+        to `roi_rect`: the layer compares the polygon's own bounds with the
+        rectangle and refuses a pair that does not match, so a polygon left
+        over from another ROI cannot be stapled onto this source. With no
+        rectangle there is no region at all and no polygon either.
+        """
+        if roi_rect is None:
+            return None
+        roi = getattr(self._window, "_active_roi", None) or {}
+        points = roi.get("polygon_fullres")
+        if not points:
+            return None
+        try:
+            return tuple((float(x), float(y)) for x, y in points)
+        except (TypeError, ValueError):
+            # Shaped wrongly rather than absent: hand it on as given and let
+            # the layer refuse it loudly -- silently dropping it here would
+            # look exactly like "this ROI has no polygon".
+            return tuple(points)
 
     # ── being looked at, or not ───────────────────────────────────────
     def activate(self):

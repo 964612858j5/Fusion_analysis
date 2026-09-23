@@ -72,7 +72,9 @@ def test_step0_shows_no_status_line_and_no_metrics_panel(win):
     boxes = {b.title() for b in page.findChildren(QtWidgets.QGroupBox)
              if _on_screen(b, page)}
     assert "Quantitative Metrics" not in boxes
-    assert {"Preview Patch", "Per-Channel Decision"} <= boxes
+    # Third round: Preview Patch moved into the viewer's toolbar.
+    assert "Preview Patch" not in boxes
+    assert "Per-Channel Decision" in boxes
     # A run still writes its words somewhere nothing breaks: the objects live.
     page._proc_status.setText("running")
     page._metrics_original.setText("Original  → SNR: 1")
@@ -107,39 +109,49 @@ def test_step1_intensity_matches_step0_in_look_and_place(win):
     _show_step(win, 0)
     s0 = win._step0
     s0_btn, s0_box = s0._btn_intensity_window, s0._channels_box
-    s0_rel = (_geo(s0_box, win).right() - _geo(s0_btn, win).right(),
-              _geo(s0_btn, win).top() - _geo(s0_box, win).top(),
-              s0_btn.size())
     _show_step(win, 1)
     btn, box = win._btn_step1_intensity, win._step1_channels_box
     assert _on_screen(btn, win)
     assert btn.styleSheet() == s0_btn.styleSheet()
     assert btn.parentWidget() is box
-    rel = (_geo(box, win).right() - _geo(btn, win).right(),
-           _geo(btn, win).top() - _geo(box, win).top(), btn.size())
-    assert rel == s0_rel
+    # Where in the frame: `test_step0_method_leads_the_row_where_step1_has_show_all`.
+    assert btn.size() == s0_btn.size()
 
 
 def test_step0_method_leads_the_row_where_step1_has_show_all(win):
-    """Second round (user ruling, 2026-09-23): Step0's `Method ▾` moves to
-    the left end of the header row, into the room the withdrawn `Show all`
-    left, so it lines up with Step1's `Show all`; both Intensity buttons
-    close their rows at the right edge."""
+    """`Method ▾` (Step0) and `Show all` (Step1) lead their rows at the same
+    place and width; `Intensity…` follows each right away (third round,
+    user ruling 2026-09-23: compact), at the same place in both."""
     _show_step(win, 0)
     s0 = win._step0
     s0_box = _geo(s0._channels_box, win)
     method = _geo(s0._method_all, win)
     s0_int = _geo(s0._btn_intensity_window, win)
-    assert method.right() < s0_int.left()
-    s0_rel = (method.left() - s0_box.left(), method.top() - s0_box.top(),
-              s0_box.right() - s0_int.right(), s0_int.top() - s0_box.top())
+    spacing = s0._channels_host.itemAt(0).layout().spacing()
+    assert s0_int.left() - method.right() - 1 == spacing
+    s0_rel = (method.left() - s0_box.left(), method.width(),
+              s0_int.left() - s0_box.left(), s0_int.top() - s0_box.top())
     _show_step(win, 1)
     box = _geo(win._step1_channels_box, win)
     show_all = _geo(win._step1_cb_all, win)
     s1_int = _geo(win._btn_step1_intensity, win)
-    rel = (show_all.left() - box.left(), show_all.top() - box.top(),
-           box.right() - s1_int.right(), s1_int.top() - box.top())
+    rel = (show_all.left() - box.left(), show_all.width(),
+           s1_int.left() - box.left(), s1_int.top() - box.top())
     assert rel == s0_rel
+
+
+def test_step1_show_all_follows_step0_method_width(win):
+    s0 = win._step0
+    _show_step(win, 0)
+    s0._method_all.setText("Method: Original ▾")
+    _pump()
+    width = s0._method_all.width()
+    s0_int = _geo(s0._btn_intensity_window, win).left() - _geo(s0._channels_box, win).left()
+    _show_step(win, 1)
+    assert win._step1_cb_all.width() == width
+    s1_int = (_geo(win._btn_step1_intensity, win).left()
+              - _geo(win._step1_channels_box, win).left())
+    assert s1_int == s0_int
 
 
 def test_step1_has_no_nucleus_line(win):
@@ -289,3 +301,284 @@ def test_the_mode_buttons_sit_on_the_patch_row(win):
         assert _on_screen(btn, win)
         assert abs(g.center().y() - patch.center().y()) <= 1
         assert patch.right() < g.left() < first_session
+
+
+# ── third round ───────────────────────────────────────────────────────────
+
+def test_step1_frame_is_called_channels(win):
+    assert win._step1_channels_box.title() == win._step0._channels_box.title() == "Channels"
+
+
+def test_step1_has_no_fusion_or_roi_line_under_the_panel(win):
+    _show_step(win, 1)
+    page = win._step1_page_widget
+    shown = [lbl.text() for lbl in page.findChildren(QtWidgets.QLabel)
+             if _on_screen(lbl, page)]
+    for text in shown:
+        assert "fusion changes" not in text and "Fusion settings saved" not in text, text
+        assert "patches=" not in text and "No ROI loaded" not in text, text
+    # The Channels frame reaches down to the bottom bar: the gap to Save
+    # Fusion Settings is exactly Step0's gap from its Channels frame to the
+    # Per-Channel Decision border (fifth round).
+    from block01.ui.main_window import groupbox_frame_rect
+    box = _geo(win._step1_channels_box, win)
+    save = _geo(win._btn_save_fusion_settings, win)
+    _show_step(win, 0)
+    s0_box = _geo(win._step0._channels_box, win)
+    decision = win._step0._decision_box
+    border_top = decision.mapTo(win, QtCore.QPoint(
+        0, groupbox_frame_rect(decision).y())).y()
+    assert save.top() - box.bottom() == border_top - s0_box.bottom()
+
+
+def test_step0_has_no_correction_status_line(win):
+    _show_step(win, 0)
+    page = win._step0
+    page._bg_corrected_status.setText(
+        "No background correction applied (no channels assigned). "
+        "Use Intensity for display mapping, or continue to Step1.")
+    shown = [lbl.text() for lbl in page.findChildren(QtWidgets.QLabel)
+             if _on_screen(lbl, page)]
+    assert not any("No background correction applied" in t for t in shown)
+    assert not _on_screen(page._bg_corrected_status, page)
+
+
+def test_step0_patch_selector_is_step1s_on_the_viewer_toolbar(win):
+    from block01.ui import main_window as mw
+    from block01.ui.step0 import step0_page as sp
+
+    assert (sp.PATCH_INLINE_BUTTONS, sp.PATCH_BTN_W, sp.PATCH_BTN_H,
+            sp.PATCH_BTN_SPACING) == (
+        mw.STEP1_INLINE_PATCH_BUTTONS, mw.STEP1_PATCH_BTN_W,
+        mw.STEP1_PATCH_BTN_H, mw.STEP1_PATCH_BTN_SPACING)
+    _show_step(win, 0)
+    page = win._step0
+    assert page._patch_menu_btn.styleSheet() == win._patch_menu_btn.styleSheet()
+    page.patches = [(0, 64, 0, 64)] * 9
+    page._rebuild_patch_buttons()
+    _pump()
+    inline = [page._patch_buttons_row.itemAt(i).widget()
+              for i in range(page._patch_buttons_row.count())]
+    assert [b.text() for b in inline] == [f"P{i}" for i in range(1, 8)]
+    assert all(b.size() == QtCore.QSize(sp.PATCH_BTN_W, sp.PATCH_BTN_H) for b in inline)
+    assert [a.text() for a in page._patch_menu_actions] == [f"P{i}" for i in range(1, 10)]
+    # Left of the Original / TopHat / cuCIM switch, on its line.
+    menu = _geo(page._patch_menu_btn, win)
+    original = _geo(page._full_method_buttons["original"], win)
+    assert _geo(inline[-1], win).right() < original.left()
+    assert abs(menu.center().y() - original.center().y()) <= 2
+    assert _on_screen(page._patch_menu_btn, page)
+    assert not _on_screen(page._patch_box, page)
+
+
+def test_step0_decision_sits_left_of_save_across_one_row(win):
+    _show_step(win, 0)
+    page = win._step0
+    dec = _geo(page._decision_box, win)
+    save = _geo(page._btn_continue, win)
+    assert _on_screen(page._decision_box, page)
+    assert isinstance(page._decision_box.layout(), QtWidgets.QHBoxLayout)
+    assert dec.right() < save.left()
+    assert dec.top() <= save.center().y() <= dec.bottom()
+    # Every control of the panel on one line.
+    ys = {(_geo(w_, win).center().y()) for w_ in (
+        page._dec_radius, page._dec_sigma, page._dec_top, page._dec_cu,
+        page._dec_orig, page._apply_btn)}
+    assert max(ys) - min(ys) <= 3, ys
+
+
+def test_step0_viewer_takes_the_column_down_to_the_bottom_row(win):
+    _show_step(win, 0)
+    page = win._step0
+    view = _geo(page._view_area, win)
+    dec = _geo(page._decision_box, win)
+    # Nothing between the picture and the bottom row but layout spacing.
+    assert 0 <= dec.top() - view.bottom() <= 12, (view.bottom(), dec.top())
+
+
+# ── fourth round ──────────────────────────────────────────────────────────
+
+_MANY = ["DAPI"] + [f"CH{i:02d}" for i in range(39)]
+
+
+@pytest.fixture
+def many(app):
+    """A window with enough channels for the list to scroll."""
+    import test_step1_channel_panel as panel_tests
+    from block01.ui.main_window import MainWindow
+
+    loader = panel_tests._Loader()
+    loader._names = list(_MANY)
+    loader.ch_map = {c: i for i, c in enumerate(_MANY)}
+    w = MainWindow()
+    w.loader = loader
+    w.config.set_channels(list(_MANY))
+    w.config.load_panel({"markers": {c: 0.5 for c in _MANY[1:]}}, "DAPI")
+    w.config.set_nucleus("DAPI", 1.0)
+    w.resize(1500, 950)
+    w.show()
+    _pump()
+    yield w
+    w.close()
+    _pump()
+
+
+def _fully_shown(widget, panel):
+    """Every pixel of `widget` lies inside what `panel` really shows."""
+    shown = panel.visibleRegion().boundingRect()
+    rect = QtCore.QRect(widget.mapTo(panel, QtCore.QPoint(0, 0)), widget.size())
+    return shown.contains(rect)
+
+
+def test_step1_channel_column_is_never_covered(many):
+    w = many
+    _show_step(w, 1)
+    w._step1_main_split.setSizes([40, 1440])        # drag the handle far left
+    _pump(10)
+    panel = w._step1_left_panel
+    lst = w._channel_dock.list_widget
+    assert lst.verticalScrollBar().isVisible()
+    for widget in (w._step1_channels_box, lst.verticalScrollBar()):
+        assert _fully_shown(widget, panel), widget
+    # Save Fusion Settings lives in the page's bottom bar since the fifth
+    # round; it must be whole there, whatever the handle does.
+    assert _fully_shown(w._btn_save_fusion_settings, w._step1_page_widget)
+    for cid in ("DAPI", "CH00", "CH38"):
+        row = w._channel_dock.row(cid)
+        spin = QtCore.QRect(row.spin.mapTo(lst.viewport(), QtCore.QPoint(0, 0)),
+                            row.spin.size())
+        assert spin.right() < lst.viewport().width(), cid
+
+
+def test_step1_scroll_bar_is_step0s(many):
+    w = many
+    _show_step(w, 0)
+    bar = w._channel_dock.list_widget.verticalScrollBar()
+    s0 = (bar.style().metaObject().className(), bar.width(), bar.isVisible())
+    s0_shot = bar.grab().toImage()
+    _show_step(w, 1)
+    s1 = (bar.style().metaObject().className(), bar.width(), bar.isVisible())
+    assert s1 == s0
+    # Same pixels too, where the two bars have the same length.
+    s1_shot = bar.grab().toImage()
+    h = min(s0_shot.height(), s1_shot.height())
+    assert s0_shot.copy(0, 0, s0_shot.width(), 16) == s1_shot.copy(0, 0, s1_shot.width(), 16)
+    assert h > 16
+
+
+def test_save_fusion_settings_has_no_icon(win):
+    assert win._btn_save_fusion_settings.text() == "Save Fusion Settings"
+
+
+def test_step1_weight_numbers_align_by_editability(win):
+    _show_step(win, 1)
+    nucleus = win._channel_dock.row("DAPI")
+    marker = win._channel_dock.row("CD3")
+    assert nucleus.spin.isReadOnly()
+    assert nucleus.spin.alignment() & QtCore.Qt.AlignHCenter
+    assert marker.spin.alignment() & QtCore.Qt.AlignRight
+    # Outside Step1 nothing moved: Step0 rows keep the template's stretch.
+    _show_step(win, 0)
+    lay = marker.layout()
+    assert lay.stretch(lay.count() - 1) == 1
+
+
+def test_step1_weight_box_sits_at_the_row_edge(win):
+    _show_step(win, 1)
+    row = win._channel_dock.row("CD3")
+    margin = row.layout().contentsMargins().right()
+    assert row.width() - (row.spin.x() + row.spin.width()) == margin
+    assert row.slider.width() > 63             # it got the band back
+
+
+def test_step0_decision_groups_are_spaced_and_the_frame_hugs_the_status(win):
+    from block01.ui.step0 import step0_page as sp
+
+    _show_step(win, 0)
+    page = win._step0
+    sigma = _geo(page._dec_sigma, win)
+    tophat = _geo(page._dec_top, win)
+    original = _geo(page._dec_orig, win)
+    apply_ = _geo(page._apply_btn, win)
+    status = _geo(page._decision_status, win)
+    for left, right in ((sigma, tophat), (original, apply_), (apply_, status)):
+        assert right.left() - left.right() - 1 >= sp.DECISION_GROUP_GAP, (left, right)
+    box = _geo(page._decision_box, win)
+    assert 0 <= box.right() - status.right() <= 10
+    assert not _on_screen(page._remap_state_lbl, page)
+
+
+def test_step0_decision_status_keeps_the_longest_width(win):
+    _show_step(win, 0)
+    page = win._step0
+    page._channel_order = ["DAPI", "CD3", "A-VERY-LONG-CHANNEL-NAME"]
+    page._fit_decision_status_width()
+    _pump()
+    label = page._decision_status
+    metrics = label.fontMetrics()
+    longest = metrics.horizontalAdvance(
+        "Saved: A-VERY-LONG-CHANNEL-NAME tophat  (r=150, σ=200)")
+    # ...plus one Background Correction tab (fifth round).
+    tab = page._step0_tabs.tabBar().tabRect(0).width()
+    assert tab > 0
+    assert label.width() >= longest + tab
+    box_before = _geo(page._decision_box, win)
+    label.setText("Saved: CD3 cucim  (r=5, σ=5)")
+    _pump()
+    assert _geo(page._decision_box, win) == box_before
+    # A message longer than the line is elided on screen, whole in the text.
+    long_msg = "TopHat parameter saved. " * 6
+    label.setText(long_msg)
+    _pump()
+    assert label.text() == long_msg and label.toolTip() == long_msg
+    assert _geo(page._decision_box, win) == box_before
+
+
+# ── fifth round ───────────────────────────────────────────────────────────
+
+def test_step0_status_line_has_one_tab_of_room_for_every_message(win):
+    _show_step(win, 0)
+    page = win._step0
+    page._channel_order = ["DAPI", "HLA-DR", "FOXP3", "PD1"]
+    page._fit_decision_status_width()
+    _pump()
+    label = page._decision_status
+    for msg in ("Saved: HLA-DR tophat  (r=35, σ=50)",
+                "HLA-DR: set radius/sigma, pick a method, press Enter."):
+        label.setText(msg)
+        _pump()
+        assert QtWidgets.QLabel.text(label) == msg     # drawn whole, not elided
+
+
+def test_step1_has_no_back_button_and_save_fusion_takes_its_place(win):
+    from block01.ui.main_window import groupbox_frame_rect
+
+    _show_step(win, 0)
+    decision = win._step0._decision_box
+    frame = groupbox_frame_rect(decision)
+    frame_top = decision.mapTo(win, QtCore.QPoint(0, frame.y())).y()
+    _show_step(win, 1)
+    assert not _on_screen(win._btn_back_to_step0, win)
+    save = win._btn_save_fusion_settings
+    assert _on_screen(save, win)
+    assert save.parentWidget() is not win._step1_left_panel
+    # As tall as the decision frame's BORDER -- not the title above it --
+    # and level with it.
+    assert frame.height() < decision.height()
+    assert save.height() == frame.height()
+    assert _geo(save, win).top() == frame_top
+    # As wide as the Channels frame and under it, following the handle.
+    box = win._step1_channels_box
+    assert (_geo(save, win).left(), save.width()) == (_geo(box, win).left(), box.width())
+    win._step1_main_split.setSizes([430, 1050])
+    _pump(8)
+    assert (_geo(save, win).left(), save.width()) == (_geo(box, win).left(), box.width())
+    assert box.width() > 400
+
+
+def test_both_channels_frames_are_the_same_height_on_the_same_line(win):
+    _show_step(win, 0)
+    s0 = _geo(win._step0._channels_box, win)
+    _show_step(win, 1)
+    s1 = _geo(win._step1_channels_box, win)
+    assert (s1.top(), s1.height()) == (s0.top(), s0.height())

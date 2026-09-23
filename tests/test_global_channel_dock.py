@@ -1395,11 +1395,12 @@ def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
 # that the panel's geometry is a fact, not something that drifts per run.
 # The dock sits 20px higher and its list is 20px taller than it was: the
 # `Ready.` status line that stood between the header rule and the list is
-# gone (user ruling, 2026-09-23). Width and frame are unchanged.
+# gone (user ruling, 2026-09-23). The frame is 2px taller again since the
+# panels under the picture left for the single Save row. Width unchanged.
 STEP0_PANEL_BASELINE = {
-    "container": (0, 0, 349, 760),
-    "dock": (10, 63, 329, 687),
-    "list": (4, 30, 321, 653),
+    "container": (0, 0, 349, 762),
+    "dock": (10, 63, 329, 689),
+    "list": (4, 30, 321, 655),
 }
 
 

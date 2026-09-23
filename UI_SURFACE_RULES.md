@@ -70,9 +70,24 @@ row, and the duplicate Tissue Preview button in the step bar.
   The Channels frame's header row IS Step0's (user ruling, 2026-09-23):
   `Show all` on the left, in Step0's look -- the Step1 tick swept over every
   row, so it means exactly what ticking each row means, and the nucleus is
-  left alone -- in the place Step0's `Method ▾` takes, and `Intensity…` in
-  Step0's exact look at the right edge, as in Step0. There is no
-  `Nucleus: … (weight …)` line. The Viewer tab's Patch row carries the
+  left alone -- in the place Step0's `Method ▾` takes and as wide as Step0
+  draws it, and `Intensity…` in Step0's exact look right after it, as in
+  Step0 (compact, third round). The frame is titled `Channels`, as in Step0.
+  There is no `Nucleus: … (weight …)` line and no `Unsaved fusion changes` /
+  `Fusion settings saved` or ROI/patch summary. `Save Fusion Settings` (no
+  icon) sits in the page's bottom bar where `← Back to Step 0` was -- that
+  button is gone from the screen. It is as wide as the Channels frame and
+  directly under it, following the column as its handle is dragged, and as
+  tall as the BORDER of Step0's Per-Channel Decision frame (not the title
+  above it), level with that border. The Channels frame takes the column's
+  height, and the two steps' Channels frames start and end on the same
+  lines.
+  The column behaves as Step0's (fourth round): the same scroll bar, and
+  dragging the handle stops where a Step1 row still fits, so the frame's
+  right edge, the scroll bar, the weight box and `Save Fusion Settings` are
+  never covered by the viewer. The weight box sits at the row's right edge
+  and the slider takes the spare width; a read-only weight (the nucleus) is
+  centred in its box. The Viewer tab's Patch row carries the
   `Overlay` / `Fusion` mode buttons and then `Load Step0 ROI Result`,
   `Load Previous Step1 Session`, `Save Session` and `⟳ Update` at its right
   end -- there is no row above it for the mode buttons -- and no status row
@@ -126,13 +141,23 @@ row, and the duplicate Tissue Preview button in the step bar.
   what an unlit method does not get is a computation.
   No `Show all` on screen (user ruling, 2026-09-23): Step0 draws one marker at
   a time. The control is kept, hidden, not deleted. `Method ▾` leads the
-  header row, where Step1 has `Show all`, and `Intensity…` closes it at the
-  right edge, where Step1 has it. No status line under the
+  header row, where Step1 has `Show all`, and `Intensity…` follows it right
+  away, where Step1 has it. No status line under the
   channel list -- no `Ready.` and no run messages -- and the list moves up
   into its place.
 * **Step0's Background Correction workspace** -- no `Quantitative Metrics`
-  panel (user ruling, 2026-09-23). `Preview Patch` and `Per-Channel
-  Decision` share the row under the picture.
+  panel (user ruling, 2026-09-23). The patch selector is Step1's -- a
+  `Patch ▾` menu with every patch and at most seven inline buttons -- at the
+  left end of the viewer's toolbar, before `Original | TopHat | cuCIM`; there
+  is no `Preview Patch` box. `Per-Channel Decision` is laid out across one
+  row at the bottom, left of `Save`, and nothing else sits under the
+  picture. Its four groups -- parameters, method, `Apply`, status -- are
+  spaced apart; its frame ends right after the status line, which is as wide
+  as the longest `Saved: <channel> <method> (r=…, σ=…)` the slide can produce
+  plus one `Background Correction` tab (fifth round), and keeps that width
+  (longer messages are elided, whole in the tooltip).
+  No `Remap: …` line. There is no status line under `Save` (no `No background
+  correction applied …`).
 * **Step0's Full Image toolbar** -- no `Compare current center` (a right-click
   opens the comparison and Esc / a right-click leave it), no `Reopen full
   image`, and no `downsampled ×N preview` banner over the picture.

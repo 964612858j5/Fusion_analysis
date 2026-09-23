@@ -242,6 +242,15 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self._step = step
         self._retire(self._acc_step0, step == STEP0)
         self._retire(self._acc_step1, step == STEP1)
+        # STEP1'S WEIGHT BOX SITS AT THE RIGHT EDGE (user ruling,
+        # 2026-09-23). The template's trailing stretch keeps a plain row's
+        # core left-aligned; beside Step1's slider it took a third of the
+        # spare width and left an empty band right of the number box. In
+        # Step1 the slider takes all of it; every other step keeps the
+        # stretch exactly as the template built it.
+        trailing = self._lay.count() - 1
+        if self._lay.itemAt(trailing).spacerItem() is not None:
+            self._lay.setStretch(trailing, 0 if step == STEP1 else 1)
         # ...and the permissions again, because a step showing a control is
         # not the same as this channel being allowed to use it: the nucleus's
         # method combo is dead in Step0 too.
@@ -303,6 +312,10 @@ class GlobalChannelRow(QtWidgets.QWidget):
         self.spin.setButtonSymbols(
             QtWidgets.QDoubleSpinBox.UpDownArrows if editable
             else QtWidgets.QDoubleSpinBox.NoButtons)
+        # A read-only box has no arrows, so a right-aligned number sat hard
+        # against its edge while every editable row's sits beside its arrows
+        # (user ruling, 2026-09-23): centre it.
+        self.spin.setAlignment(Qt.AlignRight if editable else Qt.AlignCenter)
         self.method_cb.setEnabled(
             step == STEP0
             and bool(getattr(caps, "correction_eligible", True)))

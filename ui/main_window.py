@@ -225,6 +225,66 @@ class _HeightTwinBar(QtWidgets.QWidget):
         super().showEvent(event)
 
 
+class _WidthMatchedCheckBox(QtWidgets.QCheckBox):
+    """A tick box at least as wide as another widget is drawn.
+
+    Step1's `Show all` stands where Step0's `Method ▾` does, and
+    `Intensity…` follows each of them (user ruling, 2026-09-23). For the two
+    Intensity buttons to line up, `Show all` takes the width Step0 draws its
+    Method button at -- which follows the method's text -- and its hint
+    before Step0 has been laid out.
+    """
+
+    def __init__(self, text, target, parent=None):
+        super().__init__(text, parent)
+        self._target = target
+
+    def _target_width(self):
+        if self._target.testAttribute(Qt.WA_Resized):
+            return self._target.width()
+        return self._target.sizeHint().width()
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QtCore.QSize(max(hint.width(), self._target_width()), hint.height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def showEvent(self, event):
+        self.updateGeometry()
+        super().showEvent(event)
+
+
+def groupbox_frame_rect(box):
+    """The rectangle a QGroupBox draws its BORDER in -- below the title's
+    margin, not the whole widget -- as the box's style computes it."""
+    opt = QtWidgets.QStyleOptionGroupBox()
+    opt.initFrom(box)
+    opt.text = box.title()
+    opt.subControls = (QtWidgets.QStyle.SC_GroupBoxFrame
+                       | QtWidgets.QStyle.SC_GroupBoxLabel)
+    return box.style().subControlRect(
+        QtWidgets.QStyle.CC_GroupBox, opt,
+        QtWidgets.QStyle.SC_GroupBoxFrame, box)
+
+
+class _GeometryWatcher(QtCore.QObject):
+    """Calls `callback` whenever the watched widget moves, resizes or shows."""
+
+    _EVENTS = (QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show)
+
+    def __init__(self, widget, callback):
+        super().__init__(widget)
+        self._callback = callback
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in self._EVENTS:
+            self._callback()
+        return False
+
+
 class _TerminalStatus(QtWidgets.QLabel):
     """A status line whose words go to the terminal, not to the screen.
 
@@ -718,8 +778,11 @@ class MainWindow(QMainWindow):
         page1_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root = QVBoxLayout(page1_w)
         # Step0's own outer margins and spacing, so the title bar and the tabs
-        # under it start where Step0's bar and tabs do.
-        root.setContentsMargins(6, 6, 6, 6)
+        # under it start where Step0's bar and tabs do. The bottom margin is
+        # Step0's 6 plus the 5 px (tab pane border + Section C's margin) that
+        # sit under Step0's bottom row but not under this page's, so the two
+        # Channels frames end on the same line (user ruling, 2026-09-23).
+        root.setContentsMargins(6, 6, 6, 11)
         root.setSpacing(4)
 
         # The title line IS the step's bar: the name on the left, the entry to
@@ -759,13 +822,22 @@ class MainWindow(QMainWindow):
         # patches and may delete an ROI — both go through Step0's one model and
         # its writer, never through a Step1 copy.
         left = QWidget()
-        # Wide enough for a channel row (name, slider, weight box) rather than
-        # for a status line: the column's content changed, so its floor did.
-        left.setMinimumWidth(300)
+        # NO FIXED FLOOR (user ruling, 2026-09-23). A hard 300 px here sat in
+        # a tab widget the splitter could squeeze to 1 px, so dragging the
+        # handle left pushed the panel's right edge, its scroll bar and Save
+        # Fusion Settings under the viewer. The floor is the content's own
+        # minimum now, and the tab widget below holds to it -- as Step0's
+        # column does.
         left.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Step0's column paints its channel panel under `background:#1c1c1c`
+        # (its Section C), which is also what draws the list's scroll bar.
+        # The same rule here makes the two panels the same to the pixel.
+        left.setStyleSheet("background:#1c1c1c;")
         self._step1_left_panel = left
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
+        # 3 px on top: Step0's Channels frame sits that much lower in its tab
+        # page (Section C's margin), and the two frames start on one line.
+        ll.setContentsMargins(0, 3, 0, 0)
         ll.setSpacing(4)
         # No "① ROI / Patch Overview" heading: this column is the `Channels`
         # tab now, and the tab already names it.
@@ -791,20 +863,23 @@ class MainWindow(QMainWindow):
         # rule, one set of colours, from `channel_dock.template`. Step1 used
         # to carry a plain bold label instead, so the two steps framed the
         # same list differently.
-        channels_box = QtWidgets.QGroupBox("② Channels")
+        # `Channels`, as in Step0 (user ruling, 2026-09-23).
+        channels_box = QtWidgets.QGroupBox("Channels")
         channels_box.setStyleSheet(channel_template.frame_qss())
         channels_box_lay = QVBoxLayout(channels_box)
         channels_box_lay.setContentsMargins(4, 4, 4, 4)
         channels_box_lay.setSpacing(4)
         # STEP0'S HEADER ROW, rebuilt here (user ruling, 2026-09-23):
-        # `Show all` on the left, where Step0 has `Method ▾`, `Intensity…` at
-        # the right edge, as in Step0, and the same rule under the row.
+        # `Show all` on the left, where Step0 has `Method ▾` and as wide as
+        # Step0 draws it, `Intensity…` right after it, as in Step0, and the
+        # same rule under the row.
         #
         # `Show all` here IS the Step1 tick, swept: the dock's own
         # `set_all_visible`, which puts each channel through the same
         # `use_channel` command a row's tick does. Channels that are not
         # bulk-toggleable (the nucleus) are left alone, as in Step0.
-        self._step1_cb_all = QtWidgets.QCheckBox("Show all")
+        self._step1_cb_all = _WidthMatchedCheckBox(
+            "Show all", self._step0._method_all)
         self._step1_cb_all.setStyleSheet(self._step0._cb_all.styleSheet())
         self._step1_cb_all.setToolTip(
             "Tick or untick every marker channel -- the same command as "
@@ -824,8 +899,8 @@ class MainWindow(QMainWindow):
             s0_margins[2] - box_margins[2], 0)
         header_row.setSpacing(s0_host.itemAt(0).layout().spacing())
         header_row.addWidget(self._step1_cb_all)
-        header_row.addStretch()
         header_row.addWidget(self._btn_step1_intensity)
+        header_row.addStretch()
         channels_box_lay.addLayout(header_row)
         header_rule = QtWidgets.QFrame()
         header_rule.setFrameShape(QtWidgets.QFrame.HLine)
@@ -886,11 +961,14 @@ class MainWindow(QMainWindow):
         channels_box_lay.addWidget(self.config, stretch=1)
         ll.addWidget(channels_box, stretch=1)
         self._step1_channels_box = channels_box
+        # `Save Fusion Settings` follows this frame's width and left edge.
+        self._step1_channels_watcher = _GeometryWatcher(
+            channels_box, lambda: self._follow_step1_channels_box())
 
         # The commit point for everything above it. The preview follows the
         # panel live; a segmentation search and the final fused.zarr run on
         # what this button froze, so the two can be told apart.
-        self._btn_save_fusion_settings = QPushButton("💾 Save Fusion Settings")
+        self._btn_save_fusion_settings = QPushButton("Save Fusion Settings")
         self._btn_save_fusion_settings.setToolTip(
             "Freeze the ticked channels, their weights and their Min/Max/Gamma "
             "as the settings segmentation and fused.zarr will run on. The "
@@ -902,16 +980,23 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled{color:#666;border-color:#444;}"
         )
         self._btn_save_fusion_settings.clicked.connect(self._commit_fusion_settings)
-        ll.addWidget(self._btn_save_fusion_settings)
-        self._fusion_settings_label = QLabel("Unsaved fusion changes")
+        # Laid out in the page's bottom bar, where `← Back to Step 0` was
+        # (user ruling, 2026-09-23); the Channels frame takes this column's
+        # full height.
+        # NEITHER LINE UNDER THE BUTTON IS ON SCREEN (user ruling,
+        # 2026-09-23): `Unsaved fusion changes` / `Fusion settings saved` and
+        # the ROI/patch summary. Both are kept, parented and hidden, so the
+        # code that writes them needs no guard; the height goes to the
+        # Channels frame above.
+        self._fusion_settings_label = QLabel("Unsaved fusion changes", left)
         self._fusion_settings_label.setStyleSheet("color:#f4c45e;font-size:10px;")
-        ll.addWidget(self._fusion_settings_label)
+        self._fusion_settings_label.setVisible(False)
 
-        self.roi_status = QLabel("No ROI loaded")
+        self.roi_status = QLabel("No ROI loaded", left)
         self.roi_status.setAlignment(Qt.AlignCenter)
         self.roi_status.setWordWrap(True)
         self.roi_status.setStyleSheet("color:#888;font-size:10px;")
-        ll.addWidget(self.roi_status)
+        self.roi_status.setVisible(False)
 
         # LEFT COLUMN = two tabs. `Channels` is the column above; `Method &
         # Parameters` is the segmentation settings panel, which used to own a
@@ -926,6 +1011,11 @@ class MainWindow(QMainWindow):
         # (measured: Step0 0.205 of the width, Step1 stuck at 0.241). The
         # labels elide and the bar scrolls instead.
         _free_the_tab_bar(left_tabs)
+        # ...but never narrower than the Channels page's own content: the
+        # labels may elide, the panel may not be covered. Step0's column
+        # stops at its content's minimum the same way.
+        left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_tabs.setMinimumWidth(0)
         self._step1_left_tabs = left_tabs
         left_tabs.addTab(left, "Channels")
         main_split.addWidget(left_tabs)
@@ -1157,13 +1247,33 @@ class MainWindow(QMainWindow):
         root.addWidget(main_split, stretch=1)
 
         bot = QHBoxLayout()
-        self._btn_back_to_step0 = QPushButton("← Back to Step 0")
+        self._step1_bottom_bar = bot
+        # NO `← Back to Step 0` ON SCREEN (user ruling, 2026-09-23): the step
+        # bar already goes back. The button is kept, parented and hidden, for
+        # the code that enables and disables it. `Save Fusion Settings` takes
+        # its place (`_match_step1_bottom_bar`, `_follow_step1_channels_box`):
+        #   * as WIDE as the Channels frame, and as far left, following it
+        #     when the column is dragged;
+        #   * as TALL as the BORDER of Step0's Per-Channel Decision frame --
+        #     the border, not the title above it -- and level with it: its
+        #     slot is as tall as that whole frame and the button sits at the
+        #     slot's foot, which also keeps both Channels frames ending on
+        #     the same line.
+        self._btn_back_to_step0 = QPushButton("← Back to Step 0", page1_w)
         self._btn_back_to_step0.setStyleSheet(
             "QPushButton{color:#fa8;border:1px solid #fa8;border-radius:4px;padding:6px 16px;}"
             "QPushButton:hover{background:#321;}"
         )
         self._btn_back_to_step0.clicked.connect(self._go_to_step0)
-        bot.addWidget(self._btn_back_to_step0)
+        self._btn_back_to_step0.setVisible(False)
+        save_slot = QWidget()
+        save_slot_lay = QVBoxLayout(save_slot)
+        save_slot_lay.setContentsMargins(0, 0, 0, 0)
+        save_slot_lay.setSpacing(0)
+        save_slot_lay.addStretch(1)
+        save_slot_lay.addWidget(self._btn_save_fusion_settings)
+        self._step1_save_slot = save_slot
+        bot.addWidget(save_slot)
         bot.addStretch()
         self.btn_save = QPushButton("💾  Save Config  &  Generate fused.zarr")
         self.btn_save.setEnabled(False)
@@ -4251,6 +4361,78 @@ class MainWindow(QMainWindow):
             mappings=",".join(display.mappings) if display else "",
             error=stats["last_error"] or "")
 
+    def _hold_step1_channel_floor(self):
+        """Keep Step1's channel column at least as wide as a Step1 row needs.
+
+        The list does not report its rows' minimum upwards, so a column that
+        stopped at its own content's minimum still cut a Step1 row -- slider
+        and weight box -- under the viewer. Step0's column never does: its
+        header row alone is wider than its rows. The floor here is the widest
+        row's minimum, plus the panel's own chrome around the list as it is
+        laid out now, plus a scroll bar whether or not one is showing, so
+        adding channels can never push the weight box out of sight.
+        """
+        panel = getattr(self, "_step1_left_panel", None)
+        dock = getattr(self, "_channel_dock", None)
+        if panel is None or dock is None or not panel.isVisible():
+            return
+        rows = [dock.row(cid) for cid in dock.visible_row_ids()]
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            return
+        row_min = max(r.minimumSizeHint().width() for r in rows)
+        lst = dock.list_widget
+        bar = lst.verticalScrollBar()
+        chrome = panel.width() - lst.viewport().width()
+        if bar.isVisible():
+            chrome -= bar.width()
+        extent = lst.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent,
+                                         None, bar)
+        floor = row_min + max(0, chrome) + extent
+        if panel.minimumWidth() != floor:
+            panel.setMinimumWidth(floor)
+
+    def _match_step1_bottom_bar(self):
+        """The save slot as tall as Step0's Per-Channel Decision frame, and
+        `Save Fusion Settings` as tall as that frame's BORDER."""
+        box = getattr(self._step0, "_decision_box", None)
+        button = getattr(self, "_btn_save_fusion_settings", None)
+        slot = getattr(self, "_step1_save_slot", None)
+        if box is None or button is None or slot is None:
+            return
+        if not box.testAttribute(Qt.WA_Resized):
+            box.resize(box.sizeHint())
+        frame = groupbox_frame_rect(box)
+        # The border's bottom edge is the frame's last row: the slot keeps
+        # whatever the frame leaves under it, so the button lands on it.
+        under = box.height() - (frame.y() + frame.height())
+        if slot.height() != box.height() or slot.minimumHeight() != box.height():
+            slot.setFixedHeight(box.height())
+        # +1: Step0's row sits inside its tab pane, whose 1 px border is under
+        # it; this bar has none, so the button is lifted by that pixel to
+        # meet Step0's border line exactly.
+        slot.layout().setContentsMargins(0, 0, 0, max(0, under) + 1)
+        if button.height() != frame.height() or button.minimumHeight() != frame.height():
+            button.setFixedHeight(frame.height())
+        self._follow_step1_channels_box()
+
+    def _follow_step1_channels_box(self):
+        """`Save Fusion Settings` exactly under the Channels frame: its left
+        edge and its width, whatever the column's handle does."""
+        box = getattr(self, "_step1_channels_box", None)
+        button = getattr(self, "_btn_save_fusion_settings", None)
+        bar = getattr(self, "_step1_bottom_bar", None)
+        page = getattr(self, "_step1_page_widget", None)
+        if box is None or button is None or bar is None or page is None:
+            return
+        if button.width() != box.width() or button.minimumWidth() != box.width():
+            button.setFixedWidth(box.width())
+        inset = box.mapTo(page, QtCore.QPoint(0, 0)).x() - page.layout().contentsMargins().left()
+        margins = bar.contentsMargins()
+        if margins.left() != max(0, inset):
+            bar.setContentsMargins(max(0, inset), margins.top(), margins.right(),
+                                   margins.bottom())
+
     def _set_step_active(self, active):
         # THE CAMERA OF THE STEP BEING LEFT, while it is still the active one
         # -- after this line the sinks refuse its notices, which is what
@@ -4339,6 +4521,10 @@ class MainWindow(QMainWindow):
         self._step3_lbl.setStyleSheet(_on  if active == 3 else _off)
         self._step4_lbl.setStyleSheet(_on  if active == 4 else _off)
         self._update_next_button()
+        if active == 1:
+            self._match_step1_bottom_bar()
+            # Once the page is laid out, so the chrome it measures is real.
+            QTimer.singleShot(0, self._hold_step1_channel_floor)
 
     @staticmethod
     def _make_label(text, bold=False):

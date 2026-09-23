@@ -141,16 +141,14 @@ def test_preview_patch_still_in_background_correction(app):
     from PyQt5 import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
-    # "Preview Patch" box (per-patch BG-correction view) is UNCHANGED + still in BG.
-    boxes = [b for b in s.findChildren(QtWidgets.QGroupBox)
-             if (b.title() or "") == "Preview Patch"]
-    assert boxes, "Preview Patch box missing"
-    # it is under the BG splitter (Section C), not the relocated Section B
+    # The per-patch SELECTOR is still in Background Correction: since
+    # 2026-09-23 (user ruling) it is the viewer toolbar's `Patch ▾` menu and
+    # inline buttons, under the BG splitter (Section C), not in Section B.
     ms = s._main_split
     kids = [ms.widget(i) for i in range(ms.count())]
-    assert any(_under(k, boxes[0]) for k in kids)
-    # its per-patch switching widget is still present
-    assert hasattr(s, "_patch_info")
+    assert any(_under(k, s._patch_menu_btn) for k in kids)
+    # the old box and its info label are kept, off screen
+    assert hasattr(s, "_patch_info") and s._patch_box.isHidden()
 
 
 def test_roi_edit_in_navigator_reaches_step0_view_via_model(app):
@@ -295,11 +293,12 @@ def test_preview_patch_relocated_to_c_right(app):
     assert s._btn_stop_process.isVisible() is False
     assert not _under(ch, s._proc_status)
     assert s._proc_status.isHidden() and met.isHidden()
-    # Preview Patch shares the bottom_row container with Decision only...
-    assert pp.parentWidget() is dec.parentWidget()
-    assert met.parentWidget() is not pp.parentWidget()
-    # ...and is NOT in c_left with Channels
-    assert pp.parentWidget() is not ch.parentWidget()
+    # Third round (user ruling, 2026-09-23): the Preview Patch box is off
+    # screen -- its selector is on the viewer's toolbar -- and Per-Channel
+    # Decision sits in the Save row.
+    assert pp.isHidden() and not _under(ch, pp)
+    assert dec.parentWidget() is s._btn_continue.parentWidget()
+    assert met.parentWidget() is not dec.parentWidget()
     # P-button row + info still wired (relocation kept the widgets)
     assert hasattr(s, "_patch_buttons_row") and hasattr(s, "_patch_info")
 

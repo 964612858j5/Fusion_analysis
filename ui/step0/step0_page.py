@@ -182,6 +182,64 @@ FULL_IMAGE_SOURCE_TIPS = {
 # level-0 correction Save writes. The user is told so rather than left to
 # infer it from a preview that looks subtly different after a zoom.
 FULL_IMAGE_COARSE_LEVEL = 2
+# THE PATCH SELECTOR IS STEP1'S (user ruling, 2026-09-23): a `Patch ▾` menu
+# that lists every patch, and at most seven inline buttons beside it. The
+# numbers are Step1's (`main_window.STEP1_*`, which this module cannot
+# import); a test holds the two to the same values.
+PATCH_INLINE_BUTTONS = 7
+PATCH_BTN_W = 42
+PATCH_BTN_H = 22
+PATCH_BTN_SPACING = 4
+
+
+def patch_menu_width():
+    """As wide as a full inline strip: seven buttons and their gaps."""
+    n = PATCH_INLINE_BUTTONS
+    return n * PATCH_BTN_W + (n - 1) * PATCH_BTN_SPACING
+
+
+# The space between the Per-Channel Decision row's groups -- parameters,
+# method, Apply, status -- so the compact row still reads as four things.
+DECISION_GROUP_GAP = 18
+
+
+class _FixedWidthStatusLabel(QLabel):
+    """A one-line status that keeps ONE width, whatever it says.
+
+    The Per-Channel Decision frame ends right after this line (user ruling,
+    2026-09-23), and the line's length changes with the channel's name. So
+    its width is fixed to the longest `Saved: …` line the slide can produce
+    (`Step0Page._fit_decision_status_width`); anything longer is elided, and
+    the whole message stays in the tooltip.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        self._show_elided()
+
+    def full_text(self):
+        return self._full_text
+
+    def text(self):
+        # The message, not the elided rendering of it: readers ask what the
+        # line SAYS.
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._show_elided()
+
+    def _show_elided(self):
+        width = self.width() if self.testAttribute(Qt.WA_Resized) else self.minimumWidth()
+        shown = self.fontMetrics().elidedText(
+            self._full_text, Qt.ElideRight, max(1, width)) if width > 0 else self._full_text
+        super().setText(shown)
 
 
 class Step0Page(QWidget):
@@ -870,13 +928,15 @@ class Step0Page(QWidget):
 
         # `Method ▾` LEADS THE ROW (user ruling, 2026-09-23), in the place the
         # withdrawn `Show all` left -- which is where Step1's `Show all`
-        # sits -- and `Intensity…` closes it, at the right edge in both
-        # steps. The hidden tick stays in the row only to keep its room
-        # (see above), in the empty stretch where nothing is drawn.
+        # sits -- and `Intensity…` follows it. The hidden tick stays in the
+        # row only to keep its room (see above), in the empty stretch where
+        # nothing is drawn.
         all_row.addWidget(self._method_all)   # "Method:" label dropped (combo is clear)
+        # COMPACT (user ruling, 2026-09-23): `Intensity…` right beside the
+        # Method button, not at the far edge.
+        all_row.addWidget(self._btn_intensity_window)
         all_row.addWidget(self._cb_all)
         all_row.addStretch()
-        all_row.addWidget(self._btn_intensity_window)
         chl.addLayout(all_row)
 
         # 分隔线
@@ -981,12 +1041,15 @@ class Step0Page(QWidget):
         chl.addWidget(self._cucim_warn)
 
         # ── Preview Patch 选择 ────────────────────────────────────────
-        patch_box = QGroupBox("Preview Patch")
+        # NOT ON SCREEN (user ruling, 2026-09-23): the patch selector moved to
+        # the left end of the viewer's toolbar (`_build_view_toolbar`), in
+        # Step1's format. The box is kept, parented and hidden, as the home of
+        # `_patch_info`, which the page still writes.
+        patch_box = QGroupBox("Preview Patch", self)
         patch_box.setStyleSheet(self._box_style("#98c379"))
+        patch_box.setVisible(False)
+        self._patch_box = patch_box
         pl2 = QVBoxLayout(patch_box)
-        self._patch_buttons_row = QHBoxLayout()
-        self._patch_buttons_row.setSpacing(4)
-        pl2.addLayout(self._patch_buttons_row)
         self._patch_info = QLabel("Draw a patch in Section B first.")
         self._patch_info.setWordWrap(True)
         self._patch_info.setStyleSheet("color:#888;font-size:10px;")
@@ -1227,9 +1290,6 @@ class Step0Page(QWidget):
         # the same failure fd205f2 hit connecting to a pyqtgraph scene
         # signal. The event handlers need no connection at all.
 
-        # Metrics + Decision 横排（都在右侧底部）
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(6)
 
         metrics_box = QGroupBox("Quantitative Metrics")
         metrics_box.setStyleSheet(self._box_style("#56b6c2"))
@@ -1249,15 +1309,17 @@ class Step0Page(QWidget):
         metrics_box.setParent(self)     # never a window of its own
         metrics_box.setVisible(False)
         self._metrics_box = metrics_box
-        # (#4) Preview Patch relocated here (was in c_left) — into the space freed
-        # by shrinking Metrics. Its P-buttons + _patch_info + wiring are intact.
-        bottom_row.addWidget(patch_box, stretch=1)
 
+        # AT THE BOTTOM, LEFT OF SAVE, AND LAID OUT ACROSS (user ruling,
+        # 2026-09-23): the same controls in one row -- parameters, method,
+        # Apply, then the two status lines -- so the picture gets the height
+        # the stacked panel took. Added to the Save row below.
         decision_box = QGroupBox("Per-Channel Decision")
         decision_box.setStyleSheet(self._box_style("#e06c75"))
-        dl = QVBoxLayout(decision_box)
-        dl.setContentsMargins(6, 4, 6, 4)
-        dl.setSpacing(3)
+        decision_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        dl = QHBoxLayout(decision_box)
+        dl.setContentsMargins(6, 2, 6, 2)
+        dl.setSpacing(6)
 
         # Per-channel params inherit the global Method Parameters independently;
         # editing one field overrides only that field for THIS channel.
@@ -1293,8 +1355,8 @@ class Step0Page(QWidget):
         param_row.addWidget(_rl); param_row.addWidget(self._dec_radius)
         param_row.addSpacing(8)
         param_row.addWidget(_sl); param_row.addWidget(self._dec_sigma)
-        param_row.addStretch()
         dl.addLayout(param_row)
+        dl.addSpacing(DECISION_GROUP_GAP)
 
         self._decision_group = QButtonGroup(self)
         self._dec_top  = QRadioButton("TopHat")
@@ -1308,6 +1370,7 @@ class Step0Page(QWidget):
             rb.toggled.connect(self._on_dec_method_toggled)
             rb_row.addWidget(rb)
         dl.addLayout(rb_row)
+        dl.addSpacing(DECISION_GROUP_GAP)
 
         btn_row = QHBoxLayout()
         # There is no Run button in this panel. A correction run starts by
@@ -1326,23 +1389,31 @@ class Step0Page(QWidget):
             "QPushButton:disabled{background:#333;color:#555;}"
         )
         self._apply_btn.clicked.connect(self._apply_current_channel_decision)
-        btn_row.addWidget(self._apply_btn, stretch=1)
+        btn_row.addWidget(self._apply_btn)
         dl.addLayout(btn_row)
+        dl.addSpacing(DECISION_GROUP_GAP)
 
-        self._decision_status = QLabel("No decision saved yet.")
-        self._decision_status.setWordWrap(True)
+        self._decision_status = _FixedWidthStatusLabel("No decision saved yet.")
         self._decision_status.setStyleSheet("color:#aaa;font-size:10px;")
         dl.addWidget(self._decision_status)
 
         # v15 mutual visibility: the current channel's LIVE remap state
         # (from the Intensity inspector) shown on the correction side.
-        self._remap_state_lbl = QLabel("Remap: —")
-        self._remap_state_lbl.setWordWrap(True)
+        # NOT ON SCREEN (user ruling, 2026-09-23): `Remap: …, not tuned yet`.
+        # Kept, parented and hidden, for the code that still writes it.
+        self._remap_state_lbl = QLabel("Remap: —", self)
+        self._remap_state_lbl.setWordWrap(False)
         self._remap_state_lbl.setStyleSheet("color:#879bb1;font-size:10px;")
-        dl.addWidget(self._remap_state_lbl)
-        bottom_row.addWidget(decision_box, stretch=1)
+        self._remap_state_lbl.setVisible(False)
+        # The frame ends at the status line: it hugs its contents, and the
+        # Save row's stretch takes the rest.
+        decision_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self._decision_box = decision_box
+        self._fit_decision_status_width()
 
-        crl.addLayout(bottom_row)
+        # Nothing is left under the picture: Preview Patch went to the
+        # viewer's toolbar and Per-Channel Decision to the Save row, so the
+        # viewing area takes the whole column (user ruling, 2026-09-23).
         c_split.addWidget(c_right)
 
         # C内部 左:右 = 1:2
@@ -1357,7 +1428,8 @@ class Step0Page(QWidget):
         # step0_complete (Step0->Step1 handoff). The per-patch preview-batch button
         # was dropped (its preview duty is not part of the save pipeline).
         save_row = QHBoxLayout()
-        save_row.addStretch()
+        save_row.addWidget(self._decision_box)
+        save_row.addStretch(1)
         self._btn_continue = QPushButton("Save")
         self._btn_continue.setToolTip(
             "Validate and save the current Intensity remap, run background "
@@ -1375,10 +1447,14 @@ class Step0Page(QWidget):
 
         # v14.4: explicit corrected-output status — honest about whether the last
         # Save wrote a VALID non-empty corrected_channels.zarr.
+        # NOT ON SCREEN (user ruling, 2026-09-23): the line under Save --
+        # "No background correction applied (no channels assigned)…" and the
+        # rest of its answers -- is gone. Kept as a hidden, parented object so
+        # the Save path that reports into it needs no guard.
         self._bg_corrected_status = QLabel(
-            "corrected_channels.zarr: not written yet.")
+            "corrected_channels.zarr: not written yet.", self)
         self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
-        cl.addWidget(self._bg_corrected_status)
+        self._bg_corrected_status.setVisible(False)
 
         main_split.addWidget(sec_c)
         # (#10) Section C is the sole child of the BG splitter (Section B relocated
@@ -1504,6 +1580,35 @@ class Step0Page(QWidget):
             "QPushButton:hover{border-color:#aaa;}"
             "QPushButton:disabled{color:#555;border-color:#333;}"
         )
+        # ── the patch selector, Step1's, at the bar's left end ───────────
+        #
+        # Moved here from the `Preview Patch` box (user ruling, 2026-09-23):
+        # a `Patch ▾` menu listing every patch, then at most
+        # `PATCH_INLINE_BUTTONS` inline buttons -- the same control Step1
+        # has over its picture. `_rebuild_patch_buttons` fills both.
+        self._patch_menu_btn = QtWidgets.QToolButton()
+        self._patch_menu_btn.setText("Patch")
+        self._patch_menu_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._patch_menu_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._patch_menu_btn.setFixedHeight(PATCH_BTN_H)
+        self._patch_menu_btn.setStyleSheet(
+            "QToolButton{color:#9bd0ff;background:#182230;"
+            "border:1px solid #354a63;border-radius:3px;"
+            "font-size:10px;font-weight:bold;padding:2px 8px;}"
+            "QToolButton::menu-indicator{subcontrol-position:right center;"
+            "subcontrol-origin:padding;left:-4px;}")
+        self._patch_menu = QtWidgets.QMenu(self._patch_menu_btn)
+        self._patch_menu.setMinimumWidth(patch_menu_width())
+        self._patch_menu_btn.setMenu(self._patch_menu)
+        self._patch_menu_btn.setEnabled(False)
+        self._patch_menu_btn.setToolTip("No patches yet")
+        self._patch_menu_actions = []
+        bar.addWidget(self._patch_menu_btn)
+        self._patch_buttons_row = QHBoxLayout()
+        self._patch_buttons_row.setSpacing(PATCH_BTN_SPACING)
+        bar.addLayout(self._patch_buttons_row)
+        bar.addSpacing(8)
+
         # ── the method switch, on top of the image it changes ───────────
         #
         # A PREVIEW, and nothing else: Original serves raw pixels, TopHat and
@@ -6668,6 +6773,42 @@ class Step0Page(QWidget):
         reached.
         """
         self._dock_adapter.rebuild()
+        self._fit_decision_status_width()
+
+    def _background_correction_tab_width(self):
+        """The drawn width of the `Background Correction` tab, or its hint
+        before the bar has been laid out."""
+        tabs = getattr(self, "_step0_tabs", None)
+        if tabs is None or tabs.count() == 0:
+            return 0
+        bar = tabs.tabBar()
+        width = bar.tabRect(0).width()
+        return width if width > 0 else bar.tabSizeHint(0).width()
+
+    def _fit_decision_status_width(self):
+        """Fix the decision status line to the longest `Saved: …` line this
+        slide can produce: every correctable channel, either method, and the
+        widest radius and sigma the boxes accept."""
+        label = getattr(self, "_decision_status", None)
+        if label is None:
+            return
+        label.ensurePolished()
+        metrics = label.fontMetrics()
+        radius = int(TOPHAT_RADIUS_RANGE[1])
+        sigma = int(CUCIM_SIGMA_RANGE[1])
+        names = [ch for ch in (getattr(self, "_channel_order", None) or ())
+                 if ch and ch != getattr(self, "nucleus_channel", None)]
+        names = names or ["CHANNEL"]
+        width = max(metrics.horizontalAdvance(
+            f"Saved: {ch} {method}  (r={radius}, σ={sigma})")
+            for ch in names for method in ("tophat", "cucim"))
+        # PLUS ONE `Background Correction` TAB (user ruling, 2026-09-23): the
+        # `Saved: …` line alone left the line's other messages -- "<channel>:
+        # set radius/sigma, pick a method, press Enter." -- cut off. The
+        # user's measure for the extra room is the width of this page's tab.
+        width += self._background_correction_tab_width()
+        label.setFixedWidth(width + 4)
+        label.setText(label.full_text())
 
     # NOTE: `_refresh_channel_row` used to be defined TWICE in this class.
     # Python keeps the LAST definition, so the one that stood here -- the one
@@ -8925,26 +9066,55 @@ class Step0Page(QWidget):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+        self._rebuild_patch_menu(len(self.patches))
         if not self.patches:
             self.current_patch_idx = 0
             self._patch_info.setText("No patch ROI available yet. Draw a patch in Section B first.")
             return
         self.current_patch_idx = min(self.current_patch_idx, len(self.patches) - 1)
+        # At most PATCH_INLINE_BUTTONS inline, as in Step1; the menu has all.
+        inline = min(len(self.patches), PATCH_INLINE_BUTTONS)
         for row in self._all_patch_rows():
-            for i in range(len(self.patches)):
+            for i in range(inline):
                 btn = QPushButton(f"P{i+1}")
                 btn.setCheckable(True)
-                btn.setFixedSize(44, 22)
+                btn.setFixedSize(PATCH_BTN_W, PATCH_BTN_H)
                 color = PATCH_COLORS[i % len(PATCH_COLORS)]
+                # Step1's style for a patch that is ready to show.
                 btn.setStyleSheet(
-                    f"QPushButton{{color:{color};border:1px solid {color};border-radius:3px;background:#1a1a1a;font-size:10px;font-weight:bold;}}"
+                    f"QPushButton{{color:{color};border:1px solid {color};"
+                    f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
                     f"QPushButton:checked{{background:{color};color:#111;}}"
+                    f"QPushButton:hover{{background:#2a2a2a;}}"
                 )
                 btn.clicked.connect(lambda _checked, idx=i: self._select_patch(idx))
                 btn.setChecked(i == self.current_patch_idx)
                 row.addWidget(btn)
-            row.addStretch()
+        self._sync_patch_buttons()
         self._update_patch_info()
+
+    def _rebuild_patch_menu(self, count):
+        """One checkable action per patch, in patch order -- Step1's menu."""
+        menu = getattr(self, "_patch_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        menu.setMinimumWidth(patch_menu_width())
+        self._patch_menu_actions = []
+        btn = self._patch_menu_btn
+        if count <= 0:
+            btn.setEnabled(False)
+            btn.setToolTip("No patches yet")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip(f"{count} patch{'es' if count != 1 else ''} — "
+                       "click to choose")
+        for i in range(count):
+            act = menu.addAction(f"P{i+1}")
+            act.setCheckable(True)
+            # The same entry point the inline buttons use.
+            act.triggered.connect(lambda _=False, idx=i: self._select_patch(idx))
+            self._patch_menu_actions.append(act)
 
     def _sync_patch_buttons(self):
         for row in self._all_patch_rows():
@@ -8952,6 +9122,8 @@ class Step0Page(QWidget):
                 widget = row.itemAt(i).widget()
                 if isinstance(widget, QPushButton):
                     widget.setChecked(widget.text() == f"P{self.current_patch_idx+1}")
+        for i, act in enumerate(getattr(self, "_patch_menu_actions", [])):
+            act.setChecked(i == self.current_patch_idx)
 
     def _repaint_patch_buttons(self):
         """Force an immediate synchronous repaint of the patch buttons so the

@@ -1,11 +1,20 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
-日期：2026-09-23（第二版，吸收独立审核意见）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`。
-状态：**计划，未启动。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动（块 C）须另行批准。
+日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
+状态：**A0 产出已按独立审核修订（v3.8），待用户确认后定稿；A1 及以后均未启动；块 V 的方向已通过审核，只有 V0 可以申请启动，尚未启动。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动（块 C）须另行批准。
 
 修订记录：
 - v1：初稿。
 - v2：采纳独立审核的第 1、3、4、5、6 条，以及「先做契约准备块、A 拆成 A1/A2、选定的基本约束随 C 落地」的建议。第 2 条（同名方法合并）按用户裁定**维持 v1 方案**。另补上可核验的测试基线（附录）。
+- v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
+- v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
+- v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.8：按审核意见收口。R13 改为「按相同规则参与构造」；「只定标一次」改为「应用侧不额外拉伸，每个引擎只执行一套标准预处理」；Mesmer nuclei 的第二个通道为 0，并记录 Step2 现在给的是 fusion；多余定标改为「新流程不再调用」，旧参数保持原语义；搬迁和新行为分开验收；7.11.4 写明「读取区域相同」的定义，输入数组按方法构造后再比较；几处过强的说法改为待验证。
+- v3.7：用户裁定 Mesmer 的膜通道用 Fusion、CLAHE 保留。写定 Mesmer 的输入为 `[fusion 核通道, fusion]`，并列出 Step1 的两处修改：膜通道要 ÷ 65535，核通道要改为带权重的 fusion 核通道。新界面只提供 Fusion 当膜通道（已裁定）。
+- v3.6：R11 按用户裁定修订：保留模型的自动定标，按局部做，每条路径严格只做一次；I0–I3 作废；7.11.5 改写为定标规则和逐处排查表；验收第 2 条改为「自动定标只做一次」。
+- v3.5：新增用户裁定 R13（权重在两边都生效）和 R14（一套轮子、方法模块化），新增 7.12 架构大纲。7.11.2 更正 Mesmer 两层定标的事实描述，补充膜通道为空时输入全为 0。用户对「是否关闭模型内部归一化」有新的考虑，I1、I2 **重新开放**，改为统一的 I0 决策。
+- v3.4：按审核意见修订 7.11：I1、I2、H1 已裁定；I3 改写（Mesmer 有三步局部预处理）；新增 N1（纯核输入的核权重和量化）；写定 H2；更正细胞和核的配对规则，以及 Step2 实际生效的归属路径；验收拆成两条。
+- v3.3：新增用户裁定 R10–R12（通道排法、全局亮度、Step1 HALO）；新增 7.11 模型输入契约；按讨论意见修正 7.10.4 和 7.10.5（终态登记、引擎身份与实际设备分开）。
 
 ---
 
@@ -40,6 +49,11 @@
 | R7 | **只允许一个方法、一组唯一参数组合**进入最终分割。 |
 | R8 | 执行层的模块级改动单独成块申请（块 C），批准后才动手。 |
 | R9 | 同名方法：询问是否合并；合并时每个参数取两边取值的并集，单值参数冲突时让用户二选一；选「不合并」就取消这次添加，同一个方法只保留一个块。**不做展开后的过滤去重。**（审核第 2 条，用户裁定维持原方案。） |
+| R10 | （2026-09-23）Cellpose whole-cell 的模型输入，Step1 和 Step2 **统一为 `[fusion, fusion, DAPI]`**，并显式指定 `channel_axis=-1`。不再测量旧的两种通道排法哪个更好。fused.zarr 可以继续存 `[fusion, DAPI]` 两通道，送进模型前再复制 fusion。纯核方法按方法定义只用 DAPI。 |
+| R11 | （2026-09-23，**当日修订**，以修订版为准）亮度分两层：①用户手调的显示窗口（min/max/gamma）和 fusion 权重，这是用户的设置，**不算自动定标**，在全局上生效，随运行快照冻结；②模型的**自动定标**：**保留，按局部进行**，也就是在当前送进模型的那张图上计算。应用侧**不再额外做任何自动拉伸**，每个引擎只执行**一套**明确列出的标准预处理流程，而且只执行一次（见 7.11.5）。同一个细胞在不同 patch 或切块里定标后**可能不同，幅度尚未实测**，用户**接受**。（原版要求「全局固定、禁止局部估计」，已被本修订取代。） |
+| R12 | （2026-09-23）Step1 采用和 Step2 相同的 **HALO** 做法：在 patch 四周多读一圈参与计算，推理和后处理都在带 HALO 的区域上完成，然后只保留和统计中央的 patch。 |
+| R13 | （2026-09-23；v3.8 按审核意见改写措辞）fusion 的通道窗口（min/max/gamma）和权重（通道权重、组权重、核权重），在 Step1 和 Step2 都必须**按相同规则参与 fusion 输入的构造**。这**不等于**「调了权重，mask 就一定会变」：局部定标可能把整体亮度拉回去（7.11.5「已知的后果」），验收时不能这样要求。Step1 纯核方法绕过 fusion、直接读 DAPI，是**设计错误**，要改正。N1 据此定为 (a)：两边都读 fusion 的核通道，核权重为 0 时拒绝运行。 |
+| R14 | （2026-09-23）**一套轮子**：Step1 和 Step2 能共用的组件一律共用，尽量不为同一功能造不同的轮子。分割方法**模块化**，Step1 和 Step2 只是调用方法模块的基座，便于维护。大纲见 7.12。 |
 
 同时继续遵守 `AGENTS.md`、`UI_SURFACE_RULES.md`、`docs/P0_SCOPE_RULES.md`。和本计划最相关的几条：
 - 不擅自增加可见界面。
@@ -350,6 +364,850 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - 同一个 patch 的核分割阶段复用：块 C 的第二步，另行申请。
 - Step2 的重复参数界面：本计划只保证「不作编辑直接运行时与所选组合一致」，不重做它的界面。
 - 附录中的已有失败与本计划无关，不在范围内。但它们**不能豁免**本计划涉及路径上的任何失败。
+
+---
+
+## 七、块 A0 产出（v3，2026-09-23，待用户逐条确认）
+
+核查基于 `e655409`，没有改生产代码。诊断脚本都放在会话 scratchpad，只读：
+- `a0_step2_handoff_probe.py`：⑧，Qt offscreen，只写临时目录；
+- `a0_tissue_mask_probe.py`：⑤，**只读**打开真实切片的 overview 层；
+- `a0_mesmer_both_probe.py`：②，合成图，`fusion_mesmer` 环境。
+
+三次运行前后，`cufile.log` 都保持 4449898 B；真实切片的 size 和 mtime 也没有变。
+
+v3.1 起，各条的裁定结果标在原位，汇总见 7.9。「设计选择」是我的建议，可以改。7.10 块 V 的 V1–V4 已裁定。
+
+### 7.0 A0 查出的、影响全计划的事实
+
+1. **Mesmer 在真机环境里跑不起来。**
+   - 用户正在运行的程序用的是 `fusion_test2`：进程 `python -m block01_v14.main`，exe 为 `/root/micromamba/envs/fusion_test2/bin/python3.10`。这个环境装了 cellpose 4.1.1 和 stardist 0.9.2，**没有 deepcell**。
+   - deepcell 0.12.10 只在 `fusion_mesmer` 环境里，而这个环境**没有 stardist**。
+   - 目前没有一个环境能同时跑这 8 个方法。Step1 在 `fusion_test2` 里选 Mesmer，会直接走 `status.mesmer_available=False` 报错。
+   - **GPU 实测**（2026-09-23，驱动 535.309.01）：
+     - `fusion_test2`：TF 2.21 是 CPU 版（`is_built_with_cuda=False`），torch 能用 CUDA。
+     - `fusion_mesmer`：TF 2.8.4 是 CUDA 版，但看不到 GPU；torch 能用 CUDA。
+     - 所以目前**只有 Cellpose 真正用上了 GPU**。
+     - StarDist 每个任务都会先起一个 GPU 子进程。这个子进程报「TensorFlow sees no GPU」失败后，再起一个 CPU 子进程重跑（`workers/cellpose_worker.py:236-372`，两次都用 `sys.executable`）。
+     - Mesmer 只能跑 CPU。
+   - **F1 裁定（审核，2026-09-23）**：
+     - Mesmer 保留在界面上。当前环境没有 deepcell 时置灰，并明确显示「缺少 deepcell」。
+     - 运行环境**不是 advisory**：在块 C 的 Mesmer 验收之前，必须另立环境块解决（见 7.10 块 V）。否则不能宣称 8 个方法已经交付。
+2. **Mesmer 的阈值目前没有接入。**
+   - `utils/mesmer_utils.py:331 run_mesmer_prediction` 调用 `app.predict` 时，只传了 `image_mpp`、`compartment`、`batch_size`，没有传 `postprocess_kwargs_*`。
+   - 要让 Mesmer 的阈值可以写成列表（R3），就必须改这一处调用，Step1 和 Step2 两条路径都要改。
+   - **P1 裁定**：同意把这项加进块 C 的范围（见 7.1）。
+
+### 7.1 ① 8 个方法的参数表
+
+**来源**：
+- 默认值：`utils/segmentation_config.py:23-314`；
+- worker 读参：`workers/cellpose_worker.py:568-577`、`:297-307`、`:713`，以及 `workers/mesmer_worker.py`；
+- Step2 控件范围：`ui/step2_page.py:388-460`、`:855-870`。
+
+**精度约束**（⑧ 实测）：
+- Step2 的 `QDoubleSpinBox` 默认只有 2 位小数。3 位小数的值会被四舍五入：0.375→0.38，-0.125→-0.13，0.475→0.47，0.325→0.33。
+- Step2 的 diameter 上限是 300，Step1 的是 500，超过 300 会被 Step2 截断。这一条是静态阅读得出的，Qt `setRange` 的行为，没有实测。
+- **设计选择**：新弹窗的范围和精度与 Step2 控件一致，也就是按下表校验。这样块 E 不用改 Step2 就能保证一致。Mesmer 阈值是例外，见下。
+
+**可列表参数**。「auto」表示传 `None`，由库自己决定，可以作为列表里的一项。
+
+| 方法 | 参数 | 类型 / 范围 / 精度 | 默认 | 说明 |
+|---|---|---|---|---|
+| Cellpose ×3 | `diameter` | float，0–300，1 位小数；0 = auto | auto（`None`） | cpsam 自动估计 |
+| | `flow_threshold` | float，0–3，2 位小数 | 0.4 | |
+| | `cellprob_threshold` | float，-6–6，2 位小数 | 0.0 | |
+| StarDist ×2 | `prob_thresh` | float，0–1，2 位小数；auto | auto（模型自带） | 只有非 None 时才传给 `predict_instances` |
+| | `nms_thresh` | float，0–1，2 位小数；auto | auto | 同上 |
+| StarDist expansion | `expand_distance` | float，0–200，1 位小数 | 8 | 只有 expansion 方法有这个参数；StarDist nuclei 没有 |
+| Mesmer ×3 | `maxima_threshold` | float，0–1，3 位小数 | whole-cell 0.075；nuclear 0.1 | 见下 |
+| | `interior_threshold` | float，0–1，3 位小数 | 0.2 | 见下 |
+
+**Mesmer 的「主要阈值」定为 `maxima_threshold` 和 `interior_threshold` 两个。**
+- 依据：deepcell 0.12.10 的 `deepcell/applications/mesmer.py:273-290`。`deep_watershed` 的后处理参数里，只有这两个是阈值：前者决定种子，后者决定前景。
+- 其余参数单值隐藏，沿用库的默认值：`maxima_smooth=0`、`interior_smooth=2`、`small_objects_threshold=15`、`fill_holes_threshold=15`、`radius=2`。
+- 实测：合成图上把两个值调到 0.3 / 0.5，细胞数从 173 变成 151，说明阈值确实起作用。
+- 3 位小数是因为 whole-cell 的默认值 0.075 本身就是 3 位。
+- 这两个值要能到达 Step2，前提是：
+  - 块 C 在 `run_mesmer_prediction` 里增加 `postprocess_kwargs` 的透传；
+  - 块 E 让 Step2 带上这两个值。Step2 没有对应控件，目前它们只能靠 `get_seg_config()` 里的 `data = dict(self._seg_config)` 留在顶层，⑧ 实测是这样；`params` 里没有，也没有代码读取。
+- **P1 裁定（同意）**：块 C 的范围扩大，接入 `maxima_threshold` 和 `interior_threshold`。明确包括以下几处：
+  - `utils/mesmer_utils.py:331 run_mesmer_prediction`：透传 `postprocess_kwargs_whole_cell` 和 `postprocess_kwargs_nuclear`；
+  - `workers/mesmer_worker.py`：Step1 预览和 Step2 tile 两条路径；
+  - Step2 保留这两个参数：进入 `params`，并随 `get_seg_config()` 一起提交；
+  - Step2 实际执行时透传。
+  - **验收门**：测试要证明两件事。第一，参数到达了 DeepCell `app.predict` 的 kwargs。第二，结果确实改变，用合成图上的细胞数或 mask 差异来证明。
+- **P2 裁定（同意）**：
+  - Mesmer whole-cell 和 nuclear-guided 的列表阈值**只作用于细胞输出**（`postprocess_kwargs_whole_cell`）；
+  - Mesmer nuclei 的列表阈值作用于核输出（`postprocess_kwargs_nuclear`）；
+  - nuclear-guided 的副核输出用库的默认值。
+  - 这个语义要在 `+` 弹窗的参数说明里写清楚，结果记录和参数文件的 metadata 里也要写，比如 `threshold_target: "whole_cell" | "nuclear"`。
+
+**单值参数**（弹窗里显示，只接受单值；默认值来自注册表）：
+- Cellpose：`min_size`，int，1–10000，默认 15。注意 worker 里是 `int(x or 15)`，所以 0 会变成 15，校验下限定为 1。`model_type` 固定为 cpsam，不显示。`use_gpu`、`tile_size`、`batch_size` 不显示，用默认值。
+- Cellpose expansion：`expand_distance`，0–200，1 位小数，默认 8。**只允许单值。**
+  - P3 裁定：R3 只授权了 StarDist 的 expand 可以写成列表，没有授权 Cellpose 的。
+- StarDist：`model_name`，默认 `2D_versatile_fluo`；`device_preference`，不显示。
+- Mesmer：
+  - `image_mpp`，0.01–10，3 位小数，默认 0.5。本切片 OME 记录的像素尺寸是 0.5069 µm；
+  - `postprocess_min_size`，int，≥0；
+  - `use_gpu`、`batch_size`、`tile_size`、`overlap` 不显示。
+  - **v3.7 起不再显示**：
+    - `nuclear_channel`、`membrane_channels`、`input_mode`：输入固定下来，膜通道只能用 Fusion（7.11.1、7.11.5）。按方法区分：
+      - whole-cell 和 nuclear-guided：`[fusion 核通道, fusion]`；
+      - **nuclei：`[fusion 核通道, 0]`**，第二个通道为 0。
+      - 参数文件和共用的构造函数都要按这个区分执行；
+    - `normalize_input`、`percentile_low`、`percentile_high`：这是应用侧的那一次多余定标，要删掉（7.11.5 第 3、4 处）。
+    - 这些键仍然写进参数文件，值固定为：`input_mode="step1_weighted_fusion"`，`normalize_input=False`。这样 Step2 按现有的 `fused_zarr` 路径执行，并且不再做那一次多余的拉伸。具体键值在 V1/C 实施时，对照 Step2 的读取代码最终确定。
+
+**列表校验**（设计选择，块 B 的验收门按这条写）：
+- 用逗号分隔，去掉空格；
+- 每一项都在范围内，精度不超过上表；
+- 重复值去重后保留原顺序，并提示；
+- 空列表不能保存；
+- 「auto」只能出现一次；
+- 单值参数不接受逗号。
+- 注意：这里的去重是**单个参数列表内**的去重，和 R9 说的「不做展开后的过滤去重」不冲突。
+
+### 7.2 ② 8 个方法的输出表（更正 4.5）
+
+| 方法 | 细胞 mask | 核 mask | 依据 / C 需要做的 |
+|---|---|---|---|
+| Cellpose whole-cell | ✓ | —（置灰） | 无 |
+| Cellpose nuclei | — | ✓ | 无 |
+| Cellpose nuclei + expansion | ✓（扩张后） | ✓（扩张前） | `cellpose_worker.py:578-585` 直接覆盖了核标签，要在 `expand_labels` 之前保留一份 |
+| StarDist nuclei | — | ✓ | 无 |
+| StarDist nuclei + expansion | ✓（扩张后） | ✓（扩张前） | `:711-715`，处理同上 |
+| Mesmer whole-cell | ✓ | **见 O1** | |
+| Mesmer nuclei | — | ✓ | 无 |
+| Mesmer nuclear-guided | ✓ | ✓ | 目前算了两次推理（`mesmer_worker.py:193-208`），核的结果被丢弃，没有放进队列 |
+
+**核查结果**：
+- **Mesmer 模型每次推理都同时输出 whole-cell 和 nuclear 两个 head。** `compartment` 只决定后处理的是哪一个（`deepcell/applications/mesmer.py:136-150`）。
+- 合成图实测（CPU）：`compartment='both'` 返回 `(1, H, W, 2)`，其中第 0 层和单独调用 `whole-cell` 的结果**逐像素相同**，第 1 层和单独调用 `nuclear` 的结果**逐像素相同**。
+- 这次 CPU 计时没有体现出节省（both 3.39 s，whole-cell 1.71 s，nuclear 1.61 s，受首次调用影响），所以**不声称能提速**。
+- 现状：
+  - nuclear-guided 的细胞 mask 与 Mesmer whole-cell 完全相同，因为 `method_to_mesmer_mode` 对二者都返回 `whole_cell`；
+  - nuclear-guided 只是多做一次 nuclear 推理；
+  - Step2 的 `get_seg_config` 对 nuclear-guided 写的是 `compartment: "whole-cell"`，注册表里写的是 `"both"`。这个字段目前没有代码读取，只是记录在这里。
+
+**O1 裁定（同意）**：Mesmer whole-cell 只显示细胞 mask，核开关置灰。
+
+**O2 裁定（同意）**：保留现在的两次调用，只把已经算出来的核 mask 回传。本计划不做 `compartment="both"` 优化。
+
+**三种状态**（块 C 实施）：
+- `not_produced`：方法本身没有这种输出，开关置灰；
+- `ok` 且 `count = 0`：成功，但零细胞；
+- `failed`：运行失败，附错误信息。
+
+另外增加 `cancelled`：Stop 时还没执行的任务记为这个状态（见 7.7）。
+
+### 7.3 ③ 任务格式、结果记录格式、结果文件布局
+
+**组合 ID**：
+- `combo_id = sha256(canonical({method, params}))` 的前 12 位。
+- 规范化复用 `_step1_config_hash` / `_canonical_step1_config_value`（`ui/main_window.py:7255-7281`）：浮点数保留 6 位，并去掉时间类字段。
+- `params` 只包含方法注册表里的键，去掉 `device_used` 等运行后才写入的字段。
+
+**任务**（进程之间传的内容，全部是可 pickle 的普通类型）：
+```
+{task_id, run_id, combo_id, method, params,     # params 已展开，不含列表
+ patch_bbox: [y0,y1,x0,x1], patch_label: "P3"}  # label 只用于显示和日志
+```
+- 按方法族分组派发，这一点在块 C 实施：
+  - Cellpose / StarDist 进 `run_cellpose_process`；
+  - Mesmer 进 `run_mesmer_patch_preview`。
+- 现在的 worker 本来就按每个任务的方法分派（`cellpose_worker.py:486`、`:559`、`:692`）；只有「选哪个进程入口」是按第一个任务决定的（`main_window.py:6463-6469`）。
+- 所以要改的是 `_launch_worker` 的分组，以及两个 worker 回传内容的改造。
+
+**结果记录**（每个任务一条；队列里只传这条记录，不传 mask）：
+```
+{schema: 1, run_id, task_id, combo_id, method, params,
+ patch_bbox, patch_label,
+ source: {pixel_key, manifest_digest, manifest_path, raw_ome_path},   # 见 7.4
+ fusion_settings_hash,
+ status: ok|failed|cancelled, error: "",
+ cell:    {status: ok|not_produced, path, count},
+ nucleus: {status: ok|not_produced, path, count},
+ device, runtime_s, created_at}
+```
+
+**文件布局**（设计选择）：
+```
+<step1_dir>/presegmentation_runs/<run_id>/
+    run.json                       # 点 Run 时冻结的快照，见 7.4
+    records/<combo_id>__<bboxkey>.json
+    masks/<combo_id>__<bboxkey>.cell.npy      # uint32，level-0 分辨率
+    masks/<combo_id>__<bboxkey>.nucleus.npy
+```
+- `<bboxkey> = y0_y1_x0_x1`。
+- `run_id = YYYYmmdd_HHMMSS_<4 位十六进制>`。
+- 同一次 Run 里，`(combo, bbox)` 唯一；不同 Run 在不同目录。因此现有缺陷 2（npz 互相覆盖，`cellpose_worker.py:733-737` 的文件名里没有组合信息）不会再出现。
+- `<step1_dir>` 就是现在的 `OUTPUT_DIR`（`main_window.py:2290`、`:2746`），和 `segmentation_params/`、`patch_preview_results/` 在同一目录。这样现有缺陷 4 也解决了。
+- 旧的 `patch_preview_results/` 保留，新路径不写那里。
+- 方案文件放在 `segmentation_search_plans/`（4.3），和结果目录分开。
+- **L1 裁定（同意）**：旧 Run 目录不自动删除。新的一次 Run 开始时，只从视图里清掉旧结果。磁盘清理另立任务。
+- **原子发布**（E1 裁定的要求，块 C 实施）：
+  - mask 文件先写成 `*.tmp`，再用 `os.replace` 原子替换成正式文件名；
+  - 结果记录**最后**发布，同样先写临时文件再原子替换；
+  - 记录发布成功后，才往队列发送这条记录。
+  - 这样只要一条记录存在，它引用的 mask 文件就一定完整。
+
+### 7.4 ④ 来源绑定、运行快照、运行中编辑
+
+**已有身份**：
+- `_handoff_identity()`，`ui/main_window.py:6700-6731`，给出 `manifest_path`、`manifest_digest`、`channel_remap_config_hash`、`handoff_schema_version`、`source_identity`、`raw_ome_path`。
+  - `manifest_digest` 是对整个 manifest 做的 hash；时间类字段不算在内。
+  - **Step0 每次发布都会变**，包括只改几何的发布（增删 patch 时 `geometry_revision` 和 `n_patches` 会变，`core/step0_handoff.py:291-293`）。
+- 视图 provider 的 `source_identity()`（`ui/step1_viewer_host.py:75-90`）：只改几何的发布不会让它变化，而且它只在视图里有效。**不采用。**
+- `fusion_settings_hash`（`main_window.py:6750`）只对 `fusion_config` 和 `display_mapping` 做 hash，**和几何无关**。
+
+**问题**：如果用 `manifest_digest` 判断结果是否过期，那么在 A2 随机生成 patch，或者手画一个新 patch，都会让**所有**已有结果变成过期，哪怕那些 patch 的像素完全没变。
+
+**S1 裁定（同意采用 pixel_key，定义按审核意见修订）**：记录里 `pixel_key`、`manifest_digest`、`fusion_settings_hash` 三个都保存，各管一件事：
+- `pixel_key`：判断**像素是否过期**；
+- `manifest_digest`：只用于审计追溯，不参与过期判断；
+- `fusion_settings_hash`：独立校验，和 pixel_key 分开比较，不并入 pixel_key。
+
+**pixel_key 的定义**：它和 **patch 列表无关**，不能笼统地说成「和几何无关」，因为分析 ROI 本身属于几何，而且会影响像素。
+- 做法：先生成一个**结构化**的身份字典，再用 `_step1_config_hash` 做规范化哈希。**不从 `identity_token()` 字符串里解析后删字段。**
+- 至少包含：
+  ```
+  {raw:        {dataset_path, dataset_fingerprint},         # manifest.source_identity
+   roi:        {bbox_fullres, polygon_fullres | None},      # 当前分析 ROI；full_wsi 两项都为 None
+   remap:      channel_remap_config_hash,
+   channels:   {<ch>: {decision: original|<corrected 决定>,
+                       product: None | {shape, dtype, correction_method,
+                                        roi_name, source_identity, written_at}}},
+   handoff_schema_version}
+  ```
+- **排除**：patch 列表、P 编号、`n_patches`、只改几何时的 `geometry_revision`、`patch_config_path`，以及各种发布时间和时间戳。
+- **取值来源**（块 C 实施，不改 viewer）：
+  - `raw`、`remap`、`handoff_schema_version`、各通道的 `decision` 取自 manifest，也就是 `_handoff_identity()` 已经读出的那份（`core/step0_handoff.py:220-283`）；
+  - `roi` 取自当前 `_active_roi`，或 manifest 的 `roi_config`；
+  - `product` 由块 C 的新代码用 `utils/calibration_source.open_corrected_channel_array` **只读**打开 corrected 数组，读取它的 shape、dtype 和 attrs。字段和 `viewer/step1_source.py:_product_token` 用的一致，但是结构化的。
+  - 不调用、也不修改 `Step1SourceTable` 的私有成员。
+- patch 本身由 `patch_bbox` 标识。bbox 变了，就是另一个 patch。
+- **块 C 的门**（在 HEAD 导出树上要先确认会红）：以下几种情况，pixel_key 必须**变化**：
+  - 重新生成 corrected 产物；
+  - 改某个通道的 original/corrected 决定；
+  - 改分析 ROI 的 polygon；
+  - 改 remap。
+
+  以下几种情况，pixel_key 必须**不变**：
+  - 增加或删除 patch；
+  - 只改几何的发布；
+  - 单纯重新发布。
+
+**点 Run 时冻结的内容**（写入 `run.json`，内存里也保留一份）：
+- 勾选的 `patch_bbox` 列表，以及它们当时的 P 编号；
+- 展开后的任务表，也就是方法、组合和 `combo_id`；
+- committed fusion snapshot 的 `hash`、`fusion_config` 和 `display_mapping`。现在的 `_launch_worker` 已经只从 snapshot 取值（`main_window.py:6424-6444`），保持不变；
+- `source`，也就是 pixel_key 和 `_handoff_identity()` 的相关字段。
+
+**运行中编辑**（继承 4.4，补充以下几条）：
+- 正在运行时，Run 按钮禁用。现在 `_launch_worker` 在进程还活着时会**静默返回**（`:6419`），新界面要把这个状态明确显示出来。
+- 运行中增删 patch、编辑方法块、保存 Fusion，都不影响已经派发的任务，只作用于下一次 Run。
+- 迟到的结果按 `(run_id, combo_id, patch_bbox)` 归位，不看当前的 P 编号。
+  - Step1 `_on_patches` 在 patch 数量变化时会清空 `_seg_preview_history`（`main_window.py:4740-4746`）。新的结果存储不能挂在这个按位置编号的结构上。
+- 结果的 `pixel_key` 或 `fusion_settings_hash` 和当前不一致时，照常显示，但标为过期，不能选为最终。
+- **任何结果都不会自动成为选中项。**
+  - 现有缺陷 1 的位置在 `_record_segmentation_preview_result`（`:3128-3151`）：只要结果的 `_phase != 1`，它就会写 `self._p2_params`。
+  - 轮询代码随后设置 `_params_source="patch_preview"`，并调用 `_check_save_unlock`（`:6541-6543`）。
+  - 这几处在块 C 里一起改。
+
+### 7.5 ⑤ 组织掩膜、「空白超过 40%」、ROI 包含判定
+
+**确认：没有可以复用的组织掩膜。** 全仓搜索过 tissue、otsu、foreground、background_mask、fill_holes、TMA。同名的东西都是别的用途：
+- `core/tissue_compose.py` 只做显示合成；
+- `core/bg_correction.py:236 _safe_otsu` 只算 SNR 标量；
+- `workers/hq2_marker_segmentation.py:201` 是细胞级的二值化；
+- `utils/mesmer_utils.py:280 postprocess_mask` 处理的是细胞 label。
+
+所以要在 `core/random_patches.py` 里新写（A2 白名单已经包含这个文件）。
+
+**算法（设计选择，已在真实切片上只读验证）**：
+1. **读取**：`OMETIFFLoader.read_region_lowres(DAPI, 0,H,0,W, loader.overview_downsample(), normalize=False)`（`core/io_loader.py:132`），走 TIFF 金字塔。
+   - 真实切片是 59040×35520，`ds=64`，overview 为 923×555。
+   - 读全部 29 个通道共 4.2 s（实测）；只读 DAPI 的耗时没有单独测。
+2. **信号**：`log1p`，再按 p1–p99.5 做稳健归一化。
+3. **平滑、阈值、形态学**：`gaussian(σ=2 px)` → Otsu → `closing(disk(4))` → `binary_fill_holes` → `remove_small_objects(200 px)`。约 0.56 s。
+   - 这组数值是 A0 可行性核查时在 ds=64 上用的。正式定义改用 level-0 单位，见下面的 T1、T2。
+4. **组织掩膜**就是上一步的结果。在 ds=64 的 overview 上，1 个像素对应 64×64 个 level-0 像素。
+5. **空白比例** = 1 −（候选 patch 覆盖范围内组织像素的占比）。空白比例 > 0.4 的候选直接丢弃（R1）。计算方式见 T2。
+
+**实测（真实切片）**：
+- 直接对 DAPI 做 Otsu，也就是**不允许的定义**：只有 **15.1%** 的像素算作组织。核之间的间隙全被当成空白，任何 patch 都会被判为空白超过 40%。
+- 上面的算法：只用 DAPI 时组织占 **71.8%**，用全部通道取最大值时占 **72.2%**，两者 **98.9%** 的像素一致，所以**默认只用 DAPI**。
+- 对照图在会话 scratchpad 的 `tissue_probe/side.png`（左边是直接 Otsu，右边是本算法）：轮廓贴合组织外缘，核之间的间隙被算作组织。
+
+**T1、T2 裁定（按审核意见修订）**
+
+**T1：只填小洞，洞的面积阈值用 level-0 面积来定义。**
+- `binary_fill_holes` 会把大腔隙（血管、撕裂）也算作组织。改成只填面积小于 `max_hole_area_l0` 的洞，大腔隙仍然算空白。
+- 所有形态学参数都用 **level-0 像素单位**定义，在所选的掩膜层级上按 `ds` 换算：
+  - 长度 ÷ ds；
+  - 面积 ÷ ds²。
+- 像素尺寸确认之后，同时记录对应的 µm² 值。
+- A0 在 ds=64 上用过的值，换算成 level-0 分别是：
+
+  | 参数 | ds=64 上的值 | level-0 值 |
+  |---|---|---|
+  | σ | 2 px | 128 px |
+  | closing 半径 | 4 px | 256 px |
+  | 最小组织块 | 200 px | 819 200 px² |
+  | 洞面积阈值 | 500 px | 2 048 000 px² |
+
+- 这些都是**这张切片上的像素空间经验值，不是最终常量**。A2 实测之后才能固定（见 T2 最后一条）。
+- 不能直接固定为「500 个 mask 像素」，因为换一个金字塔层级，同样的像素数对应的面积就不同。
+
+**T2：每次随机生成，只建一张定义固定的组织掩膜。不对每个候选窗口单独归一化、单独做 Otsu。**
+- 如果每个窗口各算各的，同一个组织位置会因为候选窗口不同而得到不同的判断。
+- **层级**：根据 patch 的最短边，选一个足够细的**现有**金字塔层，目标是最短边至少覆盖约 32 个掩膜像素，也就是 `ds ≤ 最短边 / 32` 时取最大的那一层。例如 512 px 的 patch 用 ds=16。
+  - 层级只来自 TIFF 已有的金字塔（`read_region_lowres` 会取 ds 不超过所请求值的最粗一层），不另外重采样。
+- **范围**：一次性算出整个生成范围的掩膜。生成范围是：有 ROI 时为 ROI 的 bbox，没有 ROI 时为整张切片。
+- 同一批候选**共享**同一组归一化、阈值和形态学参数，这组参数按 T1 从 level-0 换算过来。
+- **组织占比**：在掩膜上建积分图（`cumsum` 两次），每个候选的组织像素数用 O(1) 查表得到。候选边界和掩膜像素不对齐时，按覆盖面积加权；在 A2 的门里用合成图验证这一点。
+- **先实测，后定阈值**：A2 开工后，先在真实切片上实测，报告给用户，再固定常量。实测内容：
+  - 所选层级；
+  - 掩膜内存；
+  - 读盘和计算的耗时；
+  - 组织外缘的表现（出对照图）。
+- 内存估算（按算术，**未实测**）：ds=16 时整张切片约 3690×2220 ≈ 8.2 M 像素，float32 约 33 MB；ds=8 时约 131 MB。
+- 生成记录里写明：掩膜层级 `ds`、level-0 单位的参数、Otsu 阈值和随机种子。
+- 合成图上的验证（核之间有间隙的组织不被判为空白）放在 A2 的验收门里，本块只做了真实切片的只读核查。
+
+**ROI 包含判定**：
+- **现有工具**：
+  - `cv2.fillPoly` 栅格化，在 `ui/step0/overview_panel.py:411`、`ui/step0/search_ctrl.py:2167`；
+  - 射线法点判定 `OverviewPanel._point_in_polygon`（`overview_panel.py:2033`，overview 坐标，UI 类的 staticmethod）；
+  - Step1 只做 bbox 包含判定（`main_window.py:4540 _patch_inside_roi_bbox`）；
+  - 仓库里没有「矩形完整落在多边形内」的判定。
+- **设计选择**：在 `core/random_patches.py` 里写纯函数 `rect_inside_polygon(bbox_l0, polygon_fullres)`，用 level-0 坐标精确判定：
+  - 矩形 4 个角都在多边形内（偶奇射线法）；
+  - 并且多边形的每条边都不与矩形内部相交（线段与矩形求交）。
+  - 这对凹多边形是精确的。
+  - 不依赖 UI 类，也不引入 shapely。
+- **坐标约定**：`polygon_fullres` 是 `(x, y)`，bbox 是 `(y0, y1, x0, x1)`（`overview_panel.py:2135-2149`）。函数内部统一换算，测试里要覆盖。
+- 没有多边形的 ROI（`polygon_fullres=None`，full_wsi）：只按组织判定。有 ROI 但没有多边形时，按 `bbox_fullres` 矩形判定。
+- 有 ROI 时，候选只在 ROI 的 bbox 内抽取，而且**同样要满足空白比例不超过 40%**。R1 的空白规则对两种情况都适用。
+
+**写入 Step0 的正式 patch**（A2 实施，只调用现有接口）：
+- `OverviewPanel.add_patch_rect(y0,y1,x0,x1, roi_idx)`（`overview_panel.py:2310`）每调用一次发一次 `patches_changed`。之后走 `_on_patches_changed` → `_reconcile_roi_edit` → `_persist_geometry_edit` → `GeometryPersistWorker` → `commit_geometry_only` → `geometry_committed` → Step1 `_on_patches`（`step0_page.py:737-742`、`:4610`、`:5189`、`:5237`；`main_window.py:2068`）。
+- 连续调用 N 次时，持久化任务会合并成最后一次（`geometry_persist_worker.py:91-102`），结果正确。
+- 前提：Step0 至少发布过一次 handoff，否则只存在内存里（`step0_page.py:4648-4676`）。
+- **注意**：
+  - `add_patch_rect` 不会自动计算 `roi_idx`，要传入；
+  - Step1 会把 patch 过滤到 ROI 的 bbox（`main_window.py:4548`）；
+  - 增加 patch 会改变 `manifest_digest`，这正是 7.4 建议改用 pixel_key 的原因。
+
+### 7.6 ⑥ montage 的显示供给
+
+**复用接口**（只调用，不修改）：用整张切片 viewer 现在的合成链，而不是旧的 patch 预览链。
+1. `spec = build_spec(window._display.fusion, window._display.state, mode, scope="step1")`（`ui/step1_draft_spec.py:95`）。
+   - 它已经包含 Channels 勾选、Overlay/Fusion 模式、Intensity 映射 `mappings={ch:(lo,hi,gamma)}`，以及 fusion 权重和颜色。
+2. 需要读的通道：`viewer/step1_compose.py:84 overlay_channels` 和 `:94 fusion_channels`。
+3. 层级：用 `viewer/request_planning.py:45 pick_display_level` 按 montage 自己的缩放来选，用 `:116 bbox_to_level` 换算坐标。
+4. 像素：`window._step1_mount.host.stack.provider.read_region(ch, level, y0,y1,x0,x1)`（`ui/step1_viewer_host.py:148`）。
+   - 它是同步调用，返回 float32，缺失的地方是 NaN。
+   - 它会遵守 original 和 corrected 的决定、corrected 的 coarse 平面，以及 ROI 裁切。
+5. 合成：`viewer/step1_compose.py:193 compose(mode, tiles, **spec)`，纯 numpy，不依赖 Qt，不带缓存。
+6. `missing_windows` 里的通道，调用 `window._display.request_mapping_seed(ch)`（`ui/block01_display.py:1964`）。这是现有的共享服务；映射到达后会发 `state.mapping_changed`，montage 收到后重新合成。
+
+**不采用旧的 patch 预览链**，原因有三：
+- 整张切片 viewer 在屏幕上时，它不会填缓存（`main_window.py:5706` 提前返回）；
+- 没有映射的通道，它会退回 patch 百分位或 `loader._norm`，画出来和 viewer 不一样；
+- 它读的是全分辨率，不用金字塔。
+
+**缓存归属**：montage 自己持有两层 LRU，**不借用、不扩展** viewer 或 scheduler 的缓存。
+- **授权边界**：按 `AGENTS.md` 第 4 条，**新增这两层缓存和 montage 工作线程，属于块 D 必须明确授权的范围**。它们不涉及修改 viewer 或 scheduler，但块 D 启动时要由用户明确批准三件事：
+  - 两层缓存的容量；
+  - 缓存和线程的生命周期，也就是下面的释放时机；
+  - 取消和关闭的门：切换数据集、离开 Step1、关闭窗口时，线程都要退出，缓存都要清空，而且没有迟到的回调。
+- 下面的数值是建议，不是已经批准的值。
+- **通道块**：键为 `(patch_bbox, level, channel, pixel_key)`，值为 float32，建议上限 1 GiB。Intensity、模式或勾选变化时，不用重新读盘，只需重新合成。
+- **合成结果**：键为 `(patch_bbox, level, spec_hash)`，值为 RGBA uint8，建议上限 256 MiB。
+- 读取和合成在 montage 自己的工作线程里执行，最新请求优先；GUI 线程只上传图像。
+
+**对现有缓存的影响**（已核实）：
+- 直接调用 `provider.read_region`，**不经过** `TileScheduler.request`，所以不会写入或挤掉 viewer 的 raw 512 MiB 缓存和 corrected 2 GiB 缓存（`viewer/scheduler.py:206`、`:532-539`）；
+- 不会碰合成 LRU，也不会碰 GPU 纹理；
+- 唯一会被填充的是 `Step1SourceTable` 的元数据备忘，也就是打开的数组句柄，不含像素。
+
+**线程安全（advisory）**：
+- `Step1SourceTable` 的惰性填充没有加锁（`viewer/step1_source.py:252-258`、`:325-348`）。
+- scheduler 的多个 tile-io 线程已经在这样共用它，montage 线程只是多一个同类调用方，不引入新的风险类型。
+- 块 D 的门里加一条「viewer 和 montage 同时读取不出错」的实测。如果发现问题，停下来申请，不擅自给 source table 加锁。
+
+**释放时机**（继承 4.6）：
+- 切换数据集，或 `pixel_key` 变化：清空；
+- 离开 Step1：清空；
+- 某个 patch 被取消勾选：清掉这个 patch 的条目；
+- 新的一次 Run 开始：只清结果图层，底图缓存保留，因为像素没变；
+- Channels 或 Intensity 变化：只清合成层。
+
+**不需要改 viewer、scheduler 或已有的缓存层。** 但 montage 自己新增的两层缓存和工作线程，要作为块 D 的明确授权项申请（见上文「授权边界」），不能算作「不需要申请」。
+
+**step5_v8 参考（更正 R6 的前提描述）**：
+- step5_v8 的 montage viewer 是**浏览器 WebGL**（`deepseek/step5_v8/agentic/montage_viewer_web.py`），不是 Qt。
+- 它的底图是预先拼好的整张 montage，patch 尺寸统一；分隔线是一个栅格通道；mask 是栅格的填充图；画布上**没有矢量轮廓**，也**没有文字标签**。
+- 本计划借用的是它的思路：一张画布、一个相机、一张布局表、分隔线作为独立图层、按行列命中判定。
+- 本计划不同的地方：
+  - patch 尺寸不一，采用按行装箱的布局；
+  - 底图实时合成；
+  - mask 用 cosmetic `QPen` 画矢量轮廓（4.6，块 D 实测）；
+  - P 编号是独立图层。
+- 这些都是本计划自己的设计，参考里没有现成实现。
+
+**坐标**：mask 是 level-0 分辨率，底图是 level-k。每个 patch 的图元都要设置 level-k → 画布的变换。轮廓路径直接用 level-0 坐标乘以画布缩放，不跟随底图层级。
+
+### 7.7 ⑦ 选定资格规则（E1、E2 已裁定）
+
+**状态的含义**：
+- `ok`、`failed`、`cancelled` 都是**运行终态**：任务不会再有结果。
+- `pending`、`running` 是非终态。
+- **E2 裁定**：`cancelled` 是终态，但会让整个组合**不具备选定资格**。
+
+一个组合可以被选为最终结果，需要**同时**满足以下五条（**E1 裁定**：同意主体规则，并补上第 2 条的文件完整性条件）：
+1. 在它所属 Run 的**冻结 patch 集合**里，每个任务都已到达终态，而且没有一个是 `cancelled`。
+2. **文件完整**：这些任务的结果记录，以及记录要求的 mask 文件，都已经完整发布。也就是说，`status=ok` 的输出，`path` 必须存在，并且是原子替换后的正式文件（7.3 原子发布）。有记录缺失或文件缺失的组合，不能选。
+3. 至少有一个 `ok`。`ok` 且零细胞也算 `ok`。
+4. 不过期：`pixel_key` 和 `fusion_settings_hash` 分别都和当前一致。过期的结果**可以查看，但不能选定**。
+5. 有 `failed` 的 patch 时，按原草案处理：控制栏里标出失败数，选定前弹窗提示「k/n 个 patch 失败」，用户坚持就可以选。
+
+其他规则：
+- 选定之后再运行新的 Run，旧的选定保留。但如果它变成过期，就自动取消选定，Save 重新禁用。
+- 基本约束随块 C 落地（4.7）：没选组合时 Save 禁用；结果到达不会自动选中；hash 不一致时拒绝 Save。
+- 现有的 `_params_match_committed_settings`（`main_window.py:6681-6696`）比较的是 `_p2_params["fusion_settings_hash"]`。**Step1 Save 写出的参数文件里没有这个 hash**，`cpcfg` 由显式的键构造（`:8057-8069`）。
+  - 块 E 建议把 `fusion_settings_hash` 和 `pixel_key` 写进参数文件，只作追溯用。
+  - Step2 不读这两个字段，这条不改 Step2 的行为。
+
+### 7.8 ⑧ Step2 交接实测
+
+**方法**：
+- 脚本 `a0_step2_handoff_probe.py`，Qt offscreen，不在 DISPLAY :1 上弹窗。
+- 对 8 个方法，各用非默认值构造一个「所选组合」，经过 `normalize_segmentation_config` → `save_segmentation_params`，写入临时目录。这是现有交接契约，也是 4.7 规定的写出格式。
+- 然后走公开路径 `MainWindow._go_to_step2()`（`main_window.py:3913` 起，`:3924-3940` → `step2.load_step1_active_params`）。
+- 最后读 `step2.get_seg_config()`，也就是 `step2_page.py:2268` 实际提交给执行器的内容，逐个键比较顶层和 `params` 两处。
+- 这条路径和现有测试 `tests/test_step1_to_step2_handoff.py` 的做法一致。
+
+**结果**：
+
+| 方法 | 方法名一致 | 所选参数一致 |
+|---|---|---|
+| Cellpose whole-cell（d 17.5，flow 0.35，prob -0.5） | ✓ | ✓ |
+| Cellpose nuclei（d 12，flow 0.6，prob 0.5） | ✓ | ✓ |
+| Cellpose nuclei + expansion（同上 + expand 5） | ✓ | ✓ |
+| StarDist nuclei（prob 0.55，nms 0.35） | ✓ | ✓ |
+| StarDist expansion（同上 + expand 6） | ✓ | ✓ |
+| Mesmer ×3（maxima、interior、mpp 0.65） | ✓ | mpp ✓；**maxima 和 interior 只在顶层，`params` 里没有**，而且目前没有任何代码读取（见 7.0 第 2 条） |
+| 精度探针：flow 0.375，prob -0.125，sd prob 0.475，nms 0.325 | ✓ | **✗，被四舍五入为 0.38、-0.13、0.47、0.33** |
+
+**结论**：
+- 在 7.1 的范围和精度之内，Cellpose 和 StarDist 这 5 个方法从 Step1 Save 到 Step2 `get_seg_config()` **一致**，块 E 不需要改 Step2 的装载。
+- 缺口有两处：
+  - 超出精度或范围的值，由块 B 的弹窗校验挡住；
+  - Mesmer 阈值，按 P1 由块 C 和块 E 处理。
+- **测量范围**：只测了「交接文件 → Step2」这一段，没有测 Step1 `_save` 自身怎样组装 `cpcfg`。
+  - 现有的 `_save` 对非 Cellpose 方法也会把 `diameter`、`flow_threshold`、`cellprob_threshold` 写到顶层（`:8062-8069`）。
+  - 新界面的 Save 在块 E 里重写组装逻辑，块 E 的端到端门会覆盖这一段（8 个方法各一次）。
+- 另记：`_apply_seg_config_to_ui` 对 Mesmer 强制把 `tile_size` 和 `overlap` 设为 0，`get_seg_config` 再转成 `None`（`step2_page.py:1665`、`:1769`、`:1799-1800`）。
+  - 所以 Step1 的 Mesmer `tile_size=2048` 和 `overlap=128` 不会到达 Step2。
+  - 这是 Step2 有意的设计（控件已禁用，并提示「from Step2 Tile Grid」），而且 7.1 已经把它们定为不显示，不算缺口。
+
+### 7.9 裁定汇总（独立审核，2026-09-23）
+
+| 编号 | 裁定 | 落在哪里 |
+|---|---|---|
+| F1 | Mesmer 保留在界面上，缺少 deepcell 时置灰并明确提示；环境问题**另立块 V**，块 C 的 Mesmer 验收以块 V 为前提 | 7.0、7.10 |
+| R10–R14 | whole-cell 输入 `[fusion, fusion, DAPI]`；用户窗口和权重全局生效，模型自动定标按局部做，每个引擎只执行一套标准预处理；Step1 采用 HALO；权重在两边按相同规则参与构造（N1 选 a）；一套轮子、方法模块化。这几条是用户裁定。H1、H2 已裁定；R11 已修订为「局部自动定标，应用侧不额外拉伸，每个引擎只执行一套标准预处理」，I0–I3 作废 | 二、7.11、7.12 |
+| V1–V4 | 分 3 个引擎环境；micromamba、按平台锁定、独立子进程（只做依赖和进程隔离）；Step2 分步接入；顺序为 V0 → V1/C → V2 → E | 7.10 |
+| P1 | 同意扩大块 C：`mesmer_utils`、Mesmer worker、Step2 保留参数、实际执行透传；测试要证明参数到达 DeepCell kwargs，并且改变结果 | 7.1 |
+| P2 | whole-cell / nuclear-guided 的阈值作用于细胞，nuclei 的阈值作用于核，副核输出用默认值；界面和 metadata 里写清楚 | 7.1 |
+| P3 | Cellpose `expand_distance` 保持单值 | 7.1 |
+| O1 | Mesmer whole-cell 只显示细胞，核开关置灰 | 7.2 |
+| O2 | 保留两次调用，只回传核 mask；不做 `both` 优化 | 7.2 |
+| L1 | 旧 Run 不自动删除；磁盘清理另立任务 | 7.3 |
+| S1 | 采用 pixel_key：和 patch 列表无关，结构化生成后再哈希；manifest_digest 只用于审计；fusion hash 独立校验 | 7.4 |
+| T1 | 只填小洞；阈值用 level-0 面积定义，属于经验值，A2 实测后才固定 | 7.5 |
+| T2 | 每次生成只建一张固定定义的掩膜：最短边覆盖约 32 个掩膜像素的现有层级，参数共享，用积分图计算；先实测，后定阈值 | 7.5 |
+| E1 | 同意主体规则，并加上文件完整性条件，写盘采用原子发布 | 7.3、7.7 |
+| E2 | `cancelled` 是终态，但会让该组合不具备选定资格 | 7.7 |
+| 另 | montage 的两层 LRU 和工作线程，是块 D 的明确授权项 | 7.6 |
+
+**审核结论**：
+- A0 的调查证据可以接受。按上面修订后，A0 定稿。
+- A1 可以随后单独申请。
+- A2 要等 S1、T1、T2 的定义写实之后才能启动。本版已经写入，待用户确认。
+- 文档暂时不提交，没有 push 授权。
+
+### 7.10 块 V：按引擎的独立运行环境（方向已获独立审核通过，2026-09-23；**只有 V0 可以申请启动**）
+
+**动机**：用户提出，每种分割方法有自己的运行环境，彼此隔离，并且能随项目部署到其他电脑上。F1 要求另立的环境块，就用这个方案落实。
+
+**审核裁定**：
+
+| 项 | 裁定 |
+|---|---|
+| V1 | 分 3 个引擎环境：Cellpose、StarDist、Mesmer。8 个方法作为引擎内部的配置，不复制 8 份环境。 |
+| V2 | micromamba，按平台锁定依赖，引擎作为独立子进程运行。**只提供依赖隔离和进程隔离，不提供文件权限隔离或 GPU 资源隔离。** 下文不再使用「沙箱」一词暗示更强的隔离。 |
+| V3 | Step2 最终和 Step1 使用同一套引擎、同一个模型、同一种参数解释。分步接入，**保留 Step2 现有的切块、合并和恢复机制**。 |
+| V4 | 协议和环境验证（V0）现在就先做。Step1 接入与块 C 合并（V1/C）。Step2 接入单独成块（V2），在块 E 的全流程验收之前完成。这样可以避免块 V 和块 C 重复改派发代码。 |
+
+#### 7.10.1 已核实的事实与尚未证明的推断
+
+**已核实**：
+- 同一个 conda 环境里只能装一个 TensorFlow 版本。现在 StarDist 所在的 `fusion_test2` 装的是 TF 2.21（CPU 版），deepcell 所在的 `fusion_mesmer` 装的是 TF 2.8.4（CUDA 版），两者不能合并成一个环境。
+- **在这两个环境里，TF 都看不到 GPU**，只有 torch（Cellpose）能用 CUDA。
+- 仓库里没有任何环境描述文件，主程序自己的环境也没有。
+- Mesmer 模型路径硬编码在 `utils/mesmer_utils.py:302 _default_mesmer_model_path`，里面有本机的绝对路径 `/sda1/Fusion/benchmark/...`。
+- StarDist 在 Step1 走子进程（`workers/cellpose_worker.py:236-372`，用 `sys.executable`），在 Step2 走主进程（`workers/segment_merge_worker.py:1974-1976` 调用 `load_stardist_model`）。两条路径已经不同。
+
+**尚未证明，不能写成理由或承诺**：
+- 「StarDist 必须用 TF 2.21」**没有证明**。现在只是恰好装成这样。StarDist 的 TF 版本在 V0 按实际验证的组合来锁定。
+- CUDA 版本**不预先写死**（包括 cu121），按各引擎在 V0 实测通过的组合来锁定。
+- 老版本 TF 在 RTX 4090 上能否用 GPU，**必须实测**，不能因为缺少 sm_89 就断言靠 PTX 一定能跑或一定不能跑。驱动版本和 GPU 架构是部署约束，要写进部署说明。
+
+#### 7.10.2 部署目标
+
+- **第一版只支持 Linux x86_64。** 目标机器还要满足操作系统、系统库（glibc 等）和 NVIDIA 驱动的兼容条件，具体版本在 V0 实测后写明。
+- **不承诺跨平台。** conda-pack 不是跨平台打包工具，要求源平台和目标平台兼容。不承诺同一个包能直接在 Linux、Windows、macOS 上运行。
+- 要提供**主程序自己的环境规格和锁文件**。否则三个引擎可以搬走，整个项目仍然没法完整部署。
+- 验收层级分开说清楚：
+  - 在同一台机器上用新用户测试，只能证明不依赖原用户的配置；
+  - 它**不能代替**在另一台电脑上的部署验收。
+  - 另一台电脑的验收是否需要、何时做，由用户指定机器。
+
+#### 7.10.3 没有隐式回退
+
+- **产品运行时不回退到主环境**。引擎环境缺失，或者引擎身份和结果记录、参数文件里记的不一致时，这个方法**明确不能运行**：界面置灰，显示原因。
+  - 旧的进程内代码路径可以保留，作为**开发用的回退**，必须通过显式的开发开关才能启用，产品默认关闭，并在结果记录里标明。
+- 部署配置**不自动退回**本机的 Mesmer 绝对路径。模型只从部署目录里的 `seg_models/` 加载，并校验校验和；缺失就明确报错。
+- **CPU 回退**可以作为明确的策略：由引擎配置显式允许，实际设备如实写进结果记录。**CPU 自检通过不等于 GPU 验收通过**，两者分开报告。
+
+#### 7.10.4 输入准备与科学后处理的归属
+
+**原则**：
+- 「主程序负责读像素和做 fusion」，指的是**应用侧的后台任务**，不能把大数组的读取和合成搬到 GUI 线程上。
+- 引擎进程只负责：模型推理，以及列在下表「引擎侧」一栏里的步骤。
+- 每一步只在一侧执行一次。
+
+**现状**（静态阅读，**尚未实测**）。Step1 和 Step2 的输入准备已经不一致：
+
+| 方法 | Step1 输入（`cellpose_worker.py` / `mesmer_worker.py`） | Step2 输入（`segment_merge_worker.py`） | 不一致之处 |
+|---|---|---|---|
+| Cellpose whole-cell | `fuse_fullres` 的结果 /65535，拼成 `[cyto, cyto, nuc]` 的 3 通道图，`channel_axis=-1`（`:511-527`、`:575-576`） | fused.zarr 切块 /65535，直接传 `[cyto, nuc]` 2 通道图，**不传 `channel_axis`**（`:2003-2015`） | 通道布局不同，有没有 `channel_axis` 也不同 |
+| Cellpose nuclei（含 expansion） | `loader.read_region(DAPI)`，默认已归一化，再按 **patch 做 min-max**（`fusion._normalize_intensity`，`:540-545`） | fused.zarr 的第 1 通道 /65535（`:2018`） | 归一化的范围不同：一个按 patch，一个是 fusion 产物 |
+| StarDist（含 expansion） | 和 Cellpose nuclei 的 DAPI 相同，再在子进程里做 `normalize(1, 99.8)` | fused.zarr 的第 1 通道，再按切块做 `normalize(1, 99.8)`（`:2132`） | 同上，另外百分位是按窗口计算的 |
+| expansion 后处理 | 主进程 worker 里的 `expand_labels`（`:578-585`、`:711-715`） | 切块内的 `expand_labels`（`:2031-2038`、`:2142-2146`） | Step2 在切块边界上扩张，由现有的合并机制处理 |
+| Mesmer | `build_mesmer_input(loader, ...)` 按参数里的百分位归一化，再调用 `postprocess_mask` | `run_mesmer_on_channel_source` 或 `run_mesmer_on_fused_tile`，再调用 `postprocess_mask` | 输入来源有两种 |
+
+**块 V 的要求**：
+- V0 要为 8 个方法各出一张归属表，列出以下各项分别在哪一侧执行、怎样执行：
+  - 输入通道；
+  - 数组布局（HW / HWC，通道顺序）；
+  - dtype；
+  - 归一化（范围、百分位、按什么窗口）；
+  - 像素尺寸（Mesmer 的 `image_mpp`）；
+  - 模型推理；
+  - 扩张（expansion）；
+  - 后处理（`min_size`、`postprocess_mask`、`fill_holes` 等）。
+- 表中「引擎侧」的步骤只在引擎里执行；「应用侧」的步骤只在应用后台任务里执行。
+- 上表里 Step1 和 Step2 的不一致，已由用户裁定 R10–R12 统一处理，契约写在 **7.11**。
+  - 统一规则必须在 **V1/C 接入之前**写定，否则 Step1 接完后再改就要返工。
+  - V0 只负责记录并复现现有的两条路径，**不自行改变科学处理**。
+  - 长期保留两套输入语义并各自记录，**不能**作为预览有效性的最终验收。
+- 搬迁时，expansion 和 Mesmer 后处理**不能遗漏，也不能执行两次**。V1 和 V2 的门都要逐项检查。
+
+#### 7.10.5 进程模型与通信协议（第一版保持简单）
+
+- **按引擎串行**：一次 Run 里，同一时刻只运行一个引擎进程。当前引擎加载模型，完成自己的全部任务，然后退出并释放显存，再启动下一个引擎。**不同时保留三个模型进程。**
+- **协议**：stdin 和 stdout 上传 JSON 行，但 **stdout 只用于协议**，库的日志一律重定向到 stderr 或日志文件，不得混进 stdout。
+  - 每条消息都带 `protocol_version`。
+  - 消息类型：`hello`（引擎身份、设备）→ `task`（task_id，输入 `.npy` 路径，参数）→ `result`（task_id，记录路径，只在记录原子发布之后发送）| `error`（task_id，错误信息）→ `done`（完成）。
+  - **终态登记**：
+    - 进程被杀掉或崩溃时，没法保证 runner 还能发出消息。所以规则是：正常执行时，由 runner 用 `result` 或 `error` 回报；异常退出或被取消时，由**应用侧**给每个还没结束的任务登记唯一的终态。
+    - 每个任务**有且只有一个**终态，登记之后不能覆盖。
+    - 用户主动 Stop 的任务记为 `cancelled`，**不能**被通用的崩溃处理覆盖成 `failed`。应用侧要先记下「这是用户发起的停止」，再去结束进程。
+- **取消、崩溃、关闭**：
+  - 引擎进程用单独的进程组启动（`start_new_session`）；
+  - Stop 或关闭窗口时，先发 `cancel`，超时后对整个进程组依次发 SIGTERM、SIGKILL，确保本应用启动的进程**及其子进程**全部结束；
+  - 引擎在没有收到 Stop 的情况下崩溃时，由应用侧把还没完成的任务记为 `failed`，并附上退出码和 stderr 的末尾。
+- **引擎身份**和**实际设备**分开记录，两者都写进每条结果记录，也都写进 Step1 保存的参数文件：
+  - `engine_identity = {engine, lock_hash, lib_versions, model_checksum, runner_version}`：用来判断引擎是否匹配。不匹配就拒绝运行（7.10.3）。
+    - `runner_version` 用 runner 代码的内容哈希。原因是：锁文件和模型都不变时，参数的解释代码仍可能改变。
+  - `device_used`（cpu / gpu，以及 GPU 型号）：**不属于身份**，只记录这一次实际用的是哪个设备。
+    - 设备变化按已经批准的回退和验收策略处理（7.10.3、7.10.6），不触发「身份不同就拒绝」。
+    - 这样「显式允许 CPU 回退」和「身份不同就拒绝」两条规则不会互相冲突。
+
+#### 7.10.6 验收原则：「差异可以解释」不能作为通过条件
+
+- 同环境、同模型、同输入：先核对迁移前后的结果，要求**逐像素一致**。
+  - 做法：在旧路径和新引擎进程上，用同一个 `.npy` 输入各跑一次。
+- 设备不同（CPU 对 GPU）可能导致结果不完全一致。这种情况要**事先**定义比较指标和接受条件，由用户接受后才算数，不能事后拿解释来代替验收。
+  - 例如：label 数目的差、匹配后的 IoU 分布、不匹配对象的比例。
+- Step1 的小 patch 和 Step2 的全量切块，**不能仅凭用了同一个引擎就承诺逐像素一致**，因为切块边界、按窗口计算的归一化和合并都会带来差异。
+  - 能承诺的只是：方法相同、模型相同、参数解释相同，输入准备按 7.10.4 的表执行。
+
+#### 7.10.7 三个交付阶段
+
+**V0：部署与协议验证**（**唯一可以现在申请的一块**）
+- **范围**：
+  - 在**新建的独立环境**里，分别为 3 个引擎和主程序建立规格文件和锁文件；
+  - 离线模型目录和校验和；
+  - 最小 runner 和协议原型；
+  - 自检；
+  - 安装脚本。
+- **不改**现有的运行环境（`fusion_test2`、`fusion_mesmer`），不改任何生产代码路径。
+- **拟新增的文件**：
+  - `envs/{app,cellpose,stardist,mesmer}/`（规格文件和锁文件）；
+  - `scripts/setup_seg_envs.sh`；
+  - `seg_runner/`（协议模块和 3 个 runner，只依赖 numpy 和对应引擎）；
+  - 测试。
+
+  具体的文件白名单在块启动时确认。
+- **产出**：
+  - 每个引擎的库版本、CUDA 组合、GPU 是否可用（实测）、CPU 和 GPU 自检结果、离线加载模型是否成功、环境体积、安装耗时，以及用锁文件重装一次能否复现；
+  - 7.10.4 的归属表；
+  - 协议规格。
+- **验收门**：
+  - 在新环境里只用仓库和安装脚本就能装好，离线加载模型成功；
+  - 协议的取消、崩溃、关闭测试中没有残留进程；
+  - 同一输入在新引擎和现有路径上的结果对比，按 7.10.6；
+  - 同机新用户测试。另一台电脑的验收，按 7.10.2 由用户指定。
+
+**V1/C：Step1 接入**（和块 C 合并申请）
+- 多方法任务按引擎串行派发，细胞和核两种 mask，结果记录和原子发布，取消和关闭。
+- 7.2 至 7.4、7.7 的要求都由这一块落地。
+
+**V2：Step2 接入**（单独成块，在块 E 之前）
+- 复用同一个 runner。保留 Step2 现有的切块、合并和恢复机制，只替换每个切块的推理调用。
+- 验证：参数语义一致；输入语义按 7.10.4 和用户的裁定执行；引擎身份和 Step1 保存的参数文件一致，不一致时拒绝运行。
+
+
+### 7.11 模型输入契约（R10–R12；V1/C 和 V2 接入之前必须写定）
+
+**契约**：Step1 和 Step2 共用同一套模型输入规则。
+- whole-cell 的输入是 `[fusion, fusion, DAPI]`，`channel_axis=-1`；
+- 亮度：用户的窗口和权重在全局上生效；应用侧不额外做自动拉伸；每个引擎只执行一次它的那一套标准预处理（R11 修订版，见 7.11.5）；
+- Step1 采用和 Step2 一致的 HALO 与边界处理，再裁出中央的结果。
+
+旧的通道排法对比实验取消。验证的内容改为：**读取区域相同时**，两边的输入数组、参数和输出是否一致；并且应用侧不额外拉伸、每个引擎只执行它那一套预处理（7.11.4）。
+
+#### 7.11.1 R10 通道
+
+| 方法 | 送进模型的数组（两个 Step 相同） |
+|---|---|
+| Cellpose whole-cell | `np.stack([fusion, fusion, DAPI], -1)`，`channel_axis=-1`。Step2 在模型入口从 fused.zarr 的 `[fusion, DAPI]` 构造，**不改** fused.zarr 的存储 |
+| Cellpose nuclei / nuclei + expansion | 单通道 DAPI（cpsam 内部会补成 `[DAPI, 0, 0]`，`cellpose/transforms.py:609-614`） |
+| StarDist ×2 | 单通道 DAPI |
+| Mesmer whole-cell / nuclear-guided | **`[fusion 的核通道, fusion 通道]`**，两个 Step 相同，都取自 fusion 输出 ÷ 65535。用户平时就是用 Fusion 当膜通道（2026-09-23）。Step2 的「DAPI + Fusion channel」模式（`step1_weighted_fusion`）本来就走 fused.zarr 切块，也就是这种排法（`segment_merge_worker.py:1722-1725` → `mesmer_worker.run_mesmer_on_fused_tile`） |
+| Mesmer nuclei | `[fusion 的核通道, 0]`，与现有的「DAPI only」模式一样，第二个通道为 0 |
+
+#### 7.11.2 R11 全局亮度：应用层和模型内部都要检查
+
+**应用层**（已核实）：
+- **已经符合**：fusion 和 fusion 里的核通道。
+  - Step1 用 `fuse_fullres`（`core/fusion_engine.py:109-147`），Step2 的 fused.zarr 由 `FullFusionWorker._fuse_tile`（`ui/step0/overview_panel.py:373-405`，`_channel_norm` 在 `:308`）写出。
+  - 两边都只用 committed 的窗口；没有窗口的通道直接不参与，不会按区域估计。
+  - 两边都通过 `fuse_channels` 乘上 group/nucleus 权重，裁剪到 [0,1]，再**量化成 uint16**。
+  - V0 要核实一点：`apply_channel_remap(raw, p)` 和 `_channel_norm(ch, arr)` 在同一个窗口下**逐元素相等**。
+- **不符合**：
+  - Step1 的纯核方法先调用 `loader.read_region(DAPI, normalize=True)`，这会走 `_norm`，对当前区域取 p1–p99.5（`core/io_loader.py:294-302`）；然后又对 patch 做 min-max（`workers/cellpose_worker.py:544`）。这是两次局部归一化。
+  - Mesmer 的 `build_mesmer_input`（`utils/mesmer_utils.py:229-258`）分两种情况：
+    - 有 committed 窗口的通道，用 `apply_channel_remap`，也就是**全局窗口**（`:232-234`）；
+    - 没有窗口的通道，才按当前区域做 1–99.8 百分位（`:235-236`）。
+    - 膜通道按 `weights` 加权后取最大值（`:250-253`）。**没有设置膜通道时，第二个输入通道全为 0**（`:254-255`），而注册表里 `membrane_channels` 的默认值就是空列表。
+    - 核通道没有乘核权重，违反 R13。
+
+**纯核方法的输入（审核指出：只有「同一个 DAPI 窗口」还不够）**：
+- Step2 读到的核通道是：`clip(apply_window(DAPI) × nuc_w, 0, 1)`，量化为 uint16，再 /65535（`core/fusion_engine.py:66-68`）。
+- 如果 Step1 只是把原始 DAPI 按全局窗口映射成 float，就少了**核权重**和**uint16 量化**这两步，两边的输入仍然不同。
+- 契约要写明：窗口（包括 gamma）、核权重、裁剪、uint16 量化，每一步都做，还是每一步都不做。**两边必须一样。**
+- **待裁定 N1**：
+  - (a) 两边都用 fusion 的核通道，也就是 Step2 现有的 fused.zarr 第 1 通道。Step1 取 `fuse_fullres(...)[:, :, 1] / 65535`。这样核权重和量化都参与，Step2 不用改。
+    - 副作用：核权重 < 1 会压低纯核方法的输入亮度；`nuc_w = 0` 时输入全为 0，应当拒绝运行。
+  - (b) 两边都忽略核权重，只用「窗口 → 裁剪 → 量化」。这样 Step2 就不能直接用 fused.zarr 的核通道，要单独读 DAPI，改动更大。
+  - **N1 裁定（R13）：选 (a)**，外加 `nuc_w = 0` 时拒绝运行。
+  - Mesmer 也一样：纯核输入和核通道都从 fusion 结果中取，不再在 `build_mesmer_input` 里另读原始通道。膜通道的来源由块 B/C 按 R13 另外写定。
+
+**模型内部**（已核实）：
+- **Cellpose**：`eval` 默认 `normalize=True`，会对每张输入图的每个通道单独做 1–99 百分位拉伸（`cellpose/models.py:157`、`:174`、`:274-292`）。
+- **StarDist**：归一化是我们自己的代码调用 `csbdeep.normalize(1, 99.8)`（`cellpose_worker.py:300`、`segment_merge_worker.py:2132`）。
+- **Mesmer**：DeepCell 的 `mesmer_preprocess`（`deepcell/applications/mesmer.py:62-70`）默认对**当前输入**做三步局部处理：
+  1. `percentile_threshold(99.9)`，百分位截断；
+  2. `histogram_normalization` 里的 `rescale_intensity(out_range=(0,1))`，按当前输入的最小值和最大值重新拉伸（`deepcell_toolbox/processing.py:78-79`）；
+  3. `equalize_adapthist(kernel_size=128)`，也就是 CLAHE（`:80`）。
+  - **现状：两层定标都开着。** 第一层是上面的全局窗口，或者局部百分位；第二层是 DeepCell 的这三步。代码调用 `app.predict` 时没有传 `preprocess_kwargs`（`mesmer_utils.py:337`），所以用的是默认值。
+  - **会不会「过度拉伸」**（按代码推理，**未实测**）：
+    - 第一层已经把数值映射到 [0,1] 并截断。第二层的 99.9% 截断，会让最亮的 0.1% 再饱和一次。
+    - 最主要的是 `rescale_intensity` 按当前输入的最小值和最大值重新拉伸：在信号很弱的区域（比如只有背景和少量暗细胞），最大值本身就小，拉到 0–1 之后，**背景噪声被放大成满幅**。
+    - CLAHE 再增强局部对比度。
+    - 原始数据是 uint8（OME `Type="uint8"`，只有 256 级）。多次拉伸**可能**带来色阶断层，但这只是待验证的可能影响，不能仅凭数据是 uint8 就下结论。
+    - 所以在弱信号的 patch 上，确实可能过度放大噪声。至于这是不是用户看到「Mesmer 表现不佳」的原因，还没有证据。
+  - **其他可能拖累 Mesmer 的因素**：
+    - 已核实：膜通道为空时，whole-cell 的第二个输入全为 0；
+    - 像素尺寸：OME 的 `PhysicalSizeX` 是 0.5069 µm，和默认的 `image_mpp=0.5` **接近**，但这**不能**说明像素尺寸的影响已经排除，仍然是待验证的可能影响。
+  - 局部处理**不只是 CLAHE**：前两步取决于整个输入窗口里有没有更亮的信号。**HALO 宽度不能解决这个问题**，128 也不是 HALO 的充分条件，因为还涉及模型的输入缩放和 CLAHE 网格的位置。这一版删掉了「HALO ≥ 128」的说法。按 R11 修订版，这种随窗口变化的差异用户已经接受。
+
+**裁定**：I0–I3 已被 R11 修订版取代，I1（关掉 Cellpose 内部归一化）、I2（删掉 StarDist 的 `normalize`）、I3（关掉 Mesmer 预处理）**全部作废**。定标规则见 7.11.5。
+
+**用户窗口与权重的冻结**（不属于自动定标）：
+- 使用 committed fusion snapshot 里的 `display_mapping`，也就是 `_launch_worker` 现在已经冻结的那份（`main_window.py:6424-6444`），另加上核权重（N1）。
+- 不要求每个任务重新扫描整张图。
+- DAPI 没有 committed 窗口时，明确拒绝运行，不退回局部百分位。
+
+#### 7.11.3 R12 Step1 HALO、ROI 边界与归属
+
+**Step2 的实际做法**（已核实）：
+- **HALO**：默认 `overlap_px=200`（`workers/segment_merge_worker.py:113`）。`read_bbox = own_bbox ± overlap`，在 fused.zarr 的边界（也就是 ROI 的 bbox）处截断，不补边（`utils/tile_scheduler.py:37-60`）。
+- **多边形以外**：在**写 fused.zarr 的时候**，先 fusion，再量化成 uint16，然后把多边形以外的像素，两个通道都**置 0**（`ui/step0/overview_panel.py:606-622`，用 `cv2.fillPoly` 做掩膜）。
+  - 分割阶段没有再做多边形处理：`_segment_one_zarr` 接收了 `poly_fullres` 参数（`:2194`、`:2969`），但函数内部**没有使用**。
+  - 所以 Step2 的模型输入和全部预处理，看到的都是「多边形以外为 0」的图像。
+- **归属规则**：生效的路径是 `segment_merge_worker.py:2538-2575` 里的内联代码，**不是** `CentroidOwnershipMergePolicy`。后者在 `:2584` 附近只做影子比较，注释写的是「legacy remains authoritative」。
+  - 质心用 `_centroids_vectorised` 计算（`:2877`，bincount）。
+  - 质心落在半开区间 `[own_y0, own_y1) × [own_x0, own_x1)` 内的细胞保留，按原标签顺序通过 LUT 重新编号。
+  - HQ 方法的核用**同一个 LUT** 重新编号（`:2559-2562`）。
+
+**H1（审核同意）**：
+- HALO 宽度和 Step2 Tile Grid 的 overlap 用**同一个配置**，冻结进运行快照，写进参数文件。
+- Step2 实际执行时必须用这个值。如果改了它，旧的预览就**不能**再被说成是同一执行配置，要在界面上标出来。
+
+**H2（审核同意统一；具体规则写定如下）**：
+1. **读取范围**：`read_bbox = patch_bbox ± H`，然后与**分析 ROI 的 bbox** 取交集（full_wsi 时与整张切片取交集）。超出的部分不读、不补边，和 Step2 一样。
+2. **先 fusion，再量化**：和 fused.zarr 的写出顺序一样，得到 uint16 的 `[fusion, DAPI]`。
+3. **多边形掩膜**：在量化**之后**、构造模型输入**之前**，把多边形以外的像素，两个通道都置 0。
+   - 用和 `_poly_mask` 同一种栅格化方式（`cv2.fillPoly`，坐标为 level-0 `(x, y)`）。
+   - 这样 Step2 在 fused.zarr 里看到的 0，和 Step1 看到的 0，是同一批像素。
+4. **哪些像素参与预处理**：`read_bbox` 里的全部像素，包括多边形以外的 0，都送进模型，参与模型那唯一一次局部定标。Step2 的 fused.zarr 在同样的位置也是 0，所以读取区域相同时，两边参与定标的像素完全一样。
+5. 最后按下面的归属规则裁出中央区域。
+- 没有多边形的 ROI，跳过第 3 步。
+
+**归属与细胞 / 核的配对**（审核指出，原来的写法是错的）：
+- **不能**给细胞和核分别按各自的质心筛选、分别重新编号，然后声称配对自然保留。扩张后的细胞，质心可能在 patch 内，而它的核质心在 patch 外；分开编号还可能让本来不对应的对象拿到同一个 ID。
+- **共享标签的输出**（Cellpose / StarDist 的 nuclei + expansion：`expand_labels` 保留原标签，细胞和它的核 ID 相同）：
+  - 只按**主输出**决定归属。主输出是细胞 mask（扩张后的那张）。
+  - 用主输出的质心生成**一张** LUT，细胞 mask 和核 mask 都用这张 LUT 重新编号。
+  - 这和 Step2 对 HQ 核的做法一样（`:2559-2562`）。
+- **独立生成的输出**（Mesmer nuclear-guided：细胞和核来自两次独立的后处理，标签没有对应关系）：
+  - 细胞和核各自按自己的质心决定归属，各自重新编号。
+  - 结果记录里写明 `paired: false`，界面和下游都**不能**把「编号相同」当作「配对」。
+- **只有一种输出的方法**：只按这一种输出决定归属。
+- **细胞数**用保留下来的不同标签的个数，不用最大标签值。
+
+**复用方式**：
+- 归属和重编号的**规则**以 Step2 生效的内联代码为准：用 bincount 算质心，半开区间，按原标签顺序生成 LUT。
+- Step1 可以调用 `_centroids_vectorised`（静态方法），或者调用 `CentroidOwnershipMergePolicy`。但无论调用哪个，**V1/C 都要有一道门证明**：在同一张 label 图和同一个 own_bbox 上，它给出的保留集合和新标签，与 `segment_merge_worker.py:2538-2575` 的结果**完全一致**。
+- 没有这个证明，就不能写「调用这个类就等于照搬 Step2」。
+
+#### 7.11.4 验收：分成两个独立的问题
+
+**「读取区域相同」的定义**：以下各项都相同，才算读取区域相同：
+- 同一个 level-0 坐标区域 `read_bbox`；
+- 同一个 ROI 多边形掩膜；
+- 同一个来源版本，也就是 `pixel_key`；
+- 同一份冻结配置：fusion 快照、HALO、引擎身份、参数。
+
+比较最终归属之后的 mask 时，还要用**同一个中央区域**，也就是 `own_bbox`。
+
+1. **执行路径一致**：读取区域相同时，Step1 和 Step2 一致吗？
+   - 比较两条路径实际送进模型的**输入数组**（逐元素相等）、实际传给库的**参数**（kwargs 相等），以及**输出**。
+   - 输出比较以设备相同为前提。设备不同时，按 7.10.6 事先定下的指标来比较。
+2. **应用侧没有额外拉伸，引擎只执行它那一套预处理**：
+   - **输入数组要按方法分别构造后再比较**，不能一律写成「等于两通道的 fusion 数组」。设 `F` = fusion 输出（uint16，已经做完多边形置 0）÷ 65535，`F[...,0]` 是 fusion 通道，`F[...,1]` 是核通道：
+
+     | 方法 | 送进引擎的数组必须正好等于 |
+     |---|---|
+     | Cellpose whole-cell | `stack([F0, F0, F1], -1)`：fusion 复制一份 |
+     | Cellpose nuclei（含 expansion）、StarDist ×2 | `F1` |
+     | Mesmer whole-cell、nuclear-guided | `stack([F1, F0], -1)`：通道顺序对调 |
+     | Mesmer nuclei | `stack([F1, 0], -1)` |
+
+   - **引擎内部的预处理，检查具体的处理步骤和参数，不能只数 `normalize()` 被调用了几次**：
+     - Cellpose：`normalize=True`，没有额外的 `lowhigh` 或 `percentile` 覆盖；
+     - StarDist：只有一次 `normalize(img, 1, 99.8, axis=(0,1))`，作用在上表的输入上；
+     - Mesmer：调用 `app.predict` 时不传 `preprocess_kwargs`，也就是按 DeepCell 的默认流程：`threshold=True, percentile=99.9, normalize=True, kernel_size=128`。
+   - 同一个细胞在不同的窗口或 HALO 下，定标后**可能不同，幅度尚未实测**。用户已经接受（R11 修订版），**不作为验收项**。
+- Step2 跨切块合并后的接缝区域，另外做针对性验收，不提前保证所有像素完全一样。
+
+
+#### 7.11.5 定标规则（R11 修订版，用户裁定 2026-09-23）
+
+**两层，分清楚**：
+1. **用户的设置**：显示窗口（min/max/gamma），以及通道、组、核的权重。它们在 fusion 里全局生效（R13），随运行快照冻结。**这一层不算自动定标。**
+2. **模型的自动定标**：保留，在**当前送进模型的那张图**上计算（Step1 是 patch 加 HALO，Step2 是切块加 overlap）。应用侧**不再额外自动拉伸**；每个引擎只执行**一套**下表列出的标准预处理流程，而且只执行一次。这里说的是「一套流程执行一次」，不是「只允许一次数学变换」：Mesmer 的那一套流程本身就包含截断、拉伸和 CLAHE 三步。
+
+**每个引擎保留的那一套标准预处理**：
+
+| 方法 | 保留的那一套预处理 | 位置 |
+|---|---|---|
+| Cellpose ×3 | 模型自带：`eval(normalize=True)`，每个通道取 1–99 百分位 | 引擎内部（`cellpose/models.py:274-292`） |
+| StarDist ×2 | 库本身不做定标，保留**我们代码里唯一的一次** `normalize(1, 99.8)` | 引擎模块内，只保留一处 |
+| Mesmer ×3 | DeepCell 自带的默认预处理：99.9% 截断，按最小/最大值拉到 0–1，再做 CLAHE（`mesmer.py:62-70`） | 引擎内部，调用时不传 `preprocess_kwargs` |
+
+**新流程里不再调用的多余定标**（逐处排查的结果；在 V1/C、V2 里落实，由验收第 2 条把关）：
+- 要求是**新流程不再经过这些分支**，**不是**把旧代码整个删掉。
+- 旧的参数文件（比如手选膜通道、`normalize_input=True`）在 Step2 里**仍然按原来的语义执行**。
+- 如果要改变旧项目的行为，需要用户另外明确决定。
+
+| # | 位置 | 现在做了什么 | 处理 |
+|---|---|---|---|
+| 1 | Step1 纯核方法：`loader.read_region(DAPI, normalize=True)` → `_norm`（`core/io_loader.py:294-302`，`workers/cellpose_worker.py:540`） | 按当前区域取 p1–p99.5 | 新流程不再调用：纯核方法改为从 fusion 结果里取核通道（R13） |
+| 2 | Step1 纯核方法：`fusion._normalize_intensity`（`cellpose_worker.py:544`） | 按 patch 做 min-max | 新流程不再调用 |
+| 3 | Mesmer：`build_mesmer_input` 对没有窗口的通道调用 `normalize_percentile`（`utils/mesmer_utils.py:235-236`） | 按区域取百分位，之后 DeepCell 又会再做一次 | 新流程不再调用 `build_mesmer_input`。旧的手选膜通道参数仍然走它，行为不变 |
+| 4 | Mesmer Step2：`build_mesmer_input_from_fused_tile(normalize=True)`（`mesmer_utils.py:103-112`） | 对 fused 切块按百分位拉伸，之后 DeepCell 又会再做一次 | 新流程写出的参数带 `normalize_input=False`，所以不会进入这一步；旧参数文件里没有这个键或值为 True 的，行为不变 |
+| 5 | `FusionEngine.compute(prenormalized=False)`（`core/fusion_engine.py:87-108`） | 每个通道做 min-max | 目前模型输入路径上没用到，因为 `fuse_fullres` 传的是 `prenormalized=True`。在 V0 的归属表里确认没有其他调用方 |
+
+**不算定标的操作**：fusion 输出 ÷ 65535 只是换一下单位，保留。多边形以外置 0 也保留。
+
+**Mesmer 的 CLAHE**：用户裁定**保留**（2026-09-23）。它和截断、拉伸一起，算作 DeepCell 自带的那一次预处理。
+
+**Mesmer 的「Fusion 当膜通道」路径，现状与要改的地方**（已核实）：
+- **Step2**（`_validate_mesmer_config` → `fused_zarr` → `build_mesmer_input_from_fused_tile`，`utils/mesmer_utils.py:103-112`）：
+  - 通道排法已经是 `[核, fusion]`。对新流程来说，只需要不进入它自己做的那次百分位拉伸，也就是上表第 4 处。
+  - **已核实的新发现**：Mesmer nuclei 的 `input_mode="DAPI only"` 不在 `_mesmer_uses_selected_channels` 的集合里（`segment_merge_worker.py:1713-1720`），所以也会走 `fused_zarr` 路径，第二个通道拿到的是 **fusion，而不是 0**。Step1 的「DAPI only」给的却是 0（`mesmer_utils.py:243-244`）。两边现在就不一致。
+  - 新流程的共用构造函数按 7.11.4 的表执行：nuclei 的第二个通道为 0。旧参数文件在 Step2 里保持原来的行为。
+- **Step1**（`workers/mesmer_worker.py:172-190` → `build_mesmer_input`）：
+  - 膜通道取 `fuse_fullres(...)[:, :, 0]`。这是**没有 ÷ 65535 的 uint16**，之后靠 `normalize_percentile` 拉到 0–1。去掉这次拉伸时，**必须补上 ÷ 65535**，否则 DeepCell 拿到的就是 0–65535 的数值。
+  - 核通道是单独按窗口读的原始 DAPI，**没有乘核权重**，违反 R13。改为取 fusion 的核通道。
+  - 改完以后，Step1 和 Step2 走的是同一个构造函数。按 R14，只保留 `build_mesmer_input_from_fused_tile` 这一条路，Step1 把 `fuse_fullres` 的结果交给它。
+- **新界面**（**用户裁定，2026-09-23**）：Mesmer 的膜通道**只提供「Fusion」一种**。「手选膜通道」（`selected_channels`）模式要单独读原始通道，绕开 fusion，和 R13、R14 冲突。它在新界面里不显示，代码按 R2 的做法保留，Step2 仍然兼容。
+
+**已知的后果**（推理，**未实测**，用户已知悉）：
+- 局部定标会抵消「整体亮度倍数」。比如核权重 0.6 这种对整张图的统一缩放，对纯核方法基本不起作用。
+- 但 gamma 的曲线形状，以及通道之间、组之间的相对权重，都会保留，因为它们是在定标之前混合进去的。
+
+### 7.12 架构大纲：一套轮子，方法模块化（R14）
+
+**目标**：
+- Step1 和 Step2 都只是**基座**：Step1 驱动「patch × 组合」，Step2 驱动「切块 × 一个组合」加合并和恢复。
+- 分割方法是**模块**，两个基座调用的是同一批模块。
+- 同一个功能只保留一份实现。
+
+**共用组件**（每一项只有一份实现，Step1 和 Step2 都调用它）：
+
+| 组件 | 内容 | 现状（重复的轮子） | 落在哪一块 |
+|---|---|---|---|
+| 方法注册表与参数模式 | 方法 → 引擎、参数的类型、范围、精度和默认值、参数校验、`combo_id` | 注册表只有默认值；Step1 和 Step2 各有一套控件和读参逻辑（7.1、7.8） | B（Step1），E（Step2 装载） |
+| 输入准备 | 带 HALO 的读取范围 → fusion（窗口、权重、gamma）→ uint16 → 多边形置 0 → 按方法构造模型输入（R10）（不做任何自动定标，定标只在引擎内做一次，见 7.11.5） | Step1 用 `fuse_fullres`，Step2 用 `FullFusionWorker._fuse_tile`；纯核方法在 Step1 里绕过 fusion（R13）；Mesmer 另有 `build_mesmer_input` 和 `build_mesmer_input_from_fused_tile` 两条路 | V1/C，V2 |
+| 引擎模块（方法插件） | 每个引擎一个 runner，方法是引擎内部的配置；推理和引擎侧后处理（expansion、`min_size`、`postprocess_mask`） | Step1 的 `cellpose_worker` 和 `mesmer_worker`，Step2 的 `segment_merge_worker._segment_tile`，各自调用一遍模型；StarDist 在 Step1 走子进程，在 Step2 走主进程 | V0（原型），V1/C，V2 |
+| 归属与重编号 | 质心、半开区间、LUT、共享标签的输出共用同一张 LUT | Step2 生效的内联代码（`:2538-2575`），加上一份只做影子对比的 `CentroidOwnershipMergePolicy` | V1/C（抽出），V2（Step2 改为调用；停掉影子对比） |
+| 结果记录与原子发布 | 7.3 的记录格式和写盘顺序 | Step1 写 npz，Step2 有自己的输出 | V1/C；Step2 的输出格式不在本计划里统一，只增加引擎身份字段 |
+| 引擎身份与设备 | 7.10.5 | 没有 | V0 |
+
+**做法**：
+- **共用组件由搬迁得到，不重写。** 以 Step2 生效的代码为准，原样抽成共用函数，Step2 改为调用它。
+- **验收分成两类，不能混在一起**：
+  1. **纯搬迁**（只是把代码抽成共用函数，不改行为）：配回归测试，要求搬迁前后 Step2 的输出**完全相同**。
+  2. **落实新的输入契约**（R10–R13：通道排法、输入来源、去掉多余定标）：这会**有意改变**结果，**不和旧结果比较**，不能让旧结果的基线挡住新规则。改为验证：读取区域、配置和设备都相同时，Step1 和 Step2 一致（7.11.4）。
+  - 每次提交只做其中一类。先纯搬迁、测试通过，再改行为。这样一旦结果变了，能分清是搬迁出了错，还是新规则带来的预期变化。
+  - 这就是 7.11.3 里「不需要证明两份实现一致」的前提：本来就只剩一份实现。
+- **影子对比**：V2 里停掉 `_merge_policy_shadow_compare` 的调用（`segment_merge_worker.py:2584`）。
+  - `CentroidOwnershipMergePolicy` 类还被 `utils/tile_scheduler.py` 和 `tests/test_merge_policy.py` 引用，是否删除另立清理任务。
+- **边界**（遵守 `AGENTS.md`）：
+  - R14 是**方向**，不是一次性大重构的授权。每一个组件的抽取和替换，都在上表对应的块里做，按块的白名单单独批准。
+  - HQ、HQ2、CDS 按 R2 保留原样，不纳入这次模块化。
+  - Step2 的切块、合并和恢复机制保留（V3 裁定）。
 
 ---
 

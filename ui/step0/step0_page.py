@@ -545,7 +545,9 @@ class Step0Page(QWidget):
 
         fb.addStretch()
         # v14.2a: toggle the floating Tissue Preview / ROI Navigator popup.
-        self._btn_tissue_nav = QPushButton("🗺 Tissue Navigator")
+        # ONE name and ONE look in Step0 and Step1 (user ruling,
+        # 2026-09-23): `Tissue Navigator`, no icon; Step1 copies this style.
+        self._btn_tissue_nav = QPushButton("Tissue Navigator")
         self._btn_tissue_nav.setToolTip(
             "Show/hide the floating Tissue Preview / ROI Navigator popup.")
         self._btn_tissue_nav.setStyleSheet(
@@ -556,6 +558,9 @@ class Step0Page(QWidget):
         fb.addWidget(self._btn_tissue_nav)
 
         outer.addWidget(file_bar)   # Section A 固定高度，不拉伸
+        # Step1's title bar takes this bar's height, so both steps' tabs
+        # start on the same line (user ruling, 2026-09-23).
+        self._file_bar = file_bar
 
         # ══ Section B + C — 左右分栏，撑满剩余空间 ════════════════════
         main_split = QSplitter(Qt.Horizontal)
@@ -815,6 +820,19 @@ class Step0Page(QWidget):
             "Show or hide every marker channel. Display only: it does not "
             "choose, change or discard a background-correction method.")
         self._cb_all.stateChanged.connect(self._on_select_all_changed)
+        # NOT ON SCREEN (user ruling, 2026-09-23): Step0 draws one marker at a
+        # time, so a sweep that shows every channel has no place in its
+        # panel. The control and its handler are kept -- only its display is
+        # withdrawn. Step1 carries the same control, in the same place.
+        #
+        # It KEEPS ITS ROOM: the channel column opens at 4/3 of its minimum
+        # width, and this row is part of that minimum -- a hidden tick that
+        # gave its width back made the column 99px narrower at 1500px. The
+        # space it holds is the empty left end of the row.
+        policy = self._cb_all.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self._cb_all.setSizePolicy(policy)
+        self._cb_all.setVisible(False)
         # THE BULK PREVIEW METHOD, and the parameters it runs with, in ONE
         # control (user ruling, 2026-09-15).
         #
@@ -850,10 +868,15 @@ class Step0Page(QWidget):
             "QPushButton:hover{background:#2a1a33;}")
         self._btn_intensity_window.clicked.connect(self.show_intensity_window)
 
+        # `Method ▾` LEADS THE ROW (user ruling, 2026-09-23), in the place the
+        # withdrawn `Show all` left -- which is where Step1's `Show all`
+        # sits -- and `Intensity…` closes it, at the right edge in both
+        # steps. The hidden tick stays in the row only to keep its room
+        # (see above), in the empty stretch where nothing is drawn.
+        all_row.addWidget(self._method_all)   # "Method:" label dropped (combo is clear)
         all_row.addWidget(self._cb_all)
         all_row.addStretch()
         all_row.addWidget(self._btn_intensity_window)
-        all_row.addWidget(self._method_all)   # "Method:" label dropped (combo is clear)
         chl.addLayout(all_row)
 
         # 分隔线
@@ -943,14 +966,19 @@ class Step0Page(QWidget):
         self._btn_stop_process.setVisible(False)
         self._btn_stop_process.clicked.connect(self._on_stop_process)
 
-        self._proc_status = QLabel("Ready.")
+        # NO STATUS LINE ON SCREEN (user ruling, 2026-09-23): an idle
+        # `Ready.` under the list said nothing, and the run's words go with
+        # it. The label stays a headless object, like `_proc_pbar`, so the
+        # run callbacks that write to it need no guard; it is never laid out,
+        # and the list moves up into the line it used to take.
+        # Parented to the page, so it can never come up as a window of its own.
+        self._proc_status = QLabel("Ready.", self)
         self._proc_status.setWordWrap(True)
         self._proc_status.setStyleSheet("color:#aaa;font-size:10px;")
-        # The two that stay on screen go under the channel list: the warning
-        # only appears on a machine without cuCIM, and the status line is the
-        # only run feedback left.
+        self._proc_status.setVisible(False)
+        # The cuCIM warning stays under the channel list: it only appears on
+        # a machine without cuCIM.
         chl.addWidget(self._cucim_warn)
-        chl.addWidget(self._proc_status)
 
         # ── Preview Patch 选择 ────────────────────────────────────────
         patch_box = QGroupBox("Preview Patch")
@@ -1214,9 +1242,13 @@ class Step0Page(QWidget):
                 "color:#ddd;font-size:11px;background:#111;padding:3px;border-radius:3px;"
             )
             metl.addWidget(lbl)
-        # (#4) Metrics shrinks from 1/2 to 1/3 of bottom_row: it shares the row
-        # equally with the relocated Preview Patch and the Decision panel.
-        bottom_row.addWidget(metrics_box, stretch=1)
+        # NOT ON SCREEN (user ruling, 2026-09-23): the panel was of little
+        # use. The box and its three labels are kept as headless objects so
+        # the code that writes the numbers needs no guard; it is never laid
+        # out, and Preview Patch and Per-Channel Decision share the row.
+        metrics_box.setParent(self)     # never a window of its own
+        metrics_box.setVisible(False)
+        self._metrics_box = metrics_box
         # (#4) Preview Patch relocated here (was in c_left) — into the space freed
         # by shrinking Metrics. Its P-buttons + _patch_info + wiring are intact.
         bottom_row.addWidget(patch_box, stretch=1)

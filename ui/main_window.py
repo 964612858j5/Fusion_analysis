@@ -194,6 +194,59 @@ def _free_the_tab_bar(tabs):
     tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
 
+class _HeightTwinBar(QtWidgets.QWidget):
+    """A bar exactly as tall as another widget is drawn.
+
+    Step1's title bar holds one line of text and a button, Step0's bar holds
+    the project's paths and Load. For both steps' tabs to start on the same
+    line (user ruling, 2026-09-23) the title bar takes Step0's bar's height --
+    the height Step0 actually draws it at once it has been laid out, and its
+    hint before that.
+    """
+
+    def __init__(self, target, parent=None):
+        super().__init__(parent)
+        self._target = target
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _height(self):
+        if self._target.testAttribute(Qt.WA_Resized):
+            return self._target.height()
+        return self._target.sizeHint().height()
+
+    def sizeHint(self):
+        return QtCore.QSize(super().sizeHint().width(), self._height())
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(super().minimumSizeHint().width(), self._height())
+
+    def showEvent(self, event):
+        self.updateGeometry()
+        super().showEvent(event)
+
+
+class _TerminalStatus(QtWidgets.QLabel):
+    """A status line whose words go to the terminal, not to the screen.
+
+    Step1's two status rows under the Patch selector are not laid out any
+    more (user ruling, 2026-09-23): their height belongs to the viewer. The
+    label keeps every message as its text, so whoever reads it back is
+    unchanged, and prints each new non-blank one once.
+    """
+
+    def __init__(self, text="", tag="step1", parent=None):
+        super().__init__(text, parent)
+        self._tag = tag
+        self._last_printed = None
+
+    def setText(self, text):
+        super().setText(text)
+        message = str(text or "").strip()
+        if message and message != self._last_printed:
+            self._last_printed = message
+            print(f"[{self._tag}] {message}", flush=True)
+
+
 def _round_display_value(value):
     """One display-parameter value, rounded so float noise cannot miss a cache
     hit while a real edit still misses it."""
@@ -664,13 +717,18 @@ class MainWindow(QMainWindow):
         page1_w = QWidget()
         page1_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root = QVBoxLayout(page1_w)
-        root.setContentsMargins(6, 4, 6, 6)
+        # Step0's own outer margins and spacing, so the title bar and the tabs
+        # under it start where Step0's bar and tabs do.
+        root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
         # The title line IS the step's bar: the name on the left, the entry to
         # the one shared Tissue Preview on its right. The button is the same
         # object it has always been -- only where it sits changed.
-        title_row = QHBoxLayout()
+        title_bar = _HeightTwinBar(self._step0._file_bar)
+        self._step1_title_bar = title_bar
+        title_row = QHBoxLayout(title_bar)
+        title_row.setContentsMargins(8, 4, 8, 4)     # Step0's bar's insets
         title = self._make_label(
             "Step 1 — Channel Fusion + Preliminary Segmentation", bold=True)
         title_row.addWidget(title)
@@ -680,19 +738,17 @@ class MainWindow(QMainWindow):
         # button -- this one included -- resolves to that one instance. No
         # step builds a popup, an OverviewPanel over it, or a second ROI/patch
         # model.
-        self._btn_step1_tissue_nav = QPushButton("🗺 Tissue Preview / ROI Navigator")
+        # Step0's name and Step0's look (user ruling, 2026-09-23).
+        self._btn_step1_tissue_nav = QPushButton("Tissue Navigator")
         self._btn_step1_tissue_nav.setToolTip(
             "Open the shared Tissue Preview. One window for the whole "
             "session: the same ROI and patches, and the picture follows "
             "whichever step you are in.")
         self._btn_step1_tissue_nav.setStyleSheet(
-            "QPushButton{color:#9bd0ff;font-size:10px;"
-            "border:1px solid #354a63;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#182230;}"
-        )
+            self._step0._btn_tissue_nav.styleSheet())
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         title_row.addWidget(self._btn_step1_tissue_nav)
-        root.addLayout(title_row)
+        root.addWidget(title_bar)
 
         main_split = QSplitter(Qt.Horizontal)
         main_split.setChildrenCollapsible(False)
@@ -718,11 +774,10 @@ class MainWindow(QMainWindow):
             "Open the shared Intensity window on the current channel. "
             "One window for the whole session, with one set of "
             "Min/Max/Gamma — editable here and in every other step.")
+        # STEP0'S BUTTON, EXACTLY (user ruling, 2026-09-23): the same look,
+        # and -- below -- the same place in the same header row.
         self._btn_step1_intensity.setStyleSheet(
-            "QPushButton{color:#c678dd;font-size:10px;"
-            "border:1px solid #4a3a5a;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#231a2a;}"
-        )
+            self._step0._btn_intensity_window.styleSheet())
         self._btn_step1_intensity.clicked.connect(self._show_intensity_window)
         # It is laid out INSIDE the `Channels` frame below, where Step0 keeps
         # it (`Step0Page._build_ui`'s All row): it edits the selected channel,
@@ -741,13 +796,42 @@ class MainWindow(QMainWindow):
         channels_box_lay = QVBoxLayout(channels_box)
         channels_box_lay.setContentsMargins(4, 4, 4, 4)
         channels_box_lay.setSpacing(4)
-        # Step0 parity: the `Intensity…` entry sits at the top of the Channels
-        # frame, right-aligned, above the one public dock. Same button, same
-        # shared window -- only its place in the column changed.
-        intensity_row = QHBoxLayout()
-        intensity_row.addStretch()
-        intensity_row.addWidget(self._btn_step1_intensity)
-        channels_box_lay.addLayout(intensity_row)
+        # STEP0'S HEADER ROW, rebuilt here (user ruling, 2026-09-23):
+        # `Show all` on the left, where Step0 has `Method ▾`, `Intensity…` at
+        # the right edge, as in Step0, and the same rule under the row.
+        #
+        # `Show all` here IS the Step1 tick, swept: the dock's own
+        # `set_all_visible`, which puts each channel through the same
+        # `use_channel` command a row's tick does. Channels that are not
+        # bulk-toggleable (the nucleus) are left alone, as in Step0.
+        self._step1_cb_all = QtWidgets.QCheckBox("Show all")
+        self._step1_cb_all.setStyleSheet(self._step0._cb_all.styleSheet())
+        self._step1_cb_all.setToolTip(
+            "Tick or untick every marker channel -- the same command as "
+            "ticking each row.")
+        self._step1_cb_all.toggled.connect(
+            lambda on: self._channel_dock.set_all_visible(bool(on)))
+        header_row = QHBoxLayout()
+        # Step0's own insets inside the same frame: its Channels layout keeps
+        # the style's margins and spacing, this frame's layout uses 4px, so
+        # the row makes up the difference itself and the list below keeps
+        # the width it has.
+        s0_host = self._step0._channels_host
+        s0_margins = s0_host.getContentsMargins()
+        box_margins = channels_box_lay.getContentsMargins()
+        header_row.setContentsMargins(
+            s0_margins[0] - box_margins[0], s0_margins[1] - box_margins[1],
+            s0_margins[2] - box_margins[2], 0)
+        header_row.setSpacing(s0_host.itemAt(0).layout().spacing())
+        header_row.addWidget(self._step1_cb_all)
+        header_row.addStretch()
+        header_row.addWidget(self._btn_step1_intensity)
+        channels_box_lay.addLayout(header_row)
+        header_rule = QtWidgets.QFrame()
+        header_rule.setFrameShape(QtWidgets.QFrame.HLine)
+        header_rule.setStyleSheet("color:#333;")
+        channels_box_lay.addWidget(header_rule)
+        self._step1_header_row = header_row
         # The panel EDITS Block01's fusion model; it does not own it. Handed
         # in at construction, so there is never a moment when a second model
         # exists to be written to.
@@ -851,10 +935,8 @@ class MainWindow(QMainWindow):
         pw.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
-        head_row = QHBoxLayout()
         # No "③ Preview" heading and no Fusion colour legend: the tab names
         # the picture and the two mode buttons say which one is up.
-        head_row.addStretch()
         self._btn_mode_overlay = QPushButton("Overlay")
         self._btn_mode_fusion = QPushButton("Fusion")
         for btn, mode in ((self._btn_mode_overlay, STEP1_PREVIEW_OVERLAY),
@@ -866,14 +948,14 @@ class MainWindow(QMainWindow):
                 "padding:2px 10px;font-size:10px;}"
                 "QPushButton:checked{background:#2a5;color:#111;font-weight:bold;}")
             btn.clicked.connect(lambda _c, m=mode: self.set_preview_mode(m))
-            head_row.addWidget(btn)
         self._btn_mode_overlay.setToolTip(
             "Show the ticked channels in their own colours, using the Intensity "
             "window's Min/Max/Gamma. Fusion weights are not used here.")
         self._btn_mode_fusion.setToolTip(
             "Show the Step1 fusion: nucleus, group and channel weights, "
             "cyto in red and nucleus in blue.")
-        pl.addLayout(head_row)
+        # The two mode buttons are laid out ON THE PATCH ROW below (user
+        # ruling, 2026-09-23), not on a row of their own.
 
         # PATCH SELECTOR. The inline strip is capped at
         # `STEP1_INLINE_PATCH_BUTTONS`, so the row's width no longer grows
@@ -912,23 +994,34 @@ class MainWindow(QMainWindow):
         self._patch_sel_container.setSpacing(STEP1_PATCH_BTN_SPACING)
         sel_row.addLayout(self._patch_sel_container)
         sel_row.addStretch()
+        sel_row.addWidget(self._btn_mode_overlay)
+        sel_row.addWidget(self._btn_mode_fusion)
+        sel_row.addSpacing(8)
         pl.addLayout(sel_row)
+        # The session/handoff buttons join THIS row, at its right end (user
+        # ruling, 2026-09-23); they are added below, where they are built.
+        self._step1_patch_row = sel_row
 
-        self.patch_cache_status = QLabel(" ")
+        # NEITHER STATUS ROW IS LAID OUT (user ruling, 2026-09-23). Their
+        # messages go to the terminal (`_TerminalStatus`) and the two rows'
+        # height goes to the viewer. Parented to the page and hidden, so
+        # neither can come up as a window of its own.
+        self.patch_cache_status = _TerminalStatus(" ", parent=pw)
         self.patch_cache_status.setAlignment(Qt.AlignCenter)
         self.patch_cache_status.setWordWrap(False)
         self.patch_cache_status.setFixedHeight(18)
         self.patch_cache_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.patch_cache_status.setStyleSheet("color:#777;font-size:10px;padding:0px;")
-        pl.addWidget(self.patch_cache_status)
+        self.patch_cache_status.setVisible(False)
 
-        status_row = QHBoxLayout()
-        self.prev_status = QLabel("Please define a patch in Step 0 first")
+        status_row = sel_row
+        self.prev_status = _TerminalStatus(
+            "Please define a patch in Step 0 first", parent=pw)
         self.prev_status.setAlignment(Qt.AlignCenter)
         self.prev_status.setStyleSheet("color:#777;font-size:10px;")
         self.prev_status.setWordWrap(False)
         self.prev_status.setFixedHeight(22)
-        status_row.addWidget(self.prev_status, stretch=1)
+        self.prev_status.setVisible(False)
 
         btn_load_step0 = QPushButton("Load Step0 ROI Result")
         btn_load_step0.setStyleSheet(
@@ -971,7 +1064,6 @@ class MainWindow(QMainWindow):
         )
         btn_update.clicked.connect(self._force_update_all)
         status_row.addWidget(btn_update)
-        pl.addLayout(status_row)
         self.prev_gv = pg.GraphicsLayoutWidget()
         self.prev_gv.setBackground("#111")
         self.prev_gv.setMinimumSize(300, 280)

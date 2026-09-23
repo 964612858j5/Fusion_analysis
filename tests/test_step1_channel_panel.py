@@ -379,38 +379,36 @@ def _shown_window(app):
     return w
 
 
-def test_the_nucleus_line_is_followed_by_the_weight_buttons(app):
-    """The tool strip is laid out tight.
+def test_the_tool_strip_is_the_weight_buttons_alone(app):
+    """The tool strip is laid out tight, and it is one line now.
 
     While this panel still built the private channel rows it had to expand,
-    and an `addStretch(1)` held the space the list once filled. After the
-    list moved to the public dock that stretch had nothing to hold and simply
-    pushed Reset/Load weights to the bottom of a 327px panel -- a tall empty
-    band under `Nucleus: DAPI (weight 1.00)`.
+    and an `addStretch(1)` held the space the list once filled -- a tall
+    empty band under `Nucleus: DAPI (weight 1.00)`. That line itself is off
+    the screen since 2026-09-23 (user ruling: it repeated the nucleus row),
+    so the strip is Reset/Load weights and nothing else.
     """
-    from PyQt5.QtWidgets import QLayout, QPushButton, QSpacerItem
+    from PyQt5.QtWidgets import QPushButton, QSpacerItem
 
     w = _shown_window(app)
     try:
         cfg = w.config
-        nuc = cfg._nuc_value
+        assert cfg._nuc_value.isHidden()
         buttons = {b.text(): b for b in cfg.findChildren(QPushButton)}
         assert set(buttons) == {"Reset weights", "Load weights"}
-        gap = (min(b.geometry().top() for b in buttons.values())
-               - nuc.geometry().bottom())
-        # ONLY the layout's own spacing (4px, like every other row here),
-        # give or take the 1px a `bottom()` costs.
-        assert 0 <= gap <= 6, gap
+        # The buttons are the strip's first line: only its top margin above.
+        top = min(b.geometry().top() for b in buttons.values())
+        assert 0 <= top <= cfg.layout().contentsMargins().top() + 1, top
 
-        # ...and structurally: no expanding item between the two rows
+        # ...and structurally: one row, no expanding item
         lay = cfg.layout()
         items = [lay.itemAt(i) for i in range(lay.count())]
         assert [type(it).__name__ for it in items] == [
-            "QHBoxLayout", "QHBoxLayout"], [type(i).__name__ for i in items]
+            "QHBoxLayout"], [type(i).__name__ for i in items]
         assert not any(isinstance(it, QSpacerItem) for it in items)
         assert lay.spacing() == 4
-        # the panel hugs its two lines rather than claiming the frame
-        assert cfg.height() < 80, cfg.height()
+        # the panel hugs its one line rather than claiming the frame
+        assert cfg.height() < 50, cfg.height()
     finally:
         w.hide()
         w.close()
@@ -452,7 +450,6 @@ def test_the_weight_row_and_the_buttons_kept_their_look(app):
             "QPushButton{color:#9bd0ff;background:#182230;")
         assert buttons["Reset weights"].height() == 20
         assert buttons["Load weights"].height() == 20
-        assert cfg._nuc_value.height() == 14
         # the public row's Step1 fields are the shared template's, untouched
         row = dock.row("CD3")
         assert abs(row.height() - template.ROW_HEIGHT) <= 1

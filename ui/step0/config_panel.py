@@ -213,7 +213,13 @@ class ConfigPanel(QWidget):
             "The nucleus channel and weight come from Step0's handoff and are "
             "read-only here.")
         nuc_row.addWidget(self._nuc_value, stretch=1)
-        lay.addLayout(nuc_row)
+        # NOT ON SCREEN (user ruling, 2026-09-23): the line repeated what the
+        # nucleus row in the list already says. The two labels are kept,
+        # parented and hidden, so `_refresh_nucleus_display` still has
+        # somewhere to write; the row is never laid out.
+        for widget in (nuc_lbl, self._nuc_value):
+            widget.setParent(self)
+            widget.setVisible(False)
 
         # NO CHANNEL LIST HERE. The one public list is the dock's; this
         # panel is Step1's tool strip around it -- and a tool strip has

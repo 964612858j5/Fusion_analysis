@@ -59,11 +59,25 @@ row, and the duplicate Tissue Preview button in the step bar.
   the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
   a TAB beside the picture, never a strip stacked over it. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the
-  step's one `Tissue Preview / ROI Navigator` entry at its right end. There is
+  step's one `Tissue Navigator` entry at its right end -- Step0's name and
+  Step0's look, no icon, in both steps (user ruling, 2026-09-23). The title
+  bar is exactly as tall as Step0's Load bar and sits where it does, so the
+  two steps' tabs start on the same line. There is
   no `① ROI / Patch Overview` heading, no `③ Preview` heading over the picture
   and no `Red=cyto Blue=nucleus` legend -- the two mode buttons say which
   picture is up. `Intensity…` sits INSIDE the `Channels` frame, at its top,
   right-aligned, where Step0 keeps it. No outer scroll area wraps the page.
+  The Channels frame's header row IS Step0's (user ruling, 2026-09-23):
+  `Show all` on the left, in Step0's look -- the Step1 tick swept over every
+  row, so it means exactly what ticking each row means, and the nucleus is
+  left alone -- in the place Step0's `Method ▾` takes, and `Intensity…` in
+  Step0's exact look at the right edge, as in Step0. There is no
+  `Nucleus: … (weight …)` line. The Viewer tab's Patch row carries the
+  `Overlay` / `Fusion` mode buttons and then `Load Step0 ROI Result`,
+  `Load Previous Step1 Session`, `Save Session` and `⟳ Update` at its right
+  end -- there is no row above it for the mode buttons -- and no status row
+  under it: `Loading patch…`, `Loading channels…`, warnings and errors go to
+  the terminal, and the height goes to the viewer.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
   combo. THE TICK IS THE PICTURE (user ruling, 2026-09-17): a new slide shows
   the nucleus and no marker, and clicking a row or ticking its box shows THAT
@@ -110,6 +124,15 @@ row, and the duplicate Tissue Preview button in the step bar.
   recomputes until Save. Save applies the METHOD first and then BOTH numbers:
   a parameter is a setting, so an unlit method's number is remembered too --
   what an unlit method does not get is a computation.
+  No `Show all` on screen (user ruling, 2026-09-23): Step0 draws one marker at
+  a time. The control is kept, hidden, not deleted. `Method ▾` leads the
+  header row, where Step1 has `Show all`, and `Intensity…` closes it at the
+  right edge, where Step1 has it. No status line under the
+  channel list -- no `Ready.` and no run messages -- and the list moves up
+  into its place.
+* **Step0's Background Correction workspace** -- no `Quantitative Metrics`
+  panel (user ruling, 2026-09-23). `Preview Patch` and `Per-Channel
+  Decision` share the row under the picture.
 * **Step0's Full Image toolbar** -- no `Compare current center` (a right-click
   opens the comparison and Esc / a right-click leave it), no `Reopen full
   image`, and no `downsampled ×N preview` banner over the picture.

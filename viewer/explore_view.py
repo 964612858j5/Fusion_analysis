@@ -2894,7 +2894,17 @@ class ExploreController(QtCore.QObject):
             # while still issuing the level+1 underlay and the prefetch
             # ring -- neither of which the swap can supply and both of
             # which the next zoom-out depends on.
-            need_raw = channel_changed and atomic_kind != "precise"
+            #
+            # A selection WITHOUT a method needs the raw batch too, channel
+            # change or not: its visible image IS the raw layer, and
+            # `_issue_settled_request` asks for nothing without a method.
+            # Measured on the real slide (2026-09-23): after a cuCIM channel
+            # switch served by the PRECISE swap, which pools no raw, going
+            # to Original issued zero requests and the overview stayed up
+            # until the camera moved. The missing-tiles filter keeps this at
+            # zero visible reads when the raw layer is already pooled.
+            need_raw = ((channel_changed and atomic_kind != "precise")
+                        or not self._wants_precise())
             if need_raw:
                 # Do not wait for the next motion tick: the new channel has
                 # nothing pooled, so its raw tiles must be asked for now.

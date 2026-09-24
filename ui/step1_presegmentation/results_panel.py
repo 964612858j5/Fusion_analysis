@@ -8,9 +8,10 @@ until the user presses `Use` (plan 4.4 / 7.7); a row that may not be chosen
 says why in the row itself.
 """
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ...utils import segmentation_param_schema as ps
+from . import mask_layers
 
 _GREY = "color:#999;font-size:10px;"
 _WARN = "color:#ffd166;font-size:10px;"
@@ -19,12 +20,15 @@ _BAD = "color:#ff6b6b;font-size:10px;"
 
 class ResultRow(QtWidgets.QFrame):
     use_clicked = QtCore.pyqtSignal(str)
+    style_changed = QtCore.pyqtSignal(str, object)   # combo id, its outline style
 
-    def __init__(self, combo, parent=None):
+    def __init__(self, combo, parent=None, index=0, outputs=("cell", "nucleus")):
         super().__init__(parent)
         self.combo_id = combo["combo_id"]
+        self.style = mask_layers.default_style(index)
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        # never squeezed: many combinations scroll instead (the list below)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(4, 3, 4, 3)
         lay.setSpacing(1)
@@ -47,6 +51,85 @@ class ResultRow(QtWidgets.QFrame):
         self.status = QtWidgets.QLabel("", self)
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
+        # How this combination draws on the montage (user ruling 2026-09-25:
+        # here, in its own box, not in a panel beside the picture).
+        ctl = QtWidgets.QHBoxLayout()
+        ctl.setSpacing(4)
+        self.chk_cells = QtWidgets.QCheckBox("Cells", self)
+        self.chk_nuclei = QtWidgets.QCheckBox("Nuclei", self)
+        for chk, kind, key in ((self.chk_cells, "cell", "cells"),
+                               (self.chk_nuclei, "nucleus", "nuclei")):
+            chk.setStyleSheet("font-size:10px;")
+            chk.setEnabled(kind in outputs)          # plan 4.5: greyed when not produced
+            chk.toggled.connect(lambda on, k=key: self._set(k, bool(on)))
+            ctl.addWidget(chk)
+        ctl.addStretch(1)
+        self.btn_color = QtWidgets.QToolButton(self)
+        self.btn_color.setFixedSize(16, 16)
+        self.btn_color.clicked.connect(self._pick_color)
+        ctl.addWidget(self.btn_color)
+        self.btn_more = QtWidgets.QToolButton(self)
+        self.btn_more.setText("▾")
+        self.btn_more.setFixedSize(16, 16)
+        self.btn_more.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.menu = QtWidgets.QMenu(self)
+        self._width_actions = {}
+        group = QtWidgets.QActionGroup(self.menu)
+        for wdt in mask_layers.WIDTHS:
+            act = self.menu.addAction(f"Line width {wdt:g} px")
+            act.setCheckable(True)
+            group.addAction(act)
+            act.triggered.connect(lambda _c, v=wdt: self._set("width", v))
+            self._width_actions[wdt] = act
+        self.menu.addSeparator()
+        self.act_cell_dashed = self.menu.addAction("Cell outline dashed")
+        self.act_nucleus_dashed = self.menu.addAction("Nucleus outline dashed")
+        for act, key in ((self.act_cell_dashed, "cell_dashed"),
+                         (self.act_nucleus_dashed, "nucleus_dashed")):
+            act.setCheckable(True)
+            act.toggled.connect(lambda on, k=key: self._set(k, bool(on)))
+        self.btn_more.setMenu(self.menu)
+        ctl.addWidget(self.btn_more)
+        lay.addLayout(ctl)
+        self._show_style()
+
+    # ── the outline style ────────────────────────────────────────────
+    def set_style(self, **changes):
+        """Change the style (a panel-wide All / None, or a test)."""
+        for k, v in changes.items():
+            if k == "cells" and not self.chk_cells.isEnabled():
+                continue
+            if k == "nuclei" and not self.chk_nuclei.isEnabled():
+                continue
+            self._set(k, v)
+
+    def _set(self, key, value):
+        if self.style.get(key) == value:
+            return
+        self.style = dict(self.style, **{key: value})
+        self._show_style()
+        self.style_changed.emit(self.combo_id, dict(self.style))
+
+    def _pick_color(self):
+        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.style["color"]), self,
+                                                "Outline colour")
+        if color.isValid():
+            self._set("color", color.name())
+
+    def _show_style(self):
+        st = self.style
+        for chk, key in ((self.chk_cells, "cells"), (self.chk_nuclei, "nuclei")):
+            chk.blockSignals(True)
+            chk.setChecked(bool(st[key]))
+            chk.blockSignals(False)
+        self.btn_color.setStyleSheet(f"background:{st['color']};border:1px solid #666;")
+        for wdt, act in self._width_actions.items():
+            act.setChecked(abs(wdt - st["width"]) < 1e-6)
+        for act, key in ((self.act_cell_dashed, "cell_dashed"),
+                         (self.act_nucleus_dashed, "nucleus_dashed")):
+            act.blockSignals(True)
+            act.setChecked(bool(st[key]))
+            act.blockSignals(False)
 
     def show_state(self, text, level, can_use, in_use):
         self.status.setText(text)
@@ -58,39 +141,78 @@ class ResultRow(QtWidgets.QFrame):
 
 class ResultsPanel(QtWidgets.QWidget):
     use_requested = QtCore.pyqtSignal(str)
+    style_changed = QtCore.pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 0)
         lay.setSpacing(3)
         head = QtWidgets.QLabel("Results", self)
         head.setStyleSheet("font-weight:bold;color:#ccc;font-size:11px;")
         lay.addWidget(head)
+        # All / None for every combination's cells and nuclei at once
+        self._all_buttons = {}
+        for kind, label in (("cells", "Cells"), ("nuclei", "Nuclei")):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(3)
+            cap = QtWidgets.QLabel(label, self)
+            cap.setStyleSheet("font-size:10px;color:#bbb;")
+            cap.setMinimumWidth(34)
+            row.addWidget(cap)
+            for text, on in (("All", True), ("None", False)):
+                b = QtWidgets.QPushButton(text, self)
+                b.setStyleSheet("font-size:10px;")
+                b.setMinimumWidth(36)
+                b.clicked.connect(lambda _c, k=kind, v=on: self.set_all(k, v))
+                row.addWidget(b)
+                self._all_buttons[(kind, on)] = b
+            row.addStretch(1)
+            lay.addLayout(row)
         self.summary = QtWidgets.QLabel("No run yet.", self)
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet(_GREY)
         lay.addWidget(self.summary)
-        self._rows_host = QtWidgets.QWidget(self)
+        # The boxes scroll when there are more than the column can hold: a
+        # box squeezed below its height is unreadable (seen with a short tab).
+        self.scroll = QtWidgets.QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._rows_host = QtWidgets.QWidget(self.scroll)
         self._rows = QtWidgets.QVBoxLayout(self._rows_host)
         self._rows.setContentsMargins(0, 0, 0, 0)
         self._rows.setSpacing(3)
-        lay.addWidget(self._rows_host)
+        self._rows.addStretch(1)
+        self.scroll.setWidget(self._rows_host)
+        self.scroll.setMinimumWidth(0)
+        lay.addWidget(self.scroll, 1)
         self._by_combo = {}
+        self._fit_scroll()
 
     # ── contents ─────────────────────────────────────────────────────
-    def set_combos(self, combos):
-        """A new run: one row per combination, in the plan's order."""
+    def set_combos(self, combos, outputs_of=None):
+        """A new run: one row per combination, in the plan's order.
+        `outputs_of(method)` -> the masks the method produces (plan 4.5)."""
         for row in self._by_combo.values():
             row.setParent(None)
             row.deleteLater()
         self._by_combo = {}
-        for combo in combos or []:
-            row = ResultRow(combo, self._rows_host)
+        for i, combo in enumerate(combos or []):
+            outputs = outputs_of(combo["method"]) if outputs_of else ("cell", "nucleus")
+            row = ResultRow(combo, self._rows_host, index=i, outputs=outputs)
             row.use_clicked.connect(self.use_requested)
-            self._rows.addWidget(row)
+            row.style_changed.connect(self.style_changed)
+            self._rows.insertWidget(self._rows.count() - 1, row)
             self._by_combo[combo["combo_id"]] = row
+        self._fit_scroll()
+
+    def _fit_scroll(self):
+        """As tall as its boxes (none: nothing), scrolling beyond that."""
+        need = sum(r.sizeHint().height() + 3 for r in self._by_combo.values())
+        self.scroll.setMaximumHeight(max(0, need + 2))
+        self.scroll.setVisible(bool(self._by_combo))
 
     def clear(self, text="No run yet."):
         self.set_combos([])
@@ -98,6 +220,14 @@ class ResultsPanel(QtWidgets.QWidget):
 
     def set_summary(self, text):
         self.summary.setText(text)
+
+    def set_all(self, kind, on):
+        """Cells or nuclei of every combination on or off (greyed ones stay)."""
+        for row in self._by_combo.values():
+            row.set_style(**{kind: bool(on)})
+
+    def styles(self):
+        return {cid: dict(row.style) for cid, row in self._by_combo.items()}
 
     def rows(self):
         return list(self._by_combo.values())

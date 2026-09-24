@@ -18,6 +18,8 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ...viewer import request_planning as planning
+from ..step1_button_styles import MODE_BUTTON_QSS, layer_button_qss
+from . import mask_layers
 
 GAP_FRACTION = 0.06            # the gap between patches, of the median side
 MIN_GAP = 16
@@ -100,8 +102,19 @@ class MontageOverlay(QtWidgets.QWidget):
         return False
 
     def to_widget(self, x, y):
+        """Canvas -> widget pixels, in floating point: `mapFromScene` rounds to
+        whole pixels, and a rounded (1, 1) made the outline scale wrong."""
         scene = self.view.vb.mapViewToScene(QtCore.QPointF(x, y))
-        return QtCore.QPointF(self.view.gv.mapFromScene(scene))
+        return self.view.gv.viewportTransform().map(scene)
+
+    def canvas_transform(self):
+        """Canvas -> this widget's pixels (the ViewBox's, without rotation),
+        from two points far apart so no rounding creeps into the scale."""
+        (x0, x1), (y0, y1) = self.view.vb.viewRange()
+        a, b = self.to_widget(x0, y0), self.to_widget(x1, y1)
+        sx = (b.x() - a.x()) / (x1 - x0) if x1 != x0 else 1.0
+        sy = (b.y() - a.y()) / (y1 - y0) if y1 != y0 else 1.0
+        return QtGui.QTransform(sx, 0, 0, sy, a.x() - sx * x0, a.y() - sy * y0)
 
     def widget_rect(self, rect):
         y, x, h, w = rect
@@ -116,6 +129,14 @@ class MontageOverlay(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing, False)
         font = p.font()
         metrics = QtGui.QFontMetrics(font)
+        area = QtCore.QRectF(self.rect())
+        tr = self.canvas_transform()
+        scale = abs(tr.m11())
+        self.drawn_paths = 0
+        for i, patch in enumerate(view.layout_table.patches):
+            r = self.widget_rect(view.layout_table.rect(i))
+            if r.intersects(area):
+                self._paint_results(p, i, patch, r, tr, scale, metrics)
         for i, patch in enumerate(view.layout_table.patches):
             r = self.widget_rect(view.layout_table.rect(i))
             selected = i == view.selected
@@ -132,6 +153,54 @@ class MontageOverlay(QtWidgets.QWidget):
                 p.drawText(box, QtCore.Qt.AlignCenter, name)
         p.end()
 
+    def _paint_results(self, p, i, patch, r, tr, scale, metrics):
+        """This patch's outlines, then its `failed` / `0 cells` tags, for
+        every combination that is on."""
+        view = self.view
+        bbox = tuple(int(v) for v in patch["bbox"])
+        tags = []
+        for cid in view.combo_order:
+            st = view.styles.get(cid)
+            if not st or not (st["cells"] or st["nuclei"]):
+                continue
+            res = view.results.get((cid, bbox))
+            if res is None:
+                continue
+            if res["status"] == "failed":
+                tags.append(("failed", st["color"]))
+                continue
+            if res["status"] == "ok" and res["count"] == 0:
+                tags.append(("0 cells", st["color"]))
+                continue
+            for kind, on, dashed in (("cell", st["cells"], st["cell_dashed"]),
+                                     ("nucleus", st["nuclei"], st["nucleus_dashed"])):
+                out = res.get(kind)
+                if not on or out is None:
+                    continue
+                if out["median_d"] * scale < mask_layers.MIN_CELL_SCREEN_PX:
+                    continue                      # too small to see: frames only
+                path = view.path_for(cid, bbox, kind)
+                pen = MontageView._pen(QtGui.QColor(st["color"]), st["width"])
+                if dashed:
+                    pen.setStyle(QtCore.Qt.DashLine)
+                p.save()
+                p.setTransform(tr)
+                p.setPen(pen)
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawPath(path)
+                p.restore()
+                self.drawn_paths += 1
+        y = r.top() + 1
+        for text, color in tags:
+            box = QtCore.QRectF(r.right() - metrics.horizontalAdvance(text) - 9, y,
+                                metrics.horizontalAdvance(text) + 8, metrics.height() + 2)
+            p.fillRect(box, QtGui.QColor(0, 0, 0, 170))
+            p.setPen(QtGui.QColor(color))
+            p.drawText(box, QtCore.Qt.AlignCenter, text)
+            y += box.height() + 1
+        self.last_tags = getattr(self, "last_tags", {})
+        self.last_tags[bbox] = [t for t, _ in tags]
+
 
 class MontageView(QtWidgets.QWidget):
     """The canvas. Feed it patches with `set_patches`, and base images with
@@ -141,6 +210,7 @@ class MontageView(QtWidgets.QWidget):
     level_wanted = QtCore.pyqtSignal(int, int)       # level, stride
     patch_clicked = QtCore.pyqtSignal(object)        # patch id, or None
     mode_requested = QtCore.pyqtSignal(str)          # "overlay" | "fusion"
+    layers_changed = QtCore.pyqtSignal()             # the Fusion-mode signal / nucleus toggles
 
     LABEL_COLOR = "#ffffff"
     SEPARATOR = QtGui.QColor(110, 110, 110)
@@ -160,10 +230,23 @@ class MontageView(QtWidgets.QWidget):
         group = QtWidgets.QButtonGroup(self)
         for b, mode in ((self.btn_overlay, "overlay"), (self.btn_fusion, "fusion")):
             b.setCheckable(True)
+            b.setStyleSheet(MODE_BUTTON_QSS)             # the Viewer's own look
             group.addButton(b)
             bar.addWidget(b)
             b.clicked.connect(lambda _c, m=mode: self.mode_requested.emit(m))
         self.btn_overlay.setChecked(True)
+        # In Fusion mode, the fusion signal and the nucleus can each be left
+        # out of THIS picture (user ruling, 2026-09-25) -- a display choice of
+        # the montage's; the Fusion settings themselves are not touched.
+        bar.addSpacing(12)
+        self.btn_show_fusion = QtWidgets.QPushButton("Membrane", self)
+        self.btn_show_nucleus = QtWidgets.QPushButton("DAPI", self)
+        for b, layer in ((self.btn_show_fusion, "membrane"), (self.btn_show_nucleus, "nucleus")):
+            b.setCheckable(True)
+            b.setStyleSheet(layer_button_qss(layer))
+            b.setChecked(True)
+            b.toggled.connect(lambda _on: self.layers_changed.emit())
+            bar.addWidget(b)
         bar.addStretch(1)
         lay.addLayout(bar)
         self.gv = pg.GraphicsView(self)
@@ -183,6 +266,8 @@ class MontageView(QtWidgets.QWidget):
         self.layout_table = MontageLayout([])
         self._images = []
         self._images_shown = True               # False while the GPU layer draws the picture
+        # outlines (block D step 2): results per (combo, bbox), styles per combo
+        self.combo_order, self.styles, self.results, self._paths = [], {}, {}, {}
         self._downsamples = [1.0]
         self.level = 0
         self.stride = 1
@@ -198,6 +283,7 @@ class MontageView(QtWidgets.QWidget):
         self.fit_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         self.fit_shortcut.activated.connect(self.fit)
         self.overlay = MontageOverlay(self)
+        self.set_mode("overlay")
         self._show_empty(True)
 
     # ── contents ─────────────────────────────────────────────────────
@@ -213,6 +299,7 @@ class MontageView(QtWidgets.QWidget):
         self.selected = None
         self.focused = None
         self._on_screen = None
+        self._paths = {}                             # built for a layout: rebuild
         for i, p in enumerate(self.layout_table.patches):
             y, x, h, w = self.layout_table.rect(i)
             img = pg.ImageItem(axisOrder="row-major")
@@ -250,6 +337,15 @@ class MontageView(QtWidgets.QWidget):
     def set_mode(self, mode):
         """Follow the page's mode (the Viewer's buttons may have moved it)."""
         (self.btn_fusion if mode == "fusion" else self.btn_overlay).setChecked(True)
+        for b in (self.btn_show_fusion, self.btn_show_nucleus):
+            b.setVisible(mode == "fusion")
+
+    def set_nucleus_name(self, name):
+        self.btn_show_nucleus.setText(str(name or "Nucleus"))
+
+    def shown_layers(self):
+        """(fusion signal shown, nucleus shown) -- Fusion mode only."""
+        return self.btn_show_fusion.isChecked(), self.btn_show_nucleus.isChecked()
 
     # ── camera ───────────────────────────────────────────────────────
     def fit(self):
@@ -343,6 +439,40 @@ class MontageView(QtWidgets.QWidget):
     def select_index(self, i):
         self.selected = i
         self.overlay.update()
+
+    # ── outlines (block D step 2) ────────────────────────────────────
+    def clear_outlines(self, combo_order=(), styles=None):
+        """A new run: no results yet, these combinations in this order."""
+        self.combo_order = list(combo_order)
+        self.styles = dict(styles or {})
+        self.results, self._paths = {}, {}
+        self.overlay.update()
+
+    def set_style(self, combo_id, style):
+        self.styles[combo_id] = dict(style)
+        self.overlay.update()
+
+    def set_result(self, combo_id, bbox, status, count, cell=None, nucleus=None):
+        """One task's result: `cell` / `nucleus` = (polygons, median d) or None."""
+        bbox = tuple(int(v) for v in bbox)
+        res = {"status": status, "count": int(count or 0)}
+        for kind, out in (("cell", cell), ("nucleus", nucleus)):
+            res[kind] = None if out is None else {"polys": out[0], "median_d": float(out[1])}
+            self._paths.pop((combo_id, bbox, kind), None)
+        self.results[(combo_id, bbox)] = res
+        self.overlay.update()
+
+    def path_for(self, combo_id, bbox, kind):
+        """The outlines as one path on the canvas, built once per layout."""
+        key = (combo_id, bbox, kind)
+        path = self._paths.get(key)
+        if path is None:
+            i = self._index_of(bbox)
+            y, x, _, _ = self.layout_table.rect(i)
+            out = self.results[(combo_id, bbox)][kind]
+            path = mask_layers.qpath(out["polys"], x, y)
+            self._paths[key] = path
+        return path
 
     def show_images(self, shown):
         """The CPU picture on (no GPU layer) or off (the GPU layer draws it)."""

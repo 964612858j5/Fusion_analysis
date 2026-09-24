@@ -93,8 +93,10 @@ from .step1_presegmentation.montage_view import MontageView
 from .step1_presegmentation.montage_supply import MontageSupply, spec_channels as _montage_spec_channels
 from .step1_presegmentation import montage_gpu
 from . import step1_draft_spec
+from .step1_button_styles import MODE_BUTTON_QSS
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
 from ..core import preseg_input, preseg_run
+from ..seg_runner.engines import METHOD_OUTPUTS
 from ..utils.calibration_source import open_corrected_channel_array
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
@@ -1087,11 +1089,8 @@ class MainWindow(QMainWindow):
         for btn, mode in ((self._btn_mode_overlay, STEP1_PREVIEW_OVERLAY),
                           (self._btn_mode_fusion, STEP1_PREVIEW_FUSION)):
             btn.setCheckable(True)
-            btn.setStyleSheet(
-                "QPushButton{color:#9bd0ff;background:#182230;"
-                "border:1px solid #354a63;border-radius:4px;"
-                "padding:2px 10px;font-size:10px;}"
-                "QPushButton:checked{background:#2a5;color:#111;font-weight:bold;}")
+            # one definition, shared with the Pre-seg Results montage's pair
+            btn.setStyleSheet(MODE_BUTTON_QSS)
             btn.clicked.connect(lambda _c, m=mode: self.set_preview_mode(m))
         self._btn_mode_overlay.setToolTip(
             "Show the ticked channels in their own colours, using the Intensity "
@@ -1292,6 +1291,10 @@ class MainWindow(QMainWindow):
         self._preseg_methods.stop_requested.connect(self._on_preseg_stop)
         self._preseg_results = ResultsPanel()
         self._preseg_results.use_requested.connect(self._on_preseg_use)
+        # how each combination draws on the montage lives in its own box
+        self._preseg_results.style_changed.connect(
+            lambda cid, style: self._preseg_montage.set_style(cid, style))
+        self._montage_outlined = {}             # (run_id, task_id) -> {kind: outlines}
         method_params_lay.addWidget(self._preseg_results)
         method_params_lay.addWidget(method_params_scroll)
 
@@ -1323,6 +1326,7 @@ class MainWindow(QMainWindow):
         self._preseg_montage.level_wanted.connect(
             lambda _lvl, _stride: self._request_montage_images())
         self._preseg_montage.mode_requested.connect(self.set_preview_mode)
+        self._preseg_montage.layers_changed.connect(lambda: self._schedule_montage())
         right_tabs.currentChanged.connect(lambda _i: self._request_montage_images())
         # NOT A DEBOUNCE (user report 2026-09-25: Intensity drew only when the
         # drag paused -- a restarted timer never fires while the slider moves).
@@ -4784,8 +4788,7 @@ class MainWindow(QMainWindow):
         job = PresegRunJob(self._preseg_step1_dir(), run, lambda: open_loader(spec),
                            on_record=sig.record.emit, on_finished=sig.finished.emit)
         self._preseg_job, self._preseg_run, self._preseg_records = job, run, {}
-        self._preseg_results.set_combos(combos)
-        self._show_montage_patches()
+        self._start_results_for_run(combos)
         self._preseg_methods.set_running(True)
         self._preseg_methods.set_progress(f"Running: 0/{len(tasks)} tasks")
         self._refresh_preseg_results()
@@ -4813,6 +4816,7 @@ class MainWindow(QMainWindow):
         if run is None or rec.get("run_id") != run.get("run_id"):
             return                               # a run that is no longer shown
         self._preseg_records[rec["task_id"]] = rec
+        self._montage_sync_outlines()
         if self._preseg_job is not None and self._preseg_job.is_running():
             self._preseg_methods.set_progress(
                 "Running: " + summary_line(self._preseg_records, len(run["tasks"])))
@@ -4875,11 +4879,71 @@ class MainWindow(QMainWindow):
             supply.missing.connect(self._on_montage_missing)
             supply.finished.connect(self._on_montage_finished)
             supply.plane_ready.connect(self._on_montage_plane_ready)
+            supply.outlines_ready.connect(self._on_montage_outlines)
             self._preseg_montage_supply = supply
             self._preseg_montage.set_downsamples(
                 [provider.level_downsample(level) for level in range(provider.num_levels)])
             self._start_montage_gpu()
+            QTimer.singleShot(0, self._montage_sync_outlines)
         return supply
+
+    # ── outlines (block D step 2) ─────────────────────────────────────
+    def _start_results_for_run(self, combos):
+        """A new run: its boxes, and on the montage only its outlines -- the
+        base images stay, the pixels have not changed."""
+        self._preseg_results.set_combos(combos, outputs_of=lambda m: METHOD_OUTPUTS.get(m, ()))
+        self._montage_outlined = {}
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if supply is not None:
+            supply.forget_outlines()
+        self._preseg_montage.clear_outlines([c["combo_id"] for c in combos],
+                                            self._preseg_results.styles())
+        self._show_montage_patches()
+
+    def _montage_sync_outlines(self):
+        """Every result of the run on the montage: a failure or a finished
+        record at once, a mask's outlines once they are extracted (in the
+        supply's workers). Records that came while the montage had no supply
+        are caught up here."""
+        run, view = self._preseg_run, self.__dict__.get("_preseg_montage")
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if run is None or view is None:
+            return
+        for tid, rec in list(self._preseg_records.items()):
+            key = (run["run_id"], tid)
+            if key in self._montage_outlined:
+                continue
+            if rec.get("status") != "ok":
+                self._montage_outlined[key] = {}
+                view.set_result(rec["combo_id"], rec["patch_bbox"], rec.get("status"), 0)
+                continue
+            if supply is None:
+                continue                          # when the montage is shown
+            self._montage_outlined[key] = {}
+            for kind in ("cell", "nucleus"):
+                out = rec.get(kind) or {}
+                if out.get("status") == "ok" and out.get("path"):
+                    supply.request_outlines(key + (kind,), out["path"])
+            self._montage_show_record(key)
+
+    def _on_montage_outlines(self, key):
+        supply = self._preseg_montage_supply
+        run = self._preseg_run
+        if supply is None or run is None or key[0] != run["run_id"]:
+            return                                # another run's
+        polys, count, median_d = supply.outlines.get(key, ([], 0, 0.0))
+        self._montage_outlined.setdefault(key[:2], {})[key[2]] = (polys, median_d)
+        self._montage_show_record(key[:2])
+
+    def _montage_show_record(self, key):
+        rec = self._preseg_records.get(key[1])
+        if rec is None:
+            return
+        got = self._montage_outlined.get(key, {})
+        main = rec.get("cell") if (rec.get("cell") or {}).get("status") == "ok" else rec.get("nucleus")
+        self._preseg_montage.set_result(rec["combo_id"], rec["patch_bbox"], "ok",
+                                        int((main or {}).get("count") or 0),
+                                        cell=got.get("cell"), nucleus=got.get("nucleus"))
 
     # ── the GPU picture: Step1's own layer (user ruling, 2026-09-25) ───────
     def _start_montage_gpu(self):
@@ -4994,10 +5058,28 @@ class MainWindow(QMainWindow):
         self._montage_dirty = False
 
     def _montage_spec(self):
+        """The viewer's spec (`build_spec`), with the montage's own Fusion-mode
+        choices applied to a COPY: the fusion signal and / or the nucleus left
+        out of this picture. Nothing is written back to the model."""
         mode = step1_draft_spec.MODE_FUSION if self._step1_preview_mode == STEP1_PREVIEW_FUSION \
             else step1_draft_spec.MODE_OVERLAY
-        return step1_draft_spec.build_spec(self._display.fusion, self._display.state, mode,
+        spec = step1_draft_spec.build_spec(self._display.fusion, self._display.state, mode,
                                            scope=step1_draft_spec.STEP1_SCOPE)
+        return self._montage_layers(spec)
+
+    def _montage_layers(self, spec):
+        view = self.__dict__.get("_preseg_montage")
+        if view is None or spec.get("mode") != step1_draft_spec.MODE_FUSION:
+            return spec
+        nucleus = spec.get("nucleus") or ("", 0.0)
+        view.set_nucleus_name(nucleus[0] or "Nucleus")
+        show_fusion, show_nucleus = view.shown_layers()
+        spec = dict(spec)
+        if not show_fusion:
+            spec["groups"] = {}
+        if not show_nucleus:
+            spec["nucleus"] = ("", 0.0)
+        return spec
 
     def _request_montage_images(self, interactive=False):
         """Draw what the montage shows -- only while it is on screen.

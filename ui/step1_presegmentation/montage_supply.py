@@ -126,6 +126,7 @@ class MontageSupply(QtCore.QObject):
     missing = QtCore.pyqtSignal(object)
     finished = QtCore.pyqtSignal(int)                # generation, every patch reported
     plane_ready = QtCore.pyqtSignal(int)             # plane generation: one more plane in
+    outlines_ready = QtCore.pyqtSignal(object)       # key of a result mask's outlines
 
     def __init__(self, provider, pixel_key="", parent=None,
                  channel_budget=CHANNEL_CACHE_BYTES, composed_budget=COMPOSED_CACHE_BYTES):
@@ -136,6 +137,8 @@ class MontageSupply(QtCore.QObject):
         self.composites = ByteLRU(composed_budget)
         self._pending = collections.OrderedDict()   # bbox -> request, in order of need
         self._plane_pending = collections.OrderedDict()   # identity -> PlaneSpec (GPU path)
+        self._outline_pending = collections.OrderedDict()  # key -> mask path (step 2)
+        self.outlines = {}                                 # key -> (polygons, count, median d)
         self.plane_generation = 0
         self._cv = threading.Condition()
         self._closed = False
@@ -188,6 +191,22 @@ class MontageSupply(QtCore.QObject):
             self._cv.notify_all()
             return self.plane_generation
 
+    # ── outlines of result masks (block D step 2) ─────────────────────
+    def request_outlines(self, key, path):
+        """Extract the outlines of the mask at `path` once; `outlines_ready(key)`."""
+        with self._cv:
+            if self._closed or key in self.outlines or key in self._outline_pending:
+                return False
+            self._outline_pending[key] = path
+            self._cv.notify_all()
+            return True
+
+    def forget_outlines(self):
+        """A new run: its outlines are other results."""
+        with self._cv:
+            self._outline_pending.clear()
+            self.outlines = {}
+
     def plane(self, spec):
         """The values of a plane if it has arrived, else None."""
         return self.channels.value(self._plane_key(spec))
@@ -220,6 +239,8 @@ class MontageSupply(QtCore.QObject):
             self._closed = True
             self._pending.clear()
             self._plane_pending.clear()
+            self._outline_pending.clear()
+            self.outlines = {}
             self._cv.notify_all()
         for t in self._threads:
             t.join(timeout)
@@ -233,16 +254,24 @@ class MontageSupply(QtCore.QObject):
     def _loop(self):
         while True:
             with self._cv:
-                while not self._pending and not self._plane_pending and not self._closed:
+                while (not self._pending and not self._plane_pending
+                       and not self._outline_pending and not self._closed):
                     self._cv.wait()
                 if self._closed:
                     return
-                if self._plane_pending:
+                outline = None
+                if self._plane_pending:              # the picture first
                     _, spec = self._plane_pending.popitem(last=False)
                     gen = self.plane_generation
                     req = None
+                elif self._outline_pending:          # then the outlines
+                    outline = self._outline_pending.popitem(last=False)
+                    req = None
                 else:
                     _, req = self._pending.popitem(last=False)
+            if outline is not None:
+                self._extract_outlines(*outline)
+                continue
             if req is None:
                 self._read_plane(spec, gen)
                 continue
@@ -260,6 +289,19 @@ class MontageSupply(QtCore.QObject):
                     self.missing.emit(list(missing))
                 self.composed.emit(req["bbox"], req["level"], rgba, req["gen"])
             self._note_done(req["gen"])
+
+    def _extract_outlines(self, key, path):
+        from . import mask_layers
+        try:
+            result = mask_layers.outlines(np.load(path))
+        except Exception as exc:  # noqa: BLE001 -- one mask, said, not fatal
+            print(f"[Montage] could not outline {path}: {exc}")
+            result = ([], 0, 0.0)
+        with self._cv:
+            if self._closed:
+                return
+            self.outlines[key] = result
+        self.outlines_ready.emit(key)
 
     def _read_plane(self, spec, gen):
         key = self._plane_key(spec)

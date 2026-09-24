@@ -657,3 +657,65 @@ def test_leaving_step1_and_closing_give_the_gpu_layer_back(app, tmp_path, monkey
     w.close()
     QtWidgets.QApplication.processEvents()
     assert gone == [1]
+
+
+# ── Fusion mode: the fusion signal and the nucleus on / off (2026-09-25) ────
+def test_the_signal_and_nucleus_toggles_show_only_in_fusion_mode(app):
+    view = MontageView()
+    view.show()
+    assert not view.btn_show_fusion.isVisible() and not view.btn_show_nucleus.isVisible()
+    view.set_mode("fusion")
+    assert view.btn_show_fusion.isVisible() and view.btn_show_nucleus.isVisible()
+    assert view.shown_layers() == (True, True)
+    view.set_mode("overlay")
+    assert not view.btn_show_fusion.isVisible()
+    view.close()
+
+
+def test_leaving_out_the_signal_or_the_nucleus_changes_only_the_montages_picture(
+        app, tmp_path, monkeypatch):
+    w = _window(app, tmp_path, monkeypatch, _Provider(), gpu=True)
+    try:
+        _gpu_or_skip(w)
+        view = w._preseg_montage
+        monkeypatch.setattr(w, "_montage_spec", lambda: w._montage_layers(dict(FUSION)))
+        w.set_preview_mode("fusion")
+        assert view.btn_show_nucleus.isVisible() and view.btn_show_nucleus.text() == "DAPI"
+        assert view.btn_show_fusion.text() == "Membrane"
+        layer = w._montage_gpu_layer
+        sent = []
+        real = layer.submit
+        monkeypatch.setattr(layer, "submit", lambda *a: (sent.append(a[1]), real(*a))[1])
+        model_before = w._display.fusion.effective_config()
+        view.btn_show_fusion.setChecked(False)                            # DAPI only
+        assert sent and sent[-1].groups == {} and sent[-1].nucleus == ("DAPI", 0.8)
+        view.btn_show_nucleus.setChecked(False)                           # neither
+        assert sent[-1].groups == {} and sent[-1].nucleus == ("", 0.0)
+        view.btn_show_fusion.setChecked(True)                             # fusion only
+        assert sent[-1].groups == {"T": {"CD3": 1.0}} and sent[-1].nucleus == ("", 0.0)
+        view.btn_show_nucleus.setChecked(True)
+        assert sent[-1].groups == {"T": {"CD3": 1.0}} and sent[-1].nucleus == ("DAPI", 0.8)
+        assert w._display.fusion.effective_config() == model_before       # model untouched
+        # Overlay mode ignores them
+        assert w._montage_layers(dict(OVERLAY)) == OVERLAY
+    finally:
+        w.close()
+
+
+def test_the_montages_buttons_look_like_the_viewers(app, tmp_path, monkeypatch):
+    from block01.ui.step1_button_styles import MODE_BUTTON_QSS, layer_button_qss
+    w = _window(app, tmp_path, monkeypatch, _Provider())
+    try:
+        view = w._preseg_montage
+        # the very same look as the Viewer's Overlay / Fusion
+        assert w._btn_mode_overlay.styleSheet() == MODE_BUTTON_QSS
+        assert view.btn_overlay.styleSheet() == view.btn_fusion.styleSheet() == MODE_BUTTON_QSS
+        # the layer toggles: the same shape, their own colours, not the mode look
+        for b, layer in ((view.btn_show_fusion, "membrane"), (view.btn_show_nucleus, "nucleus")):
+            qss = b.styleSheet()
+            assert qss == layer_button_qss(layer) and qss != MODE_BUTTON_QSS
+            for part in ("border-radius:4px", "font-size:10px", "padding:2px 10px"):
+                assert part in qss
+        assert view.btn_show_fusion.styleSheet() != view.btn_show_nucleus.styleSheet()
+    finally:
+        w.close()

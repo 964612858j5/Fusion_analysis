@@ -70,7 +70,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   Step1's own GPU layer (user ruling 2026-09-25) -- Intensity, colours,
   ticks and the mode redraw on the card at once; names, frames and the
   selection are drawn above it. Without a GPU layer the CPU picture is
-  used and the terminal says why. The title line
+  used and the terminal says why. In Fusion mode two more toggles follow them,
+  `Membrane` and the nucleus channel's name (e.g. `DAPI`), both on,
+  in the mode buttons' style but lit in their layer's colour (red / blue):
+  either can be left out of the montage's picture (user ruling 2026-09-25)
+  -- the Fusion settings, the Viewer and every run are unchanged. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the
   step's one `Tissue Navigator` entry at its right end -- Step0's name and
   Step0's look, no icon, in both steps (user ruling, 2026-09-23). The title
@@ -147,6 +151,14 @@ row, and the duplicate Tissue Preview button in the step bar.
   arriving is never a choice: Save stays disabled until the user presses
   `Use`, and a choice that goes out of date (other pixels or other saved
   Fusion settings) is dropped and Save is disabled again.
+  Each row also carries how that combination draws on the montage (block D
+  step 2, user ruling 2026-09-25): `Cells` / `Nuclei` (greyed where the
+  method makes no such mask), a colour swatch, and a `▾` menu with the line
+  width (1 / 1.5 / 2 / 3 px) and dashed cell / nucleus outlines; under the
+  `Results` caption, `All` / `None` for cells and for nuclei. Outlines start
+  off, in a fixed palette; they are left out while cells are smaller than
+  about 3 screen pixels; a failed patch is tagged `failed`, a patch with no
+  cell `0 cells`. Many rows scroll rather than squeeze.
   `Save plan` and Step1's `Save Fusion settings` say when they worked
   (user ruling, 2026-09-24), not only when they fail.
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps

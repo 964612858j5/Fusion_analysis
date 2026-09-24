@@ -268,7 +268,7 @@ def test_the_methods_part_sits_under_the_patches_and_counts_the_ticked(app, tmp_
     try:
         lay = w.method_params_tab.layout()
         order = [lay.itemAt(i).widget() for i in range(lay.count())]
-        assert order[:3] == [w._preseg_patches, w._preseg_methods,
+        assert order[:4] == [w._preseg_patches, w._preseg_methods, w._preseg_results,
                              w._step1_method_params_scroll]
         w._preseg_methods.adopt(CP, _vals(CP, flow_threshold=[0.2, 0.4]))
         assert w._preseg_methods.total.text() == "Total: 3 patches × 2 combinations = 6 tasks"

@@ -312,7 +312,8 @@ def test_the_strip_heads_the_method_and_parameters_tab(app, tmp_path):
         assert lay.itemAt(0).widget() is w._preseg_patches
         # Block B put the Methods part between the strip and the old controls.
         assert lay.itemAt(1).widget() is w._preseg_methods
-        assert lay.itemAt(2).widget() is w._step1_method_params_scroll
+        assert lay.itemAt(2).widget() is w._preseg_results
+        assert lay.itemAt(3).widget() is w._step1_method_params_scroll
         assert _names(w._preseg_patches) == ["P1", "P2", "P3"]
         assert w._preseg_patches.selected_ids() == [1, 2, 3]
         # It must not widen the channel column: the left tabs' minimum is the

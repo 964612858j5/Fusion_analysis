@@ -88,6 +88,10 @@ from .step1_presegmentation.patches_panel import PatchesPanel
 from .step1_presegmentation.random_job import RandomPatchJob
 from .step1_presegmentation.method_blocks import MethodsPanel
 from .step1_presegmentation import plan_store
+from .step1_presegmentation.results_panel import ResultsPanel
+from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
+from ..core import preseg_input, preseg_run
+from ..utils.calibration_source import open_corrected_channel_array
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
@@ -466,6 +470,28 @@ class _SharedSpecTissueContext:
 #: everything that follows the transaction.
 Step1Restore = collections.namedtuple(
     "Step1Restore", "visibility changed mode_moved")
+
+
+#: Where params chosen from a pre-segmentation result are marked as coming from.
+PRESEG_SOURCE = "preseg_selected"
+#: A run with more tasks than this asks first (R4).
+PRESEG_CONFIRM_TASKS = 10
+#: The HALO read around each patch: Step2's default Tile Grid overlap
+#: (`SegmentMergeWorker(overlap_px=200)`, the Step2 spin box's default).
+#: Frozen into every run; tying it to the Step2 setting itself is block E.
+PRESEG_HALO_PX = 200
+
+
+def ps_display_name(method):
+    from ..utils.segmentation_param_schema import display_name
+    return display_name(method)
+
+
+class _PresegSignals(QtCore.QObject):
+    """The run's thread reports through these, so the page updates on its own
+    thread (queued across threads by Qt)."""
+    record = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal(object)
 
 
 class MainWindow(QMainWindow):
@@ -988,7 +1014,7 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#122333;}"
             "QPushButton:disabled{color:#666;border-color:#444;}"
         )
-        self._btn_save_fusion_settings.clicked.connect(self._commit_fusion_settings)
+        self._btn_save_fusion_settings.clicked.connect(self._on_save_fusion_settings_clicked)
         # Laid out in the page's bottom bar, where `← Back to Step 0` was
         # (user ruling, 2026-09-23); the Channels frame takes this column's
         # full height.
@@ -1232,9 +1258,24 @@ class MainWindow(QMainWindow):
         self._preseg_methods = MethodsPanel()
         self._preseg_patches.selection_changed.connect(
             lambda ids: self._preseg_methods.set_patch_count(len(ids)))
-        self._preseg_methods.save_plan_requested.connect(self._on_save_preseg_plan)
+        self._preseg_methods.save_plan_requested.connect(self._on_save_preseg_plan_clicked)
         self._preseg_methods.load_plan_requested.connect(self._on_load_preseg_plan)
         method_params_lay.addWidget(self._preseg_methods)
+        # Run / Stop and the Results list (plan block C, step 4): a list, no
+        # images -- the outlines come with block D. Nothing is chosen until
+        # the user presses Use.
+        self._preseg_job = None
+        self._preseg_run = None
+        self._preseg_records = {}
+        self._preseg_selected = None          # {"run": run, "combo_id": id}
+        self._preseg_sig = _PresegSignals(self)
+        self._preseg_sig.record.connect(self._on_preseg_record)
+        self._preseg_sig.finished.connect(self._on_preseg_finished)
+        self._preseg_methods.run_requested.connect(self._on_preseg_run)
+        self._preseg_methods.stop_requested.connect(self._on_preseg_stop)
+        self._preseg_results = ResultsPanel()
+        self._preseg_results.use_requested.connect(self._on_preseg_use)
+        method_params_lay.addWidget(self._preseg_results)
         method_params_lay.addWidget(method_params_scroll)
 
         patch_results_tab = QWidget()
@@ -2261,6 +2302,13 @@ class MainWindow(QMainWindow):
         self._retire_fusion_worker("the Step1 context was discarded")
         if self.proc is not None:
             self._stop()
+        self._close_preseg_job()
+        self._preseg_run = None
+        self._preseg_records = {}
+        self._preseg_selected = None
+        results = self.__dict__.get("_preseg_results")
+        if results is not None:
+            results.clear()
 
         # 2. Data-source bindings.
         self.loader = None
@@ -3172,12 +3220,9 @@ class MainWindow(QMainWindow):
         history.append(record)
         method_hist["latest"] = record
 
-        is_active_params = params.get("_phase") != 1
-        if is_active_params:
-            self._p2_params = params
-            self._active_segmentation_method = method
-            self._active_preview_patch = patch_name
-        return is_active_params
+        # A result arriving is never a choice (plan 4.4, block C): the params
+        # become active only when the user selects them in the result grid.
+        return False
 
     def _handle_patch_segmentation_result(self, item):
         patch_idx = int(item.get("patch_idx", 0) or 0)
@@ -4595,6 +4640,238 @@ class MainWindow(QMainWindow):
     def _preseg_step1_dir(self):
         return (self.step0_output or {}).get("step1_dir") or OUTPUT_DIR
 
+    # ── the pre-segmentation run (plan block C, step 4) ─────────────────
+    def _preseg_region(self, manifest):
+        """(roi record or None, bounds): the analysis ROI and the region a
+        read window is cut to -- the ROI's bbox, or the whole slide."""
+        roi = self._active_roi or (self._rois[0] if self._rois else None)
+        whole = (manifest or {}).get("analysis_region_type") == "full_wsi" or not roi
+        if whole:
+            h, w = getattr(self.loader, "shape", (0, 0))
+            return None, [0, int(h), 0, int(w)]
+        bbox = [int(v) for v in roi.get("bbox_fullres") or []]
+        return ({"bbox_fullres": bbox, "polygon_fullres": roi.get("polygon_fullres")}, bbox)
+
+    def _preseg_source(self):
+        """(pixel_key, source dict, manifest) for what Step1 holds now, or
+        (None, None, None) when there is no handoff to be bound to."""
+        ident = self._handoff_identity()
+        if not ident:
+            return None, None, None
+        try:
+            with open(ident["manifest_path"], encoding="utf-8") as f:
+                manifest = json.load(f) or {}
+        except (OSError, ValueError):
+            return None, None, None
+        roi, _ = self._preseg_region(manifest)
+        zpath = self._corrected_zarr_path or manifest.get("corrected_zarr_path") or ""
+        roi_name = (self._active_roi or {}).get("name") or manifest.get("active_roi") or None
+        products = {ch: preseg_run.product_meta(open_corrected_channel_array(zpath, ch, roi_name))
+                    for ch in (manifest.get("corrected_decisions") or {})}
+        channels = self.loader.channel_names() if self.loader is not None else []
+        identity = preseg_run.pixel_identity(manifest, roi, channels, products)
+        key = preseg_run.pixel_key(identity)
+        source = {"pixel_key": key, "pixel_identity": identity,
+                  "manifest_digest": ident.get("manifest_digest"),
+                  "manifest_path": ident.get("manifest_path"),
+                  "raw_ome_path": ident.get("raw_ome_path")}
+        return key, source, manifest
+
+    def _on_preseg_run(self):
+        job = self._preseg_job
+        if job is not None and job.is_running():
+            return
+        methods = self._preseg_methods.methods()
+        ticked = set(self._preseg_patches.selected_ids())
+        patches = [{"id": _patch_id_of(p), "name": self._patch_label(i),
+                    "bbox": [int(v) for v in p]}
+                   for i, p in enumerate(self._all_patches) if _patch_id_of(p) in ticked]
+        if not methods or not patches:
+            QMessageBox.information(self, "Run", "Tick at least one patch and add a method first.")
+            return False
+        snapshot = self._committed_fusion_settings()
+        if not snapshot:
+            QMessageBox.warning(self, "Run", "Save the Fusion settings first: a run uses the "
+                                "saved settings, not the ones being edited.")
+            return False
+        try:
+            preseg_input.check_fusion(snapshot)
+        except preseg_input.InputRefused as exc:
+            QMessageBox.warning(self, "Run", f"Cannot run: {exc}.")
+            return False
+        key, source, manifest = self._preseg_source()
+        if key is None or self.loader is None:
+            QMessageBox.warning(self, "Run", "There is no Step0 result to run on.")
+            return False
+        run_id = preseg_run.new_run_id()
+        combos, tasks = preseg_run.build_tasks(run_id, methods, patches)
+        if len(tasks) > PRESEG_CONFIRM_TASKS:
+            answer = QMessageBox.question(
+                self, "Run", f"This run has {len(tasks)} tasks "
+                f"({len(patches)} patches × {len(combos)} combinations) and may take a while. "
+                "Run it?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return False
+        roi, bounds = self._preseg_region(manifest)
+        run = {
+            "run_id": run_id,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "patches": patches, "combos": combos, "tasks": tasks,
+            "fusion": copy.deepcopy({k: snapshot.get(k)
+                                     for k in ("hash", "fusion_config", "display_mapping")}),
+            "source": source, "halo_px": PRESEG_HALO_PX, "bounds": bounds, "roi": roi or {},
+        }
+        spec = {"ome_path": self.loader.filepath, "name_map": self.loader.name_map,
+                "correction_config": self.loader.correction_config,
+                "corrected_zarr_path": self._corrected_zarr_path,
+                "corrected_decisions": dict(self._corrected_decisions or {})}
+        sig = self._preseg_sig
+        job = PresegRunJob(self._preseg_step1_dir(), run, lambda: open_loader(spec),
+                           on_record=sig.record.emit, on_finished=sig.finished.emit)
+        self._preseg_job, self._preseg_run, self._preseg_records = job, run, {}
+        self._preseg_results.set_combos(combos)
+        self._preseg_methods.set_running(True)
+        self._preseg_methods.set_progress(f"Running: 0/{len(tasks)} tasks")
+        self._refresh_preseg_results()
+        print(f"[Step1] pre-segmentation run {run_id}: {len(tasks)} tasks")
+        job.start()
+        return True
+
+    def _on_preseg_stop(self):
+        job = self._preseg_job
+        if job is not None and job.is_running():
+            job.stop()
+            self._preseg_methods.set_progress("Stopping…")
+
+    def _close_preseg_job(self):
+        job = self.__dict__.get("_preseg_job")
+        if job is not None:
+            job.close()
+        self._preseg_job = None
+        methods = self.__dict__.get("_preseg_methods")
+        if methods is not None:
+            methods.set_running(False)
+
+    def _on_preseg_record(self, rec):
+        run = self._preseg_run
+        if run is None or rec.get("run_id") != run.get("run_id"):
+            return                               # a run that is no longer shown
+        self._preseg_records[rec["task_id"]] = rec
+        if self._preseg_job is not None and self._preseg_job.is_running():
+            self._preseg_methods.set_progress(
+                "Running: " + summary_line(self._preseg_records, len(run["tasks"])))
+        self._refresh_preseg_results()
+
+    def _on_preseg_finished(self, records):
+        run = self._preseg_run
+        if run is None:
+            return
+        for tid, rec in (records or {}).items():
+            if rec.get("run_id") == run.get("run_id"):
+                self._preseg_records[tid] = rec
+        self._preseg_job = None
+        self._preseg_methods.set_running(False)
+        self._preseg_methods.set_progress(
+            "Finished: " + summary_line(self._preseg_records, len(run["tasks"])))
+        self._refresh_preseg_results()
+
+    def _preseg_current(self):
+        key, _, _ = self._preseg_source()
+        return key, (self._committed_fusion_settings() or {}).get("hash")
+
+    def _refresh_preseg_results(self):
+        """Each row's state, and whether the chosen result is still valid."""
+        run = self._preseg_run
+        key, fhash = self._preseg_current()
+        sel = self._preseg_selected
+        if sel is not None and preseg_run.is_stale(sel["run"], key, fhash):
+            self._drop_preseg_selection()
+            sel = None
+        panel = self._preseg_results
+        if run is None:
+            return
+        stale = preseg_run.is_stale(run, key, fhash)
+        for combo in run["combos"]:
+            cid = combo["combo_id"]
+            st = preseg_run.combo_status(run, self._preseg_records, cid)
+            can, why = preseg_run.selectable(run, self._preseg_records, cid, key, fhash)
+            bits = [f"{st['total'] - st['pending']}/{st['total']} patches"]
+            if st[preseg_run.OK]:
+                bits.append(f"{st['cells']} cells")
+            if st[preseg_run.FAILED]:
+                bits.append(f"{st[preseg_run.FAILED]} failed")
+            if st[preseg_run.CANCELLED]:
+                bits.append(f"{st[preseg_run.CANCELLED]} cancelled")
+            if stale:
+                bits.append("out of date")
+            elif not can and st["complete"]:
+                bits.append(why)
+            level = "bad" if (not can and st["complete"]) or stale else \
+                ("warn" if st[preseg_run.FAILED] else "")
+            in_use = sel is not None and sel["run"] is run and sel["combo_id"] == cid
+            panel.show_state(cid, " · ".join(bits), level, can, in_use)
+        chosen = ""
+        if sel is not None:
+            combo = next(c for c in sel["run"]["combos"] if c["combo_id"] == sel["combo_id"])
+            chosen = f"In use: {ps_display_name(combo['method'])}" + \
+                ("" if sel["run"] is run else " (from an earlier run)")
+        panel.set_summary(chosen or "Nothing chosen yet — press Use on a finished row.")
+
+    def _preseg_selection_valid(self):
+        sel = self._preseg_selected
+        if sel is None:
+            return False, "nothing is chosen"
+        run = sel["run"]
+        records = preseg_run.load_records(preseg_run.run_dir(self._preseg_step1_dir(),
+                                                            run["run_id"]))
+        key, fhash = self._preseg_current()
+        ok, why = preseg_run.selectable(run, records, sel["combo_id"], key, fhash)
+        return ok, why
+
+    def _drop_preseg_selection(self):
+        self._preseg_selected = None
+        if self._params_source == PRESEG_SOURCE:
+            self._p2_params = None
+            self._params_source = None
+            self.btn_save.setEnabled(False)
+            self._fusion_bar_widget.setVisible(False)
+
+    def _on_preseg_use(self, combo_id):
+        run = self._preseg_run
+        if run is None:
+            return False
+        key, fhash = self._preseg_current()
+        ok, why = preseg_run.selectable(run, self._preseg_records, combo_id, key, fhash)
+        if not ok:
+            QMessageBox.information(self, "Use", f"This result cannot be used: {why}.")
+            return False
+        if why:                                   # some patches failed: ask
+            answer = QMessageBox.question(self, "Use", f"{why}. Use this result anyway?",
+                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return False
+        combo = next(c for c in run["combos"] if c["combo_id"] == combo_id)
+        params = dict(combo["params"])
+        if combo["method"].startswith("mesmer_"):
+            params["normalize_input"] = False     # DeepCell's own preprocessing only
+            params["threshold_target"] = "nuclear" if combo["method"] == "mesmer_nuclei" \
+                else "whole_cell"
+        chosen = {"method": combo["method"], "params": params,
+                  "fusion_settings_hash": run["fusion"]["hash"],
+                  "pixel_key": run["source"]["pixel_key"],
+                  "preseg_run_id": run["run_id"], "combo_id": combo_id,
+                  "halo_px": run.get("halo_px")}
+        for k in ("diameter", "flow_threshold", "cellprob_threshold"):
+            if k in params:
+                chosen[k] = params[k]
+        self._p2_params = chosen
+        self._params_source = PRESEG_SOURCE
+        self._preseg_selected = {"run": run, "combo_id": combo_id}
+        self._check_save_unlock()
+        self._refresh_preseg_results()
+        print(f"[Step1] pre-segmentation result chosen: {combo['method']} {combo_id}")
+        return True
+
     def _on_save_preseg_plan(self):
         """`Save plan`: the methods, EVERY patch with its position and size,
         and which are ticked (user ruling, 2026-09-24). No computation."""
@@ -4605,6 +4882,21 @@ class MainWindow(QMainWindow):
         path = plan_store.save_plan(self._preseg_step1_dir(), self._preseg_methods.methods(),
                                     patches, self._preseg_patches.selected_ids(), source)
         print(f"[Step1] pre-segmentation plan saved: {path}")
+        return path
+
+    def _on_save_preseg_plan_clicked(self):
+        """The button: save, and say it worked or why not (user ruling,
+        2026-09-24)."""
+        try:
+            path = self._on_save_preseg_plan()
+        except OSError as exc:
+            QMessageBox.warning(self, "Save plan", f"The plan could not be saved.\n\nReason: {exc}")
+            return None
+        n_m, n_p = len(self._preseg_methods.methods()), len(self._all_patches)
+        QMessageBox.information(
+            self, "Save plan",
+            f"Plan saved: {n_m} method{'s' if n_m != 1 else ''}, "
+            f"{n_p} patch{'es' if n_p != 1 else ''}.\n\nFile: {os.path.basename(path)}")
         return path
 
     def _choose_patch_restore_mode(self, n_plan):
@@ -4933,6 +5225,9 @@ class MainWindow(QMainWindow):
                 # A loaded plan's ticks, once its restored patches are here.
                 panel.set_selected_ids([i for i in pending if i in live])
                 self._pending_plan_ticks = None
+        if self.__dict__.get("_preseg_results") is not None:
+            # A Step0 publish may have changed the pixels (not only patches).
+            self._refresh_preseg_results()
         self._rebuild_patch_buttons(patches)
         self._show_active_roi_preview()
 
@@ -5435,6 +5730,8 @@ class MainWindow(QMainWindow):
         # closed, and a close attempt that ends in `event.ignore()` would
         # stop and restart the writer on every retry.
         self._stop_all_loaders()
+        # The pre-segmentation run: Stop, and no engine process left behind.
+        self._close_preseg_job()
         # A fusion job outlives the window unless it is asked to stop and then
         # held: destroying a running QThread is what produces
         # "QThread: Destroyed while thread is still running".
@@ -6733,9 +7030,13 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(200, self._auto_select_p1)
 
     def _auto_select_p1(self):
-        """Auto-select column 0 after Phase 1, only if nothing is selected yet."""
-        if self.result_grid.get_selected() is None and self.result_grid._params:
-            self.result_grid._select(0)
+        """Auto-select column 0 after Phase 1, only if nothing is selected yet.
+        Only a Phase 1 column: selecting that sets the Phase 2 diameter, while
+        selecting any other column would make it the saved params unasked."""
+        grid = self.result_grid
+        if grid.get_selected() is None and grid._params \
+                and int((grid._params[0] or {}).get("_phase") or 0) == 1:
+            grid._select(0)
 
     def _poll_cellpose_process(self):
         if self._proc_queue is None:
@@ -6760,14 +7061,12 @@ class MainWindow(QMainWindow):
                 print(f"[Step1] received result patch_idx={item.get('patch_idx')}")
                 masks = item.get("masks")
                 self._update_patch_phase_result(item)
-                active_updated = self._record_segmentation_preview_result(
+                # Recorded, never selected: arrival is not a choice.
+                self._record_segmentation_preview_result(
                     item.get("patch_idx", 0),
                     item.get("params") or {},
                     masks,
                 )
-                if active_updated:
-                    self._params_source = "patch_preview"
-                    self._check_save_unlock()
                 self._schedule_step1_session_save()
                 if masks is not None:
                     params = item.get("params") or {}
@@ -7060,6 +7359,18 @@ class MainWindow(QMainWindow):
         self._update_fusion_settings_state()
         return snapshot
 
+    def _on_save_fusion_settings_clicked(self, _checked=False):
+        """The button: commit, and SAY it worked (user ruling, 2026-09-24) --
+        a failure already says so. Callers that commit on their own way (Save,
+        tests) get no popup."""
+        if self._commit_fusion_settings():
+            QMessageBox.information(
+                self, "Fusion settings",
+                "Fusion settings saved.\n\nRuns and Save now use them.\n\n"
+                f"File: {self._fusion_settings_path()}")
+            return True
+        return False
+
     def _commit_fusion_settings(self, _checked=False):
         """Freeze the draft as the settings every job will run on.
 
@@ -7104,6 +7415,9 @@ class MainWindow(QMainWindow):
             return False
         self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings committed: {snapshot['hash'][:12]}")
+        # Results of other settings are now out of date, and so is a choice.
+        if self.__dict__.get("_preseg_results") is not None:
+            self._refresh_preseg_results()
         self._update_fusion_settings_state()
         self._schedule_step1_session_save()
         return True
@@ -8175,6 +8489,13 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if self._params_source == PRESEG_SOURCE:
+            ok, why = self._preseg_selection_valid()
+            if not ok:
+                self._drop_preseg_selection()
+                QMessageBox.warning(self, "Pre-segmentation result",
+                                    f"The chosen result can no longer be used: {why}.")
+                return
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         if self._corrected_zarr_mode == "roi_only" and not self._rois:
             QMessageBox.warning(
@@ -8265,6 +8586,9 @@ class MainWindow(QMainWindow):
             or CELLPOSE_WHOLECELL_FUSION
         )
         params_block = dict(method_cfg.get("params") or {})
+        if self._params_source == PRESEG_SOURCE:
+            # The old panel's method has nothing to do with a chosen result.
+            params_block = {}
         params_block.update(dict(self._p2_params.get("params") or {}))
         cpcfg = normalize_segmentation_config({
             "method":             selected_method,

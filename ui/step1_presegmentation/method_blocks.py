@@ -114,6 +114,8 @@ class MethodsPanel(QtWidgets.QWidget):
     plan_changed = pyqtSignal()
     save_plan_requested = pyqtSignal()
     load_plan_requested = pyqtSignal()
+    run_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
 
     #: Seams for the dialogs (tests drive them; the product opens them).
     editor_class = MethodEditorDialog
@@ -124,6 +126,7 @@ class MethodsPanel(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         self._blocks = []                         # in the order they were added
         self._n_patches = 0
+        self._running = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 4, 6, 4)
         outer.setSpacing(4)
@@ -160,7 +163,24 @@ class MethodsPanel(QtWidgets.QWidget):
         self.total.setStyleSheet("color:#bbb;font-size:11px;")
         self.total.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         outer.addWidget(self.total)
+        # Run / Stop under the total they act on (plan block C, step 4).
+        row_run = QtWidgets.QHBoxLayout()
+        self.btn_run = QtWidgets.QPushButton("Run", self)
+        self.btn_stop = QtWidgets.QPushButton("Stop", self)
+        for b in (self.btn_run, self.btn_stop):
+            b.setMinimumWidth(44)
+            b.setStyleSheet("font-size:11px;")
+            row_run.addWidget(b)
+        row_run.addStretch(1)
+        outer.addLayout(row_run)
+        self.progress = QtWidgets.QLabel("", self)
+        self.progress.setStyleSheet("color:#bbb;font-size:11px;")
+        self.progress.setWordWrap(True)
+        self.progress.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        outer.addWidget(self.progress)
 
+        self.btn_run.clicked.connect(self.run_requested.emit)
+        self.btn_stop.clicked.connect(self.stop_requested.emit)
         self.btn_add.clicked.connect(self.add_method)
         self.btn_save.clicked.connect(self.save_plan_requested.emit)
         self.btn_load.clicked.connect(self.load_plan_requested.emit)
@@ -209,6 +229,17 @@ class MethodsPanel(QtWidgets.QWidget):
     def set_patch_count(self, n):
         self._n_patches = int(n)
         self._refresh()
+
+    def task_count(self):
+        return self._n_patches * self.total_combinations()
+
+    def set_running(self, running):
+        """While a run is going, Run is off and Stop on -- said, not silent."""
+        self._running = bool(running)
+        self._refresh()
+
+    def set_progress(self, text):
+        self.progress.setText(text)
 
     # ── gestures ─────────────────────────────────────────────────────
     def add_method(self):
@@ -305,6 +336,8 @@ class MethodsPanel(QtWidgets.QWidget):
     def _refresh(self):
         self._empty.setVisible(not self._blocks)
         self.btn_save.setEnabled(bool(self._blocks))
+        self.btn_run.setEnabled(not self._running and self.task_count() > 0)
+        self.btn_stop.setEnabled(self._running)
         m = self.total_combinations()
         n = self._n_patches
         self.total.setText(

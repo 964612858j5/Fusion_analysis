@@ -123,8 +123,19 @@ row, and the duplicate Tissue Preview button in the step bar.
   block of their own. `Edit` may change the method as well. `Save plan`
   keeps every patch (position and size) and the ticks; `Load plan…` asks
   whether to bring the patches back, and when there are patches already,
-  whether to replace them or keep both. There is NO Run / Stop here until
-  block C: a button that does nothing is not put on screen.
+  whether to replace them or keep both.
+  Under the total are `Run` and `Stop` and a progress line (plan block C,
+  authorised 2026-09-24): Run is off while a run is going (said, not
+  silent) and asks first above 10 tasks; Stop cancels what is left. Under
+  them is the RESULTS part: a `Results` caption, what is in use, and one row
+  per combination of the current run (method, its parameters, `k/n patches`,
+  cells, failed / cancelled counts, `out of date`, and `Use`). A LIST ONLY --
+  no outlines until the montage view (block D, user ruling (a)). A result
+  arriving is never a choice: Save stays disabled until the user presses
+  `Use`, and a choice that goes out of date (other pixels or other saved
+  Fusion settings) is dropped and Save is disabled again.
+  `Save plan` and Step1's `Save Fusion settings` say when they worked
+  (user ruling, 2026-09-24), not only when they fail.
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps
   its id for life and every view shows its NAME: `P<id>` until the user
   renames it (double-click its row in the Tissue Navigator's patch list, or

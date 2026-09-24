@@ -618,6 +618,23 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - `ui/step1_presegmentation/run_job.py`：普通线程，不依赖 Qt。引擎按 Cellpose → StarDist → Mesmer 串行；同一 patch 同一种输入只准备一次，各组合共用；每个任务收到结果后按共用归属函数保留中央区域（expansion 的核跟随细胞用同一张 LUT，nuclear-guided 各自归属、`paired: false`），裁成 patch 大小再发布；每个任务正好一条记录。Stop：正在跑和后面的任务记为已取消，后面的引擎不再启动；引擎起不来：它的任务记为失败并写明原因，其他引擎照常；patch 在分析区域外：只有这个 patch 失败。
   - `tests/test_preseg_run.py` 共 17 条，其中端到端用真实 StarDist 进程，与手工逐步计算逐像素相同。`fusion_test2`、`fusion_mesmer` 都 17 passed。另在 `fusion_mesmer` 里实跑 Cellpose whole-cell + Mesmer nuclear-guided（两个阈值）×2 个 patch：全部 ok，Cellpose 用 GPU、Mesmer 用 CPU，run 目录只剩 run.json、records、masks 和引擎日志。
   - 反向注入：HALO 置 0、跳过归属、expansion 不共用 LUT、Stop 不设停止标记（第一次没测出，已加强测试：Stop 后下一个引擎不得启动）、pixel_key 混入 patch 数、忽略已取消、Mesmer nuclei 第二通道不为 0，都会变红。
+- **第 3 步已提交**：`3f179ca`。
+- **第 4 步：界面接入（完成，待真机验收）**
+  - `method_blocks.py`：总任务数下方加 `Run`、`Stop` 和进度行；运行中 Run 禁用、Stop 可用（不再静默返回）。
+  - `results_panel.py`（新）：`Results` 标题、「正在使用」一行、每个组合一行（方法、参数、`k/n patches`、细胞数、失败 / 取消数、`out of date`、`Use` 按钮）；不能选时原因写在行里。
+  - `ui/main_window.py`：
+    - Run：要求已保存的 Fusion 设置，按 `check_fusion` 拒绝；超过 10 个任务先问（R4）；冻结 run（HALO 暂取 Step2 Tile Grid 的默认 overlap 200，与 Step2 设置本身绑定放到块 E）；运行用自己的 loader，在后台线程里；记录经 Qt 信号回到界面线程。
+    - Use：按 7.7 判断；有失败时先问；选中后 `_p2_params` 是该组合自己的方法和参数，带 `fusion_settings_hash`、`pixel_key`、`preseg_run_id`、`combo_id`；Mesmer 另写 `normalize_input: false` 和 `threshold_target`。Save 写参数文件时不再混入旧面板的参数。
+    - 过期：Step0 发布或保存新的 Fusion 设置后重新判断；选中的结果过期就取消选中、Save 重新禁用；Save 时再核对一次（记录或文件缺失、过期都拒绝）。
+    - 现有缺陷 1 修掉：旧流程里结果到达不再成为当前参数；结束后的自动选中只选 Phase 1 的列（它只是把直径交给 Phase 2）。
+    - 关闭窗口、切换数据集时结束运行，不留引擎进程。
+  - `UI_SURFACE_RULES.md` 同步。离屏截图（`grab()`，**不是物理屏幕截图**）检查了布局：左栏宽度不变；`Results` 标题字号改成和 `Methods` 一致。
+  - `tests/test_step1_preseg_run_ui.py` 共 9 条（真实 StarDist 进程）；八处反向注入都变红：结果到达自动成为参数、自动选中 Phase 2 列、过期不取消选中、Save 不再核对、超过 10 个不问、关窗不结束运行、运行中 Run 仍可点、结束后自动选用。
+  - 布局顺序测试更新为 Patches → Methods → Results → 旧控件。
+  - **全量回归**（2026-09-24，178 个模块，运行期间代码冻结并核对哈希）：3854 passed / 17 failed / 3 skipped。16 条与基线逐条相同；第 17 条是已知偶发的 `test_step0_compare_tiles::test_hot_requests_never_outrank_the_foreground`，整个模块单独重跑 3/3 全部通过。
+  - **真机验收**：用户人工测试通过（2026-09-24）。
+  - **验收后修改**（用户要求）：Step1 的 `Save Fusion settings` 和 `Save plan` 保存成功后弹窗说明（文件位置；方案里有几个方法、几个 patch）；失败时原有的警告不变；只有按钮会弹窗，代码内部的保存不弹。新增 1 条测试；相关 6 个模块通过；按新的测试规则不再跑全量。
+- **测试规则（用户裁定，2026-09-24）**：每一步只跑相关测试；全量回归只在一个块收尾、或某一步大改共用文件时跑，并行 4 组。
 
 ### 块 D — montage 结果视图（包含显示供给）
 - **白名单**：

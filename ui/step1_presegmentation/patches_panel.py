@@ -201,6 +201,7 @@ class PatchesPanel(QtWidgets.QWidget):
     selection_changed = pyqtSignal(list)      # ticked patch ids, in patch order
     delete_requested = pyqtSignal(int)        # patch id
     rename_requested = pyqtSignal(int, str)   # patch id, new name
+    random_requested = pyqtSignal(int, int, int)   # count, height, width (level-0 px)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -248,6 +249,16 @@ class PatchesPanel(QtWidgets.QWidget):
                                   QtWidgets.QSizePolicy.Preferred)
         row.addWidget(self._count, 1)
         outer.addLayout(row)
+
+        # Its own row: beside `Select none` it would widen the strip, and
+        # with it the channel column.
+        row2 = QtWidgets.QHBoxLayout()
+        self._btn_random = QtWidgets.QPushButton("Random…", self)
+        self._btn_random.setStyleSheet("font-size:11px;")
+        self._btn_random.clicked.connect(self._ask_random)
+        row2.addWidget(self._btn_random)
+        row2.addStretch(1)
+        outer.addLayout(row2)
 
         self._btn_all.clicked.connect(lambda: self._set_all(True))
         self._btn_none.clicked.connect(lambda: self._set_all(False))
@@ -307,6 +318,17 @@ class PatchesPanel(QtWidgets.QWidget):
         self._refresh_chrome()
         self.selection_changed.emit(self.selected_ids())
 
+    def set_random_busy(self, busy):
+        """While a generation runs, a second one cannot be asked for."""
+        self._btn_random.setEnabled(not busy)
+        self._btn_random.setText("Generating…" if busy else "Random…")
+
+    def _ask_random(self):
+        dlg = RandomPatchesDialog(self)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            n, h, w = dlg.values()
+            self.random_requested.emit(n, h, w)
+
     def _ask_rename(self, pid):
         tile = next((t for t in self._tiles if t.pid == pid), None)
         if tile is None:
@@ -344,3 +366,34 @@ class PatchesPanel(QtWidgets.QWidget):
         self._btn_all.setEnabled(has)
         self._btn_none.setEnabled(has)
         self._count.setText(f"{len(self.selected_ids())}/{n} selected" if has else "")
+
+
+class RandomPatchesDialog(QtWidgets.QDialog):
+    """How many random patches, and how large (level-0 pixels)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Random patches")
+        form = QtWidgets.QFormLayout(self)
+        self.count = QtWidgets.QSpinBox(self)
+        self.count.setRange(1, 200)
+        self.count.setValue(4)
+        self.width_px = QtWidgets.QSpinBox(self)
+        self.height_px = QtWidgets.QSpinBox(self)
+        for box in (self.width_px, self.height_px):
+            box.setRange(64, 8192)
+            box.setSingleStep(64)
+            box.setValue(512)
+            box.setSuffix(" px")
+        form.addRow("Count:", self.count)
+        form.addRow("Width:", self.width_px)
+        form.addRow("Height:", self.height_px)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return (int(self.count.value()), int(self.height_px.value()),
+                int(self.width_px.value()))

@@ -83,6 +83,7 @@ from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
 from .step1_presegmentation.patches_panel import PatchesPanel
+from .step1_presegmentation.random_job import RandomPatchJob
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
@@ -1211,6 +1212,9 @@ class MainWindow(QMainWindow):
         self._preseg_patches = PatchesPanel()
         self._preseg_patches.delete_requested.connect(self._on_preseg_patch_delete)
         self._preseg_patches.rename_requested.connect(self._on_preseg_patch_rename)
+        self._preseg_patches.random_requested.connect(self._on_random_patches_requested)
+        self._random_patch_job = RandomPatchJob(self)
+        self._random_patch_job.finished.connect(self._on_random_patches_done)
         method_params_lay.addWidget(self._preseg_patches)
         method_params_lay.addWidget(method_params_scroll)
 
@@ -4565,6 +4569,65 @@ class MainWindow(QMainWindow):
         page = self.__dict__.get("_step0")
         if page is not None and hasattr(page, "rename_patch"):
             page.rename_patch(int(pid), name)
+
+    def _random_patches_request(self, count, height, width):
+        """What a `Random…` run needs, gathered on the GUI thread."""
+        loader = getattr(self, "loader", None)
+        if loader is None or not hasattr(loader, "read_region_lowres"):
+            return None, "No slide is loaded."
+        channel = ""
+        if hasattr(self, "config"):
+            try:
+                channel = self.config.nucleus_channel() or ""
+            except Exception:  # noqa: BLE001
+                channel = ""
+        names = list(getattr(loader, "ch_map", {}) or {})
+        if channel not in names:
+            channel = next((n for n in names if "dapi" in n.lower()), names[0] if names else "")
+        if not channel:
+            return None, "The slide has no channel to find tissue in."
+        roi = self._active_roi or (self._rois[0] if self._rois else None)
+        region, polygon = None, None
+        if roi and roi.get("bbox_fullres") and len(roi["bbox_fullres"]) == 4:
+            region = tuple(int(v) for v in roi["bbox_fullres"])
+            poly = roi.get("polygon_fullres")
+            if poly and len(poly) >= 3:
+                polygon = [(float(x), float(y)) for x, y in poly]
+        return {"loader": loader, "channel": channel, "count": int(count),
+                "height": int(height), "width": int(width), "region": region,
+                "polygon": polygon,
+                "existing": [tuple(int(v) for v in p) for p in self._all_patches]}, ""
+
+    def _on_random_patches_requested(self, count, height, width):
+        request, why = self._random_patches_request(count, height, width)
+        if request is None:
+            QMessageBox.information(self, "Random patches", why)
+            return
+        if self._random_patch_job.start(request):
+            self._random_patch_in_roi = bool(request["region"])
+            self._preseg_patches.set_random_busy(True)
+            print(f"[Step1] random patches: {count} x {height}x{width}px requested "
+                  f"({'ROI polygon' if request['polygon'] else 'ROI bbox' if request['region'] else 'whole slide'})")
+
+    def _on_random_patches_done(self, answer):
+        self._preseg_patches.set_random_busy(False)
+        if answer.get("error"):
+            print(f"[Step1] random patches failed:\n{answer['error']}")
+            QMessageBox.warning(self, "Random patches",
+                                "Random patches could not be generated; see the terminal.")
+            return
+        gen = answer["generation"]
+        # The generation record goes to the terminal (user ruling, 2026-09-24).
+        print(f"[Step1] random patches record: {json.dumps(gen.record())}")
+        page = self.__dict__.get("_step0")
+        added = page.add_patches(gen.patches) if (page is not None and gen.patches) else []
+        if gen.shortfall > 0:
+            where = ("inside the ROI" if getattr(self, "_random_patch_in_roi", False)
+                     else "in the tissue")
+            QMessageBox.information(
+                self, "Random patches",
+                f"Only {len(added)} of {gen.requested} patches could be placed {where} "
+                f"with at most 40% blank and no overlap. The rules were not loosened.")
 
     def _patch_label(self, idx):
         """The one name every Step1 view shows for patch `idx`."""

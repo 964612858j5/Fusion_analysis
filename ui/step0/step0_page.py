@@ -6738,6 +6738,17 @@ class Step0Page(QWidget):
         self.overview._remove_patch(idx)
         return True
 
+    def add_patches(self, rects):
+        """Add generated patches (level-0 rectangles) as one edit.
+
+        Same path as a drawn patch: new ids from the one model, one
+        `patches_changed`, so the navigator, Step1 and the published geometry
+        follow. Refused where patch editing is not allowed.
+        """
+        if self.overview is None or not getattr(self.overview, "_patch_edit_allowed", True):
+            return []
+        return self.overview.add_patch_rects(rects)
+
     def rename_patch(self, pid, name):
         """Rename the patch with id `pid`; refused for an empty or taken name."""
         idx = self._patch_index_of(pid)

@@ -102,7 +102,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   same edit as in the Tissue Navigator. Under the tiles: `Select all`,
   `Select none` and `k/n selected`; with no patches, the line `No patches
   yet — draw them in Step0 or the Tissue Navigator`. The tiles wrap, and past
-  three rows the strip scrolls instead of growing.
+  three rows the strip scrolls instead of growing. `Random…` sits on its own
+  line under them (block A2, user ruling 2026-09-24): count, width and height
+  in a small dialog; the patches are drawn inside the ROI polygon, or in the
+  tissue without an ROI, never more than 40 % blank and never overlapping, and
+  join the patch list as drawn ones do. Only a shortfall is announced.
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps
   its id for life and every view shows its NAME: `P<id>` until the user
   renames it (double-click its row in the Tissue Navigator's patch list, or

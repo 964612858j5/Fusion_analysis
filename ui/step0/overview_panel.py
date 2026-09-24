@@ -2381,6 +2381,32 @@ class OverviewPanel(QWidget):
         self.patches_changed.emit(self._patch_coords())
         return coords
 
+    def add_patch_rects(self, rects):
+        """Add several FULL-RESOLUTION rectangles as ONE edit.
+
+        For generated patches (Step1's `Random…`): each gets the next id and
+        its ROI by centre, as a drawn patch would, and `patches_changed`
+        fires once -- one publication for the batch, not one per patch.
+        Returns the rectangles added.
+        """
+        added = []
+        for fy0, fy1, fx0, fx1 in rects or []:
+            coords = (int(fy0), int(fy1), int(fx0), int(fx1))
+            roi_idx = None
+            if self._rois and not self.full_wsi_mode:
+                cy = ((coords[0] + coords[1]) / 2.0) / float(self.ds)
+                cx = ((coords[2] + coords[3]) / 2.0) / float(self.ds)
+                roi_idx = self._find_roi_for_patch(cy, cx)
+            self._patches.append(self._new_patch_entry(coords, roi_idx))
+            if roi_idx is not None and 0 <= roi_idx < len(self._rois):
+                self._rois[roi_idx].setdefault("patch_indices", []).append(len(self._patches) - 1)
+            added.append(coords)
+        if added:
+            self._rebuild_patch_artists()
+            self._update_info()
+            self.patches_changed.emit(self._patch_coords())
+        return added
+
     def _remove_last_patch(self):
         if not self._patch_edit_allowed:
             return

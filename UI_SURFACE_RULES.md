@@ -110,6 +110,21 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Delete` beside it deletes the TICKED patches after one confirmation
   (user ruling, 2026-09-24): with `Select all` that is every patch; with no
   tick it is disabled. There is no separate "Delete all".
+  Under the Patches strip is the METHODS part (plan block B, user ruling
+  2026-09-24): a `Methods` caption, one block per method (its name, a summary
+  of its values, its combination count, `Edit`, `×`; `No method yet — add one
+  with +` when empty), then `+`, `Save plan`, `Load plan…` and the line
+  `Total: k patches × m combinations = N tasks`. `+` opens the method dialog:
+  the eight methods only (HQ / HQ2 / CDS are hidden, R2; Mesmer disabled with
+  the reason where DeepCell is missing), comma-separated values for a list
+  parameter, one value otherwise, each field checked as typed, the live
+  combination count, Save / Cancel. A method already in the plan asks to
+  merge (R9, revised 2026-09-24): Yes merges, No keeps the new values as a
+  block of their own. `Edit` may change the method as well. `Save plan`
+  keeps every patch (position and size) and the ticks; `Load plan…` asks
+  whether to bring the patches back, and when there are patches already,
+  whether to replace them or keep both. There is NO Run / Stop here until
+  block C: a button that does nothing is not put on screen.
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps
   its id for life and every view shows its NAME: `P<id>` until the user
   renames it (double-click its row in the Tissue Navigator's patch list, or

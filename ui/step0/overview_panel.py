@@ -2407,6 +2407,57 @@ class OverviewPanel(QWidget):
             self.patches_changed.emit(self._patch_coords())
         return added
 
+    def restore_patch_records(self, records, replace=False):
+        """Bring saved patches back, WITH their ids and names, as ONE edit.
+
+        For a loaded pre-segmentation plan (user ruling, 2026-09-24): a saved
+        patch coming back is the same patch, so it keeps its id -- which is
+        not a new patch taking an old number. `replace` drops every current
+        patch first; otherwise a record whose id is already here is skipped
+        (never duplicated) and a name another patch holds is changed to stay
+        unique. Returns (added_ids, renamed: {id: new_name}).
+        """
+        if not self._patch_edit_allowed:
+            return [], {}
+        if replace:
+            self._patches = []
+            for roi in self._rois:
+                roi["patch_indices"] = []
+        present = {p.get("id") for p in self._patches}
+        taken = {self.patch_name(i) for i in range(len(self._patches))}
+        added, renamed = [], {}
+        for rec in records or []:
+            pid = rec.get("id")
+            bbox = rec.get("bbox") or rec.get("bbox_fullres")
+            if pid is None or not bbox or len(bbox) != 4 or pid in present:
+                continue
+            coords = tuple(int(v) for v in bbox)
+            name = str(rec.get("name") or default_patch_name(pid))
+            if name in taken:
+                alt = default_patch_name(pid)
+                name = alt if alt not in taken else f"{name} ({pid})"
+                renamed[int(pid)] = name
+            roi_idx = None
+            if self._rois and not self.full_wsi_mode:
+                cy = ((coords[0] + coords[1]) / 2.0) / float(self.ds)
+                cx = ((coords[2] + coords[3]) / 2.0) / float(self.ds)
+                roi_idx = self._find_roi_for_patch(cy, cx)
+            self._patches.append({"roi_idx": roi_idx, "coords": coords,
+                                  "id": int(pid), "name": name})
+            if roi_idx is not None and 0 <= roi_idx < len(self._rois):
+                self._rois[roi_idx].setdefault("patch_indices", []).append(len(self._patches) - 1)
+            self._patch_id_high = max(self._patch_id_high, int(pid))
+            present.add(pid)
+            taken.add(name)
+            added.append(int(pid))
+        if added or replace:
+            self._selected_patch_idx = -1
+            self._rebuild_patch_artists()
+            self._update_info()
+            self._refresh_hint()
+            self.patches_changed.emit(self._patch_coords())
+        return added, renamed
+
     def remove_patches(self, indices):
         """Remove several patches as ONE edit -- one `patches_changed`, one
         publication (Step1's `Delete` on the ticked patches). Ids of the

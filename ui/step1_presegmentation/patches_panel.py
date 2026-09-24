@@ -301,6 +301,15 @@ class PatchesPanel(QtWidgets.QWidget):
         self._fit_height()
         self.selection_changed.emit(self.selected_ids())
 
+    def set_selected_ids(self, ids):
+        """Tick exactly the patches in `ids` (a loaded plan's selection)."""
+        want = set(ids or [])
+        for t in self._tiles:
+            t.set_checked(t.pid in want, emit=False)
+        self._unticked = {t.pid for t in self._tiles if t.pid not in want}
+        self._refresh_chrome()
+        self.selection_changed.emit(self.selected_ids())
+
     # ── state out ────────────────────────────────────────────────────
     def selected_ids(self):
         return [t.pid for t in self._tiles if t.is_checked()]

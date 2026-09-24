@@ -6770,6 +6770,13 @@ class Step0Page(QWidget):
         idx = [self._patch_index_of(pid) for pid in pids]
         return self.overview.remove_patches([i for i in idx if i >= 0])
 
+    def restore_patches(self, records, replace=False):
+        """Saved patches back with their ids and names, as one edit (a loaded
+        plan). See `OverviewPanel.restore_patch_records`."""
+        if self.overview is None or not getattr(self.overview, "_patch_edit_allowed", True):
+            return [], {}
+        return self.overview.restore_patch_records(records, replace=replace)
+
     def rename_patch(self, pid, name):
         """Rename the patch with id `pid`; refused for an empty or taken name."""
         idx = self._patch_index_of(pid)

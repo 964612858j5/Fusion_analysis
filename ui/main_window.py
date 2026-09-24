@@ -85,6 +85,8 @@ from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
 from .step1_presegmentation.patches_panel import PatchesPanel
 from .step1_presegmentation.random_job import RandomPatchJob
+from .step1_presegmentation.method_blocks import MethodsPanel
+from .step1_presegmentation import plan_store
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
@@ -1223,6 +1225,15 @@ class MainWindow(QMainWindow):
         self._random_patch_job = RandomPatchJob(self)
         self._random_patch_job.finished.connect(self._on_random_patches_done)
         method_params_lay.addWidget(self._preseg_patches)
+        # The Methods part under it (plan block B): methods and their
+        # parameter lists, the task total, plans saved and loaded. It runs
+        # nothing -- that is block C.
+        self._preseg_methods = MethodsPanel()
+        self._preseg_patches.selection_changed.connect(
+            lambda ids: self._preseg_methods.set_patch_count(len(ids)))
+        self._preseg_methods.save_plan_requested.connect(self._on_save_preseg_plan)
+        self._preseg_methods.load_plan_requested.connect(self._on_load_preseg_plan)
+        method_params_lay.addWidget(self._preseg_methods)
         method_params_lay.addWidget(method_params_scroll)
 
         patch_results_tab = QWidget()
@@ -4580,6 +4591,98 @@ class MainWindow(QMainWindow):
         if page is not None and hasattr(page, "delete_patches"):
             page.delete_patches([int(p) for p in pids])
 
+    def _preseg_step1_dir(self):
+        return (self.step0_output or {}).get("step1_dir") or OUTPUT_DIR
+
+    def _on_save_preseg_plan(self):
+        """`Save plan`: the methods, EVERY patch with its position and size,
+        and which are ticked (user ruling, 2026-09-24). No computation."""
+        patches = [{"id": _patch_id_of(p), "name": self._patch_label(i), "bbox": list(p)}
+                   for i, p in enumerate(self._all_patches)]
+        ident = self._handoff_identity() or {}
+        source = {k: ident.get(k) for k in ("manifest_path", "raw_ome_path") if ident.get(k)}
+        path = plan_store.save_plan(self._preseg_step1_dir(), self._preseg_methods.methods(),
+                                    patches, self._preseg_patches.selected_ids(), source)
+        print(f"[Step1] pre-segmentation plan saved: {path}")
+        return path
+
+    def _choose_patch_restore_mode(self, n_plan):
+        """Current patches exist: replace them, keep both, or restore none."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Load plan")
+        box.setText(f"There are patches already. Replace them with the plan's "
+                    f"{n_plan} patches, or keep both?")
+        replace = box.addButton("Replace current patches", QMessageBox.AcceptRole)
+        both = box.addButton("Keep both", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        return "replace" if clicked is replace else "both" if clicked is both else None
+
+    def _on_load_preseg_plan(self):
+        """`Load plan…`: pick a saved plan; its methods replace the current
+        ones; its patches come back if the user wants them (replacing the
+        current ones or beside them); its ticks are applied. No computation."""
+        step1_dir = self._preseg_step1_dir()
+        entries = plan_store.list_plans(step1_dir)
+        if not entries:
+            QMessageBox.information(self, "Load plan", "No plan has been saved for this project yet.")
+            return False
+        labels = [f"{e.get('created_at', '')}  —  {e.get('n_methods', 0)} method(s), "
+                  f"{e.get('n_patches', 0)} patch(es)" for e in entries]
+        label, ok = QtWidgets.QInputDialog.getItem(self, "Load plan", "Plan:", labels, 0, False)
+        if not ok:
+            return False
+        entry = entries[labels.index(label)]
+        if self._preseg_methods.blocks():
+            answer = QMessageBox.question(
+                self, "Load plan", "Replace the methods in the plan now?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return False
+        try:
+            plan = plan_store.load_plan(step1_dir, entry["file"])
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Load plan", f"The plan could not be read:\n{exc}")
+            return False
+        skipped = self._preseg_methods.set_methods(plan.get("methods"))
+        notes = []
+
+        records = list(plan.get("patches") or [])
+        restored, renamed = [], {}
+        if records:
+            answer = QMessageBox.question(
+                self, "Load plan", f"Restore the plan's {len(records)} patch(es)?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if answer == QMessageBox.Yes:
+                mode = "replace" if not self._all_patches else \
+                    self._choose_patch_restore_mode(len(records))
+                page = self.__dict__.get("_step0")
+                if mode and page is not None:
+                    restored, renamed = page.restore_patches(records, replace=(mode == "replace"))
+                    if not restored and mode == "both":
+                        notes.append("Every patch of the plan is already here.")
+        ticks = list(plan.get("selected_ids") or [])
+        if restored:
+            # The patches reach Step1 when Step0 has published them; the
+            # ticks are put on then (`_on_patches`), and on what exists now.
+            self._pending_plan_ticks = ticks
+        current = [_patch_id_of(p) for p in self._all_patches]
+        kept, gone = plan_store.resolve_patches(plan, current + list(restored))
+        self._preseg_patches.set_selected_ids(kept)
+        if gone:
+            notes.append(f"{gone} of the plan's ticked patches do not exist and were ignored.")
+        if renamed:
+            notes.append("Renamed to stay unique: " + ", ".join(
+                f"P{pid} → {name}" for pid, name in sorted(renamed.items())) + ".")
+        if skipped:
+            notes.append(f"{skipped} method(s) the Pre-segmentation tab does not offer were skipped.")
+        if notes:
+            QMessageBox.information(self, "Load plan", " ".join(notes))
+        print(f"[Step1] pre-segmentation plan loaded: {entry['file']} "
+              f"(patches restored: {len(restored)})")
+        return True
+
     def _on_preseg_patch_rename(self, pid, name):
         page = self.__dict__.get("_step0")
         if page is not None and hasattr(page, "rename_patch"):
@@ -4823,6 +4926,12 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_preseg_patches", None)
         if panel is not None:
             panel.set_patches(self._all_patches)
+            pending = getattr(self, "_pending_plan_ticks", None)
+            live = {_patch_id_of(p) for p in self._all_patches}
+            if pending is not None and set(pending) & live:
+                # A loaded plan's ticks, once its restored patches are here.
+                panel.set_selected_ids([i for i in pending if i in live])
+                self._pending_plan_ticks = None
         self._rebuild_patch_buttons(patches)
         self._show_active_roi_preview()
 

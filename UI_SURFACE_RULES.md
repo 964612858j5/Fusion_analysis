@@ -55,7 +55,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   channel column, measured from Step0 at runtime rather than copied as a
   number. (Step0's share is not one-to-two: its column starts at 4/3 of its
   minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
-  than Step0 and was rejected on the real machine.) The left column is two tabs, `Channels` and `Pre-segmentation` (named `Method & Parameters` until 2026-09-24);
+  than Step0 and was rejected on the real machine.) The left column is two tabs, `Fusion` and `Pre-segmentation` (named `Channels` and `Method & Parameters` until 2026-09-24; the FRAME inside `Fusion` is still titled `Channels`, as in Step0);
   the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
   a TAB beside the picture, never a strip stacked over it. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the

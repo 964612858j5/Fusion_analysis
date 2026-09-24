@@ -9,7 +9,7 @@ user ruled on:
   own share is not 1:2: its column starts at `4/3` of its minimum and works
   out near 0.28 of the work area. A hard 1:2 in Step1 was visibly wider than
   Step0 and is what the real-machine check rejected.)
-* `Channels | Pre-segmentation` on the left (was `Method & Parameters`), `Viewer | Patch Results` on the
+* `Fusion | Pre-segmentation` on the left (was `Channels | Method & Parameters`), `Viewer | Patch Results` on the
   right, switched rather than stacked;
 * the ONE public channel dock stays mounted while the other left tab is up: a
   tab that is not current is not visible, which is Qt's doing and not a
@@ -479,7 +479,7 @@ def test_the_two_columns_carry_the_tabs_the_user_asked_for(app):
     try:
         left, right = _columns(w)
         assert [left.tabText(i) for i in range(left.count())] == [
-            "Channels", "Pre-segmentation"]
+            "Fusion", "Pre-segmentation"]
         assert [right.tabText(i) for i in range(right.count())] == [
             "Viewer", "Patch Results"]
         assert left.currentWidget() is w._step1_left_panel

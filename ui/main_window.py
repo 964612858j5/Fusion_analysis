@@ -1022,7 +1022,12 @@ class MainWindow(QMainWindow):
         left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_tabs.setMinimumWidth(0)
         self._step1_left_tabs = left_tabs
-        left_tabs.addTab(left, "Channels")
+        # "Fusion" (user ruling, 2026-09-24): the frame inside is titled
+        # `Channels` as in Step0, and the tab had the same word over it. What
+        # the tab defines is the fusion -- ticks, weights, Save Fusion
+        # Settings -- and with `Pre-segmentation` beside it the two tabs are
+        # the two halves of the step's title.
+        left_tabs.addTab(left, "Fusion")
         main_split.addWidget(left_tabs)
 
         pw = QWidget()
@@ -1247,7 +1252,7 @@ class MainWindow(QMainWindow):
         right_tabs.setCurrentWidget(pw)
         print("[Step1-Tabs] left tabs created")
         print("[Step1-Tabs] right tabs created")
-        print("[Step1-Tabs] default tabs=Channels | Viewer")
+        print("[Step1-Tabs] default tabs=Fusion | Viewer")
         main_split.addWidget(right_tabs)
 
         # STEP0'S PROPORTION, taken from Step0 itself at runtime rather than

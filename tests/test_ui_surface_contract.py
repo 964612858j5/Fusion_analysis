@@ -249,7 +249,7 @@ def test_step1_keeps_its_ruled_layout_and_entries(app):
         left = w._step1_left_tabs
         right = w.right_tabs
         assert [left.tabText(i) for i in range(left.count())] == [
-            "Channels", "Pre-segmentation"]
+            "Fusion", "Pre-segmentation"]
         assert [right.tabText(i) for i in range(right.count())] == [
             "Viewer", "Patch Results"]
         assert w._step1_main_split.count() == 2

@@ -481,7 +481,7 @@ def test_the_two_columns_carry_the_tabs_the_user_asked_for(app):
         assert [left.tabText(i) for i in range(left.count())] == [
             "Fusion", "Pre-segmentation"]
         assert [right.tabText(i) for i in range(right.count())] == [
-            "Viewer", "Patch Results"]
+            "Viewer", "Patch Results", "Pre-seg Results"]
         assert left.currentWidget() is w._step1_left_panel
         assert right.currentWidget() is w.viewer_tab
     finally:

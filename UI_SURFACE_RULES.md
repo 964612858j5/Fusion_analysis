@@ -56,8 +56,21 @@ row, and the duplicate Tissue Preview button in the step bar.
   number. (Step0's share is not one-to-two: its column starts at 4/3 of its
   minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
   than Step0 and was rejected on the real machine.) The left column is two tabs, `Fusion` and `Pre-segmentation` (named `Channels` and `Method & Parameters` until 2026-09-24; the FRAME inside `Fusion` is still titled `Channels`, as in Step0);
-  the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
-  a TAB beside the picture, never a strip stacked over it. The title line
+  the right column is three tabs, `Viewer`, `Patch Results` and
+  `Pre-seg Results` (the montage of a pre-segmentation run, plan block D,
+  user ruling 2026-09-24; the old Patch Results stays until block E). Patch
+  Results is a TAB beside the picture, never a strip stacked over it; so is
+  Pre-seg Results: one canvas with every patch of the run (packed in rows,
+  its name at its corner, one camera, F fits all, a click selects without
+  moving, a double-click on a patch shows it alone and a second one -- or
+  one between patches -- shows them all again), composed like the viewer
+  from the same channels, Intensity and Overlay / Fusion, with its own
+  `Overlay` / `Fusion` buttons above the canvas that are the Viewer's two
+  (one command, kept in step; user ruling 2026-09-24). The picture is drawn by
+  Step1's own GPU layer (user ruling 2026-09-25) -- Intensity, colours,
+  ticks and the mode redraw on the card at once; names, frames and the
+  selection are drawn above it. Without a GPU layer the CPU picture is
+  used and the terminal says why. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the
   step's one `Tissue Navigator` entry at its right end -- Step0's name and
   Step0's look, no icon, in both steps (user ruling, 2026-09-23). The title

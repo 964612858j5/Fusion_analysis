@@ -89,6 +89,10 @@ from .step1_presegmentation.random_job import RandomPatchJob
 from .step1_presegmentation.method_blocks import MethodsPanel
 from .step1_presegmentation import plan_store
 from .step1_presegmentation.results_panel import ResultsPanel
+from .step1_presegmentation.montage_view import MontageView
+from .step1_presegmentation.montage_supply import MontageSupply, spec_channels as _montage_spec_channels
+from .step1_presegmentation import montage_gpu
+from . import step1_draft_spec
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
 from ..core import preseg_input, preseg_run
 from ..utils.calibration_source import open_corrected_channel_array
@@ -480,6 +484,12 @@ PRESEG_CONFIRM_TASKS = 10
 #: (`SegmentMergeWorker(overlap_px=200)`, the Step2 spin box's default).
 #: Frozen into every run; tying it to the Step2 setting itself is block E.
 PRESEG_HALO_PX = 200
+#: How long the montage's settings must be still before it is drawn again in
+#: full resolution (while they move it is drawn at half, frame after frame).
+MONTAGE_SETTLE_MS = 150
+#: While the montage's camera moves, its fine planes are re-planned at most
+#: this often; the picture itself follows every move from the GPU layer.
+MONTAGE_CAMERA_PLAN_MS = 60
 
 
 def ps_display_name(method):
@@ -982,6 +992,11 @@ class MainWindow(QMainWindow):
         # when that command moved two fields (a first enable answers the
         # weight as well as the participation).
         self._display.fusion.draft_changed.connect(self._on_fusion_draft_changed)
+        # The montage follows the same owners as the viewer: a tick, a colour,
+        # a window or the draft re-composes it from its channel cache.
+        for _sig in (self._display.state.visibility_changed, self._display.state.color_changed,
+                     self._display.state.mapping_changed, self._display.fusion.draft_changed):
+            _sig.connect(lambda *_a: self._schedule_montage())
         # ...and ONE notice for a session restore, which may move the display
         # half alone (same slide, same draft, other ticks or colours). The
         # draft signal cannot speak for that case, and following the display
@@ -1258,6 +1273,8 @@ class MainWindow(QMainWindow):
         self._preseg_methods = MethodsPanel()
         self._preseg_patches.selection_changed.connect(
             lambda ids: self._preseg_methods.set_patch_count(len(ids)))
+        self._preseg_patches.selection_changed.connect(
+            lambda _ids: self._show_montage_patches())
         self._preseg_methods.save_plan_requested.connect(self._on_save_preseg_plan_clicked)
         self._preseg_methods.load_plan_requested.connect(self._on_load_preseg_plan)
         method_params_lay.addWidget(self._preseg_methods)
@@ -1297,6 +1314,37 @@ class MainWindow(QMainWindow):
         left_tabs.addTab(method_params_tab, "Pre-segmentation")
         right_tabs.addTab(pw, "Viewer")
         right_tabs.addTab(patch_results_tab, "Patch Results")
+        # The montage of a pre-segmentation run (plan block D, user ruling
+        # 2026-09-24): a tab of its own; the old Patch Results stays as it is
+        # until block E retires it.
+        self._preseg_montage = MontageView()
+        self._preseg_montage_supply = None
+        self._montage_tab_index = right_tabs.addTab(self._preseg_montage, "Pre-seg Results")
+        self._preseg_montage.level_wanted.connect(
+            lambda _lvl, _stride: self._request_montage_images())
+        self._preseg_montage.mode_requested.connect(self.set_preview_mode)
+        right_tabs.currentChanged.connect(lambda _i: self._request_montage_images())
+        # NOT A DEBOUNCE (user report 2026-09-25: Intensity drew only when the
+        # drag paused -- a restarted timer never fires while the slider moves).
+        # One frame at a time: a change is drawn at once if nothing is being
+        # drawn, else as soon as the frame in flight is on screen, always with
+        # the newest settings; while things move it is drawn at half the
+        # resolution, and once they have been still for SETTLE ms, in full.
+        self._montage_inflight = None          # generation being drawn
+        self._montage_dirty = False
+        self._montage_backend = None           # "gpu" | "cpu" once a supply exists
+        self._montage_gpu_layer = None
+        self._montage_gpu_factory = None       # a test's stand-in layer
+        self._montage_plan = ([], [])
+        self._montage_submit_pending = False
+        self._montage_camera_timer = QTimer(self)
+        self._montage_camera_timer.setSingleShot(True)
+        self._montage_camera_timer.setInterval(MONTAGE_CAMERA_PLAN_MS)
+        self._montage_camera_timer.timeout.connect(self._request_montage_images)
+        self._montage_timer = QTimer(self)     # the settle: full resolution
+        self._montage_timer.setSingleShot(True)
+        self._montage_timer.setInterval(MONTAGE_SETTLE_MS)
+        self._montage_timer.timeout.connect(self._request_montage_images)
         # There is no second channel view here any more.  The mirrored
         # "Channels" tab could not show the nucleus weight or any group weight,
         # so its "1.00" was never the effective weight, and its checkbox and
@@ -1694,6 +1742,12 @@ class MainWindow(QMainWindow):
         return mount
 
     def _step1_whole_slide_step_changed(self, active):
+        if active != 1:
+            # Leaving Step1 empties the montage's caches and ends its thread.
+            self._close_montage_supply()
+        return self._step1_whole_slide_step_changed_inner(active)
+
+    def _step1_whole_slide_step_changed_inner(self, active):
         """Follow the step: Step1 composes only while it is on screen.
 
         Colours, Intensity and the fusion draft are shared, so a tick made
@@ -2303,6 +2357,7 @@ class MainWindow(QMainWindow):
         if self.proc is not None:
             self._stop()
         self._close_preseg_job()
+        self._close_montage_supply()
         self._preseg_run = None
         self._preseg_records = {}
         self._preseg_selected = None
@@ -4730,6 +4785,7 @@ class MainWindow(QMainWindow):
                            on_record=sig.record.emit, on_finished=sig.finished.emit)
         self._preseg_job, self._preseg_run, self._preseg_records = job, run, {}
         self._preseg_results.set_combos(combos)
+        self._show_montage_patches()
         self._preseg_methods.set_running(True)
         self._preseg_methods.set_progress(f"Running: 0/{len(tasks)} tasks")
         self._refresh_preseg_results()
@@ -4775,6 +4831,238 @@ class MainWindow(QMainWindow):
             "Finished: " + summary_line(self._preseg_records, len(run["tasks"])))
         self._refresh_preseg_results()
 
+    # ── the montage (plan block D) ───────────────────────────────────
+    def _montage_patches(self):
+        """A run's frozen patches; before any run, the ticked ones."""
+        run = self._preseg_run
+        if run is not None:
+            return list(run.get("patches") or [])
+        ticked = set(self._preseg_patches.selected_ids())
+        return [{"id": _patch_id_of(p), "name": self._patch_label(i), "bbox": [int(v) for v in p]}
+                for i, p in enumerate(self._all_patches) if _patch_id_of(p) in ticked]
+
+    def _show_montage_patches(self):
+        view = self.__dict__.get("_preseg_montage")
+        if view is None:
+            return False
+        patches = self._montage_patches()
+        if [tuple(p["bbox"]) for p in patches] == view.bboxes() and \
+                [p.get("name") for p in patches] == [p.get("name") for p in view.layout_table.patches]:
+            return False
+        view.set_patches(patches)
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if supply is not None:
+            supply.forget_patches(view.bboxes())  # an unticked patch's entries go
+        self._request_montage_images()
+        return True
+
+    def _montage_provider(self):
+        mount = self.__dict__.get("_step1_mount")
+        stack = getattr(getattr(mount, "host", None), "stack", None)
+        return getattr(stack, "provider", None)
+
+    def _montage_supply(self):
+        """The montage's supply, made when there is a provider to read from."""
+        provider = self._montage_provider()
+        supply = self._preseg_montage_supply
+        if supply is not None and supply.provider is not provider:
+            self._close_montage_supply()
+            supply = None
+        if supply is None and provider is not None:
+            key, _ = self._preseg_current()
+            supply = MontageSupply(provider, key or "", parent=self)
+            supply.composed.connect(self._on_montage_composed)
+            supply.missing.connect(self._on_montage_missing)
+            supply.finished.connect(self._on_montage_finished)
+            supply.plane_ready.connect(self._on_montage_plane_ready)
+            self._preseg_montage_supply = supply
+            self._preseg_montage.set_downsamples(
+                [provider.level_downsample(level) for level in range(provider.num_levels)])
+            self._start_montage_gpu()
+        return supply
+
+    # ── the GPU picture: Step1's own layer (user ruling, 2026-09-25) ───────
+    def _start_montage_gpu(self):
+        """Put Step1's GPU layer over the montage's canvas, or say why not and
+        keep the CPU picture -- the viewer's mount does the same."""
+        view = self._preseg_montage
+        layer, reason = montage_gpu.build_layer(view, self.__dict__.get("_montage_gpu_factory"))
+        if layer is None:
+            self._montage_gpu_layer = None
+            self._montage_backend = "cpu"
+            print(f"[Montage] GPU layer unavailable, using the CPU picture instead: {reason}")
+            view.show_images(True)
+            return False
+        self._montage_gpu_layer = layer
+        self._montage_backend = "gpu"
+        view.show_images(False)
+        view.keep_overlay_on_top()
+        view.vb.sigRangeChanged.connect(self._on_montage_camera)
+        return True
+
+    def _stop_montage_gpu(self):
+        layer = self.__dict__.get("_montage_gpu_layer")
+        self._montage_gpu_layer = None
+        self._montage_backend = None
+        self._montage_plan = ([], [])
+        view = self.__dict__.get("_preseg_montage")
+        if view is not None:
+            try:
+                view.vb.sigRangeChanged.disconnect(self._on_montage_camera)
+            except (TypeError, RuntimeError):
+                pass
+            view.show_images(True)
+        if layer is not None:
+            try:
+                layer.dispose()                       # its GL names and textures
+            except Exception as exc:  # noqa: BLE001 -- closing anyway
+                print(f"[Montage] GPU layer dispose: {exc}")
+            layer.hide()
+            layer.setParent(None)
+            layer.deleteLater()
+
+    def _on_montage_camera(self, *_a):
+        """A pan or a zoom: the picture follows at once from what is on the
+        card; the fine planes follow at most every CAMERA_PLAN_MS."""
+        if self._montage_backend != "gpu":
+            return
+        self._submit_montage_gpu()
+        timer = self._montage_camera_timer
+        if not timer.isActive():
+            timer.start()
+
+    def _plan_montage_gpu(self):
+        view, supply = self._preseg_montage, self._preseg_montage_supply
+        provider = supply.provider
+        level, _stride = view.wanted()
+        (x0, x1), (y0, y1) = view.vb.viewRange()
+        coarse, fine = montage_gpu.plan_planes(
+            view.layout_table.patches, view.layout_table.rects, (x0, x1, y0, y1), level,
+            _montage_spec_channels(self._montage_spec()), supply.pixel_key,
+            view._downsamples, provider.level_downsample_yx)
+        self._montage_plan = (coarse, fine)
+        supply.request_planes(coarse + fine)
+        return coarse, fine
+
+    def _on_montage_plane_ready(self, generation):
+        """A plane arrived: draw it -- coalesced, one submission per event
+        loop turn however many arrive together."""
+        if not self._montage_submit_pending:
+            self._montage_submit_pending = True
+            QTimer.singleShot(0, self._submit_montage_gpu)
+
+    def _submit_montage_gpu(self):
+        self._montage_submit_pending = False
+        layer, view = self.__dict__.get("_montage_gpu_layer"), self._preseg_montage
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if layer is None or supply is None or not view.isVisible():
+            return False
+        coarse, fine = self._montage_plan
+        arrived = {}
+        for spec in coarse + fine:
+            values = supply.plane(spec)
+            if values is not None:
+                arrived[spec.identity] = values
+        try:
+            result = layer.submit(montage_gpu.source_descriptor(coarse, fine, arrived),
+                                  montage_gpu.display_snapshot(self._montage_spec()),
+                                  montage_gpu.viewport_snapshot(view, layer))
+        except Exception as exc:  # noqa: BLE001 -- said; the CPU picture takes over
+            print(f"[Montage] GPU submission failed, using the CPU picture instead: {exc}")
+            self._stop_montage_gpu()
+            self._request_montage_images()
+            return False
+        view.keep_overlay_on_top()
+        missing = list(result.get("missing_windows") or ())
+        if missing:
+            self._on_montage_missing(missing)
+        return True
+
+    def _close_montage_supply(self):
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if supply is not None:
+            try:
+                supply.composed.disconnect(self._on_montage_composed)
+                supply.missing.disconnect(self._on_montage_missing)
+                supply.finished.disconnect(self._on_montage_finished)
+            except (TypeError, RuntimeError):
+                pass
+            supply.close()
+        self._stop_montage_gpu()
+        self._preseg_montage_supply = None
+        self._montage_inflight = None
+        self._montage_dirty = False
+
+    def _montage_spec(self):
+        mode = step1_draft_spec.MODE_FUSION if self._step1_preview_mode == STEP1_PREVIEW_FUSION \
+            else step1_draft_spec.MODE_OVERLAY
+        return step1_draft_spec.build_spec(self._display.fusion, self._display.state, mode,
+                                           scope=step1_draft_spec.STEP1_SCOPE)
+
+    def _request_montage_images(self, interactive=False):
+        """Draw what the montage shows -- only while it is on screen.
+
+        GPU: plan the planes, ask for the missing ones, and submit now with
+        what is on the card. CPU (no GPU layer): compose at full resolution,
+        one frame at a time -- no half-resolution step, which shimmered."""
+        view = self.__dict__.get("_preseg_montage")
+        if view is None or self._current_step != 1 or not view.isVisible() or not view.bboxes():
+            return False
+        supply = self._montage_supply()
+        if supply is None:
+            return False
+        if self._montage_backend == "gpu":
+            self._plan_montage_gpu()
+            return self._submit_montage_gpu()
+        need = view.bboxes_by_need()
+        if not need:
+            return False
+        level, stride = view.wanted()
+        self._montage_dirty = False
+        self._montage_inflight = supply.request(need, level, self._montage_spec(), stride=stride,
+                                                log=not interactive)
+        return True
+
+    def _schedule_montage(self):
+        """A tick, a colour, a window, the draft or the mode moved."""
+        timer = self.__dict__.get("_montage_timer")
+        if timer is None:
+            return
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if self._montage_backend == "gpu":
+            # A new uniform, not a new image: the layer redraws from the planes
+            # on the card at once (a new channel's planes are asked for).
+            self._request_montage_images()
+            return
+        if supply is not None:
+            supply.forget_composites()            # the channel blocks still hold
+        timer.start()                             # the CPU picture once still
+        if self._montage_inflight is not None:
+            self._montage_dirty = True            # drawn when this frame is up
+        else:
+            self._request_montage_images(interactive=True)
+
+    def _on_montage_finished(self, generation):
+        supply = self._preseg_montage_supply
+        if supply is None or generation != supply.generation:
+            return
+        self._montage_inflight = None
+        if self._montage_dirty:
+            self._request_montage_images(interactive=True)
+
+    def _on_montage_composed(self, bbox, level, rgba, generation):
+        supply = self._preseg_montage_supply
+        if supply is None or generation != supply.generation:
+            return                                 # late: a newer request stands
+        self._preseg_montage.set_image(bbox, rgba)
+
+    def _on_montage_missing(self, channels):
+        for ch in channels or []:
+            try:
+                self._display.request_mapping_seed(ch)
+            except Exception as exc:  # noqa: BLE001 -- the next mapping_changed redraws
+                print(f"[Montage] no display window for {ch} yet: {exc}")
+
     def _preseg_current(self):
         key, _, _ = self._preseg_source()
         return key, (self._committed_fusion_settings() or {}).get("hash")
@@ -4783,6 +5071,9 @@ class MainWindow(QMainWindow):
         """Each row's state, and whether the chosen result is still valid."""
         run = self._preseg_run
         key, fhash = self._preseg_current()
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if supply is not None and key is not None:
+            supply.set_pixel_key(key)             # other pixels: its caches go
         sel = self._preseg_selected
         if sel is not None and preseg_run.is_stale(sel["run"], key, fhash):
             self._drop_preseg_selection()
@@ -5228,6 +5519,7 @@ class MainWindow(QMainWindow):
         if self.__dict__.get("_preseg_results") is not None:
             # A Step0 publish may have changed the pixels (not only patches).
             self._refresh_preseg_results()
+            self._show_montage_patches()          # before a run: the ticked patches
         self._rebuild_patch_buttons(patches)
         self._show_active_roi_preview()
 
@@ -5730,8 +6022,10 @@ class MainWindow(QMainWindow):
         # closed, and a close attempt that ends in `event.ignore()` would
         # stop and restart the writer on every retry.
         self._stop_all_loaders()
-        # The pre-segmentation run: Stop, and no engine process left behind.
+        # The pre-segmentation run: Stop, and no engine process left behind;
+        # the montage: its thread ends and its caches are emptied.
         self._close_preseg_job()
+        self._close_montage_supply()
         # A fusion job outlives the window unless it is asked to stop and then
         # held: destroying a running QThread is what produces
         # "QThread: Destroyed while thread is still running".
@@ -5860,6 +6154,11 @@ class MainWindow(QMainWindow):
         self._step1_preview_mode = mode
         self._btn_mode_overlay.setChecked(mode == STEP1_PREVIEW_OVERLAY)
         self._btn_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
+        montage = self.__dict__.get("_preseg_montage")
+        if montage is not None:
+            montage.set_mode(mode)                # its two buttons are these two
+        if changed:
+            self._schedule_montage()              # the montage follows the mode
         if (changed or force) and reconcile:
             # The two modes need different channels.  Arriving in fusion with
             # only the overlay's channels in hand would sit on "Preparing"

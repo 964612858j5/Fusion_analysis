@@ -267,7 +267,9 @@ def test_no_new_entry_point_was_added(app, monkeypatch, tmp_path):
         _in(rig, 1)
 
         after = [tabs.tabText(i) for i in range(tabs.count())]
-        assert after == before == ["Viewer", "Patch Results"]
+        # Entering Step1 adds nothing; the third tab is block D's montage
+        # (user-authorised 2026-09-24), there from the start.
+        assert after == before == ["Viewer", "Patch Results", "Pre-seg Results"]
         mount = rig.w._step1_mount
         assert not mount.host.findChildren(QtWidgets.QPushButton)
         assert not mount.host.findChildren(QtWidgets.QCheckBox)

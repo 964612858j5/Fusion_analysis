@@ -251,7 +251,7 @@ def test_step1_keeps_its_ruled_layout_and_entries(app):
         assert [left.tabText(i) for i in range(left.count())] == [
             "Fusion", "Pre-segmentation"]
         assert [right.tabText(i) for i in range(right.count())] == [
-            "Viewer", "Patch Results"]
+            "Viewer", "Patch Results", "Pre-seg Results"]
         assert w._step1_main_split.count() == 2
 
         # The Tissue Navigator entry is on the title line, not in the column.

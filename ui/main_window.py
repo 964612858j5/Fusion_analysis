@@ -82,6 +82,7 @@ from .step0.config_panel import ConfigPanel
 from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
+from .step1_presegmentation.patches_panel import PatchesPanel
 from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
@@ -1204,6 +1205,13 @@ class MainWindow(QMainWindow):
         self.search.params_ready.connect(self._on_params_ready)
         self.search.method_changed.connect(self._on_step1_segmentation_mode_changed)
         method_params_scroll.setWidget(self.search)
+        # The Patches strip heads the tab (plan block A1): which patches a
+        # pre-segmentation run takes. Its delete and rename go to Step0, the
+        # patches' one owner, through the same path a navigator edit takes.
+        self._preseg_patches = PatchesPanel()
+        self._preseg_patches.delete_requested.connect(self._on_preseg_patch_delete)
+        self._preseg_patches.rename_requested.connect(self._on_preseg_patch_rename)
+        method_params_lay.addWidget(self._preseg_patches)
         method_params_lay.addWidget(method_params_scroll)
 
         patch_results_tab = QWidget()
@@ -4547,6 +4555,17 @@ class MainWindow(QMainWindow):
         patches = [p for p in (patch_from_record(i) for i in items or []) if p is not None]
         return with_patch_ids(patches)[0]
 
+    def _on_preseg_patch_delete(self, pid):
+        """A tile's `×`: Step0 deletes, publishes, and Step1 follows."""
+        page = self.__dict__.get("_step0")
+        if page is not None and hasattr(page, "delete_patch"):
+            page.delete_patch(int(pid))
+
+    def _on_preseg_patch_rename(self, pid, name):
+        page = self.__dict__.get("_step0")
+        if page is not None and hasattr(page, "rename_patch"):
+            page.rename_patch(int(pid), name)
+
     def _patch_label(self, idx):
         """The one name every Step1 view shows for patch `idx`."""
         if 0 <= idx < len(self._all_patches):
@@ -4742,6 +4761,9 @@ class MainWindow(QMainWindow):
         # still passes bare bboxes gets P1..Pn by position.
         patches, _ = with_patch_ids(patches)
         self._all_patches = list(patches)
+        panel = getattr(self, "_preseg_patches", None)
+        if panel is not None:
+            panel.set_patches(self._all_patches)
         self._rebuild_patch_buttons(patches)
         self._show_active_roi_preview()
 

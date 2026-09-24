@@ -93,6 +93,21 @@ row, and the duplicate Tissue Preview button in the step bar.
   end -- there is no row above it for the mode buttons -- and no status row
   under it: `Loading patch…`, `Loading channels…`, warnings and errors go to
   the terminal, and the height goes to the viewer.
+* **Step1's `Method & Parameters` tab** opens with the PATCHES strip (user
+  ruling, 2026-09-24; `docs/step1_presegmentation_redesign_plan.md` block
+  A1): one tile per patch, showing the patch's name and nothing else, all
+  ticked by default -- the ticks say which patches a pre-segmentation run
+  takes. No hover text. A ticked tile has a small `×` in its top right corner
+  that deletes the patch; double-clicking a tile renames it; both are the
+  same edit as in the Tissue Navigator. Under the tiles: `Select all`,
+  `Select none` and `k/n selected`; with no patches, the line `No patches
+  yet — draw them in Step0 or the Tissue Navigator`. The tiles wrap, and past
+  three rows the strip scrolls instead of growing.
+* **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps
+  its id for life and every view shows its NAME: `P<id>` until the user
+  renames it (double-click its row in the Tissue Navigator's patch list, or
+  its tile in the Patches strip). Deleting a patch renumbers nobody, and an
+  id is never reused. The navigator's patch list shows the name alone.
 * **Step0 row** -- tick, correction state slot, swatch, name, preview-method
   combo. THE TICK IS THE PICTURE (user ruling, 2026-09-17): a new slide shows
   the nucleus and no marker, and clicking a row or ticking its box shows THAT

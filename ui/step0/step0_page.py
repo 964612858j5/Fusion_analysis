@@ -6427,12 +6427,9 @@ class Step0Page(QWidget):
         self._patch_sel_guard = True
         try:
             self._patch_list.clear()
-            for idx, patch in enumerate(self.overview._patches):
-                y0, y1, x0, x1 = patch["coords"]
-                roi_idx = patch.get("roi_idx")
-                roi_name = self.overview._rois[roi_idx]["name"] if roi_idx is not None and roi_idx < len(self.overview._rois) else "No ROI"
-                self._patch_list.addItem(
-                    f"{self.overview.patch_name(idx)}  {roi_name}  [{y1-y0}x{x1-x0}px]")
+            for idx in range(len(self.overview._patches)):
+                # The patch's name and nothing else (user ruling, 2026-09-24).
+                self._patch_list.addItem(self.overview.patch_name(idx))
             if self.overview._patches:
                 self._patch_selected_idx = min(max(sel, 0), len(self.overview._patches) - 1)
                 self._patch_list.setCurrentRow(self._patch_selected_idx)
@@ -6721,6 +6718,32 @@ class Step0Page(QWidget):
         if 0 <= idx < len(self.patches):
             return patch_name(self.patches[idx], idx)
         return f"P{idx+1}"
+
+    def _patch_index_of(self, pid):
+        for i, pd in enumerate(self.overview._patches if self.overview else []):
+            if pd.get("id") == pid:
+                return i
+        return -1
+
+    def delete_patch(self, pid):
+        """Delete the patch with id `pid`, as a navigator Delete would.
+
+        Public for other steps' patch lists (Step1's Patches strip): the edit
+        goes out through the panel's `patches_changed` like every other, so
+        the model, the navigator, Step1 and the published geometry follow.
+        """
+        idx = self._patch_index_of(pid)
+        if idx < 0 or not getattr(self.overview, "_patch_edit_allowed", True):
+            return False
+        self.overview._remove_patch(idx)
+        return True
+
+    def rename_patch(self, pid, name):
+        """Rename the patch with id `pid`; refused for an empty or taken name."""
+        idx = self._patch_index_of(pid)
+        if idx < 0:
+            return False
+        return self.overview.rename_patch(idx, name)
 
     def _rename_patch_at(self, idx):
         """Ask for a new name for the patch in list row `idx`.

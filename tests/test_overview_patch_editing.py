@@ -627,7 +627,12 @@ def test_an_edit_on_the_thumbnail_reaches_the_patch_list(app):
     page.overview._commit_patch_geometry(0, (1500, 2500, 1200, 2200))
 
     assert page.patches == [(1500, 2500, 1200, 2200)]
-    assert "1000x1000px" in page._patch_list.item(0).text()
+    # The list row is the patch's name and nothing else (user ruling,
+    # 2026-09-24, plan block A1) -- it used to carry the size, which is why
+    # this line once asserted "1000x1000px". The edit reaching the page is
+    # the coordinates above; the row is rebuilt, still naming the patch.
+    assert page._patch_list.count() == 1
+    assert page._patch_list.item(0).text() == "P1"
 
 
 def test_an_edit_leaves_the_patch_still_under_adjustment(app):
